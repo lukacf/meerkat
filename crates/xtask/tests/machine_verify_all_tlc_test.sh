@@ -221,6 +221,36 @@ if run_part audits-c; then
   TLC_WORKERS="${tlc_workers}" "${run_start_hold_audit}" "${RUN_START_HOLD_AUDIT_MAX_STEPS:-12}"
 fi
 
+# Keeping queued inputs across a graceful stop: an unregister records the
+# disposition it began with (Stop, or Requeue with a max age), and every
+# runtime stop asks the generated ClassifyStopInputDisposition which
+# non-terminal inputs it keeps. A hand-written audit over the same generated
+# model explores two processes. One session stops with either disposition or
+# none, its in-flight run cancelled or still running, with every kind,
+# durability, directedness and objective binding of the queued input, a
+# replayed stop transaction and the unregister drain. A new process (every
+# variable at the generated Init) then recovers the durable rows through the
+# generated recovery arms, settles each kept row's expiry before the serving
+# gate and runs. Under every generated invariant it checks that a kept input
+# never runs before the restart, never gets a stop's runless carrier while
+# every input a stop ends gets one, runs at most once across the restart,
+# never runs once expired or before its settlement, and is kept only under
+# Requeue and only when eligible (never objective-bound), that exactly one
+# verdict arm answers each input, and that the requeued wait-failure arm has
+# no session guard and changes no state. It requires seven witnesses reached,
+# a graceful end and a crash among them; its --mutants mode (by hand) refuses
+# fifteen seeded defects. 32 steps reach the deepest witness, and 36 the whole
+# reachable space.
+requeue_across_stop_audit="${workspace_root}/specs/machines/meerkat_machine/requeue_across_stop_audit.sh"
+if [[ ! -x "${requeue_across_stop_audit}" ]]; then
+  echo "error: requeue-across-stop audit runner is missing from workspace runfiles: ${requeue_across_stop_audit}" >&2
+  exit 1
+fi
+if run_part audits-c; then
+  echo "running bounded requeue-across-stop TLC audit"
+  TLC_WORKERS="${tlc_workers}" "${requeue_across_stop_audit}" "${REQUEUE_ACROSS_STOP_AUDIT_MAX_STEPS:-36}"
+fi
+
 # The live-context result barrier: a delegation result on a channel with a
 # late bootstrap summary is released after the summary's provider
 # acknowledgement and only after it, never held by queued context rows (S99).
@@ -517,7 +547,9 @@ run_machine_verify() {
 # audits-c = run-start hold (239 s), live media health (155 s),
 # live-context causal-tail batch with --mutants (112 s): 506 s; plus the
 # generation high-water audit with --mutants (30 s on a local 4-worker run,
-# twelve small runs, not yet hosted; expect 50-100 s).
+# twelve small runs, not yet hosted; expect 50-100 s), plus the
+# requeue-across-stop audit (about 55 s on a local 4-worker run, seven runs
+# of about 8 s each; not yet hosted, expect 100-150 s).
 # Two shards ran 592 s and 812 s, past the pull-request lane target. A new
 # audit joins the lightest shard. Shard of the two audits the `all` lane runs
 # concurrently with machine-verify below:

@@ -440,7 +440,7 @@ mod tests {
         assert_eq!(second.version.get(), 2);
         assert_eq!(session.messages().len(), 3, "both versions remain durable");
 
-        let materialized = session.messages_for_model_boundary();
+        let materialized = session.messages_for_model_boundary()?;
         assert_eq!(materialized.len(), 2);
         assert!(matches!(
             &materialized[0],

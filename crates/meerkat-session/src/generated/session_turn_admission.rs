@@ -21,6 +21,7 @@ pub enum StartTurnExecutionKind {
     #[default]
     ContentTurn,
     ResumePending,
+    ResumeRun,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -29,6 +30,7 @@ pub enum StartTurnDisposition {
     RunContentTurn,
     RunPending,
     NoPendingBoundary,
+    ResumeRun,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -213,6 +215,7 @@ enum SessionTurnAdmissionTransition {
     ResolveDispositionContentTurn,
     ResolveDispositionResumePendingWithBoundary,
     ResolveDispositionResumePendingWithoutBoundary,
+    ResolveDispositionResumeRun,
     ResolveDispositionDirectPrompt,
     ResolveDispositionDirectPending,
     ResolveDispositionDirectNoPending,
@@ -944,6 +947,12 @@ impl SessionTurnAdmissionMachineAuthority {
                     matches.push(SessionTurnAdmissionTransition::ResolveDispositionResumePendingWithoutBoundary);
                 }
                 if (self.state.lifecycle_phase == TurnAdmissionPhase::Admitted)
+                    && ((execution_kind_present)
+                        && (execution_kind == StartTurnExecutionKind::ResumeRun))
+                {
+                    matches.push(SessionTurnAdmissionTransition::ResolveDispositionResumeRun);
+                }
+                if (self.state.lifecycle_phase == TurnAdmissionPhase::Admitted)
                     && ((execution_kind_present == false)
                         && (prompt_has_content(
                             prompt_trimmed_text_byte_count,
@@ -1000,6 +1009,13 @@ impl SessionTurnAdmissionMachineAuthority {
                         Ok(vec![
                             SessionTurnAdmissionEffect::StartTurnDispositionResolved { disposition: StartTurnDisposition::NoPendingBoundary, },
                             SessionTurnAdmissionEffect::StartTurnPublicTerminalResolved { terminal: StartTurnPublicTerminal::NoPendingBoundary, },
+                        ])
+                    }
+                    SessionTurnAdmissionTransition::ResolveDispositionResumeRun => {
+                        self.state.last_public_terminal = None;
+                        self.state.lifecycle_phase = TurnAdmissionPhase::Admitted;
+                        Ok(vec![
+                            SessionTurnAdmissionEffect::StartTurnDispositionResolved { disposition: StartTurnDisposition::ResumeRun, },
                         ])
                     }
                     SessionTurnAdmissionTransition::ResolveDispositionDirectPrompt => {

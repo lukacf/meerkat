@@ -249,6 +249,8 @@ pub enum StartTurnDisposition {
     RunPending,
     #[serde(rename = "NoPendingBoundary")]
     NoPendingBoundary,
+    #[serde(rename = "ResumeRun")]
+    ResumeRun,
 }
 impl StartTurnDisposition {
     pub fn as_str(&self) -> &'static str {
@@ -256,6 +258,7 @@ impl StartTurnDisposition {
             Self::RunContentTurn => "RunContentTurn",
             Self::RunPending => "RunPending",
             Self::NoPendingBoundary => "NoPendingBoundary",
+            Self::ResumeRun => "ResumeRun",
         }
     }
 }
@@ -266,6 +269,7 @@ impl std::convert::TryFrom<&str> for StartTurnDisposition {
             "RunContentTurn" => Ok(Self::RunContentTurn),
             "RunPending" => Ok(Self::RunPending),
             "NoPendingBoundary" => Ok(Self::NoPendingBoundary),
+            "ResumeRun" => Ok(Self::ResumeRun),
             other => Err(format!("invalid StartTurnDisposition value `{other}`")),
         }
     }
@@ -301,12 +305,15 @@ pub enum StartTurnExecutionKind {
     ContentTurn,
     #[serde(rename = "ResumePending")]
     ResumePending,
+    #[serde(rename = "ResumeRun")]
+    ResumeRun,
 }
 impl StartTurnExecutionKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::ContentTurn => "ContentTurn",
             Self::ResumePending => "ResumePending",
+            Self::ResumeRun => "ResumeRun",
         }
     }
 }
@@ -316,6 +323,7 @@ impl std::convert::TryFrom<&str> for StartTurnExecutionKind {
         match value {
             "ContentTurn" => Ok(Self::ContentTurn),
             "ResumePending" => Ok(Self::ResumePending),
+            "ResumeRun" => Ok(Self::ResumeRun),
             other => Err(format!("invalid StartTurnExecutionKind value `{other}`")),
         }
     }
@@ -737,6 +745,7 @@ pub enum TransitionId {
     ResolveLastStartTurnPublicTerminalNoPendingRunning,
     ResolveLastStartTurnPublicTerminalNoPendingCompleting,
     ResolveLastStartTurnPublicTerminalNoPendingShuttingDown,
+    ResolveDispositionResumeRun,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

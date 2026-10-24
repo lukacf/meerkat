@@ -704,15 +704,6 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `DueLeaseExpired`
   - anchors: `occurrence_lifecycle`
   - scenarios: `occurrence_lease_recovery`
-- `DueReclaimExhausted`
-  - anchors: (unclaimed)
-  - scenarios: `occurrence_recorded_dispatch_reclaim`
-- `ReclaimedAfterAdmission`
-  - anchors: (unclaimed)
-  - scenarios: `occurrence_recorded_dispatch_reclaim`
-- `ReclaimedAfterUnprovenDispatch`
-  - anchors: (unclaimed)
-  - scenarios: `occurrence_recorded_dispatch_reclaim`
 - `OccurrenceTerminalityClassified`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -740,6 +731,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `StaleCompletionArrivalClassified`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `DueReclaimExhausted`
+  - anchors: (unclaimed)
+  - scenarios: `occurrence_recorded_dispatch_reclaim`
+- `ReclaimedAfterAdmission`
+  - anchors: (unclaimed)
+  - scenarios: `occurrence_recorded_dispatch_reclaim`
+- `ReclaimedAfterUnprovenDispatch`
+  - anchors: (unclaimed)
+  - scenarios: `occurrence_recorded_dispatch_reclaim`
 
 ### Invariants
 - `live_claim_requires_owner`

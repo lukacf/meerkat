@@ -262,6 +262,7 @@ fn fresh_request(session: Session) -> ProvisionMemberRequest {
         generated_self_owned_operation_owner: Some(session_id),
         runtime_revival_intent: RuntimeRevivalIntent::None,
         held_bound: None,
+        continuity_intent: crate::runtime::SpawnContinuityIntent::Ephemeral,
     };
     stamp_identity(&mut request);
     request

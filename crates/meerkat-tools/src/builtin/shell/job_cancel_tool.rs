@@ -17,7 +17,7 @@ use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 /// Tool for cancelling a running background shell job
 ///
 /// Sends termination signals to the job's process and updates its status
-/// to [`JobStatus::Cancelled`].
+/// to [`JobStatus::Cancelled`](super::JobStatus::Cancelled).
 #[derive(Debug)]
 pub struct ShellJobCancelTool {
     /// Shared job manager instance

@@ -40,7 +40,7 @@ impl ReplayWireFamily {
             ProviderMeta::Anthropic { .. }
             | ProviderMeta::AnthropicRedacted { .. }
             | ProviderMeta::AnthropicCompaction { .. } => Self::Anthropic,
-            ProviderMeta::Gemini { .. } => Self::Gemini,
+            ProviderMeta::Gemini { .. } | ProviderMeta::GeminiFunctionCall { .. } => Self::Gemini,
             ProviderMeta::OpenAi { .. }
             | ProviderMeta::OpenAiResponse { .. }
             | ProviderMeta::OpenAiAssistantMessage { .. } => Self::OpenAi,
@@ -1241,6 +1241,27 @@ mod tests {
             assistant_disposition(&block, target),
             ReplayDisposition::ProviderNative
         );
+    }
+
+    #[test]
+    fn gemini_native_call_metadata_is_preserved_only_for_gemini_replay() {
+        let block = AssistantBlock::ToolUse {
+            id: "fc_0".into(),
+            name: "lookup".into(),
+            args: serde_json::value::to_raw_value(&serde_json::json!({})).unwrap(),
+            meta: Some(Box::new(ProviderMeta::GeminiFunctionCall {
+                provider_id: "provider-call".into(),
+                thought_signature: Some("opaque-signature".into()),
+            })),
+        };
+        assert_eq!(
+            ReplayWireFamily::Gemini.strip_foreign_metadata(block.clone()),
+            block
+        );
+        for family in [ReplayWireFamily::Anthropic, ReplayWireFamily::OpenAi] {
+            assert!(matches!(family.strip_foreign_metadata(block.clone()),
+                AssistantBlock::ToolUse { id, meta: None, .. } if id == "fc_0"));
+        }
     }
 
     #[test]

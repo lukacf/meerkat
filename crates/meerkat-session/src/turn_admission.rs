@@ -152,6 +152,10 @@ fn find_shutdown_terminal(
 pub(crate) struct TurnAdmissionSlot {
     authority: authority::SessionTurnAdmissionMachineAuthority,
     projection: TurnAdmissionProjection,
+    /// Set with the pending interrupt when a graceful requeue stop asked for
+    /// it: the dropped run then ends suspended, not cancelled. A hard
+    /// interrupt clears it, and a new claim starts without it.
+    suspend_requested: bool,
 }
 
 #[must_use = "session teardown authorization must be consumed at the actor exit boundary"]
@@ -171,6 +175,7 @@ impl TurnAdmissionSlot {
                 phase: TurnAdmissionPhase::Idle,
                 is_active: false,
             },
+            suspend_requested: false,
         };
         #[allow(clippy::expect_used)]
         slot.refresh_projection()
@@ -190,6 +195,12 @@ impl TurnAdmissionSlot {
         self.authority.state().interrupt_pending
     }
 
+    /// Whether the pending interrupt asks the dropped run to end suspended
+    /// for a graceful requeue stop instead of cancelled.
+    pub(crate) fn suspend_requested(&self) -> bool {
+        self.suspend_requested && self.interrupt_pending()
+    }
+
     #[cfg(test)]
     pub(crate) fn is_active(&self) -> bool {
         self.projection.is_active
@@ -207,6 +218,7 @@ impl TurnAdmissionSlot {
     /// or produces a `ShutdownTerminal` if the machine is already in
     /// `ShuttingDown`.
     pub(crate) fn claim(&mut self) -> Result<ClaimOutcome, TurnAdmissionError> {
+        self.suspend_requested = false;
         let from = self.phase();
         let effects = self
             .authority
@@ -280,7 +292,27 @@ impl TurnAdmissionSlot {
     }
 
     /// Request an interrupt through generated legality and wake feedback.
+    /// A hard interrupt wins over a suspension asked before it.
     pub(crate) fn request_interrupt(&mut self) -> Result<bool, TurnAdmissionError> {
+        let wake = self.request_generated_interrupt()?;
+        self.suspend_requested = false;
+        Ok(wake)
+    }
+
+    /// Request an interrupt that suspends the run for a graceful requeue
+    /// stop: the generated interrupt drops the turn exactly as a hard
+    /// interrupt does, and the run then ends with no terminal and no closing
+    /// write. A hard interrupt asked before it is not downgraded.
+    pub(crate) fn request_suspend(&mut self) -> Result<bool, TurnAdmissionError> {
+        let hard_interrupt_pending = self.interrupt_pending() && !self.suspend_requested;
+        let wake = self.request_generated_interrupt()?;
+        if !hard_interrupt_pending {
+            self.suspend_requested = true;
+        }
+        Ok(wake)
+    }
+
+    fn request_generated_interrupt(&mut self) -> Result<bool, TurnAdmissionError> {
         let from = self.phase();
         let effects = self
             .authority
@@ -383,6 +415,9 @@ impl TurnAdmissionSlot {
             }
             Some(RuntimeExecutionKind::ResumePending) => {
                 (true, authority::StartTurnExecutionKind::ResumePending)
+            }
+            Some(RuntimeExecutionKind::ResumeRun) => {
+                (true, authority::StartTurnExecutionKind::ResumeRun)
             }
             None => (false, authority::StartTurnExecutionKind::ContentTurn),
         };
@@ -748,6 +783,34 @@ mod tests {
             0,
         );
         assert_eq!(disposition, StartTurnDisposition::RunPending);
+    }
+
+    /// A resumed run resolves from its execution kind alone: its boundary is
+    /// the session's run cursor, so no transcript tail, staged result count
+    /// or empty prompt turns it into a pending continuation or a missing
+    /// boundary.
+    #[test]
+    fn resume_run_resolves_from_its_kind_whatever_the_tail() {
+        for tail in [
+            ObservedSessionTailKind::Empty,
+            ObservedSessionTailKind::System,
+            ObservedSessionTailKind::SystemNotice,
+            ObservedSessionTailKind::User,
+            ObservedSessionTailKind::BlockAssistant,
+            ObservedSessionTailKind::ToolResults,
+        ] {
+            let disposition = claimed_disposition(
+                Some(RuntimeExecutionKind::ResumeRun),
+                meerkat_core::types::ContentInput::Text(String::new()),
+                tail,
+                0,
+            );
+            assert_eq!(
+                disposition,
+                StartTurnDisposition::ResumeRun,
+                "tail {tail:?}"
+            );
+        }
     }
 
     #[test]

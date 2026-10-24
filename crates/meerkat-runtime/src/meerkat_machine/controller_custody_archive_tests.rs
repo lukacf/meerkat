@@ -530,7 +530,7 @@ async fn actual_cold_registration_settles_old_run_before_omitting_closed_termina
     );
     cold.inner_mut()
         .replace_runtime_authority(recovered.authority);
-    cold.recover_inputs_after_runtime_authority(recovered.unregister_progress.as_ref())
+    cold.recover_inputs_after_runtime_authority(recovered.unregister_progress.as_ref(), None)
         .await
         .expect("actual exact-set input recovery after lifecycle convergence");
     assert!(

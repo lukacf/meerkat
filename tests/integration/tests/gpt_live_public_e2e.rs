@@ -27,12 +27,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use meerkat::experimental_gpt_live::{
     ExperimentalGptLiveOpenAuthority, ExperimentalGptLiveWebrtcTransport,
-    ExperimentalLiveOpenAuthorityProvider, ExperimentalLivePlaybackHint,
-    ExperimentalLivePublicObservation, ExperimentalLivePublicObservationDeliveryError,
-    ExperimentalLivePublicObservationKind, ExperimentalLivePublicObservationPublisher,
-    GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID, GPT_LIVE_PUBLIC_MODEL, LIVE_RUNTIME_WORK_PREFIX,
-    PublicGptLiveOpenAuthorityConfig, PublicGptLivePlaybackPolicy, provider_recording,
+    ExperimentalLiveOpenAuthorityError, ExperimentalLiveOpenAuthorityProvider,
+    ExperimentalLivePlaybackHint, ExperimentalLivePublicObservation,
+    ExperimentalLivePublicObservationDeliveryError, ExperimentalLivePublicObservationKind,
+    ExperimentalLivePublicObservationPublisher, GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID,
+    GPT_LIVE_PUBLIC_MODEL, LIVE_RUNTIME_WORK_PREFIX, PublicGptLiveOpenAuthorityConfig,
+    PublicGptLivePlaybackPolicy, provider_recording,
 };
+use meerkat::session_runtime::live_orchestration::ExperimentalLiveChannelOpenError;
 use meerkat::session_runtime::live_summary::{
     LiveContextBootstrapMode, LiveContextSummarizer, LiveContextSummaryError,
     LiveContextSummaryPolicy, LiveContextSummarySnapshot,
@@ -42,8 +44,8 @@ use meerkat::surface::{
     LiveWebrtcBoundReadyBinder, ServiceMemberLiveHost, ServiceMemberLiveHostConfig,
 };
 use meerkat_contracts::{
-    LiveCloseStatus, LiveOpenTransport, WireAssistantBlock, WireLiveTransportBootstrap,
-    WireSessionMessage, WireToolResultContent,
+    LiveCloseStatus, LiveOpenTransport, LiveTruncateStatus, WireAssistantBlock,
+    WireLiveTransportBootstrap, WireSessionMessage, WireToolResultContent,
 };
 use meerkat_core::{
     AuthBindingRef, AuthProfileConfig, BackendProfileConfig, BindingId, BindingOrigin,
@@ -78,7 +80,6 @@ const API_KEY_ENV: &str = "OPENAI_API_KEY";
 /// Deprecated private profile: the public authority must reject it.
 const EXPERIMENTAL_CLIENT_PROFILE: &str = "openai.gpt-live-1-codex.client-context.v1";
 const DEFAULT_EXECUTOR_MODEL: &str = "gpt-5.6-sol";
-const OUTPUT_AVAILABLE: &str = "live/assistant_output_available";
 
 struct OutputDelivery<T = LiveAssistantOutputAddress> {
     output: T,
@@ -281,6 +282,36 @@ struct SharedPublicLive {
 }
 
 impl SharedPublicLive {
+    /// The public authority fails closed on the deprecated private profile:
+    /// the member live host's open is refused at its admission, before any
+    /// channel exists, so the real open that follows starts clean.
+    async fn refuse_deprecated_profile(
+        &self,
+        session_id: &meerkat_core::SessionId,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let refused = self
+            .member_host
+            .open_with_execution_identity(
+                self.authority.as_ref(),
+                session_id,
+                &serde_json::from_value(execution_identity(EXPERIMENTAL_CLIENT_PROFILE))?,
+                None,
+                None,
+                Some(LiveOpenTransport::Webrtc),
+            )
+            .await;
+        match refused {
+            Err(ExperimentalLiveChannelOpenError::Authority(
+                ExperimentalLiveOpenAuthorityError::AdmissionFailed,
+            )) => Ok(()),
+            Err(other) => Err(format!(
+                "the deprecated private profile must be refused at the public authority's admission, not by: {other}"
+            )
+            .into()),
+            Ok(_) => Err("the public authority must fail closed on the deprecated private profile".into()),
+        }
+    }
+
     async fn connect(
         &self,
         peer: &mut BrowserPeer,
@@ -620,23 +651,27 @@ fn record_metric(
     Ok(())
 }
 
-/// Acknowledge one published assistant output so the machine can admit the
-/// next synthesized assistant turn.
+/// Acknowledge one published assistant output, through the member live host
+/// that owns the channel, so the machine can admit the next synthesized
+/// assistant turn.
 async fn complete_playback(
-    rpc: &mut JsonlRpcClient,
-    channel_id: &Value,
+    shared: &SharedPublicLive,
+    exact: &ExactChannel,
     output: &Value,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    assert_eq!(&output["channel_id"], channel_id);
-    rpc.call(
-        "live/playback_complete",
-        json!({
-            "channel_id": output["channel_id"],
-            "output_id": output["output_id"],
-        }),
-        30,
+    assert_eq!(output["channel_id"], json!(exact.id));
+    timeout(
+        Duration::from_secs(30),
+        shared.member_host.complete_live_playback(
+            &exact.id,
+            &exact.activation_receipt,
+            output["output_id"]
+                .as_str()
+                .ok_or("missing assistant output identity")?,
+        ),
     )
-    .await?;
+    .await
+    .map_err(|_| "playback completion exceeded its 30-second bound")??;
     Ok(())
 }
 
@@ -1215,7 +1250,6 @@ async fn open_public_live_with_summary(
         extra_members: Vec::new(),
         instructions_preface: None,
         summary_bootstrap: false,
-        shared_host: false,
     })
     .await
 }
@@ -1250,11 +1284,6 @@ struct PublicLiveOpen<'a> {
     /// host (factory summarizer, 4 MiB / 16 KiB / 60 s, `Concurrent`).
     /// Requires `evidence`; implies unmeasured playback.
     summary_bootstrap: bool,
-    /// Compose the shared exact-receipt member host (browser peer answered
-    /// through `SharedPublicLive`) for a non-ExistingMember policy too, so
-    /// DurableFork scenarios get the same evidence and timeline. Implied for
-    /// ExistingMember.
-    shared_host: bool,
 }
 
 /// A second mob member for scenarios about "who else is around".
@@ -1278,7 +1307,6 @@ async fn open_public_live_with(
         extra_members,
         instructions_preface,
         summary_bootstrap,
-        shared_host,
     } = options;
     let concurrent = bootstrap.is_some() || unmeasured_playback || summary_bootstrap;
     let evidence = bootstrap
@@ -1542,8 +1570,10 @@ async fn open_public_live_with(
     .with_live_webrtc_answer_transport(public_transport.clone());
     let mut unmeasured_publication_fault = None;
     let mut media_health = None;
-    let shared = if execution_policy == LiveDelegationExecutionPolicy::ExistingMember || shared_host
-    {
+    // Every scenario's live session is its executor member's own session, so
+    // the channel opens through the mob's member live host: the
+    // session-scoped `live/open` refuses a mob member's session.
+    let shared = {
         let member_host = ServiceMemberLiveHost::new(ServiceMemberLiveHostConfig {
             service: runtime.inner().service.clone(),
             runtime_adapter: runtime.runtime_adapter(),
@@ -1636,101 +1666,20 @@ async fn open_public_live_with(
         let binder = open_authority
             .bound_ready_binder_for(context_host, live_host, publisher)
             .ok_or("public audio host has no complete WebRTC answer binder")?;
-        Some(SharedPublicLive {
+        SharedPublicLive {
             runtime: runtime.runtime_adapter(),
             member_host,
             authority: open_authority,
             transport: public_transport,
             binder,
             outputs: (!concurrent).then(|| ReceivedOutputs::new(outputs, 64)),
-        })
-    } else {
-        server = server.with_experimental_live_open_authority(open_authority);
-        None
+        }
     };
     let server_task = tokio::spawn(async move { server.run().await });
     rpc.call("initialize", json!({}), 60).await?;
 
-    if let Some(shared) = shared {
-        let channel = evidence.as_ref().map(Journal::next_channel).transpose()?;
-        let mut peer = match (&evidence, channel) {
-            (Some(evidence), Some(channel)) => {
-                BrowserPeer::start_recorded(BrowserPeerProtocol::Public, evidence.clone(), channel)
-                    .await?
-            }
-            _ => BrowserPeer::start(BrowserPeerProtocol::Public).await?,
-        };
-        playback_hints.attach(&peer);
-        let connect = timeout(
-            Duration::from_secs(90),
-            shared.connect(&mut peer, &session_id),
-        );
-        let exact = match (&evidence, channel) {
-            (Some(evidence), Some(channel)) => {
-                evidence
-                    .provider_recording(channel)
-                    .scope(evidence.wire(channel).scope(connect))
-                    .await??
-            }
-            _ => connect.await??,
-        };
-        if let (Some(evidence), Some(channel)) = (&evidence, channel) {
-            evidence.require_attached(channel)?;
-            evidence.channel(channel, evidence::ChannelAction::Connected)?;
-        }
-        return Ok(PublicLiveHarness {
-            evidence,
-            rpc,
-            peer,
-            channel_id: json!(exact.id),
-            session_id,
-            mob_id,
-            mobs: Arc::clone(&mobs),
-            execution_policy,
-            server_task: server_task.abort_handle(),
-            shared: Some((shared, exact)),
-            unmeasured_publication_fault,
-            media_health,
-            media_fault_heard_utterances: Vec::new(),
-            sign_off_onset_ms: None,
-            playback_hints,
-            s99_context_reported: (0, 0),
-            _temp: temp,
-        });
-    }
-    // The RPC host opens the channel on its own request tasks, outside any
-    // recorder scope: a recorded run installs the provider-stream recorder
-    // as the process fallback around the open and the answer, when the
-    // provider client is built.
+    shared.refuse_deprecated_profile(&session_id).await?;
     let channel = evidence.as_ref().map(Journal::next_channel).transpose()?;
-    let fallback = match (&evidence, channel) {
-        (Some(evidence), Some(channel)) => {
-            Some(evidence.provider_recording(channel).install_fallback())
-        }
-        _ => None,
-    };
-    let rejected = rpc
-        .call_raw(
-            "live/open",
-            json!({"session_id":session_id,"transport":"webrtc",
-                "execution_identity":execution_identity(EXPERIMENTAL_CLIENT_PROFILE)}),
-            30,
-        )
-        .await?;
-    assert!(
-        !rejected["error"].is_null(),
-        "the public authority must fail closed on the deprecated private profile"
-    );
-    let open = rpc
-        .call(
-            "live/open",
-            json!({"session_id":session_id,"transport":"webrtc",
-                "execution_identity":execution_identity(GPT_LIVE_PUBLIC_CLIENT_CONTEXT_PROFILE_ID)}),
-            60,
-        )
-        .await?;
-    let channel_id = open["channel_id"].clone();
-
     let mut peer = match (&evidence, channel) {
         (Some(evidence), Some(channel)) => {
             BrowserPeer::start_recorded(BrowserPeerProtocol::Public, evidence.clone(), channel)
@@ -1739,48 +1688,36 @@ async fn open_public_live_with(
         _ => BrowserPeer::start(BrowserPeerProtocol::Public).await?,
     };
     playback_hints.attach(&peer);
-    let offer = peer.call(json!({"type":"prepare"})).await?;
-    assert_eq!(offer["protocol"], "public");
-    // The answer step is where the host creates the provider session. The
-    // broker sanitizes provider HTTP failures to `remote_unavailable` and
-    // logs the status. A 403 "Voice session access denied" from
-    // `POST /v1/live/sessions` means either a voice name the public API does
-    // not offer or an organization without Live voice-session access.
-    let answer = rpc
-        .call(
-            open["transport"]["answer_method"]
-                .as_str()
-                .unwrap_or("live/webrtc/answer"),
-            json!({"channel_id":channel_id,"token":open["transport"]["token"],
-                "offer_sdp":offer["offer_sdp"]}),
-            90,
-        )
-        .await
-        .map_err(|error| {
-            format!(
-                "{error}; the public Live session could not be created for the configured {API_KEY_ENV}: verify the configured voice is a public Live voice and the key's organization has OpenAI Live (gpt-live-1) voice-session access"
-            )
-        })?;
-    peer.call(json!({"type":"answer","answer_sdp":answer["answer_sdp"]}))
-        .await?;
-    drop(fallback);
+    let connect = timeout(
+        Duration::from_secs(90),
+        shared.connect(&mut peer, &session_id),
+    );
+    let exact = match (&evidence, channel) {
+        (Some(evidence), Some(channel)) => {
+            evidence
+                .provider_recording(channel)
+                .scope(evidence.wire(channel).scope(connect))
+                .await??
+        }
+        _ => connect.await??,
+    };
     if let (Some(evidence), Some(channel)) = (&evidence, channel) {
+        evidence.require_attached(channel)?;
         evidence.channel(channel, evidence::ChannelAction::Connected)?;
     }
-
     Ok(PublicLiveHarness {
         evidence,
         rpc,
         peer,
-        channel_id,
+        channel_id: json!(exact.id),
         session_id,
         mob_id,
-        mobs,
+        mobs: Arc::clone(&mobs),
         execution_policy,
         server_task: server_task.abort_handle(),
-        shared: None,
-        unmeasured_publication_fault: None,
-        media_health: None,
+        shared: Some((shared, exact)),
+        unmeasured_publication_fault,
+        media_health,
         media_fault_heard_utterances: Vec::new(),
         sign_off_onset_ms: None,
         playback_hints,
@@ -1828,6 +1765,7 @@ async fn run_s97_client_context_vertical(
         channel_id,
         mob_id,
         server_task,
+        shared,
         // The scratch workspace lives as long as the scenario: dropped here,
         // the executor's working directory vanished and every S97 result was
         // "the working directory does not exist" (verdict 5e6cdc16).
@@ -1849,9 +1787,12 @@ async fn run_s97_client_context_vertical(
         extra_members: Vec::new(),
         instructions_preface: None,
         summary_bootstrap: false,
-        shared_host: false,
     })
     .await?;
+    // The executor is a mob member, so its channel is the member live host's:
+    // assistant outputs, truncation, playback completion and the close all
+    // go through that host with the channel's exact activation receipt.
+    let (mut shared, exact) = shared.ok_or("S97 opens through the mob's member live host")?;
     evidence.stage(EvidenceStage::Connected)?;
     // The lag rule's input is recorded whether the phases pass or fail: a
     // failing run must be classifiable as provider-degraded or valid.
@@ -1866,9 +1807,13 @@ async fn run_s97_client_context_vertical(
     let greeting_audio_baseline = peer.audio_evidence().await?;
     let before = peer.events().await?.len();
     peer.call(json!({"type":"play","name":"greeting"})).await?;
-    let interrupted_output = match rpc.wait_for_notification(OUTPUT_AVAILABLE, 45).await {
-        Ok(output) => output,
-        Err(error) => {
+    let interrupted_output = match shared.poll_output(Duration::from_secs(45)).await {
+        Ok(Some(output)) => output,
+        failed => {
+            let error = match failed {
+                Err(error) => error.to_string(),
+                _ => "none within 45 seconds".to_owned(),
+            };
             let events = peer.events().await?;
             return Err(format!(
                 "greeting produced no admitted assistant output: {error}; browser events: {}",
@@ -1878,19 +1823,23 @@ async fn run_s97_client_context_vertical(
         }
     };
     assert_eq!(interrupted_output["channel_id"], channel_id);
-    let truncated = rpc
-        .call(
-            "live/truncate",
-            json!({
-                "channel_id": interrupted_output["channel_id"],
-                "output_id": interrupted_output["output_id"],
-                "audio_played_ms": 0,
-            }),
-            30,
-        )
-        .await?;
+    let truncated = timeout(
+        Duration::from_secs(30),
+        shared.member_host.truncate_live_output(
+            &exact.id,
+            &exact.activation_receipt,
+            interrupted_output["output_id"]
+                .as_str()
+                .ok_or("the interrupted assistant output has no output id")?,
+            0,
+            None,
+        ),
+    )
+    .await
+    .map_err(|_| "S97: the barge-in truncation exceeded its 30-second bound")??;
     assert_eq!(
-        truncated["status"], "truncated",
+        truncated.status,
+        LiveTruncateStatus::Truncated,
         "barge-in must retire the interrupted playback owner before another assistant output"
     );
     let greeting = wait_for_events(&mut peer, 90, |events| {
@@ -1942,8 +1891,11 @@ async fn run_s97_client_context_vertical(
         "provider did not answer the barge-in speech"
     );
     wait_for_spoken_output(&mut peer, greeting_audio_baseline, 30).await?;
-    let greeting_output = rpc.wait_for_notification(OUTPUT_AVAILABLE, 45).await?;
-    complete_playback(&mut rpc, &channel_id, &greeting_output).await?;
+    let greeting_output = shared
+        .poll_output(Duration::from_secs(45))
+        .await?
+        .ok_or("the barge-in reply published no assistant output within 45 seconds")?;
+    complete_playback(&shared, &exact, &greeting_output).await?;
     assert!(
         !greeting[before..].iter().any(is_client_delegation),
         "simple greeting must remain in the same live conversation; {}",
@@ -1991,11 +1943,8 @@ async fn run_s97_client_context_vertical(
     let worker_identity = loop {
         // Keep acknowledging assistant outputs (spoken acknowledgement and
         // result readout) so the machine can admit each synthesized turn.
-        while let Some(output) = rpc
-            .poll_notification(OUTPUT_AVAILABLE, Duration::from_millis(500))
-            .await?
-        {
-            complete_playback(&mut rpc, &channel_id, &output).await?;
+        while let Some(output) = shared.poll_output(Duration::from_millis(500)).await? {
+            complete_playback(&shared, &exact, &output).await?;
             delegation_outputs += 1;
         }
         let events = rpc
@@ -2083,11 +2032,8 @@ async fn run_s97_client_context_vertical(
         )
     })?;
     wait_for_spoken_output(&mut peer, ack_audio, 60).await?;
-    while let Some(output) = rpc
-        .poll_notification(OUTPUT_AVAILABLE, Duration::from_secs(5))
-        .await?
-    {
-        complete_playback(&mut rpc, &channel_id, &output).await?;
+    while let Some(output) = shared.poll_output(Duration::from_secs(5)).await? {
+        complete_playback(&shared, &exact, &output).await?;
         delegation_outputs += 1;
     }
     assert!(
@@ -2152,8 +2098,16 @@ async fn run_s97_client_context_vertical(
         commentary_acks,
         worker_identity,
     ) = phases?;
-    rpc.call("live/close", json!({"channel_id":channel_id}), 30)
-        .await?;
+    timeout(
+        Duration::from_secs(30),
+        shared.member_host.close_experimental_live_active_channel(
+            shared.authority.as_ref(),
+            &exact.id,
+            &exact.activation_receipt,
+        ),
+    )
+    .await
+    .map_err(|_| "S97: the live close exceeded its 30-second bound")??;
     peer.stop_evidence().await?;
     evidence.stage(EvidenceStage::Finished)?;
     peer.close().await;
@@ -6994,7 +6948,6 @@ async fn run_s100_morning_standup(evidence: Journal) -> Result<(), Box<dyn std::
         extra_members: Vec::new(),
         instructions_preface: None,
         summary_bootstrap: false,
-        shared_host: false,
     })
     .await?;
     let connected_ms = started.elapsed().as_millis();
@@ -8566,7 +8519,6 @@ async fn run_s102_who_are_you(evidence: Journal) -> Result<(), Box<dyn std::erro
         }],
         instructions_preface: Some(preface.clone()),
         summary_bootstrap: false,
-        shared_host: false,
     })
     .await?;
     let connected_ms = started.elapsed().as_millis();
@@ -8922,7 +8874,6 @@ async fn run_s103_interrupt_and_recover(
         extra_members: Vec::new(),
         instructions_preface: None,
         summary_bootstrap: false,
-        shared_host: false,
     })
     .await?;
     let connected_ms = started.elapsed().as_millis();
@@ -9414,7 +9365,6 @@ async fn run_s107_stuck_close_convergence(
         extra_members: Vec::new(),
         instructions_preface: None,
         summary_bootstrap: false,
-        shared_host: false,
     })
     .await?;
     let connected_ms = started.elapsed().as_millis();
@@ -9785,7 +9735,6 @@ async fn run_s104_handoff_voice_typed_voice(
         extra_members: Vec::new(),
         instructions_preface: None,
         summary_bootstrap: true,
-        shared_host: s104_policy() == LiveDelegationExecutionPolicy::DurableFork,
     })
     .await?;
     let connected_ms = started.elapsed().as_millis();
@@ -10525,7 +10474,6 @@ async fn run_s106_long_haul(evidence: Journal) -> Result<(), Box<dyn std::error:
         extra_members: Vec::new(),
         instructions_preface: None,
         summary_bootstrap: true,
-        shared_host: false,
     })
     .await?;
     let connected_ms = started.elapsed().as_millis();
@@ -11431,7 +11379,6 @@ async fn run_s101_busy_backend(evidence: Journal) -> Result<(), Box<dyn std::err
         extra_members: Vec::new(),
         instructions_preface: None,
         summary_bootstrap: false,
-        shared_host: true,
     })
     .await?;
     let connected_ms = started.elapsed().as_millis();
@@ -11970,7 +11917,6 @@ async fn run_s105_fork_and_merge_parallel(
         extra_members: Vec::new(),
         instructions_preface: None,
         summary_bootstrap: false,
-        shared_host: true,
     })
     .await?;
     let connected_ms = started.elapsed().as_millis();
@@ -12370,7 +12316,6 @@ async fn run_s98_real_audio_and_context(
         extra_members: Vec::new(),
         instructions_preface: None,
         summary_bootstrap: false,
-        shared_host: false,
     })
     .await?;
     evidence.stage(EvidenceStage::Connected)?;

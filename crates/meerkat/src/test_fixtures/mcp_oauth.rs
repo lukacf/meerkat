@@ -6,7 +6,9 @@
 //! metadata, RFC 8414 authorization-server metadata, dynamic client
 //! registration, an authorize endpoint that redirects straight back to the
 //! registered loopback redirect, a token endpoint, and OpenID Connect
-//! discovery plus UserInfo. [`AccountEvidence::NoUserInfo`] serves an
+//! discovery plus UserInfo.
+//! [`AccountEvidence::NoUserInfo`](crate::test_fixtures::mcp_oauth::AccountEvidence::NoUserInfo)
+//! serves an
 //! authorization server without account evidence instead. Every secret it
 //! issues is a fixed canary, so tests can assert those values never reach
 //! agent-visible channels or logs. It is hand-written on tokio so it adds no

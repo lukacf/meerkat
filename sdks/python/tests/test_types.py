@@ -3732,6 +3732,24 @@ def test_parse_tool_execution_completed():
         "type": "tool_execution_completed",
         "id": "t1",
         "name": "search",
+        "is_error": False,
+        "duration_ms": 42,
+    }
+    event = parse_event(raw)
+    assert isinstance(event, ToolExecutionCompleted)
+    assert event.name == "search"
+    assert event.duration_ms == 42
+    assert event.is_error is False
+    # The execution fact carries no result body: it is on ToolResultReceived.
+    assert not hasattr(event, "content")
+
+
+def test_parse_tool_execution_completed_ignores_an_older_servers_content():
+    # A server before 0.9.5 still sends the body on the completion too.
+    raw = {
+        "type": "tool_execution_completed",
+        "id": "t1",
+        "name": "search",
         "content": [
             {"type": "text", "text": "found it"},
             {
@@ -3746,18 +3764,13 @@ def test_parse_tool_execution_completed():
     }
     event = parse_event(raw)
     assert isinstance(event, ToolExecutionCompleted)
-    assert event.name == "search"
-    assert event.duration_ms == 42
-    assert event.is_error is False
-    assert event.content == [
-        {"type": "text", "text": "found it"},
-        {
-            "type": "image",
-            "media_type": "image/png",
-            "source": "inline",
-            "data": "AAAA",
-        },
-    ]
+    assert (event.id, event.name, event.is_error, event.duration_ms) == (
+        "t1",
+        "search",
+        False,
+        42,
+    )
+    assert not hasattr(event, "content")
 
 
 def test_parse_tool_result_received_content_blocks():
@@ -3774,14 +3787,13 @@ def test_parse_tool_result_received_content_blocks():
     assert event.is_error is False
 
 
-def test_parse_tool_execution_completed_preserves_malformed_content_blocks():
+def test_parse_tool_result_received_preserves_malformed_content_blocks():
     raw = {
-        "type": "tool_execution_completed",
+        "type": "tool_result_received",
         "id": "t1",
         "name": "search",
         "content": "not blocks",
         "is_error": False,
-        "duration_ms": 42,
     }
     event = parse_event(raw)
     assert isinstance(event, UnknownEvent)
@@ -3795,7 +3807,6 @@ def test_parse_tool_execution_completed_does_not_coerce_missing_or_malformed_is_
             "type": "tool_execution_completed",
             "id": "t1",
             "name": "search",
-            "content": [{"type": "text", "text": "found it"}],
         }
     )
     malformed = parse_event(
@@ -3803,7 +3814,6 @@ def test_parse_tool_execution_completed_does_not_coerce_missing_or_malformed_is_
             "type": "tool_execution_completed",
             "id": "t1",
             "name": "search",
-            "content": [{"type": "text", "text": "found it"}],
             "is_error": "false",
         }
     )
@@ -3813,8 +3823,6 @@ def test_parse_tool_execution_completed_does_not_coerce_missing_or_malformed_is_
     assert malformed.is_error is None
     assert missing.duration_ms is None
     assert malformed.duration_ms is None
-    assert missing.content == [{"type": "text", "text": "found it"}]
-    assert malformed.content == [{"type": "text", "text": "found it"}]
 
 
 def test_parse_unknown_event_type():
@@ -6094,6 +6102,217 @@ async def test_wait_mob_members_carry_registration_refusal():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("restore", ["startup_binding", "cleanup_delivery"])
+@pytest.mark.parametrize(
+    "cause", ["served_elsewhere", "hosting_unavailable", "durable_tail_unprovable"]
+)
+async def test_mob_member_status_surfaces_custody_deferred(restore, cause):
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {
+            "status": "broken",
+            "member_ref": _make_member_ref("mob-1", "agent-a"),
+            "tokens_used": 0,
+            "is_final": False,
+            "custody_deferred": {"restore": restore, "cause": cause},
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    status = await client.mob_member_status("mob-1", "agent-a")
+    assert status["custody_deferred"] == {"restore": restore, "cause": cause}
+    assert status["status"] == "broken"
+
+
+@pytest.mark.asyncio
+async def test_mob_member_status_omits_absent_or_null_custody_deferred():
+    client = MeerkatClient()
+    for extra in ({}, {"custody_deferred": None}):
+
+        async def fake_request(_method, _params, extra=extra):
+            return {
+                "status": "active",
+                "member_ref": _make_member_ref("mob-1", "agent-a"),
+                "tokens_used": 3,
+                "is_final": False,
+                **extra,
+            }
+
+        client._request = fake_request  # type: ignore[method-assign]
+        status = await client.mob_member_status("mob-1", "agent-a")
+        assert "custody_deferred" not in status
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("deferral", "message"),
+    [
+        ("startup_binding", "invalid custody_deferred"),
+        (["startup_binding"], "invalid custody_deferred"),
+        (
+            {"restore": 7, "cause": "served_elsewhere"},
+            "invalid custody_deferred.restore",
+        ),
+        (
+            {"restore": "startup_binding", "cause": {"kind": "busy"}},
+            "invalid custody_deferred.cause",
+        ),
+        ({"cause": "served_elsewhere"}, "invalid custody_deferred.restore"),
+    ],
+)
+async def test_mob_member_status_rejects_a_malformed_custody_deferred(deferral, message):
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {
+            "status": "broken",
+            "member_ref": _make_member_ref("mob-1", "agent-a"),
+            "tokens_used": 0,
+            "is_final": False,
+            "custody_deferred": deferral,
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError, match=message):
+        await client.mob_member_status("mob-1", "agent-a")
+
+
+@pytest.mark.asyncio
+async def test_mob_member_status_reads_an_unknown_custody_restore_as_unknown():
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {
+            "status": "broken",
+            "member_ref": _make_member_ref("mob-1", "agent-a"),
+            "tokens_used": 0,
+            "is_final": False,
+            "custody_deferred": {"restore": "warm_handoff", "cause": "served_elsewhere"},
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    status = await client.mob_member_status("mob-1", "agent-a")
+    assert status["custody_deferred"] == {
+        "restore": {"unknown": "warm_handoff"},
+        "cause": "served_elsewhere",
+    }
+
+
+@pytest.mark.asyncio
+async def test_mob_member_status_reads_an_unknown_custody_cause_as_unknown():
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {
+            "status": "broken",
+            "member_ref": _make_member_ref("mob-1", "agent-a"),
+            "tokens_used": 0,
+            "is_final": False,
+            "custody_deferred": {"restore": "startup_binding", "cause": "quota_paused"},
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    status = await client.mob_member_status("mob-1", "agent-a")
+    assert status["custody_deferred"] == {
+        "restore": "startup_binding",
+        "cause": {"unknown": "quota_paused"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_mob_member_status_ignores_an_unknown_custody_deferred_field():
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {
+            "status": "broken",
+            "member_ref": _make_member_ref("mob-1", "agent-a"),
+            "tokens_used": 0,
+            "is_final": False,
+            "custody_deferred": {
+                "restore": "startup_binding",
+                "cause": "served_elsewhere",
+                "attempts": 2,
+            },
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    status = await client.mob_member_status("mob-1", "agent-a")
+    assert status["custody_deferred"] == {
+        "restore": "startup_binding",
+        "cause": "served_elsewhere",
+    }
+
+
+@pytest.mark.asyncio
+async def test_wait_mob_members_read_an_unknown_custody_deferral_as_unknown():
+    client = MeerkatClient()
+
+    async def fake_request(_method, _params):
+        return {
+            "members": [
+                {
+                    "agent_identity": "lead",
+                    "status": "broken",
+                    "tokens_used": 0,
+                    "is_final": False,
+                    "custody_deferred": {"restore": "warm_handoff", "cause": "quota_paused"},
+                },
+            ]
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    for members in (
+        await client.wait_mob_kickoff("mob-1"),
+        await client.wait_mob_ready("mob-1"),
+    ):
+        assert members[0]["custody_deferred"] == {
+            "restore": {"unknown": "warm_handoff"},
+            "cause": {"unknown": "quota_paused"},
+        }
+
+
+@pytest.mark.asyncio
+async def test_wait_mob_members_carry_custody_deferred():
+    client = MeerkatClient()
+    deferral = {"restore": "startup_binding", "cause": "served_elsewhere"}
+
+    async def fake_request(_method, _params):
+        return {
+            "members": [
+                {
+                    "agent_identity": "lead",
+                    "status": "broken",
+                    "tokens_used": 0,
+                    "is_final": False,
+                    "custody_deferred": deferral,
+                },
+                {
+                    "agent_identity": "writer",
+                    "status": "active",
+                    "tokens_used": 7,
+                    "is_final": False,
+                },
+            ]
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    for members in (
+        await client.wait_mob_kickoff("mob-1"),
+        await client.wait_mob_ready("mob-1"),
+    ):
+        assert members[0]["custody_deferred"] == deferral
+        assert "custody_deferred" not in members[1]
+
+
+@pytest.mark.asyncio
 async def test_mob_member_status_rejects_unknown_peer_connectivity_tag():
     client = MeerkatClient()
 
@@ -7578,6 +7797,65 @@ async def test_live_channel_passes_seed_max_chars_on_open():
     assert captured == [("session-seeded", None, None, 12_000)]
     assert channel.channel_id == "live_seeded"
     assert result["continuity"] == {"mode": "degraded"}
+
+
+@pytest.mark.asyncio
+async def test_live_open_advisories_keep_unknown_values_and_fail_closed_when_malformed():
+    """`advisories` on a live open result is advisory and its vocabulary may
+    grow: a value this SDK does not know is kept as the string the server
+    sent, on the raw session open and the parsed member open alike, and an
+    absent field reads as no advisories. A field that is not a list of
+    non-empty strings is malformed and fails closed.
+    """
+    from meerkat.types import LiveOpenResult, WireLiveOpenAdvisory
+
+    def open_result(**extra: object) -> dict[str, object]:
+        return {
+            "channel_id": "live_advised",
+            "transport": {"transport": "websocket", "url": "ws://x", "token": "t"},
+            "capabilities": {
+                "audio_in": True,
+                "audio_out": True,
+                "text_in": True,
+                "text_out": True,
+                "image_in": False,
+                "video_in": False,
+                "transcript_supported": True,
+                "barge_in_supported": True,
+                "provider_native_resume": False,
+            },
+            "continuity": {"mode": "transcript_only"},
+            **extra,
+        }
+
+    responses: list[dict[str, object]] = []
+
+    async def fake_request(method, params):
+        return responses.pop(0)
+
+    client = MeerkatClient()
+    client._request = fake_request  # type: ignore[method-assign]
+    advised = ["staged_prompt_refused", "a_later_advisory"]
+
+    responses.append(open_result(advisories=list(advised)))
+    raw = await client.live_open("session-advised")
+    responses.append(open_result(advisories=list(advised)))
+    member = await client.open_mob_member_live("mob-1", "worker")
+    responses.append(open_result())
+    member_without = await client.open_mob_member_live("mob-1", "worker")
+
+    assert raw["advisories"] == advised
+    assert member.advisories == advised
+    assert member_without.advisories == []
+    assert set(get_args(get_type_hints(LiveOpenResult)["advisories"])) == {
+        list[WireLiveOpenAdvisory],
+        type(None),
+    }
+
+    for malformed in ("staged_prompt_refused", [7], [""], None):
+        responses.append(open_result(advisories=malformed))
+        with pytest.raises(MeerkatError, match="Invalid mob/member_live_open response"):
+            await client.open_mob_member_live("mob-1", "worker")
 
 
 @pytest.mark.asyncio
@@ -9183,3 +9461,199 @@ def test_parse_compaction_completed_unknown_summary_source_kinds():
     event = parse_event(malformed)
     assert isinstance(event, UnknownEvent)
     assert event.type == "malformed_event"
+
+
+# Caller idempotency keys on session/external_event and mob/member_send.
+
+
+@pytest.mark.asyncio
+async def test_send_external_event_passes_the_idempotency_key_to_a_095_server() -> None:
+    client = MeerkatClient()
+    client._server_contract_version = "0.9.5"
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    async def fake_request(method: str, params: dict[str, object]) -> dict[str, object]:
+        calls.append((method, params))
+        return {"outcome_type": "deduplicated", "existing_id": "input-1"}
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    outcome = await client.send_external_event(
+        "s1", "inbox.item", {"id": 1}, idempotency_key="item-1"
+    )
+
+    assert outcome == {"outcome_type": "deduplicated", "existing_id": "input-1"}
+    assert calls == [
+        (
+            "session/external_event",
+            {
+                "session_id": "s1",
+                "kind": "generic_json",
+                "event_type": "inbox.item",
+                "payload": {"id": 1},
+                "idempotency_key": "item-1",
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_send_external_event_refuses_a_key_against_an_older_server() -> None:
+    client = MeerkatClient()
+    client._server_contract_version = "0.9.4"
+    calls: list[str] = []
+
+    async def fake_request(method: str, _params: dict[str, object]) -> dict[str, object]:
+        calls.append(method)
+        return {}
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(CapabilityUnavailableError) as raised:
+        await client.send_external_event("s1", "inbox.item", {}, idempotency_key="item-1")
+    assert raised.value.code == "CAPABILITY_UNAVAILABLE"
+    assert "0.9.5" in raised.value.message
+    assert calls == [], "a key an older server would drop is never sent"
+
+
+@pytest.mark.asyncio
+async def test_send_external_event_without_a_key_needs_no_contract_check() -> None:
+    client = MeerkatClient()
+    client._server_contract_version = "0.9.4"
+    calls: list[dict[str, object]] = []
+
+    async def fake_request(_method: str, params: dict[str, object]) -> dict[str, object]:
+        calls.append(params)
+        return {"outcome_type": "accepted"}
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    await client.send_external_event("s1", "inbox.item", {})
+    assert "idempotency_key" not in calls[0]
+
+
+@pytest.mark.asyncio
+async def test_send_mob_member_content_parses_the_keyed_continuation() -> None:
+    client = MeerkatClient()
+    client._server_contract_version = "0.9.5"
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    async def fake_request(method: str, params: dict[str, object]) -> dict[str, object]:
+        calls.append((method, params))
+        return {
+            "mob_id": "mob-1",
+            "agent_identity": "agent-a",
+            "member_ref": _make_member_ref("mob-1", "agent-a"),
+            "handling_mode": "queue",
+            "continuation": {
+                "delivery_id": "continuation:abc",
+                "committed_at_ms": 1792000000000,
+                "status": {"state": "admitted", "session_id": "s-1", "input_id": "i-1"},
+            },
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    receipt = await client.send_mob_member_content(
+        "mob-1", "agent-a", "Ingest item 1.", idempotency_key="item-1"
+    )
+
+    assert receipt["continuation"] == {
+        "delivery_id": "continuation:abc",
+        "committed_at_ms": 1792000000000,
+        "status": {"state": "admitted", "session_id": "s-1", "input_id": "i-1"},
+    }
+    assert calls[0][1]["idempotency_key"] == "item-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status",
+    [
+        {"state": "pending"},
+        {"state": "stranded"},
+        {"state": "refused", "reason": "authority_denied"},
+    ],
+)
+async def test_send_mob_member_content_parses_every_continuation_state(
+    status: dict[str, object],
+) -> None:
+    client = MeerkatClient()
+    client._server_contract_version = "0.10.0"
+
+    async def fake_request(_method: str, _params: dict[str, object]) -> dict[str, object]:
+        return {
+            "mob_id": "mob-1",
+            "agent_identity": "agent-a",
+            "member_ref": _make_member_ref("mob-1", "agent-a"),
+            "handling_mode": "queue",
+            "continuation": {
+                "delivery_id": "continuation:abc",
+                "committed_at_ms": 1,
+                "status": status,
+            },
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    receipt = await client.send_mob_member_content(
+        "mob-1", "agent-a", "x", idempotency_key="item-1"
+    )
+    assert receipt["continuation"]["status"] == status
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "continuation",
+    [
+        None,
+        {"delivery_id": "", "committed_at_ms": 1, "status": {"state": "pending"}},
+        {"delivery_id": "d", "committed_at_ms": True, "status": {"state": "pending"}},
+        {"delivery_id": "d", "committed_at_ms": 1, "status": {"state": "lost"}},
+        {"delivery_id": "d", "committed_at_ms": 1, "status": {"state": "admitted"}},
+        {"delivery_id": "d", "committed_at_ms": 1, "status": {"state": "refused"}},
+    ],
+)
+async def test_send_mob_member_content_refuses_a_malformed_keyed_answer(
+    continuation: object,
+) -> None:
+    client = MeerkatClient()
+    client._server_contract_version = "0.9.5"
+
+    async def fake_request(_method: str, _params: dict[str, object]) -> dict[str, object]:
+        answer: dict[str, object] = {
+            "mob_id": "mob-1",
+            "agent_identity": "agent-a",
+            "member_ref": _make_member_ref("mob-1", "agent-a"),
+            "handling_mode": "queue",
+        }
+        if continuation is not None:
+            answer["continuation"] = continuation
+        return answer
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(MeerkatError) as raised:
+        await client.send_mob_member_content(
+            "mob-1", "agent-a", "x", idempotency_key="item-1"
+        )
+    assert raised.value.code == "INVALID_RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_send_mob_member_content_refuses_a_key_against_an_older_server() -> None:
+    client = MeerkatClient()
+    client._server_contract_version = "0.9.4"
+    calls: list[str] = []
+
+    async def fake_request(method: str, _params: dict[str, object]) -> dict[str, object]:
+        calls.append(method)
+        return {}
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    with pytest.raises(CapabilityUnavailableError):
+        await client.send_mob_member_content(
+            "mob-1", "agent-a", "x", idempotency_key="item-1"
+        )
+    assert calls == []

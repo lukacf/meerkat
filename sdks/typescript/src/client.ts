@@ -160,6 +160,8 @@ import {
   type WireNonPortableResourceKind,
   type WireMemberPreviewUnavailable,
   type WireMemberRegistrationHookCall,
+  type WireMemberCustodyDeferralCause,
+  type WireMemberCustodyRestore,
   type WireReachability,
   type ToolDispatchAdmissionSource,
   type ToolDispatchSettlementFailure,
@@ -383,11 +385,14 @@ import type {
   MobReconcileOptionsWire as RpcMobReconcileOptionsWire,
   ContentBlock as RpcCommsContentBlock,
   CommsPeerRequestParams as RpcCommsPeerRequestParams,
+  WireMobDestroyReport,
 } from "./generated/types.js";
 import { DeferredSession, Session } from "./session.js";
 import {
   Mob,
   type MemberDeliveryReceipt,
+  type MemberSendContinuation,
+  type MemberSendContinuationStatus,
   type MemberSendOptions,
   type MobBoundedHelperResult,
   type MobHandlingMode,
@@ -395,6 +400,7 @@ import {
   type MobHelperResult,
   type MobHelperOptions,
   type MobKickoffMemberSnapshot,
+  type MobMemberCustodyDeferral,
   type MobKickoffWaitOptions,
   type MobMemberSnapshot,
   type MobPeerConnectivity,
@@ -406,10 +412,11 @@ import {
 } from "./mob.js";
 import { parseAgentEventEnvelope } from "./event-envelope.js";
 import { isCommsSendErrorCode } from "./comms-errors.js";
+import { parseMobDestroyReport } from "./mob-destroy-report.js";
 import { EventStream, AsyncQueue } from "./streaming.js";
 import { parseUsage } from "./events.js";
 import type { RealtimeMessageOrigin } from "./events.js";
-import { EventSubscription } from "./subscription.js";
+import { EventSubscription, type SubscriptionEvent, type SubscriptionItem } from "./subscription.js";
 import type {
   AgentEventEnvelope,
   AttributedMobEvent,
@@ -505,6 +512,7 @@ import type {
   UpdateScheduleRequest,
   TurnOptions,
   TurnToolOverlay,
+  ToolCallDedupeKey,
   Usage,
   ReadyWorkFilter,
   WorkGraphEventFilter,
@@ -980,6 +988,20 @@ function normalizeMobWireMembersBatchEdge(
 // close before its exit is settled anyway.
 const CHILD_EXIT_PIPE_GRACE_MS = 1_000;
 
+// How much of a child's stderr an error message carries, in UTF-16 units.
+const CHILD_STDERR_TAIL_UNITS = 8_192;
+
+/**
+ * The last `CHILD_STDERR_TAIL_UNITS` units of a child's stderr, never starting
+ * with the second half of a surrogate pair that the cut split.
+ */
+function childStderrTail(text: string): string {
+  if (text.length <= CHILD_STDERR_TAIL_UNITS) return text;
+  const tail = text.slice(-CHILD_STDERR_TAIL_UNITS);
+  const first = tail.charCodeAt(0);
+  return first >= 0xdc00 && first <= 0xdfff ? tail.slice(1) : tail;
+}
+
 export class MeerkatClient {
   private process: ChildProcess | null = null;
   // Permanent transport-failed state: once the JSONL framing is untrustworthy
@@ -995,6 +1017,7 @@ export class MeerkatClient {
   private requestId = 0;
   private _capabilities: Capability[] = [];
   private _methods = new Set<string>();
+  private _serverContractVersion = "";
   private rkatPath: string;
   private pendingRequests = new Map<
     number,
@@ -1003,7 +1026,7 @@ export class MeerkatClient {
   private eventQueues = new Map<string, AsyncQueue<Record<string, unknown> | null>>();
   private liveNotificationListeners = new Set<LiveNotificationListener>();
   private consentNoticeListeners = new Set<ConsentNoticeListener>();
-  private streamQueues = new Map<string, AsyncQueue<Record<string, unknown> | null>>();
+  private streamQueues = new Map<string, AsyncQueue<SubscriptionItem>>();
   // Per-request_id stream subscriptions for createSessionStreaming calls whose
   // session_id is not yet bound. Keyed by the JSON-RPC request id so concurrent
   // creates are admitted and correlated independently instead of colliding on a
@@ -1015,7 +1038,7 @@ export class MeerkatClient {
   // streams are pending: each event lands under the session it names, and the
   // response that binds that session_id drains exactly its own buffer.
   private unmatchedStreamBuffer = new Map<string, Record<string, unknown>[]>();
-  private unmatchedStandaloneStreamBuffer = new Map<string, Record<string, unknown>[]>();
+  private unmatchedStandaloneStreamBuffer = new Map<string, SubscriptionEvent[]>();
   private unmatchedStandaloneStreamEnd = new Map<string, Record<string, unknown>>();
   private streamTerminalOutcomes = new Map<string, Record<string, unknown>>();
   private rl: ReadlineInterface | null = null;
@@ -1024,7 +1047,10 @@ export class MeerkatClient {
     {
       description: string;
       inputSchema: Record<string, unknown>;
-      handler: (args: Record<string, unknown>) => Promise<string | ContentBlock[]>;
+      handler: (
+        args: Record<string, unknown>,
+        dedupeKey?: ToolCallDedupeKey,
+      ) => Promise<string | ContentBlock[]>;
     }
   >();
   // Typed faults from post-connect tool registration. `registerTool` is sync and
@@ -1051,12 +1077,20 @@ export class MeerkatClient {
    * Handlers may return a plain string or a `ContentBlock[]` for multimodal
    * tool results. Block arrays are forwarded faithfully to the runtime as
    * `WireToolResultContent` (no string coercion).
+   *
+   * A handler's optional second argument is the call's
+   * {@link ToolCallDedupeKey}, present when an agent-loop round dispatched
+   * the call. A resumed run that dispatches the same call again passes the
+   * same key.
    */
   registerTool(
     name: string,
     description: string,
     inputSchema: Record<string, unknown>,
-    handler: (args: Record<string, unknown>) => Promise<string | ContentBlock[]>,
+    handler: (
+      args: Record<string, unknown>,
+      dedupeKey?: ToolCallDedupeKey,
+    ) => Promise<string | ContentBlock[]>,
   ): void {
     this.toolHandlers.set(name, { description, inputSchema, handler });
     // A fresh declaration supersedes any stale fault from a prior failed attempt.
@@ -1175,8 +1209,11 @@ export class MeerkatClient {
     this.transportFault = null;
     const child = this.process;
     this.processStderr = "";
-    child.stderr?.on("data", (chunk: string | Buffer) => {
-      this.processStderr = (this.processStderr + String(chunk)).slice(-8192);
+    // Decoded as one stream: a character split across two pipe reads stays
+    // whole instead of becoming U+FFFD.
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => {
+      this.processStderr = childStderrTail(this.processStderr + chunk);
     });
     child.once("error", (error) => {
       if (this.process === child) {
@@ -1228,6 +1265,7 @@ export class MeerkatClient {
     const initResult = (await this.request("initialize", {})) as Partial<ServerCapabilities> &
       Record<string, unknown>;
     const serverVersion = String(initResult.contract_version ?? "");
+    this._serverContractVersion = serverVersion;
     if (!MeerkatClient.checkVersionCompatible(serverVersion, CONTRACT_VERSION)) {
       throw new MeerkatError(
         "VERSION_MISMATCH",
@@ -1405,6 +1443,7 @@ export class MeerkatClient {
     options?: SessionOptions,
   ): Promise<Session> {
     const params = MeerkatClient.buildCreateParams(prompt, options);
+    this.optOutOfTurnSessionEvents(params);
     const raw = await this.request("session/create", params);
     const result = MeerkatClient.parseRunResult(raw);
     return new Session(this, result);
@@ -1524,11 +1563,67 @@ export class MeerkatClient {
     return MeerkatClient.parseSessionInfo(raw);
   }
 
+  /** Whether the server reports a contract version of at least `minimum`. */
+  private serverContractAtLeast(minimum: readonly number[]): boolean {
+    const core = this._serverContractVersion.split("-", 1)[0].split("+", 1)[0];
+    const parts = core.split(".").map((part) => Number(part));
+    const valid = core.length > 0 && parts.every((part) => Number.isInteger(part));
+    let atLeast = valid;
+    if (valid) {
+      for (let index = 0; index < minimum.length; index += 1) {
+        const part = parts[index] ?? 0;
+        if (part !== minimum[index]) {
+          atLeast = part > minimum[index];
+          break;
+        }
+      }
+    }
+    return atLeast;
+  }
+
+  /**
+   * Ask the server not to write this turn's events as `session/event`: a call
+   * that does not stream its turn reads only the run result, so those copies
+   * would be parsed and dropped. Sent only to a server whose contract (0.9.5
+   * or later) takes the field; an older server refuses it on `turn/start`.
+   */
+  private optOutOfTurnSessionEvents(params: Record<string, unknown>): void {
+    if (this.serverContractAtLeast([0, 9, 5])) {
+      params.session_events = false;
+    }
+  }
+
+  /**
+   * Refuse a caller idempotency key before sending it to a server that would
+   * drop it: before contract 0.9.5 `session/external_event` ignores the field
+   * and admits the call unkeyed.
+   */
+  private requireCallerIdempotencyKeySupport(): void {
+    const minimum = [0, 9, 5];
+    if (!this.serverContractAtLeast(minimum)) {
+      throw new CapabilityUnavailableError(
+        "CAPABILITY_UNAVAILABLE",
+        `idempotencyKey needs a server contract >= ${minimum.join(".")}; `
+          + `this server reports ${this._serverContractVersion || "none"}`,
+      );
+    }
+  }
+
+  /**
+   * Append a durable external event input to a session runtime.
+   *
+   * With `idempotencyKey` a retry admits nothing new: it answers
+   * `outcome_type` `deduplicated` naming the first admission in
+   * `existing_id`. The same key with other event content is refused with
+   * the typed `INPUT_IDEMPOTENCY_CONFLICT`. Object key order inside `payload`
+   * does not matter. The key is scoped to the session and kept for its life;
+   * it needs a server contract of 0.9.5 or later.
+   */
   async sendExternalEvent(
     sessionId: string,
     eventType: string,
     payload: unknown,
-    options?: { blocks?: ContentBlock[] },
+    options?: { blocks?: ContentBlock[]; idempotencyKey?: string },
   ): Promise<Record<string, unknown>> {
     const params: RpcSessionExternalEventParams = {
       session_id: sessionId,
@@ -1538,6 +1633,10 @@ export class MeerkatClient {
     };
     if (options?.blocks !== undefined) {
       params.blocks = options.blocks.map(toWireContentBlock);
+    }
+    if (options?.idempotencyKey !== undefined) {
+      this.requireCallerIdempotencyKeySupport();
+      params.idempotency_key = options.idempotencyKey;
     }
     return this.request("session/external_event", params);
   }
@@ -2416,12 +2515,18 @@ export class MeerkatClient {
     content: string | ContentBlock[],
     options?: MemberSendOptions,
   ): Promise<MemberDeliveryReceipt> {
+    if (options?.idempotencyKey !== undefined) {
+      this.requireCallerIdempotencyKeySupport();
+    }
     const result = await this.request("mob/member_send", {
       mob_id: mobId,
       agent_identity: agentIdentity,
       content: toWireContentInput(content),
       handling_mode: options?.handlingMode,
       render_metadata: options?.renderMetadata,
+      ...(options?.idempotencyKey !== undefined
+        ? { idempotency_key: options.idempotencyKey }
+        : {}),
     });
     const memberRef =
       typeof result.member_ref === "string" && result.member_ref.length > 0
@@ -2443,7 +2548,7 @@ export class MeerkatClient {
         "Invalid mob/member_send response: mob_id mismatch",
       );
     }
-    return {
+    const receipt: MemberDeliveryReceipt = {
       mobId: resolvedMobId,
       agentIdentity: MeerkatClient.parseRequiredString(
         result.agent_identity,
@@ -2454,6 +2559,62 @@ export class MeerkatClient {
         result.handling_mode,
         "Invalid mob/member_send response: missing or unknown handling_mode",
       ),
+    };
+    if (result.continuation !== undefined && result.continuation !== null) {
+      receipt.continuation = MeerkatClient.parseMemberSendContinuation(result.continuation);
+    } else if (options?.idempotencyKey !== undefined) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid mob/member_send response: a keyed send answers its continuation",
+      );
+    }
+    return receipt;
+  }
+
+  private static parseMemberSendContinuation(raw: unknown): MemberSendContinuation {
+    const context = "Invalid mob/member_send response: invalid continuation";
+    if (typeof raw !== "object" || raw === null) {
+      throw new MeerkatError("INVALID_RESPONSE", context);
+    }
+    const record = raw as Record<string, unknown>;
+    const status = record.status as Record<string, unknown> | undefined;
+    if (
+      typeof record.delivery_id !== "string"
+      || record.delivery_id.length === 0
+      || typeof record.committed_at_ms !== "number"
+      || !Number.isInteger(record.committed_at_ms)
+      || typeof status !== "object"
+      || status === null
+    ) {
+      throw new MeerkatError("INVALID_RESPONSE", context);
+    }
+    let parsed: MemberSendContinuationStatus;
+    switch (status.state) {
+      case "pending":
+        parsed = { state: "pending" };
+        break;
+      case "stranded":
+        parsed = { state: "stranded" };
+        break;
+      case "admitted":
+        if (typeof status.session_id !== "string" || typeof status.input_id !== "string") {
+          throw new MeerkatError("INVALID_RESPONSE", context);
+        }
+        parsed = { state: "admitted", sessionId: status.session_id, inputId: status.input_id };
+        break;
+      case "refused":
+        if (typeof status.reason !== "string") {
+          throw new MeerkatError("INVALID_RESPONSE", context);
+        }
+        parsed = { state: "refused", reason: status.reason };
+        break;
+      default:
+        throw new MeerkatError("INVALID_RESPONSE", context);
+    }
+    return {
+      deliveryId: record.delivery_id,
+      committedAtMs: record.committed_at_ms,
+      status: parsed,
     };
   }
 
@@ -3169,12 +3330,13 @@ export class MeerkatClient {
     prompt: ContentInput,
     options?: MobTurnStartOptions,
   ): Promise<Record<string, unknown>> {
-    return await this.request("mob/turn_start", mobTurnStartPayload(
-      mobId,
-      agentIdentity,
-      prompt,
-      options,
-    ));
+    const payload = mobTurnStartPayload(mobId, agentIdentity, prompt, options);
+    // A non-streaming member turn: opt out of its session/event copies, as
+    // `optOutOfTurnSessionEvents` does for `turn/start`.
+    if (this.serverContractAtLeast([0, 9, 5])) {
+      payload.session_events = false;
+    }
+    return await this.request("mob/turn_start", payload);
   }
 
   async mobMemberStatus(
@@ -3283,6 +3445,13 @@ export class MeerkatClient {
     if (registrationRefusal !== undefined) {
       snapshot.registrationRefusal = registrationRefusal;
     }
+    const custodyDeferred = MeerkatClient.parseWireMemberCustodyDeferral(
+      result.custody_deferred,
+      "Invalid mob/member_status response",
+    );
+    if (custodyDeferred !== undefined) {
+      snapshot.custodyDeferred = custodyDeferred;
+    }
     return snapshot;
   }
 
@@ -3324,11 +3493,15 @@ export class MeerkatClient {
    * Wraps the `mob/destroy` RPC (DELETE_ME C3). Unlike `mob/lifecycle`
    * with `action: "destroy"`, this dedicated endpoint has a predictable
    * response shape that does not require branching on an action string.
+   * A refusal `kind` this SDK does not know reads as `{ kind: "unknown" }`.
+   * A destroy that did not finish rejects with code
+   * `mob_destroy_incomplete`; `mobDestroyIncompleteReport(err)` reads its
+   * report.
    */
   async mobDestroy(mobId: string): Promise<{
     mobId: string;
     ok: boolean;
-    destroyReport: Record<string, unknown>;
+    destroyReport: WireMobDestroyReport;
   }> {
     const result = await this.request("mob/destroy", { mob_id: mobId });
     if (
@@ -3340,6 +3513,13 @@ export class MeerkatClient {
         "Invalid mob/destroy response: missing ok or destroy_report",
       );
     }
+    const destroyReport = parseMobDestroyReport(result.destroy_report);
+    if (destroyReport === undefined) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid mob/destroy response: malformed destroy_report",
+      );
+    }
     return {
       mobId: MeerkatClient.requireStringField(
         result,
@@ -3347,7 +3527,7 @@ export class MeerkatClient {
         "Invalid mob/destroy response: missing mob_id",
       ),
       ok: result.ok,
-      destroyReport: result.destroy_report as Record<string, unknown>,
+      destroyReport,
     };
   }
 
@@ -3550,6 +3730,10 @@ export class MeerkatClient {
         member.registration_refusal,
         "Invalid mob/wait_kickoff response",
       );
+      const custodyDeferred = MeerkatClient.parseWireMemberCustodyDeferral(
+        member.custody_deferred,
+        "Invalid mob/wait_kickoff response",
+      );
       return {
         agentIdentity,
         status,
@@ -3564,6 +3748,7 @@ export class MeerkatClient {
         ),
         ...(previewUnavailable !== undefined ? { previewUnavailable } : {}),
         ...(registrationRefusal !== undefined ? { registrationRefusal } : {}),
+        ...(custodyDeferred !== undefined ? { custodyDeferred } : {}),
       };
     });
   }
@@ -3615,6 +3800,10 @@ export class MeerkatClient {
         member.registration_refusal,
         "Invalid mob/wait_ready response",
       );
+      const custodyDeferred = MeerkatClient.parseWireMemberCustodyDeferral(
+        member.custody_deferred,
+        "Invalid mob/wait_ready response",
+      );
       return {
         agentIdentity,
         status,
@@ -3629,6 +3818,7 @@ export class MeerkatClient {
         ),
         ...(previewUnavailable !== undefined ? { previewUnavailable } : {}),
         ...(registrationRefusal !== undefined ? { registrationRefusal } : {}),
+        ...(custodyDeferred !== undefined ? { custodyDeferred } : {}),
       };
     });
   }
@@ -3943,15 +4133,17 @@ export class MeerkatClient {
     if (!streamId) {
       throw new MeerkatError("INVALID_RESPONSE", `${openMethod} did not return stream_id`);
     }
-    const queue = new AsyncQueue<Record<string, unknown> | null>();
+    const queue = new AsyncQueue<SubscriptionItem>();
     this.streamQueues.set(streamId, queue);
     const buffered = this.unmatchedStandaloneStreamBuffer.get(streamId) ?? [];
     for (const event of buffered) {
       queue.put(event);
     }
     this.unmatchedStandaloneStreamBuffer.delete(streamId);
-    if (this.unmatchedStandaloneStreamEnd.delete(streamId)) {
-      queue.put(null);
+    const terminal = this.unmatchedStandaloneStreamEnd.get(streamId);
+    if (terminal != null) {
+      this.unmatchedStandaloneStreamEnd.delete(streamId);
+      queue.put({ terminalOutcome: terminal });
     }
     return new EventSubscription<T>({
       streamId,
@@ -4162,6 +4354,7 @@ export class MeerkatClient {
     }
     if (options?.providerParams) params.provider_params = options.providerParams;
     if (options?.authBinding != null) params.auth_binding = options.authBinding;
+    this.optOutOfTurnSessionEvents(params);
     const raw = await this.request("turn/start", params);
     return MeerkatClient.parseRunResult(raw);
   }
@@ -4668,6 +4861,30 @@ export class MeerkatClient {
   }
 
   /**
+   * The `dedupe_key` of a `tool/execute` request. Unknown fields are
+   * ignored; an absent value, or one that is not a complete key, is
+   * `undefined`: the key is advisory and never fails the call.
+   */
+  static parseToolCallDedupeKey(raw: unknown): ToolCallDedupeKey | undefined {
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+      return undefined;
+    }
+    const value = raw as Record<string, unknown>;
+    const { run_id, round, call_id, call_digest } = value;
+    if (
+      typeof run_id !== "string" ||
+      typeof round !== "number" ||
+      !Number.isSafeInteger(round) ||
+      round < 0 ||
+      typeof call_id !== "string" ||
+      typeof call_digest !== "string"
+    ) {
+      return undefined;
+    }
+    return { run_id, round, call_id, call_digest };
+  }
+
+  /**
    * Type-narrow an inbound live-adapter observation against
    * {@link WireLiveAdapterObservation}.
    *
@@ -4995,11 +5212,17 @@ export class MeerkatClient {
           scopeId != null || scopePath != null
             ? { event: rawEvent, scope_id: scopeId, scope_path: scopePath }
             : rawEvent;
+        const sequence = params.sequence;
+        const delivery: SubscriptionEvent = {
+          event,
+          rpcSequence: typeof sequence === "number" && Number.isSafeInteger(sequence) && sequence >= 0
+            ? sequence : undefined,
+        };
         if (queue && event) {
-          queue.put(event);
+          queue.put(delivery);
         } else if (streamId && event) {
           const buffered = this.unmatchedStandaloneStreamBuffer.get(streamId) ?? [];
-          buffered.push(event);
+          buffered.push(delivery);
           this.unmatchedStandaloneStreamBuffer.set(streamId, buffered);
         }
         return;
@@ -5011,7 +5234,7 @@ export class MeerkatClient {
         }
         const queue = this.streamQueues.get(streamId);
         if (queue) {
-          queue.put(null);
+          queue.put({ terminalOutcome: params });
         } else if (streamId) {
           this.unmatchedStandaloneStreamEnd.set(streamId, params);
         }
@@ -6153,6 +6376,62 @@ export class MeerkatClient {
     );
   }
 
+  /**
+   * Parse the member's custody restore a mob start deferred: which restore,
+   * and the cause its last attempt met. Absent (or `null`) means no restore
+   * is deferred. The field is advisory and its vocabularies may grow: a
+   * restore or cause this SDK does not know reads as `{ unknown: <value> }`,
+   * and a field it does not know is ignored, so a newer server never fails
+   * the read. A value that is not an object, or a restore or cause that is
+   * not a string, is malformed and fails closed.
+   */
+  private static parseWireMemberCustodyDeferral(
+    raw: unknown,
+    context: string,
+  ): MobMemberCustodyDeferral | undefined {
+    if (raw == null) {
+      return undefined;
+    }
+    if (typeof raw !== "object" || Array.isArray(raw)) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: custody_deferred must be an object`,
+      );
+    }
+    const record = raw as Record<string, unknown>;
+    const restores: readonly WireMemberCustodyRestore[] = [
+      "startup_binding",
+      "cleanup_delivery",
+    ];
+    const causes: readonly WireMemberCustodyDeferralCause[] = [
+      "served_elsewhere",
+      "hosting_unavailable",
+      "durable_tail_unprovable",
+    ];
+    const restore = record.restore;
+    if (typeof restore !== "string") {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: custody_deferred.restore must be a string`,
+      );
+    }
+    const cause = record.cause;
+    if (typeof cause !== "string") {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `${context}: custody_deferred.cause must be a string`,
+      );
+    }
+    return {
+      restore: restores.includes(restore as WireMemberCustodyRestore)
+        ? (restore as WireMemberCustodyRestore)
+        : { unknown: restore },
+      cause: causes.includes(cause as WireMemberCustodyDeferralCause)
+        ? (cause as WireMemberCustodyDeferralCause)
+        : { unknown: cause },
+    };
+  }
+
   private static parseMobPeerConnectivitySnapshot(
     raw: unknown,
     context: string,
@@ -6389,6 +6668,18 @@ export class MeerkatClient {
         transport,
         "debug",
         `${context}: transport`,
+      );
+    }
+
+    // What the open went ahead without. The server omits the field when
+    // there is nothing to report. The vocabulary may grow: an advisory this
+    // SDK does not know is kept as the string the server sent, so a newer
+    // server never fails the open; a field that is not an array of non-empty
+    // strings is malformed and fails closed.
+    if (result.advisories !== undefined) {
+      result.advisories = MeerkatClient.requireStringArray(
+        result.advisories,
+        `${context}: advisories`,
       );
     }
 
@@ -8470,8 +8761,9 @@ export class MeerkatClient {
 
       if (handler) {
         const args = (params.arguments ?? {}) as Record<string, unknown>;
+        const dedupeKey = MeerkatClient.parseToolCallDedupeKey(params.dedupe_key);
         handler
-          .handler(args)
+          .handler(args, dedupeKey)
           .then((content) => {
             this.writeCallbackResponse(child, requestId, { content, is_error: false });
           })
@@ -8644,7 +8936,9 @@ export class MeerkatClient {
       const options: SpawnOptions = { stdio: ["ignore", "inherit", "pipe"] };
       const proc = spawn(command, args, options);
       let stderr = "";
-      proc.stderr?.on("data", (chunk: string | Buffer) => { stderr += String(chunk); });
+      // Decoded as one stream, so a character split across two reads stays whole.
+      proc.stderr?.setEncoding("utf8");
+      proc.stderr?.on("data", (chunk: string) => { stderr += chunk; });
       proc.on("error", (error: Error) => { reject(error); });
       proc.on("close", (code: number | null) => {
         if (code === 0) { resolve(); return; }

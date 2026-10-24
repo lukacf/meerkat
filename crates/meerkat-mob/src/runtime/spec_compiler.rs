@@ -157,6 +157,9 @@ pub(crate) struct CompileMemberSpecParams<'a> {
     /// inherited-filter case is hard-denied at the ladder (ADJ-6), so the
     /// projection field stays a typed always-empty record.
     pub non_portable_disabled: Vec<WireNonPortableResourceKind>,
+    /// The spawn request's operator authority ceiling. `None` compiles the
+    /// default operator authority exactly as before ceilings existed.
+    pub operator_authority_ceiling: Option<&'a super::MemberOperatorAuthorityCeiling>,
 }
 
 /// Inputs for compiling the sole durable, authority-free member material.
@@ -605,7 +608,19 @@ pub(crate) async fn compile_portable_member_spec(
         continuity_intent,
         base_prompt,
         non_portable_disabled,
+        operator_authority_ceiling,
     } = params;
+
+    // A ceiling whose narrowing could not hold is refused before anything is
+    // compiled, whatever the profile's mob tools setting.
+    if let Some(ceiling) = operator_authority_ceiling {
+        ceiling
+            .check()
+            .map_err(|reason| MobError::OperatorAuthorityCeilingRefused {
+                agent_identity: agent_identity.clone(),
+                reason,
+            })?;
+    }
 
     let system_prompt_override =
         system_prompt_override.map(|override_value| match override_value {
@@ -675,9 +690,10 @@ pub(crate) async fn compile_portable_member_spec(
                 // lane; the phase exit gate (plan §17 T-19: upcall
                 // `list_members` / `retire_member` complete) requires the
                 // re-minted authority to carry manage scope of the CURRENT
-                // mob, so the durable record's facts include it.
-                Some(
-                    meerkat_runtime::mob_operator_authority::grant_manage_mob(
+                // mob, so the durable record's facts include it, unless the
+                // spawn request's ceiling drops it.
+                Some(match operator_authority_ceiling {
+                    None => meerkat_runtime::mob_operator_authority::grant_manage_mob(
                         &authority_context,
                         mob_id.as_str(),
                         mob_incarnation,
@@ -687,7 +703,14 @@ pub(crate) async fn compile_portable_member_spec(
                             "generated mob operator authority rejected current-mob manage scope for remote spawn of '{agent_identity}': {error}"
                         ))
                     })?,
-                )
+                    Some(ceiling) => ceiling
+                        .apply(&authority_context, mob_id.as_str(), mob_incarnation)
+                        .map_err(|error| {
+                            MobError::Internal(format!(
+                                "generated mob operator authority rejected the operator authority ceiling for remote spawn of '{agent_identity}': {error}"
+                            ))
+                        })?,
+                })
             }
             None => None,
         }
@@ -833,6 +856,7 @@ mod tests {
             max_inline_peer_notifications: None,
             output_schema: None,
             provider_params: None,
+            durable: false,
         }
     }
 
@@ -869,6 +893,7 @@ mod tests {
             continuity_intent: continuity,
             base_prompt: base,
             non_portable_disabled: Vec::new(),
+            operator_authority_ceiling: None,
         }
     }
 
@@ -1422,5 +1447,122 @@ mod tests {
             .expect("spec serializes")
             .to_string();
         assert_eq!(rendered.matches("budget").count(), 1);
+    }
+
+    /// A `tools.mob` worker in a mob that defines `lead` and `worker`.
+    fn operator_fixture() -> (Profile, MobDefinition) {
+        let mut profile = worker_profile();
+        profile.tools.mob = true;
+        let mut definition = definition();
+        for name in ["lead", "worker"] {
+            definition.profiles.insert(
+                ProfileName::from(name),
+                crate::ProfileBinding::Inline(Box::new(profile.clone())),
+            );
+        }
+        (profile, definition)
+    }
+
+    async fn compile_operator_facts(
+        ceiling: Option<&super::super::MemberOperatorAuthorityCeiling>,
+    ) -> Result<WireMobToolAuthorityContext, MobError> {
+        let mob_id = MobId::from("compiler-unit");
+        let profile_name = ProfileName::from("worker");
+        let identity = AgentIdentity::from("b2");
+        let (profile, definition) = operator_fixture();
+        let base = StaticSpawnBasePromptSource("base".to_string());
+        let continuity = super::super::handle::SpawnContinuityIntent::Ephemeral;
+        let mut p = params(
+            &mob_id,
+            &profile_name,
+            &identity,
+            &profile,
+            &definition,
+            Some(&base),
+            &continuity,
+        );
+        p.operator_authority_ceiling = ceiling;
+        let compiled = compile_portable_member_spec(p).await?;
+        let mut facts = compiled
+            .spec
+            .overlay
+            .mob_tool_authority_context
+            .expect("a tools.mob member records operator facts");
+        // Minted per compile.
+        facts.principal_token = String::new();
+        Ok(facts)
+    }
+
+    /// No ceiling compiles the default facts (manage scope over the mob,
+    /// spawn scope over every profile, create and mutate), and an explicit
+    /// ceiling that lowers nothing compiles the very same facts.
+    #[tokio::test]
+    async fn compile_without_a_ceiling_records_the_default_operator_facts() {
+        let facts = compile_operator_facts(None).await.expect("compile");
+        assert!(facts.can_create_mobs);
+        assert!(facts.can_mutate_profiles);
+        assert_eq!(
+            facts.managed_mob_scope,
+            std::collections::BTreeSet::from(["compiler-unit".to_string()])
+        );
+        assert_eq!(
+            facts.spawn_profile_scope,
+            BTreeMap::from([(
+                "compiler-unit".to_string(),
+                std::collections::BTreeSet::from(["lead".to_string(), "worker".to_string()]),
+            )])
+        );
+        let unrestricted = super::super::MemberOperatorAuthorityCeiling::unrestricted();
+        assert_eq!(
+            compile_operator_facts(Some(&unrestricted))
+                .await
+                .expect("compile"),
+            facts
+        );
+    }
+
+    /// A ceiling lowers the recorded facts: no manage scope, only its spawn
+    /// profiles, and no create authority when it drops create.
+    #[tokio::test]
+    async fn compile_lowers_the_operator_facts_to_the_ceiling() {
+        let ceiling = super::super::MemberOperatorAuthorityCeiling::unrestricted()
+            .without_manage()
+            .without_create()
+            .with_spawn_profiles(["worker", "not-a-profile"]);
+        let facts = compile_operator_facts(Some(&ceiling))
+            .await
+            .expect("compile");
+        assert!(!facts.can_create_mobs);
+        assert!(facts.can_mutate_profiles);
+        assert!(facts.managed_mob_scope.is_empty());
+        assert_eq!(
+            facts.spawn_profile_scope,
+            BTreeMap::from([(
+                "compiler-unit".to_string(),
+                std::collections::BTreeSet::from(["worker".to_string()]),
+            )]),
+            "only the ceiling's profiles the mob defines are kept"
+        );
+    }
+
+    /// Narrowed spawn profiles together with manage scope cannot hold, so the
+    /// compile refuses them, typed.
+    #[tokio::test]
+    async fn compile_refuses_spawn_profiles_with_manage_typed() {
+        let ceiling = super::super::MemberOperatorAuthorityCeiling::unrestricted()
+            .with_spawn_profiles(["worker"]);
+        let error = compile_operator_facts(Some(&ceiling))
+            .await
+            .expect_err("spawn profiles with manage scope must be refused");
+        assert!(
+            matches!(
+                error,
+                MobError::OperatorAuthorityCeilingRefused {
+                    reason: crate::error::OperatorAuthorityCeilingRefusal::SpawnProfilesWithManage,
+                    ..
+                }
+            ),
+            "got {error:?}"
+        );
     }
 }

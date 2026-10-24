@@ -165,6 +165,7 @@ pub(crate) fn project_portable_profile(
             .as_ref()
             .map(|schema| WireOpaqueJson::from_value(schema.as_value())),
         provider_params: profile.provider_params.clone().map(Into::into),
+        durable: profile.durable,
     })
 }
 
@@ -307,6 +308,7 @@ pub(crate) fn rehydrate_portable_profile(portable: &PortableProfile) -> Result<P
         max_inline_peer_notifications: portable.max_inline_peer_notifications,
         output_schema,
         provider_params: portable.provider_params.clone().map(Into::into),
+        durable: portable.durable,
     })
 }
 
@@ -418,6 +420,7 @@ mod tests {
                 .expect("valid schema"),
             ),
             provider_params: None,
+            durable: true,
         };
         let models = BTreeMap::new();
         let portable = project_portable_profile(
@@ -429,6 +432,7 @@ mod tests {
             Vec::new(),
         )
         .expect("forward projection");
+        assert!(portable.durable, "the durable worker flag is carried");
         assert_eq!(
             portable.tools.mcp_servers.get("events"),
             Some(&PortableMcpDecl::Http {
@@ -443,6 +447,7 @@ mod tests {
         );
         let rehydrated = rehydrate_portable_profile(&portable).expect("reverse projection");
         assert_eq!(rehydrated.provider, Some(meerkat_core::Provider::Anthropic));
+        assert!(rehydrated.durable, "the durable worker flag rehydrates");
         for expected in &profile.tools.mcp_servers {
             assert!(rehydrated.tools.mcp_servers.contains(expected));
         }
@@ -518,6 +523,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
+                durable: false,
             },
             crate::MobRuntimeMode::AutonomousHost,
             &BTreeMap::new(),
@@ -576,6 +582,7 @@ mod tests {
                     max_inline_peer_notifications: None,
                     output_schema: None,
                     provider_params: None,
+                    durable: false,
                 },
                 crate::MobRuntimeMode::AutonomousHost,
                 &BTreeMap::new(),
@@ -610,6 +617,7 @@ mod tests {
             max_inline_peer_notifications: None,
             output_schema: None,
             provider_params: None,
+            durable: false,
         }
     }
 

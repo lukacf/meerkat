@@ -793,6 +793,19 @@ idle session. Correlated terminal peer responses use
   and rejected here.
 </ParamField>
 
+<ParamField body="idempotency_key" type="string">
+  Optional caller key that makes a retry safe. A retry under the same key
+  admits nothing new and answers `202` `{"queued": true}` again. The same key
+  with other event content answers `409` with `{"error", "code":
+  "INPUT_IDEMPOTENCY_CONFLICT", "existing_id"}`; the first admission stands.
+  The key is scoped to the session, shared with the RPC
+  `session/external_event` method, and kept for the session's life. Object key
+  order inside `payload` does not matter. Canonical text: non-empty, no
+  surrounding whitespace, no control characters, at most 256 bytes (`400`
+  otherwise). A server older than 0.9.5 ignores the field, so check the
+  server version before relying on it.
+</ParamField>
+
 <ParamField body="event_type" type="string" required>
   Event classification, for example `"monitor.alert"`.
 </ParamField>
@@ -885,16 +898,17 @@ Event types:
 |-------|-------------|
 | `session_loaded` | Emitted on connect with session metadata |
 | `run_started` | Agent execution began |
+| `run_resumed` | Since 0.9.5: a run continued after a restart from its last committed round, under its original run id; carries `run_id`, `round` and `resume_point` (`tools_pending` or `awaiting_model`). See [Durable runs](/guides/durable-runs#after-a-crash) |
 | `run_completed` | Agent run finished |
 | `run_failed` | Agent run failed; `error_report` carries `class`, `message` and a typed `reason` (since 0.9.4 a `content_filtered` failure carries `{"reason_type": "content_filtered", "stop": ..., "detail": ...}` instead of `null`; see the [RPC event reference](/api/rpc#notifications)) |
 | `turn_started` | New LLM call within the turn; `assistant_message_id` names the assistant message it will commit |
 | `text_delta` | Streaming text chunk from LLM |
 | `text_complete` | Full text for this turn |
 | `tool_call_requested` | LLM wants to call a tool |
-| `tool_result_received` | Tool result processed |
+| `tool_result_received` | Tool result processed; the only event that carries the result body (`content`) |
 | `turn_completed` | LLM call finished; `assistant_message_id` names the message the turn closes. It is a live signal, not the commit: only a history row carrying the id is the commit. It can precede boundary work, run-completed hooks and persistence that still fail the run, and it is absent when a run fails after the row was pushed. It is also absent on realtime materializer turns, whose rows pair by `realtime_origin.provider_item_ids` |
 | `tool_execution_started` | Tool dispatch began |
-| `tool_execution_completed` | Tool returned a result |
+| `tool_execution_completed` | Tool call finished: `is_error` and `duration_ms`, no result body (since 0.9.5; read `tool_result_received` with the same `id`) |
 | `tool_execution_timed_out` | Tool exceeded timeout |
 | `compaction_started` | Context compaction began |
 | `compaction_completed` | Compaction finished; since 0.9.4 it carries `summary_source` and optional `estimated_history_tokens_after` (see the [RPC event reference](/api/rpc#notifications)) |
@@ -1004,7 +1018,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
 
 ```json Response (abbreviated)
 {
-  "contract_version": {"major": 0, "minor": 9, "patch": 4},
+  "contract_version": {"major": 0, "minor": 9, "patch": 5},
   "providers": [
     {
       "provider": "anthropic",
@@ -1038,7 +1052,7 @@ Returns runtime capabilities with status resolved against config.
 
 ```json Response (abbreviated)
 {
-  "contract_version": {"major": 0, "minor": 9, "patch": 4},
+  "contract_version": {"major": 0, "minor": 9, "patch": 5},
   "capabilities": [
     {
       "id": "sessions",

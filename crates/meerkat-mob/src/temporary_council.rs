@@ -17,7 +17,7 @@
 //! and nothing here duplicates a member phase. The council record's OWN
 //! lifecycle — request binding, discussion/merge advance, result sealing,
 //! cleanup settlement — is owned by the canonical
-//! [`crate::machines::temporary_council_lifecycle::TemporaryCouncilLifecycleMachine`],
+//! `TemporaryCouncilLifecycleMachine` ([`crate::machines::temporary_council_lifecycle`]),
 //! whose generated state the store persists. There is deliberately no
 //! handwritten phase enum here.
 //!

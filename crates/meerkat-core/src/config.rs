@@ -1746,7 +1746,7 @@ impl ModelFallbackConfig {
     /// chain, so such a table is loaded as NO fallback policy (`enabled`
     /// unset), with a typed warning. That keeps 0.8.36 inheritance: the
     /// table then equalled the default and was a no-op under
-    /// [`Config::merge`], so a child realm inherited its parent's policy.
+    /// `Config::merge`, so a child realm inherited its parent's policy.
     /// The effective policy is the parent's explicit one, or off if there is
     /// none; fallback never uses anything but explicit chain entries.
     /// Only persisted-document loads call this; writes keep

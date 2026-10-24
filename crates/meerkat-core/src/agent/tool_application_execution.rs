@@ -465,6 +465,9 @@ pub(super) async fn dispatch_host_tool_call<T: AgentToolDispatcher + ?Sized + 's
                     tool_name: tool_name.to_owned(),
                     args: args.clone(),
                     settlement_failures: error.settlement_failures().cloned().collect(),
+                    // A host-dispatched call is no call of an agent-loop
+                    // round, so it has no dedupe key.
+                    dedupe_key: None,
                 },
             ))
         }

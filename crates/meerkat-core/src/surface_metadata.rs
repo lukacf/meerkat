@@ -74,6 +74,7 @@ impl ReservedMetadataKey {
                 // cannot spoof released state, but it has no live-session API.
                 | "session_system_context_state"
                 | crate::session::SESSION_DEFERRED_TURN_STATE_KEY
+                | crate::session::SESSION_RUN_CURSOR_KEY
                 | crate::session::SESSION_PENDING_CALLBACK_BATCH_KEY
                 | crate::session::SESSION_TOOL_VISIBILITY_STATE_KEY
                 | crate::session::SESSION_LIFECYCLE_TERMINAL_KEY

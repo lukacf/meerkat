@@ -482,7 +482,7 @@ impl GeminiClient {
         let mut system_instruction_parts = Vec::new();
         let mut leading_system_prefix = true;
 
-        let mut tool_name_by_id: HashMap<String, String> = HashMap::new();
+        let mut tool_call_by_id: HashMap<String, (String, Option<String>)> = HashMap::new();
 
         for (index, msg) in request.messages.iter().enumerate() {
             match msg {
@@ -557,17 +557,28 @@ impl GeminiClient {
                                 args,
                                 meta,
                             } => {
-                                tool_name_by_id.insert(id.clone(), name.clone());
+                                let (provider_id, signature) = match meta.as_deref() {
+                                    Some(meerkat_core::ProviderMeta::GeminiFunctionCall {
+                                        provider_id,
+                                        thought_signature,
+                                    }) => (Some(provider_id), thought_signature.as_ref()),
+                                    Some(meerkat_core::ProviderMeta::Gemini {
+                                        thought_signature,
+                                    }) => (None, Some(thought_signature)),
+                                    _ => (None, None),
+                                };
+                                tool_call_by_id
+                                    .insert(id.clone(), (name.clone(), provider_id.cloned()));
                                 // Parse RawValue to Value
                                 let args_value: Value = serde_json::from_str(args.get())
                                     .unwrap_or_else(|_| serde_json::json!({}));
                                 let mut part = serde_json::json!({"functionCall": {"name": name, "args": args_value}});
+                                if let Some(provider_id) = provider_id {
+                                    part["functionCall"]["id"] = serde_json::json!(provider_id);
+                                }
                                 // Only add signature if present (first parallel call has it)
-                                if let Some(meerkat_core::ProviderMeta::Gemini {
-                                    thought_signature,
-                                }) = meta.as_deref()
-                                {
-                                    part["thoughtSignature"] = serde_json::json!(thought_signature);
+                                if let Some(signature) = signature {
+                                    part["thoughtSignature"] = serde_json::json!(signature);
                                 }
                                 parts.push(part);
                             }
@@ -593,24 +604,35 @@ impl GeminiClient {
                                     .to_string(),
                             });
                         }
-                        let function_name = tool_name_by_id
+                        let (function_name, provider_id) = tool_call_by_id
                             .get(&r.tool_use_id)
                             .cloned()
-                            .unwrap_or_else(|| r.tool_use_id.clone());
+                            .unwrap_or_else(|| (r.tool_use_id.clone(), None));
 
                         // functionResponse only supports text content. For tool
                         // results with images we emit text in the functionResponse
                         // and append the images as separate inlineData parts so
                         // the model still sees the actual image data.
-                        parts.push(serde_json::json!({
+                        //
+                        // The response object uses Gemini's documented keys: the
+                        // tool's output under "output", or, for a failed call, its
+                        // error details under "error". An "error" key on every
+                        // result told the model that no call produced output.
+                        let response = if r.is_error {
+                            serde_json::json!({ "error": r.text_content() })
+                        } else {
+                            serde_json::json!({ "output": r.text_content() })
+                        };
+                        let mut part = serde_json::json!({
                             "functionResponse": {
                                 "name": function_name,
-                                "response": {
-                                    "content": r.text_content(),
-                                    "error": r.is_error
-                                }
+                                "response": response
                             }
-                        }));
+                        });
+                        if let Some(provider_id) = provider_id {
+                            part["functionResponse"]["id"] = serde_json::json!(provider_id);
+                        }
+                        parts.push(part);
                         // NOTE: thoughtSignature is intentionally NOT included here
                         // Verified by scripts/test_gemini_thought_signature.py:
                         // - sig on functionCall only: PASS
@@ -2194,7 +2216,12 @@ impl GeminiClient {
                             .flat_map(|tool| tool.keys())
                             .filter(|name| name.as_str() != "functionDeclarations")
                             .map(|name| match name.as_str() {
-                                "googleSearch" | "googleSearchRetrieval" => ServerToolKind::GoogleSearch,
+                                // The request builder names native search
+                                // "google_search"; Gemini also reads the
+                                // camelCase keys.
+                                "googleSearch" | "google_search" | "googleSearchRetrieval" => {
+                                    ServerToolKind::GoogleSearch
+                                }
                                 _ => ServerToolKind::ProviderNative { name: name.clone() },
                             }).collect();
                         prepared.prepare_model_authorization(&url, wire_model, capabilities)?
@@ -2254,26 +2281,25 @@ impl GeminiClient {
                 Err(LlmError::from_http_response(status_code, text, &headers))
             };
             let mut stream = stream_result?;
-            let mut buffer = String::with_capacity(512);
+            let mut lines = meerkat_llm_core::streaming::Utf8LineBuffer::with_capacity(512);
             let mut tool_call_index: u32 = 0;
 
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk.map_err(|_| LlmError::ConnectionReset)?;
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                lines.push(&chunk);
 
                 let chunk_yielded = std::cell::Cell::new(false);
                 let mut chunk_consumed_line = false;
-                while let Some(newline_pos) = buffer.find('\n') {
+                while let Some(line) = lines.next_line() {
                     chunk_consumed_line = true;
-                    let line = buffer[..newline_pos].trim();
+                    let line = line?;
+                    let line = line.trim();
                     let data = line.strip_prefix("data: ");
                     let parsed_response = if let Some(d) = data {
                         self.parse_stream_line_for_wire(d)?
                     } else {
                         None
                     };
-
-                    buffer.drain(..=newline_pos);
 
                     if let Some(resp) = parsed_response {
                         // Read before the candidates are consumed (#1888).
@@ -2333,8 +2359,17 @@ impl GeminiClient {
                                                 );
                                             }
                                             if let Some(fc) = part.function_call {
+                                                // Keep internal IDs in one namespace even when a
+                                                // provider ID happens to look like a fallback ID.
                                                 let id = format!("fc_{tool_call_index}");
                                                 tool_call_index += 1;
+                                                let meta = match fc.id {
+                                                    Some(provider_id) => Some(Box::new(meerkat_core::ProviderMeta::GeminiFunctionCall {
+                                                        provider_id,
+                                                        thought_signature: part.thought_signature,
+                                                    })),
+                                                    None => meta,
+                                                };
                                                 chunk_yielded.set(true);
                                                 yield LlmEvent::ToolCallComplete {
                                                     id,
@@ -2645,6 +2680,7 @@ struct GeminiFileResource {
 
 #[derive(Debug, Deserialize)]
 struct FunctionCall {
+    id: Option<String>,
     name: String,
     args: Option<Value>,
 }
@@ -3795,6 +3831,138 @@ mod tests {
         Ok(())
     }
 
+    /// Serves each element of `chunks` as a separate paced HTTP body chunk of
+    /// raw bytes, so one character can straddle two network reads.
+    async fn paced_byte_gemini_sse(State(chunks): State<Vec<Vec<u8>>>) -> impl IntoResponse {
+        let body_stream = async_stream::stream! {
+            for chunk in chunks {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                yield Ok::<_, std::convert::Infallible>(axum::body::Bytes::from(chunk));
+            }
+        };
+        (
+            [("content-type", "text/event-stream")],
+            axum::body::Body::from_stream(body_stream),
+        )
+    }
+
+    /// The streamed text and terminal outcome of one paced Gemini byte stream.
+    async fn stream_gemini_paced_bytes(chunks: Vec<Vec<u8>>) -> (String, Option<LlmDoneOutcome>) {
+        let app = Router::new()
+            .route(
+                "/v1beta/models/gemini-2.5-flash:streamGenerateContent",
+                post(paced_byte_gemini_sse),
+            )
+            .with_state(chunks);
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test server");
+        });
+        let client =
+            GeminiClient::new_with_base_url("test-key".to_string(), format!("http://{addr}"));
+        let request = LlmRequest::new(
+            "gemini-2.5-flash",
+            vec![Message::User(UserMessage::text("hello".to_string()))],
+        );
+        let mut stream = client.stream(&request);
+        let mut text = String::new();
+        let mut done = None;
+        while let Some(event) = stream.next().await {
+            match event.expect("stream event") {
+                LlmEvent::TextDelta { delta, .. } => text.push_str(&delta),
+                LlmEvent::Done { outcome } => {
+                    done = Some(outcome);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        handle.abort();
+        (text, done)
+    }
+
+    /// `payload` cut into two network chunks inside each multi-byte character
+    /// of `text` (a 3-byte one 1|2 and 2|1, a 4-byte one 1|3, 2|2 and 3|1),
+    /// and on each side of the line break that ends the line holding `text`.
+    fn utf8_split_cases(payload: &str, text: &str) -> Vec<(String, Vec<Vec<u8>>)> {
+        let bytes = payload.as_bytes();
+        let start = payload.find(text).expect("payload holds the text");
+        let mut cases = Vec::new();
+        for (offset, ch) in text.char_indices().filter(|(_, ch)| ch.len_utf8() > 1) {
+            for split in 1..ch.len_utf8() {
+                let at = start + offset + split;
+                cases.push((
+                    format!(
+                        "U+{:04X} split {split}|{}",
+                        ch as u32,
+                        ch.len_utf8() - split
+                    ),
+                    vec![bytes[..at].to_vec(), bytes[at..].to_vec()],
+                ));
+            }
+        }
+        let line_end = start + payload[start..].find('\n').expect("a line break");
+        for (side, at) in [("before", line_end), ("after", line_end + 1)] {
+            cases.push((
+                format!("chunk boundary {side} the line break"),
+                vec![bytes[..at].to_vec(), bytes[at..].to_vec()],
+            ));
+        }
+        cases
+    }
+
+    const SPLIT_TEXT: &str = "don\u{2019}t panic \u{1F642}";
+
+    fn split_gemini_payload(text_json: &str) -> String {
+        format!(
+            "data: {{\"candidates\":[{{\"content\":{{\"parts\":[{{\"text\":\"{text_json}\"}}]}},\"finishReason\":\"STOP\"}}],\"usageMetadata\":{{\"promptTokenCount\":3,\"candidatesTokenCount\":4}}}}\n\n"
+        )
+    }
+
+    /// A character split across network chunks reaches the Gemini text
+    /// exactly, never as U+FFFD, wherever the chunk boundary falls.
+    /// (Fails-old: each chunk was decoded on its own, so a split character
+    /// became U+FFFD.)
+    #[tokio::test]
+    async fn stream_text_split_inside_a_multibyte_character_arrives_exact() {
+        let payload = split_gemini_payload(SPLIT_TEXT);
+        let mut failures = Vec::new();
+        for (case, chunks) in utf8_split_cases(&payload, SPLIT_TEXT) {
+            let (text, done) = stream_gemini_paced_bytes(chunks).await;
+            if text != SPLIT_TEXT || !matches!(done, Some(LlmDoneOutcome::Success { .. })) {
+                failures.push(format!("{case}: {text:?} {done:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// A complete line that is not valid UTF-8 fails the stream as a parse
+    /// error; its bytes are never replaced with U+FFFD. (Fails-old: the
+    /// invalid byte became U+FFFD in the text and the turn succeeded.)
+    #[tokio::test]
+    async fn stream_line_with_invalid_utf8_is_a_stream_parse_error() {
+        let mut payload = split_gemini_payload("bad \u{0001} byte").into_bytes();
+        let marker = payload
+            .iter()
+            .position(|byte| *byte == 0x01)
+            .expect("marker byte");
+        payload[marker] = 0xFF;
+        let (text, done) = stream_gemini_paced_bytes(vec![payload]).await;
+        assert!(!text.contains('\u{FFFD}'), "{text:?}");
+        assert!(
+            matches!(
+                &done,
+                Some(LlmDoneOutcome::Error {
+                    error: LlmError::StreamParseError { .. }
+                })
+            ),
+            "{done:?}"
+        );
+    }
+
     #[test]
     fn gemini_image_error_observation_uses_structured_error_reason() {
         let safety = serde_json::json!({
@@ -4797,6 +4965,250 @@ mod tests {
             Some((StopReason::EndTurn, None)),
             "{:?}",
             events.last()
+        );
+    }
+
+    /// Exercise provider parsing, block assembly, durable serialization, replay
+    /// projection and the actual next HTTP request together.
+    async fn function_call_id_roundtrip(chunks: Vec<Vec<Value>>) -> (Vec<AssistantBlock>, Value) {
+        use std::fmt::Write as _;
+
+        let mut payload = String::new();
+        for parts in chunks {
+            writeln!(
+                payload,
+                "data: {}",
+                json!({"candidates": [{"content": {"parts": parts}}]})
+            )
+            .expect("write to a String");
+        }
+        payload.push_str("data: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n");
+        let events = gemini_stream_events(payload).await;
+        let mut assembler = meerkat_llm_core::BlockAssembler::new();
+        let mut results = Vec::new();
+        for event in events {
+            if let LlmEvent::ToolCallComplete {
+                id,
+                name,
+                args,
+                meta,
+            } = event
+            {
+                results.push(ToolResult::new(id.clone(), args["city"].to_string(), false));
+                assembler
+                    .on_tool_call_complete(
+                        id,
+                        name,
+                        serde_json::value::to_raw_value(&args).unwrap(),
+                        meta,
+                    )
+                    .unwrap();
+            }
+        }
+        let blocks = assembler.finalize();
+        assert!(
+            !blocks.is_empty(),
+            "fixture must produce tool calls through the real stream"
+        );
+        // Results may finish in another order, including calls to the same tool.
+        results.reverse();
+        let messages = vec![
+            Message::User(UserMessage::text("Look up the cities")),
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                blocks.clone(),
+                StopReason::ToolUse,
+            )),
+            Message::tool_results(results),
+        ];
+        let messages = serde_json::from_value(serde_json::to_value(messages).unwrap()).unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let response = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"done\"}]},\"finishReason\":\"STOP\"}]}\n";
+        let (base_url, server) =
+            spawn_gemini_stream_stub("gemini-3.5-flash", response.into(), Arc::clone(&seen)).await;
+        let client = GeminiClient::new_with_base_url("test-key".into(), base_url);
+        let request = LlmRequest::new("gemini-3.5-flash", messages);
+        let events = client.stream(&request).collect::<Vec<_>>().await;
+        server.abort();
+        assert!(events.iter().all(Result::is_ok));
+        let bodies = seen.lock().unwrap();
+        assert_eq!(bodies.len(), 1);
+        (blocks, bodies[0].clone())
+    }
+
+    #[tokio::test]
+    async fn native_function_call_ids_survive_parallel_replay_and_match_results() {
+        let (blocks, body) = function_call_id_roundtrip(vec![vec![
+            json!({"functionCall": {"id": "native-A", "name": "weather", "args": {"city": "Oslo"}},
+                   "thoughtSignature": "opaque-signature"}),
+            json!({"functionCall": {"id": "native-B", "name": "weather", "args": {"city": "Paris"}}}),
+        ]]).await;
+        let first = &body["contents"][1]["parts"][0];
+        let second = &body["contents"][1]["parts"][1];
+        assert_eq!(first["functionCall"]["id"], "native-A");
+        assert_eq!(second["functionCall"]["id"], "native-B");
+        assert!(first["functionCall"].get("provider_id").is_none());
+        assert!(second["functionCall"].get("provider_id").is_none());
+        assert_eq!(first["thoughtSignature"], "opaque-signature");
+        assert!(second.get("thoughtSignature").is_none());
+        let responses = body["contents"][2]["parts"].as_array().unwrap();
+        assert_eq!(responses[0]["functionResponse"]["id"], "native-B");
+        assert_eq!(responses[1]["functionResponse"]["id"], "native-A");
+        assert!(
+            responses
+                .iter()
+                .all(|part| part["functionResponse"].get("provider_id").is_none())
+        );
+        assert_eq!(
+            responses[0]["functionResponse"]["response"],
+            json!({"output": "\"Paris\""})
+        );
+        assert!(
+            responses
+                .iter()
+                .all(|part| part.get("thoughtSignature").is_none())
+        );
+        assert!(
+            matches!(&blocks[0], AssistantBlock::ToolUse { meta: Some(meta), .. }
+            if matches!(meta.as_ref(), ProviderMeta::GeminiFunctionCall { provider_id, thought_signature }
+                if provider_id == "native-A" && thought_signature.as_deref() == Some("opaque-signature")))
+        );
+        let stored = serde_json::to_value(&blocks[0]).unwrap();
+        assert_eq!(stored["data"]["id"], "fc_0");
+        assert_eq!(stored["data"]["meta"]["provider_id"], "native-A");
+        assert!(stored["data"]["meta"].get("id").is_none());
+    }
+
+    #[tokio::test]
+    async fn generated_correlation_ids_are_never_replayed_as_provider_ids() {
+        let (blocks, body) = function_call_id_roundtrip(vec![vec![
+            json!({"functionCall": {"name": "weather", "args": {"city": "Oslo"}},
+                   "thoughtSignature": "legacy-signature"}),
+            json!({"functionCall": {"name": "weather", "args": {"city": "Paris"}}}),
+        ]])
+        .await;
+        let calls = body["contents"][1]["parts"].as_array().unwrap();
+        let responses = body["contents"][2]["parts"].as_array().unwrap();
+        assert!(
+            calls
+                .iter()
+                .all(|part| part["functionCall"].get("id").is_none())
+        );
+        assert!(
+            responses
+                .iter()
+                .all(|part| part["functionResponse"].get("id").is_none())
+        );
+        assert_eq!(calls[0]["thoughtSignature"], "legacy-signature");
+        assert!(matches!(&blocks[0], AssistantBlock::ToolUse { id, .. } if id == "fc_0"));
+        assert!(matches!(&blocks[1], AssistantBlock::ToolUse { id, .. } if id == "fc_1"));
+    }
+
+    #[tokio::test]
+    async fn pre_native_id_persisted_messages_load_and_replay_without_invented_ids() {
+        // Synthetic persisted JSON derived from the writer/type definitions at
+        // v0.9.4 e91835c5fea0170d0dfc1d297d70269234fd4a16 and pre-#1936
+        // 169a89905500a25ef34c62d26f772724cd40e194, not emitted by today's writer
+        // or captured by executing either historical binary. Those versions
+        // stored only signature metadata or no metadata, never a native ID.
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/pre_native_id_messages.json"
+        ))
+        .unwrap();
+        for explicit_null_meta in [false, true] {
+            let mut persisted = fixture.clone();
+            if explicit_null_meta {
+                persisted[1]["blocks"][1]["data"]["meta"] = Value::Null;
+            }
+            let messages: Vec<Message> = serde_json::from_value(persisted).unwrap();
+            let Message::BlockAssistant(assistant) = &messages[1] else {
+                panic!("legacy assistant row must load");
+            };
+            assert!(matches!(
+                &assistant.blocks[0],
+                AssistantBlock::ToolUse { id, meta: Some(meta), .. }
+                    if id == "fc_0" && matches!(meta.as_ref(),
+                        ProviderMeta::Gemini { thought_signature }
+                            if thought_signature == "legacy-signature")
+            ));
+            assert!(matches!(
+                &assistant.blocks[1],
+                AssistantBlock::ToolUse { id, meta: None, .. } if id == "fc_1"
+            ));
+            let stored = serde_json::to_value(&messages).unwrap();
+            assert_eq!(stored[1]["blocks"], fixture[1]["blocks"]);
+            assert_eq!(stored[2]["results"], fixture[2]["results"]);
+
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let response = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"done\"}]},\"finishReason\":\"STOP\"}]}\n";
+            let (base_url, server) =
+                spawn_gemini_stream_stub("gemini-3.5-flash", response.into(), Arc::clone(&seen))
+                    .await;
+            let client = GeminiClient::new_with_base_url("test-key".into(), base_url);
+            let request = LlmRequest::new("gemini-3.5-flash", messages);
+            let events = client.stream(&request).collect::<Vec<_>>().await;
+            server.abort();
+            assert!(events.iter().all(Result::is_ok));
+            let bodies = seen.lock().unwrap();
+            assert_eq!(bodies.len(), 1);
+            let calls = bodies[0]["contents"][1]["parts"].as_array().unwrap();
+            let responses = bodies[0]["contents"][2]["parts"].as_array().unwrap();
+            assert_eq!(calls.len(), 2);
+            assert_eq!(responses.len(), 2);
+            assert_eq!(calls[0]["thoughtSignature"], "legacy-signature");
+            assert!(calls[1].get("thoughtSignature").is_none());
+            assert_eq!(
+                calls[0]["functionCall"]["args"],
+                fixture[1]["blocks"][0]["data"]["args"]
+            );
+            assert_eq!(responses[0]["functionResponse"]["name"], "time_zone");
+            assert_eq!(responses[1]["functionResponse"]["name"], "weather");
+            assert_eq!(
+                responses[0]["functionResponse"]["response"],
+                json!({"output": "UTC+09:00"})
+            );
+            assert_eq!(
+                responses[1]["functionResponse"]["response"],
+                json!({"output": "Clear, 12 C"})
+            );
+            assert!(
+                calls
+                    .iter()
+                    .all(|part| part["functionCall"].get("id").is_none())
+            );
+            assert!(
+                responses
+                    .iter()
+                    .all(|part| part["functionResponse"].get("id").is_none())
+            );
+            assert!(
+                responses
+                    .iter()
+                    .all(|part| part.get("thoughtSignature").is_none())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn mixed_native_and_generated_ids_stay_distinct_across_stream_chunks() {
+        let (blocks, body) = function_call_id_roundtrip(vec![
+            vec![json!({"functionCall": {"name": "weather", "args": {"city": "Oslo"}}})],
+            vec![json!({"functionCall": {"id": "fc_0", "name": "weather", "args": {"city": "Paris"}}})],
+        ]).await;
+        assert!(
+            matches!(&blocks[0], AssistantBlock::ToolUse { id, meta: None, .. } if id == "fc_0")
+        );
+        assert!(
+            matches!(&blocks[1], AssistantBlock::ToolUse { id, meta: Some(_), .. } if id == "fc_1")
+        );
+        let calls = body["contents"][1]["parts"].as_array().unwrap();
+        assert!(calls[0]["functionCall"].get("id").is_none());
+        assert_eq!(calls[1]["functionCall"]["id"], "fc_0");
+        let responses = body["contents"][2]["parts"].as_array().unwrap();
+        assert_eq!(responses[0]["functionResponse"]["id"], "fc_0");
+        assert!(responses[1]["functionResponse"].get("id").is_none());
+        assert_eq!(
+            responses[0]["functionResponse"]["response"],
+            json!({"output": "\"Paris\""})
         );
     }
 
@@ -7172,6 +7584,64 @@ mod tests {
         Ok(())
     }
 
+    /// A tool result's functionResponse.response uses Gemini's documented
+    /// keys: a successful call's text under "output", with no "error" key,
+    /// and a failed call's text under "error", with no "output" key. Name and
+    /// id are unchanged, and the response part carries no thoughtSignature.
+    #[test]
+    fn gemini_function_response_names_output_or_error() -> Result<(), Box<dyn std::error::Error>> {
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-3.1-pro-preview",
+            vec![
+                Message::User(UserMessage::text("look both up")),
+                Message::BlockAssistant(BlockAssistantMessage::new(
+                    vec![
+                        AssistantBlock::ToolUse {
+                            id: "call-ok".into(),
+                            name: "lookup".into(),
+                            args: serde_json::value::to_raw_value(&json!({"q": "a"}))?,
+                            meta: None,
+                        },
+                        AssistantBlock::ToolUse {
+                            id: "call-failed".into(),
+                            name: "lookup".into(),
+                            args: serde_json::value::to_raw_value(&json!({"q": "b"}))?,
+                            meta: None,
+                        },
+                    ],
+                    StopReason::ToolUse,
+                )),
+                Message::tool_results(vec![
+                    ToolResult::new("call-ok".into(), "found a".into(), false),
+                    ToolResult::new("call-failed".into(), "lookup b failed".into(), true),
+                ]),
+            ],
+        );
+
+        let body = client.build_request_body(&request)?;
+        let parts = body["contents"][2]["parts"]
+            .as_array()
+            .ok_or("missing tool result parts")?;
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["functionResponse"]["name"], "lookup");
+        assert_eq!(
+            parts[0]["functionResponse"]["response"],
+            json!({"output": "found a"})
+        );
+        assert_eq!(parts[1]["functionResponse"]["name"], "lookup");
+        assert_eq!(
+            parts[1]["functionResponse"]["response"],
+            json!({"error": "lookup b failed"})
+        );
+        assert!(
+            parts
+                .iter()
+                .all(|part| part.get("thoughtSignature").is_none())
+        );
+        Ok(())
+    }
+
     #[test]
     fn gemini_tool_result_with_image_preserves_inline_data()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -7223,12 +7693,16 @@ mod tests {
             .as_array()
             .ok_or("missing parts")?;
 
-        // First part: functionResponse with text content
+        // First part: functionResponse with text content, as the output
         let response = &parts[0]["functionResponse"]["response"];
-        let content_str = response["content"].as_str().ok_or("content not string")?;
+        let content_str = response["output"].as_str().ok_or("output not string")?;
         assert!(
             content_str.contains("captured"),
             "text content should be preserved in functionResponse"
+        );
+        assert!(
+            response.get("error").is_none(),
+            "a successful result names no error"
         );
 
         // Second part: inlineData with the actual image
@@ -7547,9 +8021,9 @@ mod tests {
         assert_eq!(parts.len(), 1);
         let result = &parts[0]["functionResponse"];
         assert_eq!(result["name"], "lookup");
-        assert_eq!(result["response"]["error"], false);
+        assert!(result["response"].get("error").is_none());
         assert_eq!(
-            serde_json::from_str::<Value>(result["response"]["content"].as_str().unwrap()).unwrap(),
+            serde_json::from_str::<Value>(result["response"]["output"].as_str().unwrap()).unwrap(),
             mcp_structured_payload()
         );
     }
@@ -7564,8 +8038,8 @@ mod tests {
         assert_eq!(parts.len(), 2);
         let result = &parts[0]["functionResponse"];
         assert_eq!(result["name"], "lookup");
-        assert_eq!(result["response"]["error"], false);
-        let text = result["response"]["content"].as_str().unwrap();
+        assert!(result["response"].get("error").is_none());
+        let text = result["response"]["output"].as_str().unwrap();
         let structured = text
             .strip_prefix("before\n[image: image/png]\nafter\n")
             .expect("ordered text and image projection");

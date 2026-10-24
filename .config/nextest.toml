@@ -168,6 +168,13 @@ max-threads = 1
 filter = 'binary(agent_builder_policy_canary) and test(/^downstream_/)'
 test-group = 'downstream-cargo-canary'
 
+[[profile.default.overrides]]
+# meerkat-mob's long run conformance: each chapter test runs every row over a
+# fresh store, with a killed child process and a restart per row, so a test
+# takes minutes. The default profile's overrides apply to every profile.
+filter = 'binary(long_run_conformance)'
+slow-timeout = { period = "120s", terminate-after = 10 }
+
 [[profile.fast.overrides]]
 # Mirrors the default override above, as the cohort overrides below do.
 filter = 'binary(agent_builder_policy_canary) and test(/^downstream_/)'
@@ -272,6 +279,17 @@ threads-required = 8
 # keep the bound.
 filter = 'test(=runtime::tests::durable_fork_delegation_waits_for_a_busy_source_turn_boundary_then_forks)'
 threads-required = 8
+
+[[profile.default.overrides]]
+# Cuts 64 member unregisters by killing a child host process (this test binary
+# re-executed), then resumes the mob over the same SQLite files and takes a
+# turn. Each step has its own 150s bound, which only turns a hang into a
+# failure. Alone it takes 33-44s; in the saturated meerkat-mob lib lane
+# (ci-unit, 3026 tests, 2026-10-23) it hit the four-period bound (240s) with no
+# step bound firing, so the bound measured runner load. Its child process
+# holds no nextest slot, so reserve the whole lane instead of raising the bound.
+filter = 'test(=runtime::tests::actor_isolation::unregister_self_heal::the_first_resume_after_many_cut_unregisters_brings_every_member_back)'
+threads-required = "num-cpus"
 
 [[profile.default.overrides]]
 # The workspace unit lane uses the default profile and discovers these lib

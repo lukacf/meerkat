@@ -26,7 +26,7 @@
 //!
 //! A job whose turn was admitted under a stable delivery identity (every job
 //! on a runtime-backed host) is settled from the runtime's terminal receipt
-//! for that input alone ([`relink_by_receipt`]): a completed turn is
+//! for that input alone (`relink_by_receipt`): a completed turn is
 //! `completed`; the turn's own failure is `failed` with its typed error, and
 //! the child is retired as the live custodian retires it; an end imposed from
 //! outside (stop, destroy, cancel), an input no run answered, or one never
@@ -290,7 +290,7 @@ impl RelinkDelivery {
 }
 
 /// A live view of the mobs a host manages (see
-/// [`RelinkDelivery::managed_mobs`]).
+/// `RelinkDelivery::managed_mobs`).
 #[derive(Clone)]
 pub struct ManagedMobs {
     mobs: Arc<tokio::sync::RwLock<BTreeMap<MobId, crate::ManagedMob>>>,
@@ -1835,6 +1835,11 @@ fn receipt_failure(
             } => ReceiptFailure::TurnFailed,
             _ => ReceiptFailure::RestartCaused,
         },
+        // A graceful stop kept the turn's input queued for the next start,
+        // or that input aged out before it ran: the stop ended it, never the
+        // turn itself.
+        BoundedTurnFailure::RequeuedAcrossStop { .. }
+        | BoundedTurnFailure::RequeueExpired { .. } => ReceiptFailure::RestartCaused,
         _ => ReceiptFailure::RestartCaused,
     }
 }
@@ -2699,6 +2704,14 @@ mod tests {
             },
             BoundedTurnFailure::CompletionAuthorityClosed {
                 admitted_session_id: session_id.clone(),
+            },
+            BoundedTurnFailure::RequeuedAcrossStop {
+                session_id: session_id.clone(),
+                input_id: meerkat_core::lifecycle::InputId::new(),
+            },
+            BoundedTurnFailure::RequeueExpired {
+                session_id: session_id.clone(),
+                input_id: meerkat_core::lifecycle::InputId::new(),
             },
         ] {
             assert_eq!(

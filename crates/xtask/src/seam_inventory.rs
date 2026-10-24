@@ -46,7 +46,7 @@ pub struct SurfaceContractEntry {
 }
 
 /// Entry in the routed-effect inventory: every routed effect's consumer
-/// machine + input variant must resolve to a typed [`RoutedInput`] in the
+/// machine + input variant must resolve to a typed `RoutedInput` in the
 /// composition schema. This is the teeth B-10 puts on the
 /// `EffectDisposition::Routed` branch that the classification table skips.
 #[derive(Debug)]
@@ -102,7 +102,9 @@ pub struct DestroyRouteEntry {
 }
 
 /// Typed C-F3 teardown inventory derived purely from the declared
-/// [`Route::teardown`] / [`EffectHandoffProtocol::teardown`] facts.
+/// [`Route::teardown`] /
+/// [`EffectHandoffProtocol::teardown`](meerkat_machine_schema::EffectHandoffProtocol::teardown)
+/// facts.
 #[derive(Debug, Default)]
 pub struct TeardownInventory {
     pub destroy_routes: Vec<DestroyRouteEntry>,

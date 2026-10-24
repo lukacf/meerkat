@@ -34,16 +34,17 @@ use meerkat_contracts::wire::supervisor_bridge::{
     BridgeDeliveryResponse, BridgeDestroyResponse, BridgeDirectMemberFence, BridgeEventCursor,
     BridgeHardCancelPayload, BridgeHeldRun, BridgeLiveControlledResponse, BridgeLiveOpenedResponse,
     BridgeMemberEventsPage, BridgeMemberHistoryPage, BridgeMemberIncarnation,
-    BridgeMemberRuntimeState, BridgeMobPeerOverlayHandoff, BridgeObservationResponse,
-    BridgeOutboundTaintTarget, BridgeOutcomeTracking, BridgePeerConnectivity, BridgePeerIdentity,
-    BridgePeerSpec, BridgeProtocolVersion, BridgeRejectionCause, BridgeReply, BridgeRetireOutcome,
-    BridgeRetireResponse, BridgeRunStartHoldResponse, BridgeSupervisorPayload,
-    BridgeSupervisorRotationObservation, BridgeSupervisorRotationOperationReceipt,
-    BridgeSupervisorRotationPendingPhase, BridgeSupervisorRotationRejectionCause,
-    BridgeSupervisorRotationRejectionReceipt, BridgeSupervisorRotationState,
-    BridgeSupervisorRotationTargetReceipt, BridgeTrackedInputCancelPayload,
-    BridgeTrackedInputCancelResponse, SUPERVISOR_BRIDGE_INTENT, SupervisorRotationOperationId,
-    WireEventRow, canonicalize_bridge_address, decode_bridge_command,
+    BridgeMemberRuntimeState, BridgeMemberVisibleToolsResponse, BridgeMobPeerOverlayHandoff,
+    BridgeObservationResponse, BridgeOutboundTaintTarget, BridgeOutcomeTracking,
+    BridgePeerConnectivity, BridgePeerIdentity, BridgePeerSpec, BridgeProtocolVersion,
+    BridgeRejectionCause, BridgeReply, BridgeRetireOutcome, BridgeRetireResponse,
+    BridgeRunStartHoldResponse, BridgeSupervisorPayload, BridgeSupervisorRotationObservation,
+    BridgeSupervisorRotationOperationReceipt, BridgeSupervisorRotationPendingPhase,
+    BridgeSupervisorRotationRejectionCause, BridgeSupervisorRotationRejectionReceipt,
+    BridgeSupervisorRotationState, BridgeSupervisorRotationTargetReceipt,
+    BridgeTrackedInputCancelPayload, BridgeTrackedInputCancelResponse, SUPERVISOR_BRIDGE_INTENT,
+    SupervisorRotationOperationId, WireEventRow, canonicalize_bridge_address,
+    decode_bridge_command,
 };
 #[cfg(test)]
 use meerkat_contracts::wire::supervisor_bridge::{
@@ -6307,6 +6308,67 @@ async fn try_handle_supervisor_bridge_command(
                 }
             }
             true
+            })
+            .await
+        }
+        BridgeCommand::ReadMemberVisibleTools(payload) => {
+            // Each arm builds in its own boxed frame, as the arms around it do.
+            crate::stack_relief::box_in_own_frame(|| async move {
+                // V7: a prompt-context fork's source tools, read the way
+                // `ReadMemberHistory` reads its rows.
+                let sup_payload = BridgeSupervisorPayload {
+                    supervisor: payload.supervisor.clone(),
+                    epoch: payload.epoch,
+                    protocol_version: payload.protocol_version,
+                };
+                if let Err((cause, reason)) = resolve_authorized_supervisor_with_response_route(
+                    adapter,
+                    session_id,
+                    comms_runtime,
+                    sender,
+                    &sup_payload,
+                    "read member visible tools failed",
+                )
+                .await
+                {
+                    send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
+                    return true;
+                }
+                let observation = match resolve_member_observation_host(adapter) {
+                    Ok(observation) => observation,
+                    Err((cause, reason)) => {
+                        send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
+                        return true;
+                    }
+                };
+                if let Err((cause, reason)) = require_registered_member_incarnation(
+                    adapter,
+                    session_id,
+                    &payload.expected_member,
+                    "read member visible tools",
+                ) {
+                    send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
+                    return true;
+                }
+                match observation.visible_tool_names(session_id).await {
+                    Ok(names) => {
+                        send_bridge_response(
+                            comms_runtime,
+                            candidate,
+                            meerkat_core::interaction::ResponseStatus::Completed,
+                            BridgeReply::MemberVisibleTools(BridgeMemberVisibleToolsResponse {
+                                names,
+                            }),
+                            None,
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        let (cause, reason) = observation_error_to_bridge_rejection(&error);
+                        send_bridge_failure(comms_runtime, candidate, cause, reason, None).await;
+                    }
+                }
+                true
             })
             .await
         }
@@ -12587,6 +12649,7 @@ mod tests {
                 tool_use_id: "call-1".to_string(),
                 tool_name: "external_mock".to_string(),
                 args: json!({ "value": "browser" }),
+                dedupe_key: None,
             },
         );
 
@@ -18202,6 +18265,7 @@ mod tests {
             },
             capabilities: meerkat_core::live_adapter::LiveChannelCapabilities::default().into(),
             continuity: WireLiveContinuityMode::Fresh,
+            advisories: Vec::new(),
         }
     }
 

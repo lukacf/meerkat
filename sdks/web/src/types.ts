@@ -8,6 +8,8 @@ import type {
   WireMemberPreviewUnavailable,
   WireMemberProgressSnapshot,
   WireMemberRegistrationHookCall,
+  WireMemberCustodyDeferralCause,
+  WireMemberCustodyRestore,
   WireMobMemberStatus,
   WireNonPortableResourceKind,
   WireReachability,
@@ -22,6 +24,21 @@ export type {
   WireMemberProgressSnapshot,
   WireMemberRegistrationHookCall,
   WireMobLifecycleFailure,
+  WireMemberCustodyDeferral,
+  WireMemberCustodyDeferralCause,
+  WireMemberCustodyRestore,
+} from './generated/mob.js';
+
+// The destroy report of `Mob.lifecycle('destroy')` and of
+// `mobDestroyIncompleteReport`, nameable through the package root.
+export type {
+  MobLifecycleResult,
+  WireMemberReloadRefusal,
+  WireMemberReloadRefusalRepairBlocked,
+  WireMemberReloadRefusalUnknown,
+  WireMobDestroyIncompleteData,
+  WireMobDestroyMemberRefusal,
+  WireMobDestroyReport,
 } from './generated/mob.js';
 
 // ─── Bootstrap / session config (generated wire parity) ─────────
@@ -461,6 +478,27 @@ export interface MobMemberSnapshot {
    * call that refused it. The member stays broken until an explicit repair.
    */
   registration_refusal?: WireMemberRegistrationHookCall;
+  /**
+   * Set when a mob start deferred the member's custody restore instead of
+   * failing the whole start: the restore and the cause its last attempt met.
+   * Every operation on the member re-attempts it first.
+   */
+  custody_deferred?: MobMemberCustodyDeferral;
+}
+
+/**
+ * A custody restore or cause this SDK does not know, as the server sent it:
+ * the deferral vocabularies may grow, and an unknown value is surfaced, not
+ * refused.
+ */
+export interface MobMemberCustodyUnknown {
+  unknown: string;
+}
+
+/** A member's custody restore a mob start deferred, and the cause its last attempt met. */
+export interface MobMemberCustodyDeferral {
+  restore: WireMemberCustodyRestore | MobMemberCustodyUnknown;
+  cause: WireMemberCustodyDeferralCause | MobMemberCustodyUnknown;
 }
 
 /** Result envelope for helper-style mob flows. */
@@ -720,8 +758,60 @@ export interface ToolCallbackResult {
   is_error: boolean;
 }
 
-/** A tool callback function. */
-export type ToolCallback = (args: string) => Promise<ToolCallbackResult>;
+/**
+ * The dedupe key of one tool call, a tool callback's second argument when an
+ * agent-loop round dispatched the call. A resumed run that dispatches the
+ * same call again passes the same key, so a tool with effects that must not
+ * repeat deduplicates on all four fields.
+ */
+export interface ToolCallDedupeKey {
+  run_id: string;
+  round: number;
+  call_id: string;
+  call_digest: string;
+}
+
+/**
+ * A tool callback function. `dedupeKey` is the call's
+ * {@link ToolCallDedupeKey}, or `undefined` when the call has none.
+ */
+export type ToolCallback = (
+  args: string,
+  dedupeKey?: ToolCallDedupeKey,
+) => Promise<ToolCallbackResult>;
+
+/**
+ * Parse the dedupe key the WASM runtime passes a tool callback: a JSON
+ * string, or `undefined`. Unknown fields are ignored; an absent or malformed
+ * value is `undefined`, because the key is advisory and never fails the
+ * call.
+ */
+export function parseToolCallDedupeKey(raw: unknown): ToolCallDedupeKey | undefined {
+  if (typeof raw !== 'string') {
+    return undefined;
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+  const { run_id, round, call_id, call_digest } = value as Record<string, unknown>;
+  if (
+    typeof run_id !== 'string' ||
+    typeof round !== 'number' ||
+    !Number.isSafeInteger(round) ||
+    round < 0 ||
+    typeof call_id !== 'string' ||
+    typeof call_digest !== 'string'
+  ) {
+    return undefined;
+  }
+  return { run_id, round, call_id, call_digest };
+}
 
 // ─── Flow types ─────────────────────────────────────────────────
 

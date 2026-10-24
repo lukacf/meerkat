@@ -3,11 +3,9 @@
 #[cfg(not(feature = "memory-store"))]
 use async_trait::async_trait;
 use std::any::Any;
-use std::collections::BTreeMap;
-#[cfg(feature = "skills")]
-use std::collections::BTreeSet;
 #[cfg(not(feature = "memory-store"))]
 use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -319,12 +317,6 @@ impl AssemblyConsequencePolicy {
     }
 }
 
-/// The resources a construction started that must be settled if it is not
-/// finished, armed from the moment the construction first owns each (before
-/// any of its startup awaits) until a finished agent owns them. Dropped while
-/// armed, it spawns each owner's shutdown on the runtime the construction
-/// armed it on; [`Self::settle`] awaits that shutdown and stays armed until it
-/// completes, so a settle that is itself abandoned still hands it on.
 /// A trusted host's composition of one construction's own MCP router adapter.
 ///
 /// Called once per construction that creates a router for its configured MCP
@@ -391,6 +383,12 @@ pub trait McpAdapterCustody: Send + Sync {
 #[error("MCP adapter custody is closed")]
 pub struct McpAdapterCustodyClosed;
 
+/// The resources a construction started that must be settled if it is not
+/// finished, armed from the moment the construction first owns each (before
+/// any of its startup awaits) until a finished agent owns them. Dropped while
+/// armed, it spawns each owner's shutdown on the runtime the construction
+/// armed it on; [`Self::settle`] awaits that shutdown and stays armed until it
+/// completes, so a settle that is itself abandoned still hands it on.
 #[derive(Default)]
 struct ConstructionCleanup {
     #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
@@ -953,6 +951,12 @@ pub struct AgentBuildConfig {
     /// it is for custom `SessionAgentBuilder` implementations (host build
     /// callbacks) and not consumed by the standard build pipeline.
     pub fork_source: Option<meerkat_core::ForkBuildSource>,
+    /// Typed source of a prompt-context fork child, set only by the mob
+    /// runtime on that child's create build (see
+    /// `meerkat_core::PromptContextForkSource`). Like `fork_source`, it is for
+    /// custom `SessionAgentBuilder` implementations and not consumed by the
+    /// standard build pipeline.
+    pub prompt_context_fork_source: Option<meerkat_core::PromptContextForkSource>,
     /// Additional instruction sections appended to the system prompt after skill
     /// assembly, before tool instructions. Order preserved.
     pub additional_instructions: Option<Vec<String>>,
@@ -1164,6 +1168,10 @@ impl std::fmt::Debug for AgentBuildConfig {
             )
             .field("app_context", &self.app_context.is_some())
             .field("fork_source", &self.fork_source)
+            .field(
+                "prompt_context_fork_source",
+                &self.prompt_context_fork_source,
+            )
             .field("additional_instructions", &self.additional_instructions)
             .field("wait_for_mcp", &self.wait_for_mcp)
             .field("mcp_servers", &self.mcp_servers)
@@ -1258,6 +1266,7 @@ impl AgentBuildConfig {
             skill_engine_override: None,
             app_context: None,
             fork_source: None,
+            prompt_context_fork_source: None,
             additional_instructions: None,
             wait_for_mcp: false,
             mcp_servers: Vec::new(),
@@ -1396,6 +1405,7 @@ impl AgentBuildConfig {
         self.max_inline_peer_notifications = build.max_inline_peer_notifications;
         self.app_context = build.app_context.clone();
         self.fork_source = build.fork_source.clone();
+        self.prompt_context_fork_source = build.prompt_context_fork_source.clone();
         self.additional_instructions = build.additional_instructions.clone();
         self.initial_metadata_entries = build.initial_metadata_entries.clone();
         self.initial_tool_filter = build.initial_tool_filter.clone();
@@ -1481,6 +1491,7 @@ impl AgentBuildConfig {
             max_inline_peer_notifications: self.max_inline_peer_notifications,
             app_context: self.app_context.clone(),
             fork_source: self.fork_source.clone(),
+            prompt_context_fork_source: self.prompt_context_fork_source.clone(),
             additional_instructions: self.additional_instructions.clone(),
             initial_metadata_entries: self.initial_metadata_entries.clone(),
             initial_tool_filter: self.initial_tool_filter.clone(),
@@ -1536,6 +1547,63 @@ fn metadata_memory_override_for_realm(
 /// known whatever the compiled features so a deny list means the same thing
 /// on every build; pinned by a drift test where the family is compiled.
 pub(crate) const MEMORY_TOOL_NAMES: &[&str] = &["memory_search"];
+
+/// The mob operator authority facts a restored member's settled build holds
+/// that its persisted authority record does not: spawn profiles per mob,
+/// manage scope, create and profile mutation.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RegainedMobOperatorAuthority {
+    spawn_profiles: BTreeMap<String, BTreeSet<String>>,
+    manage_scope: BTreeSet<String>,
+    create: bool,
+    mutate: bool,
+}
+
+impl RegainedMobOperatorAuthority {
+    /// What `settled` holds and `persisted` lacks, or `None` when it lacks
+    /// nothing. Both are read through their wire projection: a persisted
+    /// record is unsealed, so its accessors read as empty, and only its
+    /// recorded facts are compared, as a hint and never as authority.
+    fn between(
+        settled: &meerkat_core::service::MobToolAuthorityContext,
+        persisted: &meerkat_core::service::MobToolAuthorityContext,
+    ) -> Option<Self> {
+        let settled = Self::recorded_facts(settled)?;
+        let persisted = Self::recorded_facts(persisted)?;
+        let spawn_profiles = settled
+            .spawn_profile_scope
+            .iter()
+            .filter_map(|(mob_id, profiles)| {
+                let held = persisted.spawn_profile_scope.get(mob_id);
+                let regained = profiles
+                    .iter()
+                    .filter(|profile| held.is_none_or(|held| !held.contains(*profile)))
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                (!regained.is_empty()).then(|| (mob_id.clone(), regained))
+            })
+            .collect();
+        let regained = Self {
+            spawn_profiles,
+            manage_scope: settled
+                .managed_mob_scope
+                .difference(&persisted.managed_mob_scope)
+                .cloned()
+                .collect(),
+            create: settled.can_create_mobs && !persisted.can_create_mobs,
+            mutate: settled.can_mutate_profiles && !persisted.can_mutate_profiles,
+        };
+        (regained != Self::default()).then_some(regained)
+    }
+
+    fn recorded_facts(
+        context: &meerkat_core::service::MobToolAuthorityContext,
+    ) -> Option<meerkat_contracts::wire::WireMobToolAuthorityContext> {
+        serde_json::to_value(context)
+            .ok()
+            .and_then(|value| serde_json::from_value(value).ok())
+    }
+}
 
 /// The built-in tool families' vocabularies: every tool name a family can
 /// provide, whether or not a given build compiles or enables the family. Each
@@ -7081,6 +7149,39 @@ impl AgentFactory {
                 .apply_generated_create_only_mob_operator_access(ToolCategoryOverride::Enable);
         }
 
+        // A restored member whose settled authority holds operator facts its
+        // persisted authority record did not hold has most likely lost a
+        // host's narrowing: the host narrowed an earlier build of it, and not
+        // this one. The record is unsealed and advisory, so this is a hint to
+        // the host, never enforcement. A first build has no record (a fork
+        // does not inherit its source's), so it never warns.
+        if let Some(binding) = build_config.mob_member_binding.as_ref()
+            && !matches!(build_config.override_mob, ToolCategoryOverride::Disable)
+            && let Some(settled) = build_config
+                .mob_tool_authority_context
+                .as_ref()
+                .filter(|authority| authority.is_generated_authority_context())
+            && let Some(persisted) = build_config
+                .resume_session
+                .as_ref()
+                .and_then(Session::build_state)
+                .and_then(|state| state.mob_tool_authority_context)
+            && let Some(regained) = RegainedMobOperatorAuthority::between(settled, &persisted)
+        {
+            tracing::warn!(
+                mob_id = %binding.mob_id,
+                member = %binding.member,
+                session_id = %session.id(),
+                regained_spawn_profiles = ?regained.spawn_profiles,
+                regained_manage_scope = ?regained.manage_scope,
+                regained_create = regained.create,
+                regained_mutate = regained.mutate,
+                "restored mob member holds mob operator authority its persisted authority \
+                 record did not; a host that narrows a member must narrow every build of \
+                 it, restores included (the record is advisory, not enforced)"
+            );
+        }
+
         // The session's final mob operator authority, settled above and only
         // read from here on. One handle carries it to every mob operator
         // surface of the session: the agent writes its in-session updates to
@@ -8545,13 +8646,18 @@ impl AgentFactory {
         );
 
         // 9d. Compose tools with mob surface (after comms/scheduler/WorkGraph, so mob
-        // gateway wraps the already-composed base capability stack).
-        let effective_mob = build_config
-            .mob_tool_authority_context
-            .as_ref()
-            .is_some_and(
-                meerkat_core::service::MobToolAuthorityContext::is_generated_authority_context,
-            );
+        // gateway wraps the already-composed base capability stack). A build
+        // with mob tools disabled mounts no mob surface even when it carries a
+        // generated authority context (an embedder can set both directly):
+        // the mob operator dispatchers in its external tools were bound to no
+        // authority above, so they hide and deny, and this surface agrees.
+        let effective_mob = !matches!(build_config.override_mob, ToolCategoryOverride::Disable)
+            && build_config
+                .mob_tool_authority_context
+                .as_ref()
+                .is_some_and(
+                    meerkat_core::service::MobToolAuthorityContext::is_generated_authority_context,
+                );
         let mob_factory = build_config
             .mob_tools
             .take()
@@ -14769,6 +14875,18 @@ mod tests {
         }
     }
 
+    /// Each test that resolves a sticky-fallback binding has a realm of its
+    /// own. A fallback rotation releases the primary binding's lease, which
+    /// refuses with `release_lease::Busy` while another test of the process
+    /// holds that binding's credential lifecycle, and plain `cargo test` runs
+    /// these tests at once in one process.
+    const FALLBACK_REALM_SESSION_OWNED: &str = "fallback_session_owned";
+    const FALLBACK_REALM_UNBOUND_SOURCE: &str = "fallback_unbound_source";
+    const FALLBACK_REALM_CHATGPT_BOUND: &str = "fallback_chatgpt_bound";
+    const FALLBACK_REALM_CHATGPT_UNBOUND: &str = "fallback_chatgpt_unbound";
+    const FALLBACK_REALM_RELOAD: &str = "fallback_reload";
+    const FALLBACK_REALM_HEAD_CANONICAL: &str = "fallback_head_canonical";
+
     fn inline_realm_section(entries: &[(&str, &str)]) -> RealmConfigSection {
         RealmConfigSection::from_inline_api_keys(entries)
     }
@@ -14964,13 +15082,17 @@ mod tests {
     }
 
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
-    fn sticky_fallback_test_config(backup_model: &str, backup_binding: AuthBindingRef) -> Config {
+    fn sticky_fallback_test_config(
+        realm: &str,
+        backup_model: &str,
+        backup_binding: AuthBindingRef,
+    ) -> Config {
         let mut config = Config {
             max_tokens: Some(1024),
             ..Default::default()
         };
         config.realm.insert(
-            "fallback_test".to_string(),
+            realm.to_string(),
             inline_realm_section(&[
                 ("anthropic", "test-primary-key"),
                 ("openai", "test-backup-key"),
@@ -15007,6 +15129,7 @@ mod tests {
 
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     fn sticky_fallback_runtime_request(
+        realm: &str,
         primary_model: &str,
         external_tools: Arc<dyn AgentToolDispatcher>,
     ) -> CreateSessionRequest {
@@ -15023,7 +15146,7 @@ mod tests {
             deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
             build: Some(SessionBuildOptions {
                 provider: Some(Provider::Anthropic),
-                realm_id: Some(RealmId::parse("fallback_test").expect("test realm")),
+                realm_id: Some(RealmId::parse(realm).expect("test realm")),
                 external_tools: Some(external_tools),
                 override_builtins: ToolCategoryOverride::Disable,
                 ..Default::default()
@@ -15140,8 +15263,10 @@ mod tests {
 
         let primary_model = "claude-sonnet-4-5";
         let backup_model = "custom-text-only-backup";
-        let primary_binding = configured_auth_binding("fallback_test", "default_anthropic");
-        let backup_binding = configured_auth_binding("fallback_test", "default_openai");
+        let primary_binding =
+            configured_auth_binding(FALLBACK_REALM_SESSION_OWNED, "default_anthropic");
+        let backup_binding =
+            configured_auth_binding(FALLBACK_REALM_SESSION_OWNED, "default_openai");
         let primary_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let backup_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let primary_client: Arc<dyn LlmClient> = Arc::new(ScriptedStickyFallbackClient {
@@ -15173,7 +15298,7 @@ mod tests {
 
         let mut config = Config::default();
         config.realm.insert(
-            "fallback_test".to_string(),
+            FALLBACK_REALM_SESSION_OWNED.to_string(),
             inline_realm_section(&[
                 ("anthropic", "test-primary-key"),
                 ("openai", "test-backup-key"),
@@ -15216,7 +15341,7 @@ mod tests {
         let mut build = AgentBuildConfig::new(primary_model);
         build.max_tokens = Some(1024);
         build.provider = Some(Provider::Anthropic);
-        build.realm_id = Some(RealmId::parse("fallback_test").expect("test realm"));
+        build.realm_id = Some(RealmId::parse(FALLBACK_REALM_SESSION_OWNED).expect("test realm"));
         build.auth_binding = Some(primary_binding.clone());
         build.resume_session = Some(session);
         build.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings.clone());
@@ -15292,7 +15417,8 @@ mod tests {
     async fn fallback_from_an_unbound_source_names_the_resolved_default_binding() {
         let primary_model = "claude-sonnet-4-5";
         let backup_model = "custom-text-only-backup";
-        let backup_binding = configured_auth_binding("fallback_test", "default_openai");
+        let backup_binding =
+            configured_auth_binding(FALLBACK_REALM_UNBOUND_SOURCE, "default_openai");
         let primary_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let backup_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let temp = tempfile::tempdir().unwrap();
@@ -15322,7 +15448,7 @@ mod tests {
         // Only the fallback's provider has a configured binding.
         let mut config = Config::default();
         config.realm.insert(
-            "fallback_test".to_string(),
+            FALLBACK_REALM_UNBOUND_SOURCE.to_string(),
             inline_realm_section(&[("openai", "test-backup-key")]),
         );
         config.models.custom.insert(
@@ -15361,7 +15487,7 @@ mod tests {
         let mut build = AgentBuildConfig::new(primary_model);
         build.max_tokens = Some(1024);
         build.provider = Some(Provider::Anthropic);
-        build.realm_id = Some(RealmId::parse("fallback_test").expect("test realm"));
+        build.realm_id = Some(RealmId::parse(FALLBACK_REALM_UNBOUND_SOURCE).expect("test realm"));
         build.resume_session = Some(session);
         build.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings.clone());
         build.override_builtins = ToolCategoryOverride::Disable;
@@ -15412,20 +15538,21 @@ mod tests {
     }
 
     /// Run one sticky fallback from an Anthropic source onto `gpt-5.5`
-    /// through realm `fallback_test`, whose OpenAI binding is the private
+    /// through realm `realm_name` (the caller's own), whose OpenAI binding is the private
     /// ChatGPT backend, and return the session's resolved capability surface
     /// afterwards. `bound` names that binding on both the source and the
     /// fallback target; otherwise neither names one, and the target is served
     /// by the binding its client resolution selects (the ChatGPT one).
     #[cfg(not(target_arch = "wasm32"))]
     async fn chatgpt_backend_sticky_fallback_capabilities(
+        realm_name: &str,
         bound: bool,
     ) -> meerkat_runtime::SessionLlmCapabilitySurface {
         use meerkat_runtime::SessionServiceRuntimeExt as _;
 
         let primary_model = "claude-sonnet-4-5";
         let backup_model = "gpt-5.5";
-        let backup_binding = configured_auth_binding("fallback_test", "default_openai");
+        let backup_binding = configured_auth_binding(realm_name, "default_openai");
         let primary_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let backup_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let temp = tempfile::tempdir().unwrap();
@@ -15473,7 +15600,7 @@ mod tests {
             .get_mut("default_openai")
             .expect("OpenAI auth")
             .auth_method = "managed_chatgpt_oauth".to_string();
-        config.realm.insert("fallback_test".to_string(), realm);
+        config.realm.insert(realm_name.to_string(), realm);
         config.model_fallback.enabled = Some(true);
         config.model_fallback.policy.cross_provider = true;
         config.model_fallback.policy.trigger_after_attempts = 1;
@@ -15498,12 +15625,9 @@ mod tests {
         let mut build = AgentBuildConfig::new(primary_model);
         build.max_tokens = Some(1024);
         build.provider = Some(Provider::Anthropic);
-        build.realm_id = Some(RealmId::parse("fallback_test").expect("test realm"));
+        build.realm_id = Some(RealmId::parse(realm_name).expect("test realm"));
         if bound {
-            build.auth_binding = Some(configured_auth_binding(
-                "fallback_test",
-                "default_anthropic",
-            ));
+            build.auth_binding = Some(configured_auth_binding(realm_name, "default_anthropic"));
         }
         build.resume_session = Some(session);
         build.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings);
@@ -15551,7 +15675,8 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn sticky_fallback_onto_a_chatgpt_binding_records_its_backend_capability() {
-        let capabilities = chatgpt_backend_sticky_fallback_capabilities(true).await;
+        let capabilities =
+            chatgpt_backend_sticky_fallback_capabilities(FALLBACK_REALM_CHATGPT_BOUND, true).await;
         assert!(
             !capabilities.supports_mid_conversation_system_messages,
             "the ChatGPT backend refuses a later System row; the fallback must not \
@@ -15565,7 +15690,9 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn unbound_fallback_target_is_judged_by_the_binding_it_resolves() {
-        let capabilities = chatgpt_backend_sticky_fallback_capabilities(false).await;
+        let capabilities =
+            chatgpt_backend_sticky_fallback_capabilities(FALLBACK_REALM_CHATGPT_UNBOUND, false)
+                .await;
         assert!(
             !capabilities.supports_mid_conversation_system_messages,
             "the target resolves the ChatGPT-backend binding; the row's capability \
@@ -15585,9 +15712,13 @@ mod tests {
         const EXTERNAL_TOOL: &str = "known_external_tool";
         const ORIGINAL_PROMPT: &str = "persist this exact user prompt";
 
-        let primary_binding = configured_auth_binding("fallback_test", "default_anthropic");
-        let backup_binding = configured_auth_binding("fallback_test", "default_openai");
-        let config = sticky_fallback_test_config(BACKUP_MODEL, backup_binding.clone());
+        let primary_binding = configured_auth_binding(FALLBACK_REALM_RELOAD, "default_anthropic");
+        let backup_binding = configured_auth_binding(FALLBACK_REALM_RELOAD, "default_openai");
+        let config = sticky_fallback_test_config(
+            FALLBACK_REALM_RELOAD,
+            BACKUP_MODEL,
+            backup_binding.clone(),
+        );
         let temp = tempfile::tempdir().expect("persistent fallback tempdir");
         let sqlite_store = Arc::new(
             meerkat_store::SqliteSessionStore::open(temp.path().join("sessions.sqlite3"))
@@ -15626,6 +15757,7 @@ mod tests {
             session_id = session.id().clone();
             runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
             let request = sticky_fallback_runtime_request(
+                FALLBACK_REALM_RELOAD,
                 PRIMARY_MODEL,
                 sticky_fallback_visibility_dispatcher(EXTERNAL_TOOL),
             );
@@ -15830,6 +15962,7 @@ mod tests {
             ORIGINAL_PROMPT,
         );
         let restart_request = sticky_fallback_runtime_request(
+            FALLBACK_REALM_RELOAD,
             PRIMARY_MODEL,
             sticky_fallback_visibility_dispatcher(EXTERNAL_TOOL),
         );
@@ -15942,8 +16075,13 @@ mod tests {
         const EXTERNAL_TOOL: &str = "known_external_tool";
         const ORIGINAL_PROMPT: &str = "persist this exact user prompt";
 
-        let backup_binding = configured_auth_binding("fallback_test", "default_openai");
-        let config = sticky_fallback_test_config(BACKUP_MODEL, backup_binding.clone());
+        let backup_binding =
+            configured_auth_binding(FALLBACK_REALM_HEAD_CANONICAL, "default_openai");
+        let config = sticky_fallback_test_config(
+            FALLBACK_REALM_HEAD_CANONICAL,
+            BACKUP_MODEL,
+            backup_binding.clone(),
+        );
         let temp = tempfile::tempdir().expect("head-canonical fallback tempdir");
         let sqlite_path = temp.path().join("sessions.sqlite3");
         let sqlite_store = Arc::new(
@@ -15981,6 +16119,7 @@ mod tests {
         let session_id = session.id().clone();
         let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
         let request = sticky_fallback_runtime_request(
+            FALLBACK_REALM_HEAD_CANONICAL,
             PRIMARY_MODEL,
             sticky_fallback_visibility_dispatcher(EXTERNAL_TOOL),
         );
@@ -16006,6 +16145,17 @@ mod tests {
             .await
             .expect("stage known external visibility filter");
 
+        // A sibling test (the reload test, which plain `cargo test` runs at
+        // once in this process) holds its primary binding's credential
+        // lifecycle while this turn falls back. The rotation releases this
+        // test's own primary lease, never a sibling's binding.
+        let _sibling = meerkat_core::auth::acquire_auth_login_lifecycle_guard(
+            &meerkat_core::handles::LeaseKey::from_auth_binding(&configured_auth_binding(
+                FALLBACK_REALM_RELOAD,
+                "default_anthropic",
+            )),
+        )
+        .await;
         let (_accept, completion) = adapter
             .accept_input_with_completion(
                 &session_id,
@@ -21155,6 +21305,37 @@ mod tests {
         );
     }
 
+    /// Both fork sources a build names survive the deferred-session round
+    /// trip through `SessionBuildOptions`.
+    #[test]
+    fn fork_sources_survive_the_session_build_options_round_trip() {
+        let binding = meerkat_core::MobMemberBinding {
+            mob_id: "mob".to_string(),
+            role: "lead".to_string(),
+            member: "source".to_string(),
+        };
+        let source_session = meerkat_core::types::SessionId::new();
+        let options = SessionBuildOptions {
+            fork_source: Some(meerkat_core::ForkBuildSource::new(
+                binding.clone(),
+                source_session.clone(),
+            )),
+            prompt_context_fork_source: Some(meerkat_core::PromptContextForkSource::new(
+                binding,
+                Some(source_session),
+            )),
+            ..SessionBuildOptions::default()
+        };
+        let mut build = AgentBuildConfig::new("claude-sonnet-4-5");
+        build.apply_session_build_options(&options);
+        let round_tripped = build.to_session_build_options();
+        assert_eq!(round_tripped.fork_source, options.fork_source);
+        assert_eq!(
+            round_tripped.prompt_context_fork_source,
+            options.prompt_context_fork_source
+        );
+    }
+
     #[test]
     fn resumed_self_hosted_binding_overrides_current_registry_server() {
         let temp = tempfile::tempdir().unwrap();
@@ -22133,6 +22314,69 @@ mod prompt_tests {
         assert_eq!(
             operator_spawn.description, OPERATOR_SPAWN_DESCRIPTION,
             "the operator tool definition keeps its full description"
+        );
+    }
+
+    /// A build with mob tools disabled mounts no mob surface, even when it
+    /// carries a generated mob operator authority context: only an embedder
+    /// that builds the config directly can set both (session build options
+    /// resolve Disable to no context). Its external mob operator tools are
+    /// bound to no authority, so the factory's mob surface must not mount
+    /// either. Before, the surface keyed on the context alone and mounted.
+    /// The control build, the same config with mob tools not disabled, mounts
+    /// it.
+    #[tokio::test]
+    async fn disabled_mob_tools_mount_no_mob_surface_even_with_a_generated_authority() {
+        async fn build_with(override_mob: ToolCategoryOverride) -> Vec<String> {
+            let temp = tempfile::tempdir().unwrap();
+            let mut build_config = external_only_build_config();
+            build_config.override_mob = override_mob;
+            build_config.mob_tool_authority_context = Some(
+                meerkat_runtime::mob_operator_authority::create_only_mob_operator_authority()
+                    .expect("generated create-only mob authority"),
+            );
+            let agent = AgentFactory::new(temp.path().join("sessions"))
+                .builtins(false)
+                .mob(true)
+                .mob_tools_factory(Arc::new(StaticMobToolsFactory {
+                    dispatcher: Arc::new(UsageTestDispatcher {
+                        tools: mob_surface_tools(&[
+                            ("delegate", "Run one bounded helper task."),
+                            ("mob_spawn_member", "Spawn a member into a mob."),
+                        ]),
+                        exact_catalog: false,
+                        may_require_control_plane: false,
+                        pending_sources: Arc::from([]),
+                    }),
+                }))
+                .build_agent(build_config, &Config::default())
+                .await
+                .unwrap();
+            agent
+                .tool_scope()
+                .visible_tools()
+                .iter()
+                .map(|tool| tool.name.as_str().to_string())
+                .collect()
+        }
+
+        let disabled = build_with(ToolCategoryOverride::Disable).await;
+        assert!(
+            !disabled
+                .iter()
+                .any(|name| name == "delegate" || name == "mob_spawn_member"),
+            "a build with mob tools disabled mounts no mob surface: {disabled:?}"
+        );
+        assert!(
+            disabled.iter().any(|name| name == "visible"),
+            "the build's other tools stay: {disabled:?}"
+        );
+
+        let enabled = build_with(ToolCategoryOverride::Inherit).await;
+        assert!(
+            enabled.iter().any(|name| name == "delegate")
+                && enabled.iter().any(|name| name == "mob_spawn_member"),
+            "the same build with mob tools not disabled mounts the surface: {enabled:?}"
         );
     }
 

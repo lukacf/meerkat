@@ -213,13 +213,15 @@ AuditBody ==
           \/ AuditCancelArgs(CancelLiveContextRecoveryObligationRunning)
           \/ AuditCancelArgs(CancelLiveContextRecoveryObligationRetired)
           \/ AuditCancelArgs(CancelLiveContextRecoveryObligationStopped)
-    \* The unregister drain, in each phase.
+    \* The unregister drain, in each phase. The unregister's queued-input
+    \* disposition does not touch live channels: every unregister here
+    \* begins with Stop.
     \/ \E b \in AuditBindings :
-        \/ BeginUnregisterSessionIdle(AuditSession, b[1], b[2], b[3], None)
-        \/ BeginUnregisterSessionAttached(AuditSession, b[1], b[2], b[3], None)
-        \/ BeginUnregisterSessionRunning(AuditSession, b[1], b[2], b[3], None)
-        \/ BeginUnregisterSessionRetainsSnapshotRetired(AuditSession, b[1], b[2], b[3], None)
-        \/ BeginUnregisterSessionRetainsSnapshotStopped(AuditSession, b[1], b[2], b[3], None)
+        \/ BeginUnregisterSessionIdle(AuditSession, b[1], b[2], b[3], None, "Stop", 0)
+        \/ BeginUnregisterSessionAttached(AuditSession, b[1], b[2], b[3], None, "Stop", 0)
+        \/ BeginUnregisterSessionRunning(AuditSession, b[1], b[2], b[3], None, "Stop", 0)
+        \/ BeginUnregisterSessionRetainsSnapshotRetired(AuditSession, b[1], b[2], b[3], None, "Stop", 0)
+        \/ BeginUnregisterSessionRetainsSnapshotStopped(AuditSession, b[1], b[2], b[3], None, "Stop", 0)
         \/ UnregisterSessionIdle(AuditSession, b[1], b[2], b[3], None)
         \/ UnregisterSessionAttached(AuditSession, b[1], b[2], b[3], None)
         \/ UnregisterSessionRunning(AuditSession, b[1], b[2], b[3], None)

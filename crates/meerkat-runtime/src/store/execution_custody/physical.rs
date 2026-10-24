@@ -32,10 +32,10 @@ impl PhysicalExecutionCustody {
         }
     }
 
-    fn try_admission(&self) -> Result<File, CustodyError> {
+    fn try_admission(&self) -> Result<HeldLock, CustodyError> {
         let gate = open_lock_file(&self.admission_path)?;
         gate.try_lock().map_err(lock_error)?;
-        Ok(gate)
+        Ok(HeldLock(gate))
     }
 
     pub(super) fn try_acquire(
@@ -51,7 +51,7 @@ impl PhysicalExecutionCustody {
         }
         .map_err(lock_error)?;
         Ok(PhysicalExecutionClaim {
-            lifetime,
+            lifetime: HeldLock(lifetime),
             owner: Arc::clone(self),
             state: if governed {
                 PhysicalClaimState::Governed
@@ -103,7 +103,7 @@ impl PhysicalExecutionCustody {
 /// Sharing this claim through the existing Arc keeps both exclusions alive.
 #[derive(Debug)]
 pub(super) struct PhysicalExecutionClaim {
-    lifetime: File,
+    lifetime: HeldLock,
     owner: Arc<PhysicalExecutionCustody>,
     state: PhysicalClaimState,
 }
@@ -114,8 +114,31 @@ enum PhysicalClaimState {
     Governed,
     /// An uncertain lifetime lock never releases admission to another owner.
     Failed {
-        _admission: File,
+        _admission: HeldLock,
     },
+}
+
+/// A lock file a claim opened and locked through its own descriptor (its
+/// admission gate or its lifetime). Dropping it unlocks the file, then closes
+/// it. The lock belongs to the open file description, and a process spawned
+/// meanwhile holds a copy of the descriptor until it executes its program,
+/// which would keep a lock released by the close alone. Each value opened its
+/// own description, so the unlock releases no other owner's lock.
+#[derive(Debug)]
+struct HeldLock(File);
+
+impl std::ops::Deref for HeldLock {
+    type Target = File;
+
+    fn deref(&self) -> &File {
+        &self.0
+    }
+}
+
+impl Drop for HeldLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
 }
 
 impl PhysicalExecutionClaim {

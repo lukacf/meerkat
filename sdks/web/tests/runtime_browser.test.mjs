@@ -1214,6 +1214,8 @@ test("canonical runtime direct-session contracts execute in Chromium", { timeout
         assert.equal(event.payload.name, "current_turn_probe");
       }
       assert.equal(completedTool.payload.is_error, false);
+      // The execution fact carries no copy of the result body.
+      assert.equal("content" in completedTool.payload, false, JSON.stringify(completedTool.payload));
       assert.deepEqual(result.payload.content, [{ type: "text", text: "BROWSER_CURRENT_TOOL_DRAINED" }]);
       const ordered = [requested, startedTool, completedTool, result, completedTurn, cancelled];
       assert.ok(ordered.every((event, i) => i === 0 || ordered[i - 1].seq < event.seq), JSON.stringify(events));

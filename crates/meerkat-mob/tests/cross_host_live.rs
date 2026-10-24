@@ -1000,6 +1000,7 @@ impl ScriptedMemberLiveHost {
                 provider_native_resume: false,
             },
             continuity: meerkat_contracts::wire::WireLiveContinuityMode::Fresh,
+            advisories: Vec::new(),
         }
     }
 }

@@ -2136,6 +2136,126 @@ impl MeerkatMachine {
         Ok(recovered_from_quiescent_archive)
     }
 
+    /// End, under `lease`, the work this session's runtime still keeps for a
+    /// later start, when the session's archive met a durable tail that its
+    /// recovery held beside that work; the archive then runs its recovery
+    /// once more. Returns the inputs it ended.
+    ///
+    /// The archive can run before any start registers the session's runtime
+    /// again: after a graceful stop that kept a durable run and requeued its
+    /// queued inputs, or after a crash. No live retire's quiesce has ended that
+    /// work then, so this ends it as the runtime ends work nothing resumes:
+    /// - the run the registration keeps resumable is settled as a stop
+    ///   settles a marked run: its bound inputs are abandoned as cancelled and
+    ///   their completion waiters failed;
+    /// - every queued input is cancelled as an exact cancellation cancels a
+    ///   queued input (the live retire's quiesce): abandoned as cancelled, with
+    ///   the interaction terminal outbox a runless cancellation records. A
+    ///   nondirected input's terminal batch is finalized and its waiters
+    ///   answered here; a directed input's publication is the archive's to
+    ///   converge, after it releases the lease.
+    ///
+    /// Every input commits through the lease's own driver. The recovery the
+    /// archive runs next finds them terminal, so its commit terminalizes
+    /// nothing this driver still holds, and the retire under the same lease
+    /// does not write over them. The runless-terminal hint is told when this returns,
+    /// while the archive still holds M: it is a pure signal to a delivery
+    /// owner, which waits for M if it needs it, and the terminals it
+    /// announces are durable by then.
+    pub async fn end_unresumed_work_with_archive_lease_before(
+        &self,
+        lease: &super::MachineSessionArchiveLease,
+        reason: &str,
+        deadline: meerkat_core::time_compat::Instant,
+    ) -> Result<Vec<meerkat_core::lifecycle::InputId>, RuntimeControlPlaneError> {
+        use crate::input_state::{InputAbandonReason, InputLifecycleState};
+
+        let internal =
+            |error: RuntimeDriverError| RuntimeControlPlaneError::Internal(error.to_string());
+        // Owed after each committed terminal and told when this returns,
+        // a committed prefix included.
+        let mut runless_terminal = self.runless_terminal_announcement();
+        let mut ended = Vec::new();
+
+        let settled = {
+            let mut driver = lease.driver.lock().await;
+            match driver.resumable_run_id() {
+                Some(run_id) => driver
+                    .settle_resumable_run(&run_id, InputAbandonReason::Cancelled)
+                    .await
+                    .map_err(internal)?,
+                None => Vec::new(),
+            }
+        };
+        if !settled.is_empty() {
+            runless_terminal.owe();
+            lease.completions.lock().await.fail_inputs(
+                settled.iter().cloned(),
+                crate::completion::CompletionWaitError::AuthorityUnavailable(format!(
+                    "the run these inputs were bound to ended with the archive of its session \
+                     before it resumed: {reason}"
+                )),
+            );
+            ended.extend(settled);
+        }
+
+        let queued: Vec<meerkat_core::lifecycle::InputId> = {
+            let driver = lease.driver.lock().await;
+            let runtime = driver.as_driver();
+            runtime
+                .active_input_ids()
+                .into_iter()
+                .filter(|input_id| {
+                    runtime
+                        .stored_input_state(input_id)
+                        .is_some_and(|stored| stored.seed.phase == InputLifecycleState::Queued)
+                })
+                .collect()
+        };
+        for input_id in queued {
+            let candidate_owner_input_id = {
+                let mut driver = lease.driver.lock().await;
+                let still_queued = driver
+                    .as_driver()
+                    .stored_input_state(&input_id)
+                    .is_some_and(|stored| stored.seed.phase == InputLifecycleState::Queued);
+                if !still_queued {
+                    continue;
+                }
+                let prepared = driver
+                    .prepare_runless_runtime_terminated_interaction_outboxes(
+                        std::slice::from_ref(&input_id),
+                        reason.to_string(),
+                    )
+                    .map_err(internal)?;
+                if let Err(error) = driver
+                    .abandon_queued_input(&input_id, InputAbandonReason::Cancelled)
+                    .await
+                {
+                    driver.rollback_prepared_runless_interaction_terminal_outboxes(prepared);
+                    return Err(internal(error));
+                }
+                runless_terminal.owe();
+                crate::meerkat_machine::driver::DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared)
+            };
+            if candidate_owner_input_id.is_none() {
+                crate::control_plane::publish_and_resolve_runless_runtime_termination_before(
+                    &lease.driver,
+                    Some(&lease.completions),
+                    None,
+                    std::slice::from_ref(&input_id),
+                    None,
+                    reason,
+                    Some(deadline),
+                )
+                .await
+                .map_err(internal)?;
+            }
+            ended.push(input_id);
+        }
+        Ok(ended)
+    }
+
     /// Archive-only sibling that supplies an owned, quiescent stored-session
     /// publisher when the restarted runtime has no attached executor. The
     /// lease-retained live publisher always wins when present.
@@ -2412,6 +2532,17 @@ impl MeerkatMachine {
             "MeerkatMachine::retire_runtime_control_plane start"
         );
 
+        // An input that a store-owned durable-tail recovery consumed outside
+        // this driver is not pending work. Adopt that terminal before the
+        // retire counts what is pending, so neither a runtime loop's drain
+        // nor the sweep below abandons it over the consumed row.
+        driver
+            .lock()
+            .await
+            .adopt_durable_consumed_inputs(Some(&completions))
+            .await
+            .map_err(|error| RuntimeControlPlaneError::Internal(error.to_string()))?;
+
         let staged_dsl = self
             .stage_session_dsl_transition(
                 &session_id,
@@ -2424,7 +2555,22 @@ impl MeerkatMachine {
             .map_err(RuntimeControlPlaneError::Internal)?;
 
         let mut drv = driver.lock().await;
-        let mut report = match Box::pin(machine_retire(&mut drv)).await {
+        // A run the session left open never resumes past a retire: its mark
+        // ends with the retire, and the retire's sweep settles its bound
+        // inputs with the rest. A failed retire restores the staged state,
+        // the mark with it.
+        let retire_result = match drv.resumable_run_id() {
+            Some(run_id) => {
+                match drv
+                    .end_resumable_run(&run_id, &crate::input_state::InputAbandonReason::Retired)
+                {
+                    Ok(()) => Box::pin(machine_retire(&mut drv)).await,
+                    Err(error) => Err(error),
+                }
+            }
+            None => Box::pin(machine_retire(&mut drv)).await,
+        };
+        let mut report = match retire_result {
             Ok(report) => report,
             Err(err) => {
                 drop(drv);

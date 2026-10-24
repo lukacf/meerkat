@@ -8,7 +8,7 @@
 //! the convener's job
 //! ([`meerkat_mob::temporary_council::TemporaryCouncilJobBinding`]).
 //!
-//! [`restore_sweep`] runs once per state after restore, on every host whose
+//! `restore_sweep` runs once per state after restore, on every host whose
 //! council store is durable. Each pass:
 //!
 //! 1. recovers unfinished councils ([`TemporaryCouncilCoordinator::sweep_unfinished`]):

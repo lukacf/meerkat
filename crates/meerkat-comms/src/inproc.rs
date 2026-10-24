@@ -99,7 +99,7 @@ pub enum RegistrationRejection {
     /// name first (`CommsRuntime::retire_inproc_route`, or its `Drop`), leaving
     /// it unbound for the next claimant, or the successor hands in the exact
     /// predecessor generation it is replacing through
-    /// [`InprocRegistry::replace_sender_in_namespace`]. A registrant that can do
+    /// `InprocRegistry::replace_sender_in_namespace`. A registrant that can do
     /// neither has not proved the incumbent is gone.
     NameOccupied { holder_pubkey: PubKey },
 }
@@ -141,7 +141,7 @@ impl std::fmt::Display for RegistrationRejection {
 /// There is deliberately no "rebound my own name" outcome. Succeeding a live
 /// generation is proved by evidence, not by identity: the incumbent releases the
 /// name, or the successor hands its exact generation in through
-/// [`InprocRegistry::replace_sender_in_namespace`].
+/// `InprocRegistry::replace_sender_in_namespace`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegistrationOutcome {
     /// The peer was inserted without touching any existing route.
@@ -291,7 +291,7 @@ impl InprocRegistry {
     ///   at a chosen point, or its `Drop` - which leaves the name unbound for
     ///   an ordinary claim; or the successor hands in the exact predecessor
     ///   generation through
-    ///   [`replace_sender_in_namespace`](Self::replace_sender_in_namespace),
+    ///   `replace_sender_in_namespace`,
     ///   which authorizes replacement by naming what it replaces. Holding the
     ///   same private key is not evidence of either.
     /// - re-registering an existing key under a *free* name is that

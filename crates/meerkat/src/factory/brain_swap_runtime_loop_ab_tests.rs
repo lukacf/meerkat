@@ -69,6 +69,11 @@ const MODEL_A: &str = "gpt-5.4";
 /// The model the session asks to become, reachable on the SAME binding.
 const MODEL_B: &str = "gpt-5.5";
 const TEST_REALM: &str = "default";
+/// How long a scripted turn may take to settle before a row calls it hung.
+/// The scripted responses answer at once, so the bound only turns a hang into
+/// a failure; it leaves room for a loaded lane, where a 5 s bound timed out in
+/// plain `cargo test` runs of the whole library.
+const TURN_SETTLE_GUARD: std::time::Duration = std::time::Duration::from_mins(1);
 const TEST_BINDING: &str = "default_openai";
 
 /// The A and B routes a harness runs against.
@@ -648,7 +653,7 @@ impl AbHarness {
     }
 
     async fn wait_completion(completion: meerkat_runtime::CompletionHandle) -> CompletionOutcome {
-        tokio::time::timeout(std::time::Duration::from_secs(5), completion.wait())
+        tokio::time::timeout(TURN_SETTLE_GUARD, completion.wait())
             .await
             .expect("the turn must settle within the deterministic budget")
             .expect("the completion waiter must resolve")

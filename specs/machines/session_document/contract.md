@@ -70,7 +70,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecoverSessionFromStore`(session_id: SessionId, has_metadata: Bool, has_build_state: Bool, runtime_projection_quarantined: Bool)
 - `ResolveRuntimeCheckpointProjection`(session_id: SessionId)
 - `ResolveSessionDocumentLifecycleMerge`(session_id: SessionId, authority_archived: Bool, candidate_archived: Bool)
-- `ClassifyDurableTail`(session_id: SessionId, candidate_id: RecoveryCandidateId, relation: DurableHeadRelation, run_id_cardinality: RunIdCardinality, terminal_stop_reason: DurableTailStopReason, dangling_tool_use_count: u64, orphan_tool_result_count: u64, messages_after_terminal: Bool)
+- `ClassifyDurableTail`(session_id: SessionId, candidate_id: RecoveryCandidateId, relation: DurableHeadRelation, run_id_cardinality: RunIdCardinality, terminal_stop_reason: DurableTailStopReason, dangling_tool_use_count: u64, orphan_tool_result_count: u64, messages_after_terminal: Bool, run_cursor: DurableTailRunCursor, cursor_inputs_open: Bool)
 - `ApplyPendingToolResults`(session_id: SessionId, result_count: u64)
 - `TranscriptEdit`(session_id: SessionId, fork_or_rewrite_directive: TranscriptEditKind)
 - `RecoverSessionLifecycleTerminal`(session_id: SessionId, terminal: SessionDocumentLifecycle)
@@ -954,7 +954,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyDurableTailCompleted`
 - From: `Ready`
-- On: `ClassifyDurableTail`(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, messages_after_terminal)
+- On: `ClassifyDurableTail`(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, messages_after_terminal, run_cursor, cursor_inputs_open)
 - Guards:
   - ``
 - Emits: `DurableTailClassified`
@@ -962,7 +962,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyDurableTailRepairable`
 - From: `Ready`
-- On: `ClassifyDurableTail`(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, messages_after_terminal)
+- On: `ClassifyDurableTail`(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, messages_after_terminal, run_cursor, cursor_inputs_open)
+- Guards:
+  - ``
+- Emits: `DurableTailClassified`
+- To: `Ready`
+
+### `ClassifyDurableTailContinuable`
+- From: `Ready`
+- On: `ClassifyDurableTail`(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, messages_after_terminal, run_cursor, cursor_inputs_open)
 - Guards:
   - ``
 - Emits: `DurableTailClassified`
@@ -970,7 +978,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ClassifyDurableTailAmbiguous`
 - From: `Ready`
-- On: `ClassifyDurableTail`(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, messages_after_terminal)
+- On: `ClassifyDurableTail`(session_id, candidate_id, relation, run_id_cardinality, terminal_stop_reason, dangling_tool_use_count, orphan_tool_result_count, messages_after_terminal, run_cursor, cursor_inputs_open)
 - Guards:
   - ``
 - Emits: `DurableTailClassified`

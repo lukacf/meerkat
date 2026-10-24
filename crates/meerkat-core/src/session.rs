@@ -12,7 +12,7 @@
 use crate::Provider;
 use crate::generated::{session_document, session_persistence_version_authority};
 use crate::lifecycle::run_primitive::{TurnMetadataOverride, TurnRequestContext};
-use crate::lifecycle::{CoreBoundaryDeliveryWitness, CoreBoundaryStageError, RunId};
+use crate::lifecycle::{CoreBoundaryDeliveryWitness, CoreBoundaryStageError, InputId, RunId};
 use crate::peer_meta::PeerMeta;
 use crate::realtime_transcript::{
     RealtimeTranscriptApplyOutcome, RealtimeTranscriptEvent, RealtimeUserContentIdentity,
@@ -2099,6 +2099,13 @@ impl Session {
 /// Metadata key used to store deferred-turn control state.
 pub const SESSION_DEFERRED_TURN_STATE_KEY: &str = "session_deferred_turn_state";
 
+/// Metadata key holding the open run cursor of a durable session.
+///
+/// Every round commit writes it with the round's transcript; the run's final
+/// save removes it. Recovery reads it to continue the same run from its last
+/// committed round instead of running its input again.
+pub const SESSION_RUN_CURSOR_KEY: &str = "session_run_cursor_v1";
+
 /// Metadata key for a mixed local/external callback batch whose completed
 /// sibling outcomes must remain hidden until the external callback result can
 /// complete the provider-adjacent `ToolResults` set.
@@ -3380,6 +3387,347 @@ impl From<session_document::SessionDocumentLifecycle> for SessionLifecycleTermin
             session_document::SessionDocumentLifecycle::Active => Self::Active,
             session_document::SessionDocumentLifecycle::Archived => Self::Archived,
         }
+    }
+}
+
+/// Where a resumed run re-enters its loop.
+///
+/// A durable session commits every inner-loop round twice: once after the
+/// model call and once after the tools. The first commit stages the round's
+/// assistant message here instead of in the transcript, so a run that ends
+/// between the two commits never leaves a tool call without its result; the
+/// second commit puts the message and its results into the transcript
+/// together. The resume point names which of the two the last committed
+/// round reached.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RunResumePoint {
+    /// The round's assistant message, with its tool calls, is committed here
+    /// and its results are not. A resumed run dispatches exactly these calls
+    /// again, under the same call ids, without calling the model.
+    ToolsPending {
+        /// The round's assistant message as the model returned it.
+        assistant_message: BlockAssistantMessage,
+    },
+    /// The round's tool results are committed, or the run has not called the
+    /// model yet. A resumed run makes the next model call.
+    AwaitingModel,
+}
+
+/// Run-scoped loop state a resumed run restores.
+///
+/// The agent loop owns these fields and may add more; other components treat
+/// the value as opaque and carry it unchanged.
+///
+/// Nothing else of the loop needs carrying across a restart: no assistant
+/// message id is reserved at a round commit (the provider turn that reserved
+/// one has already committed its message, and a staged message keeps its own
+/// id), a sticky model fallback is published before the request that uses it,
+/// and a parked compaction check is consumed before the model response a
+/// round commit follows. Extraction never takes a round commit.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct RunLoopCarryOver {
+    /// Model calls the run has completed.
+    #[serde(default)]
+    pub turn_count: u32,
+    /// Tool calls the run has completed.
+    #[serde(default)]
+    pub tool_call_count: u32,
+    /// Whether the run has already produced visible or actionable output,
+    /// which the empty-output verdict of a later model call reads.
+    #[serde(default)]
+    pub has_visible_or_actionable_output: bool,
+    /// Wall clock the run's turn horizon had used when the round committed.
+    /// A resumed run continues the remaining horizon, not a fresh one.
+    #[serde(default)]
+    pub turn_elapsed_ms: u64,
+    /// The run's usage account when the round committed. It only restores
+    /// the run's own usage on its result; the session's usage total stays the
+    /// one source of truth for what was spent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<RunUsageCarryOver>,
+    /// Asynchronous operations the committed round registered and the run had
+    /// not seen settle, with the call that started each.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_ops: Vec<RoundPendingOperation>,
+    /// A permanent model routing request a tool of this run staged; it is
+    /// promoted only when the run reaches its clean end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged_model_routing: Option<StagedModelRoutingCarryOver>,
+    /// The sequence number of the run's latest model request, as hooks see it
+    /// (`HookModelOperation`): a resumed run continues the numbering.
+    #[serde(default)]
+    pub model_operation_sequence: u64,
+}
+
+/// The usage account of an open run: the session total it started from and
+/// one row per provider call it made.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RunUsageCarryOver {
+    /// The session's reported usage total when the run started.
+    #[serde(default)]
+    pub baseline: crate::types::Usage,
+    /// The run's provider calls, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rows: Vec<crate::types::TurnUsage>,
+}
+
+/// One asynchronous operation a committed round registered.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoundPendingOperation {
+    /// Provider tool call id of the call that started the operation.
+    pub call_id: String,
+    /// The operation and how the run waits for it.
+    pub operation: crate::ops::AsyncOpRef,
+}
+
+/// A permanent routing request a tool staged in the open run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StagedModelRoutingCarryOver {
+    /// The request identity the staging tool returned to the model.
+    pub request_id: crate::image_generation::SwitchTurnRequestId,
+    /// The model the run asked to keep.
+    pub target_model: crate::lifecycle::run_primitive::ModelId,
+}
+
+/// Durable cursor of an open run in a durable session.
+///
+/// Every round commit writes it into the session document under
+/// [`SESSION_RUN_CURSOR_KEY`]; the run's final save removes it. It names the
+/// run, the inputs bound to it, the last committed round and where the run
+/// resumes, so recovery can continue the same run instead of running its
+/// input again.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SessionRunCursor {
+    /// The open run.
+    pub run_id: RunId,
+    /// Every input bound to the run so far: the input that started it and
+    /// each steer or peer input applied at one of its round boundaries.
+    pub bound_input_ids: Vec<InputId>,
+    /// Zero-based index of the last committed round.
+    pub round: u64,
+    /// Where the run resumes.
+    pub resume_point: RunResumePoint,
+    /// Loop state the resumed run restores.
+    #[serde(default)]
+    pub loop_state: RunLoopCarryOver,
+    /// The run re-based its session's committed base (a WholeBlob run whose
+    /// transcript a compaction rewrote; see
+    /// [`crate::SessionCheckpointer::rebase_run`]), with this commit or an
+    /// earlier one: its inputs are already in the committed history, so a
+    /// failure of the run consumes them and never replays them. Set on the
+    /// re-base's own commit and on every later commit of the run, a resumed
+    /// run's included. A cursor without the field reads `false`, and a cursor
+    /// that is `false` is written without it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub rebased: bool,
+}
+
+// serde's `skip_serializing_if` passes the field by reference.
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+impl SessionRunCursor {
+    /// A cursor with default loop state, of a run that has not re-based.
+    #[must_use]
+    pub fn new(
+        run_id: RunId,
+        bound_input_ids: Vec<InputId>,
+        round: u64,
+        resume_point: RunResumePoint,
+    ) -> Self {
+        Self {
+            run_id,
+            bound_input_ids,
+            round,
+            resume_point,
+            loop_state: RunLoopCarryOver::default(),
+            rebased: false,
+        }
+    }
+}
+
+/// Deduplication key a tool sees for one call of one round of one run.
+///
+/// A resumed run dispatches the calls of a round whose results were not
+/// committed again, under the same key, so a tool with external effects can
+/// recognize a repeat. A round that had no committed model response is asked
+/// of the model again, and a provider may reuse a call id for a different
+/// call; the digest of the call's tool name and arguments keeps such calls
+/// apart, so a repeat is only a call with the same name and arguments.
+///
+/// Build it with [`ToolCallDedupeKey::new`], which computes the digest, so
+/// every producer derives the same key for the same call.
+///
+/// Every kind of tool receives it unchanged: an in-process tool from
+/// [`crate::ToolDispatchContext::tool_call_dedupe_key`], an MCP tool as the
+/// `tools/call` `_meta` entry [`crate::TOOL_CALL_DEDUPE_KEY_META_KEY`], and a
+/// callback tool as the `dedupe_key` of its request or pending call. A call
+/// outside an agent-loop round has no key.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[non_exhaustive]
+pub struct ToolCallDedupeKey {
+    /// The run the call belongs to.
+    pub run_id: RunId,
+    /// Zero-based round index within the run.
+    pub round: u64,
+    /// Provider tool call id.
+    pub call_id: String,
+    /// [`tool_call_digest`] of the call's tool name and arguments: 64
+    /// lowercase hex characters.
+    pub call_digest: String,
+}
+
+impl ToolCallDedupeKey {
+    /// The key of the call `call_id` to `tool_name` with `arguments`, in
+    /// round `round` of run `run_id`. Arguments that are not valid JSON are
+    /// an error.
+    pub fn new(
+        run_id: RunId,
+        round: u64,
+        call_id: impl Into<String>,
+        tool_name: &str,
+        arguments: &serde_json::value::RawValue,
+    ) -> Result<Self, serde_json::Error> {
+        Ok(Self {
+            run_id,
+            round,
+            call_id: call_id.into(),
+            call_digest: tool_call_digest(tool_name, arguments)?,
+        })
+    }
+}
+
+/// Domain prefix of [`tool_call_digest`]: it names the digest and its
+/// version, so no other digest Core computes can collide with it.
+const TOOL_CALL_DIGEST_DOMAIN: &[u8] = b"meerkat.tool_call_digest.v1\0";
+
+/// The digest [`ToolCallDedupeKey::call_digest`] carries for one call.
+///
+/// Byte for byte, it is the lowercase hex SHA-256 of, in order:
+/// 1. the ASCII bytes `meerkat.tool_call_digest.v1` and one zero byte;
+/// 2. the tool name's UTF-8 bytes;
+/// 3. one zero byte;
+/// 4. the arguments' canonical JSON: the same JSON value written without
+///    insignificant whitespace, with every object's keys sorted by their
+///    bytes, strings escaped as `serde_json` writes them and numbers as
+///    `serde_json` prints them. This is the form the transcript persists tool
+///    arguments in.
+///
+/// Canonical JSON never contains a raw zero byte, so the name and the
+/// arguments cannot shift into each other. Arguments that are not valid JSON
+/// are an error.
+pub fn tool_call_digest(
+    tool_name: &str,
+    arguments: &serde_json::value::RawValue,
+) -> Result<String, serde_json::Error> {
+    use std::fmt::Write as _;
+
+    let canonical = crate::types::canonicalize_raw_json(arguments)?;
+    let mut hasher = Sha256::new();
+    hasher.update(TOOL_CALL_DIGEST_DOMAIN);
+    hasher.update(tool_name.as_bytes());
+    hasher.update([0_u8]);
+    hasher.update(canonical.get().as_bytes());
+    let digest: [u8; 32] = hasher.finalize().into();
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    Ok(hex)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tool_call_dedupe_key_tests {
+    use super::*;
+
+    fn raw(json: &str) -> Box<serde_json::value::RawValue> {
+        serde_json::value::RawValue::from_string(json.to_string()).unwrap()
+    }
+
+    // Unrun until the candidate's validation: the policy forbids Cargo while
+    // the batch is implemented.
+    #[test]
+    fn digest_matches_the_documented_bytes() {
+        // sha256(b"meerkat.tool_call_digest.v1\0" + b"search" + b"\0" +
+        //        b"{\"a\":\"x\",\"b\":1}"), computed outside Rust.
+        assert_eq!(
+            tool_call_digest("search", &raw(r#"{ "b": 1, "a": "x" }"#)).unwrap(),
+            "38b1125ea162352a034af675380c760044701e87c5f410996c40011108edaea9"
+        );
+    }
+
+    #[test]
+    fn key_order_and_whitespace_do_not_change_the_digest() {
+        assert_eq!(
+            tool_call_digest("search", &raw(r#"{"a":"x","b":1}"#)).unwrap(),
+            tool_call_digest("search", &raw(r#"{ "b" : 1 , "a" : "x" }"#)).unwrap()
+        );
+    }
+
+    #[test]
+    fn name_and_arguments_each_change_the_digest() {
+        let base = tool_call_digest("search", &raw(r#"{"a":"x","b":1}"#)).unwrap();
+        assert_eq!(
+            tool_call_digest("search", &raw(r#"{"a":"x","b":2}"#)).unwrap(),
+            "4c4b76e5b56910cab7d1a55f45dafc4a2a975b6886964503339567f67336dea3"
+        );
+        assert_ne!(
+            base,
+            tool_call_digest("fetch", &raw(r#"{"a":"x","b":1}"#)).unwrap()
+        );
+    }
+
+    #[test]
+    fn new_binds_the_digest() {
+        let run_id = RunId::new();
+        let key = ToolCallDedupeKey::new(
+            run_id.clone(),
+            3,
+            "call-1",
+            "search",
+            &raw(r#"{"b":1,"a":"x"}"#),
+        )
+        .unwrap();
+        assert_eq!(key.run_id, run_id);
+        assert_eq!(key.round, 3);
+        assert_eq!(key.call_id, "call-1");
+        assert_eq!(
+            key.call_digest,
+            "38b1125ea162352a034af675380c760044701e87c5f410996c40011108edaea9"
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod run_cursor_rebased_tests {
+    use super::*;
+
+    /// The re-based flag survives the cursor's round trip, a cursor written
+    /// without it reads as not re-based, and a cursor that is not re-based is
+    /// written exactly as before the field existed.
+    #[test]
+    fn the_rebased_flag_round_trips_and_reads_false_when_absent() {
+        let mut cursor =
+            SessionRunCursor::new(RunId::new(), Vec::new(), 2, RunResumePoint::AwaitingModel);
+        let plain = serde_json::to_value(&cursor).expect("the cursor serializes");
+        assert!(plain.get("rebased").is_none(), "{plain}");
+        let read: SessionRunCursor =
+            serde_json::from_value(plain).expect("a cursor without the flag reads");
+        assert!(!read.rebased);
+
+        cursor.rebased = true;
+        let marked = serde_json::to_value(&cursor).expect("the cursor serializes");
+        assert_eq!(marked.get("rebased"), Some(&serde_json::Value::Bool(true)));
+        let read: SessionRunCursor =
+            serde_json::from_value(marked).expect("a re-based cursor reads");
+        assert_eq!(read, cursor);
     }
 }
 
@@ -4818,6 +5166,36 @@ impl SessionDeferredTurnState {
             restored.extend(std::mem::take(&mut self.pending_tool_results));
             self.pending_tool_results = restored;
         }
+    }
+}
+
+/// A session's transcript cannot be projected for a model request: one of
+/// its rows does not hold the bytes its typed identity names. No model
+/// request is built from the session until its transcript is repaired.
+///
+/// Every session in memory passed the checks this projection repeats (on
+/// decode, construction and rewrite), so this names a broken invariant;
+/// the projection fails closed instead of passing the bytes on.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "session {session_id} cannot be projected for a model request: {reason}; \
+     the transcript needs a repair"
+)]
+#[non_exhaustive]
+pub struct ModelBoundaryProjectionError {
+    /// The session whose transcript failed.
+    pub session_id: SessionId,
+    /// What the projection found.
+    pub reason: String,
+}
+
+/// A turn refused because its transcript cannot be projected is refused
+/// by its malformed instruction activation history.
+impl From<ModelBoundaryProjectionError> for crate::error::AgentError {
+    fn from(error: ModelBoundaryProjectionError) -> Self {
+        Self::InstructionActivation(crate::InstructionActivationError::MalformedHistory(
+            error.to_string(),
+        ))
     }
 }
 
@@ -6444,8 +6822,20 @@ impl Session {
     /// only the latest version is selected. No request-local System message is
     /// synthesized or repositioned at this boundary. Protocol-owned tool-result
     /// host metadata remains durable but is omitted from the model projection.
-    pub fn messages_for_model_boundary(&self) -> Vec<Message> {
-        Self::project_model_boundary(self.id(), self.messages())
+    ///
+    /// A fork child's copied rows are projected for the child: an activation
+    /// row it copied names its key without the body, a skill body it copied
+    /// is named unless its fork notice carries the skill, and a fork notice
+    /// it copied from an earlier fork reads as history.
+    ///
+    /// # Errors
+    ///
+    /// [`ModelBoundaryProjectionError`] when a row does not hold the bytes
+    /// its typed identity names: the projection fails closed.
+    pub fn messages_for_model_boundary(
+        &self,
+    ) -> Result<Vec<Message>, ModelBoundaryProjectionError> {
+        self.project_model_boundary(self.messages())
     }
 
     /// [`Self::messages_for_model_boundary`] over the first `count` live
@@ -6465,17 +6855,31 @@ impl Session {
                 self.messages.len()
             ))
         })?;
-        Ok(Self::project_model_boundary(self.id(), messages))
+        self.project_model_boundary(messages)
+            .map_err(|error| <serde_json::Error as serde::ser::Error>::custom(error.to_string()))
     }
 
-    fn project_model_boundary(id: &SessionId, messages: &[Message]) -> Vec<Message> {
+    /// The model's view of `messages`, a prefix of this session's rows.
+    fn project_model_boundary(
+        &self,
+        messages: &[Message],
+    ) -> Result<Vec<Message>, ModelBoundaryProjectionError> {
+        let copied = crate::fork_notice::CopiedForkRows::of(
+            self.messages(),
+            self.id(),
+            self.metadata()
+                .get(crate::fork_notice::SESSION_FORK_SEED_KEY),
+        );
+        let forked = crate::fork_notice::project_fork_rows(self.id(), messages, copied.as_ref());
+        let messages = forked.as_deref().unwrap_or(messages);
         let prompts = crate::types::materialize_latest_system_prompt_versions(messages);
-        let mut projected = match materialize_instruction_activation_messages(id, &prompts) {
-            Ok(messages) => messages,
-            Err(_) => prompts,
-        };
+        let mut projected = materialize_instruction_activation_messages(self.id(), &prompts)
+            .map_err(|reason| ModelBoundaryProjectionError {
+                session_id: self.id().clone(),
+                reason,
+            })?;
         crate::types::strip_tool_result_host_metadata(&mut projected);
-        projected
+        Ok(projected)
     }
 
     /// The text [`Session::last_assistant_text`] returns, paired with the
@@ -6676,6 +7080,30 @@ impl Session {
             )
     }
 
+    /// Adopt the runtime's store-owned finalization of committed compaction
+    /// projection intents as this actor's HeadCanonical preparation baseline.
+    ///
+    /// After a compacting run's boundary, the runtime removes the finalized
+    /// intents from the committed head in a metadata-only mutation, and this
+    /// actor removes the same intents from its own map
+    /// ([`Self::complete_compaction_projection_intent`]). So this actor's live
+    /// value for exactly that key, applied to its current baseline, must hash
+    /// to the committed boundary identity; any divergence fails closed.
+    /// Mutation intent for every other key is retained. Adopting a baseline
+    /// that already equals `committed` changes nothing.
+    pub fn acknowledge_head_canonical_compaction_finalization(
+        &mut self,
+        committed: &SessionHeadMetadataIdentity,
+    ) -> Result<(), String> {
+        self.history_caches
+            .head_canonical_metadata
+            .rebase_control_commit_baseline(
+                &[crate::memory::SESSION_COMPACTION_PROJECTION_INTENTS_KEY],
+                &self.metadata,
+                committed,
+            )
+    }
+
     pub(crate) fn validate_head_canonical_metadata_acknowledgement(
         &self,
         projection: &Arc<SessionHeadMetadataProjection>,
@@ -6708,23 +7136,13 @@ impl Session {
             Some(usize::try_from(rewrite_count).unwrap_or(usize::MAX));
     }
 
-    /// Whether this session keeps more rewrite bodies than `retention`
-    /// because its durable HeadCanonical head does not cover them yet
-    /// ([`Self::retire_transcript_history`] never retires past that head).
-    /// Only a checkpoint that moves the durable head over them lets
-    /// retirement reach the bound.
-    ///
-    /// It reads only the graph this process already holds validated (one
-    /// installed by a materialization or a compaction): an unchanged graph is
-    /// never parsed or validated again for this check, and a graph that is
-    /// not held answers false.
-    pub(crate) fn durable_head_holds_retirement(
-        &self,
-        retention: TranscriptHistoryRetention,
-    ) -> bool {
-        self.durable_head_held_graph().is_some_and(|history| {
-            history.commit_count() - history.retired_count() > retention.retained_rewrites()
-        })
+    /// Whether a durable HeadCanonical head describes this session. Its
+    /// recovery reads a provisional tail written after a transcript rewrite
+    /// as a rewrite descendant of that head; a session without one (a
+    /// WholeBlob session) is recovered only from a strict continuation of its
+    /// committed transcript.
+    pub(crate) fn has_durable_head_canonical_head(&self) -> bool {
+        self.history_caches.durable_rewrite_count.is_some()
     }
 
     /// The graph this session holds validated in this process, when its
@@ -6826,7 +7244,7 @@ impl Session {
     /// Retire transcript-history occurrences beyond `retention`.
     ///
     /// Applies the graph owner's one re-anchoring transition
-    /// ([`TranscriptHistoryState::retire_occurrences_beyond`]) and installs
+    /// (`TranscriptHistoryState::retire_occurrences_beyond`) and installs
     /// the result. Commits and rolling prefix digests are unchanged, so every
     /// rewrite authority that binds the graph still verifies; only the bodies
     /// of retired occurrences go. Returns how many occurrences this call
@@ -7025,6 +7443,33 @@ impl Session {
                     .map_err(<serde_json::Error as serde::de::Error>::custom)
             })
             .transpose()
+    }
+
+    /// Store the open run cursor that a round commit carries.
+    pub fn set_run_cursor(&mut self, cursor: &SessionRunCursor) -> Result<(), serde_json::Error> {
+        let value = serde_json::to_value(cursor)?;
+        self.set_metadata_unchecked(SESSION_RUN_CURSOR_KEY, value);
+        Ok(())
+    }
+
+    /// Load the open run cursor, if this session carries one.
+    pub fn try_run_cursor(&self) -> Result<Option<SessionRunCursor>, serde_json::Error> {
+        self.metadata
+            .get(SESSION_RUN_CURSOR_KEY)
+            .map(|value| serde_json::from_value(value.clone()))
+            .transpose()
+    }
+
+    /// Remove the run cursor once the run's final boundary is saved.
+    pub fn clear_run_cursor(&mut self) {
+        self.remove_metadata_unchecked(SESSION_RUN_CURSOR_KEY);
+    }
+
+    /// Whether this session is a deferred template: it carries no messages
+    /// and no deferred-turn state. A deferred create that resumes a template
+    /// marks its first turn pending, as it does for a new session.
+    pub fn is_deferred_template(&self) -> bool {
+        self.messages().is_empty() && !self.metadata.contains_key(SESSION_DEFERRED_TURN_STATE_KEY)
     }
 
     /// Load durable deferred-turn control state from the session metadata map.
@@ -7871,6 +8316,11 @@ impl Session {
                 }
             }
         }
+        // A recovered document is committed, and a committed body never
+        // carries a run cursor: recovery closes the run it attributes. The
+        // head's timestamp is restored below, so the removal stays
+        // deterministic.
+        self.remove_metadata_unchecked(SESSION_RUN_CURSOR_KEY);
         self.mark_content_mutated(*head_updated_at);
         Ok(())
     }
@@ -16342,6 +16792,21 @@ mod tests {
     }
 
     #[test]
+    fn a_deferred_template_has_no_messages_and_no_deferred_turn_state() {
+        assert!(Session::new().is_deferred_template());
+
+        let mut with_message = Session::new();
+        with_message.push(Message::User(UserMessage::text("hello")));
+        assert!(!with_message.is_deferred_template());
+
+        let mut with_state = Session::new();
+        with_state
+            .set_deferred_turn_state(SessionDeferredTurnState::default())
+            .expect("deferred-turn state should serialize");
+        assert!(!with_state.is_deferred_template());
+    }
+
+    #[test]
     fn test_session_forks_drop_generated_authority_metadata() {
         let mut session = Session::new();
         session.push(Message::User(UserMessage::text("original")));
@@ -17419,7 +17884,7 @@ mod tests {
         let bytes = serde_json::to_vec(&session).expect("serialize session");
         let resumed: Session = serde_json::from_slice(&bytes).expect("deserialize session");
         assert_eq!(resumed.messages(), expected.as_slice());
-        assert_eq!(resumed.messages_for_model_boundary(), expected);
+        assert_eq!(resumed.messages_for_model_boundary().unwrap(), expected);
     }
     #[test]
     fn system_control_idempotency_is_explicit_and_does_not_coalesce_keyless_rows() {
@@ -18147,11 +18612,11 @@ mod tests {
         let count = session.messages().len();
         assert_eq!(
             session.messages_for_model_boundary_prefix(count).unwrap(),
-            session.messages_for_model_boundary()
+            session.messages_for_model_boundary().unwrap()
         );
         assert_eq!(
             session.messages_for_model_boundary_prefix(2).unwrap(),
-            session.fork_at(2).messages_for_model_boundary()
+            session.fork_at(2).messages_for_model_boundary().unwrap()
         );
         assert!(
             session
@@ -18205,7 +18670,7 @@ mod tests {
             panic!("expected persisted result row");
         };
         assert_eq!(results[0], result);
-        let projected = restored.messages_for_model_boundary();
+        let projected = restored.messages_for_model_boundary().unwrap();
         let Message::ToolResults { results, .. } = &projected[1] else {
             panic!("expected model result row");
         };
@@ -19235,6 +19700,43 @@ mod deferred_tool_failure_tests {
         include!("../tests/fixtures/v0_9_3_session_persistence_version_authority.rs.txt");
     }
 
+    // Byte-exact released v0.9.4 authority, commit
+    // e91835c5fea0170d0dfc1d297d70269234fd4a16, source blob
+    // 845ba539ac70e8bc670b343df78a8dbbdd59e455: the newest released reader.
+    #[allow(dead_code)]
+    mod released_v0_9_4_version_authority {
+        include!("../tests/fixtures/v0_9_4_session_persistence_version_authority.rs.txt");
+    }
+
+    /// The released 0.9.4 version authority admits stored input state v3 to
+    /// v7. A row this binary writes without a requeue-across-stop fact is
+    /// stamped at the v7 baseline, so 0.9.4 still reads it; a row carrying a
+    /// stop mark is v8, which this gate refuses with its typed version error
+    /// instead of misreading the mark. A v8 row that ended `RequeueExpired`
+    /// never reaches this gate in 0.9.4: its decode fails first, on the abandon
+    /// reason 0.9.4 does not know (meerkat-runtime's
+    /// `a_released_v0_9_4_reader_fails_closed_on_both_requeue_facts`).
+    #[test]
+    fn released_v0_9_4_version_gate_reads_baseline_rows_and_refuses_v8_typed() {
+        use crate::generated::session_persistence_version_authority as current;
+        assert_eq!(
+            released_v0_9_4_version_authority::restore_stored_input_state_version(
+                current::stored_input_state_version_for_row(false)
+            ),
+            Ok(7)
+        );
+        let refusal = released_v0_9_4_version_authority::restore_stored_input_state_version(
+            current::stored_input_state_version_for_row(true),
+        )
+        .expect_err("0.9.4 refuses a v8 row");
+        assert!(
+            refusal.to_string().contains(
+                "generated session persistence version authority rejected StoredInputState"
+            ),
+            "{refusal}"
+        );
+    }
+
     /// The released 0.9.3 authority admits stored input state v3 to v6 and
     /// rejects a current row: once a 0.9.4 binary has written an input row,
     /// a 0.9.3 binary cannot reopen it.
@@ -19257,23 +19759,24 @@ mod deferred_tool_failure_tests {
 
     /// The released 0.8.50 authority, which admits only stored input state v3
     /// to v5, rejects a current row; the current authority still admits every
-    /// supported older form, the v6 rows 0.9.0 to 0.9.3 wrote included. An
+    /// supported older form, the v6 rows 0.9.0 to 0.9.3 wrote and the v7 rows
+    /// 0.9.4 wrote included. An
     /// older binary may reject a newer row's content before reaching this
     /// version check, so no specific error is promised.
     #[test]
     fn released_reader_rejects_current_stored_input_state_and_current_admits_older_rows() {
         use crate::generated::session_persistence_version_authority as current;
-        assert_eq!(current::stored_input_state_version(), 7);
+        assert_eq!(current::stored_input_state_version(), 8);
         assert!(
             released_v0_8_50_version_authority::restore_stored_input_state_version(
                 current::stored_input_state_version()
             )
             .is_err()
         );
-        for supported in [3, 4, 5, 6, 7] {
+        for supported in [3, 4, 5, 6, 7, 8] {
             assert_eq!(
                 current::restore_stored_input_state_version(supported),
-                Ok(7)
+                Ok(8)
             );
         }
     }

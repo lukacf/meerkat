@@ -4786,7 +4786,10 @@ impl McpRouter {
             let (metadata, _lease, final_check) = match preparation {
                 Some(prepared) => {
                     let mut metadata = prepared.metadata;
+                    // Core owns these names: a host never replaces or forges
+                    // them.
                     if metadata.contains_key(meerkat_core::CALL_ORIGIN_META_KEY)
+                        || metadata.contains_key(meerkat_core::TOOL_CALL_DEDUPE_KEY_META_KEY)
                         || metadata.contains_key("progressToken")
                     {
                         return Err(McpError::CallContext(crate::McpCallContextError::Denied));
@@ -4808,6 +4811,9 @@ impl McpRouter {
                     .map_err(|error| McpError::EntryRefused(Box::new(error.into())))?;
             }
             self.validate_app_call(call, context)?;
+            // The call's dedupe key, when an agent-loop round dispatched it:
+            // sent as Core's own `_meta` entry beside the host's metadata.
+            let dedupe_key = context.tool_call_dedupe_key(call);
             // The native entry step runs inside the connection, after its
             // final request preparation and immediately before the local
             // transport handoff. The preparation's own final check, fallible,
@@ -4819,38 +4825,45 @@ impl McpRouter {
             let send_lease = _lease.clone();
             let generation = conn.connection_id().generation();
             let result = conn
-                .call_tool_result_admitted(admission, &route.raw_operation, args, metadata, || {
-                    self.validate_app_call(call, context)?;
-                    if let Some(control) = context.tool_application_control() {
-                        control
-                            .revalidate()
-                            .map_err(|error| McpError::EntryRefused(Box::new(error.into())))?;
-                    }
-                    // What the check guards stays held through the
-                    // reviewed entry and the handoff, with the request.
-                    let checked = final_check
-                        .map(|check| check().map_err(McpError::CallContext))
-                        .transpose()?;
-                    // A checked route's own conjunct, after every await:
-                    // its single entry is reserved here, and released only
-                    // if the native entry below refuses.
-                    if let Some(entry) = route_entry {
-                        entry
-                            .reserve_entry(call, context, generation)
-                            .map_err(|error| McpError::EntryRefused(Box::new(error)))?;
-                    }
-                    let (entering, review) = context
-                        .enter_reviewed_effect_held(call, None)
-                        .map_err(|error| {
-                            if let Some(entry) = route_entry {
-                                entry.release_entry();
-                            }
-                            McpError::EntryRefused(Box::new(error))
-                        })?;
-                    Ok(Some(crate::transport::protected::SendCustody::new((
-                        send_lease, checked, review, entering,
-                    ))))
-                })
+                .call_tool_result_admitted(
+                    admission,
+                    &route.raw_operation,
+                    args,
+                    metadata,
+                    dedupe_key.as_ref(),
+                    || {
+                        self.validate_app_call(call, context)?;
+                        if let Some(control) = context.tool_application_control() {
+                            control
+                                .revalidate()
+                                .map_err(|error| McpError::EntryRefused(Box::new(error.into())))?;
+                        }
+                        // What the check guards stays held through the
+                        // reviewed entry and the handoff, with the request.
+                        let checked = final_check
+                            .map(|check| check().map_err(McpError::CallContext))
+                            .transpose()?;
+                        // A checked route's own conjunct, after every await:
+                        // its single entry is reserved here, and released only
+                        // if the native entry below refuses.
+                        if let Some(entry) = route_entry {
+                            entry
+                                .reserve_entry(call, context, generation)
+                                .map_err(|error| McpError::EntryRefused(Box::new(error)))?;
+                        }
+                        let (entering, review) = context
+                            .enter_reviewed_effect_held(call, None)
+                            .map_err(|error| {
+                                if let Some(entry) = route_entry {
+                                    entry.release_entry();
+                                }
+                                McpError::EntryRefused(Box::new(error))
+                            })?;
+                        Ok(Some(crate::transport::protected::SendCustody::new((
+                            send_lease, checked, review, entering,
+                        ))))
+                    },
+                )
                 .await?;
             project(result)
         }

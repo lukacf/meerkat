@@ -1978,6 +1978,438 @@ mod tests {
         );
     }
 
+    /// A HeadCanonical session with memory, served by one live actor, runs a
+    /// compacting turn. That turn's boundary carries the compaction's
+    /// projection intent, and the runtime then finalizes it in a store-owned,
+    /// metadata-only head commit the live actor never prepared.
+    #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+    async fn compact_and_finalize_on_a_live_head_canonical_session(
+        root: &std::path::Path,
+    ) -> (
+        Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        Arc<MeerkatMachine>,
+        meerkat::SessionId,
+    ) {
+        let client: Arc<dyn LlmClient> = Arc::new(HistorySummarizingTestClient);
+        let (service, adapter, runtime_store, _event_store) =
+            build_rewrite_audit_failure_memory_service(root, client);
+        let session = Session::new();
+        let session_id = session.id().clone();
+        materialize_callback_memory_session(&service, &adapter, session).await;
+        run_prompt(&adapter, &session_id, "first turn before the compaction").await;
+        run_prompt(&adapter, &session_id, "second turn compacts").await;
+
+        let committed = service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("load the compacted session")
+            .expect("the compacted session exists");
+        assert!(
+            has_compaction_summary(&committed),
+            "test setup failed: the second turn did not compact; messages: {:?}",
+            user_texts(&committed)
+        );
+        assert!(
+            committed
+                .compaction_projection_intents()
+                .expect("read the committed compaction intents")
+                .is_empty(),
+            "the runtime finalized the compaction's projection intent"
+        );
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+        assert!(
+            runtime_store
+                .load_pending_compaction_projections(&runtime_id)
+                .await
+                .expect("load the compaction outbox")
+                .is_empty(),
+            "the compaction outbox is finalized"
+        );
+        let memory_store =
+            meerkat_memory::HnswMemoryStore::open(root.join("sessions").join("memory"))
+                .expect("open the compaction memory store");
+        let page = memory_store
+            .enumerate_scoped(
+                &MemorySearchScope::for_session(session_id.clone()),
+                MemoryEnumerationRequest {
+                    limit: 64,
+                    offset: 0,
+                    source_overlap: None,
+                    indexed_after: None,
+                },
+            )
+            .await
+            .expect("enumerate the compaction memory");
+        assert!(
+            page.records.iter().any(|record| matches!(
+                &record.metadata.source,
+                meerkat_core::MemorySource::Compaction { .. }
+            )),
+            "test setup failed: the compaction staged no memory, so it carried no projection intent"
+        );
+        (service, adapter, session_id)
+    }
+
+    /// The live actor serves its next turn after a compaction finalized. RED
+    /// before: the runtime's metadata-only finalization commit was never
+    /// adopted by the live actor, so the same actor's next turn was refused at
+    /// its first checkpoint ("prepared metadata transition does not extend the
+    /// observed head identity"). Unrun: written while Cargo is not run.
+    #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+    #[tokio::test]
+    async fn a_live_head_canonical_actor_serves_its_next_turn_after_a_compaction_finalizes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (service, adapter, session_id) =
+            compact_and_finalize_on_a_live_head_canonical_session(temp.path()).await;
+
+        run_prompt(&adapter, &session_id, "third turn on the same live actor").await;
+
+        let after = service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("load the session after the third turn")
+            .expect("the session exists");
+        assert!(
+            user_texts(&after)
+                .iter()
+                .any(|text| text.contains("third turn on the same live actor")),
+            "the third turn committed: {:?}",
+            user_texts(&after)
+        );
+    }
+
+    /// A live context append right after a compaction finalized commits. RED
+    /// before: the append prepared its boundary from the live actor's stale
+    /// metadata baseline and was refused, which also discarded the live
+    /// actor. Unrun: written while Cargo is not run.
+    #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+    #[tokio::test]
+    async fn a_live_context_append_after_a_compaction_finalizes_commits() {
+        use meerkat_core::service::SessionServiceControlExt as _;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (service, adapter, session_id) =
+            compact_and_finalize_on_a_live_head_canonical_session(temp.path()).await;
+
+        let appended = service
+            .append_system_context(
+                &session_id,
+                meerkat_core::AppendSystemContextRequest {
+                    content: meerkat_core::CoreRenderable::text(
+                        "context appended after the compaction",
+                    ),
+                    source: Some("test:context".to_string()),
+                    idempotency_key: Some("test:context:v1".to_string()),
+                },
+            )
+            .await
+            .expect("the live append commits over the finalized head");
+        assert!(matches!(
+            appended.status,
+            meerkat_core::service::AppendSystemContextStatus::Applied
+        ));
+        run_prompt(&adapter, &session_id, "turn after the context append").await;
+    }
+
+    /// A restart that finds the compaction outbox still pending builds the
+    /// actor from the head that carries the intent; startup recovery then
+    /// finalizes it in a metadata-only head commit, and the recovered actor
+    /// serves its first turn. RED before: the actor never adopted the startup
+    /// finalization, so that turn was refused at its first checkpoint.
+    /// Unrun: written while Cargo is not run.
+    #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+    #[tokio::test]
+    async fn a_recovered_head_canonical_actor_serves_its_turn_after_startup_finalizes_the_outbox() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_id = {
+            let client: Arc<dyn LlmClient> = Arc::new(HistorySummarizingTestClient);
+            let (service, adapter, runtime_store, event_store) =
+                build_rewrite_audit_failure_memory_service(temp.path(), client);
+            let session = Session::new();
+            let session_id = session.id().clone();
+            materialize_callback_memory_session(&service, &adapter, session).await;
+            run_prompt(&adapter, &session_id, "first turn before the compaction").await;
+            // The compacting turn's rewrite audit append fails after its
+            // boundary committed, so its compaction outbox stays pending into
+            // the restart.
+            event_store.arm();
+            let outcome = run_prompt_capture(&adapter, &session_id, "second turn compacts").await;
+            assert_eq!(
+                event_store.failed_rewrite_appends(),
+                1,
+                "test setup must fail exactly the post-commit rewrite audit append; outcome={outcome:?}"
+            );
+            let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+            assert_eq!(
+                runtime_store
+                    .load_pending_compaction_projections(&runtime_id)
+                    .await
+                    .expect("load the outbox before the restart")
+                    .len(),
+                1,
+                "the compaction outbox stays pending into the restart"
+            );
+            wait_for_canonical_unregister_completion(&adapter, &session_id).await;
+            session_id
+        };
+
+        let client: Arc<dyn LlmClient> = Arc::new(HistorySummarizingTestClient);
+        let (service, adapter, runtime_store, _event_store) =
+            build_rewrite_audit_failure_memory_service(temp.path(), client);
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+        let projection_store =
+            meerkat::SqliteSessionStore::open(temp.path().join("sessions.sqlite3"))
+                .expect("open the session projection store after the restart");
+        let resume_source = projection_store
+            .load(&session_id)
+            .await
+            .expect("load the session after the restart")
+            .expect("the session survives the restart");
+        assert!(
+            !resume_source
+                .compaction_projection_intents()
+                .expect("read the carried compaction intents")
+                .is_empty(),
+            "the recovered actor is built from the head that still carries the intent"
+        );
+        materialize_callback_memory_session(&service, &adapter, resume_source).await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if runtime_store
+                    .load_pending_compaction_projections(&runtime_id)
+                    .await
+                    .expect("poll the recovering outbox")
+                    .is_empty()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("startup recovery finalizes the pending outbox");
+
+        run_prompt(&adapter, &session_id, "first turn of the recovered actor").await;
+    }
+
+    /// An executor that forwards every hook except the compaction
+    /// finalization adoption, whose typed default refuses: an executor (or a
+    /// session service wrapper) written before that hook existed.
+    #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+    struct FinalizationHookLessExecutor {
+        inner: Box<dyn meerkat_core::lifecycle::CoreExecutor>,
+    }
+
+    #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+    #[async_trait::async_trait]
+    impl meerkat_core::lifecycle::CoreExecutor for FinalizationHookLessExecutor {
+        fn supports_work_authorization(&self) -> bool {
+            self.inner.supports_work_authorization()
+        }
+        fn boundary_handle(
+            &self,
+        ) -> Option<Arc<dyn meerkat_core::lifecycle::core_executor::CoreExecutorBoundaryHandle>>
+        {
+            self.inner.boundary_handle()
+        }
+        fn interrupt_handle(
+            &self,
+        ) -> Option<Arc<dyn meerkat_core::lifecycle::core_executor::CoreExecutorInterruptHandle>>
+        {
+            self.inner.interrupt_handle()
+        }
+        fn publication_handle(
+            &self,
+        ) -> Option<Arc<dyn meerkat_core::lifecycle::core_executor::CoreExecutorPublicationHandle>>
+        {
+            self.inner.publication_handle()
+        }
+        fn machine_managed_post_stop_unregister(&self) -> bool {
+            self.inner.machine_managed_post_stop_unregister()
+        }
+        fn post_stop_cleanup_handle(
+            &self,
+        ) -> Option<
+            Arc<dyn meerkat_core::lifecycle::core_executor::CoreExecutorPostStopCleanupHandle>,
+        > {
+            self.inner.post_stop_cleanup_handle()
+        }
+        fn turn_finalization_boundary_handle(
+            &self,
+        ) -> Option<
+            Arc<
+                dyn meerkat_core::lifecycle::core_executor::CoreExecutorTurnFinalizationBoundaryHandle,
+            >,
+        >{
+            self.inner.turn_finalization_boundary_handle()
+        }
+        fn pre_dequeue_handle(
+            &self,
+        ) -> Option<Arc<dyn meerkat_core::lifecycle::core_executor::CoreExecutorPreDequeueHandle>>
+        {
+            self.inner.pre_dequeue_handle()
+        }
+        fn transcript_notice_handle(
+            &self,
+        ) -> Option<
+            Arc<dyn meerkat_core::lifecycle::core_executor::CoreExecutorTranscriptNoticeHandle>,
+        > {
+            self.inner.transcript_notice_handle()
+        }
+        async fn apply(
+            &mut self,
+            run_id: meerkat_core::lifecycle::RunId,
+            primitive: meerkat_core::lifecycle::run_primitive::RunPrimitive,
+        ) -> Result<
+            meerkat_core::lifecycle::core_executor::CoreApplyOutput,
+            meerkat_core::lifecycle::core_executor::CoreExecutorError,
+        > {
+            self.inner.apply(run_id, primitive).await
+        }
+        async fn checkpoint_committed_session_snapshot(
+            &mut self,
+            snapshot: Arc<Vec<u8>>,
+        ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+            self.inner
+                .checkpoint_committed_session_snapshot(snapshot)
+                .await
+        }
+        async fn acknowledge_committed_session_boundary(
+            &mut self,
+            authority: &meerkat_core::CommittedSessionBoundaryAuthority,
+        ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+            self.inner
+                .acknowledge_committed_session_boundary(authority)
+                .await
+        }
+        async fn reconcile_committed_compaction_projections(
+            &mut self,
+            intents: &[meerkat_core::CompactionProjectionIntent],
+        ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+            self.inner
+                .reconcile_committed_compaction_projections(intents)
+                .await
+        }
+        async fn abort_uncommitted_compaction_projections(
+            &mut self,
+        ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+            self.inner.abort_uncommitted_compaction_projections().await
+        }
+        async fn abort_rejected_run_projections(
+            &mut self,
+        ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+            self.inner.abort_rejected_run_projections().await
+        }
+        async fn publish_interaction_terminals(
+            &mut self,
+            events: &[meerkat_core::AgentEvent],
+        ) -> Result<
+            Vec<meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt>,
+            meerkat_core::lifecycle::core_executor::CoreExecutorError,
+        > {
+            self.inner.publish_interaction_terminals(events).await
+        }
+        async fn publish_boundary_appends_discarded(
+            &mut self,
+            discarded: &meerkat_core::event::BoundaryAppendsDiscarded,
+        ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+            self.inner
+                .publish_boundary_appends_discarded(discarded)
+                .await
+        }
+        async fn cancel_after_boundary(
+            &mut self,
+            reason: String,
+        ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+            self.inner.cancel_after_boundary(reason).await
+        }
+        async fn stop_runtime_executor(
+            &mut self,
+            reason: String,
+        ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+            self.inner.stop_runtime_executor(reason).await
+        }
+        async fn cleanup_after_runtime_stop_terminalized(
+            &mut self,
+        ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+            self.inner.cleanup_after_runtime_stop_terminalized().await
+        }
+    }
+
+    /// An executor without the finalization adoption hook (its typed default
+    /// refuses) leaves the live actor unadopted, and the runtime carries on:
+    /// the compacting turn still completes, the session stays registered, and
+    /// a later input is accepted. RED before: a refused adoption was a
+    /// finalization failure, so the committed run was reported failed and the
+    /// runtime executor stopped. Unrun: written while Cargo is not run.
+    #[cfg(all(feature = "memory-store-session", feature = "session-compaction"))]
+    #[tokio::test]
+    async fn an_executor_without_the_finalization_hook_keeps_the_runtime_serving() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let client: Arc<dyn LlmClient> = Arc::new(HistorySummarizingTestClient);
+        let (service, adapter, runtime_store, _event_store) =
+            build_rewrite_audit_failure_memory_service(temp.path(), client);
+        let session = Session::new();
+        let session_id = session.id().clone();
+        let service_for_executor = Arc::clone(&service);
+        let adapter_for_executor = Arc::clone(&adapter);
+        Box::pin(materialize_session(
+            &service,
+            &adapter,
+            session,
+            callback_memory_request(),
+            move |session_id| -> Box<dyn meerkat_core::lifecycle::CoreExecutor> {
+                Box::new(FinalizationHookLessExecutor {
+                    inner: default_persistent_executor(
+                        service_for_executor,
+                        adapter_for_executor,
+                        session_id,
+                    ),
+                })
+            },
+        ))
+        .await
+        .expect("materialize the session under the hook-less executor");
+
+        run_prompt(&adapter, &session_id, "first turn before the compaction").await;
+        run_prompt(&adapter, &session_id, "second turn compacts").await;
+
+        let committed = service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("load the compacted session")
+            .expect("the compacted session exists");
+        assert!(
+            has_compaction_summary(&committed),
+            "test setup failed: the second turn did not compact; messages: {:?}",
+            user_texts(&committed)
+        );
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+        assert!(
+            runtime_store
+                .load_pending_compaction_projections(&runtime_id)
+                .await
+                .expect("load the compaction outbox")
+                .is_empty(),
+            "the compaction outbox is finalized even though the actor was not adopted"
+        );
+        assert!(
+            adapter.contains_session(&session_id).await,
+            "the runtime keeps the session registered"
+        );
+        let (_outcome, handle) = adapter
+            .accept_input_with_completion(
+                &session_id,
+                Input::Prompt(PromptInput::new("a later input", None)),
+            )
+            .await
+            .expect("the runtime still accepts input");
+        assert!(
+            handle.is_some(),
+            "the accepted input has a completion handle"
+        );
+    }
+
     /// On the legacy whole-blob profile, a rejected RuntimeStore atomic
     /// boundary has no committed outbox authority. The live agent must
     /// therefore roll back the compaction rewrite and delete its exact

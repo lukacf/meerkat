@@ -208,6 +208,28 @@ pub fn is_pre_run_apply_runtime_turn_failure(
     )
 }
 
+/// Pure predicate: did a stop suspend the run `apply_runtime_turn` drove
+/// ([`meerkat_core::error::AgentError::RunSuspended`])?
+///
+/// A suspended run is neither a failure nor a cancellation: a graceful stop
+/// that keeps queued work stopped it at an await point, its inputs stay bound
+/// to it, and it resumes at the session's next start. A first turn that a stop
+/// suspended has therefore not failed: its session stays materialized, and
+/// the staged slot is never restored for it, so the suspension reaches the
+/// runtime as the suspension it is.
+fn is_suspended_apply_runtime_turn(result: &Result<CoreApplyOutput, SessionError>) -> bool {
+    match result {
+        Err(error) => match error.primary_error() {
+            SessionError::Agent(error) => matches!(
+                error.primary_error(),
+                meerkat_core::error::AgentError::RunSuspended { .. }
+            ),
+            _ => false,
+        },
+        Ok(_) => false,
+    }
+}
+
 /// Pure predicate: did the underlying `create_session` call reject
 /// because the session was archived?
 #[must_use]
@@ -249,7 +271,9 @@ pub async fn finish_pending_promotion_after_service_turn(
 /// Pure predicate: should the staged slot be restored after a runtime
 /// `apply_runtime_turn` failure? True when the apply failed before the
 /// runtime-driven boundary closed, or when the underlying live session
-/// is still in deferred-first-turn-pending state.
+/// is still in deferred-first-turn-pending state. Never for a run a stop
+/// suspended (`AgentError::RunSuspended`): it did not fail, and it resumes at
+/// the session's next start.
 pub async fn should_restore_pending_after_apply_runtime_turn(
     service: &PersistentSessionService<FactoryAgentBuilder>,
     session_id: &SessionId,
@@ -258,6 +282,9 @@ pub async fn should_restore_pending_after_apply_runtime_turn(
     if is_pre_run_apply_runtime_turn_failure(result) {
         return Ok(true);
     }
+    if is_suspended_apply_runtime_turn(result) {
+        return Ok(false);
+    }
     if result.is_err() {
         pending_live_first_turn_is_still_deferred(service, session_id).await
     } else {
@@ -265,7 +292,8 @@ pub async fn should_restore_pending_after_apply_runtime_turn(
     }
 }
 
-/// Runtime-loop variant of [`should_restore_pending_after_apply_runtime_turn`].
+/// Runtime-loop variant of [`should_restore_pending_after_apply_runtime_turn`],
+/// with the same verdict for a run a stop suspended: never restored.
 pub async fn should_restore_pending_after_apply_runtime_turn_under_runtime_turn_boundary(
     service: &PersistentSessionService<FactoryAgentBuilder>,
     session_id: &SessionId,
@@ -273,6 +301,9 @@ pub async fn should_restore_pending_after_apply_runtime_turn_under_runtime_turn_
 ) -> Result<bool, SessionError> {
     if is_pre_run_apply_runtime_turn_failure(result) {
         return Ok(true);
+    }
+    if is_suspended_apply_runtime_turn(result) {
+        return Ok(false);
     }
     if result.is_err() {
         pending_live_first_turn_is_still_deferred_under_runtime_turn_boundary(service, session_id)

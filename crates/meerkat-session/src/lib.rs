@@ -43,6 +43,7 @@ pub use ephemeral::{
     LiveChannelClosedNotPublished, LiveSessionActorRegistry, LiveSessionActorWitness,
     LiveSessionActorWitnessSlot, McpAttemptGuardSource, RuntimeContextAdmissionGuard,
     SessionActivityWatch, SessionAgent, SessionAgentBuilder, SessionSnapshot,
+    StagedPromptLiveOpenDelivery, TryPinControllerError, TurnBoundaryHeld,
 };
 pub use live_durable_source::LiveDurableSourceObservation;
 pub use live_transcript_authority::LiveAssistantPlaybackObservationResult;
@@ -65,8 +66,8 @@ pub use compactor::DefaultCompactor;
 
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub use persistent::{
-    CommittedBoundaryRecovery, CommittedBoundaryResumePreparationReceipt,
-    DEFAULT_WHOLE_BLOB_BODY_CACHE_BYTES, DurableSessionForkWithProvenance,
+    ColdAttachSettlement, CommittedBoundaryRecovery, CommittedBoundaryResumePreparationReceipt,
+    DEFAULT_WHOLE_BLOB_BODY_CACHE_BYTES, DurableSessionForkWithProvenance, ForkInstructionPolicies,
     LiveChannelProjectionBoundaryHold, LiveContextCommittedBoundary, LiveResyncRelease,
     LiveSessionActorTurnBoundaryLease, LiveSessionExport, LiveStalenessPosition,
     MachineServiceTurnCommitProtocol, MachineSessionArchiveProtocol, PendingLiveResync,

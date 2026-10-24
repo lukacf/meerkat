@@ -668,6 +668,19 @@ mod native_admission_wire_tests {
         }
     }
 
+    /// A held turn boundary is a trusted host's cause, not a native admission
+    /// error: it projects to the existing `unknown` kind, so the wire is
+    /// unchanged.
+    #[test]
+    fn a_held_turn_boundary_projects_to_the_unknown_kind() {
+        assert_eq!(
+            WireControllerReadinessFailure::from(
+                meerkat_core::authorization::ControllerReadinessFailure::TurnBoundaryHeld,
+            ),
+            WireControllerReadinessFailure::Unknown {}
+        );
+    }
+
     /// A pending original keeps its own readiness kind on the wire instead
     /// of `unknown`, and decodes back to it.
     #[test]

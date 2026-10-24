@@ -664,3 +664,61 @@ async fn real_host_denies_plain_resume_and_admits_the_attached_spawn() {
     );
     fixture.shutdown().await;
 }
+
+/// A capability-attached seating also launches as a `Resume`, but it is a
+/// fork seat, not a plain resume: it never asks its host for the adopted
+/// first turn, and it keeps its kickoff even when the host would report
+/// the session's first turn as started.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_attached_seat_neither_asks_for_nor_waives_its_kickoff() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let (scripted, controlling, _host_id, capability) =
+        host_owned_capability("fp-host-first-turn").await;
+    scripted.serve_v7(support::ScriptedV7Mode::Features(vec![
+        meerkat_mob::runtime::bridge_protocol::HOST_FEATURE_ADOPTED_FIRST_TURN.to_string(),
+    ]));
+    scripted.script_adopted_first_turn(
+        "branch",
+        meerkat_mob::runtime::bridge_protocol::BridgeAdoptedFirstTurn::Started,
+    );
+
+    seat(
+        &controlling,
+        &capability,
+        "att-first-turn",
+        SpawnMemberSpec::new("worker", "branch")
+            .with_runtime_mode(meerkat_mob::MobRuntimeMode::AutonomousHost),
+    )
+    .await
+    .expect("an autonomous seat of a host-owned capability seats");
+
+    let payloads = branch_payloads(&scripted);
+    assert_eq!(payloads.len(), 1);
+    assert!(
+        !payloads[0].report_adopted_first_turn,
+        "a fork seat never asks for the adopted first turn"
+    );
+    assert!(
+        !scripted
+            .received_command_kinds()
+            .iter()
+            .any(|kind| kind == "host_features"),
+        "a fork seat does not probe its host"
+    );
+    let obligations = controlling
+        .storage_events
+        .replay_all()
+        .await
+        .expect("replay mob events")
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.kind,
+                meerkat_mob::event::MobEventKind::PlacedKickoffObligationRecorded { obligation }
+                    if obligation.agent_identity.as_str() == "branch"
+            )
+        })
+        .count();
+    assert_eq!(obligations, 1, "the seat keeps its kickoff");
+    scripted.shutdown();
+}

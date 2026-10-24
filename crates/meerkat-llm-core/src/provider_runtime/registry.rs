@@ -1,4 +1,4 @@
-//! ProviderRuntimeRegistry — maps Provider → Arc<dyn ProviderRuntime>.
+//! ProviderRuntimeRegistry - maps Provider → `Arc<dyn ProviderRuntime>`.
 //!
 //! Also houses `ResolverEnvironment`, the explicit env-injection seam that
 //! replaces direct `std::env::var` calls in the new resolution stack.

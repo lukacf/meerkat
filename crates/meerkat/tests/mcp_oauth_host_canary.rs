@@ -546,3 +546,74 @@ async fn mcp_status_reports_reauth_for_a_stored_credential_without_a_secret() {
         HostMcpAuthPhase::ReauthRequired
     );
 }
+
+/// A host start says what this call admitted: a refused start admitted
+/// nothing, beside the error the existing start returns for it, and a
+/// started attempt is returned as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_start_says_what_this_call_admitted() {
+    const REDIRECT: &str = "http://127.0.0.1:9/mcp/oauth/callback";
+    let fixture = McpOAuthFixture::spawn().await.unwrap();
+    let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
+    let service = host_service(&runtime);
+    let target = McpServerIdentity::from_config(&selected_server(fixture.mcp_url())).unwrap();
+
+    // No registered base: the registered start admitted nothing.
+    let failure = service
+        .mcp_login_start_registered_with_admission(&target, None)
+        .await
+        .expect_err("the service has no registered base");
+    assert_eq!(failure.admission, meerkat::OAuthStartAdmission::NotAdmitted);
+    let existing = service
+        .mcp_login_start_registered(&target, None)
+        .await
+        .expect_err("the service has no registered base");
+    assert_eq!(failure.error.reason(), existing.reason());
+    assert_eq!(failure.error.to_string(), existing.to_string());
+
+    // No account selected: refused before discovery.
+    let unselected = McpServerIdentity::from_config(&McpServerConfig::streamable_http(
+        "unselected",
+        fixture.mcp_url(),
+        HashMap::new(),
+    ))
+    .unwrap();
+    let failure = service
+        .mcp_login_start_with_admission(&unselected, REDIRECT, None)
+        .await
+        .expect_err("an unselected target is refused");
+    assert_eq!(failure.admission, meerkat::OAuthStartAdmission::NotAdmitted);
+    assert!(
+        matches!(
+            failure.error,
+            meerkat::HostAuthError::McpOAuth(meerkat::McpOAuthError::AccountSelectionRequired)
+        ),
+        "{failure:?}"
+    );
+    let existing = service
+        .mcp_login_start(&unselected, REDIRECT, None)
+        .await
+        .expect_err("an unselected target is refused");
+    assert_eq!(failure.error.to_string(), existing.to_string());
+
+    // A selected target starts as before.
+    let started = service
+        .mcp_login_start_with_admission(&target, REDIRECT, None)
+        .await
+        .expect("the start is admitted");
+    assert_eq!(
+        started.disposition,
+        meerkat::McpOAuthLoginDisposition::Started
+    );
+    assert_eq!(
+        service
+            .mcp_status(&target)
+            .await
+            .unwrap()
+            .attempt
+            .map(|attempt| attempt.attempt_ref),
+        Some(started.attempt_ref())
+    );
+    service.mcp_login_cancel(&target, &started).unwrap();
+    assert_eq!(service.mcp_status(&target).await.unwrap().attempt, None);
+}

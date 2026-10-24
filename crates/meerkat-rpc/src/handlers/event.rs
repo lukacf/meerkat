@@ -44,6 +44,19 @@ pub async fn handle_external_event(
         Ok(sid) => sid,
         Err(resp) => return resp,
     };
+    // The one canonical rule checks a caller key and stores it in the caller
+    // namespace, so it never meets a key Core derives for this session.
+    let idempotency_key = match params
+        .idempotency_key
+        .as_deref()
+        .map(meerkat_runtime::IdempotencyKey::caller)
+        .transpose()
+    {
+        Ok(key) => key,
+        Err(error) => {
+            return RpcResponse::error(id, crate::error::INVALID_PARAMS, error.to_string());
+        }
+    };
 
     let outcome = match params.event {
         SessionExternalEventEnvelope::GenericJson {
@@ -62,7 +75,13 @@ pub async fn handle_external_event(
                 }
             };
             runtime
-                .accept_external_event_via_runtime(&session_id, event_type, payload_value, blocks)
+                .accept_external_event_via_runtime_with_key(
+                    &session_id,
+                    event_type,
+                    payload_value,
+                    blocks,
+                    idempotency_key,
+                )
                 .await
         }
         SessionExternalEventEnvelope::PeerResponseTerminal { .. } => {

@@ -493,13 +493,36 @@ mod file_lock {
         Busy,
     }
 
+    /// The cross-process lock file, locked exclusively through this
+    /// descriptor. Dropping it unlocks the file, then closes it, whether the
+    /// work under it finished or was cancelled. The lock belongs to the open
+    /// file description, and a process spawned meanwhile holds a copy of the
+    /// descriptor until it executes its program, which would keep a lock
+    /// released by the close alone. It opened its own description, so the
+    /// unlock releases no other holder's lock.
+    struct HeldLock(File);
+
+    impl std::ops::Deref for HeldLock {
+        type Target = File;
+
+        fn deref(&self) -> &File {
+            &self.0
+        }
+    }
+
+    impl Drop for HeldLock {
+        fn drop(&mut self) {
+            let _ = FileExt::unlock(&self.0);
+        }
+    }
+
     /// Take the cross-process lock without parking a thread: poll the
     /// non-blocking lock until `wait` has passed.
     async fn acquire_lock_file(
         lock_dir: &Path,
         lock_path: &Path,
         wait: Duration,
-    ) -> Result<File, LockAdmission> {
+    ) -> Result<HeldLock, LockAdmission> {
         tokio::fs::create_dir_all(lock_dir)
             .await
             .map_err(LockAdmission::Failed)?;
@@ -513,7 +536,7 @@ mod file_lock {
         let deadline = tokio::time::Instant::now() + wait;
         loop {
             if FileExt::try_lock_exclusive(&file).map_err(LockAdmission::Failed)? {
-                return Ok(file);
+                return Ok(HeldLock(file));
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(LockAdmission::Busy);
@@ -574,10 +597,7 @@ mod file_lock {
                         })?;
 
                     let result = refresh_fn().await;
-
-                    let _ = FileExt::unlock(&file);
                     drop(file);
-
                     result
                 })
             })
@@ -612,10 +632,7 @@ mod file_lock {
                         })?;
 
                     let result = mutation_fn().await;
-
-                    let _ = FileExt::unlock(&file);
                     drop(file);
-
                     result
                 })
             })
@@ -661,6 +678,74 @@ mod file_lock {
         ) -> Result<PersistedTokens, RefreshError> {
             let refresh_fn = self.with_locking_refresh(&key, refresh_fn);
             self.inner.with_forced_refresh(key, refresh_fn).await
+        }
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::expect_used, clippy::panic)]
+    mod tests {
+        use super::*;
+
+        /// A process this test spawns that holds a copy of one of the test's
+        /// descriptors, as its standard input, until it is dropped: what any process
+        /// spawned meanwhile holds until it executes its program, kept for as long as
+        /// the test needs.
+        #[cfg(unix)]
+        struct DescriptorCopy(std::process::Child);
+
+        #[cfg(unix)]
+        impl DescriptorCopy {
+            /// Spawn a process holding a copy of `file`'s descriptor.
+            fn spawn(file: &std::fs::File) -> Self {
+                let copy = file.try_clone().expect("a copy of the descriptor");
+                #[allow(clippy::disallowed_methods)] // the test's own process, which holds the copy
+                let child = std::process::Command::new("sleep")
+                    .arg("600")
+                    .stdin(copy)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .expect("a process holding the copy");
+                Self(child)
+            }
+        }
+
+        #[cfg(unix)]
+        impl Drop for DescriptorCopy {
+            fn drop(&mut self) {
+                // On request (MEERKAT_TEST_DESCRIPTOR_COPY_LINGER_MS), the copy stays open
+                // that long first, so an fd sampler watching the run sees it.
+                if let Some(linger) = std::env::var("MEERKAT_TEST_DESCRIPTOR_COPY_LINGER_MS")
+                    .ok()
+                    .and_then(|millis| millis.parse::<u64>().ok())
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(linger));
+                }
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        /// A refresh lock dropped without its explicit release (a refresh
+        /// cancelled while it held the lock) is free at once while a process
+        /// spawned meanwhile still holds a copy of its descriptor.
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn a_dropped_lock_is_free_while_a_spawned_process_holds_its_descriptor() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let lock_path = dir.path().join("dev--binding.lock");
+            let Ok(lock) = acquire_lock_file(dir.path(), &lock_path, Duration::ZERO).await else {
+                panic!("the lock");
+            };
+            let copy = DescriptorCopy::spawn(&lock);
+            drop(lock);
+            assert!(
+                acquire_lock_file(dir.path(), &lock_path, Duration::ZERO)
+                    .await
+                    .is_ok(),
+                "a dropped lock is free while a spawned process holds a copy of its descriptor"
+            );
+            drop(copy);
         }
     }
 }

@@ -1,5 +1,6 @@
 import { EventSubscription } from './events.js';
 import { MeerkatError, parseRunStopReceipt, serializePromptContentInput } from './session.js';
+import { parseMobDestroyReport } from './mob-destroy-report.js';
 import type { WireRunStopReceipt } from './generated/session.js';
 import { foldUnknownSkillResolutionReason, isKnownEvent } from './types.js';
 import type { ProviderTokenAccounting } from './generated/events.js';
@@ -24,6 +25,7 @@ import type {
   ContentBlock,
   MemberDeliveryReceipt,
   MobRespawnResult,
+  MobMemberCustodyDeferral,
   MobMemberSnapshot,
   MobPeerConnectivity,
   MobPeerConnectivitySnapshot,
@@ -52,6 +54,8 @@ import type {
   WireMemberProgressSnapshot,
   WireMemberRegistrationHookCall,
   WireMobLifecycleFailure,
+  WireMemberCustodyDeferralCause,
+  WireMemberCustodyRestore,
   WireNonPortableResourceKind,
   WireReachability,
   WireResolvedModelCapabilities,
@@ -825,6 +829,56 @@ function parseWireMemberRegistrationRefusal(
   );
 }
 
+const WIRE_MEMBER_CUSTODY_RESTORE_VALUES: readonly WireMemberCustodyRestore[] = [
+  'startup_binding',
+  'cleanup_delivery',
+];
+
+const WIRE_MEMBER_CUSTODY_DEFERRAL_CAUSE_VALUES: readonly WireMemberCustodyDeferralCause[] = [
+  'served_elsewhere',
+  'hosting_unavailable',
+  'durable_tail_unprovable',
+];
+
+/**
+ * The member's custody restore a mob start deferred: which restore, and the
+ * cause its last attempt met. Absent (or `null`) means no restore is
+ * deferred. The field is advisory and its vocabularies may grow: a restore or
+ * cause this SDK does not know reads as `{ unknown: <value> }`, and a field
+ * it does not know is ignored, so a newer server never fails the read. A
+ * value that is not an object, or a restore or cause that is not a string,
+ * is malformed and fails closed.
+ */
+function parseWireMemberCustodyDeferral(raw: unknown): MobMemberCustodyDeferral | undefined {
+  if (raw == null) {
+    return undefined;
+  }
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('Invalid mob member_status response: custody_deferred must be an object');
+  }
+  const record = raw as Record<string, unknown>;
+  const restore = record.restore;
+  if (typeof restore !== 'string') {
+    throw new Error(
+      'Invalid mob member_status response: custody_deferred.restore must be a string',
+    );
+  }
+  const cause = record.cause;
+  if (typeof cause !== 'string') {
+    throw new Error('Invalid mob member_status response: custody_deferred.cause must be a string');
+  }
+  return {
+    restore: WIRE_MEMBER_CUSTODY_RESTORE_VALUES.includes(restore as WireMemberCustodyRestore)
+      ? (restore as WireMemberCustodyRestore)
+      : { unknown: restore },
+    cause: WIRE_MEMBER_CUSTODY_DEFERRAL_CAUSE_VALUES.includes(
+      cause as WireMemberCustodyDeferralCause,
+    )
+      ? (cause as WireMemberCustodyDeferralCause)
+      : { unknown: cause },
+  };
+}
+
 function parseWireReachability(raw: unknown, field: string): WireReachability | undefined {
   if (raw == null) {
     return undefined;
@@ -1104,6 +1158,10 @@ function parseMobMemberSnapshot(raw: unknown): MobMemberSnapshot {
   const registrationRefusal = parseWireMemberRegistrationRefusal(snapshot.registration_refusal);
   if (registrationRefusal !== undefined) {
     result.registration_refusal = registrationRefusal;
+  }
+  const custodyDeferred = parseWireMemberCustodyDeferral(snapshot.custody_deferred);
+  if (custodyDeferred !== undefined) {
+    result.custody_deferred = custodyDeferred;
   }
   return result;
 }
@@ -1731,9 +1789,18 @@ export class Mob {
    *
    *  Returns the typed {@link MobLifecycleResult} from the WASM boundary
    *  (carrying the typed destroy_report for a destroy action), parsed
-   *  fail-closed — a malformed payload throws instead of being dropped. */
+   *  fail-closed: a malformed payload throws instead of being dropped. A
+   *  refusal `kind` this SDK does not know reads as `{ kind: 'unknown' }`.
+   *  A refused action rejects with a {@link MeerkatError}; a destroy that did
+   *  not finish has code `mob_destroy_incomplete`, and
+   *  `mobDestroyIncompleteReport(error)` reads its report. */
   async lifecycle(action: MobLifecycleAction): Promise<MobLifecycleResult> {
-    const json = await this.bindings.mob_lifecycle(this.mobId, action);
+    let json: string;
+    try {
+      json = await this.bindings.mob_lifecycle(this.mobId, action);
+    } catch (error) {
+      throw MeerkatError.fromWasm(error);
+    }
     const raw = parseJsonPayload(json, 'Invalid mob/lifecycle response');
     if (
       typeof raw !== 'object' ||
@@ -1744,7 +1811,15 @@ export class Mob {
     ) {
       throw new Error('Invalid mob/lifecycle response: missing typed fields');
     }
-    return raw as MobLifecycleResult;
+    const result = raw as MobLifecycleResult;
+    if (result.destroy_report === undefined || result.destroy_report === null) {
+      return result;
+    }
+    const destroyReport = parseMobDestroyReport(result.destroy_report);
+    if (destroyReport === undefined) {
+      throw new Error('Invalid mob/lifecycle response: malformed destroy_report');
+    }
+    return { ...result, destroy_report: destroyReport };
   }
 
   /** Get mob events after a cursor. The cursor is an opaque u64-backed string

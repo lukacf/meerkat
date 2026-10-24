@@ -65,6 +65,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AuthorizeDurableTailRecoveryHoldInputEvidenceRetired`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `AuthorizeDurableTailRecoveryContinueIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeDurableTailRecoveryRepairContinuableRetiredIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeDurableTailRecoveryRepairContinuableRetiredRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeDurableTailRecoveryHoldContinuableRetiredIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeDurableTailRecoveryHoldContinuableRetiredRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `AuthorizeDurableTailRecoveryRefuseRunFactsIdle`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -90,6 +105,75 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `AuthorizeDurableTailRecoveryRefuseNonQuiescentDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeOperatorDurableTailRepairIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeOperatorDurableTailRepairRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeOperatorDurableTailRepairRefuseIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeOperatorDurableTailRepairRefuseRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeOperatorDurableTailRepairRefuseNonQuiescentInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeOperatorDurableTailRepairRefuseNonQuiescentAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeOperatorDurableTailRepairRefuseNonQuiescentRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeOperatorDurableTailRepairRefuseNonQuiescentStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `AuthorizeOperatorDurableTailRepairRefuseNonQuiescentDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `MarkRunResumableInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `MarkRunResumableIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `MarkRunResumableAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResumeRunRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseResumableRunInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseResumableRunIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseResumableRunAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseResumableRunRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReleaseResumableRunStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleResumableRunInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleResumableRunIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleResumableRunAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleResumableRunRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SettleResumableRunStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `PrepareTerminalSupervisorCleanupBindings`
@@ -2039,6 +2123,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `NormalizeRecoveredInputStagedStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `NormalizeRecoveredInputStagedResumableInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `NormalizeRecoveredInputStagedResumableIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `NormalizeRecoveredInputStagedResumableAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `NormalizeRecoveredInputStagedResumableRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `NormalizeRecoveredInputStagedResumableRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `NormalizeRecoveredInputStagedResumableStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `NormalizeRecoveredInputAppliedCommittedInitializing`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -2073,6 +2175,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `NormalizeRecoveredInputAppliedMissingReceiptStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `NormalizeRecoveredInputAppliedResumableInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `NormalizeRecoveredInputAppliedResumableIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `NormalizeRecoveredInputAppliedResumableAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `NormalizeRecoveredInputAppliedResumableRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `NormalizeRecoveredInputAppliedResumableRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `NormalizeRecoveredInputAppliedResumableStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `NormalizeRecoveredInputAppliedUnobservedReceiptInitializing`
@@ -3191,6 +3311,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RollbackRunRunningToRetired`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `SuspendRunForStopRunningToIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `SuspendRunForStopRunningToAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `RecycleFromIdleOrRetired`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
@@ -3376,6 +3502,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - scenarios: (unclaimed)
 - `RollbackStagedStopped`
   - anchors: `meerkat_machine`
+  - scenarios: (unclaimed)
+- `ReplayAppliedRunContributorIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReplayAppliedRunContributorAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReplayAppliedRunContributorRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReplayAppliedRunContributorRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ReplayAppliedRunContributorStopped`
+  - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `ResolveStagedRollbackQueuedIdle`
   - anchors: (unclaimed)
@@ -7856,6 +7997,78 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ResolveCheckpointCompletionResultFailedStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ClassifyStopInputDispositionRetainInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyStopInputDispositionRetainIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyStopInputDispositionRetainAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyStopInputDispositionRetainRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyStopInputDispositionRetainRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyStopInputDispositionRetainStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyStopInputDispositionRetainResumableInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyStopInputDispositionRetainResumableIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyStopInputDispositionRetainResumableAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyStopInputDispositionRetainResumableRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyStopInputDispositionRetainResumableRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyStopInputDispositionRetainResumableStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyStopInputDispositionAbandonInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyStopInputDispositionAbandonIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyStopInputDispositionAbandonAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyStopInputDispositionAbandonRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyStopInputDispositionAbandonRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ClassifyStopInputDispositionAbandonStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRuntimeCompletionWaitFailureRequeuedAcrossStopInitializing`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRuntimeCompletionWaitFailureRequeuedAcrossStopIdle`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRuntimeCompletionWaitFailureRequeuedAcrossStopAttached`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRuntimeCompletionWaitFailureRequeuedAcrossStopRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRuntimeCompletionWaitFailureRequeuedAcrossStopRetired`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveRuntimeCompletionWaitFailureRequeuedAcrossStopStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Effects
 - `RuntimeBound`
@@ -8617,6 +8830,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AbandonedCompletionResultResolved`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `StopInputDispositionClassified`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResumableRunMarked`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResumedRunAuthorized`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResumableRunReleased`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResumableRunSettled`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `RunSuspendedForStop`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Invariants
 - `live_delegation_steer_records_are_authorized_and_single`
@@ -8758,6 +8989,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `unregister_drain_obligations_require_draining`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `unregister_requeue_max_age_matches_disposition`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `current_run_only_while_running_or_retired`

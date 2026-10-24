@@ -1519,7 +1519,7 @@ fn openai_realtime_capabilities_for(
 
 /// Identity-free capability advertisement for the factory seam, projected
 /// from the canonical realtime model's catalog row (see
-/// [`OPENAI_CANONICAL_REALTIME_MODEL`]).
+/// `OPENAI_CANONICAL_REALTIME_MODEL`).
 ///
 /// Public because composition seams that wrap the OpenAI factory (the
 /// facade's per-open credential-resolving factory) must advertise the same
@@ -4310,7 +4310,7 @@ where
 ///
 /// `voice` is the typed realtime output voice for the continuation
 /// `response.create`; callers pass the session's resolved
-/// [`OpenAiRealtimePolicy`] voice so spoken output stays consistent with
+/// `OpenAiRealtimePolicy` voice so spoken output stays consistent with
 /// the rest of the channel rather than re-reading a process-env default.
 pub fn openai_live_function_call_success_events(
     call_id: impl Into<String>,

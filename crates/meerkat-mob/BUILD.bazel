@@ -105,7 +105,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
@@ -184,7 +184,7 @@ rust_library(
         "//tests/integration:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
@@ -255,7 +255,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
     },
@@ -288,6 +288,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_with_runtime_test_support",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
@@ -351,7 +352,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "adaptive_disabled_thinking",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -375,6 +376,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -441,7 +443,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "cold_restart_mob_resume",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -467,6 +469,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -530,7 +533,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "cold_resume_digest_cost",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -554,6 +557,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -620,7 +624,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "cross_host_events",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -644,6 +648,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -710,7 +715,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "cross_host_flows",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -734,6 +739,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -801,7 +807,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "cross_host_live",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -827,6 +833,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -893,7 +900,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "cross_host_wiring",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -917,6 +924,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -980,7 +988,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "dispatcher_rule_synthetic_injection",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -1006,6 +1014,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -1069,7 +1078,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "ephemeral_service_owns_its_machine",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -1093,6 +1102,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -1156,7 +1166,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "flow_frame_recovery_tests",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -1180,6 +1190,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -1246,7 +1257,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "forked_participant_attached_spawn",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -1270,6 +1281,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -1333,7 +1345,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "forked_participant_capabilities",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -1357,6 +1369,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -1420,7 +1433,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "forked_participant_containment_rule",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -1444,6 +1457,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -1510,7 +1524,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "forked_participant_host_attached_spawn",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -1534,6 +1548,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -1600,7 +1615,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "forked_participant_routing",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -1624,6 +1639,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -1688,7 +1704,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "governed_ingress",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -1712,6 +1728,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -1775,7 +1792,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "host_actor",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -1799,6 +1816,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -1865,7 +1883,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "host_actor_persistence",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -1889,6 +1907,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -1955,7 +1974,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "host_bind_ceremony",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -1981,6 +2000,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -2044,7 +2064,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "host_forked_participant_attachment",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -2068,6 +2088,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -2134,7 +2155,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "host_forked_participant_live_daemon",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -2158,6 +2179,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -2224,7 +2246,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "host_materialize_serving",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -2250,6 +2272,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -2316,7 +2339,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "host_member_release",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -2340,6 +2363,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -2406,7 +2430,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "host_member_revival",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -2432,6 +2456,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -2498,7 +2523,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "host_orphan_reconciliation",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -2522,6 +2547,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -2585,7 +2611,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "host_release_disposal",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -2611,6 +2637,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -2677,7 +2704,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "host_resume_recovery",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -2701,6 +2728,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -2764,7 +2792,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "kickoff_spawn_teardown_quiesce",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -2788,6 +2816,98 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
+        "//crates/meerkat:meerkat_atif_agent_factory_build",
+        "//crates/meerkat:meerkat_authorization_agent_factory_build",
+        "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
+        "//crates/meerkat:meerkat_client_agent_factory_build",
+        "//crates/meerkat:meerkat_comms_agent_factory_build",
+        "//crates/meerkat:meerkat_contracts_agent_factory_build",
+        "//crates/meerkat:meerkat_core_agent_factory_build",
+        "//crates/meerkat:meerkat_live_agent_factory_build",
+        "//crates/meerkat:meerkat_llm_core_agent_factory_build",
+        "//crates/meerkat:meerkat_machine_kernels_agent_factory_build",
+        "//crates/meerkat:meerkat_machine_schema_agent_factory_build",
+        "//crates/meerkat:meerkat_models_agent_factory_build",
+        "//crates/meerkat:meerkat_runtime_agent_factory_build_test_support",
+        "//crates/meerkat:meerkat_session_agent_factory_build_with_runtime_test_support",
+        "//crates/meerkat:meerkat_sqlite_agent_factory_build",
+        "//crates/meerkat:meerkat_store_agent_factory_build",
+        "//crates/meerkat:meerkat_with_runtime_test_support",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-mob",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
+    name = "long_run_conformance_test",
+    aliases = aliases(
+        package_name = "crates/meerkat-mob",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "long_run_conformance",
+    crate_root = "tests/long_run_conformance.rs",
+    crate_features = [
+        "integration-real-tests",
+        "openai-live",
+        "runtime-adapter",
+        "schema",
+        "test-support",
+    ],
+    edition = "2024",
+    rustc_flags = WORKSPACE_LINT_RUSTC_FLAGS,
+    compile_data = [
+        "Cargo.toml",
+        "src/runtime/actor.rs",
+        "src/runtime/actor/retirement_io.rs",
+        "src/runtime/builder.rs",
+        "src/runtime/flow_frame_engine.rs",
+        "src/runtime/handle.rs",
+        "src/runtime/provisioner.rs",
+        "src/runtime/recovery.rs",
+        "src/runtime/state.rs",
+        "src/store/in_memory.rs",
+        "src/store/mod.rs",
+        "src/store/sqlite.rs",
+    ],
+    srcs = [
+        "tests/long_run_conformance.rs",
+        "tests/long_run_support/mod.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.9.5",
+        "CARGO_BIN_NAME": "long_run_conformance",
+        "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
+    },
+    tags = [
+        "fast",
+    ],
+    size = "enormous",
+    data = [
+        ":package_runfiles",
+    ],
+    env = {
+        "RUST_MIN_STACK": "8388608",
+        "RUST_TEST_THREADS": "1",
+    },
+    proc_macro_deps = [
+        "//crates/meerkat-machine-derive:meerkat_machine_derive",
+        "//crates/meerkat-machine-dsl:meerkat_machine_dsl",
+    ] + all_crate_deps(
+        package_name = "crates/meerkat-mob",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -2851,7 +2971,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "member_revival_rebinding",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -2875,6 +2995,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -2938,7 +3059,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "member_session_bindings",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -2962,6 +3083,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -3025,7 +3147,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "member_turn_options_public_api",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -3049,6 +3171,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -3115,7 +3238,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "member_upcall_lane",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -3141,6 +3264,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -3204,7 +3328,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "mob_host_binding_authority",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -3228,6 +3352,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -3291,7 +3416,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "mob_orchestrator_kernel",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -3315,6 +3440,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -3378,7 +3504,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "multi_host_machine",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -3402,6 +3528,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -3465,7 +3592,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "owned_retirement_shutdown",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -3489,6 +3616,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -3555,7 +3683,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "placed_member_respawn",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -3579,6 +3707,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -3642,7 +3771,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "placed_spawn_carrier_store",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -3666,6 +3795,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -3729,7 +3859,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "profile_tool_deny",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -3753,6 +3883,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -3819,7 +3950,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "remote_spawn_ladder",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -3843,6 +3974,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -3909,7 +4041,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "remote_spawn_materialization",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -3933,6 +4065,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -3997,7 +4130,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "s2_member_manifest",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -4021,6 +4154,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -4088,7 +4222,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "scope_matrix",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -4114,6 +4248,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -4177,7 +4312,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "shadow_state_absent",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -4201,6 +4336,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -4267,7 +4403,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "smoke_mob_flow_runtime",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -4293,6 +4429,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -4356,7 +4493,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "smoke_mob_generated_image_comms",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -4382,6 +4519,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -4445,7 +4583,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "smoke_mob_idle_burn",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -4469,6 +4607,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -4532,7 +4671,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "smoke_mob_pictionary",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -4556,6 +4695,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -4619,7 +4759,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "smoke_mob_resume",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -4645,6 +4785,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -4708,7 +4849,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "smoke_mob_turn_latency",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -4734,6 +4875,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -4797,7 +4939,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "spawn_while_member_turn_runs",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -4821,6 +4963,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -4884,7 +5027,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "stop_during_member_run",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -4910,6 +5053,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -4973,7 +5117,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "stop_run_model_selected_successor",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -4997,6 +5141,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -5060,7 +5205,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "tool_process_custody_mob_restart",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -5086,6 +5231,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -5152,7 +5298,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "turn_boundary_fork_forwarding",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -5178,6 +5324,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -5241,7 +5388,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "whole_blob_resume_cost_slow",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-mob",
         "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
@@ -5264,6 +5411,7 @@ rust_test(
     ),
     deps = [
         "//crates/meerkat-mob:meerkat_mob_with_runtime_test_support",
+        "//crates/meerkat-store-conformance:meerkat_store_conformance",
         "//crates/meerkat:meerkat_atif_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_agent_factory_build",
         "//crates/meerkat:meerkat_authorization_contracts_agent_factory_build",
@@ -5319,6 +5467,7 @@ test_suite(
         ":host_release_disposal_test",
         ":host_resume_recovery_test",
         ":kickoff_spawn_teardown_quiesce_test",
+        ":long_run_conformance_test",
         ":meerkat_mob_unit_test",
         ":member_revival_rebinding_test",
         ":member_session_bindings_test",

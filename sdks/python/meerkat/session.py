@@ -277,13 +277,19 @@ class Session:
         payload: Any,
         *,
         blocks: list[ContentBlock] | None = None,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Append a durable external event input into this session runtime."""
+        """Append a durable external event input into this session runtime.
+
+        ``idempotency_key`` makes a retry admit nothing new; see
+        :meth:`MeerkatClient.send_external_event`.
+        """
         return await self._client.send_external_event(
             self._id,
             event_type,
             payload,
             blocks=blocks,
+            idempotency_key=idempotency_key,
         )
 
     async def send_peer_response_terminal(
@@ -631,13 +637,19 @@ class DeferredSession:
         payload: Any,
         *,
         blocks: list[ContentBlock] | None = None,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Append a durable external event input into this deferred session."""
+        """Append a durable external event input into this deferred session.
+
+        ``idempotency_key`` makes a retry admit nothing new; see
+        :meth:`MeerkatClient.send_external_event`.
+        """
         return await self._client.send_external_event(
             self._id,
             event_type,
             payload,
             blocks=blocks,
+            idempotency_key=idempotency_key,
         )
 
     async def send_peer_response_terminal(

@@ -260,8 +260,11 @@ mod planned_identity_fork_inheritance {
                 planned_child.clone(),
                 None,
                 None,
-                meerkat_core::ForkInstructionPolicy::default()
-                    .effective(meerkat_core::ActivationWindow::None),
+                meerkat_session::ForkInstructionPolicies {
+                    inherited: meerkat_core::ForkInstructionPolicy::default()
+                        .effective(meerkat_core::ActivationWindow::None),
+                    declared: meerkat_core::ForkInstructionPolicy::default(),
+                },
             )
             .await
             .expect("planned fork");

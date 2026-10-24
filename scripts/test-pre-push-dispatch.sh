@@ -54,6 +54,67 @@ cleanup_harness() {
 }
 trap cleanup_harness EXIT
 
+# Exercise the production lane resolver without Cargo or a validation build.
+# Large duplicate entries must not deadlock or fail when only the first is used.
+python3 -c '
+import os
+from pathlib import Path
+import re
+import signal
+import subprocess
+import sys
+
+script, harness, bash = sys.argv[1:]
+source = Path(script).read_text()
+match = re.search(r"(?ms)^resolve_lane_targets_root\(\) \{\n.*?^\}", source)
+assert match, "lane resolver is missing"
+root = Path(harness) / "resolver"
+repo = root / "source"
+(repo / "scripts").mkdir(parents=True)
+wrapper = repo / "scripts/repo-cargo"
+wrapper.write_text("#!/usr/bin/env bash\ncat \"$RESOLVER_ENV_FIXTURE\"\n")
+wrapper.chmod(0o755)
+lane = "pre-push-1234567890abcdef"
+for name in ("large", "medium", "actual-sized", "empty-first", "missing"):
+    cache = root / name / "cache space\\literal=values" / "targets" / "v4"
+    first, second = cache / "first" / lane, cache / "second" / lane
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    contents = "OTHER_CARGO_TARGET_DIR=ignored\n"
+    if name == "large":
+        contents += f"CARGO_TARGET_DIR={first}\n" + f"CARGO_TARGET_DIR={second}\n" * 12000
+    elif name in ("medium", "actual-sized"):
+        contents += f"CARGO_TARGET_DIR={first}\nCARGO_TARGET_DIR={second}\n"
+        size = 2231 if name == "medium" else 1353
+        contents += "OTHER=" + "x" * (size - len(contents) - 7) + "\n"
+    elif name == "empty-first":
+        contents += f"CARGO_TARGET_DIR=\nCARGO_TARGET_DIR={second}\n"
+    fixture = root / (name + ".env")
+    fixture.write_text(contents)
+    program = "set -euo pipefail\n" + match[0] + "\n" + r"""SOURCE_ROOT="$RESOLVER_SOURCE"
+validation_lane="$RESOLVER_LANE"
+lane_targets_root=""
+resolve_lane_targets_root
+printf %s "$lane_targets_root"
+"""
+    process = subprocess.Popen(
+        [bash, "-c", program], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env={**os.environ, "RESOLVER_SOURCE": str(repo), "RESOLVER_LANE": lane,
+             "RESOLVER_ENV_FIXTURE": str(fixture)}, start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.communicate()
+        raise AssertionError(f"lane resolver exceeded five seconds: {name}") from None
+    assert process.returncode == 0, (name, process.returncode, stderr.decode())
+    expected = str(cache) if name in ("large", "medium", "actual-sized") else ""
+    assert stdout.decode() == expected, (name, stdout.decode(), expected)
+    assert (first / ".meerkat-pre-push-last-used").exists() == (name in ("large", "medium", "actual-sized"))
+    assert not (second / ".meerkat-pre-push-last-used").exists()
+' "$REPO_ROOT/scripts/pre-push-dispatch.sh" "$HARNESS_ROOT" "$BASH"
+
 hash_path() {
   if command -v shasum >/dev/null 2>&1; then
     printf '%s' "$1" | shasum -a 256 | cut -c1-16

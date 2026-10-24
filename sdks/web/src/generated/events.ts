@@ -313,6 +313,44 @@ export type EffortLevel = "none" | "minimal" | "low" | "medium" | "high" | "xhig
 
 export type ExternalToolDeltaPhase = "pending" | "applied" | "draining" | "forced" | "failed";
 
+export interface ForkBoundaryNotice {
+  child_session_id: string;
+  earlier_rows_omitted?: number;
+  fork: ForkNoticeKind;
+  injected_rows_carried?: number;
+  injected_rows_removed?: number;
+  instructions_added?: InstructionKeyRef[];
+  instructions_carried?: InstructionKeyRef[];
+  instructions_removed?: InstructionKeyRef[];
+  skills_carried?: SkillKey[];
+  skills_removed?: SkillKey[];
+  source: ForkNoticeSource;
+  source_system_prompt: ForkNoticeSystemPrompt;
+  summary: string;
+  tools: ForkNoticeTools;
+}
+
+export type ForkNoticeKind = "transcript" | "prompt_context";
+
+export type ForkNoticeSource = {
+  member?: MobMemberBinding | null;
+  session_id?: string | null;
+};
+
+export type ForkNoticeSystemPrompt = "not_carried" | "not_applicable";
+
+export type ForkNoticeTools = {
+  added?: ToolName[];
+  comparison: "compared";
+  omitted?: number;
+  removed?: ToolName[];
+} | {
+  comparison: "not_compared";
+  reason: ForkToolsNotComparedReason;
+};
+
+export type ForkToolsNotComparedReason = "source_not_live" | "placed_source" | "member_host_unsupported" | "seed_unreadable";
+
 export type GeminiImageMetadata = {
   continuity_ref?: string | null;
   response_id?: string | null;
@@ -352,6 +390,11 @@ export type HookPoint = "run_started" | "run_completed" | "run_failed" | "pre_ll
 export type HookReasonCode = "policy_violation" | "safety_violation" | "schema_violation" | "timeout" | "runtime_error";
 
 export type InputId = string;
+
+export interface InstructionKeyRef {
+  key: string;
+  namespace: string;
+}
 
 export type InteractionFailureReason = {
   kind: "cancelled";
@@ -442,6 +485,12 @@ export type McpAttachmentRestoreWireOutcome = "suppressed" | "retired" | "reboun
 
 export type MeerkatSchema = unknown;
 
+export interface MobMemberBinding {
+  member: string;
+  mob_id: string;
+  role: string;
+}
+
 export type ModelFallbackSkipReason = "provider_boundary" | "auth_unavailable" | "context_fit" | "context_unknown" | "output_budget" | "tool_parity" | "modality_parity" | "request_unsupported" | "admission_unavailable" | "tool_choice_unsupported";
 
 export type ModelFallbackSkippedTarget = {
@@ -491,12 +540,13 @@ export type OutputSchema = {
 
 export type PeerId = string;
 
-export interface PendingCallbackToolCall {
+export type PendingCallbackToolCall = {
   args: unknown;
+  dedupe_key?: ToolCallDedupeKey | null;
   settlement_failures?: ToolDispatchSettlementFailure[];
   tool_name: string;
   tool_use_id: string;
-}
+};
 
 export type PresentedTokenConvention = "anthropic_disjoint_input_components" | "open_ai_input_includes_cached_subset" | "gemini_prompt_includes_cached_subset" | "open_ai_compatible_prompt_includes_cache_details" | "host_declared_inclusive_input_total";
 
@@ -669,6 +719,8 @@ export type RunInput = {
 } | {
   kind: "pending_tool_results";
 };
+
+export type RunResumePointKind = "tools_pending" | "awaiting_model";
 
 export interface RuntimeAppendOrigin {
   append_ordinal: number;
@@ -876,6 +928,22 @@ export type SystemNoticeBlock = {
   tool_call_id?: string | null;
   type: "tool_process_interrupted";
 } | {
+  child_session_id: string;
+  earlier_rows_omitted?: number;
+  fork: ForkNoticeKind;
+  injected_rows_carried?: number;
+  injected_rows_removed?: number;
+  instructions_added?: InstructionKeyRef[];
+  instructions_carried?: InstructionKeyRef[];
+  instructions_removed?: InstructionKeyRef[];
+  skills_carried?: SkillKey[];
+  skills_removed?: SkillKey[];
+  source: ForkNoticeSource;
+  source_system_prompt: ForkNoticeSystemPrompt;
+  summary: string;
+  tools: ForkNoticeTools;
+  type: "fork_boundary";
+} | {
   payload?: unknown;
   summary?: string | null;
   type: "unknown";
@@ -906,6 +974,13 @@ export interface SystemTime {
 export type TokenAggregationProvenance = "sum_disjoint_provider_components" | "provider_inclusive_input_total";
 
 export type ToolCallArguments = Record<string, unknown>;
+
+export interface ToolCallDedupeKey {
+  call_digest: string;
+  call_id: string;
+  round: number;
+  run_id: RunId;
+}
 
 export type ToolConfigChangeDomain = "tool_scope" | "deferred_catalog";
 
@@ -1237,7 +1312,6 @@ export interface ToolExecutionStartedEvent {
 }
 
 export interface ToolExecutionCompletedEvent {
-  content: ContentBlock[];
   duration_ms: number;
   id: string;
   is_error: boolean;
@@ -1456,6 +1530,14 @@ export interface RequestReasoningLoweredEvent {
   type: "request_reasoning_lowered";
 }
 
+export interface RunResumedEvent {
+  resume_point: RunResumePointKind;
+  round: number;
+  run_id: RunId;
+  session_id: SessionId;
+  type: "run_resumed";
+}
+
 export const KNOWN_AGENT_EVENT_TYPES = [
   "run_started",
   "run_completed",
@@ -1507,7 +1589,8 @@ export const KNOWN_AGENT_EVENT_TYPES = [
   "boundary_append_applied",
   "boundary_appends_discarded",
   "live_channel_closed",
-  "request_reasoning_lowered"
+  "request_reasoning_lowered",
+  "run_resumed"
 ] as const;
 
 export type KnownAgentEventType = typeof KNOWN_AGENT_EVENT_TYPES[number];
@@ -1563,4 +1646,5 @@ export type AgentEvent =
   LiveChannelClosedEvent |
   OperationObservationFailedEvent |
   HookLaunchRefusedEvent |
-  RequestReasoningLoweredEvent;
+  RequestReasoningLoweredEvent |
+  RunResumedEvent;

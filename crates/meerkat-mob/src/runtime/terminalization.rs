@@ -41,6 +41,10 @@ impl FlowFailureCause {
             MobError::RunCanceled(_) => FlowFailureClass::RunCanceled,
             MobError::SupervisorEscalation(_) => FlowFailureClass::SupervisorEscalation,
             MobError::InsufficientTargets { .. } => FlowFailureClass::InsufficientTargets,
+            // A role-targeted step whose bound members can no longer meet its
+            // collection policy is the same terminal class as any other
+            // target shortfall: no new class, no new event.
+            MobError::BoundFlowTargetsUnavailable { .. } => FlowFailureClass::InsufficientTargets,
             MobError::FlowFailed { .. } => FlowFailureClass::StepError,
             _ => FlowFailureClass::Internal,
         };

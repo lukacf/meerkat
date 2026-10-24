@@ -383,6 +383,21 @@ pub struct Profile {
     /// `reasoning_effort`.
     #[serde(default)]
     pub provider_params: Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
+    /// Spawn this profile's members as durable workers.
+    ///
+    /// A durable member is spawned with a durable identity
+    /// ([`crate::runtime::SpawnContinuityIntent::DurableIdentity`], keyed by
+    /// the member's identity), which a host reads back through
+    /// `MobHandle::durable_identity_members` to re-attach the worker after a
+    /// restart. It needs a mob whose session service keeps persistent
+    /// sessions; a spawn on any other mob is refused with
+    /// [`crate::MobError::NonDurableService`]. Like every member of a
+    /// persisted mob, a durable worker is rebuilt on its session after a
+    /// crash, kill or restart, and a run it was in continues from its last
+    /// committed round. An explicit continuity intent on the spawn wins.
+    /// Omitted means an ordinary member.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub durable: bool,
 }
 
 /// Profile fields that may override durable session metadata on resume.
@@ -441,6 +456,7 @@ impl Profile {
         "max_inline_peer_notifications",
         "output_schema",
         "provider_params",
+        "durable",
     ];
 
     /// Project the declared `resume_overrides` into the typed core mask.
@@ -758,6 +774,7 @@ mod tests {
             max_inline_peer_notifications: None,
             output_schema: None,
             provider_params: None,
+            durable: false,
         };
         let json = serde_json::to_string(&profile).unwrap();
         let parsed: Profile = serde_json::from_str(&json).unwrap();
@@ -798,6 +815,7 @@ mod tests {
             max_inline_peer_notifications: Some(20),
             output_schema: None,
             provider_params: None,
+            durable: false,
         };
         let toml_str = toml::to_string(&profile).unwrap();
         let parsed: Profile = toml::from_str(&toml_str).unwrap();
@@ -833,6 +851,41 @@ model = "claude-sonnet-4-5"
         assert_eq!(profile.runtime_mode, MobRuntimeMode::AutonomousHost);
         assert_eq!(profile.max_inline_peer_notifications, None);
         assert_eq!(profile.provider_params, None);
+        assert!(!profile.durable);
+    }
+
+    /// `durable` reads as false when omitted and is written only when true,
+    /// so an ordinary profile keeps its stored bytes.
+    #[test]
+    fn durable_is_read_when_set_and_written_only_when_true() {
+        let durable: Profile = toml::from_str(
+            r#"
+model = "claude-sonnet-4-5"
+durable = true
+"#,
+        )
+        .unwrap();
+        assert!(durable.durable);
+        let json = serde_json::to_value(&durable).unwrap();
+        assert_eq!(json["durable"], serde_json::Value::Bool(true));
+        let parsed: Profile = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, durable);
+        let parsed: Profile = toml::from_str(&toml::to_string(&durable).unwrap()).unwrap();
+        assert_eq!(parsed, durable);
+
+        let ordinary: Profile = toml::from_str(
+            r#"
+model = "claude-sonnet-4-5"
+"#,
+        )
+        .unwrap();
+        assert!(!ordinary.durable);
+        let json = serde_json::to_value(&ordinary).unwrap();
+        assert!(
+            json.get("durable").is_none(),
+            "an ordinary profile does not write the field: {json}"
+        );
+        assert!(!toml::to_string(&ordinary).unwrap().contains("durable"));
     }
 
     #[test]
@@ -1047,6 +1100,7 @@ provider_params = { thinking_budget = 8192, top_k = 20 }
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
+                durable: false,
             }
         };
         let binding = ProfileBinding::Inline(Box::new(profile.clone()));
@@ -1141,6 +1195,7 @@ provider_params = { thinking_budget = 8192, top_k = 20 }
             max_inline_peer_notifications: None,
             output_schema: None,
             provider_params: None,
+            durable: false,
         };
         let tooling = SpawnTooling::Profile {
             source: Box::new(ProfileSource::Inline(Box::new(profile))),

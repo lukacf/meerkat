@@ -948,6 +948,10 @@ pub(crate) struct MobOperatorToolDispatcher {
     handle: MobHandle,
     authority: OperatorAuthority,
     tools: Arc<[Arc<ToolDef>]>,
+    /// The upper bound every member a flow run provisions carries, when the
+    /// run is member-initiated (the controlling side's upcall executor sets
+    /// the requesting member's recorded ceiling here).
+    flow_provision_bound: Option<super::MemberOperatorAuthorityCeiling>,
 }
 
 /// The mob operator authority a dispatcher admits its calls against.
@@ -1083,7 +1087,18 @@ impl MobOperatorToolDispatcher {
             handle,
             authority,
             tools: defs.into(),
+            flow_provision_bound: None,
         }
+    }
+
+    /// Bound every member a flow run started through this dispatcher
+    /// provisions by `bound` (see [`MobHandle::run_flow_with_provision_bound`]).
+    pub(crate) fn with_flow_provision_bound(
+        mut self,
+        bound: Option<super::MemberOperatorAuthorityCeiling>,
+    ) -> Self {
+        self.flow_provision_bound = bound;
+        self
     }
 
     /// The authority this call is admitted against: the fixed context, or one
@@ -1468,7 +1483,7 @@ pub(crate) fn local_operator_tool_defs() -> Vec<Arc<ToolDef>> {
     let mut defs: Vec<Arc<ToolDef>> = Vec::new();
     defs.push(tool_def(
             TOOL_SPAWN_MEMBER,
-            "Spawn a mob member from a profile. Supports fresh, resume, or fork launch modes.",
+            "Spawn a mob member from a profile. Supports fresh, resume, or fork launch modes. A resume runs the member's first turn (its kickoff or initial_message) only if the resumed session's first turn never started; a started or interrupted first turn is not re-run.",
             json!({
                 "type": "object",
                 "properties": {
@@ -1496,7 +1511,7 @@ pub(crate) fn local_operator_tool_defs() -> Vec<Arc<ToolDef>> {
         ));
     defs.push(tool_def(
             TOOL_SPAWN_MANY_MEMBERS,
-            "Spawn multiple mob members in one call. Returns per-item results in input order.",
+            "Spawn multiple mob members in one call. Returns per-item results in input order. A resume runs a member's first turn (its kickoff or initial_message) only if the resumed session's first turn never started.",
             json!({
                 "type": "object",
                 "properties": {
@@ -2134,7 +2149,11 @@ impl MobOperatorToolDispatcher {
                     .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
                 let run_id = self
                     .handle
-                    .run_flow(FlowId::from(args.flow_id), args.params)
+                    .run_flow_with_provision_bound(
+                        FlowId::from(args.flow_id),
+                        args.params,
+                        self.flow_provision_bound.as_ref(),
+                    )
                     .await
                     .map_err(|error| Self::map_mob_error(call, error))?;
                 self.record_successful_operator_action(call.name, &authority)

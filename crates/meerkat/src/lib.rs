@@ -214,6 +214,13 @@ pub use continuation::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use continuation::{
+    BoundHostOriginal, GovernedAdmissionOutcome, HostOriginalAdmission, HostOriginalBinder,
+    HostOriginalBinderReadiness, HostOriginalFacts, HostOriginalLookup, HostOriginalReadiness,
+    HostOriginalRecord, HostOriginalRef, HostOriginalRefusal, HostOriginalSettlement,
+    RESERVED_HOST_NAMESPACE_PREFIX, governed_admission_outcome, is_reserved_host_namespace,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use continuation::{
     ContinuationAdmitError, ContinuationBindError, ContinuationBinding,
     ContinuationBindingGeneration, ContinuationHostBindings, RetainedJobFacts, RetainedJobLookup,
     RetainedJobRecord, RetainedJobSource, retained_admission_outcome,
@@ -417,11 +424,11 @@ pub use factory::{
 pub use host_auth::{
     HostAuthDevicePoll, HostAuthDeviceStart, HostAuthError, HostAuthLoginComplete,
     HostAuthLoginStart, HostAuthService, HostAuthStatus, HostAuthTarget, HostMcpAuthPhase,
-    HostMcpAuthStatus, HostMcpTargetRefusal, connector_ready_to_wire, connector_slot_from_wire,
-    connector_slot_to_wire, connector_status_to_wire, connector_target_from_wire,
-    mcp_account_verification_to_wire, mcp_auth_target_to_wire, mcp_login_disposition_to_wire,
-    resolve_configured_mcp_target, resolve_configured_mcp_target_in_realm,
-    resolve_configured_mcp_target_in_realm_trusting,
+    HostMcpAuthStatus, HostMcpStartFailure, HostMcpTargetRefusal, connector_ready_to_wire,
+    connector_slot_from_wire, connector_slot_to_wire, connector_status_to_wire,
+    connector_target_from_wire, mcp_account_verification_to_wire, mcp_auth_target_to_wire,
+    mcp_login_disposition_to_wire, resolve_configured_mcp_target,
+    resolve_configured_mcp_target_in_realm, resolve_configured_mcp_target_in_realm_trusting,
 };
 #[cfg(all(feature = "mcp", not(target_arch = "wasm32")))]
 pub use host_auth::{default_mcp_auth_resolver, default_mcp_auth_resolver_in_realm};
@@ -453,8 +460,9 @@ pub use meerkat_providers::mcp_oauth::{
     McpOAuthCancelHandle, McpOAuthCeremonyContext, McpOAuthError, McpOAuthListenerCleanup,
     McpOAuthLoginComplete, McpOAuthLoginDisposition, McpOAuthLoginStart, McpOAuthLoopbackBegin,
     McpOAuthNetworkBounds, McpOAuthNetworkStage, McpOAuthPendingAttempt, McpOAuthPendingClose,
-    McpOAuthPendingLogin, McpOAuthRegisteredCallback, McpRegisteredRedirectBase, McpServerIdentity,
-    McpStoredCredentialPhase, McpStoredCredentialStatus, OidcUserInfoAccountStrategy,
+    McpOAuthPendingLogin, McpOAuthRegisteredCallback, McpOAuthStartFailure,
+    McpRegisteredRedirectBase, McpServerIdentity, McpStoredCredentialPhase,
+    McpStoredCredentialStatus, OAuthStartAdmission, OidcUserInfoAccountStrategy,
     open_system_browser_guarded, open_system_browser_trusting,
 };
 
@@ -487,7 +495,8 @@ pub use persistence::{
 };
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 pub use storage_provider::{
-    DiskStorageProvider, RealmOpenContext, RealmStorageProvider, RealmStoreSet,
+    DiskStorageProvider, HostStoreProvider, HostSuppliedStores, RealmOpenContext,
+    RealmStorageProvider, RealmStoreSet,
 };
 
 mod meerkat_machine;
@@ -565,7 +574,7 @@ pub use meerkat_session::{
 };
 #[cfg(feature = "session-store")]
 pub use meerkat_session::{
-    LiveSessionActorTurnBoundaryLease, LiveSessionActorWitnessSlot,
+    LiveDurableSourceObservation, LiveSessionActorTurnBoundaryLease, LiveSessionActorWitnessSlot,
     MachineServiceTurnCommitProtocol, MachineSessionArchiveProtocol, PersistentSessionService,
 };
 // Maintenance compositions (offline `rkat storage migrate`): a builder that

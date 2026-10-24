@@ -22,7 +22,14 @@ from meerkat.events import (
     TurnStarted,
     Usage,
 )
-from meerkat.streaming import RPC_STDOUT_LIMIT_BYTES, EventStream, _StdoutDispatcher
+from meerkat.streaming import (
+    RPC_STDOUT_LIMIT_BYTES,
+    EventStream,
+    _StdoutDispatcher,
+    _SubscriptionEnd,
+    _SubscriptionEvent,
+    _SubscriptionItem,
+)
 from meerkat.types import RunResult
 
 
@@ -874,7 +881,7 @@ class TestStandaloneSubscriptions:
         await asyncio.sleep(0)
         queue = d.subscribe_stream("stream-1")
         event = await asyncio.wait_for(queue.get(), timeout=1.0)
-        assert event == ev
+        assert event == _SubscriptionEvent(ev, None)
         reader.feed_eof()
         await d.stop()
 
@@ -897,8 +904,8 @@ class TestStandaloneSubscriptions:
         queue = d.subscribe_stream("stream-1")
         first = await asyncio.wait_for(queue.get(), timeout=1.0)
         second = await asyncio.wait_for(queue.get(), timeout=1.0)
-        assert first == ev1
-        assert second == ev2
+        assert first == _SubscriptionEvent(ev1, None)
+        assert second == _SubscriptionEvent(ev2, None)
         reader.feed_eof()
         await d.stop()
 
@@ -915,12 +922,12 @@ class TestStandaloneSubscriptions:
         await asyncio.sleep(0)
         queue = d.subscribe_stream("stream-1")
         event = await asyncio.wait_for(queue.get(), timeout=1.0)
-        assert event is None
         expected = {
             "stream_id": "stream-1",
             "ended": True,
             "outcome": "remote_end",
         }
+        assert event == _SubscriptionEnd(expected)
         assert d.stream_terminal("stream-1") == expected
 
         from meerkat.streaming import EventSubscription
@@ -944,13 +951,15 @@ class TestStandaloneSubscriptions:
         d.start()
         queue = d.subscribe_stream("stream-1")
         event = await asyncio.wait_for(queue.get(), timeout=1.0)
-        assert event == ev
+        assert event == _SubscriptionEvent(ev, None)
         await d.stop()
 
     @pytest.mark.asyncio
     async def test_event_subscription_context_manager_closes_stream(self):
-        queue: asyncio.Queue[dict | None] = asyncio.Queue()
-        queue.put_nowait(agent_event_envelope({"type": "text_delta", "delta": "hi"}))
+        queue: asyncio.Queue[_SubscriptionItem] = asyncio.Queue()
+        queue.put_nowait(_SubscriptionEvent(
+            agent_event_envelope({"type": "text_delta", "delta": "hi"}), None,
+        ))
         dispatcher = type("Dispatcher", (), {"unsubscribe_stream": lambda self, _sid: None})()
         closed = []
 
@@ -980,7 +989,7 @@ class TestStandaloneSubscriptions:
         # propagate the typed error and leave the subscription open (no
         # local closed state, no queue sentinel). Only an accepted close
         # flips closed terminal state.
-        queue: asyncio.Queue[dict | None] = asyncio.Queue()
+        queue: asyncio.Queue[_SubscriptionItem] = asyncio.Queue()
         unsubscribed = []
         dispatcher = type(
             "Dispatcher",

@@ -1314,18 +1314,8 @@ fn assert_public_notifications(
         .enumerate()
         .filter_map(|(position, (_, event))| match &event.payload {
             AgentEvent::ToolExecutionCompleted {
-                id,
-                name,
-                content,
-                is_error,
-                ..
-            } => Some((
-                position,
-                id.as_str(),
-                name.as_str(),
-                content.as_slice(),
-                *is_error,
-            )),
+                id, name, is_error, ..
+            } => Some((position, id.as_str(), name.as_str(), *is_error)),
             _ => None,
         })
         .collect();
@@ -1348,26 +1338,38 @@ fn assert_public_notifications(
             _ => None,
         })
         .collect();
-    for outcomes in [completions.as_slice(), results.as_slice()] {
-        assert_eq!(outcomes.len(), 2, "one outcome per actual sibling call");
-        for ((_, id, name, content, is_error), (expected_id, expected_name, expected_error)) in
-            outcomes.iter().zip([
-                (DENIED_CALL, "delete_record", true),
-                (PERMITTED_CALL, "read_record", false),
-            ])
-        {
-            assert_eq!(*id, expected_id);
-            assert_eq!(*name, expected_name);
-            assert_eq!(*is_error, expected_error);
-            let text = meerkat_core::types::text_content(content);
-            if expected_error {
-                assert_eq!(
-                    serde_json::from_str::<Value>(&text).unwrap(),
-                    denied_before_dispatch_payload()
-                );
-            } else {
-                assert_eq!(text, "record-7 value");
-            }
+    let expected = [
+        (DENIED_CALL, "delete_record", true),
+        (PERMITTED_CALL, "read_record", false),
+    ];
+    // The execution facts carry no body; the results carry it.
+    assert_eq!(
+        completions.len(),
+        2,
+        "one completion per actual sibling call"
+    );
+    for ((_, id, name, is_error), (expected_id, expected_name, expected_error)) in
+        completions.iter().zip(expected)
+    {
+        assert_eq!(*id, expected_id);
+        assert_eq!(*name, expected_name);
+        assert_eq!(*is_error, expected_error);
+    }
+    assert_eq!(results.len(), 2, "one result per actual sibling call");
+    for ((_, id, name, content, is_error), (expected_id, expected_name, expected_error)) in
+        results.iter().zip(expected)
+    {
+        assert_eq!(*id, expected_id);
+        assert_eq!(*name, expected_name);
+        assert_eq!(*is_error, expected_error);
+        let text = meerkat_core::types::text_content(content);
+        if expected_error {
+            assert_eq!(
+                serde_json::from_str::<Value>(&text).unwrap(),
+                denied_before_dispatch_payload()
+            );
+        } else {
+            assert_eq!(text, "record-7 value");
         }
     }
     let ordered = [

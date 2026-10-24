@@ -5,8 +5,8 @@ use async_trait::async_trait;
 #[cfg(feature = "comms")]
 use super::configure_peer_ingress;
 use super::schedule_host::{
-    accept_schedule_runtime_input_with_reconciliation, schedule_runtime_correlation_id,
-    schedule_runtime_delivery_idempotency_key,
+    ScheduleAdmissionFence, accept_fenced_schedule_runtime_input_with_reconciliation,
+    schedule_runtime_correlation_id, schedule_runtime_delivery_idempotency_key,
 };
 use super::{
     NoopScheduleMobHost, PersistentRuntimeExecutor, ScheduledEventDispatch,
@@ -195,6 +195,23 @@ enum ScheduledSessionAdmission {
         expected_member:
             Option<meerkat_contracts::wire::supervisor_bridge::BridgeMemberIncarnation>,
     },
+}
+
+impl ScheduledSessionAdmission {
+    /// The fence [`RuntimeBackedScheduleSessionHost::accept_scheduled_input`]
+    /// admits under, which a redelivery's existing-only admission keeps.
+    fn fence(&self) -> ScheduleAdmissionFence<'_> {
+        match self {
+            Self::Ordinary => ScheduleAdmissionFence::Unfenced,
+            Self::MobOwned {
+                attachment,
+                expected_member,
+            } => ScheduleAdmissionFence::AttachmentAndMemberResidency {
+                attachment,
+                expected_member: expected_member.as_ref(),
+            },
+        }
+    }
 }
 
 fn materialized_build_options(
@@ -680,7 +697,8 @@ impl<B: SessionAgentBuilder + 'static> SurfaceScheduleSessionHost
     for RuntimeBackedScheduleSessionHost<B>
 {
     /// Its prompt and event deliveries admit through
-    /// `accept_schedule_runtime_input_with_reconciliation` on the calling task.
+    /// `accept_fenced_schedule_runtime_input_with_reconciliation` on the
+    /// calling task, under the fence of their own admission.
     fn decides_existing_admission(&self) -> bool {
         true
     }
@@ -853,13 +871,14 @@ impl<B: SessionAgentBuilder + 'static> SurfaceScheduleSessionHost
         ));
         prompt_input.header.correlation_id = Some(schedule_runtime_correlation_id(identity)?);
 
-        accept_schedule_runtime_input_with_reconciliation(
+        accept_fenced_schedule_runtime_input_with_reconciliation(
             self.runtime_adapter.as_ref(),
             session_id,
             occurrence,
             identity,
             meerkat_runtime::Input::Prompt(prompt_input),
             dispatch.materialized_session_id,
+            admission.fence(),
             |input| self.accept_scheduled_input(session_id, input, &admission),
         )
         .await
@@ -906,13 +925,14 @@ impl<B: SessionAgentBuilder + 'static> SurfaceScheduleSessionHost
             render_metadata: dispatch.render_metadata,
         });
 
-        accept_schedule_runtime_input_with_reconciliation(
+        accept_fenced_schedule_runtime_input_with_reconciliation(
             self.runtime_adapter.as_ref(),
             session_id,
             occurrence,
             identity,
             input,
             dispatch.materialized_session_id,
+            admission.fence(),
             |input| self.accept_scheduled_input(session_id, input, &admission),
         )
         .await
@@ -1685,6 +1705,473 @@ mod tests {
             .unregister_session(&result.session_id)
             .await
             .expect("unregister peer-only mob runtime session");
+    }
+
+    /// A live in-process mob member session (peer-only, no placed residency)
+    /// on a fresh comms service, built as
+    /// `live_peer_only_mob_attachment_is_preserved_and_fenced` builds it.
+    #[cfg(all(
+        feature = "session-store",
+        feature = "comms",
+        feature = "jsonl-store",
+        not(target_arch = "wasm32")
+    ))]
+    async fn live_peer_only_mob_session(
+        temp: &tempfile::TempDir,
+        name: &str,
+    ) -> (
+        Arc<PersistentSessionService<crate::FactoryAgentBuilder>>,
+        Arc<MeerkatMachine>,
+        SessionId,
+    ) {
+        let service_runtime = Arc::new(
+            crate::CommsRuntime::inproc_only(&format!("{name}-service-runtime"))
+                .expect("service comms runtime"),
+        );
+        let (service, runtime_adapter) =
+            build_comms_test_service(temp, Arc::clone(&service_runtime)).await;
+        let mut request = make_runtime_backed_request(name, true);
+        request
+            .build
+            .as_mut()
+            .expect("fixture request carries build options")
+            .mob_member_binding = Some(meerkat_core::MobMemberBinding {
+            mob_id: format!("{name}-mob"),
+            role: "worker".to_string(),
+            member: format!("{name}-worker"),
+        });
+        let result = Box::pin(materialize_session(
+            &service,
+            &runtime_adapter,
+            Session::new(),
+            request,
+            {
+                let service = Arc::clone(&service);
+                let runtime_adapter = Arc::clone(&runtime_adapter);
+                move |session_id| default_persistent_executor(service, runtime_adapter, session_id)
+            },
+        ))
+        .await
+        .expect("materialize a live peer-only mob session");
+        (service, runtime_adapter, result.session_id)
+    }
+
+    /// A live orchestrator over a fixture's service, addressing sessions as
+    /// `session_addressing`, with no live host composed.
+    #[cfg(all(
+        feature = "session-store",
+        feature = "comms",
+        feature = "jsonl-store",
+        feature = "live",
+        not(target_arch = "wasm32")
+    ))]
+    fn fixture_live_orchestrator<'a>(
+        service: &'a Arc<PersistentSessionService<crate::FactoryAgentBuilder>>,
+        runtime_adapter: &'a Arc<MeerkatMachine>,
+        staged_sessions: &'a Arc<crate::StagedSessionRegistry>,
+        staged_capacity_admissions: &'a crate::session_runtime::admission::StagedCapacityAdmissions,
+        session_addressing: crate::session_runtime::live_orchestration::LiveSessionAddressing,
+    ) -> crate::session_runtime::live_orchestration::LiveOrchestrator<'a> {
+        crate::session_runtime::live_orchestration::LiveOrchestrator {
+            service,
+            staged_sessions,
+            staged_capacity_admissions,
+            runtime_adapter,
+            host: None,
+            config_runtime: None,
+            default_llm_client: None,
+            agent_llm_client_decorator: None,
+            external_tools: None,
+            archive_runtime_cleanup: crate::session_runtime::runtime_state::ArchiveRuntimeCleanup {
+                runtime_adapter: Arc::clone(runtime_adapter),
+                pending_session_event_streams: None,
+                mcp_state: None,
+                mob_state: None,
+            },
+            realm_id: None,
+            instance_id: None,
+            backend: None,
+            ingress_reconciler: None,
+            actor_witness_capture: Arc::new(
+                |_session_id: SessionId,
+                 _actor_witness_slot: crate::LiveSessionActorWitnessSlot| {},
+            ),
+            session_addressing,
+        }
+    }
+
+    /// A session-scoped surface opens no live channel on a mob member's
+    /// session, live or not, and restores none from storage: the member's
+    /// mob opens its channels after checking the member. The open's refusal
+    /// is typed (the mob-member kind); a live member session is still found
+    /// for the reads behind a channel that exists, and nothing is restored.
+    /// The member live host addresses the same session through its mob and
+    /// is never refused. Before, a session-scoped open of a live member
+    /// session went ahead without any member check.
+    #[cfg(all(
+        feature = "session-store",
+        feature = "comms",
+        feature = "jsonl-store",
+        feature = "live",
+        not(target_arch = "wasm32")
+    ))]
+    #[tokio::test]
+    async fn a_session_scoped_surface_opens_no_mob_member_session_live_or_cold() {
+        use crate::session_runtime::live_orchestration::LiveSessionAddressing;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (service, runtime_adapter, session_id) =
+            live_peer_only_mob_session(&temp, "member-open-refusal").await;
+        let staged_sessions = Arc::new(crate::StagedSessionRegistry::new());
+        let staged_capacity_admissions: crate::session_runtime::admission::StagedCapacityAdmissions =
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let scoped = fixture_live_orchestrator(
+            &service,
+            &runtime_adapter,
+            &staged_sessions,
+            &staged_capacity_admissions,
+            LiveSessionAddressing::SessionScoped,
+        );
+        let member_host = fixture_live_orchestrator(
+            &service,
+            &runtime_adapter,
+            &staged_sessions,
+            &staged_capacity_admissions,
+            LiveSessionAddressing::MobMember,
+        );
+
+        let refused = scoped
+            .refuse_mob_member_session_by_id(&session_id)
+            .await
+            .expect_err("a session-scoped open refuses a live member session");
+        assert!(
+            refused.is_mob_member_session_addressed_by_id(),
+            "{refused:?}"
+        );
+        scoped
+            .recover_live_session_for_realtime_open(&session_id)
+            .await
+            .expect("a live member session is found, not restored");
+        member_host
+            .refuse_mob_member_session_by_id(&session_id)
+            .await
+            .expect("the member live host opens through the mob");
+
+        // Cold: the live actor is gone, the durable member session stays.
+        service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard the live member session");
+        // Twice: a first refusal that had restored the session would leave
+        // it live, and the second attempt would then find it instead.
+        for attempt in 0..2 {
+            let refused = scoped
+                .recover_live_session_for_realtime_open(&session_id)
+                .await
+                .expect_err("a session-scoped recovery refuses a cold member session");
+            assert!(
+                refused.is_mob_member_session_addressed_by_id(),
+                "attempt {attempt}: {refused:?}"
+            );
+        }
+        if let Err(error) = member_host
+            .recover_live_session_for_realtime_open(&session_id)
+            .await
+        {
+            assert!(
+                !error.is_mob_member_session_addressed_by_id(),
+                "the member live host is never refused as a session-scoped surface: {error:?}"
+            );
+        }
+
+        let _ = service.discard_live_session(&session_id).await;
+        runtime_adapter
+            .unregister_session(&session_id)
+            .await
+            .expect("unregister the member session");
+    }
+
+    /// A redelivery to a mob member's session runs its existing-only
+    /// admission under the session's own fence (its exact attachment and its
+    /// member residency), as the ordinary admission does, and with the fence
+    /// intact it finds the earlier admission: deduplicated, the same input.
+    #[cfg(all(
+        feature = "session-store",
+        feature = "comms",
+        feature = "jsonl-store",
+        not(target_arch = "wasm32")
+    ))]
+    #[tokio::test]
+    async fn a_mob_member_redelivery_finds_its_admission_under_the_sessions_fence() {
+        use meerkat_schedule::{
+            ExistingDelivery, ExistingDeliveryAnswer, RuntimeDeliveryOutcome,
+            ScheduleTargetDelivery as _,
+        };
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (service, runtime_adapter, session_id) =
+            live_peer_only_mob_session(&temp, "fenced-redelivery").await;
+        let host = RuntimeBackedScheduleSessionHost::new(
+            Arc::clone(&service),
+            Arc::clone(&runtime_adapter),
+            SessionBuildOptions::default(),
+            None,
+        );
+        let admission = host
+            .ensure_runtime_session_registered(&session_id)
+            .await
+            .expect("the mob session's attachment is usable");
+        assert!(matches!(
+            admission.fence(),
+            ScheduleAdmissionFence::AttachmentAndMemberResidency {
+                expected_member: None,
+                ..
+            }
+        ));
+        let adapter = SharedScheduleTargetAdapter::new(
+            ScheduleService::new(Arc::new(meerkat_schedule::MemoryScheduleStore::new())),
+            Arc::new(host),
+            Arc::new(NoopScheduleMobHost::new("mob targets unused here")),
+        );
+        let first = exact_session_occurrence(&session_id, 1);
+        let identity = ScheduleDeliveryIdentity::for_occurrence(&first);
+        let dispatch = adapter
+            .deliver_occurrence(&first, &identity)
+            .await
+            .expect("the ordinary delivery admits under the fence");
+        assert_eq!(
+            dispatch.receipt.runtime_outcome,
+            Some(RuntimeDeliveryOutcome::AdmissionAccepted)
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(2), dispatch.completion)
+            .await
+            .expect("the scheduled prompt completes")
+            .expect("the delivery terminal resolves");
+        let admitted = durable_admission(&runtime_adapter, &session_id, &first)
+            .await
+            .expect("the ordinary delivery's input is indexed under its key");
+
+        let answer = adapter
+            .deliver_existing_occurrence(&first, &identity, ExistingDelivery::Admitted)
+            .await
+            .expect("the admitted redelivery answers");
+        let ExistingDeliveryAnswer::Dispatch(replay) = answer else {
+            panic!("an admitted redelivery answers with a dispatch: {answer:?}");
+        };
+        assert_eq!(
+            replay.receipt.runtime_outcome,
+            Some(RuntimeDeliveryOutcome::AdmissionDeduplicated)
+        );
+        assert_eq!(
+            durable_admission(&runtime_adapter, &session_id, &first).await,
+            Some(admitted),
+            "the key still names the earlier input"
+        );
+
+        service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard the mob session");
+        runtime_adapter
+            .unregister_session(&session_id)
+            .await
+            .expect("unregister the mob session");
+    }
+
+    /// A session host whose admission carries a fence that no longer holds:
+    /// an executor attachment taken from another runtime, so every fenced
+    /// admission through it is refused, as one whose attachment changed after
+    /// the host took it.
+    #[cfg(all(
+        feature = "session-store",
+        feature = "comms",
+        feature = "jsonl-store",
+        not(target_arch = "wasm32")
+    ))]
+    struct StaleFenceHost {
+        runtime: Arc<MeerkatMachine>,
+        stale_attachment: meerkat_runtime::RuntimeExecutorAttachmentWitness,
+    }
+
+    #[cfg(all(
+        feature = "session-store",
+        feature = "comms",
+        feature = "jsonl-store",
+        not(target_arch = "wasm32")
+    ))]
+    #[async_trait]
+    impl SurfaceScheduleSessionHost for StaleFenceHost {
+        fn decides_existing_admission(&self) -> bool {
+            true
+        }
+
+        async fn probe_session_target(
+            &self,
+            _binding: &SessionTargetBinding,
+        ) -> Result<TargetProbeOutcome, ScheduleDomainError> {
+            Ok(TargetProbeOutcome::Ready)
+        }
+
+        async fn materialize_session(
+            &self,
+            _occurrence: &crate::Occurrence,
+            _create: &SessionMaterializationSpec,
+        ) -> Result<SessionId, ScheduleDomainError> {
+            Err(ScheduleDomainError::Internal(
+                "this host targets an exact session".to_string(),
+            ))
+        }
+
+        async fn deliver_prompt(
+            &self,
+            session_id: &SessionId,
+            occurrence: &crate::Occurrence,
+            identity: &ScheduleDeliveryIdentity,
+            dispatch: ScheduledPromptDispatch,
+        ) -> Result<crate::DeliveryDispatch, ScheduleDomainError> {
+            let mut prompt =
+                meerkat_runtime::PromptInput::from_content_input(dispatch.prompt, None);
+            prompt.header.idempotency_key = Some(meerkat_runtime::IdempotencyKey::new(
+                schedule_runtime_delivery_idempotency_key(
+                    self.runtime.as_ref(),
+                    session_id,
+                    occurrence,
+                    &identity.idempotency_key,
+                )
+                .await?,
+            ));
+            prompt.header.correlation_id = Some(schedule_runtime_correlation_id(identity)?);
+            accept_fenced_schedule_runtime_input_with_reconciliation(
+                self.runtime.as_ref(),
+                session_id,
+                occurrence,
+                identity,
+                meerkat_runtime::Input::Prompt(prompt),
+                dispatch.materialized_session_id,
+                ScheduleAdmissionFence::AttachmentAndMemberResidency {
+                    attachment: &self.stale_attachment,
+                    expected_member: None,
+                },
+                |input| {
+                    self.runtime
+                        .accept_input_with_completion_for_attachment_and_member_residency(
+                            &self.stale_attachment,
+                            input,
+                            None,
+                        )
+                },
+            )
+            .await
+        }
+
+        async fn deliver_event(
+            &self,
+            _session_id: &SessionId,
+            _occurrence: &crate::Occurrence,
+            _identity: &ScheduleDeliveryIdentity,
+            _dispatch: ScheduledEventDispatch,
+        ) -> Result<crate::DeliveryDispatch, ScheduleDomainError> {
+            Err(ScheduleDomainError::Internal(
+                "this host delivers prompts only".to_string(),
+            ))
+        }
+    }
+
+    /// A redelivery whose fence no longer holds admits nothing and answers
+    /// nothing about the earlier admission: the occurrence stays reclaimable
+    /// (`DeliveryRepairDeferred`), and the next attempt takes the fence
+    /// afresh. Before, the existing-only admission ignored the host's fence
+    /// and answered deduplicated (the mutation control: route it unfenced and
+    /// this row sees a dispatch).
+    #[cfg(all(
+        feature = "session-store",
+        feature = "comms",
+        feature = "jsonl-store",
+        not(target_arch = "wasm32")
+    ))]
+    #[tokio::test]
+    async fn a_redelivery_whose_fence_no_longer_holds_admits_nothing_and_stays_reclaimable() {
+        use meerkat_schedule::{
+            ExistingDelivery, RuntimeDeliveryOutcome, ScheduleTargetDelivery as _,
+        };
+        let temp = tempfile::tempdir().expect("tempdir");
+        let other_temp = tempfile::tempdir().expect("tempdir");
+        let (service, runtime_adapter, session_id) =
+            live_peer_only_mob_session(&temp, "stale-fence").await;
+        let (other_service, other_runtime, other_session_id) =
+            live_peer_only_mob_session(&other_temp, "stale-fence-other").await;
+        let stale_attachment = other_runtime
+            .current_executor_attachment_witness(&other_session_id)
+            .await
+            .expect("the other runtime's session has a serving attachment");
+
+        let host = RuntimeBackedScheduleSessionHost::new(
+            Arc::clone(&service),
+            Arc::clone(&runtime_adapter),
+            SessionBuildOptions::default(),
+            None,
+        );
+        let adapter = SharedScheduleTargetAdapter::new(
+            ScheduleService::new(Arc::new(meerkat_schedule::MemoryScheduleStore::new())),
+            Arc::new(host),
+            Arc::new(NoopScheduleMobHost::new("mob targets unused here")),
+        );
+        let first = exact_session_occurrence(&session_id, 1);
+        let identity = ScheduleDeliveryIdentity::for_occurrence(&first);
+        let dispatch = adapter
+            .deliver_occurrence(&first, &identity)
+            .await
+            .expect("the ordinary delivery admits under the session's own fence");
+        assert_eq!(
+            dispatch.receipt.runtime_outcome,
+            Some(RuntimeDeliveryOutcome::AdmissionAccepted)
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(2), dispatch.completion)
+            .await
+            .expect("the scheduled prompt completes")
+            .expect("the delivery terminal resolves");
+        let admitted = durable_admission(&runtime_adapter, &session_id, &first)
+            .await
+            .expect("the earlier input is indexed under its key");
+
+        let stale = SharedScheduleTargetAdapter::new(
+            ScheduleService::new(Arc::new(meerkat_schedule::MemoryScheduleStore::new())),
+            Arc::new(StaleFenceHost {
+                runtime: Arc::clone(&runtime_adapter),
+                stale_attachment,
+            }),
+            Arc::new(NoopScheduleMobHost::new("mob targets unused here")),
+        );
+        for existing in [ExistingDelivery::Admitted, ExistingDelivery::UnprovenLate] {
+            let answer = stale
+                .deliver_existing_occurrence(&first, &identity, existing)
+                .await;
+            assert!(
+                matches!(
+                    answer,
+                    Err(ScheduleDomainError::DeliveryRepairDeferred { .. })
+                ),
+                "a fence refusal leaves the {existing:?} redelivery reclaimable: {answer:?}"
+            );
+        }
+        assert_eq!(
+            durable_admission(&runtime_adapter, &session_id, &first).await,
+            Some(admitted),
+            "nothing is admitted and the earlier input is left as it is"
+        );
+
+        for (service, runtime, session_id) in [
+            (&service, &runtime_adapter, &session_id),
+            (&other_service, &other_runtime, &other_session_id),
+        ] {
+            service
+                .discard_live_session(session_id)
+                .await
+                .expect("discard the mob session");
+            runtime
+                .unregister_session(session_id)
+                .await
+                .expect("unregister the mob session");
+        }
     }
 
     #[cfg(all(

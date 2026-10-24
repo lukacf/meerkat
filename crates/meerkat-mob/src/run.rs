@@ -4838,6 +4838,18 @@ pub struct MobRun {
     /// store operation as the derived run/frame/loop projection they authorize.
     #[serde(default)]
     pub flow_authority_inputs: Vec<FlowAuthorityInputRecord>,
+    /// The member set each role of this run dispatches to, when the run was
+    /// admitted with role targets; `None` for a role-wide run.
+    ///
+    /// Written once, by the same `create_run` as the run and its
+    /// `activation_params`; no store operation rewrites it. Execution carries
+    /// the admitted value in memory and recovery never reads this copy: it is
+    /// the run's durable record for readers. An older runtime reads a bound
+    /// run without this field, and drops it if it rewrites the run (only when
+    /// its recovery cancels an in-flight run); a reader that needs the binding
+    /// must treat its absence as "not a role-targeted run".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role_targets: Option<FlowRoleTargets>,
 }
 
 impl MobRun {
@@ -5121,6 +5133,7 @@ impl MobRun {
             root_step_outputs: IndexMap::new(),
             loop_iteration_outputs: BTreeMap::new(),
             flow_authority_inputs: Vec::new(),
+            role_targets: None,
         }
     }
 
@@ -6368,6 +6381,164 @@ impl FlowRunConfig {
     }
 }
 
+/// The explicit member set each role of one flow run dispatches to.
+///
+/// A run admitted without role targets dispatches every step to all Active
+/// members of the step's role. A run admitted with role targets binds every
+/// role its flow dispatches to: admission checked that each listed identity is
+/// a member of this mob, holds that role and is Active, and every execution of
+/// a step then dispatches only to the bound members of its role that are still
+/// Active and still hold the role. The binding is fixed for the life of the
+/// run and persisted on [`MobRun::role_targets`].
+///
+/// The wire form maps each role to its members, for example
+/// `{"reviewer": ["rev-a1", "rev-a2"]}`. Construction and decoding refuse an
+/// empty binding, a role without members, a role named twice and a member
+/// listed twice for one role, so a duplicate can never count as a second
+/// producer and a silently merged key can never change the set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct FlowRoleTargets {
+    roles: BTreeMap<ProfileName, BTreeSet<AgentIdentity>>,
+}
+
+/// Why a [`FlowRoleTargets`] value could not be built or decoded.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum FlowRoleTargetsError {
+    /// The binding names no role.
+    #[error("role targets must bind at least one role")]
+    Empty,
+    /// A role is bound to no members.
+    #[error("role targets bind role '{role}' to no members")]
+    EmptyRole { role: ProfileName },
+    /// A role is named more than once.
+    #[error("role targets name role '{role}' more than once")]
+    DuplicateRole { role: ProfileName },
+    /// A member is listed more than once for one role.
+    #[error("role targets list member '{member}' more than once for role '{role}'")]
+    DuplicateMember {
+        role: ProfileName,
+        member: AgentIdentity,
+    },
+}
+
+impl FlowRoleTargets {
+    /// Build a binding from `(role, members)` pairs.
+    ///
+    /// Refuses an empty binding, a role without members, a role named twice
+    /// and a member listed twice for one role.
+    pub fn new<R, M, I>(roles: I) -> Result<Self, FlowRoleTargetsError>
+    where
+        I: IntoIterator<Item = (R, M)>,
+        R: Into<ProfileName>,
+        M: IntoIterator<Item = AgentIdentity>,
+    {
+        let mut bound: BTreeMap<ProfileName, BTreeSet<AgentIdentity>> = BTreeMap::new();
+        for (role, members) in roles {
+            let role = role.into();
+            if bound.contains_key(&role) {
+                return Err(FlowRoleTargetsError::DuplicateRole { role });
+            }
+            let mut set = BTreeSet::new();
+            for member in members {
+                if set.contains(&member) {
+                    return Err(FlowRoleTargetsError::DuplicateMember { role, member });
+                }
+                set.insert(member);
+            }
+            if set.is_empty() {
+                return Err(FlowRoleTargetsError::EmptyRole { role });
+            }
+            bound.insert(role, set);
+        }
+        if bound.is_empty() {
+            return Err(FlowRoleTargetsError::Empty);
+        }
+        Ok(Self { roles: bound })
+    }
+
+    /// The members bound to `role`, or `None` when the role is not bound.
+    pub fn members(&self, role: &ProfileName) -> Option<&BTreeSet<AgentIdentity>> {
+        self.roles.get(role)
+    }
+
+    /// Every bound role with its members, in role order.
+    pub fn bound_roles(&self) -> impl Iterator<Item = (&ProfileName, &BTreeSet<AgentIdentity>)> {
+        self.roles.iter()
+    }
+
+    /// Check the binding against the flow it is admitted for, before any
+    /// member is looked at: every bound role must be a role some step of the
+    /// flow dispatches to, every such role must be bound, and no quorum step
+    /// may need more producers than its role's bound set holds.
+    pub(crate) fn check_against_flow(
+        &self,
+        flow: &FlowSpec,
+    ) -> Result<(), crate::error::FlowRoleTargetRefusal> {
+        let flow_roles = flow
+            .steps
+            .values()
+            .map(|step| step.role.clone())
+            .collect::<BTreeSet<_>>();
+        if let Some(role) = self.roles.keys().find(|role| !flow_roles.contains(*role)) {
+            return Err(crate::error::FlowRoleTargetRefusal::RoleNotInFlow { role: role.clone() });
+        }
+        if let Some(role) = flow_roles
+            .iter()
+            .find(|role| !self.roles.contains_key(*role))
+        {
+            return Err(crate::error::FlowRoleTargetRefusal::RoleUnbound { role: role.clone() });
+        }
+        for (step_id, step) in &flow.steps {
+            if let crate::definition::CollectionPolicy::Quorum { n } = step.collection_policy {
+                let bound = self.roles.get(&step.role).map_or(0, BTreeSet::len);
+                if usize::from(n) > bound {
+                    return Err(crate::error::FlowRoleTargetRefusal::QuorumExceedsBoundSet {
+                        step_id: step_id.clone(),
+                        required: n,
+                        bound,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<'de> Deserialize<'de> for FlowRoleTargets {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct RoleTargetsVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for RoleTargetsVisitor {
+            type Value = Vec<(ProfileName, Vec<AgentIdentity>)>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("an object mapping each role to an array of member identities")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                // Collect every entry as written, so a role named twice
+                // reaches the validating constructor instead of being merged.
+                let mut entries = Vec::new();
+                while let Some(entry) = map.next_entry::<ProfileName, Vec<AgentIdentity>>()? {
+                    entries.push(entry);
+                }
+                Ok(entries)
+            }
+        }
+
+        let entries = deserializer.deserialize_map(RoleTargetsVisitor)?;
+        Self::new(entries).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Per-loop iteration output history, ordered by iteration index.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct LoopContextHistory {
@@ -6979,6 +7150,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
+                durable: false,
             })),
         );
         profiles.insert(
@@ -7000,6 +7172,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
+                durable: false,
             })),
         );
 
@@ -7331,6 +7504,7 @@ mod tests {
             root_step_outputs: IndexMap::new(),
             loop_iteration_outputs: BTreeMap::new(),
             flow_authority_inputs: Vec::new(),
+            role_targets: None,
         };
 
         let encoded = serde_json::to_string(&run).unwrap();
@@ -7338,6 +7512,184 @@ mod tests {
         assert_eq!(decoded.flow_id, run.flow_id);
         assert_eq!(decoded.step_ledger.len(), 1);
         assert_eq!(decoded.failure_ledger.len(), 1);
+    }
+
+    fn role_targets(roles: &[(&str, &[&str])]) -> Result<FlowRoleTargets, FlowRoleTargetsError> {
+        FlowRoleTargets::new(roles.iter().map(|(role, members)| {
+            (
+                *role,
+                members
+                    .iter()
+                    .map(|member| AgentIdentity::from(*member))
+                    .collect::<Vec<_>>(),
+            )
+        }))
+    }
+
+    #[test]
+    fn flow_role_targets_decode_refuses_empty_map_empty_list_duplicate_member_and_role() {
+        for (raw, expected) in [
+            ("{}", "at least one role"),
+            (r#"{"reviewer": []}"#, "to no members"),
+            (
+                r#"{"reviewer": ["rev-a1", "rev-a1"]}"#,
+                "more than once for role",
+            ),
+            (
+                r#"{"reviewer": ["rev-a1"], "reviewer": ["rev-a2"]}"#,
+                "more than once",
+            ),
+        ] {
+            let error = serde_json::from_str::<FlowRoleTargets>(raw)
+                .expect_err("malformed role targets must not decode");
+            assert!(
+                error.to_string().contains(expected),
+                "decoding {raw} should refuse with `{expected}`, got: {error}"
+            );
+        }
+        assert_eq!(
+            role_targets(&[]).expect_err("an empty binding is refused"),
+            FlowRoleTargetsError::Empty
+        );
+        assert_eq!(
+            role_targets(&[("reviewer", &["rev-a1", "rev-a1"])])
+                .expect_err("a duplicate member is refused"),
+            FlowRoleTargetsError::DuplicateMember {
+                role: ProfileName::from("reviewer"),
+                member: AgentIdentity::from("rev-a1"),
+            }
+        );
+        assert_eq!(
+            role_targets(&[("reviewer", &["rev-a1"]), ("reviewer", &["rev-a2"])])
+                .expect_err("a role named twice is refused"),
+            FlowRoleTargetsError::DuplicateRole {
+                role: ProfileName::from("reviewer"),
+            }
+        );
+    }
+
+    #[test]
+    fn flow_role_targets_serialize_canonically_and_round_trip() {
+        let targets = role_targets(&[("reviewer", &["rev-a2", "rev-a1"]), ("coder", &["coder-a"])])
+            .expect("valid binding");
+        let encoded = serde_json::to_string(&targets).expect("encode role targets");
+        assert_eq!(
+            encoded, r#"{"coder":["coder-a"],"reviewer":["rev-a1","rev-a2"]}"#,
+            "roles and members serialize sorted, whatever the input order"
+        );
+        let decoded: FlowRoleTargets = serde_json::from_str(&encoded).expect("decode");
+        assert_eq!(decoded, targets);
+        assert_eq!(
+            decoded
+                .members(&ProfileName::from("reviewer"))
+                .map(|members| members
+                    .iter()
+                    .map(AgentIdentity::as_str)
+                    .collect::<Vec<_>>()),
+            Some(vec!["rev-a1", "rev-a2"])
+        );
+    }
+
+    #[test]
+    fn mob_run_role_targets_are_skipped_when_absent_and_legacy_rows_decode_unbound() {
+        let mut run = MobRun::pending(
+            MobId::from("mob"),
+            FlowId::from("flow-a"),
+            MobRun::flow_state_for_steps([StepId::from("s1")]).unwrap(),
+            serde_json::json!({"head": "abc"}),
+        );
+        let unbound = serde_json::to_value(&run).expect("encode role-wide run");
+        assert!(
+            unbound.get("role_targets").is_none(),
+            "a role-wide run serializes exactly as before: no role_targets key"
+        );
+        let legacy: MobRun = serde_json::from_value(unbound).expect("decode legacy-shaped row");
+        assert!(legacy.role_targets.is_none());
+
+        run.role_targets =
+            Some(role_targets(&[("worker", &["w-a1", "w-a2"])]).expect("valid binding"));
+        let bound = serde_json::to_value(&run).expect("encode bound run");
+        assert_eq!(
+            bound.get("role_targets"),
+            Some(&serde_json::json!({"worker": ["w-a1", "w-a2"]}))
+        );
+        let decoded: MobRun = serde_json::from_value(bound).expect("decode bound run");
+        assert_eq!(decoded.role_targets, run.role_targets);
+    }
+
+    #[test]
+    fn flow_role_targets_check_against_flow_refuses_unused_unbound_roles_and_impossible_quorum() {
+        let definition = sample_definition();
+        let flow = definition
+            .flows
+            .get(&FlowId::from("flow-a"))
+            .expect("sample flow");
+        role_targets(&[("worker", &["w-1"])])
+            .expect("valid binding")
+            .check_against_flow(flow)
+            .expect("a binding of exactly the flow's roles fits");
+        assert_eq!(
+            role_targets(&[("worker", &["w-1"]), ("lead", &["lead-1"])])
+                .expect("valid binding")
+                .check_against_flow(flow)
+                .expect_err("a role no step uses is refused"),
+            crate::error::FlowRoleTargetRefusal::RoleNotInFlow {
+                role: ProfileName::from("lead"),
+            }
+        );
+        assert_eq!(
+            role_targets(&[("lead", &["lead-1"])])
+                .expect("valid binding")
+                .check_against_flow(flow)
+                .expect_err("a binding of only an unused role is refused"),
+            crate::error::FlowRoleTargetRefusal::RoleNotInFlow {
+                role: ProfileName::from("lead"),
+            },
+            "an unused bound role is named before an unbound flow role"
+        );
+
+        let mut two_roles = flow.clone();
+        let review_step = crate::definition::FlowStepSpec {
+            role: ProfileName::from("lead"),
+            depends_on: vec![StepId::from("s1")],
+            ..two_roles
+                .steps
+                .get(&StepId::from("s1"))
+                .expect("sample step")
+                .clone()
+        };
+        two_roles.steps.insert(StepId::from("s2"), review_step);
+        assert_eq!(
+            role_targets(&[("worker", &["w-1"])])
+                .expect("valid binding")
+                .check_against_flow(&two_roles)
+                .expect_err("a flow role left unbound is refused"),
+            crate::error::FlowRoleTargetRefusal::RoleUnbound {
+                role: ProfileName::from("lead"),
+            }
+        );
+        role_targets(&[("worker", &["w-1"]), ("lead", &["lead-1"])])
+            .expect("valid binding")
+            .check_against_flow(&two_roles)
+            .expect("binding every role the flow uses fits");
+
+        let mut quorum = flow.clone();
+        quorum
+            .steps
+            .get_mut(&StepId::from("s1"))
+            .expect("sample step")
+            .collection_policy = crate::definition::CollectionPolicy::Quorum { n: 2 };
+        assert_eq!(
+            role_targets(&[("worker", &["w-1"])])
+                .expect("valid binding")
+                .check_against_flow(&quorum)
+                .expect_err("a quorum larger than the bound set is refused"),
+            crate::error::FlowRoleTargetRefusal::QuorumExceedsBoundSet {
+                step_id: StepId::from("s1"),
+                required: 2,
+                bound: 1,
+            }
+        );
     }
 
     #[test]
@@ -7374,6 +7726,7 @@ mod tests {
             root_step_outputs: IndexMap::new(),
             loop_iteration_outputs: BTreeMap::new(),
             flow_authority_inputs: Vec::new(),
+            role_targets: None,
         };
 
         let wire = run.public_status_value().expect("public projection");

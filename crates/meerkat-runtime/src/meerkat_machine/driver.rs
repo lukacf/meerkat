@@ -4414,12 +4414,62 @@ impl DriverEntry {
         }
     }
 
+    /// Discard `run_id`'s provisional tail by its exact authority, if the
+    /// store holds it; see `PersistentRuntimeDriver::discard_run_provisional_tail`.
+    /// An ephemeral runtime keeps no tail.
+    pub(crate) async fn discard_run_provisional_tail(
+        &self,
+        run_id: &meerkat_core::lifecycle::RunId,
+    ) -> Result<bool, RuntimeDriverError> {
+        match self {
+            DriverEntry::Ephemeral(_) => Ok(true),
+            DriverEntry::Persistent(driver) => driver.discard_run_provisional_tail(run_id).await,
+        }
+    }
+
+    /// Whether `run_id`'s provisional tail records that the run re-based; see
+    /// `PersistentRuntimeDriver::run_tail_records_rebase`. An ephemeral
+    /// runtime keeps no tail.
+    pub(crate) async fn run_tail_records_rebase(
+        &self,
+        run_id: &meerkat_core::lifecycle::RunId,
+    ) -> Result<bool, RuntimeDriverError> {
+        match self {
+            DriverEntry::Ephemeral(_) => Ok(false),
+            DriverEntry::Persistent(driver) => driver.run_tail_records_rebase(run_id).await,
+        }
+    }
+
+    /// The run whose provisional tail the store holds for this runtime, if
+    /// any. An ephemeral runtime keeps none.
+    pub(crate) async fn provisional_tail_run(
+        &self,
+    ) -> Result<Option<meerkat_core::lifecycle::RunId>, RuntimeDriverError> {
+        match self {
+            DriverEntry::Ephemeral(_) => Ok(None),
+            DriverEntry::Persistent(driver) => driver.provisional_tail_run().await,
+        }
+    }
+
     pub(crate) async fn load_compaction_checkpoint_snapshot(
         &self,
     ) -> Result<Option<Arc<Vec<u8>>>, RuntimeDriverError> {
         match self {
             DriverEntry::Ephemeral(_) => Ok(None),
             DriverEntry::Persistent(driver) => driver.load_compaction_checkpoint_snapshot().await,
+        }
+    }
+
+    /// The committed HeadCanonical head authority; see
+    /// `PersistentRuntimeDriver::committed_head_canonical_authority`.
+    pub(crate) async fn committed_head_canonical_authority(
+        &self,
+    ) -> Result<meerkat_core::CommittedSessionBoundaryAuthority, RuntimeDriverError> {
+        match self {
+            DriverEntry::Ephemeral(_) => Err(RuntimeDriverError::Internal(
+                "ephemeral runtime holds no committed HeadCanonical authority".to_string(),
+            )),
+            DriverEntry::Persistent(driver) => driver.committed_head_canonical_authority().await,
         }
     }
 
@@ -4444,6 +4494,32 @@ impl DriverEntry {
             DriverEntry::Ephemeral(d) => d,
             DriverEntry::Persistent(d) => d,
         }
+    }
+
+    /// The inputs among `input_ids` that the generated stop classifier
+    /// retains now; see [`EphemeralRuntimeDriver::stop_retained_input_ids`].
+    pub(crate) fn stop_retained_input_ids(
+        &mut self,
+        input_ids: &[InputId],
+    ) -> Result<Vec<InputId>, RuntimeDriverError> {
+        match self {
+            DriverEntry::Ephemeral(d) => d.stop_retained_input_ids(input_ids),
+            DriverEntry::Persistent(d) => d.inner_mut().stop_retained_input_ids(input_ids),
+        }
+    }
+
+    /// The inputs a committed stop kept queued for the next start, with the
+    /// time the stop kept them: non-terminal, and carrying the stop's mark.
+    pub(crate) fn stop_requeued_inputs(&self) -> Vec<(InputId, chrono::DateTime<chrono::Utc>)> {
+        let driver = self.as_driver();
+        driver
+            .active_input_ids()
+            .into_iter()
+            .filter_map(|input_id| {
+                let stopped_at = driver.input_state(&input_id)?.stop_requeue?.stopped_at;
+                Some((input_id, stopped_at))
+            })
+            .collect()
     }
 
     /// Input admissions of this driver; see
@@ -4922,6 +4998,77 @@ impl DriverEntry {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         crate::meerkat_machine::dsl_authority::current_run_id_from_authority(&authority)
+    }
+
+    /// The run this live authority keeps resumable after a restart, if any.
+    /// A live fact: it is never persisted and every registration derives it
+    /// again from the stored run cursor.
+    pub(crate) fn resumable_run_id(&self) -> Option<RunId> {
+        let authority = self.shared_dsl_authority();
+        let authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::meerkat_machine::dsl_authority::resumable_run_id_from_authority(&authority)
+    }
+
+    /// Release the resumable run `run_id` to ordinary requeue: its kept
+    /// inputs return to Queued, committed durably on the persistent driver.
+    /// Returns the requeued inputs; the caller wakes the loop.
+    pub(crate) async fn release_resumable_run(
+        &mut self,
+        run_id: &RunId,
+    ) -> Result<Vec<InputId>, RuntimeDriverError> {
+        match self {
+            DriverEntry::Ephemeral(driver) => {
+                let checkpoint = driver.rollback_snapshot();
+                match driver.release_resumable_run_inputs(run_id) {
+                    Ok(requeued) => Ok(requeued),
+                    Err(error) => {
+                        driver.restore_rollback_snapshot(checkpoint);
+                        Err(error)
+                    }
+                }
+            }
+            DriverEntry::Persistent(driver) => driver.release_resumable_run(run_id).await,
+        }
+    }
+
+    /// Settle the resumable run `run_id` and abandon its kept inputs with
+    /// `reason`, committed durably on the persistent driver. Only
+    /// `ResumeRefused`, `Cancelled` and `RequeueExpired` are accepted.
+    /// Returns the abandoned inputs; the caller fails their completion
+    /// waiters and owes the runless-terminal announcement.
+    pub(crate) async fn settle_resumable_run(
+        &mut self,
+        run_id: &RunId,
+        reason: crate::input_state::InputAbandonReason,
+    ) -> Result<Vec<InputId>, RuntimeDriverError> {
+        match self {
+            DriverEntry::Ephemeral(driver) => {
+                let checkpoint = driver.rollback_snapshot();
+                match driver.settle_resumable_run_inputs(run_id, reason) {
+                    Ok(abandoned) => Ok(abandoned),
+                    Err(error) => {
+                        driver.restore_rollback_snapshot(checkpoint);
+                        Err(error)
+                    }
+                }
+            }
+            DriverEntry::Persistent(driver) => driver.settle_resumable_run(run_id, reason).await,
+        }
+    }
+
+    /// End the resumable run `run_id` without touching its inputs: for
+    /// retire, destroy and reset, whose own sweeps terminalize them.
+    pub(crate) fn end_resumable_run(
+        &mut self,
+        run_id: &RunId,
+        reason: &crate::input_state::InputAbandonReason,
+    ) -> Result<(), RuntimeDriverError> {
+        match self {
+            DriverEntry::Ephemeral(driver) => driver.end_resumable_run(run_id, reason),
+            DriverEntry::Persistent(driver) => driver.inner_mut().end_resumable_run(run_id, reason),
+        }
     }
 
     pub(crate) fn pre_run_phase(&self) -> Option<crate::runtime_state::RuntimeState> {
@@ -5768,6 +5915,98 @@ impl DriverEntry {
         }
     }
 
+    /// Reload the `Consumed` terminals a store-owned durable-tail recovery
+    /// committed for inputs this driver still holds as non-terminal
+    /// (`PersistentRuntimeDriver::adopt_durable_consumed_inputs`). Every sweep
+    /// of the pending inputs (retire, reset, destroy, stop, the queued-input
+    /// cancel point, a replaced attachment's predecessor work) runs it before
+    /// it names the inputs it ends. An adopted input leaves the active set, so
+    /// no sweep answers its process-local waiters any more: they fail here
+    /// with `AuthorityUnavailable`, because the run that consumed the input
+    /// was committed outside this runtime and its result does not reach them.
+    /// An ephemeral runtime keeps no durable rows, so nothing is reloaded.
+    pub(crate) async fn adopt_durable_consumed_inputs(
+        &mut self,
+        completions: Option<&SharedCompletionRegistry>,
+    ) -> Result<Vec<InputId>, RuntimeDriverError> {
+        let adopted = match self {
+            DriverEntry::Ephemeral(_) => return Ok(Vec::new()),
+            DriverEntry::Persistent(driver) => driver.adopt_durable_consumed_inputs().await?,
+        };
+        if !adopted.is_empty()
+            && let Some(completions) = completions
+        {
+            completions.lock().await.fail_inputs(
+                adopted.iter().cloned(),
+                Self::consumed_by_outside_recovery(),
+            );
+        }
+        Ok(adopted)
+    }
+
+    /// The wait failure of an input a store-owned durable-tail recovery
+    /// consumed outside this runtime.
+    fn consumed_by_outside_recovery() -> crate::completion::CompletionWaitError {
+        crate::completion::CompletionWaitError::AuthorityUnavailable(
+            "a durable-tail recovery outside this runtime consumed the input with the run it \
+             committed; read the session's committed history for its result"
+                .to_string(),
+        )
+    }
+
+    /// After the settle of cancelled run `run_id` committed its provisional
+    /// tail as an interrupted run, adopt the `Consumed` terminals that
+    /// recovery wrote for inputs this driver still holds as non-terminal
+    /// (`PersistentRuntimeDriver::adopt_durable_consumed_inputs`).
+    ///
+    /// Those are the inputs the tail's run cursor lists that the cancel
+    /// requeued: a join the run's round commit took into the tail, whose
+    /// live image the cancel dropped, and which keeps the run as its run.
+    /// Adopted, the loop never runs their content again. Their waiters fail
+    /// with [`CompletionWaitError::ConsumedWithInterruptedRun`]: the input was
+    /// consumed with the run, not lost to a vanished authority. Any other
+    /// input adopted here was consumed by a recovery outside this runtime,
+    /// and its waiter fails as [`Self::adopt_durable_consumed_inputs`] fails
+    /// it. A settle that did not commit consumed nothing of the run.
+    ///
+    /// [`CompletionWaitError::ConsumedWithInterruptedRun`]: crate::completion::CompletionWaitError::ConsumedWithInterruptedRun
+    pub(crate) async fn adopt_settled_cancelled_run_inputs(
+        &mut self,
+        run_id: &RunId,
+        completions: Option<&SharedCompletionRegistry>,
+    ) -> Result<Vec<InputId>, RuntimeDriverError> {
+        // The run association is read before the adoption consumes them.
+        let of_the_run = self
+            .as_driver()
+            .active_input_ids()
+            .into_iter()
+            .filter(|input_id| {
+                self.as_driver().input_last_run_id(input_id).as_ref() == Some(run_id)
+            })
+            .collect::<std::collections::HashSet<_>>();
+        let adopted = match self {
+            DriverEntry::Ephemeral(_) => return Ok(Vec::new()),
+            DriverEntry::Persistent(driver) => driver.adopt_durable_consumed_inputs().await?,
+        };
+        if !adopted.is_empty()
+            && let Some(completions) = completions
+        {
+            let (with_the_run, other): (Vec<_>, Vec<_>) = adopted
+                .iter()
+                .cloned()
+                .partition(|input_id| of_the_run.contains(input_id));
+            let mut completions = completions.lock().await;
+            completions.fail_inputs(
+                with_the_run,
+                crate::completion::CompletionWaitError::ConsumedWithInterruptedRun {
+                    run_id: run_id.clone(),
+                },
+            );
+            completions.fail_inputs(other, Self::consumed_by_outside_recovery());
+        }
+        Ok(adopted)
+    }
+
     pub(crate) fn prepare_destroy_lifecycle(
         &mut self,
     ) -> Result<PreparedDestroy, RuntimeDriverError> {
@@ -6178,6 +6417,165 @@ pub(crate) fn machine_begin_run(
         projection.pre_run_phase,
     );
     Ok(BeginRunOutcome::Started)
+}
+
+/// What [`machine_begin_resumed_run`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ResumedRunStart {
+    /// The marked run is current again under its own id, with exactly these
+    /// bound inputs in admission order. Nothing was staged again: each is
+    /// Staged or Applied already.
+    Started { input_ids: Vec<InputId> },
+    /// Run starts are held (#1500): nothing changed and the run stays marked.
+    RunStartsHeld,
+    /// No run with this id is marked resumable, a run is current, or no
+    /// input is bound to it: nothing changed.
+    NotResumable,
+}
+
+/// Start the marked resumable run `run_id`, the exclusive resume step that
+/// goes ahead of every queued batch.
+///
+/// Under one hold of the authority lock: the generated plan names the run's
+/// bound inputs, the ordinary `Prepare` starts the run under its own id (with
+/// the same run-start holds and completion correlation as any run), and
+/// `ResumeRun` clears the mark. The caller dispatches the run with
+/// `RuntimeExecutionKind::ResumeRun` and does not stage or re-persist its
+/// inputs' bindings, which are durable already.
+pub(crate) fn machine_begin_resumed_run(
+    driver: &mut DriverEntry,
+    run_id: &RunId,
+) -> Result<ResumedRunStart, RuntimeDriverError> {
+    let dsl_run_id = crate::meerkat_machine::dsl::RunId::from_domain(run_id);
+    let started = {
+        let authority = driver.shared_dsl_authority();
+        let mut auth = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(plan) =
+            generated_command_capabilities::AuthorizedResumedRun::authorize_resumed_run_from_state(
+                auth.state(),
+                &dsl_run_id,
+            )
+        else {
+            return Ok(ResumedRunStart::NotResumable);
+        };
+        let Some(dsl_session_id) = auth.state().session_id.clone() else {
+            return Ok(ResumedRunStart::NotResumable);
+        };
+        let (capability, raw_input_ids) = plan.into_parts();
+        let prepared = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut *auth,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::Prepare {
+                session_id: dsl_session_id,
+                run_id: dsl_run_id.clone(),
+            },
+        )
+        .map_err(|error| {
+            RuntimeDriverError::Internal(format!(
+                "generated machine refused to start resumable run {run_id}: {error:?}"
+            ))
+        })?;
+        if effects_hold_run_start(prepared.effects()) {
+            return Ok(ResumedRunStart::RunStartsHeld);
+        }
+        let resumed = apply_authorized_resume_run(&mut auth, capability, &dsl_run_id);
+        let projection = RuntimeLifecycleProjection::from_authority(&auth);
+        (resumed, raw_input_ids, projection)
+    };
+    let (resumed, raw_input_ids, projection) = started;
+    driver.set_control_projection(
+        projection.phase,
+        projection.current_run_id,
+        projection.pre_run_phase,
+    );
+    if let Err(error) = resumed {
+        // Prepare established the run but ResumeRun refused it: return the
+        // run so the mark stays and a later wake retries the resume.
+        if let Err(rollback_error) =
+            machine_apply_run_return_projection(driver, run_id, RunReturnDisposition::Rollback)
+        {
+            return Err(RuntimeDriverError::Internal(format!(
+                "failed to roll back resumed run {run_id} after ResumeRun refused it: \
+                 {rollback_error}; refusal: {error}"
+            )));
+        }
+        return Err(error);
+    }
+    let input_ids = raw_input_ids
+        .iter()
+        .map(|raw| {
+            uuid::Uuid::parse_str(raw).map(InputId).map_err(|error| {
+                RuntimeDriverError::Internal(format!(
+                    "resumed run {run_id} names input key {raw:?} that is not an input id: {error}"
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ResumedRunStart::Started { input_ids })
+}
+
+/// Suspend the current run for a graceful requeue stop: the run stops being
+/// current and is marked resumable, with no turn terminal and no input
+/// change, so the stop keeps its bound inputs and the next start resumes it
+/// from its last committed round. The caller has already stopped the turn
+/// without a closing save or a boundary. `durable_session` is the caller's
+/// observation that the session commits every round.
+///
+/// `Ok(false)`, with nothing changed, when the machine refuses: the stop does
+/// not requeue, the session is not durable, a live-boundary join is still
+/// published, the runtime is retiring, `run_id` is not the current run, or
+/// the run's turn terminal is already published. The caller then ends the
+/// run as before.
+pub(crate) fn machine_suspend_run_for_stop(
+    driver: &mut DriverEntry,
+    run_id: &RunId,
+    durable_session: bool,
+) -> Result<bool, RuntimeDriverError> {
+    let projection = {
+        let authority = driver.shared_dsl_authority();
+        let mut auth = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let suspended = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut *auth,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::SuspendRunForStop {
+                run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
+                durable_session,
+            },
+        );
+        if suspended.is_err() {
+            return Ok(false);
+        }
+        RuntimeLifecycleProjection::from_authority(&auth)
+    };
+    driver.set_control_projection(
+        projection.phase,
+        projection.current_run_id,
+        projection.pre_run_phase,
+    );
+    Ok(true)
+}
+
+/// Apply `ResumeRun`, consuming the generated capability that authorized it.
+fn apply_authorized_resume_run(
+    authority: &mut crate::meerkat_machine::dsl::MeerkatMachineAuthority,
+    _capability: generated_command_capabilities::AuthorizedResumedRun,
+    run_id: &crate::meerkat_machine::dsl::RunId,
+) -> Result<(), RuntimeDriverError> {
+    crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+        authority,
+        crate::meerkat_machine::dsl::MeerkatMachineInput::ResumeRun {
+            run_id: run_id.clone(),
+        },
+    )
+    .map(|_| ())
+    .map_err(|error| {
+        RuntimeDriverError::Internal(format!(
+            "generated machine refused ResumeRun for run {}: {error:?}",
+            run_id.0
+        ))
+    })
 }
 
 /// Disposition the runtime-loop apply produced. `Failed` is only used after the
@@ -7226,6 +7624,7 @@ pub(crate) fn machine_authorize_stage_for_run(
 
 pub(crate) fn machine_validate_boundary_applied(
     driver: &DriverEntry,
+    run_id: &RunId,
     contributing_work_ids: &[InputId],
 ) -> Result<(), RuntimeDriverError> {
     if contributing_work_ids.is_empty() {
@@ -7236,7 +7635,11 @@ pub(crate) fn machine_validate_boundary_applied(
 
     for work_id in contributing_work_ids {
         let lifecycle = driver.as_driver().input_phase(work_id);
-        if lifecycle != Some(InputLifecycleState::Staged) {
+        // A resumed run's contributor can already be applied by one of the
+        // run's committed rounds; it still belongs to this run.
+        if lifecycle != Some(InputLifecycleState::Staged)
+            && !driver.input_bound_to_open_run(work_id, run_id)
+        {
             return Err(RuntimeDriverError::Internal(format!(
                 "boundary applied requires staged contributors, but {work_id:?} is {lifecycle:?}"
             )));
@@ -7288,7 +7691,7 @@ pub(crate) fn machine_validate_run_commit_receipt(
         )));
     }
 
-    machine_validate_boundary_applied(driver, &receipt.contributing_input_ids)
+    machine_validate_boundary_applied(driver, run_id, &receipt.contributing_input_ids)
 }
 
 pub(crate) fn machine_staged_contributors(driver: &DriverEntry) -> Vec<InputId> {
@@ -7363,17 +7766,22 @@ pub(crate) fn machine_staged_directed_interaction_ids(
 
 pub(crate) fn machine_validate_run_failed(
     driver: &DriverEntry,
+    run_id: &RunId,
     contributing_work_ids: &[InputId],
 ) -> Result<(), RuntimeDriverError> {
     if contributing_work_ids.is_empty() {
         return Err(RuntimeDriverError::Internal(
-            "run failed requires at least one staged contributor".to_string(),
+            "run failed requires at least one contributor".to_string(),
         ));
     }
 
     for work_id in contributing_work_ids {
         let lifecycle = driver.as_driver().input_phase(work_id);
-        if lifecycle != Some(InputLifecycleState::Staged) {
+        // A resumed run's contributor can already be applied by one of the
+        // run's committed rounds; it still belongs to this run.
+        if lifecycle != Some(InputLifecycleState::Staged)
+            && !driver.input_bound_to_open_run(work_id, run_id)
+        {
             return Err(RuntimeDriverError::Internal(format!(
                 "run failed requires staged contributors, but {work_id:?} is {lifecycle:?}"
             )));
@@ -7383,19 +7791,62 @@ pub(crate) fn machine_validate_run_failed(
     Ok(())
 }
 
+/// The contributors an ended run (failed or cancelled) disposes of: its staged
+/// contributors and, for a resumed run, each input one of `run_id`'s committed
+/// rounds already applied that is still bound to the run.
+///
+/// Only a resumed run holds applied contributors. None of them may stay bound
+/// to the run once it ends: left applied, a later registration would find the
+/// run open and resumable again. The run's realization disposes of them with
+/// the staged ones: a replayed failure returns them to their lanes
+/// (`ReplayAppliedRunContributor`), a machine-terminal failure consumes them,
+/// a run that never began executing consumes them too (they did execute, so
+/// they are never reported as never executed), and a cancellation abandons
+/// them as cancelled.
+///
+/// A resumed run's set lists its bound inputs in admission order, the order
+/// the generated resume plan dispatched them in and so the order of a receipt
+/// the run carries, then any staged input not bound to it. An ordinary run's
+/// set is its staged contributors, unchanged.
+fn machine_ended_run_contributors(
+    driver: &DriverEntry,
+    run_id: &RunId,
+    staged_input_ids: &[InputId],
+) -> Vec<InputId> {
+    let bound = driver.resumed_run_bound_input_ids(run_id);
+    let holds_applied = bound.iter().any(|input_id| {
+        driver.as_driver().input_phase(input_id) != Some(InputLifecycleState::Staged)
+    });
+    if !holds_applied {
+        return staged_input_ids.to_vec();
+    }
+    let mut contributors = bound;
+    for input_id in staged_input_ids {
+        if !contributors.contains(input_id) {
+            contributors.push(input_id.clone());
+        }
+    }
+    contributors
+}
+
 pub(crate) fn machine_validate_run_cancelled(
     driver: &DriverEntry,
+    run_id: &RunId,
     contributing_work_ids: &[InputId],
 ) -> Result<(), RuntimeDriverError> {
     if contributing_work_ids.is_empty() {
         return Err(RuntimeDriverError::Internal(
-            "run cancelled requires at least one staged contributor".to_string(),
+            "run cancelled requires at least one contributor".to_string(),
         ));
     }
 
     for work_id in contributing_work_ids {
         let lifecycle = driver.as_driver().input_phase(work_id);
-        if lifecycle != Some(InputLifecycleState::Staged) {
+        // A resumed run's contributor can already be applied by one of the
+        // run's committed rounds; it still belongs to this run.
+        if lifecycle != Some(InputLifecycleState::Staged)
+            && !driver.input_bound_to_open_run(work_id, run_id)
+        {
             return Err(RuntimeDriverError::Internal(format!(
                 "run cancelled requires staged contributors, but {work_id:?} is {lifecycle:?}"
             )));
@@ -7409,6 +7860,7 @@ pub(crate) async fn machine_normalize_recovered_input_state(
     store: &dyn crate::store::RuntimeStore,
     runtime_id: &LogicalRuntimeId,
     mut bundle: StoredInputState,
+    resumable_run: Option<&crate::recovery::ResumableRunObservation>,
 ) -> Result<
     (
         StoredInputState,
@@ -7438,8 +7890,12 @@ pub(crate) async fn machine_normalize_recovered_input_state(
         None
     };
 
-    let delta =
-        machine_apply_recovered_input_normalization(&mut bundle, applied_boundary_committed)?;
+    let bound_run_resumable = bound_to_resumable_run(&bundle, resumable_run);
+    let delta = machine_apply_recovered_input_normalization(
+        &mut bundle,
+        applied_boundary_committed,
+        bound_run_resumable,
+    )?;
 
     Ok((bundle, delta.admission_sequence_recovery))
 }
@@ -7564,12 +8020,38 @@ fn recovery_normalization_reason(
         crate::meerkat_machine::dsl::RecoveredInputNormalizationReasonKind::MissingBoundaryReceipt => {
             "recovery: missing boundary receipt"
         }
+        crate::meerkat_machine::dsl::RecoveredInputNormalizationReasonKind::ResumableRun => {
+            "recovery: kept bound to the resumable run"
+        }
     }
+}
+
+/// Whether `bundle` is an input the stored run cursor keeps bound to the run
+/// this registration resumes: listed in the cursor's bound inputs, last
+/// staged for that run, and Staged, Applied or AppliedPendingConsumption. The
+/// recovery classifier holds the same predicate for the whole bound set.
+fn bound_to_resumable_run(
+    bundle: &StoredInputState,
+    resumable_run: Option<&crate::recovery::ResumableRunObservation>,
+) -> bool {
+    let Some(resumable_run) = resumable_run else {
+        return false;
+    };
+    matches!(
+        bundle.seed.phase,
+        InputLifecycleState::Staged
+            | InputLifecycleState::Applied
+            | InputLifecycleState::AppliedPendingConsumption
+    ) && bundle.seed.last_run_id.as_ref() == Some(&resumable_run.run_id)
+        && resumable_run
+            .bound_input_ids
+            .contains(&bundle.state.input_id)
 }
 
 pub(crate) fn machine_apply_recovered_input_normalization(
     bundle: &mut StoredInputState,
     applied_boundary_committed: Option<bool>,
+    bound_run_resumable: bool,
 ) -> Result<MachineRecoveryDelta, RuntimeDriverError> {
     let mut delta = MachineRecoveryDelta::default();
     let StoredInputState { state, seed } = bundle;
@@ -7591,6 +8073,7 @@ pub(crate) fn machine_apply_recovered_input_normalization(
             input_id: input_id.clone(),
             phase: recovered_observed_phase(seed.phase),
             applied_boundary_committed,
+            bound_run_resumable,
         },
     )
     .map_err(|err| {
@@ -7881,6 +8364,15 @@ fn missing_recovered_ingress_entry_reason(state: &InputState, seed: &InputStateS
 pub(crate) fn machine_recover_ephemeral_driver(
     driver: &mut crate::driver::ephemeral::EphemeralRuntimeDriver,
 ) -> Result<RecoveryReport, RuntimeDriverError> {
+    machine_recover_ephemeral_driver_keeping(driver, None)
+}
+
+/// [`machine_recover_ephemeral_driver`], keeping the inputs of the run this
+/// registration resumes bound to it.
+fn machine_recover_ephemeral_driver_keeping(
+    driver: &mut crate::driver::ephemeral::EphemeralRuntimeDriver,
+    resumable_run: Option<&crate::recovery::ResumableRunObservation>,
+) -> Result<RecoveryReport, RuntimeDriverError> {
     let mut recovered = 0;
     let mut abandoned = 0;
     let mut requeued = 0;
@@ -7897,7 +8389,9 @@ pub(crate) fn machine_recover_ephemeral_driver(
         let Some(mut bundle) = driver.stored_input_state(input_id) else {
             continue;
         };
-        let delta = machine_apply_recovered_input_normalization(&mut bundle, None)?;
+        let bound_run_resumable = bound_to_resumable_run(&bundle, resumable_run);
+        let delta =
+            machine_apply_recovered_input_normalization(&mut bundle, None, bound_run_resumable)?;
         recovered += delta.recovered;
         abandoned += delta.abandoned;
         requeued += delta.requeued;
@@ -8315,6 +8809,7 @@ pub(crate) async fn machine_recover_persistent_inputs(
         driver,
         observed_input_states,
         recovered_unregister_progress,
+        None,
     )
     .await
 }
@@ -8331,12 +8826,35 @@ pub(crate) async fn machine_recover_persistent_inputs_from_observed(
     driver: &mut crate::driver::ephemeral::EphemeralRuntimeDriver,
     observed_input_states: Vec<StoredInputState>,
     recovered_unregister_progress: Option<&crate::store::MachineUnregisterProgressSnapshot>,
+    resumable_run: Option<&crate::recovery::ResumableRunObservation>,
 ) -> Result<RecoveryReport, RuntimeDriverError> {
     let mut recovered_payloads = Vec::new();
 
+    // Mark the run the stored cursor names on the live authority before any
+    // input is normalized, so its inputs stay bound instead of requeueing.
+    // A refused mark (no Initializing, Idle or Attached phase, or a current
+    // run) leaves the run to ordinary recovery: its inputs normalize as
+    // today.
+    let resumable_run = match resumable_run {
+        Some(observation) => {
+            if driver.mark_run_resumable(&observation.run_id) {
+                Some(observation)
+            } else {
+                tracing::warn!(
+                    %runtime_id,
+                    run_id = %observation.run_id,
+                    "the live authority refused to mark the stored cursor's run resumable; its inputs recover as an interrupted run's"
+                );
+                None
+            }
+        }
+        None => None,
+    };
+
     for bundle in observed_input_states {
         let (mut bundle, admission_sequence_recovery) =
-            machine_normalize_recovered_input_state(store, runtime_id, bundle).await?;
+            machine_normalize_recovered_input_state(store, runtime_id, bundle, resumable_run)
+                .await?;
 
         if matches!(
             machine_classify_recovered_input_durability(&bundle.state)?,
@@ -8406,7 +8924,7 @@ pub(crate) async fn machine_recover_persistent_inputs_from_observed(
         }
     }
 
-    let report = machine_recover_ephemeral_driver(driver)?;
+    let report = machine_recover_ephemeral_driver_keeping(driver, resumable_run)?;
 
     // Generic input recovery may rebuild the ordinary runtime phase from
     // stored ingress. The durable unregister prefix is later lifecycle
@@ -8463,15 +8981,16 @@ pub(crate) fn machine_build_replay_plan(
 
 pub(crate) async fn machine_stop_runtime(
     driver: &mut DriverEntry,
+    retained_before_exit: &[InputId],
 ) -> Result<(), RuntimeDriverError> {
     match driver {
         DriverEntry::Ephemeral(d) => {
             d.apply_runtime_executor_exited_authority()?;
             d.sync_control_projection_from_dsl_authority();
-            d.finalize_stop_runtime()?;
+            d.finalize_stop_runtime(retained_before_exit)?;
             Ok(())
         }
-        DriverEntry::Persistent(d) => d.finalize_runtime_executor_exit().await,
+        DriverEntry::Persistent(d) => d.finalize_runtime_executor_exit(retained_before_exit).await,
     }
 }
 
@@ -10498,7 +11017,11 @@ pub(crate) async fn cancel_runtime_loop_run(
     let mut driver = driver.lock().await;
     let cancelled_run_id = run_id.clone();
     let staged_input_ids = machine_staged_contributors(&driver);
-    machine_validate_run_cancelled(&driver, &staged_input_ids)
+    // A cancellation abandons every input bound to the run, the ones a
+    // resumed run's committed rounds already applied included.
+    let contributing_input_ids =
+        machine_ended_run_contributors(&driver, &cancelled_run_id, &staged_input_ids);
+    machine_validate_run_cancelled(&driver, &cancelled_run_id, &contributing_input_ids)
         .map_err(RuntimeLoopRunFailError::Rejected)?;
     let terminal_checkpoint = driver
         .begin_terminal_transition("cancelled_run_terminal_commit")
@@ -10506,7 +11029,7 @@ pub(crate) async fn cancel_runtime_loop_run(
     let candidate = crate::input_state::InteractionTerminalCandidate::Cancelled;
     let completion_batch = match driver.stage_input_terminal_completion_batch(
         InteractionTerminalBatchScope::Run(&cancelled_run_id),
-        &staged_input_ids,
+        &contributing_input_ids,
         candidate.clone(),
         false,
     ) {
@@ -10522,7 +11045,7 @@ pub(crate) async fn cancel_runtime_loop_run(
     };
     let interaction_outboxes = match authorized_staged_directed_terminal_outboxes(
         &driver,
-        &staged_input_ids,
+        &contributing_input_ids,
         &completion_batch,
     ) {
         Ok(outboxes) => outboxes,
@@ -10567,7 +11090,7 @@ pub(crate) async fn cancel_runtime_loop_run(
         return Err(RuntimeLoopRunFailError::Rejected(error));
     }
     if let Err(run_err) = driver
-        .machine_realize_run_cancelled(cancelled_run_id.clone(), staged_input_ids)
+        .machine_realize_run_cancelled(cancelled_run_id.clone(), contributing_input_ids)
         .await
     {
         let error = RuntimeDriverError::Internal(format!(
@@ -10603,7 +11126,7 @@ fn machine_terminal_carrier_validation_failed(reason: impl Into<String>) -> Runt
 fn validate_machine_terminal_applied_commit(
     driver: &DriverEntry,
     failed_run_id: &RunId,
-    staged_input_ids: &[InputId],
+    contributing_input_ids: &[InputId],
     error: &meerkat_core::TurnErrorMetadata,
     applied: MachineTerminalAppliedDraft,
 ) -> Result<MachineTerminalAppliedCommit, RuntimeDriverError> {
@@ -10708,7 +11231,7 @@ fn validate_machine_terminal_applied_commit(
     let receipt = applied
         .receipt
         .into_sequenced(driver.terminal_boundary_sequence(failed_run_id)?);
-    machine_validate_run_commit_receipt(driver, failed_run_id, staged_input_ids, &receipt)?;
+    machine_validate_run_commit_receipt(driver, failed_run_id, contributing_input_ids, &receipt)?;
     if receipt.message_count != committed_message_count {
         return Err(machine_terminal_carrier_validation_failed(format!(
             "machine-terminal receipt message count {} did not match boundary message count {committed_message_count}",
@@ -10763,7 +11286,11 @@ async fn fail_runtime_loop_run_inner(
     let mut driver = driver.lock().await;
     let failed_run_id = run_id.clone();
     let staged_input_ids = machine_staged_contributors(&driver);
-    machine_validate_run_failed(&driver, &staged_input_ids)
+    // Every disposition disposes of every input bound to the run, the ones a
+    // resumed run's committed rounds already applied included.
+    let contributing_input_ids =
+        machine_ended_run_contributors(&driver, &failed_run_id, &staged_input_ids);
+    machine_validate_run_failed(&driver, &failed_run_id, &contributing_input_ids)
         .map_err(RuntimeLoopRunFailError::Rejected)?;
     if machine_terminal_failure_observed != machine_terminal_error.is_some() {
         return Err(RuntimeLoopRunFailError::Rejected(
@@ -10796,7 +11323,7 @@ async fn fail_runtime_loop_run_inner(
             validate_machine_terminal_applied_commit(
                 &driver,
                 &failed_run_id,
-                &staged_input_ids,
+                &contributing_input_ids,
                 error,
                 applied,
             )
@@ -10828,7 +11355,7 @@ async fn fail_runtime_loop_run_inner(
         };
         let completion_batch = match driver.stage_input_terminal_completion_batch(
             InteractionTerminalBatchScope::Run(&failed_run_id),
-            &staged_input_ids,
+            &contributing_input_ids,
             candidate,
             true,
         ) {
@@ -10844,7 +11371,7 @@ async fn fail_runtime_loop_run_inner(
         };
         let interaction_outboxes = match authorized_staged_directed_terminal_outboxes(
             &driver,
-            &staged_input_ids,
+            &contributing_input_ids,
             &completion_batch,
         ) {
             Ok(outboxes) => outboxes,
@@ -10888,9 +11415,10 @@ async fn fail_runtime_loop_run_inner(
             );
             return Err(RuntimeLoopRunFailError::Rejected(error));
         }
-        if let Err(error) = driver
-            .machine_realize_terminal_failure_applied_in_memory(&failed_run_id, &staged_input_ids)
-        {
+        if let Err(error) = driver.machine_realize_terminal_failure_applied_in_memory(
+            &failed_run_id,
+            &contributing_input_ids,
+        ) {
             let error = driver.fail_terminal_transition(
                 terminal_checkpoint,
                 "failed_run_applied_terminal_realization",
@@ -10931,7 +11459,7 @@ async fn fail_runtime_loop_run_inner(
             return Err(RuntimeLoopRunFailError::Rejected(error));
         }
     };
-    let replay_plan = machine_build_replay_plan(&driver, &staged_input_ids, "RunFailed");
+    let replay_plan = machine_build_replay_plan(&driver, &contributing_input_ids, "RunFailed");
     if let Err(err) = machine_apply_run_return_projection(
         &mut driver,
         &failed_run_id,
@@ -10950,7 +11478,7 @@ async fn fail_runtime_loop_run_inner(
     let persistence = match driver
         .machine_realize_run_failed(MachineRunFailureRealization {
             run_id: failed_run_id.clone(),
-            contributing_input_ids: staged_input_ids,
+            contributing_input_ids,
             replay_plan,
             terminal_error,
             runtime_apply_failure,
@@ -11793,10 +12321,12 @@ mod recovery_tests {
                 tool_use_id,
                 tool_name,
                 args,
+                dedupe_key,
             } => CompletionOutcome::CallbackPending {
                 tool_use_id: tool_use_id.clone().unwrap_or_default(),
                 tool_name: tool_name.clone(),
                 args: args.clone(),
+                dedupe_key: dedupe_key.clone(),
             },
             InteractionTerminalCandidate::CallbackBatchPending { pending_tool_calls } => {
                 CompletionOutcome::CallbackBatchPending {

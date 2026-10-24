@@ -90,6 +90,7 @@ impl McpProtocol {
             name,
             args,
             None,
+            None,
             || Ok(None),
         )
         .await?;

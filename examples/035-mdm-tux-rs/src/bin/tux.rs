@@ -73,6 +73,9 @@ struct TargetView {
     /// Cached model IDs from the last `/models` catalog fetch. Used to
     /// validate a `/model <name>` next-turn override.
     known_models: HashSet<String>,
+    /// Each finished tool call's duration, by call id, until its result
+    /// event (which carries the output) arrives.
+    tool_durations: HashMap<String, u64>,
 }
 
 impl TargetView {
@@ -89,6 +92,7 @@ impl TargetView {
             phase: TargetPhase::Disconnected,
             _cancel_tx: None,
             known_models: HashSet::new(),
+            tool_durations: HashMap::new(),
         }
     }
 
@@ -956,7 +960,18 @@ fn handle_stream_event(target: &mut TargetView, params: &Value) {
                 "```".into(),
             ]);
         }
+        // The execution fact carries the duration; the result event that
+        // follows it carries the output.
         "tool_execution_completed" | "ToolExecutionCompleted" => {
+            if let Some(id) = event.get("id").and_then(|v| v.as_str()) {
+                let duration_ms = event
+                    .get("duration_ms")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                target.tool_durations.insert(id.to_string(), duration_ms);
+            }
+        }
+        "tool_result_received" | "ToolResultReceived" => {
             let name = event.get("name").and_then(|v| v.as_str()).unwrap_or("?");
             let result = event
                 .get("content")
@@ -975,8 +990,9 @@ fn handle_stream_event(target: &mut TargetView, params: &Value) {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             let duration_ms = event
-                .get("duration_ms")
-                .and_then(|v| v.as_u64())
+                .get("id")
+                .and_then(|v| v.as_str())
+                .and_then(|id| target.tool_durations.remove(id))
                 .unwrap_or(0);
             let lines = format_tool_completion(name, &result, is_error, duration_ms);
             target.push_section(lines);

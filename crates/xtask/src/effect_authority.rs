@@ -223,6 +223,7 @@ const CORE_EXECUTOR_PURE_FORWARD_METHODS: &[&str] = &[
     "apply",
     "checkpoint_committed_session_snapshot",
     "acknowledge_committed_session_boundary",
+    "acknowledge_compaction_finalization",
     "reconcile_committed_compaction_projections",
     "abort_uncommitted_compaction_projections",
     "abort_rejected_run_projections",

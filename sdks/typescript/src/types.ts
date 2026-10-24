@@ -164,6 +164,19 @@ export type SessionContentBlock = Generated.WireContentBlock;
 /** Exact generated content projection used by session and tool-result history. */
 export type SessionContentInput = Generated.WireContentInput;
 
+/**
+ * The dedupe key of one callback tool call, sent with a call that an
+ * agent-loop round dispatched. A resumed run that dispatches the same call
+ * again sends the same key, so a tool with effects that must not repeat
+ * deduplicates on all four fields.
+ */
+export interface ToolCallDedupeKey {
+  readonly run_id: string;
+  readonly round: number;
+  readonly call_id: string;
+  readonly call_digest: string;
+}
+
 /** Raw blob bytes fetched by blob id. */
 export interface BlobPayload {
   readonly blobId: string;

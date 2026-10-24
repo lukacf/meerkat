@@ -260,9 +260,20 @@ impl MobActor {
                     return;
                 };
                 // The rebuild request carries the overlay the member is rebuilt
-                // with (see `recustomized_rebuild_overlay`).
-                let recipe = profile
-                    .and_then(|profile| self.explicit_resume_provision_recipe(&work, *profile));
+                // with (see `recustomized_rebuild_overlay`), and the continuity
+                // intent its incarnation was spawned with, read before the
+                // recipe takes its provision owner.
+                let recipe = match profile {
+                    Ok(profile) => Box::pin(self.recorded_member_continuity_intent(
+                        &work.rebuild.entry,
+                        &work.rebuild.bridge_session_id,
+                    ))
+                    .await
+                    .and_then(|continuity_intent| {
+                        self.explicit_resume_provision_recipe(&work, *profile, continuity_intent)
+                    }),
+                    Err(error) => Err(error),
+                };
                 match recipe {
                     Ok(recipe) => self.spawn_explicit_resume_provision(work, Some(recipe)),
                     Err(error) => {
@@ -284,10 +295,38 @@ impl MobActor {
         }
     }
 
+    /// The continuity intent `entry`'s incarnation was spawned with, read from
+    /// the current epoch of the mob's journal as a cold restore reads it. An
+    /// explicit resume and a warm revival provision the member with it, so a
+    /// durable worker is rebuilt with its resume gate. A member whose own spawn
+    /// the epoch does not hold is refused on `session_id`, never rebuilt as
+    /// ephemeral.
+    pub(super) async fn recorded_member_continuity_intent(
+        &self,
+        entry: &RosterEntry,
+        session_id: &SessionId,
+    ) -> Result<crate::runtime::SpawnContinuityIntent, MobError> {
+        let events = self.events.replay_all().await?;
+        let epoch = crate::runtime::remote_turn_reconciler::current_epoch_events_for_mob(
+            &events,
+            &self.definition.id,
+        );
+        let recorded = crate::runtime::builder::recorded_continuity_intents(&epoch);
+        crate::runtime::builder::entry_continuity_intent(&recorded, entry).map_err(|reason| {
+            MobError::MemberRestoreFailed {
+                member_id: entry.agent_identity.clone(),
+                session_id: Some(session_id.clone()),
+                reason,
+                hold: None,
+            }
+        })
+    }
+
     fn explicit_resume_provision_recipe(
         &mut self,
         work: &ExplicitResumeMemberWork,
         profile: crate::profile::Profile,
+        continuity_intent: crate::runtime::SpawnContinuityIntent,
     ) -> Result<Box<DeferredResumeProvision>, MobError> {
         let entry = &work.rebuild.entry;
         self.authorize_spawn_profile_material(
@@ -384,6 +423,7 @@ impl MobActor {
             ops_registry: None,
             generated_self_owned_operation_owner: Some(work.rebuild.bridge_session_id.clone()),
             direct_member_incarnation: None,
+            continuity_intent,
         }))
     }
 

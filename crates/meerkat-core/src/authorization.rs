@@ -88,6 +88,12 @@ pub enum ControllerReadinessFailure {
     /// yet and will promote or withdraw it within its own bound.
     #[error("an original's admission is not yet settled by its source owner")]
     OriginalAdmissionPending,
+    /// The exact live actor's turn boundary is held now (a turn or another
+    /// boundary holder has it), and the caller does not wait for it: a
+    /// trusted host answers this instead of queueing behind the turn. Not a
+    /// verdict; asking again after the boundary is released may succeed.
+    #[error("the session's turn boundary is held")]
+    TurnBoundaryHeld,
 }
 
 /// A domain owner's external resource or physical destination coordinates.

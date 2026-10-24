@@ -20,7 +20,7 @@ Verification contract: paths, symbols, boundary kinds, owner shells, write-sets,
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | runtime | 5 | 20 | 3 | 0 | 0 | 0 |
 | mcp | 11 | 21 | 2 | 0 | 0 | 0 |
-| mob | 8 | 38 | 3 | 0 | 0 | 0 |
+| mob | 8 | 38 | 4 | 0 | 0 | 0 |
 | auth | 1 | 8 | 0 | 0 | 0 | 0 |
 
 ## Boundary Manifest
@@ -203,6 +203,7 @@ Verification contract: paths, symbols, boundary kinds, owner shells, write-sets,
 | `mob_pending_spawn_alignment` | `MobActor.pending_spawns`, `PendingSpawnLineage.tasks`, `MobMachine pending_spawn_count tracking` | `closed` | `pending spawn lineage helpers + MobMachine pending_spawn_count tracking` |
 | `mob_runtime_bridge_alignment` | `SessionBackend.runtime_sessions`, `RuntimeSessionState.queued_turn_owner`, `MobOpsAdapter.member_bindings` | `closed` | `SessionBackend runtime session sidecar contract + MeerkatMachine registration truth + RuntimeOpsLifecycleRegistry` |
 | `mob_wiring_alignment` | `Roster.wired_to`, `trust edges`, `edge locks` | `closed` | `Roster wiring projection contract + do_wire/handle_unwire edge-lock discipline` |
+| `mob_flow_target_selection_alignment` | `MobRun.role_targets`, `MobMachine member_profile_names`, `MobMachine member lifecycle` | `closed` | `FlowRoleTargets admitted run input + MobMachine member_profile_names and member lifecycle` |
 
 ## Auth State Cells
 

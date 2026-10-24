@@ -5,7 +5,8 @@
 //! occurrence that head does not cover yet: the next checkpoint proves the
 //! pending rewrite suffix from that head, which needs their bodies. A run
 //! that compacts many times before its run-end checkpoint must still keep its
-//! in-memory history bounded by the retention, not by how often it compacted.
+//! in-memory history bounded by the retention, not by how often it compacted:
+//! its round commits move the durable head over its rewrites.
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use crate as meerkat_core;
@@ -190,13 +191,85 @@ impl Compactor for EveryBoundaryCompactor {
 /// What a HeadCanonical store checkpointer does with the live session, without
 /// the store: it proves the pending rewrite suffix from the durable head (so
 /// it refuses when the live graph retired an occurrence that head does not
-/// cover), then acknowledges the successor, whose head covers every rewrite.
+/// cover), then acknowledges the successor, whose head covers every rewrite,
+/// and issues the next provisional receipt of the run.
 #[derive(Default)]
 struct HeadCanonicalCheckpointer {
-    /// `(commit_count, retired_count)` of the live graph at each checkpoint.
+    /// `(commit_count, retired_count)` of the live graph at each checkpoint
+    /// whose session carries a graph.
     checkpoints: Mutex<Vec<(usize, usize)>>,
     /// The checkpointed session's tail at each checkpoint.
     tails: Mutex<Vec<CheckpointTail>>,
+    /// The run cursor each checkpoint carried, by round and resume point.
+    cursors: Mutex<Vec<Option<(u64, CursorPoint)>>>,
+    /// Stand in for a WholeBlob store: no durable head is acknowledged.
+    whole_blob: bool,
+    /// Re-base a run after a rewrite (only with `whole_blob`).
+    rebases: bool,
+    /// Which checkpoints were re-bases, in order.
+    rebased: Mutex<Vec<bool>>,
+    /// The re-based flag of the run cursor each checkpoint carried.
+    cursor_rebased: Mutex<Vec<Option<bool>>>,
+}
+
+impl HeadCanonicalCheckpointer {
+    /// A WholeBlob stand-in that re-bases runs, or does not.
+    fn whole_blob(rebases: bool) -> Self {
+        Self {
+            whole_blob: true,
+            rebases,
+            ..Self::default()
+        }
+    }
+}
+
+/// Where a checkpointed run cursor resumes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CursorPoint {
+    ToolsPending,
+    AwaitingModel,
+}
+
+fn cursor_rebased(session: &Session) -> Option<bool> {
+    session
+        .try_run_cursor()
+        .expect("the cursor decodes")
+        .map(|cursor| cursor.rebased)
+}
+
+fn cursor_point(session: &Session) -> Option<(u64, CursorPoint)> {
+    let cursor = session.try_run_cursor().expect("the cursor decodes")?;
+    let point = match cursor.resume_point {
+        meerkat_core::RunResumePoint::ToolsPending { .. } => CursorPoint::ToolsPending,
+        meerkat_core::RunResumePoint::AwaitingModel => CursorPoint::AwaitingModel,
+    };
+    Some((cursor.round, point))
+}
+
+/// The next provisional receipt of the run: contiguous after `previous`, as
+/// the agent requires of every checkpointer.
+fn next_receipt(
+    session: &Session,
+    run_id: &RunId,
+    previous: Option<&RunCheckpointReceipt>,
+) -> RunCheckpointReceipt {
+    let sequence = previous.map_or(1, |receipt| receipt.candidate_sequence() + 1);
+    let authority = meerkat_core::HeadCanonicalProvisionalTailAuthority::issued(
+        session.id().clone(),
+        1,
+        "committed-head".to_string(),
+        1 + sequence,
+        format!("provisional-head-{sequence}"),
+        run_id.clone(),
+        sequence,
+    )
+    .expect("a contiguous provisional authority");
+    RunCheckpointReceipt::issued(
+        meerkat_core::RunCheckpointAuthority::HeadCanonical(authority),
+        format!("digest-{sequence}"),
+        session.messages().len() as u64,
+    )
+    .expect("a valid receipt")
 }
 
 /// What a checkpoint saw at the end of the session it persisted.
@@ -235,17 +308,26 @@ impl SessionCheckpointer for HeadCanonicalCheckpointer {
         &self,
         session: &mut Session,
         run_id: &RunId,
-        _previous: Option<&RunCheckpointReceipt>,
+        previous: Option<&RunCheckpointReceipt>,
     ) -> Result<Option<RunCheckpointReceipt>, AgentError> {
         self.tails
             .lock()
             .unwrap()
             .push(checkpoint_tail(session, run_id));
+        self.cursors.lock().unwrap().push(cursor_point(session));
+        self.cursor_rebased
+            .lock()
+            .unwrap()
+            .push(cursor_rebased(session));
+        self.rebased.lock().unwrap().push(false);
+        if self.whole_blob {
+            return Ok(Some(next_receipt(session, run_id, previous)));
+        }
         let Some(graph) = session
             .transcript_history_state()
             .map_err(|error| AgentError::InternalError(error.to_string()))?
         else {
-            return Ok(None);
+            return Ok(Some(next_receipt(session, run_id, previous)));
         };
         if let Some(durable) = session.durable_transcript_rewrite_count_for_test() {
             graph.refuse_if_retired_count(durable).map_err(|error| {
@@ -259,7 +341,32 @@ impl SessionCheckpointer for HeadCanonicalCheckpointer {
             .unwrap()
             .push((graph.commit_count(), graph.retired_count()));
         session.note_durable_transcript_rewrites(graph.commit_count() as u64);
-        Ok(None)
+        Ok(Some(next_receipt(session, run_id, previous)))
+    }
+
+    fn rebases_runs(&self) -> bool {
+        self.rebases
+    }
+
+    /// The re-based document becomes the committed base; the tail restarts
+    /// on it at candidate sequence 1.
+    async fn rebase_run(
+        &self,
+        session: &mut Session,
+        run_id: &RunId,
+        _previous: Option<&RunCheckpointReceipt>,
+    ) -> Result<RunCheckpointReceipt, AgentError> {
+        self.tails
+            .lock()
+            .unwrap()
+            .push(checkpoint_tail(session, run_id));
+        self.cursors.lock().unwrap().push(cursor_point(session));
+        self.cursor_rebased
+            .lock()
+            .unwrap()
+            .push(cursor_rebased(session));
+        self.rebased.lock().unwrap().push(true);
+        Ok(next_receipt(session, run_id, None))
     }
 }
 
@@ -359,46 +466,113 @@ async fn a_long_run_keeps_its_history_within_the_retention_while_it_compacts() {
     );
 }
 
-/// The checkpoints a long compacting run takes before its end come after the
-/// run's own tool results, never right after a compaction: a durable tail
-/// always holds a row the run wrote after its last rewrite, so recovery can
-/// attribute it to the run instead of holding it.
+/// A long compacting run commits each of its tool rounds twice. The first
+/// commit, after the model call, stages the round's assistant message in the
+/// cursor and writes no row, so its tail is the run's input in the first
+/// round and the compaction summary after that: the cursor names the run.
+/// The second commit follows the run's own tool call and results. The run's
+/// end saves its answer without a cursor.
 #[tokio::test]
-async fn a_long_run_checkpoints_only_after_its_own_tool_results() {
+async fn a_long_run_commits_each_tool_round_twice() {
     let checkpointer = Arc::new(HeadCanonicalCheckpointer::default());
     run_long_compacting_run(Some(0), Some(checkpointer.clone())).await;
 
     let tails = checkpointer.tails.lock().unwrap().clone();
-    let (last, mid_run) = tails.split_last().expect("the run checkpoints at its end");
-    assert!(
-        !mid_run.is_empty(),
-        "the run must checkpoint before its end to bound its history: {tails:?}"
-    );
-    assert!(
-        mid_run
-            .iter()
-            .all(|tail| *tail == CheckpointTail::RunToolUseThenResults),
-        "every mid-run checkpoint follows the run's own tool call and results: {tails:?}"
-    );
-    assert_eq!(*last, CheckpointTail::RunAnswer, "{tails:?}");
+    let cursors = checkpointer.cursors.lock().unwrap().clone();
+    let mut expected_tails = Vec::new();
+    let mut expected_cursors = Vec::new();
+    for round in 0..TOOL_TURNS as u64 {
+        expected_tails.push(if round == 0 {
+            CheckpointTail::Other
+        } else {
+            CheckpointTail::CompactionSummary
+        });
+        expected_cursors.push(Some((round, CursorPoint::ToolsPending)));
+        expected_tails.push(CheckpointTail::RunToolUseThenResults);
+        expected_cursors.push(Some((round, CursorPoint::AwaitingModel)));
+    }
+    expected_tails.push(CheckpointTail::RunAnswer);
+    expected_cursors.push(None);
+    assert_eq!(tails, expected_tails);
+    assert_eq!(cursors, expected_cursors);
 }
 
-/// A session no durable HeadCanonical head describes (WholeBlob) retires
-/// freely, so the run never takes an extra checkpoint: the only checkpoint is
-/// the one at its end.
+/// A session no durable HeadCanonical head describes (WholeBlob) is
+/// recovered only from a strict continuation of its committed transcript, so
+/// with a checkpointer that does not re-base, its run takes no round commit
+/// after its first rewrite: the first round's two commits, then only the
+/// end-of-run save.
 #[tokio::test]
-async fn a_long_run_without_a_durable_head_checkpoints_only_at_its_end() {
-    let checkpointer = Arc::new(HeadCanonicalCheckpointer::default());
+async fn a_long_run_without_a_durable_head_stops_round_commits_at_its_first_rewrite() {
+    let checkpointer = Arc::new(HeadCanonicalCheckpointer::whole_blob(false));
     let session = run_long_compacting_run(None, Some(checkpointer.clone())).await;
 
     let tails = checkpointer.tails.lock().unwrap().clone();
-    assert_eq!(tails, vec![CheckpointTail::RunAnswer]);
+    assert_eq!(
+        tails,
+        vec![
+            CheckpointTail::Other,
+            CheckpointTail::RunToolUseThenResults,
+            CheckpointTail::RunAnswer,
+        ]
+    );
+    let cursors = checkpointer.cursors.lock().unwrap().clone();
+    assert_eq!(
+        cursors,
+        vec![
+            Some((0, CursorPoint::ToolsPending)),
+            Some((0, CursorPoint::AwaitingModel)),
+            None,
+        ]
+    );
     let graph = session
         .transcript_history_state()
         .expect("graph decodes")
         .expect("graph present");
     assert_eq!(graph.commit_count(), TOOL_TURNS);
     assert!(graph.commit_count() - graph.retired_count() <= RETAINED_REWRITES);
+    assert!(
+        session
+            .try_run_cursor()
+            .expect("the cursor decodes")
+            .is_none(),
+        "the end-of-run save removed the cursor"
+    );
+}
+
+/// With a checkpointer that re-bases runs, a WholeBlob run keeps committing
+/// its rounds after a rewrite: the first round commit after each rewrite is
+/// a re-base (here every round's first commit, since the run compacts at
+/// every boundary after the first), and the second commit chains on it. The
+/// end-of-run save after the final boundary's compaction is a re-base too,
+/// without a cursor, so no tail recovery would refuse is ever written. From
+/// the run's first re-base on, every cursor says the run re-based, so a
+/// restart does not forget that its inputs are in the committed history.
+#[tokio::test]
+async fn a_long_run_without_a_durable_head_rebases_after_each_rewrite() {
+    let checkpointer = Arc::new(HeadCanonicalCheckpointer::whole_blob(true));
+    run_long_compacting_run(None, Some(checkpointer.clone())).await;
+
+    let cursors = checkpointer.cursors.lock().unwrap().clone();
+    let rebased = checkpointer.rebased.lock().unwrap().clone();
+    let cursor_rebased = checkpointer.cursor_rebased.lock().unwrap().clone();
+    let mut expected_cursors = Vec::new();
+    let mut expected_rebased = Vec::new();
+    let mut expected_cursor_rebased = Vec::new();
+    for round in 0..TOOL_TURNS as u64 {
+        expected_cursors.push(Some((round, CursorPoint::ToolsPending)));
+        expected_rebased.push(round > 0);
+        expected_cursor_rebased.push(Some(round > 0));
+        expected_cursors.push(Some((round, CursorPoint::AwaitingModel)));
+        expected_rebased.push(false);
+        expected_cursor_rebased.push(Some(round > 0));
+    }
+    expected_cursors.push(None);
+    expected_rebased.push(true);
+    expected_cursor_rebased.push(None);
+    assert_eq!(cursors, expected_cursors);
+    assert_eq!(rebased, expected_rebased);
+    assert_eq!(cursor_rebased, expected_cursor_rebased);
 }
 
 /// Without a checkpointer a run cannot move its durable head, so it takes no

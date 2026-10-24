@@ -627,6 +627,11 @@ A profile's member operator tools (`member_status`, `retire_member`,
 `force_cancel_member`, `list_members`) apply the same rule. With manage scope,
 all of these tools reach every member, as before.
 
+A member placed on a member host holds manage scope over its mob, including
+the privileged spawn arguments, unless its controlling host narrowed it with
+an operator authority ceiling on its spawn request. See
+[Placed-member operator authority](/guides/mobs#placed-member-operator-authority).
+
 Retirement cascades like a process tree. Retiring a member retires every member
 it transitively spawned, deepest first, then the member itself, each through
 the same exact-incarnation retire; every retirement is attempted and the first

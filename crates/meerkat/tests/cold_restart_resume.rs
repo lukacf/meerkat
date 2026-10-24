@@ -396,7 +396,9 @@ mod tests {
                 .any(|t| t.contains("second turn after restart")),
             "the post-restart turn must be recorded: {texts:?}"
         );
-        let projected = final_session.messages_for_model_boundary();
+        let projected = final_session
+            .messages_for_model_boundary()
+            .expect("the transcript projects for the model");
         let system_rows_after_resume = final_session
             .messages()
             .iter()
@@ -541,7 +543,9 @@ mod tests {
             system_prompt.contains("cold restart resume contract v2"),
             "the explicit resume System append must be applied: {system_prompt}"
         );
-        let projected = final_session.messages_for_model_boundary();
+        let projected = final_session
+            .messages_for_model_boundary()
+            .expect("the transcript projects for the model");
         assert!(
             projected.iter().any(|message| {
                 matches!(

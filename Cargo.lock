@@ -145,7 +145,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -156,7 +156,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1301,9 +1301,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.2"
+version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
+checksum = "38d28fb6aa7dd680b3ffd1a3e64e115c177bdba63c0ae7f9cd48129ff05c4fa0"
 dependencies = [
  "cmov",
 ]
@@ -1678,7 +1678,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2299,7 +2299,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -2760,7 +2760,7 @@ dependencies = [
 
 [[package]]
 name = "machine-dsl-tests"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "indexmap",
  "meerkat-machine-codegen",
@@ -2787,7 +2787,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "mcp-test-server"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "rmcp",
  "schemars 1.2.2",
@@ -2809,7 +2809,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "axum",
@@ -2867,11 +2867,11 @@ dependencies = [
 
 [[package]]
 name = "meerkat-agent-build-authority"
-version = "0.9.4"
+version = "0.9.5"
 
 [[package]]
 name = "meerkat-anthropic"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2897,7 +2897,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-atif"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "chrono",
  "meerkat-core",
@@ -2908,7 +2908,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-auth-core"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -2953,7 +2953,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-authorization"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "axum",
@@ -2982,7 +2982,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-authorization-contracts"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "meerkat-core",
  "serde",
@@ -2994,7 +2994,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-capabilities"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "inventory",
  "meerkat-core",
@@ -3005,7 +3005,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-client"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "axum",
@@ -3025,7 +3025,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-comms"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "base64",
@@ -3062,7 +3062,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-contracts"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "base64",
@@ -3085,7 +3085,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-copilot"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3109,7 +3109,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-core"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "base64",
@@ -3146,7 +3146,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-gemini"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3173,7 +3173,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-hooks"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3195,7 +3195,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-integration-tests"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "axum",
@@ -3237,7 +3237,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-jobs"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3256,7 +3256,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-live"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "axum",
@@ -3284,7 +3284,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-llm-core"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3310,7 +3310,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-machine-codegen"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "meerkat-core",
  "meerkat-machine-schema",
@@ -3323,7 +3323,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-machine-derive"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "quote",
  "syn 2.0.119",
@@ -3331,14 +3331,14 @@ dependencies = [
 
 [[package]]
 name = "meerkat-machine-dsl"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "meerkat-machine-dsl-core",
 ]
 
 [[package]]
 name = "meerkat-machine-dsl-core"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3347,7 +3347,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-machine-kernels"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "indexmap",
  "meerkat-authorization-contracts",
@@ -3360,7 +3360,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-machine-schema"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "indexmap",
  "meerkat-authorization-contracts",
@@ -3374,7 +3374,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-mcp"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "axum",
@@ -3407,7 +3407,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-mcp-server"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3441,7 +3441,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-memory"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "hnsw_rs",
@@ -3463,7 +3463,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-mob"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3493,6 +3493,7 @@ dependencies = [
  "meerkat-session",
  "meerkat-sqlite",
  "meerkat-store",
+ "meerkat-store-conformance",
  "reqwest 0.12.28",
  "rusqlite",
  "schemars 1.2.2",
@@ -3514,14 +3515,14 @@ dependencies = [
 
 [[package]]
 name = "meerkat-mob-adaptive"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "meerkat-mob",
 ]
 
 [[package]]
 name = "meerkat-mob-mcp"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "base64",
@@ -3557,7 +3558,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-mob-pack"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "chrono",
  "ed25519-dalek",
@@ -3577,7 +3578,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-models"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "meerkat-core",
  "serde_json",
@@ -3585,7 +3586,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-openai"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3622,7 +3623,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-providers"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "meerkat-auth-core",
  "meerkat-llm-core",
@@ -3630,7 +3631,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-rest"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3671,7 +3672,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-rpc"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3718,7 +3719,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-runtime"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3756,7 +3757,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-sandbox"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "meerkat-core",
  "nix 0.29.0",
@@ -3766,7 +3767,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-schedule"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3790,7 +3791,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-session"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "futures",
@@ -3815,7 +3816,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-skills"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "indexmap",
@@ -3838,7 +3839,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-sqlite"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "notify",
  "rusqlite",
@@ -3850,7 +3851,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-store"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3875,7 +3876,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-store-conformance"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "meerkat-core",
@@ -3886,7 +3887,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-tools"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "base64",
@@ -3928,7 +3929,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-web-runtime"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "flate2",
@@ -3967,7 +3968,7 @@ dependencies = [
 
 [[package]]
 name = "meerkat-workgraph"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4164,7 +4165,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4613,7 +4614,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -4651,7 +4652,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -5007,7 +5008,7 @@ dependencies = [
 
 [[package]]
 name = "rkat"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5223,7 +5224,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5689,7 +5690,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5790,7 +5791,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "surface-build-fixtures"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "meerkat",
  "serde_json",
@@ -5902,7 +5903,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6021,9 +6022,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
-version = "1.52.3"
+version = "1.53.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fc7f01b389ac15039e4dc9531aa973a135d7a4135281b12d7c1bc79fd57fffe"
+checksum = "ce3335fa71841cda333a58d7615b03901380ecf09d59b3296d21f8bbac0dde4e"
 dependencies = [
  "bytes",
  "libc",
@@ -7033,7 +7034,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -7598,7 +7599,7 @@ checksum = "66fee0b777b0f5ac1c69bb06d361268faafa61cd4682ae064a171c16c433e9e4"
 
 [[package]]
 name = "xtask"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "anyhow",
  "clap",

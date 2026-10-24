@@ -359,6 +359,12 @@ pub enum MachineKernelRenderError {
         "MeerkatMachine public TransitionId tail must name unique schema transitions: rendered {rendered}, schema has {schema}"
     )]
     NonUniquePublicTransitionTail { rendered: usize, schema: usize },
+    #[error("MeerkatMachine appended-input section names missing schema input `{input}`")]
+    MissingAppendedInputSectionLast { input: String },
+    #[error(
+        "MeerkatMachine transition `{transition}` belongs to an input declared after the appended-input section; list it in MEERKAT_TRANSITION_ENUM_LATE_TAIL"
+    )]
+    UnlistedLateTransition { transition: String },
 }
 
 // Rust enum order is a public compatibility surface, while transition schema
@@ -402,25 +408,156 @@ const MEERKAT_TRANSITION_ENUM_TAIL: &[&str] = &[
     "DrainQueuedRunRetiredRetainingUnsettledCompletion",
 ];
 
+// The last input whose transitions the appended-input section emits in
+// declaration order. The section already carries published variants, so a
+// transition added to the tail above would move them; see the late tail.
+#[cfg(not(test))]
+const MEERKAT_APPENDED_INPUT_SECTION_LAST: &str = "ClassifyStopInputDisposition";
+
+// Append-only emission tail after every other transition: new arms of inputs
+// declared up to MEERKAT_APPENDED_INPUT_SECTION_LAST (in place in the catalog,
+// they would land mid-enum), and every transition of an input declared after
+// it. Rendering refuses a transition of such a later input that is not listed.
+#[cfg(not(test))]
+const MEERKAT_TRANSITION_ENUM_LATE_TAIL: &[&str] = &[
+    "ResolveRuntimeCompletionWaitFailureRequeuedAcrossStopInitializing",
+    "ResolveRuntimeCompletionWaitFailureRequeuedAcrossStopIdle",
+    "ResolveRuntimeCompletionWaitFailureRequeuedAcrossStopAttached",
+    "ResolveRuntimeCompletionWaitFailureRequeuedAcrossStopRunning",
+    "ResolveRuntimeCompletionWaitFailureRequeuedAcrossStopRetired",
+    "ResolveRuntimeCompletionWaitFailureRequeuedAcrossStopStopped",
+    "AuthorizeDurableTailRecoveryContinueIdle",
+    "AuthorizeDurableTailRecoveryRepairContinuableRetiredIdle",
+    "AuthorizeDurableTailRecoveryRepairContinuableRetiredRetired",
+    "AuthorizeDurableTailRecoveryHoldContinuableRetiredIdle",
+    "AuthorizeDurableTailRecoveryHoldContinuableRetiredRetired",
+    "MarkRunResumableInitializing",
+    "MarkRunResumableIdle",
+    "MarkRunResumableAttached",
+    "ResumeRunRunning",
+    "ReleaseResumableRunInitializing",
+    "ReleaseResumableRunIdle",
+    "ReleaseResumableRunAttached",
+    "ReleaseResumableRunRetired",
+    "ReleaseResumableRunStopped",
+    "SettleResumableRunInitializing",
+    "SettleResumableRunIdle",
+    "SettleResumableRunAttached",
+    "SettleResumableRunRetired",
+    "SettleResumableRunStopped",
+    "NormalizeRecoveredInputStagedResumableInitializing",
+    "NormalizeRecoveredInputStagedResumableIdle",
+    "NormalizeRecoveredInputStagedResumableAttached",
+    "NormalizeRecoveredInputStagedResumableRunning",
+    "NormalizeRecoveredInputStagedResumableRetired",
+    "NormalizeRecoveredInputStagedResumableStopped",
+    "NormalizeRecoveredInputAppliedResumableInitializing",
+    "NormalizeRecoveredInputAppliedResumableIdle",
+    "NormalizeRecoveredInputAppliedResumableAttached",
+    "NormalizeRecoveredInputAppliedResumableRunning",
+    "NormalizeRecoveredInputAppliedResumableRetired",
+    "NormalizeRecoveredInputAppliedResumableStopped",
+    "SuspendRunForStopRunningToIdle",
+    "SuspendRunForStopRunningToAttached",
+    "ReplayAppliedRunContributorIdle",
+    "ReplayAppliedRunContributorAttached",
+    "ReplayAppliedRunContributorRunning",
+    "ReplayAppliedRunContributorRetired",
+    "ReplayAppliedRunContributorStopped",
+    "ClassifyStopInputDispositionRetainResumableInitializing",
+    "ClassifyStopInputDispositionRetainResumableIdle",
+    "ClassifyStopInputDispositionRetainResumableAttached",
+    "ClassifyStopInputDispositionRetainResumableRunning",
+    "ClassifyStopInputDispositionRetainResumableRetired",
+    "ClassifyStopInputDispositionRetainResumableStopped",
+    "AuthorizeOperatorDurableTailRepairIdle",
+    "AuthorizeOperatorDurableTailRepairRetired",
+    "AuthorizeOperatorDurableTailRepairRefuseIdle",
+    "AuthorizeOperatorDurableTailRepairRefuseRetired",
+    "AuthorizeOperatorDurableTailRepairRefuseNonQuiescentInitializing",
+    "AuthorizeOperatorDurableTailRepairRefuseNonQuiescentAttached",
+    "AuthorizeOperatorDurableTailRepairRefuseNonQuiescentRunning",
+    "AuthorizeOperatorDurableTailRepairRefuseNonQuiescentStopped",
+    "AuthorizeOperatorDurableTailRepairRefuseNonQuiescentDestroyed",
+];
+
+// Append-only emission tails for the other machines, whose public
+// TransitionId otherwise follows catalog declaration order. A new arm sits
+// beside its siblings in the catalog, where its first-match chain needs it;
+// listing it here emits it after every published variant instead of moving
+// them. Listed transitions are emitted last, in this order. Append only.
+#[cfg(not(test))]
+const MACHINE_TRANSITION_ENUM_LATE_TAILS: &[(&str, &[&str])] = &[
+    (
+        "SessionDocumentMachine",
+        &["ClassifyDurableTailContinuable"],
+    ),
+    (
+        "SessionTurnAdmissionMachine",
+        &["ResolveDispositionResumeRun"],
+    ),
+    (
+        "OccurrenceLifecycleMachine",
+        &[
+            "ClassifyDuePendingReclaimExhausted",
+            "ClaimPendingAfterAdmission",
+            "ClaimPendingAfterUnprovenDispatch",
+            "TargetProbeBusyExistingRedelivery",
+            "ReclaimExhaustedAfterAdmission",
+            "ReclaimExhaustedAfterUnprovenDispatch",
+            "UnprovenLateNotAdmittedFromClaimed",
+            "UnprovenLateNotAdmittedFromDispatching",
+        ],
+    ),
+];
+
 #[cfg(not(test))]
 fn transitions_in_public_enum_order(
     schema: &MachineSchema,
 ) -> Result<Vec<&TransitionSchema>, MachineKernelRenderError> {
     if schema.machine.as_ref() != "MeerkatMachine" {
-        return Ok(schema.transitions.iter().collect());
-    }
-
-    let mut compatibility_tail = Vec::with_capacity(MEERKAT_TRANSITION_ENUM_TAIL.len());
-    for expected_name in MEERKAT_TRANSITION_ENUM_TAIL {
-        let transition = schema
+        let late_names = MACHINE_TRANSITION_ENUM_LATE_TAILS
+            .iter()
+            .find(|(machine, _)| *machine == schema.machine.as_ref())
+            .map_or(&[][..], |(_, names)| *names);
+        let mut ordered: Vec<&TransitionSchema> = schema
             .transitions
             .iter()
-            .find(|transition| transition.name.as_ref() == *expected_name)
-            .ok_or_else(|| MachineKernelRenderError::MissingPublicTransitionTail {
-                transition: (*expected_name).to_owned(),
-            })?;
-        compatibility_tail.push(transition);
+            .filter(|transition| !late_names.contains(&transition.name.as_ref()))
+            .collect();
+        for expected_name in late_names {
+            let transition = schema
+                .transitions
+                .iter()
+                .find(|transition| transition.name.as_ref() == *expected_name)
+                .ok_or_else(|| MachineKernelRenderError::MissingPublicTransitionTail {
+                    transition: (*expected_name).to_owned(),
+                })?;
+            ordered.push(transition);
+        }
+        return Ok(ordered);
     }
+
+    let named_transitions = |names: &[&str]| {
+        names
+            .iter()
+            .map(|expected_name| {
+                schema
+                    .transitions
+                    .iter()
+                    .find(|transition| transition.name.as_ref() == *expected_name)
+                    .ok_or_else(|| MachineKernelRenderError::MissingPublicTransitionTail {
+                        transition: (*expected_name).to_owned(),
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()
+    };
+    let compatibility_tail = named_transitions(MEERKAT_TRANSITION_ENUM_TAIL)?;
+    let late_tail = named_transitions(MEERKAT_TRANSITION_ENUM_LATE_TAIL)?;
+    let listed_in_a_tail = |transition: &TransitionSchema| {
+        MEERKAT_TRANSITION_ENUM_TAIL.contains(&transition.name.as_ref())
+            || MEERKAT_TRANSITION_ENUM_LATE_TAIL.contains(&transition.name.as_ref())
+    };
     let input_position = |transition: &TransitionSchema| match &transition.on {
         meerkat_machine_schema::TriggerMatch::Input { variant, .. } => schema
             .inputs
@@ -436,23 +573,38 @@ fn transitions_in_public_enum_order(
         .iter()
         .filter_map(|transition| input_position(transition))
         .max();
+    let appended_section_last = schema
+        .inputs
+        .variants
+        .iter()
+        .position(|input| input.name.as_str() == MEERKAT_APPENDED_INPUT_SECTION_LAST)
+        .ok_or_else(
+            || MachineKernelRenderError::MissingAppendedInputSectionLast {
+                input: MEERKAT_APPENDED_INPUT_SECTION_LAST.to_owned(),
+            },
+        )?;
     let appended_input_transition = |transition: &TransitionSchema| {
         compatibility_input_end
             .zip(input_position(transition))
             .is_some_and(|(end, position)| position > end)
     };
+    if let Some(unlisted) = schema.transitions.iter().find(|transition| {
+        input_position(transition).is_some_and(|position| position > appended_section_last)
+            && !MEERKAT_TRANSITION_ENUM_LATE_TAIL.contains(&transition.name.as_ref())
+    }) {
+        return Err(MachineKernelRenderError::UnlistedLateTransition {
+            transition: unlisted.name.as_ref().to_owned(),
+        });
+    }
     let mut ordered = Vec::with_capacity(schema.transitions.len());
     ordered.extend(schema.transitions.iter().filter(|transition| {
-        !MEERKAT_TRANSITION_ENUM_TAIL.contains(&transition.name.as_ref())
-            && !appended_input_transition(transition)
+        !listed_in_a_tail(transition) && !appended_input_transition(transition)
     }));
     ordered.extend(compatibility_tail);
-    ordered.extend(
-        schema
-            .transitions
-            .iter()
-            .filter(|transition| appended_input_transition(transition)),
-    );
+    ordered.extend(schema.transitions.iter().filter(|transition| {
+        !listed_in_a_tail(transition) && appended_input_transition(transition)
+    }));
+    ordered.extend(late_tail);
     if ordered.len() != schema.transitions.len() {
         return Err(MachineKernelRenderError::NonUniquePublicTransitionTail {
             rendered: ordered.len(),

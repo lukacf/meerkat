@@ -21,21 +21,22 @@ mod inner {
     use crate::runtime_state::RuntimeState;
     use crate::store::{
         AuthOAuthFlowSnapshotUpdate, CommittedRecoveryBoundary, CommittedWholeBlobProvisionalTail,
-        CommittedWholeBlobSnapshot, ContinuationAdmission, ContinuationAdmissionOutcome,
-        ContinuationAdmissionTransition, ContinuationKeyBinding, ExactInputStateObservation,
-        FencedInputStateBatchCasOutcome, FencedMachineLifecycleCasOutcome,
-        HeadCanonicalProvisionalTailAuthority, HeadCanonicalRuntimeAuthorityActivation,
-        HeadCanonicalStoreAuthority, InputStateBatchCasImplementationProfile,
-        InputStateBatchCasOutcome, InputStateRow, KeyedRuntimeDeliveryCasOutcome,
-        MachineLifecycleCasOutcome, MachineLifecycleCommit, MachineLifecycleExpectedVersion,
-        MachineLifecycleObservation, MachineLifecycleObservationVersion, MachineLifecycleSnapshot,
-        MachineLifecycleStoreRecord, PreparedDurableTailRecoverySource,
-        PreparedHeadCanonicalProvisionalTail, PreparedRecoveryInputSnapshot,
-        PreparedRecoveryInputStateMutation, PreparedRecoveryReceiptSource,
-        PreparedRuntimeSessionCommit, PreparedRuntimeSessionCommitPayload,
-        PreparedRuntimeSessionCommitResult, PreparedWholeBlobProvisionalTail,
-        PreparedWholeBlobRewriteStoreParts, PreparedWholeBlobSnapshotCas, RecoveryCommitStatus,
-        RecoveryInputSetRevision, RecoveryInputStateMutation, RuntimeDeliveryAuthorityCasOutcome,
+        CommittedWholeBlobSnapshot, ContinuationAdmission, ContinuationAdmissionEntry,
+        ContinuationAdmissionOutcome, ContinuationAdmissionTransition, ContinuationKeyBinding,
+        ExactInputStateObservation, FencedInputStateBatchCasOutcome,
+        FencedMachineLifecycleCasOutcome, HeadCanonicalProvisionalTailAuthority,
+        HeadCanonicalRuntimeAuthorityActivation, HeadCanonicalStoreAuthority,
+        InputStateBatchCasImplementationProfile, InputStateBatchCasOutcome, InputStateRow,
+        KeyedRuntimeDeliveryCasOutcome, MachineLifecycleCasOutcome, MachineLifecycleCommit,
+        MachineLifecycleExpectedVersion, MachineLifecycleObservation,
+        MachineLifecycleObservationVersion, MachineLifecycleSnapshot, MachineLifecycleStoreRecord,
+        PreparedDurableTailRecoverySource, PreparedHeadCanonicalProvisionalTail,
+        PreparedRecoveryInputSnapshot, PreparedRecoveryInputStateMutation,
+        PreparedRecoveryReceiptSource, PreparedRuntimeSessionCommit,
+        PreparedRuntimeSessionCommitPayload, PreparedRuntimeSessionCommitResult,
+        PreparedWholeBlobProvisionalTail, PreparedWholeBlobRewriteStoreParts,
+        PreparedWholeBlobSnapshotCas, RecoveryCommitStatus, RecoveryInputSetRevision,
+        RecoveryInputStateMutation, RuntimeDeliveryAuthorityCasOutcome,
         RuntimeDeliveryAuthorityRecord, RuntimeDeliveryStoreRecord, RuntimeSessionAuthority,
         RuntimeSessionAuthorityReadCost, RuntimeSessionPersistenceProfile,
         RuntimeSessionResumeObservation, RuntimeStore, RuntimeStoreError, RuntimeStoreWriteFence,
@@ -742,14 +743,22 @@ CREATE TABLE IF NOT EXISTS runtime_direct_member_high_waters (
                     5 | 6 if target_current => {}
                     version
                         if target_current
-                            && version
+                            && (version
                                 == u64::from(
-                                    meerkat_core::generated::session_persistence_version_authority::stored_input_state_version(),
-                                ) =>
+                                    meerkat_core::generated::session_persistence_version_authority::stored_input_state_version_for_row(false),
+                                )
+                                || version
+                                    == u64::from(
+                                        meerkat_core::generated::session_persistence_version_authority::stored_input_state_version(),
+                                    )) =>
                     {
                         // A file already at the current encoding is verified,
                         // not rewritten: the row must already be exactly what
-                        // this binary would write.
+                        // this binary would write. This binary stamps a row
+                        // with the baseline version unless it carries a fact
+                        // only the current version can hold, and the
+                        // exact-bytes check below holds the stamp to the
+                        // row's own facts.
                         let stored: StoredInputState =
                             serde_json::from_value(encoded).map_err(|error| error.to_string())?;
                         validate_pre_0_8_10_row_identity(input_id, &stored)?;
@@ -3554,7 +3563,7 @@ END";
                 serde_json::from_slice(&carried_v3).expect("carried v3 json");
             assert_eq!(
                 carried_v3_json["stored_input_state_version"],
-                meerkat_core::generated::session_persistence_version_authority::stored_input_state_version()
+                meerkat_core::generated::session_persistence_version_authority::stored_input_state_version_for_row(false)
             );
             for field in [
                 "input_id",
@@ -3934,7 +3943,7 @@ END";
             let successor = load_row(&conn, "runtime", &input_id);
             assert_eq!(
                 serde_json::from_slice::<serde_json::Value>(&successor).expect("successor json")["stored_input_state_version"],
-                meerkat_core::generated::session_persistence_version_authority::stored_input_state_version()
+                meerkat_core::generated::session_persistence_version_authority::stored_input_state_version_for_row(false)
             );
 
             conn.execute_batch(
@@ -3947,14 +3956,57 @@ END";
             )
             .expect("target ledger");
             let tx = conn.transaction().expect("rerun tx");
-            assert_eq!(
-                prepare_pre_0_8_10_runtime_input_states(&tx)
-                    .expect("target-v2 rerun")
-                    .changed,
-                0
-            );
+            let rerun = prepare_pre_0_8_10_runtime_input_states(&tx).expect("target-v2 rerun");
+            assert_eq!(rerun.changed, 0);
+            assert!(rerun.refused.is_empty(), "{:?}", rerun.refused);
             tx.commit().expect("rerun commit");
             assert_eq!(load_row(&conn, "runtime", &input_id), successor);
+        }
+
+        /// A store a released 0.9.4 binary wrote holds every runtime input
+        /// row at stored input state version 7 under runtime-store ledger 3.
+        /// Version 7 is still the encoding this binary writes for a row
+        /// without a requeue fact, so a maintenance rerun over such a store
+        /// reads those rows as already canonical: nothing is rewritten and
+        /// nothing is refused as not admitted.
+        #[test]
+        fn maintenance_prepare_rerun_accepts_the_v7_rows_of_a_store_released_0_9_4_wrote() {
+            let mut conn = Connection::open_in_memory().expect("open");
+            conn.execute_batch(CREATE_RUNTIME_SCHEMA_SQL)
+                .expect("runtime v1 schema");
+            let (input_id, source) = legacy_prompt_row();
+            insert_row(&conn, "runtime", &input_id, &source);
+            let tx = conn.transaction().expect("bridge tx");
+            assert_eq!(
+                prepare_pre_0_8_10_runtime_input_states(&tx)
+                    .expect("bridge")
+                    .changed,
+                1
+            );
+            tx.commit().expect("bridge commit");
+            let released_row = load_row(&conn, "runtime", &input_id);
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&released_row).expect("row json")["stored_input_state_version"],
+                7,
+                "a row without a requeue fact is in the version 7 encoding 0.9.4 writes"
+            );
+
+            conn.execute_batch(
+                "CREATE TABLE meerkat_schema (
+                     domain TEXT PRIMARY KEY,
+                     version INTEGER NOT NULL
+                 );
+                 INSERT INTO meerkat_schema (domain, version)
+                 VALUES ('runtime-store', 3);",
+            )
+            .expect("the runtime-store ledger 0.9.4 writes");
+            let tx = conn.transaction().expect("rerun tx");
+            let rerun = prepare_pre_0_8_10_runtime_input_states(&tx)
+                .expect("a rerun over a store 0.9.4 wrote");
+            assert_eq!(rerun.changed, 0);
+            assert!(rerun.refused.is_empty(), "{:?}", rerun.refused);
+            tx.commit().expect("rerun commit");
+            assert_eq!(load_row(&conn, "runtime", &input_id), released_row);
         }
 
         /// A row a 0.8.11 to 0.8.52 binary wrote (v5), or a 0.9.0 to 0.9.3
@@ -9390,7 +9442,11 @@ ORDER BY runtime_id";
     /// release left pending could never be finalized. Such a row is compared as
     /// the current typed decoder reads it, re-encoded. A row at the current
     /// version is compared exactly as stored, and a row that does not decode
-    /// stays as stored, so any other difference is still stale.
+    /// stays as stored, so any other difference is still stale. A row this
+    /// binary writes without a requeue fact keeps the baseline stamp, below
+    /// the current version, and is re-encoded too: the stamp cannot tell it
+    /// from an earlier release's row of that version, whose bytes may differ,
+    /// and its own re-encoding is the same bytes.
     fn input_row_in_current_encoding(stored: Vec<u8>) -> Vec<u8> {
         use meerkat_core::generated::session_persistence_version_authority as version_authority;
 
@@ -11883,16 +11939,112 @@ ORDER BY runtime_id";
             Self::new_whole_blob(path)
         }
 
+        /// Open an EXISTING runtime database for an operator verb, in the
+        /// persistence profile its own rows claim, without the maintenance a
+        /// host's open performs.
+        ///
+        /// A database with a durable head-canonical claim (the profile pin, a
+        /// head-canonical authority or an activation) opens as the
+        /// head-canonical store co-located with its session store; any other
+        /// opens as a WholeBlob runtime database, as
+        /// [`Self::open_existing_whole_blob`] opens it. Read-only preflights
+        /// run first and refuse typed:
+        /// - a missing database (`NotFound`);
+        /// - a runtime-store schema other than this binary's;
+        /// - for a head-canonical database, a co-tenant session-store schema
+        ///   other than this binary's, an unpinned profile, or a
+        ///   head-canonical activation still pending.
+        ///
+        /// A head-canonical database then opens without any of a host's
+        /// open-time maintenance: no schema is created or migrated, no pin is
+        /// written, no activation runs (the owning host stages the realm's
+        /// inline media before it activates), and no runtime authority still
+        /// in the flat boundary form is rewritten (such an authority refuses
+        /// typed at the first read or commit that needs it instead). What
+        /// remains is what any open of the same file writes: the WAL
+        /// journal-mode conversion of a database not yet in WAL mode, and the
+        /// `<file>.mfence` lock sibling and the WAL sidecars.
+        pub fn open_existing(path: impl Into<PathBuf>) -> Result<Self, RuntimeStoreError> {
+            let path = path.into();
+            validate_runtime_database_file(&path)?;
+            if !path.is_file() {
+                return Err(RuntimeStoreError::NotFound(format!(
+                    "no runtime database at {}",
+                    path.display()
+                )));
+            }
+            let head_canonical = {
+                let conn = Self::open_existing_read_only(&path)?;
+                Self::preflight_existing_runtime_schema_in(&conn, &path)?;
+                let head_canonical = head_canonical_profile_has_durable_claim(&conn)?;
+                if head_canonical {
+                    Self::preflight_existing_schema_domain_in(
+                        &conn,
+                        &path,
+                        &meerkat_store::sqlite_store::SESSION_STORE_DOMAIN,
+                        "session-store schema",
+                        "session-store schema ledger entry; open it once with the host that owns it",
+                    )?;
+                    Self::refuse_head_canonical_host_maintenance_in(&conn, &path)?;
+                }
+                head_canonical
+            };
+            if !head_canonical {
+                return Self::new_whole_blob(path);
+            }
+            let (path, execution_custody) = bind_runtime_execution_custody(path)?;
+            Ok(Self::head_canonical_store(path, execution_custody))
+        }
+
+        /// Refuse an operator open of a head-canonical database that a host's
+        /// open would still maintain: an unpinned profile, or a head-canonical
+        /// activation still pending (the skip test of the activation pass).
+        fn refuse_head_canonical_host_maintenance_in(
+            conn: &Connection,
+            path: &Path,
+        ) -> Result<(), RuntimeStoreError> {
+            let pending = || {
+                RuntimeStoreError::Unsupported(format!(
+                    "runtime database {} has a head-canonical activation pending; open it once \
+                     with the host that owns it before resolving a held tail",
+                    path.display()
+                ))
+            };
+            if !head_canonical_profile_is_pinned(conn)? {
+                return Err(pending());
+            }
+            for runtime_id in head_canonical_activation_candidate_ids(conn)? {
+                let authority = load_head_canonical_authority(conn, &runtime_id)?;
+                let marker = load_head_canonical_activation_marker(conn, &runtime_id)?;
+                if !matches!(
+                    (
+                        authority.as_ref(),
+                        marker.as_ref().map(|marker| marker.state)
+                    ),
+                    (Some(_), None | Some(HeadCanonicalActivationState::Complete))
+                ) {
+                    return Err(pending());
+                }
+            }
+            Ok(())
+        }
+
         /// Read the recorded runtime-store schema version over a read-only
         /// connection and refuse an older database typed, so an operator
         /// diagnose never runs a migration.
         fn preflight_existing_runtime_schema_read_only(
             path: &Path,
         ) -> Result<(), RuntimeStoreError> {
+            let conn = Self::open_existing_read_only(path)?;
+            Self::preflight_existing_runtime_schema_in(&conn, path)
+        }
+
+        /// A read-only connection for an operator open's preflights.
+        fn open_existing_read_only(path: &Path) -> Result<Connection, RuntimeStoreError> {
             // #1551: even a read-only connection names sidecars after this
             // path; refuse an unsafe database file before opening it.
             meerkat_sqlite::validate_database_file(path).map_err(map_shared_sqlite_error)?;
-            let conn = Connection::open_with_flags(
+            Connection::open_with_flags(
                 path,
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
                     | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -11902,11 +12054,39 @@ ORDER BY runtime_id";
                     "read-only preflight of {} failed: {error}",
                     path.display()
                 ))
-            })?;
+            })
+        }
+
+        fn preflight_existing_runtime_schema_in(
+            conn: &Connection,
+            path: &Path,
+        ) -> Result<(), RuntimeStoreError> {
+            Self::preflight_existing_schema_domain_in(
+                conn,
+                path,
+                &RUNTIME_STORE_DOMAIN,
+                "schema",
+                "runtime-store schema ledger entry; it is not a meerkat runtime store",
+            )
+        }
+
+        /// Compare one schema domain's recorded version with this binary's
+        /// over the caller's read-only connection, refusing an older, newer
+        /// or absent domain typed, so an operator open never migrates or
+        /// creates that domain. `schema` names the domain's version in the
+        /// refusal, and `absent` completes the refusal of a domain with no
+        /// ledger entry.
+        fn preflight_existing_schema_domain_in(
+            conn: &Connection,
+            path: &Path,
+            domain: &meerkat_sqlite::SchemaDomain,
+            schema: &str,
+            absent: &str,
+        ) -> Result<(), RuntimeStoreError> {
             let recorded: Option<i64> = conn
                 .query_row(
                     "SELECT version FROM meerkat_schema WHERE domain = ?1",
-                    [RUNTIME_STORE_DOMAIN.name],
+                    [domain.name],
                     |row| row.get(0),
                 )
                 .optional()
@@ -11916,19 +12096,19 @@ ORDER BY runtime_id";
                         path.display()
                     ))
                 })?;
-            let current = i64::try_from(RUNTIME_STORE_DOMAIN.migrations.len()).unwrap_or(i64::MAX);
+            let current = domain.supported_version();
             match recorded {
                 Some(version) if version == current => Ok(()),
                 Some(version) if version < current => Err(RuntimeStoreError::Unsupported(format!(
-                    "runtime database {} records schema version {version} but this binary expects {current}; the repair does not migrate a store in place, open it once with the gateway that owns it (or a matching rkat run) before repairing",
+                    "runtime database {} records {schema} version {version} but this binary expects {current}; the repair does not migrate a store in place, open it once with the gateway that owns it (or a matching rkat run) before repairing",
                     path.display()
                 ))),
                 Some(version) => Err(RuntimeStoreError::Unsupported(format!(
-                    "runtime database {} records schema version {version}, newer than this binary's {current}; use a matching or newer rkat",
+                    "runtime database {} records {schema} version {version}, newer than this binary's {current}; use a matching or newer rkat",
                     path.display()
                 ))),
                 None => Err(RuntimeStoreError::Unsupported(format!(
-                    "runtime database {} has no runtime-store schema ledger entry; it is not a meerkat runtime store",
+                    "runtime database {} has no {absent}",
                     path.display()
                 ))),
             }
@@ -12038,7 +12218,16 @@ ORDER BY runtime_id";
             repair_flat_physical_head_boundaries(&mut conn)?;
             drop(conn);
             let (path, execution_custody) = bind_runtime_execution_custody(path)?;
-            Ok(Self {
+            Ok(Self::head_canonical_store(path, execution_custody))
+        }
+
+        /// The head-canonical store over its bound database, once the
+        /// database is open and maintained.
+        fn head_canonical_store(
+            path: PathBuf,
+            execution_custody: crate::store::RuntimeStoreExecutionCustody,
+        ) -> Self {
+            Self {
                 path,
                 execution_custody,
                 session_persistence_profile: RuntimeSessionPersistenceProfile::HeadCanonicalV1,
@@ -12056,7 +12245,7 @@ ORDER BY runtime_id";
                 input_persist_ack_loss: crate::store::InputPersistAckLossFault::default(),
                 #[cfg(test)]
                 machine_lifecycle_commit_pause: std::sync::Mutex::new(None),
-            })
+            }
         }
 
         /// Convert a standalone WholeBlob runtime database in place to the
@@ -15986,6 +16175,22 @@ ORDER BY runtime_id";
             let Some(next) = transition.next(current.as_ref()) else {
                 return Ok(ContinuationAdmissionOutcome::Rejected { current });
             };
+            let next = match next {
+                ContinuationAdmissionEntry::Holds(next) => next,
+                ContinuationAdmissionEntry::Released => {
+                    tx.execute(
+                        r"
+                        DELETE FROM runtime_continuation_admissions
+                        WHERE runtime_id = ?1 AND delivery_id = ?2
+                        ",
+                        params![runtime_id_text(address), delivery_id],
+                    )
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                    tx.commit()
+                        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                    return Ok(ContinuationAdmissionOutcome::Released);
+                }
+            };
             let state = match &next {
                 ContinuationAdmission::Reserved { .. } => "reserved",
                 ContinuationAdmission::Applied { .. } => "applied",
@@ -16357,6 +16562,222 @@ ORDER BY runtime_id";
             })
             .await
             .map_err(|err| RuntimeStoreError::Internal(format!("Task join failed: {err}")))?
+        }
+
+        fn supports_whole_blob_run_rebase(&self) -> bool {
+            true
+        }
+
+        async fn commit_prepared_whole_blob_run_rebase(
+            &self,
+            runtime_id: &LogicalRuntimeId,
+            rebase: crate::store::PreparedWholeBlobRunRebaseStoreParts,
+        ) -> Result<crate::store::WholeBlobRunRebaseOutcome, RuntimeStoreError> {
+            self.require_whole_blob_session_operation(
+                runtime_id,
+                "commit_prepared_whole_blob_run_rebase",
+            )?;
+            let (issued_committed, issued_tail) = rebase.issued_authorities()?;
+            let (
+                rewrite,
+                expected_tail,
+                _run_id,
+                _candidate_blob_sha256,
+                candidate_bytes,
+                conversation_digest,
+                message_count,
+                candidate_catalog_entry,
+                candidate_compaction_intents,
+            ) = rebase.into_parts();
+            let (
+                expected,
+                successor_session_id,
+                successor_blob_sha256,
+                successor_bytes,
+                mut successor_catalog_entry,
+                compaction_projection_intents,
+            ) = rewrite.into_tuple();
+            if expected.session_id() != &successor_session_id
+                || &LogicalRuntimeId::for_session(&successor_session_id) != runtime_id
+                || candidate_catalog_entry.session_id() != &successor_session_id
+                || candidate_catalog_entry.persistence_profile()
+                    != RuntimeSessionPersistenceProfile::WholeBlobV1
+                || u64::try_from(candidate_catalog_entry.message_count()).ok()
+                    != Some(message_count)
+            {
+                return Err(session_authority_conflict(
+                    runtime_id,
+                    "prepared WholeBlob re-base does not bind this runtime/session",
+                ));
+            }
+            // As for a tail write: the candidate's facts are a pure function
+            // of its bytes, served only for an authority naming its digest.
+            self.whole_blob_transcript_facts.record(
+                runtime_id,
+                issued_tail.candidate_blob_sha256(),
+                crate::store::WholeBlobCommittedTranscriptFacts::new(
+                    conversation_digest.clone(),
+                    message_count,
+                ),
+                None,
+            );
+            let catalog_json = serde_json::to_vec(&candidate_catalog_entry)
+                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+            let compaction_intents_json = serde_json::to_vec(&candidate_compaction_intents)
+                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+            let path = self.path.clone();
+            let runtime_id = runtime_id.clone();
+            spawn_blocking_holding_claim(move || {
+                let mut conn = open_runtime_connection(&path)?;
+                let tx = begin_runtime_transaction(&mut conn)?;
+                refuse_whole_blob_write_under_head_authority(
+                    &tx,
+                    &runtime_id,
+                    "whole-BLOB run re-base",
+                )?;
+                let current = load_whole_blob_store_authority(&tx, &runtime_id)?;
+                let current_tail = load_whole_blob_provisional_metadata(&tx, &runtime_id)?
+                    .map(|existing| existing.authority);
+                if current.as_ref() == Some(&issued_committed)
+                    && current_tail.as_ref() == Some(&issued_tail)
+                {
+                    return Ok(crate::store::WholeBlobRunRebaseOutcome::Applied {
+                        committed: issued_committed,
+                        tail: issued_tail,
+                    });
+                }
+                if current.as_ref() != Some(&expected) || current_tail != expected_tail {
+                    return Ok(crate::store::WholeBlobRunRebaseOutcome::Stale);
+                }
+                // The re-base is the compaction's boundary: its intents enter
+                // the outbox in this transaction (below), unless one is
+                // already finalized or held with other content.
+                reject_finalized_compaction_projection_replays(
+                    &tx,
+                    &runtime_id,
+                    &compaction_projection_intents,
+                )?;
+                // Drop the old tail first: an ordinary snapshot write refuses
+                // while a store-owned candidate exists.
+                if current_tail.is_some() {
+                    let deleted = tx
+                        .execute(
+                            "DELETE FROM runtime_whole_blob_provisional_tails WHERE runtime_id = ?1",
+                            params![runtime_id_text(&runtime_id)],
+                        )
+                        .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                    if deleted != 1 {
+                        return Err(session_authority_conflict(
+                            &runtime_id,
+                            "WholeBlob re-base lost the tail it replaces",
+                        ));
+                    }
+                }
+                let runtime_state = load_runtime_session_catalog_entry_in_txn(&tx, &runtime_id)?
+                    .ok_or_else(|| {
+                        session_authority_conflict(
+                            &runtime_id,
+                            "prepared WholeBlob re-base predecessor has no catalog projection",
+                        )
+                    })?
+                    .runtime_state();
+                successor_catalog_entry.set_runtime_state(runtime_state);
+                let committed = upsert_runtime_snapshot_issued(
+                    &tx,
+                    &runtime_id,
+                    successor_bytes.as_ref(),
+                    &successor_session_id,
+                    &successor_blob_sha256,
+                    &successor_catalog_entry,
+                )?;
+                if committed != issued_committed {
+                    return Err(session_authority_conflict(
+                        &runtime_id,
+                        "WholeBlob re-base issued an authority other than its prepared successor",
+                    ));
+                }
+                insert_compaction_projection_outbox_intents(
+                    &tx,
+                    &runtime_id,
+                    &compaction_projection_intents,
+                )?;
+                let base_revision =
+                    i64::try_from(issued_tail.base_store_revision()).map_err(|_| {
+                        RuntimeStoreError::WriteFailed(format!(
+                            "WholeBlob re-base revision exceeds SQLite INTEGER for runtime {runtime_id}"
+                        ))
+                    })?;
+                let message_count = i64::try_from(message_count).map_err(|_| {
+                    RuntimeStoreError::WriteFailed(format!(
+                        "WholeBlob re-base message count exceeds SQLite INTEGER for runtime {runtime_id}"
+                    ))
+                })?;
+                tx.execute(
+                    r"
+                    INSERT INTO runtime_whole_blob_bodies (blob_sha256, session_snapshot)
+                    VALUES (?1, ?2)
+                    ON CONFLICT(blob_sha256) DO NOTHING
+                    ",
+                    params![issued_tail.candidate_blob_sha256(), candidate_bytes.as_ref()],
+                )
+                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                tx.execute(
+                    r"
+                    INSERT INTO runtime_whole_blob_provisional_tails
+                        (runtime_id, authority_version, session_id, base_store_revision,
+                         base_blob_sha256, run_id, candidate_sequence,
+                         candidate_blob_sha256, conversation_digest, message_count,
+                         catalog_json, compaction_intents_json)
+                    VALUES (?1, 1, ?2, ?3, ?4, ?5, 1, ?6, ?7, ?8, ?9, ?10)
+                    ",
+                    params![
+                        runtime_id_text(&runtime_id),
+                        issued_tail.session_id().to_string(),
+                        base_revision,
+                        issued_tail.base_blob_sha256(),
+                        issued_tail.run_id().0.to_string(),
+                        issued_tail.candidate_blob_sha256(),
+                        conversation_digest,
+                        message_count,
+                        catalog_json,
+                        compaction_intents_json,
+                    ],
+                )
+                .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                // The replaced tail's candidate body, unless another row still
+                // names it (the new tail or the committed successor may).
+                if let Some(old_tail) = current_tail.as_ref()
+                    && old_tail.candidate_blob_sha256() != issued_tail.candidate_blob_sha256()
+                {
+                    tx.execute(
+                        r"
+                        DELETE FROM runtime_whole_blob_bodies
+                        WHERE blob_sha256 = ?1
+                          AND NOT EXISTS (
+                              SELECT 1 FROM runtime_whole_blob_authority
+                              WHERE blob_sha256 = ?1
+                          )
+                          AND NOT EXISTS (
+                              SELECT 1 FROM runtime_whole_blob_provisional_tails
+                              WHERE candidate_blob_sha256 = ?1
+                                 OR base_blob_sha256 = ?1
+                          )
+                        ",
+                        params![old_tail.candidate_blob_sha256()],
+                    )
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                }
+                // The predecessor's committed body went with the snapshot
+                // upsert above: the old tail no longer named it as its base.
+                tx.commit()
+                    .map_err(|error| RuntimeStoreError::WriteFailed(error.to_string()))?;
+                Ok(crate::store::WholeBlobRunRebaseOutcome::Applied {
+                    committed,
+                    tail: issued_tail,
+                })
+            })
+            .await
+            .map_err(|error| RuntimeStoreError::Internal(format!("Task join failed: {error}")))?
         }
 
         async fn atomic_apply(
@@ -19528,6 +19949,7 @@ ORDER BY runtime_id";
                 foreign.try_lock().unwrap();
                 assert!(matches!(owner.try_acquire_shared(), Err(Busy)));
                 assert!(matches!(owner.try_acquire_governed(), Err(Busy)));
+                foreign.unlock().unwrap();
                 drop(foreign);
                 owner.try_acquire_shared().unwrap();
                 owner.try_acquire_governed().unwrap();
@@ -22199,6 +22621,171 @@ ORDER BY runtime_id";
                     .unwrap()
                     .is_some(),
                 "marker-first retry must install the exact current authority"
+            );
+        }
+
+        fn schema_ledger_version(path: &Path, domain: &str) -> i64 {
+            let conn = Connection::open(path).unwrap();
+            conn.query_row(
+                "SELECT version FROM meerkat_schema WHERE domain = ?1",
+                params![domain],
+                |row| row.get(0),
+            )
+            .unwrap()
+        }
+
+        fn set_schema_ledger_version(path: &Path, domain: &str, version: i64) {
+            let conn = Connection::open(path).unwrap();
+            conn.execute(
+                "UPDATE meerkat_schema SET version = ?2 WHERE domain = ?1",
+                params![domain, version],
+            )
+            .unwrap();
+        }
+
+        #[test]
+        fn open_existing_opens_each_database_in_the_profile_its_rows_claim() {
+            let dir = TempDir::new().unwrap();
+            let whole_blob = dir.path().join("runtime.sqlite3");
+            drop(SqliteRuntimeStore::new_whole_blob(&whole_blob).unwrap());
+            let head_canonical = dir.path().join("sessions.sqlite3");
+            drop(SqliteRuntimeStore::new_head_canonical(&head_canonical).unwrap());
+            let head_canonical_before = std::fs::read(&head_canonical).unwrap();
+
+            let opened = SqliteRuntimeStore::open_existing(&whole_blob).unwrap();
+            assert_eq!(
+                RuntimeStore::session_persistence_profile(&opened),
+                RuntimeSessionPersistenceProfile::WholeBlobV1
+            );
+            let opened = SqliteRuntimeStore::open_existing(&head_canonical).unwrap();
+            assert_eq!(
+                RuntimeStore::session_persistence_profile(&opened),
+                RuntimeSessionPersistenceProfile::HeadCanonicalV1
+            );
+            drop(opened);
+            assert_eq!(
+                std::fs::read(&head_canonical).unwrap(),
+                head_canonical_before,
+                "a pinned, activated database opens without any host maintenance"
+            );
+
+            let missing = dir.path().join("missing.sqlite3");
+            assert!(matches!(
+                SqliteRuntimeStore::open_existing(&missing),
+                Err(RuntimeStoreError::NotFound(_))
+            ));
+            assert!(!missing.exists(), "a refused open creates no database");
+        }
+
+        #[test]
+        fn open_existing_refuses_an_older_runtime_schema_without_migrating_it() {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("runtime.sqlite3");
+            drop(SqliteRuntimeStore::new_whole_blob(&path).unwrap());
+            let current = schema_ledger_version(&path, RUNTIME_STORE_DOMAIN.name);
+            set_schema_ledger_version(&path, RUNTIME_STORE_DOMAIN.name, current - 1);
+            let before = std::fs::read(&path).unwrap();
+
+            let refused = SqliteRuntimeStore::open_existing(&path);
+            assert!(
+                matches!(
+                    &refused,
+                    Err(RuntimeStoreError::Unsupported(message))
+                        if message.contains("records schema version")
+                ),
+                "{:?}",
+                refused.as_ref().err()
+            );
+            assert_eq!(
+                schema_ledger_version(&path, RUNTIME_STORE_DOMAIN.name),
+                current - 1,
+                "the refused open migrates nothing"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
+
+        #[test]
+        fn open_existing_refuses_an_older_session_schema_without_migrating_it() {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("sessions.sqlite3");
+            drop(SqliteRuntimeStore::new_head_canonical(&path).unwrap());
+            let session_domain = meerkat_store::sqlite_store::SESSION_STORE_DOMAIN.name;
+            let current = schema_ledger_version(&path, session_domain);
+            set_schema_ledger_version(&path, session_domain, current - 1);
+            let before = std::fs::read(&path).unwrap();
+
+            let refused = SqliteRuntimeStore::open_existing(&path);
+            assert!(
+                matches!(
+                    &refused,
+                    Err(RuntimeStoreError::Unsupported(message))
+                        if message.contains("records session-store schema version")
+                ),
+                "{:?}",
+                refused.as_ref().err()
+            );
+            assert_eq!(
+                schema_ledger_version(&path, session_domain),
+                current - 1,
+                "the refused open migrates nothing"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
+
+        #[test]
+        fn open_existing_refuses_a_pending_activation_and_leaves_it_pending() {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("sessions.sqlite3");
+            drop(SqliteRuntimeStore::new_head_canonical(&path).unwrap());
+            let session_id = Session::new().id().clone();
+            let runtime_id = LogicalRuntimeId::for_session(&session_id);
+            {
+                let mut conn = open_runtime_connection(&path).unwrap();
+                let tx = begin_runtime_transaction(&mut conn).unwrap();
+                tx.execute(
+                    r"
+                    INSERT INTO runtime_head_canonical_activations (
+                        runtime_id, activation_version, state, session_id,
+                        started_at_ms, updated_at_ms
+                    ) VALUES (?1, 1, 'in_progress', ?2, 1, 1)
+                    ",
+                    params![runtime_id_text(&runtime_id), session_id.to_string()],
+                )
+                .unwrap();
+                tx.commit().unwrap();
+            }
+            let before = std::fs::read(&path).unwrap();
+
+            let refused = SqliteRuntimeStore::open_existing(&path);
+            assert!(
+                matches!(
+                    &refused,
+                    Err(RuntimeStoreError::Unsupported(message))
+                        if message.contains("head-canonical activation pending")
+                ),
+                "{:?}",
+                refused.as_ref().err()
+            );
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                before,
+                "the refused open leaves the activation to the owning host"
+            );
+            let conn = Connection::open(&path).unwrap();
+            assert_eq!(
+                conn.query_row(
+                    "SELECT state FROM runtime_head_canonical_activations WHERE runtime_id = ?1",
+                    params![runtime_id_text(&runtime_id)],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+                "in_progress"
+            );
+            assert!(
+                load_head_canonical_authority(&conn, &runtime_id)
+                    .unwrap()
+                    .is_none(),
+                "the refused open installs no authority"
             );
         }
 
@@ -28253,9 +28840,11 @@ ORDER BY runtime_id";
                 completion.phase,
                 crate::input_state::InputTerminalCompletionPhase::Pending
             ));
+            // This binary stamps a row without a requeue fact with the
+            // baseline version.
             let current_stamp = format!(
                 "\"stored_input_state_version\":{}",
-                version_authority::stored_input_state_version()
+                version_authority::stored_input_state_version_for_row(false)
             );
             assert_eq!(
                 serde_json::to_string(&expected).unwrap(),
@@ -29322,6 +29911,376 @@ ORDER BY runtime_id";
                 .unwrap();
             assert_eq!(catalog.updated_at(), stored.updated_at());
             assert_eq!(catalog.message_count(), stored.messages().len());
+        }
+
+        // --- WholeBlob run re-base (unrun until the candidate's validation) -
+
+        fn rebase_with_cursor(mut session: Session, run_id: &RunId, round: u64) -> Session {
+            session
+                .set_run_cursor(&meerkat_core::SessionRunCursor::new(
+                    run_id.clone(),
+                    Vec::new(),
+                    round,
+                    meerkat_core::RunResumePoint::AwaitingModel,
+                ))
+                .unwrap();
+            session
+        }
+
+        fn rebase_compact(session: &Session) -> (Session, meerkat_core::TranscriptRewriteCommit) {
+            let mut compacted = session.clone();
+            let parent = compacted.transcript_revision().unwrap();
+            let commit = compacted
+                .commit_transcript_rewrite(
+                    TranscriptRewriteSelection::MessageRange { start: 0, end: 2 },
+                    vec![Message::User(UserMessage::compaction_summary(
+                        "compacted context",
+                    ))],
+                    TranscriptRewriteReason::new("compaction"),
+                    Some("sqlite-rebase-test".to_string()),
+                    Some(parent),
+                )
+                .unwrap();
+            (compacted, commit)
+        }
+
+        async fn rebase_payload(
+            store: &SqliteRuntimeStore,
+            runtime_id: &LogicalRuntimeId,
+            session_id: &meerkat_core::types::SessionId,
+        ) -> crate::store::VerifiedCommittedWholeBlobPayload {
+            let committed = store
+                .load_committed_whole_blob_snapshot(runtime_id)
+                .await
+                .unwrap()
+                .unwrap();
+            crate::store::VerifiedCommittedWholeBlobPayload::from_committed(session_id, committed)
+                .unwrap()
+        }
+
+        /// A committed one-turn base, plus a run that appended a round after
+        /// it and wrote that round as its first provisional tail.
+        async fn rebase_run_with_tail(
+            store: &SqliteRuntimeStore,
+        ) -> (
+            LogicalRuntimeId,
+            Session,
+            RunId,
+            WholeBlobStoreAuthority,
+            WholeBlobProvisionalTailAuthority,
+        ) {
+            let original = session_with_one_turn();
+            let runtime_id = LogicalRuntimeId::for_session(original.id());
+            store
+                .commit_session_snapshot(
+                    &runtime_id,
+                    SerializedSessionSnapshot {
+                        session_snapshot: serde_json::to_vec(&original).unwrap().into(),
+                    },
+                )
+                .await
+                .unwrap();
+            let base = rebase_payload(store, &runtime_id, original.id())
+                .await
+                .store_authority()
+                .clone();
+            let run_id = RunId::new();
+            let mut live = original;
+            live.push(Message::User(UserMessage::text(
+                "next question".to_string(),
+            )));
+            live.push(Message::BlockAssistant(BlockAssistantMessage {
+                blocks: vec![AssistantBlock::Text {
+                    text: "another verbose answer".to_string(),
+                    meta: None,
+                }],
+                stop_reason: Some(StopReason::EndTurn),
+                identity: meerkat_core::types::TranscriptMessageIdentity::default(),
+                created_at: meerkat_core::types::message_timestamp_now(),
+                assistant_message_id: None,
+            }));
+            let live = rebase_with_cursor(live, &run_id, 0);
+            let first = PreparedWholeBlobProvisionalTail::prepare_from_session(
+                base.clone(),
+                run_id.clone(),
+                1,
+                &live,
+            )
+            .unwrap();
+            let tail = store
+                .write_prepared_whole_blob_provisional_tail(&runtime_id, first)
+                .await
+                .unwrap();
+            (runtime_id, live, run_id, base, tail)
+        }
+
+        #[tokio::test]
+        async fn sqlite_run_rebase_commits_the_compacted_base_and_restarts_the_tail_together() {
+            let (_dir, store) = temp_store();
+            let (runtime_id, live, run_id, base, first_tail) = rebase_run_with_tail(&store).await;
+            let (compacted, commit) = rebase_compact(&live);
+            let payload = rebase_payload(&store, &runtime_id, live.id()).await;
+            let rebase = crate::store::PreparedWholeBlobRunRebase::prepare(
+                payload,
+                Some(first_tail),
+                run_id.clone(),
+                compacted.clone(),
+                std::slice::from_ref(&commit),
+            )
+            .unwrap();
+            let outcome = store
+                .commit_prepared_whole_blob_run_rebase(&runtime_id, rebase.store_parts())
+                .await
+                .unwrap();
+            let crate::store::WholeBlobRunRebaseOutcome::Applied { committed, tail } = outcome
+            else {
+                unreachable!("the re-base applies");
+            };
+            assert_eq!(committed.store_revision(), base.store_revision() + 1);
+            assert_eq!(tail.base_store_revision(), committed.store_revision());
+            assert_eq!(tail.candidate_sequence(), 1);
+            assert_eq!(tail.run_id(), &run_id);
+            let stored = store
+                .load_committed_whole_blob_snapshot(&runtime_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.authority(), &committed);
+            assert!(stored.session().try_run_cursor().unwrap().is_none());
+            let loaded = store
+                .load_whole_blob_provisional_tail(&runtime_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(loaded.authority(), &tail);
+            let replay = store
+                .commit_prepared_whole_blob_run_rebase(&runtime_id, rebase.store_parts())
+                .await
+                .unwrap();
+            assert_eq!(
+                replay,
+                crate::store::WholeBlobRunRebaseOutcome::Applied {
+                    committed: committed.clone(),
+                    tail,
+                }
+            );
+            let mut next = compacted;
+            next.push(Message::User(UserMessage::text(
+                "after the compaction".to_string(),
+            )));
+            let next = rebase_with_cursor(next, &run_id, 1);
+            let second = PreparedWholeBlobProvisionalTail::prepare_from_session(
+                committed.clone(),
+                run_id,
+                2,
+                &next,
+            )
+            .unwrap();
+            let second_tail = store
+                .write_prepared_whole_blob_provisional_tail(&runtime_id, second)
+                .await
+                .unwrap();
+            assert_eq!(
+                second_tail.base_store_revision(),
+                committed.store_revision()
+            );
+            assert_eq!(second_tail.candidate_sequence(), 2);
+        }
+
+        #[tokio::test]
+        async fn sqlite_closing_save_rebase_shares_one_body_and_keeps_it_for_the_base() {
+            let (_dir, store) = temp_store();
+            let (runtime_id, live, run_id, _base, first_tail) = rebase_run_with_tail(&store).await;
+            let (mut compacted, commit) = rebase_compact(&live);
+            compacted.clear_run_cursor();
+            let payload = rebase_payload(&store, &runtime_id, live.id()).await;
+            let rebase = crate::store::PreparedWholeBlobRunRebase::prepare(
+                payload,
+                Some(first_tail),
+                run_id.clone(),
+                compacted.clone(),
+                std::slice::from_ref(&commit),
+            )
+            .unwrap();
+            let outcome = store
+                .commit_prepared_whole_blob_run_rebase(&runtime_id, rebase.store_parts())
+                .await
+                .unwrap();
+            let crate::store::WholeBlobRunRebaseOutcome::Applied { committed, tail } = outcome
+            else {
+                unreachable!("the closing save re-bases");
+            };
+            // The base and the candidate are one body.
+            assert_eq!(tail.candidate_blob_sha256(), committed.blob_sha256());
+            // Replacing the tail drops its candidate body only when nothing
+            // names it: the committed base still does.
+            let mut next = compacted;
+            next.push(Message::User(UserMessage::text(
+                "after the closing save".to_string(),
+            )));
+            let next = rebase_with_cursor(next, &run_id, 1);
+            let second = PreparedWholeBlobProvisionalTail::prepare_from_session(
+                committed.clone(),
+                run_id,
+                2,
+                &next,
+            )
+            .unwrap();
+            store
+                .write_prepared_whole_blob_provisional_tail(&runtime_id, second)
+                .await
+                .unwrap();
+            let stored = store
+                .load_committed_whole_blob_snapshot(&runtime_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.authority(), &committed);
+            assert!(stored.session().try_run_cursor().unwrap().is_none());
+        }
+
+        #[tokio::test]
+        async fn sqlite_single_turn_closing_save_rebases_without_an_earlier_tail() {
+            let (_dir, store) = temp_store();
+            // A committed base and a single-turn run whose one boundary
+            // compacts: no round commit, so no tail before its closing save.
+            let original = session_with_one_turn();
+            let runtime_id = LogicalRuntimeId::for_session(original.id());
+            store
+                .commit_session_snapshot(
+                    &runtime_id,
+                    SerializedSessionSnapshot {
+                        session_snapshot: serde_json::to_vec(&original).unwrap().into(),
+                    },
+                )
+                .await
+                .unwrap();
+            let base = rebase_payload(&store, &runtime_id, original.id())
+                .await
+                .store_authority()
+                .clone();
+            let run_id = RunId::new();
+            let mut live = original;
+            live.push(Message::User(UserMessage::text(
+                "one long question".to_string(),
+            )));
+            live.push(Message::BlockAssistant(BlockAssistantMessage {
+                blocks: vec![AssistantBlock::Text {
+                    text: "the run's only answer".to_string(),
+                    meta: None,
+                }],
+                stop_reason: Some(StopReason::EndTurn),
+                identity: meerkat_core::types::TranscriptMessageIdentity::default(),
+                created_at: meerkat_core::types::message_timestamp_now(),
+                assistant_message_id: None,
+            }));
+            let (compacted, commit) = rebase_compact(&live);
+            let payload = rebase_payload(&store, &runtime_id, live.id()).await;
+            let rebase = crate::store::PreparedWholeBlobRunRebase::prepare(
+                payload,
+                None,
+                run_id.clone(),
+                compacted.clone(),
+                std::slice::from_ref(&commit),
+            )
+            .unwrap();
+            let outcome = store
+                .commit_prepared_whole_blob_run_rebase(&runtime_id, rebase.store_parts())
+                .await
+                .unwrap();
+            let crate::store::WholeBlobRunRebaseOutcome::Applied { committed, tail } = outcome
+            else {
+                unreachable!("the closing save re-bases on a fresh base");
+            };
+            assert_eq!(committed.store_revision(), base.store_revision() + 1);
+            assert_eq!(tail.run_id(), &run_id);
+            assert_eq!(tail.candidate_sequence(), 1);
+            assert_eq!(tail.base_blob_sha256(), committed.blob_sha256());
+            assert_eq!(tail.candidate_blob_sha256(), committed.blob_sha256());
+            let stored = store
+                .load_committed_whole_blob_snapshot(&runtime_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.authority(), &committed);
+            assert_eq!(stored.session().messages(), compacted.messages());
+            let loaded = store
+                .load_whole_blob_provisional_tail(&runtime_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(loaded.authority(), &tail);
+            assert!(
+                Session::from_persisted_bytes(loaded.candidate_bytes())
+                    .unwrap()
+                    .try_run_cursor()
+                    .unwrap()
+                    .is_none()
+            );
+            // An exact replay answers the same pair and writes nothing.
+            assert_eq!(
+                store
+                    .commit_prepared_whole_blob_run_rebase(&runtime_id, rebase.store_parts())
+                    .await
+                    .unwrap(),
+                crate::store::WholeBlobRunRebaseOutcome::Applied { committed, tail }
+            );
+        }
+
+        #[tokio::test]
+        async fn sqlite_run_rebase_is_stale_once_another_writer_moved_the_tail() {
+            let (_dir, store) = temp_store();
+            let (runtime_id, live, run_id, base, first_tail) = rebase_run_with_tail(&store).await;
+            let (compacted, commit) = rebase_compact(&live);
+            let payload = rebase_payload(&store, &runtime_id, live.id()).await;
+            let rebase = crate::store::PreparedWholeBlobRunRebase::prepare(
+                payload,
+                Some(first_tail),
+                run_id.clone(),
+                compacted,
+                std::slice::from_ref(&commit),
+            )
+            .unwrap();
+            let mut moved = live;
+            moved.push(Message::User(UserMessage::text(
+                "a racing round".to_string(),
+            )));
+            let moved = rebase_with_cursor(moved, &run_id, 1);
+            let racing = PreparedWholeBlobProvisionalTail::prepare_from_session(
+                base.clone(),
+                run_id,
+                2,
+                &moved,
+            )
+            .unwrap();
+            let racing_tail = store
+                .write_prepared_whole_blob_provisional_tail(&runtime_id, racing)
+                .await
+                .unwrap();
+            assert_eq!(
+                store
+                    .commit_prepared_whole_blob_run_rebase(&runtime_id, rebase.store_parts())
+                    .await
+                    .unwrap(),
+                crate::store::WholeBlobRunRebaseOutcome::Stale
+            );
+            assert_eq!(
+                store
+                    .load_whole_blob_store_authority(&runtime_id)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                base
+            );
+            assert_eq!(
+                store
+                    .load_whole_blob_provisional_tail(&runtime_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .authority(),
+                &racing_tail
+            );
         }
 
         #[tokio::test]
@@ -31541,6 +32500,7 @@ ORDER BY runtime_id";
             );
             assert!(!database.exists());
 
+            fence.unlock().unwrap();
             drop(fence);
             assert_eq!(store.load_delivery_generation().await.unwrap(), 0);
             assert!(

@@ -195,3 +195,63 @@ async fn an_administrative_hold_on_the_snapshot_stays_exclusive() {
     drop(hold);
     assert_eq!(fixture.installed.check(&fixture.server), Ok(()));
 }
+
+/// A process this test forks. It holds a copy of every descriptor the test
+/// process has open, as any process spawned meanwhile does until it executes
+/// its program, until it is dropped.
+#[cfg(unix)]
+struct ForkedCopies(nix::unistd::Pid);
+
+#[cfg(unix)]
+impl ForkedCopies {
+    #[allow(unsafe_code, clippy::disallowed_methods)] // the test's own child, which only waits
+    fn fork() -> Self {
+        // SAFETY: the child calls only async-signal-safe functions (alarm and
+        // pause) until a signal ends it.
+        match unsafe { nix::unistd::fork() }.expect("fork") {
+            nix::unistd::ForkResult::Child => {
+                nix::unistd::alarm::set(600);
+                loop {
+                    nix::unistd::pause();
+                }
+            }
+            nix::unistd::ForkResult::Parent { child } => Self(child),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ForkedCopies {
+    fn drop(&mut self) {
+        // On request (MEERKAT_TEST_DESCRIPTOR_COPY_LINGER_MS), the copy stays open
+        // that long first, so an fd sampler watching the run sees it.
+        if let Some(linger) = std::env::var("MEERKAT_TEST_DESCRIPTOR_COPY_LINGER_MS")
+            .ok()
+            .and_then(|millis| millis.parse::<u64>().ok())
+        {
+            std::thread::sleep(std::time::Duration::from_millis(linger));
+        }
+        let _ = nix::sys::signal::kill(self.0, nix::sys::signal::Signal::SIGKILL);
+        let _ = nix::sys::wait::waitpid(self.0, None);
+    }
+}
+
+/// A writer's custody released while a process spawned meanwhile still holds
+/// copies of the test process's descriptors refuses no decision: releasing
+/// custody unlocks it, and no copy keeps it.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_released_writer_refuses_no_decision_while_a_spawned_process_holds_its_descriptor() {
+    let fixture = Installed::new().await;
+    let writer = ConfigWriterLock::try_hold(&fixture.lock_path())
+        .unwrap()
+        .expect("writer custody");
+    let copies = ForkedCopies::fork();
+    drop(writer);
+    assert_eq!(
+        fixture.installed.check(&fixture.server),
+        Ok(()),
+        "a decision right after the writer released, while a spawned process holds copies"
+    );
+    drop(copies);
+}

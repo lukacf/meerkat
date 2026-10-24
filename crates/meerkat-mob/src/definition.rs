@@ -923,6 +923,7 @@ impl MobDefinition {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
+                durable: false,
             })),
         );
         Self {
@@ -1680,6 +1681,7 @@ deny = ["mob_wire", "mob_unwire", "mob_spawn_member"]
                 MeerkatSchema::new(serde_json::json!({"type": "object"})).expect("object schema"),
             ),
             provider_params: None,
+            durable: false,
         };
         let worker = toml::Value::try_from(&profile).expect("profile serializes to TOML");
         let emitted: Vec<&str> = worker
@@ -1841,6 +1843,7 @@ deny = ["mob_wire", "mob_unwire", "mob_spawn_member"]
                         max_inline_peer_notifications: None,
                         output_schema: None,
                         provider_params: None,
+                        durable: false,
                     })),
                 );
                 m

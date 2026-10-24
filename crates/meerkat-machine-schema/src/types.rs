@@ -53,7 +53,7 @@ impl<T: Into<String>> From<T> for CommsRuntimeId {
 
 /// Mob instance identifier.
 ///
-/// Catalog-DSL twin of [`meerkat_mob::ids::MobId`] carried on
+/// Catalog-DSL twin of `meerkat_mob::ids::MobId` carried on
 /// `AttachMobIngress` to record which mob owns a peer-ingress transport
 /// capability. The runtime mirrors the real typed ID; catalog DSL keeps it
 /// stub-grade since this crate is a leaf.

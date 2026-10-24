@@ -609,10 +609,14 @@ fn generated_meerkat_transition_enum_order_is_decoupled_from_dispatch_order() {
     );
 }
 
+/// An input appended after the appended-input section
+/// (`MEERKAT_APPENDED_INPUT_SECTION_LAST`) would emit its transitions ahead of
+/// the late tail and move that tail's published `TransitionId` variants, so
+/// such a transition renders only when the late tail lists it. An unlisted one
+/// is refused with a structured error that names it.
 #[test]
-fn newly_appended_input_transitions_follow_the_existing_compatibility_tail() {
+fn an_unlisted_transition_of_an_input_appended_after_the_appended_section_is_refused() {
     let mut schema = meerkat_machine();
-    let before = render_machine_kernel_module(&schema);
     let mut appended = schema
         .transitions
         .first()
@@ -633,27 +637,16 @@ fn newly_appended_input_transitions_follow_the_existing_compatibility_tail() {
             fields: Vec::new(),
         });
     schema.transitions.push(appended);
-    let after = render_machine_kernel_module(&schema);
-    let variants = |rendered: &str| -> Vec<String> {
-        rendered
-            .split_once("pub enum TransitionId {")
-            .expect("TransitionId enum")
-            .1
-            .split_once("\n}")
-            .expect("TransitionId end")
-            .0
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(str::to_owned)
-            .collect()
-    };
-    let old = variants(&before);
-    let current = variants(&after);
-    assert_eq!(&current[..old.len()], old.as_slice());
-    assert_eq!(
-        current.last().map(String::as_str),
-        Some("OrdinalAppendProbe,")
+
+    let error = try_render_machine_kernel_module(&schema)
+        .expect_err("an unlisted transition of a later input would move the late tail");
+    assert!(
+        matches!(
+            &error,
+            MachineKernelRenderError::UnlistedLateTransition { transition }
+                if transition == "OrdinalAppendProbe"
+        ),
+        "{error:?}"
     );
 }
 

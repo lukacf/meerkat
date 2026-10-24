@@ -200,6 +200,17 @@ impl OpenAiBackendWire {
     fn admits_prompt_cache_fields(&self) -> bool {
         self.backend_kind().admits_prompt_cache_fields()
     }
+
+    /// Whether this wire carries a hosted web search's evidence from one
+    /// stateless step to the next: it asks for the sources each search
+    /// consulted and replays them with the answer's `url_citation`
+    /// annotations. Only the public OpenAI API wire does, the one a live
+    /// provider row proves accepts them back. The ChatGPT backend, Azure
+    /// OpenAI and Copilot wires keep the shape they had before: no sources
+    /// asked for or replayed, and `annotations: []`.
+    fn carries_web_search_evidence(&self) -> bool {
+        matches!(self, Self::PublicOpenAi)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -331,6 +342,136 @@ pub(crate) fn web_search_message_annotations(value: &Value) -> Option<Vec<Value>
         .cloned()
         .collect::<Vec<_>>();
     (!web_citations.is_empty()).then_some(web_citations)
+}
+
+/// The `message_annotations` server content of one assistant message: its
+/// web-search citations, and how many `output_text` parts its text has.
+/// Citation indices count from the start of their own part, and the parts
+/// are joined into one text at capture, so only the citations of a message
+/// with one text part can be placed on its replayed text.
+pub(crate) fn message_citations_content(annotations: Vec<Value>, text_parts: usize) -> Value {
+    serde_json::json!({
+        "type": "message_annotations",
+        "annotations": annotations,
+        "text_parts": text_parts,
+    })
+}
+
+/// The `include` entry that asks for the sources a hosted web search
+/// consulted, inside its `web_search_call` item.
+const WEB_SEARCH_SOURCES_INCLUDE: &str = "web_search_call.action.sources";
+
+/// Add `field` to a Responses request's `include` list, once.
+fn include_response_field(body: &mut Value, field: &str) {
+    match body.get_mut("include").and_then(Value::as_array_mut) {
+        Some(include) => {
+            if !include.iter().any(|entry| entry.as_str() == Some(field)) {
+                include.push(Value::String(field.to_owned()));
+            }
+        }
+        None => body["include"] = serde_json::json!([field]),
+    }
+}
+
+/// Whether `content` is a `message_annotations` block holding at least one
+/// `url_citation`: the web-search citations of one assistant message,
+/// captured beside its text.
+fn is_web_search_citations(content: &Value) -> bool {
+    content.get("type").and_then(Value::as_str) == Some("message_annotations")
+        && content
+            .get("annotations")
+            .and_then(web_search_message_annotations)
+            .is_some()
+}
+
+/// A replayed `web_search_call` as a wire not proven to accept its sources
+/// receives it: `action.sources` removed, the rest as captured.
+fn without_web_search_sources(item: &Value) -> Value {
+    let mut item = item.clone();
+    if let Some(action) = item.get_mut("action").and_then(Value::as_object_mut) {
+        action.remove("sources");
+    }
+    item
+}
+
+/// The `url_citation` annotations captured beside the assistant messages of
+/// one replayed assistant turn, by message item id.
+#[derive(Default)]
+struct WebSearchCitations<'a> {
+    by_message: HashMap<&'a str, &'a [Value]>,
+    /// Messages whose citations cannot be placed on the replayed text: its
+    /// text came from several parts, the block does not say how many (it was
+    /// recorded before the part count was), or the message has more than one
+    /// citations block.
+    unplaceable: HashSet<&'a str>,
+}
+
+impl<'a> WebSearchCitations<'a> {
+    fn of(blocks: &'a [AssistantBlock]) -> Self {
+        let mut citations = Self::default();
+        for block in blocks {
+            let AssistantBlock::ServerToolContent {
+                id: Some(id),
+                content,
+                ..
+            } = block
+            else {
+                continue;
+            };
+            if !is_web_search_citations(content) {
+                continue;
+            }
+            let Some(annotations) = content.get("annotations").and_then(Value::as_array) else {
+                continue;
+            };
+            let one_text_part = content.get("text_parts").and_then(Value::as_u64) == Some(1);
+            if !one_text_part
+                || citations
+                    .by_message
+                    .insert(id.as_str(), annotations.as_slice())
+                    .is_some()
+            {
+                citations.unplaceable.insert(id.as_str());
+            }
+        }
+        citations
+    }
+
+    /// The annotations replayed on message `id`, whose text is `text`: its
+    /// `url_citation` entries whose character range fits the text. A range
+    /// that does not fit is dropped, never moved.
+    fn for_message(&self, id: &str, text: &str) -> Vec<Value> {
+        if self.unplaceable.contains(id) {
+            return Vec::new();
+        }
+        let Some(annotations) = self.by_message.get(id) else {
+            return Vec::new();
+        };
+        let chars = text.chars().count();
+        annotations
+            .iter()
+            .filter(|annotation| {
+                annotation.get("type").and_then(Value::as_str) == Some("url_citation")
+                    && citation_fits(annotation, chars)
+            })
+            .cloned()
+            .collect()
+    }
+}
+
+/// Whether a citation's `start_index..end_index` lies within a text of
+/// `chars` characters.
+fn citation_fits(annotation: &Value, chars: usize) -> bool {
+    let index = |field: &str| {
+        annotation
+            .get(field)
+            .and_then(Value::as_u64)
+            .and_then(|index| usize::try_from(index).ok())
+    };
+    matches!(
+        (index("start_index"), index("end_index")),
+        (Some(start), Some(end)) if start <= end && end <= chars
+    )
 }
 
 fn project_openai_content_blocks(
@@ -486,6 +627,7 @@ fn project_openai_assistant_blocks(
     replay_application: &mut meerkat_core::ReplayApplication<'_>,
     message: meerkat_core::ReplayMessageIndex,
     mode: OpenAiReplayProjectionMode,
+    web_search_evidence: bool,
     blocks: &[AssistantBlock],
 ) -> Result<Vec<AssistantBlock>, LlmError> {
     let mut projected = Vec::with_capacity(blocks.len());
@@ -533,6 +675,19 @@ fn project_openai_assistant_blocks(
             }
             AssistantBlock::ServerToolContent { content, .. }
                 if openai_server_tool_content_replayable(mode, content) =>
+            {
+                Some(meerkat_core::ReplayWireFamily::OpenAi.strip_foreign_metadata(block.clone()))
+            }
+            // A message's web-search citations, on a wire that carries search
+            // evidence: the Responses lowering puts them back on that
+            // message's text; they are never an input item of their own.
+            AssistantBlock::ServerToolContent {
+                id: Some(_),
+                content,
+                ..
+            } if web_search_evidence
+                && matches!(mode, OpenAiReplayProjectionMode::Responses)
+                && is_web_search_citations(content) =>
             {
                 Some(meerkat_core::ReplayWireFamily::OpenAi.strip_foreign_metadata(block.clone()))
             }
@@ -592,14 +747,25 @@ pub(crate) fn project_openai_replay_messages_for_capabilities(
     image_input: bool,
     image_tool_results: bool,
 ) -> Result<Vec<Message>, LlmError> {
-    project_openai_replay_messages_for_target(messages, mode, image_input, image_tool_results)
+    project_openai_replay_messages_for_target(
+        messages,
+        mode,
+        image_input,
+        image_tool_results,
+        false,
+    )
 }
 
+/// `web_search_evidence`: whether the target wire carries a hosted web
+/// search's evidence across steps
+/// (`OpenAiBackendWire::carries_web_search_evidence`); only then do an
+/// assistant message's citations stay in its replayed history.
 pub(crate) fn project_openai_replay_messages_for_target(
     messages: &[Message],
     mode: OpenAiReplayProjectionMode,
     image_input: bool,
     image_tool_results: bool,
+    web_search_evidence: bool,
 ) -> Result<Vec<Message>, LlmError> {
     let mut projected = Vec::with_capacity(messages.len());
     // Responses can now accept image parts in `function_call_output.output`.
@@ -696,6 +862,7 @@ pub(crate) fn project_openai_replay_messages_for_target(
                     &mut replay_application,
                     message_index,
                     mode,
+                    web_search_evidence,
                     &assistant.blocks,
                 )?;
                 if blocks.is_empty() {
@@ -968,18 +1135,21 @@ impl OpenAiClient {
         let wire_tag = self.wire_openai_tag(request);
         let cache_breakpoints =
             ResponsesCacheBreakpoints::for_request(request, wire_tag.as_deref());
+        let web_search_evidence = self.backend_wire.carries_web_search_evidence();
         let (input, instructions, _) = if self.is_chatgpt_backend_wire() {
             Self::validate_chatgpt_system_messages(&request.messages)?;
             Self::convert_to_responses_input_with_system_mode(
                 &request.messages,
                 SystemMessageMode::ExtractToInstructions,
                 cache_breakpoints,
+                web_search_evidence,
             )?
         } else {
             Self::convert_to_responses_input_with_system_mode(
                 &request.messages,
                 SystemMessageMode::IncludeInInput,
                 cache_breakpoints,
+                web_search_evidence,
             )?
         };
         let reasoning_enabled = Self::request_supports_reasoning_payload(request);
@@ -1169,6 +1339,7 @@ impl OpenAiClient {
         }
 
         // Inject provider-native web search tool from typed tag.
+        let mut hosted_web_search = false;
         if let Some(web_search) = wire_tag.as_deref().and_then(|t| t.web_search.as_ref()) {
             let ws_value = web_search.as_value();
             if ws_value.is_object() {
@@ -1176,7 +1347,14 @@ impl OpenAiClient {
                     Some(arr) => arr.push(ws_value),
                     None => body["tools"] = Value::Array(vec![ws_value]),
                 }
+                hosted_web_search = true;
             }
+        }
+        // With `store: false` OpenAI keeps nothing of a search, so a later
+        // step sees only what the replayed `web_search_call` item holds: ask
+        // for the sources the search consulted, so they ride along in it.
+        if hosted_web_search && web_search_evidence {
+            include_response_field(&mut body, WEB_SEARCH_SOURCES_INCLUDE);
         }
 
         self.apply_tool_choice(request, &mut body)?;
@@ -1498,11 +1676,15 @@ impl OpenAiClient {
     /// history before this point so Responses replay keeps OpenAI reasoning and
     /// final hosted-tool items together, while provider switches and Chat
     /// Completions mode do not receive OpenAI-private transcript state.
-    fn convert_to_responses_input(messages: &[Message]) -> Result<Vec<Value>, LlmError> {
+    fn convert_to_responses_input(
+        messages: &[Message],
+        web_search_evidence: bool,
+    ) -> Result<Vec<Value>, LlmError> {
         Self::convert_to_responses_input_with_system_mode(
             messages,
             SystemMessageMode::IncludeInInput,
             ResponsesCacheBreakpoints::None,
+            web_search_evidence,
         )
         .map(|(input, _, _)| input)
     }
@@ -1672,10 +1854,16 @@ impl OpenAiClient {
         Some(item)
     }
 
+    /// `web_search_evidence`: the target wire carries a hosted web search's
+    /// evidence (`OpenAiBackendWire::carries_web_search_evidence`). Then an
+    /// assistant message's text replays with its `url_citation` annotations
+    /// and a `web_search_call` with its sources; otherwise the message
+    /// replays `annotations: []` and the call without `action.sources`.
     fn convert_to_responses_input_with_system_mode(
         messages: &[Message],
         system_mode: SystemMessageMode,
         cache_breakpoints: ResponsesCacheBreakpoints,
+        web_search_evidence: bool,
     ) -> Result<
         (
             Vec<Value>,
@@ -1787,6 +1975,11 @@ impl OpenAiClient {
                     }
                 }
                 Message::BlockAssistant(a) => {
+                    let citations = if web_search_evidence {
+                        WebSearchCitations::of(&a.blocks)
+                    } else {
+                        WebSearchCitations::default()
+                    };
                     // BlockAssistantMessage format - render blocks as items
                     for block in &a.blocks {
                         match block {
@@ -1810,7 +2003,8 @@ impl OpenAiClient {
                                     {
                                         item["id"] = Value::String(id.clone());
                                         item["status"] = Value::String("completed".into());
-                                        item["content"] = serde_json::json!([{"type":"output_text","text":text,"annotations":[]}]);
+                                        let annotations = citations.for_message(id, text);
+                                        item["content"] = serde_json::json!([{"type":"output_text","text":text,"annotations":annotations}]);
                                         if let Some(phase) = phase {
                                             item["phase"] =
                                                 serde_json::to_value(phase).map_err(|error| {
@@ -1838,7 +2032,15 @@ impl OpenAiClient {
                                 }
                             }
                             AssistantBlock::ServerToolContent { content, .. } => {
-                                items.push(content.clone());
+                                match content.get("type").and_then(Value::as_str) {
+                                    // Its citations ride on their message's
+                                    // text (the `Text` arm above).
+                                    Some("message_annotations") => {}
+                                    Some("web_search_call") if !web_search_evidence => {
+                                        items.push(without_web_search_sources(content));
+                                    }
+                                    _ => items.push(content.clone()),
+                                }
                             }
                             // Unknown future variants are omitted unless the
                             // OpenAI projection explicitly admits them above.
@@ -2074,7 +2276,10 @@ impl OpenAiClient {
                 "content": Self::image_prompt(&request)
             })]
         } else {
-            Self::convert_to_responses_input(&request.projected_messages)?
+            Self::convert_to_responses_input(
+                &request.projected_messages,
+                self.backend_wire.carries_web_search_evidence(),
+            )?
         };
         let mut tool = serde_json::Map::new();
         tool.insert(
@@ -2353,21 +2558,21 @@ impl OpenAiClient {
         response: reqwest::Response,
     ) -> Result<ProviderImageGenerationOutput, LlmError> {
         let mut stream = Box::pin(response.bytes_stream());
-        let mut buffer = String::with_capacity(512);
+        let mut lines = meerkat_llm_core::streaming::Utf8LineBuffer::with_capacity(512);
         let mut streamed_output_items: Vec<Value> = Vec::new();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|_| LlmError::ConnectionReset)?;
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            lines.push(&chunk);
 
-            while let Some(newline_pos) = buffer.find('\n') {
-                let line = buffer[..newline_pos].trim();
+            while let Some(line) = lines.next_line() {
+                let line = line?;
+                let line = line.trim();
                 let should_process = !line.is_empty() && !line.starts_with(':');
                 let parsed_event = if should_process {
                     Self::parse_responses_sse_line(line)?
                 } else {
                     None
                 };
-                buffer.drain(..=newline_pos);
 
                 let Some(event) = parsed_event else {
                     continue;
@@ -2579,7 +2784,7 @@ impl OpenAiClient {
             for diagnostic in diagnostics { yield diagnostic; }
             let response = response?;
             let mut stream = response.bytes_stream();
-            let mut buffer = String::with_capacity(512);
+            let mut lines = meerkat_llm_core::streaming::Utf8LineBuffer::with_capacity(512);
             let mut usage = Usage::default();
             let mut active_response_id: Option<String> = None;
             let mut saw_stream_text_delta = false;
@@ -2606,15 +2811,15 @@ impl OpenAiClient {
 
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk.map_err(|_| LlmError::ConnectionReset)?;
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                lines.push(&chunk);
 
                 let chunk_yielded = std::cell::Cell::new(false);
                 let mut chunk_consumed_line = false;
-                while let Some(newline_pos) = buffer.find('\n') {
+                while let Some(line) = lines.next_line() {
                     chunk_consumed_line = true;
-                    let line = buffer[..newline_pos].trim();
+                    let line = line?;
+                    let line = line.trim();
                     if line == "data: [DONE]" {
-                        buffer.drain(..=newline_pos);
                         if !done_emitted && saw_terminal_fallback_output {
                             if !completed_items.is_empty() {
                                 let blocks = crate::responses_output::lower_items(completed_items.values(), active_response_id.as_deref())?;
@@ -2654,8 +2859,6 @@ impl OpenAiClient {
                     } else {
                         None
                     };
-
-                    buffer.drain(..=newline_pos);
 
                     if let Some(event) = parsed_event {
                         if let Some(response_id) = event
@@ -2760,6 +2963,10 @@ impl OpenAiClient {
                                                 "message" => {
                                                     // content is an array: [{"type": "output_text", "text": "..."}, ...]
                                                     if let Some(content_parts) = item.get("content").and_then(|c| c.as_array()) {
+                                                        let text_parts = content_parts
+                                                            .iter()
+                                                            .filter(|part| part.get("type").and_then(Value::as_str) == Some("output_text"))
+                                                            .count();
                                                         for part in content_parts {
                                                             if let Some(part_type) = part.get("type").and_then(|t| t.as_str()) {
                                                                 match part_type {
@@ -2774,10 +2981,7 @@ impl OpenAiClient {
                                                                                     .and_then(|v| v.as_str())
                                                                                     .map(std::string::ToString::to_string),
                                                                                 kind: ServerToolKind::WebSearch,
-                                                                                content: serde_json::json!({
-                                                                                    "type": "message_annotations",
-                                                                                    "annotations": annotations
-                                                                                }),
+                                                                                content: message_citations_content(annotations, text_parts),
                                                                                 meta: openai_response_meta(active_response_id.as_deref()),
                                                                             };
                                                                         }
@@ -3336,11 +3540,12 @@ impl LlmClient for OpenAiClient {
     }
 
     fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
-        project_openai_replay_messages_for_capabilities(
+        project_openai_replay_messages_for_target(
             messages,
             OpenAiReplayProjectionMode::Responses,
             self.supports_image_input,
             true,
+            self.backend_wire.carries_web_search_evidence(),
         )
     }
 
@@ -3424,6 +3629,7 @@ impl LlmClient for OpenAiClient {
             &request.messages,
             system_mode,
             ResponsesCacheBreakpoints::EveryInput,
+            self.backend_wire.carries_web_search_evidence(),
         )?;
         let ttl = if tag
             .prompt_cache_options
@@ -4808,6 +5014,181 @@ mod tests {
             axum::serve(listener, app).await.expect("serve test server");
         });
         (format!("http://{addr}"), handle)
+    }
+
+    /// Serves each element of `chunks` as a separate paced HTTP body chunk of
+    /// raw bytes, so one character can straddle two network reads.
+    async fn paced_byte_sse(State(chunks): State<Vec<Vec<u8>>>) -> impl IntoResponse {
+        let body_stream = async_stream::stream! {
+            for chunk in chunks {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                yield Ok::<_, std::convert::Infallible>(axum::body::Bytes::from(chunk));
+            }
+        };
+        (
+            [("content-type", "text/event-stream")],
+            axum::body::Body::from_stream(body_stream),
+        )
+    }
+
+    async fn spawn_openai_paced_byte_server(
+        route: &'static str,
+        chunks: Vec<Vec<u8>>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new()
+            .route(route, post(paced_byte_sse))
+            .with_state(chunks);
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test server");
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    /// `payload` cut into two network chunks inside each multi-byte character
+    /// of `text` (a 3-byte one 1|2 and 2|1, a 4-byte one 1|3, 2|2 and 3|1),
+    /// and on each side of the line break that ends the line holding `text`.
+    fn utf8_split_cases(payload: &str, text: &str) -> Vec<(String, Vec<Vec<u8>>)> {
+        let bytes = payload.as_bytes();
+        let start = payload.find(text).expect("payload holds the text");
+        let mut cases = Vec::new();
+        for (offset, ch) in text.char_indices().filter(|(_, ch)| ch.len_utf8() > 1) {
+            for split in 1..ch.len_utf8() {
+                let at = start + offset + split;
+                cases.push((
+                    format!(
+                        "U+{:04X} split {split}|{}",
+                        ch as u32,
+                        ch.len_utf8() - split
+                    ),
+                    vec![bytes[..at].to_vec(), bytes[at..].to_vec()],
+                ));
+            }
+        }
+        let line_end = start + payload[start..].find('\n').expect("a line break");
+        for (side, at) in [("before", line_end), ("after", line_end + 1)] {
+            cases.push((
+                format!("chunk boundary {side} the line break"),
+                vec![bytes[..at].to_vec(), bytes[at..].to_vec()],
+            ));
+        }
+        cases
+    }
+
+    const SPLIT_TEXT: &str = "don\u{2019}t panic \u{1F642}";
+
+    fn split_responses_payload(text_json: &str) -> String {
+        let delta =
+            format!(r#"data: {{"type":"response.output_text.delta","delta":"{text_json}"}}"#);
+        [
+            delta.as_str(),
+            r#"data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":4,"output_tokens":3}}}"#,
+            "data: [DONE]",
+            "",
+        ]
+        .join("\n")
+    }
+
+    /// The streamed Responses text and terminal outcome of one paced byte
+    /// stream.
+    async fn stream_responses_paced_bytes(
+        chunks: Vec<Vec<u8>>,
+    ) -> (String, Option<LlmDoneOutcome>) {
+        let (base_url, server) = spawn_openai_paced_byte_server("/v1/responses", chunks).await;
+        let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
+        let request = LlmRequest::new(
+            "gpt-5.5",
+            vec![Message::User(UserMessage::text("hello".to_string()))],
+        );
+        let mut stream = client.stream(&request);
+        let mut text = String::new();
+        let mut done = None;
+        while let Some(event) = stream.next().await {
+            match event.expect("stream event") {
+                LlmEvent::TextDelta { delta, .. } => text.push_str(&delta),
+                LlmEvent::Done { outcome } => {
+                    done = Some(outcome);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        server.abort();
+        (text, done)
+    }
+
+    /// A character split across network chunks reaches the Responses text
+    /// exactly, never as U+FFFD, wherever the chunk boundary falls.
+    /// (Fails-old: each chunk was decoded on its own, so a split character
+    /// became U+FFFD.)
+    #[tokio::test]
+    async fn responses_text_split_inside_a_multibyte_character_arrives_exact() {
+        let payload = split_responses_payload(SPLIT_TEXT);
+        let mut failures = Vec::new();
+        for (case, chunks) in utf8_split_cases(&payload, SPLIT_TEXT) {
+            let (text, done) = stream_responses_paced_bytes(chunks).await;
+            if text != SPLIT_TEXT || !matches!(done, Some(LlmDoneOutcome::Success { .. })) {
+                failures.push(format!("{case}: {text:?} {done:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// A complete Responses line that is not valid UTF-8 fails the stream as
+    /// a parse error; its bytes are never replaced with U+FFFD. (Fails-old:
+    /// the invalid byte became U+FFFD in the text and the turn succeeded.)
+    #[tokio::test]
+    async fn responses_line_with_invalid_utf8_is_a_stream_parse_error() {
+        let mut payload = split_responses_payload("bad \u{0001} byte").into_bytes();
+        let marker = payload
+            .iter()
+            .position(|byte| *byte == 0x01)
+            .expect("marker byte");
+        payload[marker] = 0xFF;
+        let (text, done) = stream_responses_paced_bytes(vec![payload]).await;
+        assert!(!text.contains('\u{FFFD}'), "{text:?}");
+        assert!(
+            matches!(
+                &done,
+                Some(LlmDoneOutcome::Error {
+                    error: LlmError::StreamParseError { .. }
+                })
+            ),
+            "{done:?}"
+        );
+    }
+
+    /// The streamed image path (ChatGPT backend) reads a provider message
+    /// split inside a multi-byte character exactly. (Fails-old: the split
+    /// character became U+FFFD in the reported failure.)
+    #[tokio::test]
+    async fn streamed_image_failure_split_inside_a_multibyte_character_arrives_exact() {
+        let event = format!(
+            r#"data: {{"type":"error","error":{{"code":"rate_limit_exceeded","message":"{SPLIT_TEXT}"}}}}"#
+        );
+        let payload = [event.as_str(), "data: [DONE]", ""].join("\n");
+        let mut failures = Vec::new();
+        for (case, chunks) in utf8_split_cases(&payload, SPLIT_TEXT) {
+            let (base_url, handle) = spawn_openai_paced_byte_server("/responses", chunks).await;
+            let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url)
+                .with_chatgpt_backend_wire();
+            let output = client
+                .execute_image_generation(image_executor_request_json(hosted_openai_plan_json()))
+                .await
+                .unwrap_or_else(|err| panic!("{case}: a provider failure output: {err}"));
+            handle.abort();
+            if !matches!(
+                output.warnings.as_slice(),
+                [ImageGenerationWarning::ProviderExecutionFailed { message }]
+                    if message.contains(SPLIT_TEXT) && !message.contains('\u{FFFD}')
+            ) {
+                failures.push(format!("{case}: {:?}", output.warnings));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
     }
 
     async fn spawn_openai_stub_server_with_body(
@@ -6390,20 +6771,23 @@ mod tests {
 
     #[test]
     fn test_request_input_rejects_video_tool_results() {
-        let err = OpenAiClient::convert_to_responses_input(&[Message::ToolResults {
-            results: vec![meerkat_core::ToolResult::with_blocks(
-                "tool_1".to_string(),
-                vec![ContentBlock::Video {
-                    media_type: "video/mp4".to_string(),
-                    duration_ms: 12_000,
-                    data: meerkat_core::VideoData::Inline {
-                        data: "AAAA".to_string(),
-                    },
-                }],
-                false,
-            )],
-            created_at: meerkat_core::types::message_timestamp_now(),
-        }])
+        let err = OpenAiClient::convert_to_responses_input(
+            &[Message::ToolResults {
+                results: vec![meerkat_core::ToolResult::with_blocks(
+                    "tool_1".to_string(),
+                    vec![ContentBlock::Video {
+                        media_type: "video/mp4".to_string(),
+                        duration_ms: 12_000,
+                        data: meerkat_core::VideoData::Inline {
+                            data: "AAAA".to_string(),
+                        },
+                    }],
+                    false,
+                )],
+                created_at: meerkat_core::types::message_timestamp_now(),
+            }],
+            true,
+        )
         .expect_err("video tool results should be rejected");
 
         match err {
@@ -10121,3 +10505,7 @@ mod tests {
 #[cfg(test)]
 #[path = "authorization_tests.rs"]
 mod authorization_tests;
+
+#[cfg(test)]
+#[path = "web_search_evidence_tests.rs"]
+mod web_search_evidence_tests;

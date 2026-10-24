@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # TLC audit of the generated SessionDocumentMachine durable-tail
-# classification: the three ClassifyDurableTail* arms partition the whole
-# observation product, and a store-proven rewrite descendant classifies
-# exactly like a strict descendant.
+# classification: the four ClassifyDurableTail* arms partition the whole
+# observation product, a store-proven rewrite descendant classifies exactly
+# like a strict descendant except where only the store binding of a strict
+# continuation attributes a tail with no run rows, and a run cursor never
+# upgrades an Ambiguous tail outside that one designed case.
 #
 # usage: durable_tail_classification_audit.sh [--mutants] [extra tlc args...]
 #
@@ -10,24 +12,26 @@
 # generated constant and invariant, unchanged) and adds the audit's
 # invariants. The audit checks the initial state alone, with ENABLED over
 # every observation tuple; that stands for every reachable state only while
-# the three arms are verdicts whose guards read no state but phase, so this
+# the four arms are verdicts whose guards read no state but phase, so this
 # script checks that premise on the generated model first and fails if it
 # stops holding. It then checks the invariants (safety), and reruns with the
 # reachability witness's negation as an extra invariant, requiring TLC to
-# report exactly that violation. With --mutants it seeds fourteen defects
+# report exactly that violation. With --mutants it seeds seventeen defects
 # into a copy of the generated model and requires TLC to refuse each with
 # the invariant it targets; with -continue it records every invariant each
 # defect breaks, and AuditReportGaps names the tuples the defect leaves with
 # no arm or several. The defects:
 #   - each relation conjunct back to strict only (Completed, Repairable);
 #   - Ambiguous counting the rewrite relation as a foreign one;
-#   - Repairable admitting the rewrite relation with any run-id count;
-#   - each of Ambiguous's six disjuncts dropped alone;
+#   - Repairable ignoring the attribution (any run-id count);
+#   - each of Ambiguous's disjuncts dropped alone (foreign relation,
+#     attribution, orphan results, messages after the terminal, Other stop,
+#     dangling tool use, a disagreeing cursor, a cursor on EndTurn);
 #   - a rewrite tail ending at ToolUse completing;
-#   - Repairable ignoring the run-id count (Ambiguous narrowed to keep the
-#     partition);
 #   - EndTurn repairing and Absent completing;
-#   - ToolUse turning Ambiguous.
+#   - ToolUse turning Ambiguous;
+#   - Continuable ignoring whether the bound inputs are bound;
+#   - Repairable attributing a rewrite tail with no run rows and no cursor.
 # An anchor this script expects but cannot find fails the run.
 set -euo pipefail
 
@@ -51,7 +55,12 @@ text = open(os.environ["MODEL"]).read()
 declared = re.search(r"^VARIABLES (.*)$", text, re.M)
 assert declared, "VARIABLES line not found in model.tla"
 variables = {name.strip() for name in declared.group(1).split(",")}
-for arm in ("ClassifyDurableTailCompleted", "ClassifyDurableTailRepairable", "ClassifyDurableTailAmbiguous"):
+for arm in (
+    "ClassifyDurableTailCompleted",
+    "ClassifyDurableTailRepairable",
+    "ClassifyDurableTailContinuable",
+    "ClassifyDurableTailAmbiguous",
+):
     heads = re.findall(r"(?m)^" + arm + r"\(([^)]*)\) ==$", text)
     assert len(heads) == 1, f"expected one {arm} definition, found {len(heads)}"
     start = text.index("\n" + arm + "(") + 1
@@ -72,7 +81,7 @@ for arm in ("ClassifyDurableTailCompleted", "ClassifyDurableTailRepairable", "Cl
         bare = re.sub(r'"[^"]*"', '""', line)
         read = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", bare)) & variables
         assert not read, f"{arm} now reads state {sorted(read)}: the initial state no longer stands for every state"
-print("premise holds: the three classification arms are verdicts that read no state but phase")
+print("premise holds: the four classification arms are verdicts that read no state but phase")
 PY
 
 replace_exact_line() {
@@ -90,9 +99,15 @@ replace_exact_line() {
 
 audit_invariants="  AuditClassificationIsTotalAndDisjoint
   AuditRewriteClassifiesLikeStrict
-  AuditRewriteWithoutOneRunIdHolds
+  AuditRewriteUnattributedHolds
   AuditRewriteEndTurnCompletes
-  AuditRewriteToolUseRepairs"
+  AuditRewriteToolUseRepairs
+  AuditAgreeingBoundCursorContinues
+  AuditStrictNoRunRowsRepairs
+  AuditDisagreeingCursorHolds
+  AuditCursorOnEndTurnHolds
+  AuditContinuableNeedsAgreeingBoundCursor
+  AuditCursorNeverUpgradesAmbiguous"
 
 # usage: write_cfg <file> <extra invariant lines>
 write_cfg() {
@@ -208,7 +223,9 @@ print("; ".join(" ".join(item.split()) for item in found))
 
   C='ClassifyDurableTailCompleted'
   R='ClassifyDurableTailRepairable'
+  K='ClassifyDurableTailContinuable'
   A='ClassifyDurableTailAmbiguous'
+  attributed='(IF (run_id_cardinality = "SingleRunId") THEN TRUE ELSE'
   either='(IF (relation = "VerifiedStrictDescendant") THEN TRUE ELSE (relation = "VerifiedRewriteDescendant"))'
   strict_only='(relation = "VerifiedStrictDescendant")'
   foreign='((relation # "VerifiedStrictDescendant") /\ (relation # "VerifiedRewriteDescendant"))'
@@ -222,16 +239,19 @@ print("; ".join(" ".join(item.split()) for item in found))
     "${R}" "${either}" "${strict_only}"
   mutate ambiguous_counts_rewrite_as_foreign AuditClassificationIsTotalAndDisjoint \
     "${A}" "${foreign}" '(relation # "VerifiedStrictDescendant")'
-  # C3: Repairable admits the rewrite relation with any run-id count.
-  mutate repairable_rewrite_any_run_id AuditRewriteWithoutOneRunIdHolds \
-    "${R}" "${either} /\\ (run_id_cardinality = \"SingleRunId\")" \
-    '(IF (relation = "VerifiedStrictDescendant") THEN (run_id_cardinality = "SingleRunId") ELSE (relation = "VerifiedRewriteDescendant"))'
+  # C3: Repairable ignores the attribution and admits any run-id count.
+  mutate repairable_ignores_attribution AuditRewriteUnattributedHolds \
+    "${R}" "${attributed}" '(IF TRUE THEN TRUE ELSE'
   # C1, one disjunct of the Ambiguous complement at a time: each leaves the
   # tuples where it alone refuses Completed and Repairable with no arm.
   mutate ambiguous_drops_foreign_relation AuditClassificationIsTotalAndDisjoint \
     "${A}" "${foreign}" 'FALSE'
-  mutate ambiguous_drops_run_id_count AuditClassificationIsTotalAndDisjoint \
-    "${A}" '(run_id_cardinality # "SingleRunId")' 'FALSE'
+  mutate ambiguous_drops_attribution AuditClassificationIsTotalAndDisjoint \
+    "${A}" "${attributed}" '(IF TRUE THEN TRUE ELSE'
+  mutate ambiguous_drops_disagreeing_cursor AuditDisagreeingCursorHolds \
+    "${A}" '(run_cursor = "Disagrees")' 'FALSE'
+  mutate ambiguous_drops_cursor_on_end_turn AuditCursorOnEndTurnHolds \
+    "${A}" '((terminal_stop_reason = "EndTurn") /\ (run_cursor # "Absent"))' 'FALSE'
   mutate ambiguous_drops_orphan_results AuditClassificationIsTotalAndDisjoint \
     "${A}" '(orphan_tool_result_count # 0)' 'FALSE'
   mutate ambiguous_drops_messages_after_terminal AuditClassificationIsTotalAndDisjoint \
@@ -247,17 +267,18 @@ print("; ".join(" ".join(item.split()) for item in found))
     '(IF (relation = "VerifiedStrictDescendant") THEN (terminal_stop_reason = "EndTurn") ELSE ((relation = "VerifiedRewriteDescendant") /\ (IF (terminal_stop_reason = "EndTurn") THEN TRUE ELSE (terminal_stop_reason = "ToolUse")))) /\ (run_id_cardinality = "SingleRunId")' \
     "${R}" "${repairable_stops}" \
     '(IF (terminal_stop_reason = "ToolUse") THEN (relation = "VerifiedStrictDescendant") ELSE (terminal_stop_reason = "Absent"))'
-  # C3 alone (the partition kept, strict and rewrite alike): Repairable
-  # ignores the run-id count, and Ambiguous keeps only its EndTurn tuples.
-  mutate repairable_ignores_run_id_count AuditRewriteWithoutOneRunIdHolds \
-    "${R}" ' /\ (run_id_cardinality = "SingleRunId")' '' \
-    "${A}" '(run_id_cardinality # "SingleRunId")' \
-    '((run_id_cardinality # "SingleRunId") /\ (terminal_stop_reason = "EndTurn"))'
   # C4 alone (the partition kept): EndTurn repairs and Absent completes.
   mutate end_turn_repairs AuditRewriteEndTurnCompletes \
     "${C}" '(terminal_stop_reason = "EndTurn")' '(terminal_stop_reason = "Absent")' \
     "${R}" "${repairable_stops}" \
     '(IF (terminal_stop_reason = "ToolUse") THEN TRUE ELSE (terminal_stop_reason = "EndTurn"))'
+  # Continuable ignores whether the cursor's inputs are still bound.
+  mutate continuable_ignores_bound_inputs AuditContinuableNeedsAgreeingBoundCursor \
+    "${K}" '(cursor_inputs_open = TRUE)' 'TRUE'
+  # Repairable lets the store binding attribute a rewrite tail with no run
+  # rows: a cursor-less rewrite tail is closed instead of held.
+  mutate repairable_attributes_rewrite_without_cursor AuditRewriteUnattributedHolds \
+    "${R}" '(IF (relation = "VerifiedStrictDescendant") THEN TRUE ELSE (run_cursor = "Agrees"))' 'TRUE'
   # The ToolUse pin alone (the partition kept): ToolUse turns Ambiguous.
   mutate tool_use_turns_ambiguous AuditRewriteToolUseRepairs \
     "${R}" "${repairable_stops}" '(terminal_stop_reason = "Absent")' \

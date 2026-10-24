@@ -202,6 +202,13 @@ where
         self.continuations.resolve_address(address).await
     }
 
+    async fn observe_address(
+        &self,
+        address: &meerkat_runtime::LogicalRuntimeId,
+    ) -> Result<crate::AddressObservation, String> {
+        self.continuations.observe_address(address).await
+    }
+
     fn retained_job_source(&self) -> Option<Arc<dyn crate::RetainedJobSource>> {
         let others = self.continuations.job_source();
         match &self.consent_notices {

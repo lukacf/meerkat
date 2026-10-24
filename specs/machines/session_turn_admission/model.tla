@@ -315,6 +315,15 @@ ResolveDispositionResumePendingWithoutBoundary(execution_kind_present, execution
     /\ UnchangedFrame_d1621713d5ecc1d1
 
 
+ResolveDispositionResumeRun(execution_kind_present, execution_kind, prompt_trimmed_text_byte_count, prompt_non_text_block_count, pending_continuation) ==
+    /\ phase = "Admitted"
+    /\ (execution_kind_present /\ (execution_kind = "ResumeRun"))
+    /\ phase' = "Admitted"
+    /\ model_step_count' = model_step_count + 1
+    /\ last_public_terminal' = None
+    /\ UnchangedFrame_d1621713d5ecc1d1
+
+
 ResolveDispositionDirectPrompt(execution_kind_present, execution_kind, prompt_trimmed_text_byte_count, prompt_non_text_block_count, pending_continuation) ==
     /\ phase = "Admitted"
     /\ ((execution_kind_present = FALSE) /\ prompt_has_content(prompt_trimmed_text_byte_count, prompt_non_text_block_count))
@@ -453,6 +462,7 @@ Next ==
     \/ (phase = "Admitted") /\ \E execution_kind \in StartTurnExecutionKindValues : \E prompt_trimmed_text_byte_count \in 0..2 : \E prompt_non_text_block_count \in 0..2 : \E pending_continuation \in PendingContinuationDispositionValues : ResolveDispositionContentTurn(TRUE, execution_kind, prompt_trimmed_text_byte_count, prompt_non_text_block_count, pending_continuation)
     \/ (phase = "Admitted") /\ \E execution_kind \in StartTurnExecutionKindValues : \E prompt_trimmed_text_byte_count \in 0..2 : \E prompt_non_text_block_count \in 0..2 : \E pending_continuation \in PendingContinuationDispositionValues : ResolveDispositionResumePendingWithBoundary(TRUE, execution_kind, prompt_trimmed_text_byte_count, prompt_non_text_block_count, pending_continuation)
     \/ (phase = "Admitted") /\ \E execution_kind \in StartTurnExecutionKindValues : \E prompt_trimmed_text_byte_count \in 0..2 : \E prompt_non_text_block_count \in 0..2 : \E pending_continuation \in PendingContinuationDispositionValues : ResolveDispositionResumePendingWithoutBoundary(TRUE, execution_kind, prompt_trimmed_text_byte_count, prompt_non_text_block_count, pending_continuation)
+    \/ (phase = "Admitted") /\ \E execution_kind \in StartTurnExecutionKindValues : \E prompt_trimmed_text_byte_count \in 0..2 : \E prompt_non_text_block_count \in 0..2 : \E pending_continuation \in PendingContinuationDispositionValues : ResolveDispositionResumeRun(TRUE, execution_kind, prompt_trimmed_text_byte_count, prompt_non_text_block_count, pending_continuation)
     \/ (phase = "Admitted") /\ \E execution_kind \in StartTurnExecutionKindValues : \E prompt_trimmed_text_byte_count \in 0..2 : \E prompt_non_text_block_count \in 0..2 : \E pending_continuation \in PendingContinuationDispositionValues : ResolveDispositionDirectPrompt(FALSE, execution_kind, prompt_trimmed_text_byte_count, prompt_non_text_block_count, pending_continuation)
     \/ (phase = "Admitted") /\ \E execution_kind \in StartTurnExecutionKindValues : \E prompt_trimmed_text_byte_count \in 0..2 : \E prompt_non_text_block_count \in 0..2 : \E pending_continuation \in PendingContinuationDispositionValues : ResolveDispositionDirectPending(FALSE, execution_kind, prompt_trimmed_text_byte_count, prompt_non_text_block_count, pending_continuation)
     \/ (phase = "Admitted") /\ \E execution_kind \in StartTurnExecutionKindValues : \E prompt_trimmed_text_byte_count \in 0..2 : \E prompt_non_text_block_count \in 0..2 : \E pending_continuation \in PendingContinuationDispositionValues : ResolveDispositionDirectNoPending(FALSE, execution_kind, prompt_trimmed_text_byte_count, prompt_non_text_block_count, pending_continuation)

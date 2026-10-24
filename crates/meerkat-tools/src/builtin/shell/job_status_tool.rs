@@ -17,7 +17,7 @@ use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 
 /// Tool for checking the status of a background shell job
 ///
-/// Returns the full [`BackgroundJob`] information for a given job ID.
+/// Returns the full [`BackgroundJob`](super::BackgroundJob) information for a given job ID.
 #[derive(Debug)]
 pub struct ShellJobStatusTool {
     /// Shared job manager instance

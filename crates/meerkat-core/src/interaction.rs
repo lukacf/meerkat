@@ -184,6 +184,10 @@ pub fn format_external_event_projection(source_name: &str, body: Option<&str>) -
     }
 }
 
+/// The line a model reads after peer content whose sender declared it
+/// tainted.
+pub const SENDER_TAINT_MARKER: &str = "[sender declared this content tainted]";
+
 /// Canonical model-facing text projection for a peer message.
 pub fn format_peer_message_projection(from_peer: &str, body: &str) -> String {
     format!("Peer message from {from_peer}:\n{body}")

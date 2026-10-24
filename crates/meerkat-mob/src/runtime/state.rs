@@ -1038,6 +1038,7 @@ pub(super) enum MobCommand {
         external_delivery_intent: Option<crate::store::MobExternalDeliveryIntent>,
         scoped_event_tx: Option<tokio::sync::mpsc::Sender<meerkat_core::ScopedAgentEvent>>,
         exact_operation: Option<super::handle::FlowOperationCustody>,
+        role_targets: Option<std::sync::Arc<crate::run::FlowRoleTargets>>,
         reply_tx: oneshot::Sender<Result<RunId, MobError>>,
     },
     PreviewRunFlowAdmission {
@@ -1717,6 +1718,9 @@ pub(super) enum MobCommand {
         /// Caller-owned bound for the Shutdown's waits; `None` uses the
         /// member lifecycle hang guard.
         deadline: Option<meerkat_core::time_compat::Instant>,
+        /// What the Shutdown does with inputs still queued behind a member's
+        /// running turn.
+        queued_inputs: super::QueuedInputsOnShutdown,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },
     /// Test-support-only process-death simulation. Unlike `Shutdown`, this

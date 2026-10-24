@@ -864,6 +864,14 @@ pub(crate) fn rebuild_resume_spec(
             &mut spec,
         )?;
     }
+    // Only an ordinary local member is rebuilt here, and a ceiling binds only
+    // a placed member: refuse it rather than ignore it.
+    if spec.operator_authority_ceiling.is_some() {
+        return Err(MobError::OperatorAuthorityCeilingRefused {
+            agent_identity: spec.identity.clone(),
+            reason: crate::error::OperatorAuthorityCeilingRefusal::UnplacedMember,
+        });
+    }
     Ok(spec)
 }
 

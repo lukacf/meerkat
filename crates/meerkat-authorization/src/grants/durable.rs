@@ -517,7 +517,7 @@ impl std::fmt::Debug for FileGrantOwnerStore {
 
 #[derive(Debug)]
 struct FileWriter {
-    file: std::fs::File,
+    file: LeaseFile,
     next_revision: u64,
     /// Set after an uncertain write; the writer refuses everything after it.
     poisoned: bool,
@@ -564,13 +564,20 @@ impl FileGrantOwnerStore {
         self.durability == GrantStoreDurability::OsCrash
     }
 
-    fn open_locked(&self) -> std::io::Result<std::fs::File> {
+    /// Test-only: a copy of the lease writer's descriptor while this store
+    /// holds the lease. It shares the writer's open file description.
+    #[cfg(test)]
+    pub(super) fn writer_descriptor_copy(&self) -> Option<std::fs::File> {
+        self.writer.lock().ok()?.as_ref()?.file.try_clone().ok()
+    }
+
+    fn open_locked(&self) -> std::io::Result<LeaseFile> {
         let file = std::fs::OpenOptions::new()
             .read(true)
             .append(true)
             .open(&self.path)?;
         file.try_lock().map_err(std::io::Error::other)?;
-        Ok(file)
+        Ok(LeaseFile(file))
     }
 
     fn sync_parent(&self) -> std::io::Result<()> {
@@ -668,12 +675,13 @@ impl GrantOwnerStore for FileGrantOwnerStore {
         // published under the owner name, and the same handle stays the
         // writer. No other opener can take the lease in between.
         let installed = (|| {
-            let mut file = std::fs::OpenOptions::new()
+            let file = std::fs::OpenOptions::new()
                 .read(true)
                 .append(true)
                 .create_new(true)
                 .open(&staged)?;
             file.try_lock().map_err(std::io::Error::other)?;
+            let mut file = LeaseFile(file);
             file.write_all(&bytes)?;
             file.flush()?;
             if self.synced() {
@@ -739,8 +747,38 @@ impl GrantOwnerStore for FileGrantOwnerStore {
 
     fn release(&self) {
         if let Ok(mut writer) = self.writer.lock() {
-            // Dropping the file closes it and releases the exclusive lock.
+            // Dropping the writer releases the exclusive lock, then closes the
+            // file (see `LeaseFile`).
             *writer = None;
         }
+    }
+}
+
+/// The store file, opened and locked exclusively through this descriptor:
+/// the lease. Dropping it unlocks the file, then closes it. The lock belongs
+/// to the open file description, and a process spawned meanwhile holds a copy
+/// of the descriptor until it executes its program, which would keep a lease
+/// released by the close alone. It opened its own description, so the unlock
+/// releases no other opener's lock.
+#[derive(Debug)]
+struct LeaseFile(std::fs::File);
+
+impl std::ops::Deref for LeaseFile {
+    type Target = std::fs::File;
+
+    fn deref(&self) -> &std::fs::File {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for LeaseFile {
+    fn deref_mut(&mut self) -> &mut std::fs::File {
+        &mut self.0
+    }
+}
+
+impl Drop for LeaseFile {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
     }
 }

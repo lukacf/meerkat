@@ -589,12 +589,15 @@ pub enum AutonomousShutdownMemberActionKind {
     Interrupt,
     #[serde(rename = "SkipTerminalRetirementAnchor")]
     SkipTerminalRetirementAnchor,
+    #[serde(rename = "KeepForResume")]
+    KeepForResume,
 }
 impl AutonomousShutdownMemberActionKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Interrupt => "Interrupt",
             Self::SkipTerminalRetirementAnchor => "SkipTerminalRetirementAnchor",
+            Self::KeepForResume => "KeepForResume",
         }
     }
 }
@@ -604,6 +607,7 @@ impl std::convert::TryFrom<&str> for AutonomousShutdownMemberActionKind {
         match value {
             "Interrupt" => Ok(Self::Interrupt),
             "SkipTerminalRetirementAnchor" => Ok(Self::SkipTerminalRetirementAnchor),
+            "KeepForResume" => Ok(Self::KeepForResume),
             other => Err(format!(
                 "invalid AutonomousShutdownMemberActionKind value `{other}`"
             )),
@@ -2106,6 +2110,8 @@ pub enum IdentityLeaseCondition {
     HeldByOtherLiveIncarnation,
     #[serde(rename = "HeldByExpiredIncarnation")]
     HeldByExpiredIncarnation,
+    #[serde(rename = "HeldByEndedIncarnation")]
+    HeldByEndedIncarnation,
 }
 impl IdentityLeaseCondition {
     pub fn as_str(&self) -> &'static str {
@@ -2116,6 +2122,7 @@ impl IdentityLeaseCondition {
             Self::HeldByCurrentIncarnation => "HeldByCurrentIncarnation",
             Self::HeldByOtherLiveIncarnation => "HeldByOtherLiveIncarnation",
             Self::HeldByExpiredIncarnation => "HeldByExpiredIncarnation",
+            Self::HeldByEndedIncarnation => "HeldByEndedIncarnation",
         }
     }
 }
@@ -2129,6 +2136,7 @@ impl std::convert::TryFrom<&str> for IdentityLeaseCondition {
             "HeldByCurrentIncarnation" => Ok(Self::HeldByCurrentIncarnation),
             "HeldByOtherLiveIncarnation" => Ok(Self::HeldByOtherLiveIncarnation),
             "HeldByExpiredIncarnation" => Ok(Self::HeldByExpiredIncarnation),
+            "HeldByEndedIncarnation" => Ok(Self::HeldByEndedIncarnation),
             other => Err(format!("invalid IdentityLeaseCondition value `{other}`")),
         }
     }
@@ -7935,6 +7943,7 @@ pub mod inputs {
         pub runtime_residue_present: bool,
         pub archive_authority_known: bool,
         pub placed_release_confirmed: bool,
+        pub keeps_durable_run: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ForceCancel {
@@ -12540,6 +12549,9 @@ pub enum TransitionId {
     RetireAtScopeMobNotRunningDestroyed,
     ResolveMemberRevivalHostRefusedRunning,
     RecoverMemberRestoreHostRefusedRunning,
+    ResolveAutonomousShutdownMemberActionKeepForResumeRunning,
+    ResolveAutonomousShutdownMemberActionKeepForResumeStopped,
+    ResolveAutonomousShutdownMemberActionKeepForResumeCompleted,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

@@ -360,6 +360,7 @@ mod tests {
             .await
             .expect("reads pass while the fence is held");
 
+        foreign.unlock().expect("release the foreign fence");
         drop(foreign);
         store
             .put(record("artifact-2", None))

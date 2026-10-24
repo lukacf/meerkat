@@ -93,6 +93,16 @@ pub enum SessionExternalEventEnvelope {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SessionExternalEventParams {
     pub session_id: String,
+    /// Optional caller idempotency key. A retry under the same key admits
+    /// nothing new and names the first admission (`deduplicated`, with its
+    /// `existing_id`); the same key with other event content is refused as
+    /// `INPUT_IDEMPOTENCY_CONFLICT`. Scoped to this session and kept for the
+    /// session's life. Canonical text: non-empty, no surrounding whitespace,
+    /// no control characters, at most 256 bytes. A server older than contract
+    /// 0.9.5 ignores the field, so check `contract_version` before relying on
+    /// it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
     #[serde(flatten)]
     pub event: SessionExternalEventEnvelope,
 }
@@ -290,89 +300,9 @@ pub struct RuntimeAcceptResult {
 }
 
 // -----------------------------------------------------------------------
-// V8 — Typed replacement for the legacy untyped session ingress method
-// (retired name: the `session/accept`-prefixed-`input` RPC; kept without
-// the literal string here so `scripts/session_control_public_name_scan.sh`
-// doesn't mistake an explanatory retirement note for an active surface).
-// -----------------------------------------------------------------------
-
-/// Typed wire projection of `ConversationAppendRole`.
-///
-/// Deliberately narrower than the core enum: `InjectedContext` is NOT
-/// mirrored here. This wire vocabulary feeds the accept-input ingress params
-/// ([`SessionAcceptInputParams`]), which has no live host consumer — every
-/// shipping submit-work path delivers injected context through its typed
-/// slot (`StartTurnRequest.injected_context`, the runtime `PromptInput` /
-/// `PeerInput` slots, `WorkSpec.injected_context`, RPC/REST request params).
-/// Letting this ingress mint the role from a wire string would bypass the
-/// slot-derived-role authenticity invariant, so an `injected_context` role
-/// fails closed at this serde boundary instead.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum WireConversationAppendRole {
-    User,
-    Assistant,
-    SystemNotice,
-    Tool,
-}
-
-/// Typed wire projection of a conversation append operation. Body content
-/// is carried as the existing `WireContentBlock` vector so the wire stays
-/// structurally typed end-to-end.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct WireConversationAppend {
-    pub role: WireConversationAppendRole,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub blocks: Vec<WireContentBlock>,
-}
-
-/// Typed wire projection of a batched staged input.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct WireStagedRunInput {
-    #[serde(default)]
-    pub contributing_input_ids: Vec<String>,
-    #[serde(default)]
-    pub appends: Vec<WireConversationAppend>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub boundary: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub turn_metadata: Option<WireRuntimeTurnMetadata>,
-}
-
-/// Typed wire projection of `meerkat_core::lifecycle::run_primitive::RunPrimitive`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[allow(clippy::large_enum_variant)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum WireRunPrimitive {
-    StagedInput(WireStagedRunInput),
-    ImmediateAppend(WireConversationAppend),
-}
-
-/// Typed request payload for the input-acceptance RPC method.
-///
-/// Replaces the untyped ad-hoc JSON shape the RPC handler parsed by hand
-/// pre-wave-b. Every field is a typed projection of a core type.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct SessionAcceptInputParams {
-    pub session_id: String,
-    pub primitive: WireRunPrimitive,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub idempotency_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub turn_metadata: Option<WireRuntimeTurnMetadata>,
-}
-
-// -----------------------------------------------------------------------
 // V3 — Typed wire projection of `RuntimeTurnMetadata`.
 //
 // This is the typed projection part of the Wave B turn-metadata rewrite.
-// `SessionAcceptInputParams` + the stringly-typed `WireInputState` fields
-// above belong to B-9's scope and are intentionally untouched here.
 // -----------------------------------------------------------------------
 
 /// Typed wire projection of [`meerkat_core::lifecycle::run_primitive::KeepAliveMode`].
@@ -1630,6 +1560,9 @@ pub struct WireRuntimeTurnMetadata {
 pub enum WireRuntimeExecutionKind {
     ContentTurn,
     ResumePending,
+    /// The continuation of a run a durable session left open. A dispatch
+    /// kind only: no input is admitted with it.
+    ResumeRun,
 }
 
 /// Typed wire projection of
@@ -1649,6 +1582,7 @@ impl From<meerkat_core::lifecycle::run_primitive::RuntimeExecutionKind>
         match value {
             Core::ContentTurn => Self::ContentTurn,
             Core::ResumePending => Self::ResumePending,
+            Core::ResumeRun => Self::ResumeRun,
         }
     }
 }
@@ -1660,6 +1594,7 @@ impl From<WireRuntimeExecutionKind>
         match value {
             WireRuntimeExecutionKind::ContentTurn => Self::ContentTurn,
             WireRuntimeExecutionKind::ResumePending => Self::ResumePending,
+            WireRuntimeExecutionKind::ResumeRun => Self::ResumeRun,
         }
     }
 }

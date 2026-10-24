@@ -16,6 +16,12 @@
 //! and the runtime unregister does not wait for that exit. The lease of a
 //! member whose actor still lives is not released: a successor given the
 //! identity would find the session still hosted here.
+//!
+//! A restart over a persistent store takes at once a lease that an earlier
+//! incarnation left in a process that has exited (see
+//! `identity_incarnation_custody`); an earlier incarnation of this process,
+//! one whose exit this process cannot prove, and a store without a file wait
+//! the lease out as before.
 
 use super::actor_isolation::FaultInjectingRuntimeStore;
 use super::*;
@@ -210,6 +216,8 @@ struct LeaseFixture {
     service: Arc<meerkat_session::PersistentSessionService<ExitGatedBuilder>>,
     runtime_store: Arc<FaultInjectingRuntimeStore>,
     exit_gate: ActorExitGate,
+    /// SQLite mob stores that replace the in-memory ones, when set.
+    persistent: Option<MobStorage>,
 }
 
 impl LeaseFixture {
@@ -251,7 +259,15 @@ impl LeaseFixture {
             service,
             runtime_store,
             exit_gate,
+            persistent: None,
         }
+    }
+
+    /// The fixture over SQLite mob stores at `store` (the system clock).
+    fn persistent(label: &str, store: &std::path::Path) -> Self {
+        let mut fixture = Self::new(label);
+        fixture.persistent = Some(MobStorage::persistent(store).expect("persistent mob storage"));
+        fixture
     }
 
     /// The runtime machine the session service owns.
@@ -262,6 +278,9 @@ impl LeaseFixture {
     }
 
     fn storage(&self) -> MobStorage {
+        if let Some(storage) = &self.persistent {
+            return storage.clone();
+        }
         MobStorage {
             events: self.events.clone(),
             runs: self.runs.clone(),
@@ -315,42 +334,7 @@ impl LeaseFixture {
     }
 
     async fn adopt(&self, handle: &MobHandle, member: &AgentIdentity, session_id: &SessionId) {
-        let adoption = crate::identity::AdoptMemberIdentityDeclaration {
-            mob_id: self.definition.id.clone(),
-            agent_identity: member.clone(),
-            request_id: crate::identity::IdentityAdoptionId::new(format!("adopt-{member}"))
-                .expect("valid adoption id"),
-            precondition: crate::identity::IdentityAdoptionPrecondition::ExpectedAbsent,
-            declaration_scope: crate::identity::IdentityDeclarationScopeId::new("example-policy")
-                .expect("valid declaration scope"),
-            declaration_revision: 1,
-            session: crate::identity::DesiredSessionTarget {
-                session_id: session_id.clone(),
-                lineage_id: meerkat_core::SessionLineageId::for_session(session_id),
-                lineage_generation: meerkat_core::SessionGeneration::INITIAL,
-                authority_policy: crate::identity::DesiredSessionAuthorityPolicy::RequireExisting,
-            },
-            member: crate::identity::IdentityProfileMemberDeclaration {
-                profile_name: ProfileName::from("worker"),
-                profile_override: None,
-                model_override: None,
-                external_addressable_override: None,
-                context: None,
-                labels: None,
-                additional_instructions: None,
-                system_prompt_override: None,
-                tool_access_policy: None,
-                auth_binding: None,
-                budget_limits: None,
-                runtime_mode: Some(meerkat_contracts::wire::WireMobRuntimeMode::TurnDriven),
-                required_env_keys: Vec::new(),
-                required_local_callback_tools: Vec::new(),
-                execution: crate::identity::DesiredExecution::ControllingSession,
-            },
-            wiring_custody: crate::identity::IdentityWiringCustody::ExternalManaged,
-            owned_wiring: BTreeSet::new(),
-            convergence: crate::identity::IdentityConvergenceMode::Drain { max_wait_ms: 5_000 },
-        };
+        let adoption = adoption(&self.definition.id, member, session_id);
         assert!(matches!(
             handle
                 .adopt_member_identity_declaration(adoption)
@@ -378,9 +362,41 @@ impl LeaseFixture {
         .expect("resume the lease test mob")
     }
 
+    /// Replace `member`'s lease with a live one of this mob's incarnation
+    /// `incarnation`, as an earlier incarnation elsewhere left it.
+    async fn hand_lease_to(&self, member: &AgentIdentity, incarnation: &str) -> IdentityLeaseClaim {
+        let identity = self.storage().identity;
+        let held = self
+            .lease(member)
+            .await
+            .expect("a converged identity holds a lease");
+        assert!(
+            identity
+                .release_identity_lease(&self.definition.id, member, &held)
+                .await
+                .expect("release the lease"),
+            "{member}: the crashed incarnation's lease is released"
+        );
+        match identity
+            .claim_or_renew_identity_lease(
+                &self.definition.id,
+                member,
+                &format!("mob:{}", self.definition.id),
+                incarnation,
+                crate::identity::IDENTITY_LEASE_MAX_TTL_MS,
+            )
+            .await
+            .expect("claim the lease")
+        {
+            crate::identity::IdentityLeaseClaimOutcome::Acquired(claim) => claim,
+            other => panic!("{member}: the free lease is acquired: {other:?}"),
+        }
+    }
+
     /// The member's active identity lease, if any.
     async fn lease(&self, member: &AgentIdentity) -> Option<IdentityLeaseClaim> {
         match self
+            .storage()
             .identity
             .observe_identity_lease(&self.definition.id, member)
             .await
@@ -393,6 +409,51 @@ impl LeaseFixture {
     }
 }
 
+/// The adoption of `member`'s existing session as its identity's desired
+/// state, converging by drain.
+pub(super) fn adoption(
+    mob_id: &MobId,
+    member: &AgentIdentity,
+    session_id: &SessionId,
+) -> crate::identity::AdoptMemberIdentityDeclaration {
+    crate::identity::AdoptMemberIdentityDeclaration {
+        mob_id: mob_id.clone(),
+        agent_identity: member.clone(),
+        request_id: crate::identity::IdentityAdoptionId::new(format!("adopt-{member}"))
+            .expect("valid adoption id"),
+        precondition: crate::identity::IdentityAdoptionPrecondition::ExpectedAbsent,
+        declaration_scope: crate::identity::IdentityDeclarationScopeId::new("example-policy")
+            .expect("valid declaration scope"),
+        declaration_revision: 1,
+        session: crate::identity::DesiredSessionTarget {
+            session_id: session_id.clone(),
+            lineage_id: meerkat_core::SessionLineageId::for_session(session_id),
+            lineage_generation: meerkat_core::SessionGeneration::INITIAL,
+            authority_policy: crate::identity::DesiredSessionAuthorityPolicy::RequireExisting,
+        },
+        member: crate::identity::IdentityProfileMemberDeclaration {
+            profile_name: ProfileName::from("worker"),
+            profile_override: None,
+            model_override: None,
+            external_addressable_override: None,
+            context: None,
+            labels: None,
+            additional_instructions: None,
+            system_prompt_override: None,
+            tool_access_policy: None,
+            auth_binding: None,
+            budget_limits: None,
+            runtime_mode: Some(meerkat_contracts::wire::WireMobRuntimeMode::TurnDriven),
+            required_env_keys: Vec::new(),
+            required_local_callback_tools: Vec::new(),
+            execution: crate::identity::DesiredExecution::ControllingSession,
+        },
+        wiring_custody: crate::identity::IdentityWiringCustody::ExternalManaged,
+        owned_wiring: BTreeSet::new(),
+        convergence: crate::identity::IdentityConvergenceMode::Drain { max_wait_ms: 5_000 },
+    }
+}
+
 /// Wait until `member`'s identity converged at intent revision 1 under a lease
 /// epoch above `after_epoch`; the latest status when it does not within
 /// [`STEP`].
@@ -400,6 +461,16 @@ async fn wait_converged(
     handle: &MobHandle,
     member: &AgentIdentity,
     after_epoch: u64,
+) -> Result<(), String> {
+    wait_converged_within(handle, member, after_epoch, STEP).await
+}
+
+/// [`wait_converged`] within `bound`.
+pub(super) async fn wait_converged_within(
+    handle: &MobHandle,
+    member: &AgentIdentity,
+    after_epoch: u64,
+    bound: Duration,
 ) -> Result<(), String> {
     let converged =
         |status: &IdentityStoredObservation<crate::identity::IdentityConvergenceStatus>| {
@@ -413,7 +484,7 @@ async fn wait_converged(
                 }) if *epoch > after_epoch
             )
         };
-    let waited = tokio::time::timeout(STEP, async {
+    let waited = tokio::time::timeout(bound, async {
         while !converged(
             &handle
                 .identity_convergence_status(member)
@@ -725,4 +796,209 @@ async fn a_shutdown_releases_the_lease_once_the_member_session_actor_has_exited(
         None,
         "the lease is released once the member's session actor exited"
     );
+}
+
+/// The bound within which a restart takes the lease an exited process left:
+/// well inside the 30 s lifetime a restart that cannot prove the exit waits
+/// out.
+const RECLAIM_BOUND: Duration = Duration::from_secs(2);
+
+/// A marked incarnation this process did not mint: one of a process that has
+/// exited, as far as a process holding the store's custody can tell.
+fn exited_process_incarnation() -> String {
+    format!(
+        "{}{}",
+        crate::runtime::identity_incarnation_custody::CUSTODY_MARK,
+        meerkat_core::ops::OperationId::new()
+    )
+}
+
+/// The restart waits on `held`: the identity reaches AwaitLease and the lease
+/// is still `held` a reclaim bound later.
+async fn assert_waits_out(
+    fixture: &LeaseFixture,
+    resumed: &MobHandle,
+    member: &AgentIdentity,
+    held: &IdentityLeaseClaim,
+) {
+    let awaited = tokio::time::timeout(STEP, async {
+        while !matches!(
+            resumed
+                .identity_convergence_status(member)
+                .await
+                .expect("read the convergence status"),
+            IdentityStoredObservation::Valid(crate::identity::IdentityConvergenceStatus {
+                decision: Some(IdentityReconcileDecision::AwaitLease),
+                ..
+            })
+        ) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(awaited.is_ok(), "{member}: the restart waits on the lease");
+    tokio::time::sleep(RECLAIM_BOUND).await;
+    assert_eq!(
+        fixture.lease(member).await.as_ref(),
+        Some(held),
+        "{member}: the restart leaves the lease to expire"
+    );
+}
+
+/// A restart over a persistent store takes at once the lease an earlier
+/// incarnation left in a process that has exited, and the identity converges
+/// under the restart's lease.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restart_takes_at_once_the_lease_an_exited_process_left() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let fixture = LeaseFixture::persistent("lease-exited-process", &dir.path().join("mob.db"));
+    let (handle, members) = fixture.create(&["worker-1"]).await;
+    let member = &members[0].0;
+    crash_stop_and_release_routes(handle).await;
+    let left = fixture
+        .hand_lease_to(member, &exited_process_incarnation())
+        .await;
+
+    let resumed = fixture.resume().await;
+    if let Err(latest) = wait_converged_within(&resumed, member, left.epoch, RECLAIM_BOUND).await {
+        panic!(
+            "{member}: the restart takes the exited process's lease at once; latest status: {latest}"
+        );
+    }
+    resumed.shutdown().await.expect("shut the resumed mob down");
+}
+
+/// An earlier incarnation of this same process may still have work running
+/// here: a restart in the process waits its lease out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restart_waits_out_a_lease_an_earlier_incarnation_of_its_process_holds() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let fixture = LeaseFixture::persistent("lease-same-process", &dir.path().join("mob.db"));
+    let (handle, members) = fixture.create(&["worker-1"]).await;
+    let member = &members[0].0;
+    let held = fixture
+        .lease(member)
+        .await
+        .expect("a converged identity holds a lease");
+    crash_stop_and_release_routes(handle).await;
+
+    let resumed = fixture.resume().await;
+    assert_waits_out(&fixture, &resumed, member, &held).await;
+    resumed.shutdown().await.expect("shut the resumed mob down");
+}
+
+/// An unmarked incarnation (minted without the store's custody, or by a
+/// version before it) may belong to a live process: a restart waits its lease
+/// out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restart_waits_out_the_lease_of_an_unmarked_incarnation() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let fixture = LeaseFixture::persistent("lease-unmarked", &dir.path().join("mob.db"));
+    let (handle, members) = fixture.create(&["worker-1"]).await;
+    let member = &members[0].0;
+    crash_stop_and_release_routes(handle).await;
+    let held = fixture
+        .hand_lease_to(member, &meerkat_core::ops::OperationId::new().to_string())
+        .await;
+
+    let resumed = fixture.resume().await;
+    assert_waits_out(&fixture, &resumed, member, &held).await;
+    resumed.shutdown().await.expect("shut the resumed mob down");
+}
+
+/// An incarnation minted while another holder kept the store's custody is
+/// unmarked: a later incarnation that does hold the custody still cannot
+/// tell whether that one's process lives, so it waits its lease out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restart_waits_out_the_lease_of_an_incarnation_minted_while_custody_was_busy() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = dir.path().join("mob.db");
+    let fixture = LeaseFixture::persistent("lease-minted-busy", &store);
+    let mut lock_path = std::fs::canonicalize(&store)
+        .expect("the store file exists")
+        .into_os_string();
+    lock_path.push(".incarnation-custody");
+    let other_holder = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .expect("open the custody lock file");
+    other_holder
+        .try_lock()
+        .expect("the other holder takes the custody");
+    let (handle, members) = fixture.create(&["worker-1"]).await;
+    let member = &members[0].0;
+    let held = fixture
+        .lease(member)
+        .await
+        .expect("a converged identity holds a lease");
+    assert!(
+        !held
+            .incarnation_id
+            .starts_with(crate::runtime::identity_incarnation_custody::CUSTODY_MARK),
+        "{member}: an incarnation minted while the custody was busy is unmarked: {}",
+        held.incarnation_id
+    );
+    crash_stop_and_release_routes(handle).await;
+    // The busy holder is gone: the restart takes the custody, and its own
+    // incarnation is marked.
+    drop(other_holder);
+
+    let resumed = fixture.resume().await;
+    assert_waits_out(&fixture, &resumed, member, &held).await;
+    resumed.shutdown().await.expect("shut the resumed mob down");
+}
+
+/// While another holder (a live process) keeps the store's custody, this
+/// process cannot prove any incarnation's exit: a restart waits out even a
+/// marked incarnation's lease.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restart_waits_out_every_lease_while_another_holder_keeps_the_custody() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = dir.path().join("mob.db");
+    let fixture = LeaseFixture::persistent("lease-custody-held", &store);
+    let mut lock_path = std::fs::canonicalize(&store)
+        .expect("the store file exists")
+        .into_os_string();
+    lock_path.push(".incarnation-custody");
+    let other_holder = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .expect("open the custody lock file");
+    other_holder
+        .try_lock()
+        .expect("the other holder takes the custody");
+    let (handle, members) = fixture.create(&["worker-1"]).await;
+    let member = &members[0].0;
+    crash_stop_and_release_routes(handle).await;
+    let held = fixture
+        .hand_lease_to(member, &exited_process_incarnation())
+        .await;
+
+    let resumed = fixture.resume().await;
+    assert_waits_out(&fixture, &resumed, member, &held).await;
+    resumed.shutdown().await.expect("shut the resumed mob down");
+    drop(other_holder);
+}
+
+/// A store without a file has no custody to prove an exit with: a restart
+/// waits out even a marked incarnation's lease.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restart_over_a_store_without_a_file_waits_out_every_lease() {
+    let fixture = LeaseFixture::new("lease-no-file");
+    let (handle, members) = fixture.create(&["worker-1"]).await;
+    let member = &members[0].0;
+    crash_stop_and_release_routes(handle).await;
+    let held = fixture
+        .hand_lease_to(member, &exited_process_incarnation())
+        .await;
+
+    let resumed = fixture.resume().await;
+    assert_waits_out(&fixture, &resumed, member, &held).await;
+    resumed.shutdown().await.expect("shut the resumed mob down");
 }

@@ -117,6 +117,12 @@ pub struct WirePendingToolCall {
     pub args: serde_json::Value,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub settlement_failures: Vec<meerkat_core::ops::ToolDispatchSettlementFailure>,
+    /// The call's dedupe key, present when an agent-loop round dispatched
+    /// it. A resumed run that asks for the same call again asks with the
+    /// same key, so the caller can recognize the repeat and deduplicate on
+    /// all four fields. Absent for a call outside an agent-loop round.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dedupe_key: Option<meerkat_core::ToolCallDedupeKey>,
 }
 
 /// Canonical typed contract for a turn that suspended on external tool
@@ -167,6 +173,7 @@ impl WireCallbackPending {
     }
 
     /// Build a pending contract for a single blocked tool call.
+    #[allow(clippy::too_many_arguments)]
     pub fn single(
         session_id: SessionId,
         session_ref: Option<String>,
@@ -175,6 +182,7 @@ impl WireCallbackPending {
         tool_use_id: String,
         tool_name: String,
         args: serde_json::Value,
+        dedupe_key: Option<meerkat_core::ToolCallDedupeKey>,
     ) -> Self {
         Self::many(
             session_id,
@@ -186,6 +194,7 @@ impl WireCallbackPending {
                 tool_name,
                 args,
                 settlement_failures: Vec::new(),
+                dedupe_key,
             }],
         )
     }
@@ -256,6 +265,7 @@ mod tests {
             tool_name: "external".to_string(),
             args: serde_json::json!({"question": "approve?"}),
             settlement_failures: Vec::new(),
+            dedupe_key: None,
         };
         let json = serde_json::to_value(&call)?;
         assert_eq!(json["tool_use_id"], "call-1");
@@ -269,6 +279,57 @@ mod tests {
             serde_json::from_value::<WirePendingToolCall>(missing).is_err(),
             "tool_use_id is a required wire field"
         );
+        Ok(())
+    }
+
+    /// The wire pending call writes the call's dedupe key beside it when it
+    /// has one and omits the field otherwise; a reader of a call without the
+    /// field reads no key. (Unrun until the candidate's validation.)
+    #[test]
+    fn wire_pending_tool_call_carries_an_optional_dedupe_key() -> Result<(), serde_json::Error> {
+        let arguments =
+            serde_json::value::RawValue::from_string(r#"{"question":"approve?"}"#.to_string())?;
+        let key = meerkat_core::ToolCallDedupeKey::new(
+            meerkat_core::RunId::new(),
+            1,
+            "call-1",
+            "external",
+            &arguments,
+        )?;
+        let pending = |dedupe_key| {
+            WireCallbackPending::single(
+                SessionId::new(),
+                None,
+                false,
+                true,
+                "call-1".to_string(),
+                "external".to_string(),
+                serde_json::json!({"question": "approve?"}),
+                dedupe_key,
+            )
+        };
+
+        let keyed = serde_json::to_value(pending(Some(key.clone())))?;
+        assert_eq!(
+            keyed["pending_tool_calls"][0]["dedupe_key"],
+            serde_json::to_value(&key)?
+        );
+        let unkeyed = serde_json::to_value(pending(None))?;
+        assert!(unkeyed["pending_tool_calls"][0].get("dedupe_key").is_none());
+
+        let read: WirePendingToolCall = serde_json::from_value(serde_json::json!({
+            "tool_use_id": "call-1",
+            "tool_name": "external",
+            "args": {}
+        }))?;
+        assert_eq!(read.dedupe_key, None);
+        let read: WirePendingToolCall = serde_json::from_value(serde_json::json!({
+            "tool_use_id": "call-1",
+            "tool_name": "external",
+            "args": {},
+            "dedupe_key": serde_json::to_value(&key)?
+        }))?;
+        assert_eq!(read.dedupe_key, Some(key));
         Ok(())
     }
 

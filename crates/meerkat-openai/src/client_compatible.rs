@@ -945,7 +945,7 @@ impl OpenAiCompatibleClient {
                         Err(LlmError::from_http_response(status_code, text, &headers))
                     };
                     let mut stream = stream_result?;
-                    let mut buffer = String::with_capacity(512);
+                    let mut lines = meerkat_llm_core::streaming::Utf8LineBuffer::with_capacity(512);
                     let mut tool_buffers: HashMap<usize, ToolCallBuffer> = HashMap::new();
                     let mut reasoning_text = String::new();
                     // `finish_reason` and the `stream_options.include_usage`
@@ -1037,20 +1037,27 @@ impl OpenAiCompatibleClient {
                             Err(_) if latched_stop.is_some() => break 'consume,
                             Err(_) => Err(LlmError::ConnectionReset)?,
                         };
-                        buffer.push_str(&String::from_utf8_lossy(&chunk));
+                        lines.push(&chunk);
 
                         let chunk_yielded = std::cell::Cell::new(false);
                         let mut chunk_consumed_line = false;
-                        while let Some(newline_pos) = buffer.find('\n') {
+                        while let Some(line) = lines.next_line() {
                             chunk_consumed_line = true;
-                            let line = buffer[..newline_pos].trim();
+                            // A line that is not valid UTF-8 is undecodable
+                            // like any other: it fails the turn before the
+                            // stop is latched and ends the stream after it.
+                            let line = match line {
+                                Ok(line) => line,
+                                Err(_) if latched_stop.is_some() => break 'consume,
+                                Err(err) => Err(err)?,
+                            };
+                            let line = line.trim();
                             let should_process = !line.is_empty() && !line.starts_with(':');
                             let parsed = if should_process {
                                 Self::parse_chat_completions_line(line)
                             } else {
                                 Ok(ChatCompletionsLine::Ignored)
                             };
-                            buffer.drain(..=newline_pos);
 
                             // Post-latch, an undecodable line is also end of
                             // stream rather than turn failure. The original
@@ -1267,14 +1274,28 @@ impl OpenAiCompatibleClient {
                     // finish reason is latched or `[DONE]` has been seen, the
                     // turn is complete and trailing bytes are not a fault -
                     // exactly the reachability this branch had when `Done` was
-                    // emitted at `finish_reason`.
-                    if latched_stop.is_none() && !saw_done_sentinel && !buffer.trim().is_empty() {
-                        Err::<(), _>(LlmError::IncompleteResponse {
-                            message: format!(
-                                "chat completions stream ended with an incomplete SSE buffer: {}",
-                                buffer.trim()
-                            ),
-                        })?;
+                    // emitted at `finish_reason`. A partial line cut inside a
+                    // character is as incomplete as any other; the error keeps
+                    // its text up to the cut and says where decoding stops,
+                    // instead of replacing the bytes.
+                    if latched_stop.is_none() && !saw_done_sentinel {
+                        let partial = match String::from_utf8(lines.take_partial_line()) {
+                            Ok(text) => text.trim().to_owned(),
+                            Err(error) => {
+                                let valid = error.utf8_error().valid_up_to();
+                                let mut bytes = error.into_bytes();
+                                bytes.truncate(valid);
+                                let text = String::from_utf8(bytes).unwrap_or_default();
+                                format!("{} (not valid UTF-8 from byte {valid})", text.trim_start())
+                            }
+                        };
+                        if !partial.is_empty() {
+                            Err::<(), _>(LlmError::IncompleteResponse {
+                                message: format!(
+                                    "chat completions stream ended with an incomplete SSE buffer: {partial}"
+                                ),
+                            })?;
+                        }
                     }
                     if !reasoning_text.is_empty() {
                         yield LlmEvent::ReasoningComplete {
@@ -2601,6 +2622,227 @@ mod tests {
             LlmEvent::Done { outcome } => Some(outcome),
             _ => None,
         })
+    }
+
+    /// Serves each element of `chunks` as a separate paced HTTP body chunk of
+    /// raw bytes, so one character can straddle two network reads.
+    async fn paced_byte_chat_sse(State(chunks): State<Vec<Vec<u8>>>) -> impl IntoResponse {
+        let body_stream = async_stream::stream! {
+            for chunk in chunks {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                yield Ok::<_, std::convert::Infallible>(axum::body::Bytes::from(chunk));
+            }
+        };
+        (
+            [("content-type", "text/event-stream")],
+            axum::body::Body::from_stream(body_stream),
+        )
+    }
+
+    /// The text and every event of one paced chat-completions byte stream.
+    async fn collect_paced_chat_bytes(chunks: Vec<Vec<u8>>) -> (String, Vec<LlmEvent>) {
+        let app = Router::new()
+            .route("/v1/chat/completions", post(paced_byte_chat_sse))
+            .route("/v1/models", axum::routing::get(models))
+            .with_state(chunks);
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test server");
+        });
+        let client = OpenAiCompatibleClient::new_with_options(
+            OpenAiCompatibleMode::ChatCompletions,
+            "remote-model".to_string(),
+            format!("http://{addr}/v1"),
+            None,
+            options(true, false, false, false),
+        );
+        let request = LlmRequest::new(
+            "qwen3.8-27b",
+            vec![Message::User(UserMessage::text("Hello".to_string()))],
+        );
+        let events: Vec<LlmEvent> = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            client.stream(&request).collect::<Vec<_>>(),
+        )
+        .await
+        .expect("chat completions stream must terminate")
+        .into_iter()
+        .map(|event| event.expect("stream event"))
+        .collect();
+        handle.abort();
+        let text = events
+            .iter()
+            .filter_map(|event| match event {
+                LlmEvent::TextDelta { delta, .. } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect();
+        (text, events)
+    }
+
+    /// `payload` cut into two network chunks inside each multi-byte character
+    /// of `text` (a 3-byte one 1|2 and 2|1, a 4-byte one 1|3, 2|2 and 3|1),
+    /// and on each side of the line break that ends the line holding `text`.
+    fn utf8_split_cases(payload: &str, text: &str) -> Vec<(String, Vec<Vec<u8>>)> {
+        let bytes = payload.as_bytes();
+        let start = payload.find(text).expect("payload holds the text");
+        let mut cases = Vec::new();
+        for (offset, ch) in text.char_indices().filter(|(_, ch)| ch.len_utf8() > 1) {
+            for split in 1..ch.len_utf8() {
+                let at = start + offset + split;
+                cases.push((
+                    format!(
+                        "U+{:04X} split {split}|{}",
+                        ch as u32,
+                        ch.len_utf8() - split
+                    ),
+                    vec![bytes[..at].to_vec(), bytes[at..].to_vec()],
+                ));
+            }
+        }
+        let line_end = start + payload[start..].find('\n').expect("a line break");
+        for (side, at) in [("before", line_end), ("after", line_end + 1)] {
+            cases.push((
+                format!("chunk boundary {side} the line break"),
+                vec![bytes[..at].to_vec(), bytes[at..].to_vec()],
+            ));
+        }
+        cases
+    }
+
+    const SPLIT_TEXT: &str = "don\u{2019}t panic \u{1F642}";
+
+    fn split_chat_payload(text_json: &str) -> String {
+        format!(
+            concat!(
+                "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{}\"}}}}]}}\n\n",
+                "data: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\n",
+                "data: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}}}\n\n",
+                "data: [DONE]\n\n"
+            ),
+            text_json
+        )
+    }
+
+    /// A character split across network chunks reaches the chat-completions
+    /// text exactly, never as U+FFFD, wherever the chunk boundary falls.
+    /// (Fails-old: each chunk was decoded on its own, so a split character
+    /// became U+FFFD.)
+    #[tokio::test]
+    async fn chat_completions_text_split_inside_a_multibyte_character_arrives_exact() {
+        let payload = split_chat_payload(SPLIT_TEXT);
+        let mut failures = Vec::new();
+        for (case, chunks) in utf8_split_cases(&payload, SPLIT_TEXT) {
+            let (text, events) = collect_paced_chat_bytes(chunks).await;
+            if text != SPLIT_TEXT
+                || !matches!(
+                    observed_done_outcome(&events),
+                    Some(LlmDoneOutcome::Success { .. })
+                )
+            {
+                failures.push(format!("{case}: {text:?} {events:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// A complete line that is not valid UTF-8 before the finish fails the
+    /// turn as a stream parse error, never replaced with U+FFFD; after the
+    /// finish it ends the stream like any other undecodable line there.
+    /// (Fails-old: the invalid byte became U+FFFD in the text and the turn
+    /// succeeded.)
+    #[tokio::test]
+    async fn chat_completions_line_with_invalid_utf8_is_a_stream_parse_error() {
+        let mut before = split_chat_payload("bad \u{0001} byte").into_bytes();
+        let marker = before
+            .iter()
+            .position(|byte| *byte == 0x01)
+            .expect("marker byte");
+        before[marker] = 0xFF;
+        let (text, events) = collect_paced_chat_bytes(vec![before]).await;
+        assert!(!text.contains('\u{FFFD}'), "{text:?}");
+        assert!(
+            matches!(
+                observed_done_outcome(&events),
+                Some(LlmDoneOutcome::Error {
+                    error: LlmError::StreamParseError { .. }
+                })
+            ),
+            "{events:?}"
+        );
+
+        let mut after = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"usage\":{\"prompt_tokens\":56,\"completion_tokens\":16,\"total_tokens\":72}}\n\n",
+            "data: keep-\u{0001}-alive\n\n"
+        )
+        .as_bytes()
+        .to_vec();
+        let marker = after
+            .iter()
+            .position(|byte| *byte == 0x01)
+            .expect("marker byte");
+        after[marker] = 0xFF;
+        let (text, events) = collect_paced_chat_bytes(vec![after]).await;
+        assert_eq!(text, "ok");
+        assert!(
+            matches!(
+                observed_done_outcome(&events),
+                Some(LlmDoneOutcome::Success { .. })
+            ),
+            "an invalid line after the finish ends a delivered turn: {events:?}"
+        );
+    }
+
+    /// A stream that ends inside a line before the finish is an incomplete
+    /// response, retried like any other cut stream, also when it ends inside a
+    /// character: the error keeps the line's text up to the cut and says where
+    /// decoding stops, instead of carrying U+FFFD. After the finish the cut
+    /// bytes are trailing bytes of a complete turn. (Fails-old on the message
+    /// only: it carried U+FFFD.)
+    #[tokio::test]
+    async fn chat_completions_stream_cut_inside_a_character_is_an_incomplete_response() {
+        let cut = |payload: &str| {
+            let at = payload.find('\u{2019}').expect("a 3-byte character") + 2;
+            payload.as_bytes()[..at].to_vec()
+        };
+        let before = cut(concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok \"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"don\u{2019}t\"}}]}\n\n"
+        ));
+        let (text, events) = collect_paced_chat_bytes(vec![before]).await;
+        assert_eq!(text, "ok ");
+        match observed_done_outcome(&events) {
+            Some(LlmDoneOutcome::Error { error }) => {
+                assert!(error.is_retryable(), "{error:?}");
+                let LlmError::IncompleteResponse { message } = error else {
+                    panic!("expected IncompleteResponse, got {error:?}");
+                };
+                assert!(
+                    !message.contains('\u{FFFD}')
+                        && message.contains(r#""content":"don (not valid UTF-8 from byte "#),
+                    "{message}"
+                );
+            }
+            other => panic!("expected Done{{Error}}, got {other:?}"),
+        }
+
+        let after = cut(concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"don\u{2019}t\"}}]}\n\n"
+        ));
+        let (text, events) = collect_paced_chat_bytes(vec![after]).await;
+        assert_eq!(text, "ok");
+        assert!(
+            matches!(
+                observed_done_outcome(&events),
+                Some(LlmDoneOutcome::Success { .. })
+            ),
+            "{events:?}"
+        );
     }
 
     /// A provider error envelope BEFORE the finish event must fail the turn.

@@ -132,7 +132,8 @@ Since the PR #759 dogma campaign (and its follow-up lanes), additionally:
   `MemberState` mirror were deleted; fail-closed current Session versions
   are enforced by the generated `SessionPersistenceVersionAuthorityMachine`
   (session envelope v4 since 0.8.51, released v3 restoring to v4 in memory;
-  stored input state v7 since 0.9.4).
+  stored input state v7 since 0.9.4; since 0.9.5 a row carrying a stop
+  requeue fact is v8, chosen per row by `stored_input_state_version_for_row`).
 - Meerkat 0.8.11 sets the durable-state compatibility floor at 0.8.10. Store
   activation has one explicit importer for the exact released v2 envelope:
   historically stamped documents run the frozen 0.8.10 verifier once;

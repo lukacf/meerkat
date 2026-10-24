@@ -352,6 +352,21 @@ impl CoreExecutorInterruptHandle for SessionRuntimeInterruptHandle {
             })
             .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
     }
+
+    async fn suspend_run_if_current(
+        &self,
+        expected_run_id: &meerkat_core::lifecycle::RunId,
+        _reason: String,
+    ) -> Result<bool, CoreExecutorError> {
+        self.runtime
+            .suspend_run_live_with_machine_authority(&self.session_id, expected_run_id)
+            .await
+            .or_else(|err| match err {
+                SessionError::NotRunning { .. } => Ok(false),
+                err => Err(err),
+            })
+            .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
+    }
 }
 
 #[cfg(feature = "mob")]
@@ -609,6 +624,40 @@ impl CoreExecutorInterruptHandle for MobRpcRuntimeInterruptHandle {
             self.session_id
         )))
     }
+
+    async fn suspend_run_if_current(
+        &self,
+        expected_run_id: &meerkat_core::lifecycle::RunId,
+        _reason: String,
+    ) -> Result<bool, CoreExecutorError> {
+        let suspended = if let Some(runtime) = self.runtime.as_ref() {
+            runtime
+                .suspend_run_live_with_machine_authority(&self.session_id, expected_run_id)
+                .await
+        } else if let Some(adapter) = self
+            .session_service
+            .acquire_runtime_adapter(None)
+            .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))?
+        {
+            self.session_service
+                .suspend_run_with_machine_authority(
+                    &self.session_id,
+                    expected_run_id,
+                    adapter.session_control_authority(),
+                )
+                .await
+        } else {
+            // Without machine authority there is nothing to suspend through:
+            // the stop hard-cancels the run instead.
+            return Ok(false);
+        };
+        suspended
+            .or_else(|err| match err {
+                SessionError::NotRunning { .. } => Ok(false),
+                err => Err(err),
+            })
+            .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
+    }
 }
 
 #[cfg(test)]
@@ -670,6 +719,32 @@ mod typed_context_append_tests {
         ));
     }
 
+    /// A run a stop suspended reaches the runtime loop through this
+    /// process's own bridge as the typed suspension, with its run id: not as
+    /// an apply failure, which would fail the run and replay its inputs, and
+    /// not as a cancellation, which would abandon them. A malformed marker
+    /// fails closed as an apply failure.
+    #[test]
+    fn a_suspended_run_crosses_the_rpc_bridge_as_suspended() {
+        let run_id = meerkat_core::lifecycle::RunId::new();
+        let rpc_error = crate::session_runtime::session_error_to_rpc(SessionError::Agent(
+            meerkat_core::AgentError::RunSuspended {
+                run_id: run_id.clone(),
+            },
+        ));
+        let error = core_executor_error_from_rpc(rpc_error);
+        assert_eq!(error.suspended_run_id(), Some(&run_id), "{error:?}");
+
+        let error = core_executor_error_from_rpc(RpcError {
+            code: error::INTERNAL_ERROR,
+            message: "malformed suspension marker".to_string(),
+            data: Some(serde_json::json!({
+                CORE_EXECUTOR_SUSPENDED_RUN_ID_KEY: "not-a-run-id",
+            })),
+        });
+        assert!(matches!(error, CoreExecutorError::ApplyFailed { .. }));
+    }
+
     #[test]
     fn malformed_rpc_teardown_marker_fails_closed_without_teardown() {
         let error = core_executor_error_from_rpc(RpcError {
@@ -701,7 +776,26 @@ mod typed_context_append_tests {
     }
 }
 
+/// The data key with which the session runtime hands its executor a run that
+/// a stop suspended ([`meerkat_core::AgentError::RunSuspended`]), across this
+/// process's own bridge between the two (see
+/// [`crate::session_runtime::session_error_to_rpc`]): the executor reports it
+/// as [`CoreExecutorError::Suspended`], never as a failure or a cancellation.
+pub(crate) const CORE_EXECUTOR_SUSPENDED_RUN_ID_KEY: &str = "core_executor_suspended_run_id";
+
 pub(crate) fn core_executor_error_from_rpc(err: RpcError) -> CoreExecutorError {
+    if let Some(marker) = err
+        .data
+        .as_ref()
+        .and_then(|data| data.get(CORE_EXECUTOR_SUSPENDED_RUN_ID_KEY))
+    {
+        return match serde_json::from_value::<meerkat_core::lifecycle::RunId>(marker.clone()) {
+            Ok(run_id) => CoreExecutorError::Suspended { run_id },
+            Err(_) => CoreExecutorError::apply_failed_runtime_turn(format!(
+                "invalid suspended run id in RPC error: {marker}"
+            )),
+        };
+    }
     if err.code == error::REQUEST_CANCELLED {
         return CoreExecutorError::cancelled();
     }
@@ -860,13 +954,20 @@ impl CoreExecutor for SessionRuntimeExecutor {
 
         // Create an event channel and forward events to the notification sink.
         // Read the CURRENT sink from the runtime (not the one captured at
-        // executor creation) so reconnected TCP clients get events.
+        // executor creation) so reconnected TCP clients get events. A turn
+        // whose requests all opted out of its session/event copies drains
+        // the channel without writing them.
         let (event_tx, mut event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(128);
         let sink = self.runtime.current_notification_sink();
         let sid = self.session_id.clone();
+        let write_session_events = self
+            .runtime
+            .turn_writes_session_events(&self.session_id, primitive.contributing_input_ids());
         let forwarder = tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
-                sink.emit_event(&sid, &event).await;
+                if write_session_events {
+                    sink.emit_event(&sid, &event).await;
+                }
             }
         });
 
@@ -909,6 +1010,17 @@ impl CoreExecutor for SessionRuntimeExecutor {
         self.runtime
             .core_session_service()
             .reconcile_runtime_compaction_projections(&self.session_id, intents.to_vec())
+            .await
+            .map_err(|error| CoreExecutorError::Internal(error.to_string()))
+    }
+
+    async fn acknowledge_compaction_finalization(
+        &mut self,
+        authority: &meerkat_core::CommittedSessionBoundaryAuthority,
+    ) -> Result<(), CoreExecutorError> {
+        self.runtime
+            .core_session_service()
+            .acknowledge_runtime_compaction_finalization(&self.session_id, authority)
             .await
             .map_err(|error| CoreExecutorError::Internal(error.to_string()))
     }
@@ -1222,9 +1334,16 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
         let (event_tx, mut event_rx) = mpsc::channel::<EventEnvelope<AgentEvent>>(128);
         let sink = self.notification_sink.clone();
         let sid = self.session_id.clone();
+        // A turn whose requests all opted out of its session/event copies
+        // drains the channel without writing them.
+        let write_session_events = self.runtime.as_ref().is_none_or(|runtime| {
+            runtime.turn_writes_session_events(&self.session_id, primitive.contributing_input_ids())
+        });
         let forwarder = tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
-                sink.emit_event(&sid, &event).await;
+                if write_session_events {
+                    sink.emit_event(&sid, &event).await;
+                }
             }
         });
 
@@ -1275,6 +1394,16 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
     ) -> Result<(), CoreExecutorError> {
         self.session_service
             .reconcile_runtime_compaction_projections(&self.session_id, intents.to_vec())
+            .await
+            .map_err(|error| CoreExecutorError::Internal(error.to_string()))
+    }
+
+    async fn acknowledge_compaction_finalization(
+        &mut self,
+        authority: &meerkat_core::CommittedSessionBoundaryAuthority,
+    ) -> Result<(), CoreExecutorError> {
+        self.session_service
+            .acknowledge_runtime_compaction_finalization(&self.session_id, authority)
             .await
             .map_err(|error| CoreExecutorError::Internal(error.to_string()))
     }

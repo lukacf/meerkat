@@ -10,7 +10,7 @@
 //! `placement`. Each call maps to exactly one [`MemberOperatorOp`] variant,
 //! rides the member's own comms runtime to the controlling supervisor bridge
 //! (`member_operator_forwarder`), and reconstructs the exact agent-visible
-//! `ToolResult`/`ToolError` from the typed [`UpcallToolOutcome`] envelope so
+//! `ToolResult`/`ToolError` from the typed `UpcallToolOutcome` envelope so
 //! behavior is call-for-call identical to a local dispatch.
 //!
 //! No authority claim rides the wire: admission is MobMachine-owned
@@ -705,7 +705,7 @@ pub(crate) fn remote_operator_tool_defs() -> Vec<Arc<ToolDef>> {
     let mut defs: Vec<Arc<ToolDef>> = Vec::with_capacity(12);
     defs.push(tool_def(
         TOOL_SPAWN_MEMBER,
-        "Spawn a mob member from a profile. Supports fresh, resume, or fork launch modes.",
+        "Spawn a mob member from a profile. Supports fresh, resume, or fork launch modes. A resume runs the member's first turn (its kickoff or initial_message) only if the resumed session's first turn never started; a started or interrupted first turn is not re-run.",
         json!({
             "type": "object",
             "properties": {
@@ -730,7 +730,7 @@ pub(crate) fn remote_operator_tool_defs() -> Vec<Arc<ToolDef>> {
     ));
     defs.push(tool_def(
         TOOL_SPAWN_MANY_MEMBERS,
-        "Spawn multiple mob members in one call. Returns per-item results in input order.",
+        "Spawn multiple mob members in one call. Returns per-item results in input order. A resume runs a member's first turn (its kickoff or initial_message) only if the resumed session's first turn never started.",
         json!({
             "type": "object",
             "properties": {

@@ -267,6 +267,11 @@ impl std::fmt::Display for SkillKey {
     }
 }
 
+/// Name of the built-in tool that loads a skill's full body into the
+/// conversation. Its results are skill-bearing session state: the mob's
+/// prompt-context fork planner recognises them by this name.
+pub const LOAD_SKILL_TOOL_NAME: &str = "load_skill";
+
 /// Structured skill reference for wire/surface input.
 ///
 /// Post-V4 this has exactly one variant — `Structured` — and is kept only as a

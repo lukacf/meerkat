@@ -1901,6 +1901,10 @@ impl EphemeralRuntimeDriver {
                     mm_dsl::InputAbandonReason::ToolProcessInterrupted => {
                         InputAbandonReason::ToolProcessInterrupted
                     }
+                    mm_dsl::InputAbandonReason::RequeueExpired => {
+                        InputAbandonReason::RequeueExpired
+                    }
+                    mm_dsl::InputAbandonReason::ResumeRefused => InputAbandonReason::ResumeRefused,
                 };
                 Some(InputTerminalOutcome::Abandoned { reason })
             }
@@ -2334,14 +2338,20 @@ impl EphemeralRuntimeDriver {
                 },
             )?;
 
+        let runtime_execution_kind = mm_dsl::RecoveredRuntimeExecutionKind::try_from(
+            runtime_semantics.execution_kind,
+        )
+        .map_err(|err| {
+            RuntimeDriverError::Internal(format!(
+                "store corruption: recovered input '{work_id}' has unsupported runtime execution kind: {err}"
+            ))
+        })?;
         self.dsl_apply(
             mm_dsl::MeerkatMachineInput::RecoverAdmittedInput {
                 input_id: Self::dsl_key(work_id),
                 input_kind: mm_dsl::RecoveredInputKind::from(input_kind),
                 runtime_boundary,
-                runtime_execution_kind: mm_dsl::RecoveredRuntimeExecutionKind::from(
-                    runtime_semantics.execution_kind,
-                ),
+                runtime_execution_kind,
                 runtime_peer_response_terminal_apply_intent: terminal_apply_intent,
                 lane: mm_dsl::InputLane::from(handling_mode),
             },
@@ -2466,11 +2476,17 @@ impl EphemeralRuntimeDriver {
                         "input '{work_id}' has unsupported runtime boundary for recovered grouping: {err}"
                     ))
                 })?;
+            let runtime_execution_kind = mm_dsl::RecoveredRuntimeExecutionKind::try_from(
+                runtime_semantics.execution_kind,
+            )
+            .map_err(|err| {
+                RuntimeDriverError::Internal(format!(
+                    "store corruption: input '{work_id}' has unsupported runtime execution kind for recovered grouping: {err}"
+                ))
+            })?;
             (
                 Some(runtime_boundary),
-                Some(mm_dsl::RecoveredRuntimeExecutionKind::from(
-                    runtime_semantics.execution_kind,
-                )),
+                Some(runtime_execution_kind),
                 runtime_semantics
                     .peer_response_terminal_apply_intent
                     .map(mm_dsl::RecoveredPeerResponseTerminalApplyIntent::from),
@@ -3442,6 +3458,7 @@ impl EphemeralRuntimeDriver {
         let delta = crate::meerkat_machine::driver::machine_apply_recovered_input_normalization(
             &mut bundle,
             None,
+            false,
         )?;
         let input_id = bundle.state.input_id.clone();
         if self.ledger.get(&input_id).is_some() {
@@ -3533,6 +3550,105 @@ impl EphemeralRuntimeDriver {
             }
         };
         self.hydrate_lane_prefix(source_name, &lane_ids, batch.input_ids())
+    }
+
+    /// Whether `input_id` is still bound to `run_id` in a phase a resumed run
+    /// continues from: staged for the run, or applied by one of its committed
+    /// rounds.
+    pub(crate) fn input_bound_to_open_run(&self, input_id: &InputId, run_id: &RunId) -> bool {
+        matches!(
+            self.input_phase(input_id),
+            Some(
+                InputLifecycleState::Staged
+                    | InputLifecycleState::Applied
+                    | InputLifecycleState::AppliedPendingConsumption
+            )
+        ) && self.input_last_run_id(input_id).as_ref() == Some(run_id)
+    }
+
+    /// The inputs still bound to the open `run_id`, in admission order: the
+    /// batch a resumed run continues with.
+    pub(crate) fn resumed_run_bound_input_ids(&self, run_id: &RunId) -> Vec<InputId> {
+        self.admission_order()
+            .into_iter()
+            .filter(|input_id| self.input_bound_to_open_run(input_id, run_id))
+            .collect()
+    }
+
+    /// Whether any of `input_ids` carries a graceful stop's requeue mark.
+    pub(crate) fn any_stop_requeue_mark(&self, input_ids: &[InputId]) -> bool {
+        input_ids.iter().any(|input_id| {
+            self.ledger
+                .get(input_id)
+                .is_some_and(|state| state.stop_requeue.is_some())
+        })
+    }
+
+    /// Clear the requeue marks a graceful stop left on `input_ids`, the
+    /// inputs of a resumed run as it starts: the run runs now, so a later
+    /// crash of it is never read as an expired stop. Returns the inputs whose
+    /// mark was cleared.
+    pub(crate) fn clear_stop_requeue_marks(&mut self, input_ids: &[InputId]) -> Vec<InputId> {
+        let now = Utc::now();
+        let mut cleared = Vec::new();
+        for input_id in input_ids {
+            if let Some(state) = self.ledger.get_mut(input_id)
+                && state.stop_requeue.take().is_some()
+            {
+                state.updated_at = now;
+                cleared.push(input_id.clone());
+            }
+        }
+        cleared
+    }
+
+    /// Whether a graceful stop that kept the open `run_id` has outlived its
+    /// max age at `now`: any input still bound to the run carries the stop's
+    /// mark and is over it (`crate::input_state::input_stop_requeue_expired`).
+    pub(crate) fn resumable_run_stop_requeue_expired(
+        &self,
+        run_id: &RunId,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> bool {
+        self.resumed_run_bound_input_ids(run_id)
+            .iter()
+            .any(|input_id| {
+                self.ledger
+                    .get(input_id)
+                    .is_some_and(|state| crate::input_state::input_stop_requeue_expired(state, now))
+            })
+    }
+
+    /// Hydrate the payloads of a resumed run's bound inputs from the ledger.
+    ///
+    /// Every input must still be bound to the run: a resumed batch is the
+    /// run's own inputs, never queued work, so it is not read from a lane.
+    pub(crate) fn hydrate_resumed_run_inputs(
+        &self,
+        run_id: &RunId,
+        input_ids: &[InputId],
+    ) -> Result<Vec<(InputId, Input)>, RuntimeDriverError> {
+        input_ids
+            .iter()
+            .map(|input_id| {
+                if !self.input_bound_to_open_run(input_id, run_id) {
+                    return Err(RuntimeDriverError::Internal(format!(
+                        "resumed run {run_id} names input {input_id}, which is {:?} and not bound to it",
+                        self.input_phase(input_id)
+                    )));
+                }
+                let input = self
+                    .ledger
+                    .get(input_id)
+                    .and_then(|state| state.persisted_input.clone())
+                    .ok_or_else(|| {
+                        RuntimeDriverError::Internal(format!(
+                            "resumed run {run_id} input {input_id} has no persisted payload"
+                        ))
+                    })?;
+                Ok((input_id.clone(), input))
+            })
+            .collect()
     }
 
     /// Machine-owned realization for a validated staged contributor batch.
@@ -3638,7 +3754,23 @@ impl EphemeralRuntimeDriver {
         input_ids: &[InputId],
     ) -> Result<(), RuntimeDriverError> {
         for input_id in input_ids {
-            self.apply_input(input_id, run_id)?;
+            // A resumed run's contributor can already be applied by one of
+            // the run's committed rounds: an `Applied` one only becomes
+            // pending consumption at this terminal, and one already pending
+            // consumption has nothing left to apply.
+            match self.input_phase(input_id) {
+                Some(InputLifecycleState::AppliedPendingConsumption)
+                    if self.input_bound_to_open_run(input_id, run_id) =>
+                {
+                    continue;
+                }
+                Some(InputLifecycleState::Applied)
+                    if self.input_bound_to_open_run(input_id, run_id) =>
+                {
+                    self.mark_applied_contributor_pending_consumption(input_id, run_id)?;
+                }
+                _ => self.apply_input(input_id, run_id)?,
+            }
             self.dsl_apply(
                 mm_dsl::MeerkatMachineInput::RecordBoundarySeq {
                     input_id: Self::dsl_key(input_id),
@@ -3688,6 +3820,61 @@ impl EphemeralRuntimeDriver {
                 )));
         }
         Ok(())
+    }
+
+    /// Adopt the `Consumed` terminal of `stored`, a durable row this driver
+    /// still holds as non-terminal: a store-owned durable-tail recovery
+    /// consumed it outside this driver, with the run whose tail it committed.
+    /// The generated authority consumes the input in memory, and its payload
+    /// follows the stored row; nothing is persisted, because the store already
+    /// holds the terminal. Returns whether the input was adopted: a row that
+    /// is not `Consumed`, or an input this driver does not hold as
+    /// non-terminal, is left alone.
+    pub(crate) fn adopt_durable_consumed_input(
+        &mut self,
+        stored: &StoredInputState,
+    ) -> Result<bool, RuntimeDriverError> {
+        if stored.seed.phase != InputLifecycleState::Consumed {
+            return Ok(false);
+        }
+        let input_id = &stored.state.input_id;
+        let Some(from_phase) = self.input_phase(input_id) else {
+            return Ok(false);
+        };
+        if matches!(
+            from_phase,
+            InputLifecycleState::Consumed
+                | InputLifecycleState::Superseded
+                | InputLifecycleState::Coalesced
+                | InputLifecycleState::Abandoned
+        ) {
+            return Ok(false);
+        }
+        self.dsl_apply(
+            mm_dsl::MeerkatMachineInput::ConsumeInput {
+                input_id: Self::dsl_key(input_id),
+            },
+            "ConsumeInput(DurableRecovery)",
+        )?;
+        self.sync_terminal_projection_from_machine(
+            input_id,
+            from_phase,
+            InputLifecycleState::Consumed,
+            "ConsumeDurableRecovery",
+        )?;
+        if let Some(state) = self.ledger.get_mut(input_id) {
+            state.persisted_input = stored.state.persisted_input.clone();
+        }
+        if let Some(run_id) = stored.seed.last_run_id.clone() {
+            self.events
+                .push(self.make_envelope(RuntimeEvent::InputLifecycle(
+                    InputLifecycleEvent::Consumed {
+                        input_id: input_id.clone(),
+                        run_id,
+                    },
+                )));
+        }
+        Ok(true)
     }
 
     pub(crate) fn machine_normalize_live_boundary_unavailable(
@@ -4428,13 +4615,163 @@ impl EphemeralRuntimeDriver {
         Ok(abandoned)
     }
 
-    pub(crate) fn stop_runtime_cleanup(&mut self) -> Result<(), RuntimeDriverError> {
-        self.abandon_all_non_terminal(InputAbandonReason::Stopped)?;
+    pub(crate) fn stop_runtime_cleanup(
+        &mut self,
+        retained_before_exit: &[InputId],
+    ) -> Result<(), RuntimeDriverError> {
+        self.stop_non_terminal_inputs(retained_before_exit)?;
         Ok(())
     }
 
-    pub(crate) fn finalize_stop_runtime(&mut self) -> Result<(), RuntimeDriverError> {
-        self.stop_runtime_cleanup()
+    /// The inputs among `input_ids` that the generated stop classifier
+    /// retains now. The stop terminalization asks before the executor's exit,
+    /// to stage the runless carriers for the other inputs only; the exit
+    /// does not change a verdict, and the stop checks that it gives the same
+    /// one ([`Self::stop_non_terminal_inputs`]).
+    pub(crate) fn stop_retained_input_ids(
+        &mut self,
+        input_ids: &[InputId],
+    ) -> Result<Vec<InputId>, RuntimeDriverError> {
+        let mut retained = Vec::new();
+        for id in input_ids {
+            if !self.input_is_non_terminal_by_authority(id) {
+                continue;
+            }
+            if let (mm_dsl::StopInputDisposition::Retain, _) = self.classify_stop_input(id)? {
+                retained.push(id.clone());
+            }
+        }
+        Ok(retained)
+    }
+
+    /// End the non-terminal inputs of a runtime stop. The generated stop
+    /// classifier decides each one: an input it retains (the unregister
+    /// began with the requeue disposition, and the input is an eligible
+    /// queued prompt, or an input of a run marked resumable and not resumed
+    /// yet, which stays Staged or Applied and bound to its run) keeps its
+    /// phase and payload and is durably marked with the stop's time and max
+    /// age; every other input ends as stopped. Returns the retained inputs.
+    ///
+    /// `retained_before_exit` is the set the classifier retained before the
+    /// executor's exit, for which no runless carrier was staged. The stop
+    /// refuses before it changes any input if its own verdicts differ.
+    pub(crate) fn stop_non_terminal_inputs(
+        &mut self,
+        retained_before_exit: &[InputId],
+    ) -> Result<Vec<InputId>, RuntimeDriverError> {
+        let non_terminal_ids: Vec<InputId> = self
+            .ledger
+            .iter()
+            .filter(|&(id, _)| self.input_is_non_terminal_by_authority(id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        let mut verdicts = Vec::with_capacity(non_terminal_ids.len());
+        for id in non_terminal_ids {
+            let verdict = self.classify_stop_input(&id)?;
+            verdicts.push((id, verdict));
+        }
+        let retained_now: std::collections::HashSet<&InputId> = verdicts
+            .iter()
+            .filter(|(_, (disposition, _))| *disposition == mm_dsl::StopInputDisposition::Retain)
+            .map(|(id, _)| id)
+            .collect();
+        let retained_before: std::collections::HashSet<&InputId> =
+            retained_before_exit.iter().collect();
+        if retained_now != retained_before {
+            return Err(RuntimeDriverError::Internal(format!(
+                "the stop classifier retained {retained_now:?} after the executor exit but \
+                 {retained_before:?} before it, whose complement got the runless carriers"
+            )));
+        }
+        let stopped_at = Utc::now();
+        let mut retained = Vec::new();
+        let mut stopped = Vec::new();
+        for (id, verdict) in verdicts {
+            match verdict {
+                (mm_dsl::StopInputDisposition::Retain, max_age_ms) => {
+                    let state = self.ledger.get_mut(&id).ok_or_else(|| {
+                        RuntimeDriverError::Internal(format!(
+                            "input {id} vanished from the ledger while its stop was classified"
+                        ))
+                    })?;
+                    state.stop_requeue = Some(crate::input_state::StopRequeueMark {
+                        stopped_at,
+                        max_age_ms,
+                    });
+                    state.updated_at = stopped_at;
+                    retained.push(id);
+                }
+                (mm_dsl::StopInputDisposition::Abandon, _) => stopped.push(id),
+            }
+        }
+        self.abandon_non_terminal_inputs(&stopped, &InputAbandonReason::Stopped)?;
+        Ok(retained)
+    }
+
+    /// Ask the generated stop classifier about one non-terminal input. The
+    /// shell supplies only the facts the machine does not hold: the row's
+    /// durability (a row without its payload cannot run again, so it is
+    /// observed as missing), whether the input is a directed one, and
+    /// whether its own turn metadata binds it to an objective.
+    fn classify_stop_input(
+        &mut self,
+        input_id: &InputId,
+    ) -> Result<(mm_dsl::StopInputDisposition, u64), RuntimeDriverError> {
+        let (durability, directed, objective_bound) = {
+            let state = self.ledger.get(input_id).ok_or_else(|| {
+                RuntimeDriverError::Internal(format!(
+                    "input {input_id} is not in the ledger its stop classification reads"
+                ))
+            })?;
+            match state.persisted_input.as_ref() {
+                Some(input) => (
+                    mm_dsl::InputDurabilityKind::from(state.durability),
+                    // A payload whose directed correlation does not validate
+                    // is never kept.
+                    !matches!(
+                        crate::input::validated_directed_interaction_id(input),
+                        Ok(None)
+                    ),
+                    crate::runtime_loop::input_own_turn_metadata(input)
+                        .transcript_identity
+                        .objective_id
+                        .is_some(),
+                ),
+                None => (mm_dsl::InputDurabilityKind::Missing, false, false),
+            }
+        };
+        let key = Self::dsl_key(input_id);
+        let effects = self.dsl_apply_effects(
+            mm_dsl::MeerkatMachineInput::ClassifyStopInputDisposition {
+                input_id: key.clone(),
+                durability,
+                directed,
+                objective_bound,
+            },
+            "ClassifyStopInputDisposition",
+        )?;
+        effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                mm_dsl::MeerkatMachineEffect::StopInputDispositionClassified {
+                    input_id,
+                    disposition,
+                    requeue_max_age_ms,
+                } if input_id == key => Some((disposition, requeue_max_age_ms)),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                RuntimeDriverError::Internal(format!(
+                    "ClassifyStopInputDisposition emitted no verdict for input {input_id}"
+                ))
+            })
+    }
+
+    pub(crate) fn finalize_stop_runtime(
+        &mut self,
+        retained_before_exit: &[InputId],
+    ) -> Result<(), RuntimeDriverError> {
+        self.stop_runtime_cleanup(retained_before_exit)
     }
 
     pub fn recover_ephemeral(&mut self) -> Result<RecoveryReport, RuntimeDriverError> {
@@ -5630,9 +5967,19 @@ impl EphemeralRuntimeDriver {
                 }
             })
             .collect();
-        let dsl_reason = mm_dsl::InputAbandonReason::from(&reason);
+        self.abandon_non_terminal_inputs(&non_terminal_ids, &reason)
+    }
+
+    /// Abandon each of `non_terminal_ids` with `reason` through the generated
+    /// `AbandonInput`.
+    fn abandon_non_terminal_inputs(
+        &mut self,
+        non_terminal_ids: &[InputId],
+        reason: &InputAbandonReason,
+    ) -> Result<usize, RuntimeDriverError> {
+        let dsl_reason = mm_dsl::InputAbandonReason::from(reason);
         let mut count = 0;
-        for id in &non_terminal_ids {
+        for id in non_terminal_ids {
             let key = Self::dsl_key(id);
             let attempt_count = u64::from(self.input_attempt_count(id));
             let from_phase = self.input_phase(id).ok_or_else(|| {
@@ -5751,6 +6098,202 @@ impl EphemeralRuntimeDriver {
         Ok(true)
     }
 
+    /// Mark `run_id` resumable (`MarkRunResumable`). False, with nothing
+    /// changed, when the machine refuses it: no Initializing, Idle or
+    /// Attached phase, a current run, or another run already marked.
+    pub(crate) fn mark_run_resumable(&mut self, run_id: &RunId) -> bool {
+        self.dsl_apply(
+            mm_dsl::MeerkatMachineInput::MarkRunResumable {
+                run_id: mm_dsl::RunId::from_domain(run_id),
+            },
+            "MarkRunResumable",
+        )
+        .is_ok()
+    }
+
+    /// The inputs `run_id` still holds: associated with it and Staged,
+    /// Applied or AppliedPendingConsumption, with their phases, in admission
+    /// order.
+    fn resumable_run_kept_inputs(&self, run_id: &RunId) -> Vec<(InputId, InputLifecycleState)> {
+        let run = mm_dsl::RunId::from_domain(run_id);
+        let mut kept: Vec<(u64, String, InputId, InputLifecycleState)> =
+            self.with_dsl_state(|state| {
+                self.admission_order
+                    .iter()
+                    .filter_map(|input_id| {
+                        let key = Self::dsl_key(input_id);
+                        if state.input_run_associations.get(&key) != Some(&run) {
+                            return None;
+                        }
+                        let phase =
+                            Self::input_phase_to_lifecycle(state.input_phases.get(&key).copied()?);
+                        matches!(
+                            phase,
+                            InputLifecycleState::Staged
+                                | InputLifecycleState::Applied
+                                | InputLifecycleState::AppliedPendingConsumption
+                        )
+                        .then(|| {
+                            let seq = state
+                                .input_admission_seq
+                                .get(&key)
+                                .copied()
+                                .unwrap_or(u64::MAX);
+                            (seq, key, input_id.clone(), phase)
+                        })
+                    })
+                    .collect()
+            });
+        kept.sort_by(|(left_seq, left_key, ..), (right_seq, right_key, ..)| {
+            left_seq
+                .cmp(right_seq)
+                .then_with(|| left_key.cmp(right_key))
+        });
+        kept.into_iter()
+            .map(|(_, _, input_id, phase)| (input_id, phase))
+            .collect()
+    }
+
+    /// Release the resumable run `run_id` to ordinary requeue
+    /// (`ReleaseResumableRun`): every input it still holds returns to Queued
+    /// in its recovery lane, a Staged one through `RollbackStaged` and an
+    /// Applied or AppliedPendingConsumption one through
+    /// `ReplayAppliedRunContributor`. Returns the requeued inputs.
+    ///
+    /// Requeueing an applied input cannot run an input whose boundary
+    /// committed: a run is resumable only while the store holds a provisional
+    /// tail whose cursor names it and whose bound inputs are all still bound,
+    /// and a boundary commit drops the provisional tail in the same
+    /// transaction that consumes the inputs (HeadCanonical:
+    /// `store/sqlite.rs` around line 6066; WholeBlob:
+    /// `promote_whole_blob_provisional_in_txn`; the SPI runtime store keeps
+    /// both in one batch). Callers release only while the durable rows are
+    /// unchanged since registration (recovery held or refused the tail, or
+    /// no recovery ran); after a recovery commit the registration is stale
+    /// and takes the durability-reload path instead.
+    pub(crate) fn release_resumable_run_inputs(
+        &mut self,
+        run_id: &RunId,
+    ) -> Result<Vec<InputId>, RuntimeDriverError> {
+        let dsl_run_id = mm_dsl::RunId::from_domain(run_id);
+        self.dsl_apply(
+            mm_dsl::MeerkatMachineInput::ReleaseResumableRun {
+                run_id: dsl_run_id.clone(),
+            },
+            "ReleaseResumableRun",
+        )?;
+        let kept = self.resumable_run_kept_inputs(run_id);
+        let mut requeued = Vec::with_capacity(kept.len());
+        for (input_id, from) in kept {
+            let lane = self.input_recovery_lane(&input_id).ok_or_else(|| {
+                RuntimeDriverError::Internal(format!(
+                    "generated recovery lane missing for released resumable input '{input_id}'"
+                ))
+            })?;
+            if from == InputLifecycleState::Staged {
+                self.dsl_apply(
+                    mm_dsl::MeerkatMachineInput::RollbackStaged {
+                        input_id: Self::dsl_key(&input_id),
+                        lane: mm_dsl::InputLane::from(lane),
+                    },
+                    "RollbackStaged(ReleaseResumableRun)",
+                )?;
+            } else {
+                self.dsl_apply(
+                    mm_dsl::MeerkatMachineInput::ReplayAppliedRunContributor {
+                        input_id: Self::dsl_key(&input_id),
+                        run_id: dsl_run_id.clone(),
+                        lane: mm_dsl::InputLane::from(lane),
+                    },
+                    "ReplayAppliedRunContributor(ReleaseResumableRun)",
+                )?;
+            }
+            let now = Utc::now();
+            if let Some(state) = self.ledger.get_mut(&input_id) {
+                state.history.push(InputStateHistoryEntry {
+                    timestamp: now,
+                    from,
+                    to: InputLifecycleState::Queued,
+                    reason: Some("ReleaseResumableRun".into()),
+                });
+                state.updated_at = now;
+            }
+            requeued.push(input_id);
+        }
+        Ok(requeued)
+    }
+
+    /// End the resumable run `run_id` without resuming it and without
+    /// touching its inputs (`SettleResumableRun`): the mark is cleared and
+    /// the run is recorded terminal. For retire, destroy and reset, whose own
+    /// sweeps terminalize the inputs with their receipts.
+    pub(crate) fn end_resumable_run(
+        &mut self,
+        run_id: &RunId,
+        reason: &InputAbandonReason,
+    ) -> Result<(), RuntimeDriverError> {
+        self.dsl_apply(
+            mm_dsl::MeerkatMachineInput::SettleResumableRun {
+                run_id: mm_dsl::RunId::from_domain(run_id),
+                reason: mm_dsl::InputAbandonReason::from(reason),
+            },
+            "SettleResumableRun",
+        )
+    }
+
+    /// Settle the resumable run `run_id` (`SettleResumableRun`) and abandon
+    /// every input it still holds with `reason`, without a receipt. Only the
+    /// reasons the input reader accepts without a receipt are allowed:
+    /// `ResumeRefused`, `Cancelled` and `RequeueExpired`; use
+    /// [`Self::end_resumable_run`] where the caller's own sweep terminalizes
+    /// the inputs. Returns the abandoned inputs.
+    pub(crate) fn settle_resumable_run_inputs(
+        &mut self,
+        run_id: &RunId,
+        reason: InputAbandonReason,
+    ) -> Result<Vec<InputId>, RuntimeDriverError> {
+        if !matches!(
+            reason,
+            InputAbandonReason::ResumeRefused
+                | InputAbandonReason::Cancelled
+                | InputAbandonReason::RequeueExpired
+        ) {
+            return Err(RuntimeDriverError::Internal(format!(
+                "a resumable run settles its inputs without a receipt only as ResumeRefused, \
+                 Cancelled or RequeueExpired, not {reason:?}"
+            )));
+        }
+        self.end_resumable_run(run_id, &reason)?;
+        let kept = self.resumable_run_kept_inputs(run_id);
+        let mut abandoned = Vec::with_capacity(kept.len());
+        for (input_id, from) in kept {
+            let attempt_count = u64::from(self.input_attempt_count(&input_id));
+            self.dsl_apply(
+                mm_dsl::MeerkatMachineInput::AbandonInput {
+                    input_id: Self::dsl_key(&input_id),
+                    reason: mm_dsl::InputAbandonReason::from(&reason),
+                    attempt_count,
+                },
+                "AbandonInput(SettleResumableRun)",
+            )?;
+            self.sync_terminal_projection_from_machine(
+                &input_id,
+                from,
+                InputLifecycleState::Abandoned,
+                "SettleResumableRun",
+            )?;
+            self.events
+                .push(self.make_envelope(RuntimeEvent::InputLifecycle(
+                    InputLifecycleEvent::Abandoned {
+                        input_id: input_id.clone(),
+                        reason: reason.clone(),
+                    },
+                )));
+            abandoned.push(input_id);
+        }
+        Ok(abandoned)
+    }
+
     pub(crate) fn abandon_pending_inputs(
         &mut self,
         reason: InputAbandonReason,
@@ -5832,8 +6375,11 @@ impl EphemeralRuntimeDriver {
                 self.abandon_staged_inputs(
                     contributing_input_ids,
                     InputAbandonReason::NeverExecuted,
-                )
-                .map(|_| ())
+                )?;
+                // A contributor one of the run's committed rounds already
+                // applied did execute: its effect is the run's committed
+                // history, so it ends consumed, never as never executed.
+                self.consume_applied_contributors_of_run(run_id, contributing_input_ids)
             }
             FailedRunContributorDisposition::Replayed => {
                 tracing::debug!(
@@ -5844,12 +6390,167 @@ impl EphemeralRuntimeDriver {
                     "runtime replayed queued contributors"
                 );
 
+                // A resumed run can hold contributors that a committed round
+                // of the same run already applied. They replay with the staged
+                // ones: left applied, they would stay bound to a run that
+                // ended, and a later registration would find that run open
+                // and resumable again.
+                self.replay_applied_contributors_of_run(run_id, contributing_input_ids)?;
                 // `rollback_staged` drives generated `ResolveStagedRollback`
                 // authority and re-inserts surviving contributors into the correct
                 // lane - no separate lane seeding is needed here.
                 self.rollback_staged(contributing_input_ids)
             }
         }
+    }
+
+    /// Return to its recovery lane each contributor of the failed `run_id`
+    /// that a committed round of that run already applied (`Applied` or
+    /// `AppliedPendingConsumption`, still associated with the run). Only a
+    /// resumed run has such contributors: an ordinary run applies its inputs
+    /// at the boundary that also consumes them.
+    fn replay_applied_contributors_of_run(
+        &mut self,
+        run_id: &RunId,
+        input_ids: &[InputId],
+    ) -> Result<(), RuntimeDriverError> {
+        for (input_id, from) in self.applied_contributors_of_run(run_id, input_ids) {
+            let input_id = &input_id;
+            let lane = self.input_recovery_lane(input_id).ok_or_else(|| {
+                RuntimeDriverError::Internal(format!(
+                    "generated recovery lane missing for replay of applied input '{input_id}'"
+                ))
+            })?;
+            self.dsl_apply(
+                mm_dsl::MeerkatMachineInput::ReplayAppliedRunContributor {
+                    input_id: Self::dsl_key(input_id),
+                    run_id: mm_dsl::RunId::from_domain(run_id),
+                    lane: mm_dsl::InputLane::from(lane),
+                },
+                "ReplayAppliedRunContributor(failed run)",
+            )?;
+            let now = Utc::now();
+            if let Some(state) = self.ledger.get_mut(input_id) {
+                state.history.push(InputStateHistoryEntry {
+                    timestamp: now,
+                    from,
+                    to: InputLifecycleState::Queued,
+                    reason: Some(format!("ReplayAppliedRunContributor({run_id})")),
+                });
+                state.updated_at = now;
+            }
+        }
+        Ok(())
+    }
+
+    /// The contributors among `input_ids` that a committed round of `run_id`
+    /// already applied (`Applied` or `AppliedPendingConsumption`, still
+    /// associated with the run), with their phase. Only a resumed run has
+    /// such contributors: an ordinary run applies its inputs at the boundary
+    /// that also consumes them.
+    fn applied_contributors_of_run(
+        &self,
+        run_id: &RunId,
+        input_ids: &[InputId],
+    ) -> Vec<(InputId, InputLifecycleState)> {
+        input_ids
+            .iter()
+            .filter_map(|input_id| {
+                let phase = self.input_phase(input_id)?;
+                (matches!(
+                    phase,
+                    InputLifecycleState::Applied | InputLifecycleState::AppliedPendingConsumption
+                ) && self.input_last_run_id(input_id).as_ref() == Some(run_id))
+                .then(|| (input_id.clone(), phase))
+            })
+            .collect()
+    }
+
+    /// `Applied` to `AppliedPendingConsumption` for a contributor a
+    /// committed round of `run_id` already applied, as its run's terminal
+    /// takes it.
+    fn mark_applied_contributor_pending_consumption(
+        &mut self,
+        input_id: &InputId,
+        run_id: &RunId,
+    ) -> Result<(), RuntimeDriverError> {
+        self.dsl_apply(
+            mm_dsl::MeerkatMachineInput::MarkAppliedPendingConsumption {
+                input_id: Self::dsl_key(input_id),
+            },
+            "MarkAppliedPendingConsumption(ended run)",
+        )?;
+        let now = Utc::now();
+        if let Some(state) = self.ledger.get_mut(input_id) {
+            state.history.push(InputStateHistoryEntry {
+                timestamp: now,
+                from: InputLifecycleState::Applied,
+                to: InputLifecycleState::AppliedPendingConsumption,
+                reason: Some(format!("MarkAppliedPendingConsumption(ended run {run_id})")),
+            });
+            state.updated_at = now;
+        }
+        Ok(())
+    }
+
+    /// Consume each contributor a committed round of the ended `run_id`
+    /// already applied: its effect is the run's committed history. An
+    /// `Applied` one becomes pending consumption first.
+    fn consume_applied_contributors_of_run(
+        &mut self,
+        run_id: &RunId,
+        input_ids: &[InputId],
+    ) -> Result<(), RuntimeDriverError> {
+        let applied = self.applied_contributors_of_run(run_id, input_ids);
+        for (input_id, phase) in &applied {
+            if *phase == InputLifecycleState::Applied {
+                self.mark_applied_contributor_pending_consumption(input_id, run_id)?;
+            }
+        }
+        let applied = applied
+            .into_iter()
+            .map(|(input_id, _)| input_id)
+            .collect::<Vec<_>>();
+        self.consume_inputs(&applied, run_id)
+    }
+
+    /// Abandon with `reason` each contributor a committed round of the ended
+    /// `run_id` already applied, as `abandon_staged_inputs` abandons the staged
+    /// ones, so none of the run's inputs stays bound to it. Returns how many
+    /// were abandoned.
+    fn abandon_applied_contributors_of_run(
+        &mut self,
+        run_id: &RunId,
+        input_ids: &[InputId],
+        reason: &InputAbandonReason,
+    ) -> Result<usize, RuntimeDriverError> {
+        let dsl_reason = mm_dsl::InputAbandonReason::from(reason);
+        let applied = self.applied_contributors_of_run(run_id, input_ids);
+        for (input_id, from) in &applied {
+            let attempt_count = u64::from(self.input_attempt_count(input_id));
+            self.dsl_apply(
+                mm_dsl::MeerkatMachineInput::AbandonInput {
+                    input_id: Self::dsl_key(input_id),
+                    reason: dsl_reason,
+                    attempt_count,
+                },
+                "AbandonInput(AppliedRunContributor)",
+            )?;
+            self.sync_terminal_projection_from_machine(
+                input_id,
+                *from,
+                InputLifecycleState::Abandoned,
+                "Abandon",
+            )?;
+            self.events
+                .push(self.make_envelope(RuntimeEvent::InputLifecycle(
+                    InputLifecycleEvent::Abandoned {
+                        input_id: input_id.clone(),
+                        reason: reason.clone(),
+                    },
+                )));
+        }
+        Ok(applied.len())
     }
 
     /// Machine-owned realization for a validated cancelled run.
@@ -5865,6 +6566,13 @@ impl EphemeralRuntimeDriver {
         );
         let _ =
             self.abandon_staged_inputs(contributing_input_ids, InputAbandonReason::Cancelled)?;
+        // A resumed run's contributors one of its committed rounds already
+        // applied end with the cancellation too: none stays bound to the run.
+        let _ = self.abandon_applied_contributors_of_run(
+            run_id,
+            contributing_input_ids,
+            &InputAbandonReason::Cancelled,
+        )?;
         Ok(())
     }
 
@@ -5888,6 +6596,49 @@ impl EphemeralRuntimeDriver {
             // The matches_last_run guard on the DSL / shell is enforced by
             // the MeerkatMachine contributor-set validation before this
             // realization runs; here we just drive the transitions.
+            //
+            // A resumed run's contributor can already be applied by one of
+            // the run's committed rounds: it only becomes pending consumption
+            // at this boundary. One already pending consumption has nothing
+            // left to apply.
+            if self.input_phase(input_id) == Some(InputLifecycleState::Applied)
+                && self.input_bound_to_open_run(input_id, run_id)
+            {
+                self.dsl_apply(
+                    mm_dsl::MeerkatMachineInput::MarkAppliedPendingConsumption {
+                        input_id: key.clone(),
+                    },
+                    "MarkAppliedPendingConsumption",
+                )?;
+                self.dsl_apply(
+                    mm_dsl::MeerkatMachineInput::RecordBoundarySeq {
+                        input_id: key,
+                        run_id: mm_dsl::RunId::from_domain(run_id),
+                        boundary: Some(
+                            mm_dsl::RecoveredRunApplyBoundary::try_from(receipt.boundary).map_err(
+                                |reason| RuntimeDriverError::ValidationFailed {
+                                    reason: reason.to_string(),
+                                },
+                            )?,
+                        ),
+                    },
+                    "RecordBoundarySeq",
+                )?;
+                let now = Utc::now();
+                if let Some(state) = self.ledger.get_mut(input_id) {
+                    state.history.push(InputStateHistoryEntry {
+                        timestamp: now,
+                        from: InputLifecycleState::Applied,
+                        to: InputLifecycleState::AppliedPendingConsumption,
+                        reason: Some(format!(
+                            "MarkAppliedPendingConsumption(resumed, boundary_sequence={})",
+                            receipt.sequence
+                        )),
+                    });
+                    state.updated_at = now;
+                }
+                continue;
+            }
             if self.input_phase(input_id) != Some(InputLifecycleState::Staged) {
                 continue;
             }
@@ -7663,6 +8414,524 @@ mod tests {
         }
     }
 
+    /// Open the unregister drain with `disposition` on the driver's contract
+    /// session authority.
+    fn begin_unregister_with(
+        driver: &mut EphemeralRuntimeDriver,
+        queued_inputs: mm_dsl::UnregisterQueuedInputsDisposition,
+        requeue_max_age_ms: u64,
+    ) {
+        let state = driver.dsl.lock().state().clone();
+        driver
+            .dsl_apply(
+                mm_dsl::MeerkatMachineInput::BeginUnregisterSession {
+                    session_id: state
+                        .session_id
+                        .clone()
+                        .expect("contract session authority is registered"),
+                    agent_runtime_id: state.active_runtime_id.clone(),
+                    fence_token: state.active_fence_token,
+                    generation: state.active_runtime_generation,
+                    runtime_epoch_id: state.active_runtime_epoch_id.clone(),
+                    queued_inputs,
+                    requeue_max_age_ms,
+                },
+                "BeginUnregisterSession",
+            )
+            .expect("the unregister drain opens");
+    }
+
+    /// A durable queued prompt, an ephemeral queued prompt and a staged
+    /// prompt, on a driver with a registered contract session.
+    async fn stop_classification_fixture(
+        name: &str,
+    ) -> (EphemeralRuntimeDriver, InputId, InputId, InputId) {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new(name));
+        driver
+            .ensure_contract_session_authority()
+            .expect("contract session authority");
+        let staged = prompt_input("staged by the running turn");
+        let staged_id = staged.id().clone();
+        driver.accept_input(staged).await.unwrap();
+        let run_id = RunId::new();
+        driver.contract_begin_run_authority(run_id.clone()).unwrap();
+        driver
+            .machine_realize_stage_batch(std::slice::from_ref(&staged_id), &run_id)
+            .unwrap();
+        let durable = prompt_input("queued behind the running turn");
+        let durable_id = durable.id().clone();
+        driver.accept_input(durable).await.unwrap();
+        let mut ephemeral = PromptInput::new("queued and ephemeral", None);
+        ephemeral.header.durability = InputDurability::Ephemeral;
+        let ephemeral = Input::Prompt(ephemeral);
+        let ephemeral_id = ephemeral.id().clone();
+        driver.accept_input(ephemeral).await.unwrap();
+        (driver, durable_id, ephemeral_id, staged_id)
+    }
+
+    /// Under an unregister that began with the requeue disposition, the
+    /// generated stop classifier keeps exactly the durable queued prompt:
+    /// marked, still queued, payload kept. The ephemeral prompt and the
+    /// staged one, which belongs to the running turn, end as stopped.
+    #[tokio::test]
+    async fn a_requeue_stop_keeps_only_the_eligible_queued_prompt() {
+        let (mut driver, durable_id, ephemeral_id, staged_id) =
+            stop_classification_fixture("stop-requeue-keeps-eligible").await;
+        begin_unregister_with(
+            &mut driver,
+            mm_dsl::UnregisterQueuedInputsDisposition::Requeue,
+            900_000,
+        );
+
+        let active = driver.active_input_ids();
+        let before_exit = driver.stop_retained_input_ids(&active).unwrap();
+        let retained = driver.stop_non_terminal_inputs(&before_exit).unwrap();
+
+        assert_eq!(before_exit, vec![durable_id.clone()]);
+        assert_eq!(retained, vec![durable_id.clone()]);
+        let kept = driver.ledger.get(&durable_id).expect("kept row");
+        assert_eq!(kept.stop_requeue.map(|mark| mark.max_age_ms), Some(900_000));
+        assert!(
+            kept.persisted_input.is_some(),
+            "a kept input keeps its payload"
+        );
+        assert_eq!(
+            driver.input_phase(&durable_id),
+            Some(InputLifecycleState::Queued)
+        );
+        for stopped in [&ephemeral_id, &staged_id] {
+            assert_eq!(
+                driver.input_terminal_outcome(stopped),
+                Some(InputTerminalOutcome::Abandoned {
+                    reason: InputAbandonReason::Stopped
+                }),
+                "{stopped}"
+            );
+            assert!(driver.ledger.get(stopped).unwrap().stop_requeue.is_none());
+        }
+    }
+
+    /// Under the stop disposition, and on a stop outside any unregister, the
+    /// classifier keeps nothing: every non-terminal input ends as stopped,
+    /// exactly as before the requeue disposition existed.
+    #[tokio::test]
+    async fn a_stopping_unregister_and_a_plain_stop_keep_nothing() {
+        for begin in [true, false] {
+            let (mut driver, durable_id, ephemeral_id, staged_id) =
+                stop_classification_fixture("stop-keeps-nothing").await;
+            if begin {
+                begin_unregister_with(
+                    &mut driver,
+                    mm_dsl::UnregisterQueuedInputsDisposition::Stop,
+                    0,
+                );
+            }
+
+            let active = driver.active_input_ids();
+            let before_exit = driver.stop_retained_input_ids(&active).unwrap();
+            let retained = driver.stop_non_terminal_inputs(&before_exit).unwrap();
+
+            assert!(before_exit.is_empty(), "begin={begin}");
+            assert!(retained.is_empty(), "begin={begin}");
+            for stopped in [&durable_id, &ephemeral_id, &staged_id] {
+                assert_eq!(
+                    driver.input_terminal_outcome(stopped),
+                    Some(InputTerminalOutcome::Abandoned {
+                        reason: InputAbandonReason::Stopped
+                    }),
+                    "begin={begin} {stopped}"
+                );
+                assert!(driver.ledger.get(stopped).unwrap().stop_requeue.is_none());
+            }
+        }
+    }
+
+    /// Under the requeue disposition a prompt queued in the steer lane behind
+    /// the running turn is not kept: it ends as stopped, unmarked, while the
+    /// durable prompt queued in the queue lane is kept.
+    #[tokio::test]
+    async fn a_requeue_stop_does_not_keep_a_queued_steer_prompt() {
+        let (mut driver, durable_id, _, _) =
+            stop_classification_fixture("stop-requeue-steer").await;
+        let steer = Input::Prompt(PromptInput::new(
+            "steer behind the running turn",
+            Some(
+                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
+                    ..Default::default()
+                },
+            ),
+        ));
+        let steer_id = steer.id().clone();
+        let resolved = driver
+            .resolve_admission_with_active_turn_boundary(&steer, true)
+            .expect("steer admission behind the running turn");
+        driver
+            .accept_resolved_input(steer, resolved)
+            .await
+            .expect("steer accepted");
+        assert_eq!(driver.dsl_steer_lane(), vec![steer_id.clone()]);
+        assert_eq!(
+            driver.input_phase(&steer_id),
+            Some(InputLifecycleState::Queued)
+        );
+        begin_unregister_with(
+            &mut driver,
+            mm_dsl::UnregisterQueuedInputsDisposition::Requeue,
+            900_000,
+        );
+
+        let active = driver.active_input_ids();
+        let before_exit = driver.stop_retained_input_ids(&active).unwrap();
+        let retained = driver.stop_non_terminal_inputs(&before_exit).unwrap();
+
+        assert_eq!(retained, vec![durable_id]);
+        assert_eq!(
+            driver.input_terminal_outcome(&steer_id),
+            Some(InputTerminalOutcome::Abandoned {
+                reason: InputAbandonReason::Stopped
+            })
+        );
+        assert!(driver.ledger.get(&steer_id).unwrap().stop_requeue.is_none());
+    }
+
+    /// Under the requeue disposition only a prompt is kept: a durable
+    /// external event and a directed flow step, both queued behind the
+    /// running turn, end as stopped and unmarked, so the directed one keeps
+    /// its terminal carrier and the event never runs again.
+    #[tokio::test]
+    async fn a_requeue_stop_does_not_keep_a_queued_event_or_a_directed_input() {
+        let (mut driver, durable_id, _, _) =
+            stop_classification_fixture("stop-requeue-event-directed").await;
+        let event = Input::ExternalEvent(crate::input::ExternalEventInput {
+            header: InputHeader {
+                id: InputId::new(),
+                timestamp: chrono::Utc::now(),
+                source: InputOrigin::External {
+                    source_name: "webhook".into(),
+                },
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+                ingress_context: None,
+                retained_resume: None,
+                authority_association: None,
+            },
+            event_type: "build".into(),
+            payload: serde_json::json!({ "status": "queued" }),
+            blocks: None,
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            render_metadata: None,
+            objective_id: None,
+        });
+        let event_id = event.id().clone();
+        assert!(driver.accept_input(event).await.unwrap().is_accepted());
+        let directed_uuid = meerkat_core::time_compat::new_uuid_v7();
+        let directed = crate::mob_adapter::create_tracked_flow_step_input(
+            "requeue-directed",
+            meerkat_core::types::ContentInput::Text("directed work".to_string()),
+            "requeue-flow",
+            None,
+            &directed_uuid.to_string(),
+        )
+        .expect("tracked flow step");
+        let directed_id = directed.id().clone();
+        assert!(driver.accept_input(directed).await.unwrap().is_accepted());
+        for queued in [&event_id, &directed_id] {
+            assert_eq!(
+                driver.input_phase(queued),
+                Some(InputLifecycleState::Queued),
+                "{queued}"
+            );
+        }
+        begin_unregister_with(
+            &mut driver,
+            mm_dsl::UnregisterQueuedInputsDisposition::Requeue,
+            900_000,
+        );
+
+        let active = driver.active_input_ids();
+        let before_exit = driver.stop_retained_input_ids(&active).unwrap();
+        let retained = driver.stop_non_terminal_inputs(&before_exit).unwrap();
+
+        assert_eq!(before_exit, vec![durable_id.clone()]);
+        assert_eq!(retained, vec![durable_id]);
+        for stopped in [&event_id, &directed_id] {
+            assert_eq!(
+                driver.input_terminal_outcome(stopped),
+                Some(InputTerminalOutcome::Abandoned {
+                    reason: InputAbandonReason::Stopped
+                }),
+                "{stopped}"
+            );
+            assert!(driver.ledger.get(stopped).unwrap().stop_requeue.is_none());
+        }
+    }
+
+    /// The stop's mark stays on a kept input until it runs or expires, so
+    /// every attachment that still finds it queued checks its age again: a
+    /// check within the bound leaves it queued and marked, and a later one,
+    /// past the bound, selects it for expiry.
+    #[tokio::test]
+    async fn every_attachment_that_finds_a_kept_input_queued_checks_its_age_again() {
+        let (mut driver, durable_id, _, _) =
+            stop_classification_fixture("stop-requeue-age-rechecked").await;
+        begin_unregister_with(
+            &mut driver,
+            mm_dsl::UnregisterQueuedInputsDisposition::Requeue,
+            900_000,
+        );
+        let active = driver.active_input_ids();
+        let before_exit = driver.stop_retained_input_ids(&active).unwrap();
+        assert_eq!(
+            driver.stop_non_terminal_inputs(&before_exit).unwrap(),
+            vec![durable_id.clone()]
+        );
+        let admitted_at = driver
+            .ledger
+            .get(&durable_id)
+            .and_then(|state| state.persisted_input.as_ref())
+            .expect("a kept input keeps its payload")
+            .header()
+            .timestamp;
+
+        let within = admitted_at + chrono::Duration::milliseconds(900_000);
+        assert!(crate::input_state::expired_stop_requeued_inputs(&driver, within).is_empty());
+        assert!(
+            driver
+                .ledger
+                .get(&durable_id)
+                .is_some_and(|state| state.stop_requeue.is_some()),
+            "a check within the bound leaves the mark"
+        );
+        assert_eq!(
+            driver.input_phase(&durable_id),
+            Some(InputLifecycleState::Queued)
+        );
+        let past = admitted_at + chrono::Duration::milliseconds(900_001);
+        assert_eq!(
+            crate::input_state::expired_stop_requeued_inputs(&driver, past),
+            vec![durable_id]
+        );
+    }
+
+    /// A requeue stop that suspends the in-flight run marks it resumable
+    /// before its first classification: the stop then keeps the run's staged
+    /// input bound to it with the stop's mark, and the verdicts before and
+    /// after the executor's exit agree, so the stop neither stages a carrier
+    /// for that input nor refuses. Outside a requeue stop, or for a session
+    /// without durable rounds, the machine refuses the suspension. Unrun:
+    /// written while Cargo is not run.
+    #[tokio::test]
+    async fn a_suspended_run_is_marked_before_the_stop_classifies_and_keeps_its_inputs() {
+        use crate::meerkat_machine::driver::{DriverEntry, machine_suspend_run_for_stop};
+
+        let (driver, durable_id, ephemeral_id, staged_id) =
+            stop_classification_fixture("suspend-before-classification").await;
+        let run_id = driver
+            .current_run_id()
+            .expect("the fixture's run is current");
+        let mut entry = DriverEntry::Ephemeral(driver);
+        assert!(
+            !machine_suspend_run_for_stop(&mut entry, &run_id, true).expect("the machine answers"),
+            "no requeue stop is draining"
+        );
+        let DriverEntry::Ephemeral(mut driver) = entry else {
+            panic!("the entry stays ephemeral");
+        };
+        begin_unregister_with(
+            &mut driver,
+            mm_dsl::UnregisterQueuedInputsDisposition::Requeue,
+            900_000,
+        );
+        let mut entry = DriverEntry::Ephemeral(driver);
+        assert!(
+            !machine_suspend_run_for_stop(&mut entry, &run_id, false).expect("the machine answers"),
+            "a session without durable rounds is not suspended"
+        );
+        assert!(
+            machine_suspend_run_for_stop(&mut entry, &run_id, true).expect("the machine answers")
+        );
+        let DriverEntry::Ephemeral(mut driver) = entry else {
+            panic!("the entry stays ephemeral");
+        };
+        assert_eq!(driver.current_run_id(), None);
+        assert_eq!(
+            driver.with_dsl_state(|state| state.resumable_run_id.clone()),
+            Some(mm_dsl::RunId::from_domain(&run_id))
+        );
+
+        let active = driver.active_input_ids();
+        let before_exit = driver.stop_retained_input_ids(&active).unwrap();
+        assert!(before_exit.contains(&staged_id), "{before_exit:?}");
+        assert!(before_exit.contains(&durable_id), "{before_exit:?}");
+        assert!(!before_exit.contains(&ephemeral_id), "{before_exit:?}");
+        let retained = driver
+            .stop_non_terminal_inputs(&before_exit)
+            .expect("the verdicts agree before and after the exit");
+        assert_eq!(retained.len(), before_exit.len());
+        assert_eq!(
+            driver.input_phase(&staged_id),
+            Some(InputLifecycleState::Staged)
+        );
+        assert_eq!(driver.input_last_run_id(&staged_id), Some(run_id));
+        assert!(
+            driver
+                .ledger
+                .get(&staged_id)
+                .unwrap()
+                .stop_requeue
+                .is_some()
+        );
+    }
+
+    /// A resumed run's start clears the requeue marks a graceful stop left on
+    /// its inputs, so a later crash of the run is never read as an expired
+    /// stop; inputs without a mark are left alone. Unrun: written while Cargo
+    /// is not run.
+    #[tokio::test]
+    async fn a_resumed_runs_start_clears_the_stop_marks_of_its_inputs() {
+        let (mut driver, durable_id, ephemeral_id, _) =
+            stop_classification_fixture("resumed-run-clears-stop-marks").await;
+        begin_unregister_with(
+            &mut driver,
+            mm_dsl::UnregisterQueuedInputsDisposition::Requeue,
+            900_000,
+        );
+        let active = driver.active_input_ids();
+        let before_exit = driver.stop_retained_input_ids(&active).unwrap();
+        assert_eq!(
+            driver.stop_non_terminal_inputs(&before_exit).unwrap(),
+            vec![durable_id.clone()]
+        );
+        assert!(driver.any_stop_requeue_mark(std::slice::from_ref(&durable_id)));
+
+        let both = [durable_id.clone(), ephemeral_id.clone()];
+        assert_eq!(
+            driver.clear_stop_requeue_marks(&both),
+            vec![durable_id.clone()]
+        );
+        assert!(!driver.any_stop_requeue_mark(&both));
+        assert!(
+            driver.clear_stop_requeue_marks(&both).is_empty(),
+            "a cleared mark is cleared once"
+        );
+    }
+
+    /// Under the requeue disposition a durable prompt bound to an objective
+    /// is not kept, even when queued in the queue lane: it ends as stopped
+    /// and unmarked, as under the stop disposition. A member's kickoff has
+    /// exactly this shape (an operator prompt whose turn metadata carries
+    /// only its objective), and the mob records the kickoff's outcome in the
+    /// stopping process, so a kept kickoff would run after a restart that
+    /// record already calls failed.
+    #[tokio::test]
+    async fn a_requeue_stop_does_not_keep_a_queued_objective_bound_prompt() {
+        let (mut driver, durable_id, _, _) =
+            stop_classification_fixture("stop-requeue-objective-bound").await;
+        let metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+            transcript_identity: meerkat_core::types::TranscriptMessageIdentity {
+                objective_id: Some(meerkat_core::interaction::ObjectiveId::new()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let bound = Input::Prompt(PromptInput::new(
+            "kickoff queued behind the running turn",
+            Some(metadata),
+        ));
+        let bound_id = bound.id().clone();
+        assert!(driver.accept_input(bound).await.unwrap().is_accepted());
+        assert_eq!(
+            driver.input_phase(&bound_id),
+            Some(InputLifecycleState::Queued)
+        );
+        begin_unregister_with(
+            &mut driver,
+            mm_dsl::UnregisterQueuedInputsDisposition::Requeue,
+            900_000,
+        );
+
+        let active = driver.active_input_ids();
+        let before_exit = driver.stop_retained_input_ids(&active).unwrap();
+        let retained = driver.stop_non_terminal_inputs(&before_exit).unwrap();
+
+        assert_eq!(retained, vec![durable_id]);
+        assert_eq!(
+            driver.input_terminal_outcome(&bound_id),
+            Some(InputTerminalOutcome::Abandoned {
+                reason: InputAbandonReason::Stopped
+            })
+        );
+        assert!(driver.ledger.get(&bound_id).unwrap().stop_requeue.is_none());
+    }
+
+    /// The stop refuses, before it changes any input, when its verdicts
+    /// differ from the set the classifier retained before the executor's
+    /// exit, whose complement got the runless carriers: a kept input with a
+    /// carrier, or a stopped one without, is never committed.
+    #[tokio::test]
+    async fn a_stop_whose_verdicts_differ_from_the_pre_exit_set_changes_nothing() {
+        let (mut driver, durable_id, ephemeral_id, staged_id) =
+            stop_classification_fixture("stop-verdicts-must-agree").await;
+        begin_unregister_with(
+            &mut driver,
+            mm_dsl::UnregisterQueuedInputsDisposition::Requeue,
+            900_000,
+        );
+
+        for claimed_before_exit in [Vec::new(), vec![durable_id.clone(), ephemeral_id.clone()]] {
+            let error = driver
+                .stop_non_terminal_inputs(&claimed_before_exit)
+                .expect_err("differing verdicts are refused");
+            assert!(
+                error.to_string().contains("the stop classifier retained"),
+                "{error}"
+            );
+            for untouched in [&durable_id, &ephemeral_id] {
+                assert_eq!(
+                    driver.input_phase(untouched),
+                    Some(InputLifecycleState::Queued),
+                    "{untouched}"
+                );
+                assert!(driver.ledger.get(untouched).unwrap().stop_requeue.is_none());
+            }
+            assert_eq!(driver.input_terminal_outcome(&staged_id), None);
+        }
+    }
+
+    /// The generated begin refuses a requeue without a max age and a stop
+    /// with one, so the disposition and its max age always agree.
+    #[tokio::test]
+    async fn the_unregister_disposition_and_its_max_age_must_agree() {
+        for (queued_inputs, max_age_ms) in [
+            (mm_dsl::UnregisterQueuedInputsDisposition::Requeue, 0),
+            (mm_dsl::UnregisterQueuedInputsDisposition::Stop, 60_000),
+        ] {
+            let mut driver =
+                EphemeralRuntimeDriver::new(LogicalRuntimeId::new("unregister-disposition-shape"));
+            driver
+                .ensure_contract_session_authority()
+                .expect("contract session authority");
+            let state = driver.dsl.lock().state().clone();
+            let refused = driver.dsl_apply(
+                mm_dsl::MeerkatMachineInput::BeginUnregisterSession {
+                    session_id: state.session_id.clone().unwrap(),
+                    agent_runtime_id: state.active_runtime_id.clone(),
+                    fence_token: state.active_fence_token,
+                    generation: state.active_runtime_generation,
+                    runtime_epoch_id: state.active_runtime_epoch_id.clone(),
+                    queued_inputs,
+                    requeue_max_age_ms: max_age_ms,
+                },
+                "BeginUnregisterSession",
+            );
+            assert!(refused.is_err(), "{queued_inputs:?} with {max_age_ms}");
+        }
+    }
+
     #[tokio::test]
     async fn abandon_all_non_terminal_projects_generated_terminal_outcome() {
         let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("abandon-projection"));
@@ -7938,5 +9207,94 @@ mod tests {
         assert_eq!(projected.policy().wake_mode, WakeMode::WakeIfIdle);
         assert!(!flags.interrupt_yielding);
         assert!(!flags.request_immediate_processing);
+    }
+
+    // Resumable-run primitives.
+
+    #[test]
+    fn settle_refuses_a_reason_that_needs_a_receipt() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("settle-reasons"));
+        for reason in [
+            InputAbandonReason::Retired,
+            InputAbandonReason::Reset,
+            InputAbandonReason::Stopped,
+            InputAbandonReason::Destroyed,
+            InputAbandonReason::NeverExecuted,
+        ] {
+            let error = driver
+                .settle_resumable_run_inputs(&RunId::new(), reason.clone())
+                .expect_err("a reason that needs a receipt is refused");
+            assert!(
+                error.to_string().contains("without a receipt only"),
+                "{reason:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn primitives_refuse_a_run_that_is_not_marked() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("unmarked-run"));
+        let run_id = RunId::new();
+        assert!(driver.release_resumable_run_inputs(&run_id).is_err());
+        assert!(
+            driver
+                .settle_resumable_run_inputs(&run_id, InputAbandonReason::ResumeRefused)
+                .is_err()
+        );
+        assert!(
+            driver
+                .end_resumable_run(&run_id, &InputAbandonReason::Retired)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_marked_run_ends_once_and_records_its_terminal() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("marked-run"));
+        let run_id = RunId::new();
+        let other = RunId::new();
+        assert!(driver.mark_run_resumable(&run_id));
+        assert!(
+            !driver.mark_run_resumable(&other),
+            "one run is resumable at a time"
+        );
+        assert_eq!(
+            driver.with_dsl_state(|state| state.resumable_run_id.clone()),
+            Some(mm_dsl::RunId::from_domain(&run_id))
+        );
+        driver
+            .end_resumable_run(&run_id, &InputAbandonReason::Retired)
+            .expect("the marked run ends");
+        assert_eq!(
+            driver.with_dsl_state(|state| state.resumable_run_id.clone()),
+            None
+        );
+        assert_eq!(
+            driver.with_dsl_state(|state| state.turn_terminal_run_id.clone()),
+            Some(mm_dsl::RunId::from_domain(&run_id))
+        );
+        assert!(
+            driver
+                .end_resumable_run(&run_id, &InputAbandonReason::Retired)
+                .is_err(),
+            "an ended run is no longer resumable"
+        );
+    }
+
+    #[test]
+    fn releasing_a_marked_run_without_kept_inputs_requeues_nothing() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("release-empty"));
+        let run_id = RunId::new();
+        assert!(driver.mark_run_resumable(&run_id));
+        assert_eq!(
+            driver
+                .release_resumable_run_inputs(&run_id)
+                .expect("the marked run is released"),
+            Vec::<InputId>::new()
+        );
+        assert_eq!(
+            driver.with_dsl_state(|state| state.resumable_run_id.clone()),
+            None
+        );
     }
 }

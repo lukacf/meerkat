@@ -3900,10 +3900,20 @@ async fn fork_off_of_an_activated_member_runs_when_the_host_opts_in() {
         "{result}"
     );
     let child_request = log.request_for(POLICY_CHILD_TASK);
+    // The inherited row reaches the model as a header that names the key;
+    // the body comes once, from the child's own re-activation.
     assert_eq!(
         child_request.rendered.matches(STANDING_BODY).count(),
-        2,
-        "the child's request carries the inherited history row and its own activation"
+        1,
+        "the child's request carries the body once, from its own activation"
+    );
+    assert_eq!(
+        child_request
+            .rendered
+            .matches("[meerkat-inherited-instruction-v2]")
+            .count(),
+        1,
+        "the inherited history row is a header without its body"
     );
     fixture.teardown().await;
 }

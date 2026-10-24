@@ -106,7 +106,7 @@ repos:
       - id: end-of-file-fixer
         # Released fixture bytes are manifest-hashed and must not be rewritten.
         # Vendored third-party sources must stay byte-exact (see above).
-        exclude: '^(crates/meerkat-runtime/tests/fixtures/v0_8_10_released_realm/corpus/realm/|crates/meerkat-runtime/tests/fixtures/v0_7_x_pre_ledger_realm/corpus/|crates/meerkat-core/tests/fixtures/v0_8_10_recovery_migration_session\.json$|crates/meerkat-runtime/tests/fixtures/v0_8_10_recovery_migration_session\.json$|crates/meerkat-cli/tests/fixtures/v0_8_10_released_realm/|crates/meerkat-store/tests/fixtures/v0_9_3_realtime_voice_session/session\.json$|tools/third-party/)'
+        exclude: '^(crates/meerkat-runtime/tests/fixtures/v0_8_10_released_realm/corpus/realm/|crates/meerkat-runtime/tests/fixtures/v0_7_x_pre_ledger_realm/corpus/|crates/meerkat-core/tests/fixtures/v0_8_10_recovery_migration_session\.json$|crates/meerkat-runtime/tests/fixtures/v0_8_10_recovery_migration_session\.json$|crates/meerkat-cli/tests/fixtures/v0_8_10_released_realm/|crates/meerkat-store/tests/fixtures/v0_9_3_realtime_voice_session/session\.json$|crates/meerkat-runtime/tests/fixtures/v0_9_4_input_terminal_outcome\.rs\.txt$|tools/third-party/)'
         stages: [pre-push]
       - id: check-yaml
         stages: [pre-push]

@@ -501,6 +501,77 @@ async fn only_a_migrated_mob_serves_addresses_without_a_mob_incarnation() {
     migrated.shutdown().await.expect("stop the resume");
 }
 
+/// A key a member's continuation bound in a mob that crash-stopped stays
+/// bound when a mob is created again under the id: replaying it through the
+/// new mob's member answers the first receipt, stranded (the first
+/// incarnation never admitted it), and never commits it again for the new
+/// incarnation; a new key binds the new incarnation. A keyed member send
+/// relies on this replay: a retried send never admits twice, even across a
+/// re-creation.
+#[tokio::test]
+async fn a_key_bound_before_a_crash_stop_replays_stranded_through_the_mob_created_again() {
+    let (first, _first_service) = create_test_mob(sample_definition()).await;
+    let identity = AgentIdentity::from("w-cont");
+    first
+        .spawn_spec(SpawnMemberSpec::new("worker", identity.as_str()))
+        .await
+        .expect("spawn");
+    let current = Arc::new(CurrentMob(std::sync::Mutex::new(first.clone())));
+    let continuations = ContinuationOwnerService::new(
+        RuntimeDeliveryInbox::new(Arc::new(InMemoryRuntimeStore::new())),
+        Arc::new(MobContinuationResolver::new(current.clone())),
+        Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
+    );
+    let owner = ContinuationOwner::Member {
+        mob_id: first.mob_id().as_str().to_string(),
+        identity: identity.as_str().to_string(),
+    };
+    let receipt = first
+        .submit_continuation(&continuations, &identity, delivery("member_send:item-1"), 1)
+        .await
+        .expect("commit at the first incarnation");
+
+    first
+        .crash_stop_preserving_durable_work_for_test()
+        .await
+        .expect("stop the first mob's actor");
+    let (second, _second_service) = create_test_mob(sample_definition()).await;
+    assert_ne!(second.incarnation(), first.incarnation());
+    second
+        .spawn_spec(SpawnMemberSpec::new("worker", identity.as_str()))
+        .await
+        .expect("spawn under the same identity");
+    current.replace(second.clone());
+
+    let replay = second
+        .submit_continuation(&continuations, &identity, delivery("member_send:item-1"), 2)
+        .await
+        .expect("the key replays");
+    assert_eq!(replay, receipt, "the first receipt, never a new commit");
+    assert_eq!(
+        continuations
+            .continuation_status(
+                &owner,
+                &ContinuationKey::new("member_send:item-1").expect("key")
+            )
+            .await
+            .expect("status"),
+        ContinuationStatus::Stranded {
+            receipt: receipt.clone(),
+            cause: StrandedCause::OwnerRetired,
+        },
+        "the first incarnation never admitted it"
+    );
+    let fresh = second
+        .submit_continuation(&continuations, &identity, delivery("member_send:item-2"), 3)
+        .await
+        .expect("a new key commits");
+    assert_ne!(
+        fresh.address, receipt.address,
+        "a new key binds the new incarnation"
+    );
+}
+
 /// A mob with the member `w-cont`, which the host's lookup holds.
 async fn mob_with_a_member() -> (MobHandle, Arc<MockSessionService>, Arc<CurrentMob>) {
     let (first, first_service) = create_test_mob(sample_definition()).await;

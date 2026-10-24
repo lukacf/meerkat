@@ -1264,7 +1264,7 @@ fn verify_released_pre_floor_session_schema(conn: &Connection) -> Result<(), Str
 /// Maintenance-prepare callback for the explicit pre-0.8.10 session bridge.
 ///
 /// When the transaction's catalog is exactly the released pre-ledger
-/// plain-CREATE shape ([`verify_released_pre_floor_session_schema`]), the two
+/// plain-CREATE shape (`verify_released_pre_floor_session_schema`), the two
 /// legacy objects are rebuilt from the current migration-1 constants (the
 /// post-migration convergence fingerprint compares the stored CREATE text)
 /// and the remaining migration-1 objects are planted, so migrations

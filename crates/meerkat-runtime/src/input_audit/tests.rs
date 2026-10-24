@@ -518,7 +518,7 @@ fn observation_infrastructure_reserve_error_injection_is_not_policy_denial() {
 async fn mandatory_hook_withholding_persists_on_the_actual_row_at_the_current_version() {
     use crate::input_state::{InputStatePersistenceRecord, StoredInputState};
     use crate::store::{InMemoryRuntimeStore, RuntimeStore};
-    use meerkat_core::generated::session_persistence_version_authority::stored_input_state_version;
+    use meerkat_core::generated::session_persistence_version_authority::stored_input_state_version_for_row;
     let store = InMemoryRuntimeStore::new();
     let runtime = crate::identifiers::LogicalRuntimeId::new("audit-hook-withholding");
     let (audit, sink) = fixture();
@@ -555,9 +555,10 @@ async fn mandatory_hook_withholding_persists_on_the_actual_row_at_the_current_ve
         .unwrap()
         .unwrap();
     let stored = serde_json::to_value(&committed).unwrap();
+    // The row carries no requeue fact, so it is written at the baseline.
     assert_eq!(
         stored["stored_input_state_version"],
-        stored_input_state_version()
+        stored_input_state_version_for_row(false)
     );
     let records = serde_json::to_value(&committed.state.authorization_audit).unwrap();
     assert_eq!(records.as_array().unwrap().len(), 1);
@@ -597,7 +598,7 @@ async fn publication_reads_persist_at_the_current_version_and_never_before_v7() 
         AuditPolicyRead, AuditPublicationMode, AuditRecipient, AuditRefusalBasis, AuditRefusalRead,
         AuditTarget,
     };
-    use meerkat_core::generated::session_persistence_version_authority::stored_input_state_version;
+    use meerkat_core::generated::session_persistence_version_authority::stored_input_state_version_for_row;
 
     let store = InMemoryRuntimeStore::new();
     let runtime = crate::identifiers::LogicalRuntimeId::new("audit-publication-reads");
@@ -652,9 +653,10 @@ async fn publication_reads_persist_at_the_current_version_and_never_before_v7() 
         .unwrap()
         .unwrap();
     let stored = serde_json::to_value(&committed).unwrap();
+    // The row carries no requeue fact, so it is written at the baseline.
     assert_eq!(
         stored["stored_input_state_version"],
-        stored_input_state_version()
+        stored_input_state_version_for_row(false)
     );
     let reread: StoredInputState = serde_json::from_value(stored.clone()).unwrap();
     assert_eq!(serde_json::to_value(&reread).unwrap(), stored);

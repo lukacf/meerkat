@@ -811,7 +811,7 @@ impl Inbox {
     /// Raw inboxes do not own Meerkat peer/event admission authority and have
     /// no delivery queue: sending semantic `InboxItem`s through the public
     /// sender fails closed. Runtime peer/event ingress must use
-    /// [`Self::new_classified`] with an installed machine handle.
+    /// `Self::new_classified` with an installed machine handle.
     pub fn new_transport_only() -> (Self, InboxSender) {
         let notify = Arc::new(Notify::new());
         (

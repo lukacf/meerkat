@@ -1979,9 +1979,9 @@ impl MeerkatMcpState {
         &self,
         session_id: &meerkat::SessionId,
     ) -> Result<runtime_ingress::McpLiveRouterLease, ToolCallError> {
-        if self
-            .service
-            .load_authoritative_session(session_id)
+        // Presence only, read body-free: a running session's provisional
+        // tail must not refuse a live MCP change.
+        if runtime_ingress::committed_source_archived(&self.service, session_id)
             .await
             .map_err(|error| {
                 runtime_ingress::session_error_to_tool_error(
@@ -2524,6 +2524,7 @@ fn format_agent_result(
             tool_use_id,
             tool_name,
             args,
+            dedupe_key,
         })) => {
             // Pending state is a typed terminal-control fact, not a success
             // envelope. Serialize the canonical `WireCallbackPending` contract
@@ -2539,6 +2540,7 @@ fn format_agent_result(
                 tool_use_id,
                 tool_name,
                 args,
+                dedupe_key.map(|key| *key),
             );
             let mut payload = serde_json::to_value(&pending)
                 .map_err(|err| format!("Failed to serialize callback pending contract: {err}"))?;
@@ -2568,6 +2570,7 @@ fn format_agent_result(
                         tool_name: call.tool_name,
                         args: call.args,
                         settlement_failures: call.settlement_failures,
+                        dedupe_key: call.dedupe_key,
                     })
                     .collect(),
             );
@@ -2699,7 +2702,7 @@ const DEFAULT_STREAM_READ_TIMEOUT_MS: u64 = 5_000;
 /// its wire `name`, the human-readable `description`, the `input_schema`
 /// builder, and — co-located here rather than in a separate string-keyed
 /// catalog — its [`RequestLifecycle`] classification. The rendered
-/// `tools/list` JSON (see [`base_tools_list`]) and the lifecycle lookup (see
+/// `tools/list` JSON (see `base_tools_list`) and the lifecycle lookup (see
 /// [`mcp_tool_request_lifecycle`]) are both read-only projections of this
 /// single typed table, so a tool's lifecycle can never drift from where its
 /// name/description/schema are declared.
@@ -2908,7 +2911,7 @@ fn contributed_tool_lifecycles() -> Vec<(Vec<String>, RequestLifecycle)> {
 /// classification straight off the typed [`BaseToolDescriptor`] co-located
 /// with the tool's name/description/schema; contributed tools read the
 /// lifecycle their owning surface declares in
-/// [`contributed_tool_lifecycles`]. Unknown names resolve to `None` — the
+/// `contributed_tool_lifecycles`. Unknown names resolve to `None` - the
 /// caller must fail closed (reject the call as an unknown tool) instead of
 /// classifying an unadvertised name under a default lifecycle.
 pub fn mcp_tool_request_lifecycle(tool_name: &str) -> Option<RequestLifecycle> {
@@ -4647,6 +4650,7 @@ async fn handle_meerkat_run_with_help_tools(
                 max_inline_peer_notifications: None,
                 app_context: input.app_context.clone(),
                 fork_source: None,
+                prompt_context_fork_source: None,
                 additional_instructions: input.additional_instructions.clone(),
                 // The help marker makes every rebuild of a help session from
                 // storage refuse it.
@@ -4807,9 +4811,12 @@ async fn handle_meerkat_resume(
         .prepare_cold_attach(&session_id, claim)
         .await
         .map_err(prepare_session_tool_error)?;
+    // A resume of a running session queues behind its durable run, whose
+    // provisional tail stands ahead of the committed snapshot: the archive and
+    // help checks and the stored settings read that snapshot.
     let session = state
         .service
-        .load_authoritative_session(&session_id)
+        .load_committed_session_tolerating_tail(&session_id)
         .await
         .map_err(|e| ToolCallError::internal(format!("Failed to load session: {e}")))?
         .ok_or_else(|| {
@@ -5126,6 +5133,7 @@ async fn handle_meerkat_resume(
             max_inline_peer_notifications: None,
             app_context: None,
             fork_source: None,
+            prompt_context_fork_source: None,
             additional_instructions: input.additional_instructions.clone(),
             initial_metadata_entries: std::collections::BTreeMap::new(),
             initial_tool_filter: None,
@@ -5395,40 +5403,31 @@ async fn handle_meerkat_resume(
             Err((other, _admission)) => Err(other),
         }
     };
-    let session_exists = match state.service.load_authoritative_session(&session_id).await {
-        Ok(Some(session)) => match state
-            .service
-            .session_archived_by_authority(&session_id, &session)
-            .await
-        {
-            Ok(true) => {
-                state
-                    .cleanup_archived_session_runtime(&session_id)
-                    .await
-                    .map_err(archive_session_error_to_tool_error)?;
-                false
-            }
-            Ok(false) => true,
-            Err(err) => {
-                tracing::warn!(
-                    session_id = %session_id,
-                    error = %err,
-                    "failed to load machine archive state during MCP session existence check"
-                );
-                return Err(ToolCallError::internal(format!(
-                    "failed to load machine archive state during MCP session existence check for {session_id}: {err}"
-                )));
-            }
-        },
+    // Presence and archive state, read body-free: a run still going on the
+    // session (this resume queued behind it) holds a provisional tail.
+    let session_exists = match runtime_ingress::committed_source_archived(
+        &state.service,
+        &session_id,
+    )
+    .await
+    {
+        Ok(Some(true)) => {
+            state
+                .cleanup_archived_session_runtime(&session_id)
+                .await
+                .map_err(archive_session_error_to_tool_error)?;
+            false
+        }
+        Ok(Some(false)) => true,
         Ok(None) => false,
         Err(err) => {
             tracing::warn!(
                 session_id = %session_id,
                 error = %err,
-                "failed to load authoritative session after MCP resume attempt"
+                "failed to load machine archive state during MCP session existence check"
             );
             return Err(ToolCallError::internal(format!(
-                "failed to load authoritative session after MCP resume attempt for {session_id}: {err}"
+                "failed to load machine archive state during MCP session existence check for {session_id}: {err}"
             )));
         }
     };
@@ -5677,6 +5676,8 @@ mod tests {
     use super::*;
     use futures::stream;
     use meerkat::Session;
+
+    pub(crate) mod committed_reads_tests;
     use meerkat::surface::{
         CancelActionInstallOutcome, SurfaceRequestExecutor, noop_request_action,
     };
@@ -8294,6 +8295,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
+                durable: false,
             })),
         );
         let owner_session_id =
@@ -8348,6 +8350,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
+                durable: false,
             })),
         );
         let handle = meerkat_mob::MobBuilder::new(definition, meerkat_mob::MobStorage::in_memory())
@@ -9492,12 +9495,14 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
                     physical_outcome: meerkat_core::LiveBridgeEffectOutcome::Unknown,
                     failure_kind: meerkat_core::ToolDispatchTerminalErrorKind::Unavailable,
                 }],
+                dedupe_key: None,
             },
             meerkat_core::error::PendingCallbackToolCall {
                 tool_use_id: "callback-b".to_string(),
                 tool_name: "ask_b".to_string(),
                 args: json!({"question": "b"}),
                 settlement_failures: Vec::new(),
+                dedupe_key: None,
             },
         ];
         let payload = format_agent_result(
@@ -9532,6 +9537,49 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
                 .is_none(),
             "tool_use_id must not be smuggled into callback args"
         );
+    }
+
+    /// The `pending_tool_calls` of a single pending callback call carry its
+    /// dedupe key unchanged, and a call without one omits the field. (Unrun
+    /// until the candidate's validation.)
+    #[test]
+    fn test_format_agent_result_carries_the_callback_dedupe_key() {
+        let session_id = meerkat::SessionId::new();
+        let arguments = serde_json::value::RawValue::from_string(r#"{"question":"a"}"#.into())
+            .expect("valid arguments");
+        let key = meerkat_core::ToolCallDedupeKey::new(
+            meerkat_core::RunId::new(),
+            0,
+            "callback-a",
+            "ask_a",
+            &arguments,
+        )
+        .expect("valid dedupe key");
+        for dedupe_key in [Some(key), None] {
+            let payload = format_agent_result(
+                Err(SessionError::Agent(meerkat::AgentError::CallbackPending {
+                    tool_use_id: "callback-a".to_string(),
+                    tool_name: "ask_a".to_string(),
+                    args: json!({"question": "a"}),
+                    dedupe_key: dedupe_key.clone().map(Box::new),
+                })),
+                &session_id,
+            )
+            .expect("a pending callback call stays a resumable MCP result");
+            let raw = payload["content"][0]["text"]
+                .as_str()
+                .expect("wrapped MCP payload text");
+            let decoded: Value = serde_json::from_str(raw).expect("valid wrapped JSON");
+            assert_eq!(decoded["status"], "pending_tool_call");
+            let call = &decoded["pending_tool_calls"][0];
+            match &dedupe_key {
+                Some(key) => assert_eq!(
+                    call["dedupe_key"],
+                    serde_json::to_value(key).expect("key serializes")
+                ),
+                None => assert!(call.get("dedupe_key").is_none(), "{call}"),
+            }
+        }
     }
 
     #[test]

@@ -71,6 +71,14 @@ mod tokio {
 
 use async_trait::async_trait;
 
+/// The continuation producer namespace a keyed member send commits under.
+/// Core owns the `meerkat.` host namespaces, so no host source shares it.
+pub const MEMBER_SEND_CONTINUATION_NAMESPACE: &str = "meerkat.member_send";
+
+/// The prefix a caller's member-send key carries in the continuation key
+/// ledger, so it never meets another producer's key for the same member.
+pub const MEMBER_SEND_CONTINUATION_KEY_PREFIX: &str = "member_send:";
+
 use meerkat_client::LlmClient;
 use meerkat_contracts::{
     MobDefinitionInput, MobLifecycleParams, MobSpawnManyResultEntry, WireContentInput,
@@ -751,11 +759,9 @@ impl MobMcpDestroyError {
     }
 
     pub fn incomplete_error_data(report: &meerkat_mob::MobDestroyReport) -> serde_json::Value {
-        json!({
-            "code": "mob_destroy_incomplete",
-            "destroy_report": report,
-            "retryable": true,
-        })
+        json!(meerkat_contracts::WireMobDestroyIncompleteData::new(
+            report.into()
+        ))
     }
 
     pub fn error_data(&self) -> Option<serde_json::Value> {
@@ -1217,8 +1223,9 @@ pub struct MobMcpState {
     /// whose creation record disagrees with its log.
     #[cfg(test)]
     refused_resume_store: std::sync::Mutex<Option<PathBuf>>,
-    /// Test seam: when set, the next agent mob tool call parks once between
-    /// its admission and its action (see [`Self::pause_agent_call`]).
+    /// Test seam: when set, the next agent mob tool call (or keyed member
+    /// send) parks once between its admission and its action (see
+    /// [`Self::pause_agent_call`]).
     #[cfg(test)]
     agent_call_hold: std::sync::Mutex<Option<Arc<InsertHold>>>,
     /// Test seam: when set, a member lookup parks once between its first
@@ -6117,6 +6124,209 @@ impl MobMcpState {
             .await
     }
 
+    /// Deliver `content` to a member under a caller idempotency key: the one
+    /// keyed member-send door for RPC, the public MCP tool and Meta.
+    ///
+    /// A keyed send is committed as a member continuation, so the key is kept
+    /// for the member identity in the continuation key ledger, together with
+    /// the committed delivery, and survives a respawn. The ledger decides a
+    /// replay or a conflict before anything about the member is read, so a
+    /// replay answers the first receipt even after the member was replaced.
+    /// Only a first commit checks the member: it must exist and hold a
+    /// session binding, because a peer-only member would never be served.
+    /// The commit is bound to the mob incarnation the send was admitted
+    /// against ([`meerkat::ContinuationOwnerService::submit_for_member_incarnation`]),
+    /// as every operator call acts through the handle it was admitted
+    /// against: a mob destroyed and created again under the id in between
+    /// gets nothing committed for its member. Every answer carries the
+    /// delivery status read after the commit.
+    ///
+    /// # Errors
+    /// [`MobError::MemberSendIdempotency`] for an invalid key, a conflict, a
+    /// host without a continuation service, a governed runtime, or a status
+    /// read that cannot be made; [`MobError::MemberNotFound`] and
+    /// [`MobError::DeliveryScopeUnavailable`] for a first commit to a member
+    /// that does not exist or has no session binding, and
+    /// [`MobError::MemberNotFound`] when the mob it was admitted against is no
+    /// longer the one under the id.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn mob_member_send_keyed(
+        &self,
+        mob_id: &MobId,
+        identity: AgentIdentity,
+        content: ContentInput,
+        handling_mode: HandlingMode,
+        idempotency_key: &str,
+    ) -> Result<meerkat_contracts::WireContinuationReceipt, MobError> {
+        use meerkat_mob::MemberSendIdempotencyRefusal as Refusal;
+
+        let refuse = |refusal: Refusal| MobError::MemberSendIdempotency {
+            identity: identity.clone(),
+            refusal,
+        };
+        let handle = self
+            .admitted_handle_for(mob_id, ControlScope::SendCommand)
+            .await?;
+        meerkat_runtime::validate_canonical_key_text(
+            "idempotency_key",
+            idempotency_key,
+            meerkat_runtime::CALLER_IDEMPOTENCY_KEY_MAX_BYTES,
+        )
+        .map_err(|error| {
+            refuse(Refusal::InvalidKey {
+                detail: error.to_string(),
+            })
+        })?;
+        let service = self
+            .continuation_service()
+            .ok_or_else(|| refuse(Refusal::NoContinuationService))?;
+        if service.governs_work_authority() {
+            return Err(refuse(Refusal::GovernedRuntime));
+        }
+        let owner = meerkat::ContinuationOwner::Member {
+            mob_id: mob_id.to_string(),
+            identity: identity.to_string(),
+        };
+        let key = meerkat::ContinuationKey::new(format!(
+            "{MEMBER_SEND_CONTINUATION_KEY_PREFIX}{idempotency_key}"
+        ))
+        .map_err(|error| {
+            refuse(Refusal::InvalidKey {
+                detail: error.to_string(),
+            })
+        })?;
+        let status_error = |error: meerkat::ContinuationStatusError| match error {
+            meerkat::ContinuationStatusError::Unavailable(detail) => {
+                refuse(Refusal::Unavailable { detail })
+            }
+            meerkat::ContinuationStatusError::Inconsistent(detail) => {
+                refuse(Refusal::Inconsistent { detail })
+            }
+        };
+        if matches!(
+            service
+                .continuation_status(&owner, &key)
+                .await
+                .map_err(status_error)?,
+            meerkat::ContinuationStatus::NotCommitted
+        ) {
+            handle.capture_member_delivery_scope(&identity).await?;
+        }
+        let content_bytes = serde_json::to_vec(&content).map_err(|error| {
+            refuse(Refusal::Inconsistent {
+                detail: format!("member send content does not serialize: {error}"),
+            })
+        })?;
+        let delivery = meerkat::ContinuationDelivery {
+            key: key.clone(),
+            result: meerkat::ContinuationResultRef {
+                producer: meerkat::ContinuationProducer::Host {
+                    namespace: MEMBER_SEND_CONTINUATION_NAMESPACE.to_string(),
+                },
+                producer_id: idempotency_key.to_string(),
+                result_digest: meerkat_runtime::delivery_digest_hex(&[
+                    MEMBER_SEND_CONTINUATION_NAMESPACE.as_bytes(),
+                    &content_bytes,
+                ]),
+                summary: None,
+            },
+            body: meerkat::ContinuationBody::Content { content },
+            handling: match handling_mode {
+                HandlingMode::Queue => meerkat::ContinuationHandling::Queue,
+                HandlingMode::Steer => meerkat::ContinuationHandling::Steer,
+            },
+        };
+        let committed_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| {
+                u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+            });
+        self.pause_agent_call().await;
+        let receipt = service
+            .submit_for_member_incarnation(&owner, handle.incarnation(), delivery, committed_at_ms)
+            .await
+            .map_err(|error| match error {
+                meerkat::ContinuationSubmitError::Conflict { existing } => {
+                    refuse(Refusal::Conflict {
+                        delivery_id: existing.delivery_id.clone(),
+                        committed_at_ms: existing.committed_at_ms,
+                    })
+                }
+                meerkat::ContinuationSubmitError::OwnerRetired => {
+                    MobError::MemberNotFound(identity.clone())
+                }
+                meerkat::ContinuationSubmitError::NoAdmissibleWorkBinding => {
+                    refuse(Refusal::GovernedRuntime)
+                }
+                meerkat::ContinuationSubmitError::Invalid(detail) => {
+                    refuse(Refusal::InvalidKey { detail })
+                }
+                meerkat::ContinuationSubmitError::Unavailable(detail) => {
+                    refuse(Refusal::Unavailable { detail })
+                }
+            })?;
+        let status = match service
+            .continuation_status(&owner, &key)
+            .await
+            .map_err(status_error)?
+        {
+            meerkat::ContinuationStatus::NotCommitted => {
+                return Err(refuse(Refusal::Inconsistent {
+                    detail: "the key reads as not committed after its commit".to_string(),
+                }));
+            }
+            meerkat::ContinuationStatus::Pending { admitted: None, .. } => {
+                meerkat_contracts::WireContinuationStatus::Pending
+            }
+            meerkat::ContinuationStatus::Pending {
+                admitted: Some((session, input)),
+                ..
+            }
+            | meerkat::ContinuationStatus::Applied { session, input, .. } => {
+                meerkat_contracts::WireContinuationStatus::Admitted {
+                    session_id: session.to_string(),
+                    input_id: input.to_string(),
+                }
+            }
+            meerkat::ContinuationStatus::Stranded { .. } => {
+                meerkat_contracts::WireContinuationStatus::Stranded
+            }
+            meerkat::ContinuationStatus::Refused { reason, .. } => {
+                meerkat_contracts::WireContinuationStatus::Refused {
+                    reason: serde_json::to_value(reason)
+                        .ok()
+                        .and_then(|value| value.as_str().map(str::to_string))
+                        .unwrap_or_else(|| format!("{reason:?}")),
+                }
+            }
+        };
+        Ok(meerkat_contracts::WireContinuationReceipt {
+            delivery_id: receipt.delivery_id,
+            committed_at_ms: receipt.committed_at_ms,
+            status,
+        })
+    }
+
+    /// [`Self::mob_member_send_keyed`] on a host that binds no continuation
+    /// service (the browser runtime): the key cannot be kept, so it is
+    /// refused after authorization, never dropped.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn mob_member_send_keyed(
+        &self,
+        mob_id: &MobId,
+        identity: AgentIdentity,
+        _content: ContentInput,
+        _handling_mode: HandlingMode,
+        _idempotency_key: &str,
+    ) -> Result<meerkat_contracts::WireContinuationReceipt, MobError> {
+        self.admitted_handle_for(mob_id, ControlScope::SendCommand)
+            .await?;
+        Err(MobError::MemberSendIdempotency {
+            identity,
+            refusal: meerkat_mob::MemberSendIdempotencyRefusal::NoContinuationService,
+        })
+    }
+
     pub async fn mob_ingress_interaction(
         &self,
         mob_id: &MobId,
@@ -7202,9 +7412,9 @@ impl MobMcpState {
         Ok(handle)
     }
 
-    /// Test seam: an agent mob tool call parks here, once, between its
-    /// admission against a mob and its action, so a test can replace the
-    /// mob under the id in between. A no-op outside tests.
+    /// Test seam: an agent mob tool call, or a keyed member send, parks here,
+    /// once, between its admission against a mob and its action, so a test
+    /// can replace the mob under the id in between. A no-op outside tests.
     pub(crate) async fn pause_agent_call(&self) {
         #[cfg(test)]
         {
@@ -8087,6 +8297,16 @@ struct LocalSessionService {
 impl LocalSessionService {
     fn new() -> Self {
         Self::new_with_archive_failures(Arc::new(InMemoryArchiveFailureControl::default()))
+    }
+
+    /// [`Self::new`] over a runtime the test configured first (a governed
+    /// one). Tests only.
+    #[cfg(test)]
+    fn new_over_runtime_for_tests(runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>) -> Self {
+        Self {
+            runtime_adapter,
+            ..Self::new()
+        }
     }
 
     fn new_with_archive_failures(archive_failures: Arc<InMemoryArchiveFailureControl>) -> Self {
@@ -15142,6 +15362,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
+                durable: false,
             })),
         );
         let mut definition = MobDefinition::explicit(MobId::from(mob_id));
@@ -15425,6 +15646,7 @@ mod tests {
             max_inline_peer_notifications: None,
             output_schema: None,
             provider_params: None,
+            durable: false,
         }
     }
 
@@ -20119,6 +20341,115 @@ mod tests {
         assert_eq!(
             member_ids(&state, mob_id).await,
             vec!["b-member".to_string()]
+        );
+    }
+
+    /// A keyed member send admitted against a mob commits for that mob's
+    /// member or nowhere. When the mob is destroyed and created again under
+    /// the id, with a member of the same identity, between the send's
+    /// admission and its commit, the send answers that the member it was
+    /// admitted for is gone: the key stays uncommitted for the new mob's
+    /// member, and nothing reaches the inbox.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn an_admitted_keyed_member_send_never_commits_for_a_mob_recreated_under_its_id() {
+        let runtime = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
+        let state = MobMcpState::from_acquired_runtime_adapter(
+            Arc::new(crate::LocalSessionService::new_over_runtime_for_tests(
+                Arc::clone(&runtime),
+            )),
+            Some(runtime),
+            meerkat_mob::MobControlPrincipal::Owner,
+        )
+        .into_shared();
+        let inbox = meerkat_runtime::RuntimeDeliveryInbox::new(Arc::new(
+            meerkat_runtime::InMemoryRuntimeStore::new(),
+        ));
+        state
+            .bind_continuations(inbox.clone(), &meerkat::ContinuationHostBindings::default())
+            .expect("bind the state's continuations");
+        let mob_id = MobId::from("raced-keyed-send-mob");
+        let member = AgentIdentity::from("w-1");
+        let create_with_member = || async {
+            crate::public_mcp::handle_public_tools_call(
+                &state,
+                "meerkat_mob_create",
+                &json!({
+                    "definition": {
+                        "id": mob_id.as_str(),
+                        "profiles": {
+                            "worker": { "model": "gpt-5.4", "tools": {"comms": true} }
+                        }
+                    }
+                }),
+            )
+            .await
+            .expect("create the mob");
+            crate::public_mcp::handle_public_tools_call(
+                &state,
+                "meerkat_mob_spawn",
+                &json!({
+                    "mob_id": mob_id.as_str(),
+                    "profile": "worker",
+                    "agent_identity": member.as_str(),
+                    "runtime_mode": "turn_driven"
+                }),
+            )
+            .await
+            .expect("spawn the member");
+        };
+        create_with_member().await;
+
+        let hold = hold_next_agent_call(&state);
+        let send = state.mob_member_send_keyed(
+            &mob_id,
+            member.clone(),
+            ContentInput::from("raced keyed send"),
+            HandlingMode::Queue,
+            "raced-item",
+        );
+        let race = async {
+            wait_parked(&hold).await;
+            state
+                .mob_destroy(&mob_id)
+                .await
+                .expect("the console destroys the admitted mob");
+            create_with_member().await;
+            hold.release.notify_one();
+        };
+        let (outcome, ()) = tokio::join!(send, race);
+
+        assert!(
+            matches!(&outcome, Err(MobError::MemberNotFound(identity)) if identity == &member),
+            "the member the send was admitted for is gone: {outcome:?}"
+        );
+        let status = state
+            .continuation_service()
+            .expect("bound")
+            .continuation_status(
+                &meerkat::ContinuationOwner::Member {
+                    mob_id: mob_id.to_string(),
+                    identity: member.to_string(),
+                },
+                &meerkat::ContinuationKey::new(format!(
+                    "{MEMBER_SEND_CONTINUATION_KEY_PREFIX}raced-item"
+                ))
+                .expect("key"),
+            )
+            .await
+            .expect("status");
+        assert_eq!(
+            status,
+            meerkat::ContinuationStatus::NotCommitted,
+            "nothing is committed for the new mob's member"
+        );
+        assert_eq!(
+            inbox
+                .pending_delivery_total()
+                .await
+                .expect("read the inbox"),
+            0,
+            "nothing reaches the inbox"
         );
     }
 

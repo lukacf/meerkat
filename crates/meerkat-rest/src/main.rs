@@ -259,13 +259,31 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("Listening on http://{}", addr);
 
-    // Run server with graceful shutdown
+    // Run server with graceful shutdown. The shutdown future awaits the
+    // signal, then stops schedule delivery (so no occurrence admits work
+    // into a session the shutdown tears down) and unregisters the runtime's
+    // sessions, and only then resolves, so axum's drain starts after the
+    // unregisters. On a runtime with a persistence store they requeue: the
+    // run in flight of a session that commits each round is suspended for the
+    // session's next start, and the open request waiting on it is answered
+    // (`409` `requeued_across_stop`) instead of holding the drain open until
+    // the run ends.
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    let signal_state = shutdown_state.clone();
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            signal_state.shutdown_schedule_host().await;
+            meerkat_rest::unregister_runtime_sessions_for_shutdown(&signal_state).await;
+        })
         .await?;
 
-    // Cancel in-flight requests and abort stragglers.
+    // The listener accepted requests until the drain began, so a session
+    // they registered after the first pass is unregistered here, with the
+    // same disposition, before the requests still tracked are cancelled.
+    meerkat_rest::unregister_runtime_sessions_for_shutdown(&shutdown_state).await;
+
+    // Cancel the requests still tracked and abort stragglers.
     shutdown_state
         .request_executor
         .shutdown_and_abort_stragglers()
@@ -274,8 +292,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Shut down all live MCP adapters to close connections cleanly.
     #[cfg(feature = "mcp")]
     meerkat_rest::shutdown_all_mcp_sessions(&shutdown_state).await;
-
-    shutdown_state.shutdown_schedule_host().await;
 
     tracing::info!("Server shutdown complete");
     Ok(())

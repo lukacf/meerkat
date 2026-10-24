@@ -93,6 +93,7 @@ fn fork_target(member: &str) -> meerkat_core::DurableSessionForkTarget {
         cache_identity: None,
         source_admission: meerkat_core::DurableForkSourceAdmission::Quiescent,
         inherited_instructions: meerkat_core::ForkInstructionPolicy::default(),
+        declared_instructions: meerkat_core::ForkInstructionPolicy::default(),
     }
 }
 
@@ -120,6 +121,7 @@ fn definition() -> MobDefinition {
             max_inline_peer_notifications: None,
             output_schema: None,
             provider_params: None,
+            durable: false,
         })),
     );
     let mut definition = MobDefinition::explicit(MobId::from(format!(

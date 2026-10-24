@@ -2577,6 +2577,7 @@ mod tests {
                 "AuthorizedAcceptedInputMaterialization",
                 "AuthorizeRuntimeLoopBatch",
                 "AuthorizedStageForRun",
+                "AuthorizedResumedRun",
                 "AuthorizedRuntimeLoopRunCommit",
                 "AuthorizedInteractionTerminalOutboxAdoption",
                 "AuthorizedRuntimeCompletionResultClosure"

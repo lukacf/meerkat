@@ -283,6 +283,26 @@ fn request(client: &dyn LlmClient, policy: Arc<Policy>) -> PreparedLlmRequest {
             ModelAuthorizationUse::Inference,
         )))
 }
+/// A governed request that asks for Gemini's native search through the
+/// request's Gemini tag.
+fn search_request(client: &dyn LlmClient, policy: Arc<Policy>) -> PreparedLlmRequest {
+    let messages = vec![Message::User(UserMessage::text("search the web"))];
+    let projection = client.project_replay_request(&messages).unwrap();
+    let work = WorkAuthorizationContext::new(
+        policy,
+        meerkat_core::exact_operation::OperationExecutionScope::Domain,
+    );
+    let request = LlmRequest::new(MODEL, messages).with_gemini_tag_merge(|tag| {
+        tag.google_search = Some(
+            meerkat_core::lifecycle::run_primitive::OpaqueProviderBody::from_value(
+                &serde_json::json!({}),
+            ),
+        );
+    });
+    PreparedLlmRequest::from_projection(request, projection).with_authorization(Some(
+        LlmRequestAuthorization::new(work, OperationId::new(), ModelAuthorizationUse::Inference),
+    ))
+}
 async fn collect(
     client: &dyn LlmClient,
     request: &PreparedLlmRequest,
@@ -346,6 +366,36 @@ async fn selected_target_reaches_policy_and_actual_http_body() {
         Some(AuthCredentialIdentity::Binding(binding()))
     );
     assert!(facts[0].hosted_capabilities.is_empty());
+}
+
+/// A governed request with Gemini's native search reaches the policy as the
+/// GoogleSearch hosted capability. The request names the tool
+/// "google_search", and the adapter's scan of the lowered body maps that key
+/// to GoogleSearch, not to an unknown provider-native tool the policy cannot
+/// judge.
+#[tokio::test]
+async fn native_google_search_reaches_the_policy_as_google_search() {
+    let server = serve(StatusCode::OK, None).await;
+    let policy = Policy::new();
+    let client = client(&server.url, Authorizer::new(false, None));
+    let request = search_request(client.as_ref(), Arc::clone(&policy));
+    let results = collect(client.as_ref(), &request).await;
+    assert!(succeeded(&results));
+    let bodies = server.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 1);
+    assert!(
+        bodies[0]["tools"]
+            .as_array()
+            .is_some_and(|tools| tools.iter().any(|tool| tool.get("google_search").is_some())),
+        "the request asks for native search: {}",
+        bodies[0]
+    );
+    let facts = policy.facts.lock().unwrap();
+    assert_eq!(facts.len(), 1);
+    assert_eq!(
+        facts[0].hosted_capabilities.to_vec(),
+        vec![meerkat_core::ServerToolKind::GoogleSearch]
+    );
 }
 
 #[tokio::test]

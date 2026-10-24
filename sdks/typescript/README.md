@@ -215,11 +215,14 @@ Returns typed session details including `model`, `provider`, `lastAssistantText`
 ### Session ingress helpers
 
 ```ts
-async sendExternalEvent(sessionId: string, eventType: string, payload: unknown, options?: { blocks?: ContentBlock[] }): Promise<Record<string, unknown>>
+async sendExternalEvent(sessionId: string, eventType: string, payload: unknown, options?: { blocks?: ContentBlock[]; idempotencyKey?: string }): Promise<Record<string, unknown>>
 async injectContext(sessionId: string, text: string, options?: { source?: string; idempotencyKey?: string }): Promise<{ status: string }>
 ```
 
 These expose `session/external_event` and `session/inject_context` as first-class public APIs.
+With `idempotencyKey`, a retried `sendExternalEvent` admits nothing new and
+answers `outcome_type` `deduplicated`; it needs a server contract of 0.9.5 or
+later, and the SDK refuses the key against an older server.
 
 Input reconciliation, ATIF export, transcript revision read/list, forking,
 guarded rewriting, system-prompt update, and revision restore are also public
@@ -394,6 +397,22 @@ individual properties.
 - `Usage`, `SessionInfo`, `Capability`, and `SchemaWarning` model the runtime responses directly.
 - `Session` and `DeferredSession` are the canonical runtime-backed wrappers for session lifecycle.
 - `EventStream` yields typed events such as `text_delta`, `turn_completed`, and `tool_execution_completed`.
+
+`subscribeSessionEvents(...)`, `subscribeMobMemberEvents(...)`, and
+`subscribeMobEvents(...)` return a standalone `EventSubscription`.
+After delivering earlier queued events, its iterator throws
+`EventSubscriptionError` (a `MeerkatError`) when the runtime's `stream_end`
+contains an error. Error-free `remote_end` and `explicit_close` notifications
+end iteration normally. Catching this error does not cancel the agent run.
+
+The error retains the server's `code`, `message`, and full `terminalOutcome`,
+including unknown codes and outcomes. The subscription also exposes
+`terminalOutcome`. Both expose `lastRpcSequence` and `lastEventSeq` for the
+last event delivered to the caller. The former is the RPC notification's
+sequence; the latter is the canonical envelope's `seq` (the nested envelope
+for mob events). These values are not interchangeable or replay cursors.
+Missing sequence values stay `undefined`. This API reports stream errors;
+it does not automatically reopen a stream or replay missing events.
 
 `TurnCompletedEvent.usage` is optional; absent means unmeasured, not zero.
 `RunStartedEvent.input` preserves the typed `RunInput`: content (text or blocks)

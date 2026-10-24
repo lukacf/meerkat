@@ -407,6 +407,21 @@ pub trait MemberObservationHost: Send + Sync {
         })
     }
 
+    /// The member session's visible tool names as its session task last
+    /// published them, for the fork notice of a prompt-context fork of
+    /// this member (V7 `ReadMemberVisibleTools`). `None` when the session
+    /// is not live here. A host that cannot read them answers
+    /// `Unavailable`, and the forking side compares nothing.
+    async fn visible_tool_names(
+        &self,
+        session: &SessionId,
+    ) -> Result<Option<Vec<String>>, MemberObservationError> {
+        let _ = session;
+        Err(MemberObservationError::Unavailable {
+            reason: "member observation host does not read visible tools".to_string(),
+        })
+    }
+
     /// O2: adopt an accepted directive-bearing or explicitly interaction-
     /// tracked delivery as a tracked turn.
     /// Spawns the terminal watcher (classify → bind `terminal_seq` →

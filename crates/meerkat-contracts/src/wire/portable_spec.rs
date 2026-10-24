@@ -90,6 +90,10 @@ pub struct PortableProfile {
     pub output_schema: Option<WireOpaqueJson>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_params: Option<WireProviderParamsOverride>,
+    /// The profile spawns durable workers. Omitted means false, so a spec
+    /// for an ordinary member keeps the shape an older member host reads.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub durable: bool,
 }
 
 /// `Eq` is required by the `MaterializeMember` command chain, and
@@ -498,6 +502,7 @@ pub(crate) fn sample_portable_member_spec() -> PortableMemberSpec {
             max_inline_peer_notifications: Some(3),
             output_schema: None,
             provider_params: None,
+            durable: false,
         },
         definition_extract: PortableDefinitionExtract {
             models: BTreeMap::new(),

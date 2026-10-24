@@ -75,6 +75,10 @@ pub struct PlannedForkRequest {
     /// participant fork: the council admits the participant's turns itself,
     /// so the host has no window to activate inherited instruction keys.
     pub inherited_instructions: meerkat_core::ForkInstructionPolicy,
+    /// The same policy as the host declared it. The skills the copied rows
+    /// loaded follow it (see
+    /// [`meerkat_core::DurableSessionForkTarget::declared_instructions`]).
+    pub declared_instructions: meerkat_core::ForkInstructionPolicy,
 }
 
 /// Provenance returned by a successful planned fork.
@@ -770,6 +774,7 @@ impl ForkedParticipantService {
                         prefix_message_count: request.prefix_message_count,
                         inherited_instructions: policy
                             .effective(meerkat_core::ActivationWindow::None),
+                        declared_instructions: policy,
                     })
                     .await
                 {

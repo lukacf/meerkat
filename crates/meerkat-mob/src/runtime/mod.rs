@@ -217,6 +217,10 @@ mod delegation;
 mod delivery_scope;
 mod delivery_wait;
 mod disposal;
+#[cfg(feature = "runtime-adapter")]
+mod durable_resume;
+#[cfg(feature = "runtime-adapter")]
+pub use durable_resume::{DurableResumeGate, DurableResumeRequest, DurableResumeVerdict};
 mod edge_locks;
 mod event_pump;
 mod event_router;
@@ -224,9 +228,11 @@ mod events;
 mod flow;
 pub mod flow_frame_engine;
 mod fork_build;
+mod fork_context;
 pub mod forked_participant_routing;
 mod handle;
 mod held_spawn;
+mod identity_incarnation_custody;
 mod identity_local_services;
 #[cfg(any(test, feature = "test-support"))]
 mod identity_recovery_test_support;
@@ -240,6 +246,8 @@ mod read_handle;
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub use actor::fail_stop_next_actor_start_for_test;
+#[cfg(any(test, feature = "test-support"))]
+mod restore_fault_test_support;
 pub(crate) use handle::MemberTurnLlmIdentityAppliedSender;
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
@@ -261,6 +269,11 @@ pub use provisioner::{
     arm_owned_actor_cleanup_released_boundary_pause_for_test,
     arm_owned_actor_cleanup_rollback_pause_for_test,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use restore_fault_test_support::apply_restore_tuple_fault_for_test;
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub use restore_fault_test_support::{RestoreTupleFault, fault_next_restore_tuple_for_test};
 
 /// Test-support seam: the operator tool definitions a mob member receives
 /// from `MobOperatorToolDispatcher` (local flavor), so the provider schema
@@ -304,8 +317,10 @@ mod member_history_proxy;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 mod member_instruction;
 mod member_live_proxy;
+mod member_operator_ceiling;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 pub use member_instruction::MemberInstructionActivationError;
+pub use member_operator_ceiling::MemberOperatorAuthorityCeiling;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 pub(crate) mod member_operator_forwarder;
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
@@ -472,20 +487,20 @@ pub use handle::{
     InitializeAdaptiveRunRequest, MEMBER_ADMISSION_LANE_CAPACITY, MEMBER_RELOAD_TOTAL_TIMEOUT,
     MemberAdmissionBacklogGauge, MemberAdmissionBacklogSnapshot, MemberBoundedTurnResult,
     MemberDeliveryReceipt, MemberHandle, MemberInputAdmission, MemberPreviewUnavailable,
-    MemberReloadDisposition, MemberReloadOutcome, MemberRespawnReceipt, MemberRunState,
-    MemberTargetAbsence, MemberTurnEventSender, MemberTurnHandle, MemberTurnOptions,
-    MobActorTaskWait, MobActorTaskWatch, MobDestroyError, MobDestroyReport, MobEventsSubscription,
-    MobEventsSubscriptionConfig, MobEventsView, MobHandle, MobMachineStateChanges,
-    MobMemberEndpointOwner, MobMemberEndpointStatus, MobMemberListEntry, MobMemberPeerEndpoint,
-    MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot, MobRespawnError,
-    MobSpawnManyFailure, MobUnreachablePeer, MobWireMembersBatchReport, OwnedMemberTargetAdmission,
-    PeerMessageReceipt, PeerTarget, PreviousMemberCleanupReport, ResumedMemberView,
-    SpawnContinuityIntent, SpawnCustomizationContext, SpawnMemberAdmission,
-    SpawnMemberAdmissionObservations, SpawnMemberCustomizer, SpawnMemberCustomizerChain,
-    SpawnMemberSpec, SpawnResult, SpawnSource, SpawnSystemPromptOverride, SpawnToolAdmission,
-    SupervisorRotationReport, WithheldToolBundle, WorkAdmissionStage, WorkBoundedTurnResult,
-    WorkDeliveryReceipt, WorkTurnHandle, mob_error_wire_code, profile_to_wire,
-    stored_realm_profile_to_wire,
+    MemberReloadDisposition, MemberReloadOutcome, MemberReloadRefusal, MemberRespawnReceipt,
+    MemberRunState, MemberTargetAbsence, MemberTurnEventSender, MemberTurnHandle,
+    MemberTurnOptions, MobActorTaskWait, MobActorTaskWatch, MobDestroyError,
+    MobDestroyMemberRefusal, MobDestroyReport, MobEventsSubscription, MobEventsSubscriptionConfig,
+    MobEventsView, MobHandle, MobMachineStateChanges, MobMemberEndpointOwner,
+    MobMemberEndpointStatus, MobMemberListEntry, MobMemberPeerEndpoint, MobMemberSnapshot,
+    MobMemberStatus, MobPeerConnectivitySnapshot, MobRespawnError, MobSpawnManyFailure,
+    MobUnreachablePeer, MobWireMembersBatchReport, OwnedMemberTargetAdmission, PeerMessageReceipt,
+    PeerTarget, PreviousMemberCleanupReport, ResumedMemberView, SpawnContinuityIntent,
+    SpawnCustomizationContext, SpawnMemberAdmission, SpawnMemberAdmissionObservations,
+    SpawnMemberCustomizer, SpawnMemberCustomizerChain, SpawnMemberSpec, SpawnResult, SpawnSource,
+    SpawnSystemPromptOverride, SpawnToolAdmission, SupervisorRotationReport, WithheldToolBundle,
+    WorkAdmissionStage, WorkBoundedTurnResult, WorkDeliveryReceipt, WorkTurnHandle,
+    mob_error_wire_code, profile_to_wire, stored_realm_profile_to_wire,
 };
 pub(crate) use handle::{
     CanonicalOpsOwnerContext, ExactTurnCompletionSender, FlowOperationCustody, MemberSpawnReceipt,
@@ -526,15 +541,16 @@ pub(crate) use retirement_settlement::{
 };
 pub use retirement_settlement::{
     MemberShutdownOutcome, MemberUnregisterSettlement, MemberUnregisterState, MobShutdownReport,
-    RetirementSettlement, RetirementSettlementWatch, RetirementStage, ShutdownOptions,
+    QueuedInputsOnShutdown, RequeueMaxAge, RetirementSettlement, RetirementSettlementWatch,
+    RetirementStage, ShutdownOptions, ShutdownOptionsError,
 };
 use roster_authority::{RosterAuthority, RosterMutator};
 #[cfg(not(target_arch = "wasm32"))]
 pub use session_service::ControllerRouteObservation;
 pub use session_service::LiveDurableSourceObservation;
 pub use session_service::{
-    AgentEventSubscription, AuthorizedSessionResume, MemberSessionActivity,
-    MemberStatusSessionView, MemberStatusViewSource, MobSessionService,
+    AgentEventSubscription, AuthorizedSessionResume, ColdStartTailSettlement,
+    MemberSessionActivity, MemberStatusSessionView, MemberStatusViewSource, MobSessionService,
     PersistedSessionAuthorityReadCost, ResumeRejectionKind, ResumeSessionLoad,
     ResumeVerdictTerminality, SessionResumeAuthority, SessionResumeLifecycle,
     SessionResumeMaterialization, SessionResumePreparationReceipt, SessionResumeRejection,

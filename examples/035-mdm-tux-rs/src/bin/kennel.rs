@@ -313,6 +313,7 @@ async fn run() -> anyhow::Result<()> {
                 image_generation_provider: None,
                 auto_compact_threshold: None,
                 resume_overrides: Vec::new(),
+                durable: false,
             })),
         );
 

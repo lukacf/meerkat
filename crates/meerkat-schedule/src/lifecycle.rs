@@ -738,7 +738,8 @@ impl AdmissionEvidence {
 
 /// The attempts an occurrence whose earlier attempt recorded its dispatch
 /// may use past its misfire deadline. The occurrence machine's guards spell
-/// the same cap; a test pins them equal.
+/// the same cap as a literal, which no constant feeds: rows pin each guard
+/// at its boundary, and a test pins this constant to the machine's.
 pub const ADMITTED_RECLAIM_ATTEMPT_CAP: u32 = 5;
 
 /// Domain mirror of the occurrence authority's claimed-occurrence pre-dispatch
@@ -5502,6 +5503,60 @@ mod tests {
         }
     }
 
+    /// The unproven side of the reclaim cap, each guard at its boundary. A
+    /// reclaim whose only evidence is a dispatch start claims past the
+    /// deadline below the cap and is refused at it
+    /// (ClaimPendingAfterUnprovenDispatch), and its exhaustion is refused
+    /// below the cap (ReclaimExhaustedAfterUnprovenDispatch). The rows above
+    /// pin the admitted side and the due classification.
+    #[test]
+    fn the_unproven_dispatch_guards_hold_the_reclaim_cap() {
+        let cap = ADMITTED_RECLAIM_ATTEMPT_CAP;
+        let exhaust = |occurrence: &Occurrence, at| {
+            occurrence
+                .clone()
+                .apply(OccurrenceLifecycleInput::ResolveReclaimExhausted {
+                    admission_evidence: AdmissionEvidence::Started,
+                    detail: Some(occurrence.reclaim_exhausted_detail(AdmissionEvidence::Started)),
+                    at_utc: at,
+                })
+                .map(OccurrenceLifecycleMutator::into_occurrence)
+        };
+
+        let (below, due) = pending_after_attempts(cap - 1);
+        let past = due + Duration::seconds(45);
+        let reclaimed = reclaim(&below, past, AdmissionEvidence::Started)
+            .expect("an unproven reclaim below the cap claims");
+        assert_eq!(
+            reclaimed.effects().to_vec(),
+            vec![
+                OccurrenceLifecycleEffect::Claimed,
+                OccurrenceLifecycleEffect::ReclaimedAfterUnprovenDispatch
+            ]
+        );
+        assert_eq!(reclaimed.into_occurrence().attempt_count, cap);
+        assert!(
+            exhaust(&below, past).is_err(),
+            "an unproven occurrence below the cap is not exhausted"
+        );
+
+        let (capped, due) = pending_after_attempts(cap);
+        let past = due + Duration::seconds(45);
+        assert!(
+            reclaim(&capped, past, AdmissionEvidence::Started).is_err(),
+            "the cap ends an unproven reclaim past the deadline"
+        );
+        assert_eq!(
+            exhaust(&capped, past)
+                .expect("an unproven occurrence at the cap is exhausted")
+                .phase,
+            OccurrencePhase::Misfired
+        );
+    }
+
+    /// The domain constant equals the occurrence machine's constant. No guard
+    /// reads either: the guards spell the cap as a literal, and the cap rows
+    /// above pin each guard at its boundary.
     #[test]
     fn the_reclaim_cap_is_the_occurrence_machines_cap() {
         assert_eq!(

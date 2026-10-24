@@ -301,7 +301,7 @@ impl SchemaDomain {
     /// authenticate `conn`'s unledgered catalog as, if any.
     ///
     /// This asks the question through the very code the bridge asks it with
-    /// ([`authenticate_unledgered_source_version`]), against the same
+    /// (`authenticate_unledgered_source_version`), against the same
     /// caller-authorized source list ([`Self::bridge_recoverable_versions`]).
     /// Answering it a second, similar way is what produced the defect this
     /// replaces: an oracle that consulted only the frozen verifiers called a

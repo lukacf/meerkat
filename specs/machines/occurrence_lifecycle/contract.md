@@ -68,14 +68,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveDeliveryFailure`(reason: DeliveryFailureReason, detail: Option<String>, at_utc_ms: u64)
 - `ResolveTargetProbe`(outcome: OccurrenceTargetProbeOutcome, redelivery: ClaimRedelivery, detail: Option<String>, at_utc_ms: u64)
 - `ResolveDueMisfire`(detail: Option<String>, at_utc_ms: u64)
-- `ResolveReclaimExhausted`(admission_evidence: AdmissionEvidence, detail: Option<String>, at_utc_ms: u64)
-- `ResolveUnprovenLateNotAdmitted`(admission_evidence: AdmissionEvidence, detail: Option<String>, at_utc_ms: u64)
 - `Supersede`(superseded_by_revision: u64, at_utc_ms: u64)
 - `RenewLease`(claim_token: ClaimToken, lease_expires_at_utc_ms: u64, at_utc_ms: u64)
 - `LeaseExpired`(at_utc_ms: u64)
 - `ReleaseLeaseForPausedSchedule`(at_utc_ms: u64)
 - `ClassifyTransitionFailure`(refusal_kind: OccurrenceTransitionFailureRefusalKind, trigger: OccurrenceLifecycleInputVariant)
 - `ClassifyStaleCompletionArrival`(trigger: OccurrenceLifecycleInputVariant)
+- `ResolveReclaimExhausted`(admission_evidence: AdmissionEvidence, detail: Option<String>, at_utc_ms: u64)
+- `ResolveUnprovenLateNotAdmitted`(admission_evidence: AdmissionEvidence, detail: Option<String>, at_utc_ms: u64)
 
 ## Signals
 
@@ -93,9 +93,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `DueClaimEligible`
 - `DueMisfireRequired`
 - `DueLeaseExpired`
-- `DueReclaimExhausted`
-- `ReclaimedAfterAdmission`
-- `ReclaimedAfterUnprovenDispatch`
 - `OccurrenceTerminalityClassified`(terminal: Bool)
 - `ClaimedDispatchDispositionClassified`(disposition: ClaimedDispatchDisposition, superseded_by_revision: Option<u64>)
 - `CompletionSupersessionClassified`(disposition: CompletionSupersessionDisposition, superseded_by_revision: Option<u64>)
@@ -105,6 +102,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `TransitionFailureClassified`(phase: OccurrenceLifecycleState, refusal_kind: OccurrenceTransitionFailureRefusalKind, trigger: OccurrenceLifecycleInputVariant, public_class: OccurrenceTransitionFailureClassKind)
 - `LateCompletionResolutionRecorded`(resolution: LateCompletionResolutionClass)
 - `StaleCompletionArrivalClassified`(phase: OccurrenceLifecycleState, trigger: OccurrenceLifecycleInputVariant)
+- `DueReclaimExhausted`
+- `ReclaimedAfterAdmission`
+- `ReclaimedAfterUnprovenDispatch`
 
 ## Helpers
 - `is_live_claim_phase`(phase: OccurrenceLifecycleState) -> `Bool`

@@ -1162,3 +1162,254 @@ async fn a_cancelled_notice_input_withdraws_its_parked_consent_in_either_order()
         );
     }
 }
+
+/// A governed runtime's native work authorization host, which refuses all;
+/// only its installation (the governed posture) matters here.
+#[cfg(feature = "session-store")]
+struct RefusingWorkAuthority;
+
+#[cfg(feature = "session-store")]
+impl meerkat_runtime::input_authority::NativeWorkAuthorizationHost for RefusingWorkAuthority {
+    fn authenticate_association(
+        &self,
+        _runtime_id: &meerkat_runtime::LogicalRuntimeId,
+        _input: &meerkat_runtime::Input,
+        _ingress: &meerkat_runtime::input_authority::NativeIngressContext,
+        _association: &meerkat_authorization_contracts::work_association::InputAuthorityAssociation,
+    ) -> Result<(), meerkat_runtime::input_authority::NativeAdmissionError> {
+        Err(meerkat_core::OperationRefused::new(meerkat_core::OperationRefusalKind::Denied).into())
+    }
+
+    fn work_context(
+        &self,
+        _batch: &meerkat_runtime::input_authority::NativeWorkBatch,
+    ) -> Result<
+        meerkat_core::WorkAuthorizationContext,
+        meerkat_runtime::input_authority::NativeWorkContextError,
+    > {
+        Err(meerkat_runtime::input_authority::NativeWorkContextError::MalformedAcceptedWork)
+    }
+}
+
+/// The committed owner of one host original and one fork_off job, as a test
+/// sets it: holding them, or holding nothing.
+#[cfg(feature = "session-store")]
+struct Owner {
+    original: Option<meerkat::HostOriginalFacts>,
+    job: Option<meerkat::RetainedJobFacts>,
+}
+
+#[cfg(feature = "session-store")]
+#[async_trait::async_trait]
+impl RetainedJobSource for Owner {
+    async fn retained_job(
+        &self,
+        producer: &meerkat::ContinuationProducer,
+        job_id: &str,
+    ) -> RetainedJobLookup {
+        match &self.job {
+            Some(facts)
+                if *producer == meerkat::ContinuationProducer::ForkOff && job_id == "job-1" =>
+            {
+                RetainedJobLookup::Found(facts.clone())
+            }
+            _ => RetainedJobLookup::Absent,
+        }
+    }
+
+    async fn host_original(
+        &self,
+        namespace: &str,
+        producer_id: &str,
+    ) -> meerkat::HostOriginalLookup {
+        match &self.original {
+            Some(facts) if namespace == "app.ingest" && producer_id == "observation-1" => {
+                meerkat::HostOriginalLookup::Found(facts.clone())
+            }
+            _ => meerkat::HostOriginalLookup::Absent,
+        }
+    }
+}
+
+/// The restart window on a consent-aware host: deliveries committed before a
+/// restart are drained by the arming reconcile before the host binds its
+/// continuation services. A host original and a retained completion drained
+/// then stay pending (retried), never refused, as the readiness signal
+/// (`Unbound`) says. Once the host binds, the bound owner decides them: here
+/// it holds neither, so each is refused.
+#[cfg(feature = "session-store")]
+#[tokio::test]
+async fn deliveries_drained_before_the_host_binds_its_services_stay_pending_until_bound() {
+    use meerkat::{
+        ContinuationDelivery, ContinuationHandling, ContinuationProducer, ContinuationResultRef,
+    };
+    let runtime = Arc::new(
+        MeerkatMachine::ephemeral()
+            .with_native_work_authorization_host(Arc::new(RefusingWorkAuthority))
+            .expect("a governed runtime"),
+    );
+    let temp = tempfile::tempdir().expect("tempdir");
+    let service = Arc::new(meerkat::build_ephemeral_service(
+        meerkat::AgentFactory::new(temp.path().join("sessions")),
+        meerkat::Config::default(),
+        4,
+    ));
+    let inbox = RuntimeDeliveryInbox::new(Arc::new(InMemoryRuntimeStore::new()));
+    let continuations = ContinuationOwnerService::new(
+        inbox.clone(),
+        Arc::new(SessionAddressResolver),
+        Arc::clone(&runtime),
+    );
+
+    // Before the restart: a host original owed to one session and a
+    // retained fork_off completion owed to another, each committed from its
+    // owner's record.
+    let original_owner = ContinuationOwner::Session {
+        session_id: SessionId::new(),
+    };
+    let original = ContinuationDelivery {
+        key: ContinuationKey::new("ingest:observation-1").expect("key"),
+        result: ContinuationResultRef {
+            producer: ContinuationProducer::Host {
+                namespace: "app.ingest".into(),
+            },
+            producer_id: "observation-1".into(),
+            result_digest: "sha256:observation-1".into(),
+            summary: None,
+        },
+        body: "a new item arrived".into(),
+        handling: ContinuationHandling::Queue,
+    };
+    let fork_session = SessionId::new();
+    let fork_owner = ContinuationOwner::Session {
+        session_id: fork_session.clone(),
+    };
+    let identity = origin_work("rt:session:fork-owner");
+    let fork = ContinuationDelivery {
+        key: ContinuationKey::new("fork_off:job-1").expect("key"),
+        result: ContinuationResultRef {
+            producer: ContinuationProducer::ForkOff,
+            producer_id: "job-1".into(),
+            result_digest: "sha256:result".into(),
+            summary: None,
+        },
+        body: "the fork finished".into(),
+        handling: ContinuationHandling::Queue,
+    };
+    let before = Owner {
+        original: Some(meerkat::HostOriginalFacts::new(
+            original_owner.clone(),
+            original.clone(),
+            meerkat_runtime::OriginalWorkRef {
+                authority: PrincipalRef::in_domain(
+                    PrincipalKind::ServiceAccount,
+                    "source-owner",
+                    TrustDomainId::new("restart-window").expect("domain"),
+                )
+                .expect("qualified"),
+                work: meerkat_authorization_contracts::evidence::EvidenceId::new("observation-1")
+                    .expect("id"),
+            },
+        )),
+        job: Some(meerkat::RetainedJobFacts {
+            owner_session_id: fork_session,
+            retained_work: Some(identity),
+            result_digest: "sha256:result".into(),
+        }),
+    };
+    let record = meerkat::HostOriginalRecord::from_owner(&before, "app.ingest", "observation-1")
+        .await
+        .expect("read the owner")
+        .expect("held");
+    continuations
+        .submit_host_original(&original_owner, original, &record, 1)
+        .await
+        .expect("commit the host original");
+    let job =
+        meerkat::RetainedJobRecord::from_owner(&before, ContinuationProducer::ForkOff, "job-1")
+            .await
+            .expect("read the owner")
+            .expect("held");
+    continuations
+        .submit_retained_completion(&fork_owner, fork, &job, 1)
+        .await
+        .expect("commit the retained completion");
+
+    // After the restart: the host composes consent notices and arms its
+    // delivery owner before it binds its continuation services.
+    let bindings = Arc::new(ContinuationHostBindings::default());
+    let host = meerkat::surface::SessionServiceDeliveryHost::new(
+        &service,
+        &runtime,
+        meerkat::DetachedJobService::new(Arc::new(MemoryDetachedJobStore::new())),
+        None,
+    )
+    .with_continuation_bindings(Arc::clone(&bindings))
+    .with_consent_notices(Arc::new(ConsentNoticeProjector::new(
+        Arc::new(ApprovalService::new()),
+        domain("restart-window/hosting"),
+        inbox.clone(),
+        &runtime,
+    )));
+    let handle = RuntimeDeliveryOwner::new(Arc::new(MemoryDetachedJobStore::new()), inbox)
+        .with_source_changes(bindings.subscribe_source_changes())
+        .arm(Arc::new(host))
+        .expect("arm");
+    let mut passes = handle.subscribe_passes();
+    let drained = wait_for_pass(&mut passes, "the arming reconcile drained both", |pass| {
+        pass.refused > 0 || pass.blocked_runtimes.len() >= 2
+    })
+    .await;
+    assert_eq!(
+        drained.refused, 0,
+        "never refused before the host binds: {:?}",
+        drained.failures
+    );
+    for (owner, key) in [
+        (&original_owner, "ingest:observation-1"),
+        (&fork_owner, "fork_off:job-1"),
+    ] {
+        let status = continuations
+            .continuation_status(owner, &ContinuationKey::new(key).expect("key"))
+            .await
+            .expect("status");
+        assert!(
+            matches!(status, ContinuationStatus::Pending { .. }),
+            "{key}: {status:?}"
+        );
+    }
+
+    // The host binds its services; their owner holds neither now.
+    let _binding = bindings
+        .bind(
+            Arc::new(SessionAddressResolver),
+            Arc::new(Owner {
+                original: None,
+                job: None,
+            }),
+        )
+        .expect("bind");
+    wait_for_pass(&mut passes, "both decided by the bound owner", |pass| {
+        pass.refused >= 2
+    })
+    .await;
+    for (owner, key) in [
+        (&original_owner, "ingest:observation-1"),
+        (&fork_owner, "fork_off:job-1"),
+    ] {
+        let status = continuations
+            .continuation_status(owner, &ContinuationKey::new(key).expect("key"))
+            .await
+            .expect("status");
+        assert!(
+            matches!(
+                status,
+                ContinuationStatus::Refused {
+                    reason: meerkat_runtime::RuntimeDeliveryRefusalReason::NoAdmissibleWorkBinding,
+                    ..
+                }
+            ),
+            "{key}: {status:?}"
+        );
+    }
+}

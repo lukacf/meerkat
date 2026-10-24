@@ -27,7 +27,7 @@ const EVENT_ROUTER_POLL_BATCH_LIMIT: usize = 100;
 const EVENT_ROUTER_SAFETY_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 const EVENT_ROUTER_MAX_RECOVERY_BACKOFF: Duration = Duration::from_secs(30);
 
-/// Configuration for the [`MobEventRouter`].
+/// Configuration for the mob event router.
 #[derive(Clone, Copy)]
 pub struct MobEventRouterConfig {
     /// Initial retry delay after a structural event-store read failure.
@@ -126,7 +126,7 @@ pub(super) struct AuthorizedMobEventRouterMember {
     pub role: ProfileName,
 }
 
-/// Handle returned by [`spawn_event_router`]. Drop to stop the router.
+/// Handle returned by `spawn_event_router`. Drop to stop the router.
 pub struct MobEventRouterHandle {
     /// Receive attributed events from all mob members.
     pub event_rx: mpsc::Receiver<AttributedEvent>,

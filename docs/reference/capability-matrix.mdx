@@ -102,10 +102,13 @@ failures -32010 (exit 20), budget exhaustion -32011 (exit 21), hook denial
 -32603 (exit 1). The CLI exit status is always the `cli_exit_code()` of the
 same `ErrorCode`.
 
-`FailedWithData` has two typed exceptions: a runtime teardown in progress
-answers `SESSION_BUSY` (-32002, exit 11), and, since 0.9.4, a fork whose source
+`FailedWithData` has three typed exceptions: a runtime teardown in progress
+answers `SESSION_BUSY` (-32002, exit 11); since 0.9.4, a fork whose source
 has session metadata but no build state answers `INVALID_PARAMS` (-32602,
-exit 2) with the data kind `fork_source_build_state_missing`.
+exit 2) with the data kind `fork_source_build_state_missing`; and, since
+0.9.5, a session-scoped live open of a mob member's session (live, or one it
+would restore from storage) answers `INVALID_PARAMS` (-32602, exit 2) with the
+data kind `mob_member_session_addressed_by_id`.
 
 Temporary councils are agent-internal mob orchestration, not a public wire
 family. Where the host can deliver a later completion to the convener (a mob
@@ -170,27 +173,27 @@ v1 (recorded v2 hardening).
 ```toml
 # Minimal: just the agent loop
 [dependencies]
-meerkat = { version = "=0.9.4", default-features = false, features = ["anthropic"] }
+meerkat = { version = "=0.9.5", default-features = false, features = ["anthropic"] }
 
 # Add persistence
-meerkat = { version = "=0.9.4", default-features = false, features = ["anthropic", "session-store"] }
+meerkat = { version = "=0.9.5", default-features = false, features = ["anthropic", "session-store"] }
 
 # Add compaction
-meerkat = { version = "=0.9.4", default-features = false, features = ["anthropic", "session-store", "session-compaction"] }
+meerkat = { version = "=0.9.5", default-features = false, features = ["anthropic", "session-store", "session-compaction"] }
 
 # Add facade-local predicate-schedule helper re-exports. The schedule service
 # and WorkGraph substrate are already linked.
-meerkat = { version = "=0.9.4", default-features = false, features = ["anthropic", "session-store", "schedule"] }
+meerkat = { version = "=0.9.5", default-features = false, features = ["anthropic", "session-store", "schedule"] }
 
 # Broad native facade with WebSocket live support
-meerkat = { version = "=0.9.4", features = [
+meerkat = { version = "=0.9.5", features = [
   "all-providers", "openai-realtime", "session-store", "session-compaction",
   "memory-store-session", "comms", "mcp", "skills", "schedule", "live",
   "atif", # 0.8.23+
 ] }
 
 # WebRTC is separate and still needs `rkat-rpc --live-webrtc` at runtime
-meerkat = { version = "=0.9.4", features = ["openai-realtime", "live-webrtc"] }
+meerkat = { version = "=0.9.5", features = ["openai-realtime", "live-webrtc"] }
 ```
 
 ## Runtime capabilities

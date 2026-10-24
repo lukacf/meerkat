@@ -1919,7 +1919,18 @@ fn age_days(path: &Path, name: &str) -> u64 {
         .unwrap_or(0)
 }
 
+/// Suffix of a mob store's incarnation custody lock file
+/// (`<mob store>.incarnation-custody`, meerkat-mob's
+/// `identity_incarnation_custody`). A process holds it for its whole life,
+/// and a removed and recreated lock file would let another process take
+/// custody while the holder lives, so no sweep may remove it.
+pub const MOB_INCARNATION_CUSTODY_LOCK_SUFFIX: &str = ".incarnation-custody";
+
 fn artifact_kind(name: &str) -> Option<PruneArtifactKind> {
+    // Never prune an incarnation custody lock, whatever its store is named.
+    if name.ends_with(MOB_INCARNATION_CUSTODY_LOCK_SUFFIX) {
+        return None;
+    }
     if is_backup_artifact_name(name) {
         Some(PruneArtifactKind::BackupArtifact)
     } else if is_quarantine_artifact_name(name) {
@@ -2191,6 +2202,7 @@ mod tests {
                 if path.ends_with(REALM_WRITE_ADMISSION_STEM)),
             "{error:?}"
         );
+        foreign.unlock().unwrap();
         drop(foreign);
         RealmMaintenanceFence::acquire(&realm, Duration::from_secs(1)).unwrap();
     }
@@ -2233,6 +2245,7 @@ mod tests {
                 .unwrap();
         assert!(admission.is_some(), "admission fence must be released");
         drop(admission);
+        foreign.unlock().unwrap();
         drop(foreign);
 
         // With the foreign lock gone, full acquisition succeeds.
@@ -2337,6 +2350,29 @@ mod tests {
         let mode = fs::metadata(&external).unwrap().permissions().mode();
         assert!(mode & 0o200 != 0, "mode {mode:o}");
         assert!(external.is_file());
+    }
+
+    /// An incarnation custody lock is never a prune artifact, even when its
+    /// store's name makes the whole name look like a backup: prune neither
+    /// lists nor removes it. Without the guard the second name below parses
+    /// as a backup artifact of `alpha`.
+    #[test]
+    fn an_incarnation_custody_lock_is_never_a_prune_artifact() {
+        let temp = tempfile::tempdir().unwrap();
+        for name in [
+            "alpha.db.incarnation-custody",
+            "alpha.pre-0.9-1700000000.incarnation-custody",
+        ] {
+            let lock = temp.path().join(name);
+            fs::write(&lock, b"").unwrap();
+            assert!(artifact_kind(name).is_none(), "{name}");
+            let error = remove_maintenance_artifact(&lock).expect_err("must refuse");
+            assert!(matches!(error, StoreError::Internal(_)), "{name}");
+            assert!(lock.is_file(), "{name} must survive");
+        }
+        let mut listed = Vec::new();
+        push_artifacts_in(temp.path(), true, None, &mut listed);
+        assert!(listed.is_empty(), "{listed:?}");
     }
 
     #[test]

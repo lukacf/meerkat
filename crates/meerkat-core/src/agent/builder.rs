@@ -765,6 +765,9 @@ impl AgentBuilder {
             checkpointer: self.checkpointer,
             model_routing_handoff_staging: self.model_routing_handoff_staging,
             latest_run_checkpoint_receipt: None,
+            round_commits: Default::default(),
+            run_start_input_ids: Vec::new(),
+            pending_resumed_round: None,
             tool_application_observations: Default::default(),
             durable_row_floor,
             blob_store: self.blob_store,
@@ -773,6 +776,8 @@ impl AgentBuilder {
                 .unwrap_or_else(crate::event_tap::new_event_tap),
             #[cfg(any(test, feature = "test-support"))]
             model_preparation_observer: None,
+            #[cfg(any(test, feature = "test-support"))]
+            round_commit_observer: None,
             transient_turn_context_state,
             default_event_tx: self.default_event_tx,
             applied_cursor,

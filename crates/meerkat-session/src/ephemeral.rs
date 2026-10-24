@@ -1578,6 +1578,26 @@ struct LiveSessionActorIncarnation {
     transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle,
 }
 
+/// A session's turn finalization boundary was held when a non-waiting caller
+/// tried to take it: a turn (or another boundary holder) has it now. Nothing
+/// was asked of the actor. It grants nothing and prescribes no retry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("the session's turn boundary is held")]
+pub struct TurnBoundaryHeld;
+
+/// Why a non-waiting controller pin returned no client.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum TryPinControllerError {
+    /// The session's turn boundary is held now; nothing was asked of the
+    /// actor.
+    #[error("the session's turn boundary is held")]
+    TurnBoundaryHeld,
+    /// The exact actor could not be pinned: it is gone, replaced or failed.
+    #[error(transparent)]
+    Session(SessionError),
+}
+
 /// One-shot publication cell for the exact actor inserted by a service create.
 ///
 /// The slot lives at the ephemeral registry boundary so both native and wasm
@@ -2181,6 +2201,8 @@ enum SessionCommand {
         /// injected-context user messages before the turn's user message.
         injected_context: Vec<meerkat_core::types::ContentInput>,
         runtime: Box<meerkat_core::service::StartTurnRuntimeSemantics>,
+        /// Runtime facts of the dispatched run; empty for a direct turn.
+        run_context: Box<RuntimeTurnRunContext>,
         event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
         result_tx: oneshot::Sender<SessionTurnExecutionOutcome>,
         active_admission: Option<RuntimeContextAdmissionGuard>,
@@ -2299,6 +2321,11 @@ enum SessionCommand {
     AppendExternalUserContent {
         content: ContentInput,
         reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
+    },
+    DeliverStagedPromptForLiveOpen {
+        reply_tx: oneshot::Sender<
+            Result<StagedPromptLiveOpenDelivery, meerkat_core::error::AgentError>,
+        >,
     },
     AppendExternalAssistantOutput {
         blocks: Vec<meerkat_core::types::AssistantBlock>,
@@ -2490,6 +2517,10 @@ enum SessionCommand {
         successor_head_token: String,
         reply_tx:
             oneshot::Sender<Result<HeadCanonicalRuntimeBoundaryAcknowledgeOutcome, AgentError>>,
+    },
+    AcknowledgeHeadCanonicalCompactionFinalization {
+        committed: meerkat_core::SessionHeadMetadataIdentity,
+        reply_tx: oneshot::Sender<Result<(), AgentError>>,
     },
 }
 
@@ -3273,6 +3304,26 @@ pub trait McpAttemptGuardSource {
     fn mcp_attempt_guards(&self) -> Option<&Self::Guards>;
 }
 
+/// What a live open did with a session's staged create-time prompt
+/// ([`EphemeralSessionService::deliver_staged_prompt_for_live_open`]).
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum StagedPromptLiveOpenDelivery {
+    /// No create-time prompt was staged, or a turn already consumed it.
+    NothingStaged,
+    /// Committed as the session's next user row, ahead of the realtime seed.
+    Delivered,
+    /// A `RunStarted` hook refused it; it stays staged for the first turn.
+    Refused(meerkat_core::error::AgentError),
+    /// The session's turn boundary was held, so an open that never waits
+    /// behind a turn asked nothing of the actor. A turn in flight has already
+    /// consumed a staged prompt; any other holder leaves it staged for the
+    /// next open or the first turn. Only the non-waiting delivery
+    /// (`PersistentSessionService::try_deliver_staged_prompt_for_live_open`)
+    /// answers this.
+    TurnBoundaryHeld,
+}
+
 /// Trait for building agents from session creation requests.
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -3351,6 +3402,48 @@ pub struct SessionAgentTurnInput {
     pub request_contexts: Vec<meerkat_core::lifecycle::TurnRequestContext>,
     pub transcript_identity: Option<meerkat_core::types::TranscriptMessageIdentity>,
     pub execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
+}
+
+/// The input of a resumed run: the run a durable session left open, which
+/// the runtime dispatches again under its original id.
+///
+/// It carries no prompt. The run's inputs are already in the session, and the
+/// agent re-enters its loop from the session's run cursor.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct SessionAgentResumeInput {
+    /// The run the runtime resumed. The agent refuses a run cursor that
+    /// names another run.
+    pub run_id: meerkat_core::lifecycle::RunId,
+    /// The provisional checkpoint receipt the session was materialized from.
+    /// The resumed run's next checkpoint chains from it.
+    pub receipt: meerkat_core::RunCheckpointReceipt,
+    pub work_authorization: Option<meerkat_core::WorkAuthorizationContext>,
+    /// Runtime-admitted model request context, for this run only.
+    pub request_contexts: Vec<meerkat_core::lifecycle::TurnRequestContext>,
+    pub transcript_identity: Option<meerkat_core::types::TranscriptMessageIdentity>,
+    /// The interrupted tool calls whose notices the session's runtime still
+    /// owes, unacknowledged: a resumed round answers a call of its own run
+    /// whose process had started with these custody facts instead of
+    /// dispatching it again.
+    pub interrupted_calls: Vec<meerkat_core::tool_process::InterruptedToolCall>,
+}
+
+/// Runtime facts of one dispatched run that the persistent session service
+/// hands to its session task with the turn. They never travel in the public
+/// turn request.
+#[derive(Debug, Default)]
+pub(crate) struct RuntimeTurnRunContext {
+    /// The runtime's id for the dispatched run.
+    pub(crate) run_id: Option<meerkat_core::lifecycle::RunId>,
+    /// The inputs the runtime bound to the run when it dispatched it.
+    pub(crate) run_start_input_ids: Vec<meerkat_core::lifecycle::InputId>,
+    /// For a resumed run, the provisional checkpoint receipt the session was
+    /// materialized from.
+    pub(crate) resume_receipt: Option<meerkat_core::RunCheckpointReceipt>,
+    /// For a resumed run, the interrupted tool calls whose notices its
+    /// runtime still owes.
+    pub(crate) resume_interrupted_calls: Vec<meerkat_core::tool_process::InterruptedToolCall>,
 }
 
 /// Exact noncommitting input for one already-bound durable session agent.
@@ -3618,6 +3711,29 @@ pub trait SessionAgent: Send {
         ))
     }
 
+    /// Continue the run the session's durable run cursor names, from its
+    /// last committed round, instead of starting a turn.
+    ///
+    /// The runtime dispatches a resumed run with
+    /// [`meerkat_core::lifecycle::RuntimeExecutionKind::ResumeRun`]. An agent
+    /// without durable round commits cannot resume one.
+    async fn resume_run_with_events(
+        &mut self,
+        input: SessionAgentResumeInput,
+        _event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<RunResult, meerkat_core::error::AgentError> {
+        Err(meerkat_core::error::AgentError::ConfigError(format!(
+            "this session agent cannot resume run {}",
+            input.run_id
+        )))
+    }
+
+    /// Record the inputs the runtime bound to the run this turn starts, so a
+    /// durable session's run cursor names every input of the run. The
+    /// runtime calls it before every runtime-dispatched turn; an agent
+    /// without durable round commits ignores it.
+    fn set_run_start_input_ids(&mut self, _input_ids: Vec<meerkat_core::lifecycle::InputId>) {}
+
     /// Stage skill references to resolve and inject on the next turn.
     fn set_skill_references(&mut self, refs: Option<Vec<meerkat_core::skills::SkillKey>>);
 
@@ -3762,6 +3878,15 @@ pub trait SessionAgent: Send {
     /// only for agents that publish no run lifecycle events.
     fn cancel_dropped_run(&mut self) -> Option<AgentEvent> {
         self.cancel();
+        None
+    }
+
+    /// End a turn whose run future a graceful requeue stop's suspension has
+    /// dropped, with no terminal and no closing write, and say how the run
+    /// ended: resumable from its last round commit, or past its final save.
+    /// The default (`None`) is for an agent without durable round commits:
+    /// the session task then cancels the run as for a hard interrupt.
+    fn suspend_dropped_run(&mut self) -> Option<meerkat_core::DroppedRunSuspension> {
         None
     }
 
@@ -3977,6 +4102,30 @@ pub trait SessionAgent: Send {
             "HeadCanonical boundary acknowledgement is not supported by this session agent"
                 .to_string(),
         ))
+    }
+
+    /// Adopt the runtime's store-owned HeadCanonical compaction finalization
+    /// as this agent's metadata baseline
+    /// (`Session::acknowledge_head_canonical_compaction_finalization`).
+    fn acknowledge_head_canonical_compaction_finalization(
+        &mut self,
+        _committed: &meerkat_core::SessionHeadMetadataIdentity,
+    ) -> Result<(), AgentError> {
+        Err(AgentError::ConfigError(
+            "HeadCanonical compaction finalization acknowledgement is not supported by this session agent"
+                .to_string(),
+        ))
+    }
+
+    /// Admit a staged create-time prompt that a live open delivers in place
+    /// of a turn: the `RunStarted` hooks a turn carrying it would run. A
+    /// denial keeps the prompt staged. The default (an agent without hooks)
+    /// admits it.
+    async fn admit_staged_prompt_for_live_open(
+        &mut self,
+        _prompt: &ContentInput,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        Ok(())
     }
 
     /// Append externally-produced user content into the canonical transcript.
@@ -4410,6 +4559,44 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .await
     }
 
+    /// Suspend one exact live run for a graceful requeue stop.
+    ///
+    /// The turn is dropped at its next await point exactly as a hard
+    /// interrupt drops it, but the run then ends suspended: no terminal and
+    /// no closing write, so its last committed round stays the point the next
+    /// start resumes from, and the turn answers `AgentError::RunSuspended`.
+    /// The same exact-run comparison as [`Self::interrupt_run_if_current`]
+    /// applies: a stale request resolves as `false`.
+    pub async fn suspend_run_if_current(
+        &self,
+        id: &SessionId,
+        expected_run_id: &RunId,
+    ) -> Result<bool, SessionError> {
+        self.sessions
+            .read(|sessions| -> Result<bool, SessionError> {
+                let handle = sessions
+                    .get(id)
+                    .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+                let woke = {
+                    let mut slot = lock_turn_admission(&handle.turn_admission);
+                    let active_run_id = handle
+                        .turn_state_handle
+                        .as_deref()
+                        .and_then(|turn_state| turn_state.snapshot().active_run_id);
+                    if active_run_id.as_ref() != Some(expected_run_id) {
+                        return Ok(false);
+                    }
+                    slot.request_suspend()
+                        .map_err(|_| SessionError::NotRunning { id: id.clone() })?
+                };
+                if woke {
+                    wake_interrupt_notify(&handle.interrupt_notify);
+                }
+                Ok(true)
+            })
+            .await
+    }
+
     /// Deliver cooperative cancellation to one exact live run.
     ///
     /// Machine-owned boundary handles must use this run-scoped seam. The
@@ -4500,10 +4687,12 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 tool_use_id,
                 tool_name,
                 args,
+                dedupe_key,
             }) => Some(CoreApplyTerminal::CallbackPending {
                 tool_use_id: tool_use_id.clone(),
                 tool_name: tool_name.clone(),
                 args: args.clone(),
+                dedupe_key: dedupe_key.as_deref().cloned(),
             }),
             SessionError::Agent(AgentError::CallbackBatchPending { pending_tool_calls }) => {
                 Some(CoreApplyTerminal::CallbackBatchPending {
@@ -5259,7 +5448,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             })?
             .map_err(SessionError::Agent)?;
 
-        let state = lock_deferred_turn_state(&deferred_turn_state).clone();
+        let state = live_deferred_turn_state_for_durable_write(&deferred_turn_state);
         session.set_deferred_turn_state(state).map_err(|err| {
             SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
                 "failed to serialize deferred-turn state: {err}"
@@ -5413,7 +5602,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         if !still_current {
             return Ok(None);
         }
-        let state = lock_deferred_turn_state(&deferred_turn_state).clone();
+        let state = live_deferred_turn_state_for_durable_write(&deferred_turn_state);
         session.set_deferred_turn_state(state).map_err(|error| {
             SessionError::Agent(AgentError::InternalError(format!(
                 "failed to serialize generation-bound deferred-turn state: {error}"
@@ -5662,6 +5851,40 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 "Session task dropped the reply channel".to_string(),
             ))
         })
+    }
+
+    /// The visible tool names of the live session `id` at a fork boundary,
+    /// for the child's fork notice ([`meerkat_core::fork_notice`]): the
+    /// tools its session task last published (see
+    /// [`Self::published_live_visible_tool_defs`]). No command is sent, so a
+    /// source in the middle of a turn, such as one forking itself from one
+    /// of its own tool calls, is read as of its last turn boundary instead
+    /// of waiting on that turn.
+    pub async fn fork_source_tools(
+        &self,
+        id: &SessionId,
+    ) -> meerkat_core::fork_notice::ForkSeedSourceTools {
+        use meerkat_core::fork_notice::{ForkSeedSourceTools, ForkToolsNotComparedReason};
+        let published = self
+            .sessions
+            .with_handle(id, |handle| {
+                (!handle.command_tx.is_closed()).then(|| {
+                    handle
+                        .visible_tool_defs_rx
+                        .borrow()
+                        .iter()
+                        .map(|tool| tool.name.clone())
+                        .collect::<Vec<_>>()
+                })
+            })
+            .await
+            .flatten();
+        match published {
+            Some(names) => ForkSeedSourceTools::Read { names },
+            None => ForkSeedSourceTools::NotRead {
+                reason: ForkToolsNotComparedReason::SourceNotLive,
+            },
+        }
     }
 
     /// How a live session's next model request projects its tool catalog:
@@ -6548,6 +6771,35 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .map_err(SessionError::Agent)
     }
 
+    /// Deliver the session's staged create-time prompt for a live open: run
+    /// the `RunStarted` hooks a turn carrying it would run and, when they
+    /// admit it, commit it as the session's next user row, so the realtime
+    /// seed carries it. Consumed exactly once: a later first turn finds no
+    /// staged prompt, and one a turn already consumed is never delivered here.
+    pub async fn deliver_staged_prompt_for_live_open(
+        &self,
+        id: &SessionId,
+    ) -> Result<StagedPromptLiveOpenDelivery, SessionError> {
+        let command_tx = self.session_command_tx(id).await?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        command_tx
+            .send(SessionCommand::DeliverStagedPromptForLiveOpen { reply_tx })
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+        reply_rx
+            .await
+            .map_err(|_| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                    "Session task dropped the reply channel".to_string(),
+                ))
+            })?
+            .map_err(SessionError::Agent)
+    }
+
     /// Append externally-produced user content into the canonical transcript.
     pub async fn append_external_user_content(
         &self,
@@ -7246,6 +7498,39 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .map_err(SessionError::Agent)
     }
 
+    /// Adopt the runtime's store-owned HeadCanonical compaction finalization
+    /// (`committed` is the finalized head's metadata identity) as the live
+    /// agent's metadata baseline. `NotFound` when no live actor exists.
+    pub async fn acknowledge_head_canonical_compaction_finalization(
+        &self,
+        id: &SessionId,
+        committed: meerkat_core::SessionHeadMetadataIdentity,
+    ) -> Result<(), SessionError> {
+        let command_tx = self.session_command_tx(id).await?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        command_tx
+            .send(
+                SessionCommand::AcknowledgeHeadCanonicalCompactionFinalization {
+                    committed,
+                    reply_tx,
+                },
+            )
+            .await
+            .map_err(|_| {
+                SessionError::Agent(AgentError::InternalError(
+                    "Session task has exited".to_string(),
+                ))
+            })?;
+        reply_rx
+            .await
+            .map_err(|_| {
+                SessionError::Agent(AgentError::InternalError(
+                    "Session task dropped the reply channel".to_string(),
+                ))
+            })?
+            .map_err(SessionError::Agent)
+    }
+
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     pub(crate) async fn sync_session_from_durable_snapshot(
         &self,
@@ -7310,7 +7595,17 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         contributing_input_ids: Vec<InputId>,
     ) -> Result<CoreApplyOutput, SessionError> {
         Self::require_runtime_execution_kind_stamp(&req)?;
-        let execution = self.start_runtime_turn_execution(id, req).await?;
+        // An ephemeral session keeps no provisional tail, so it never
+        // carries a resume receipt: a resumed dispatch here is refused.
+        let run_context = RuntimeTurnRunContext {
+            run_id: Some(run_id.clone()),
+            run_start_input_ids: contributing_input_ids.clone(),
+            resume_receipt: None,
+            resume_interrupted_calls: Vec::new(),
+        };
+        let execution = self
+            .start_runtime_turn_execution(id, req, run_context)
+            .await?;
         let (result, machine_terminal_failure) =
             execution.into_runtime_parts().map_err(|error| {
                 SessionError::runtime_executor_stopped(format!(
@@ -7460,10 +7755,18 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         &self,
         id: &SessionId,
         req: StartTurnRequest,
+        run_context: RuntimeTurnRunContext,
     ) -> Result<SessionTurnExecutionOutcome, SessionError> {
-        self.start_turn_execution_with_admission_recovering_not_found(id, req, None, None, None)
-            .await
-            .map_err(|(error, _admission)| error)
+        self.start_turn_execution_with_admission_recovering_not_found(
+            id,
+            req,
+            None,
+            None,
+            None,
+            run_context,
+        )
+        .await
+        .map_err(|(error, _admission)| error)
     }
 
     #[cfg(feature = "session-store")]
@@ -7472,6 +7775,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         id: &SessionId,
         req: StartTurnRequest,
         admission: RuntimeContextAdmissionGuard,
+        run_context: RuntimeTurnRunContext,
     ) -> Result<SessionTurnExecutionOutcome, (SessionError, Option<RuntimeContextAdmissionGuard>)>
     {
         self.start_turn_execution_with_admission_recovering_not_found(
@@ -7480,6 +7784,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             Some(admission),
             None,
             None,
+            run_context,
         )
         .await
     }
@@ -7518,6 +7823,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 reserved_admission.take(),
                 None,
                 None,
+                RuntimeTurnRunContext::default(),
             )
             .await?;
         outcome
@@ -7525,6 +7831,12 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .map_err(|error| (SessionError::Agent(error), None))
     }
 
+    #[allow(
+        clippy::result_large_err,
+        reason = "its session-map closure answers with the typed session error and the \
+                  reserved admission guard, the pair this function returns so its caller \
+                  gets the admission back"
+    )]
     async fn start_turn_execution_with_admission_recovering_not_found(
         &self,
         id: &SessionId,
@@ -7532,6 +7844,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         mut reserved_admission: Option<RuntimeContextAdmissionGuard>,
         mut preclaimed_turn: Option<StartTurnAdmissionClaim>,
         admission_notification: Option<oneshot::Sender<()>>,
+        run_context: RuntimeTurnRunContext,
     ) -> Result<SessionTurnExecutionOutcome, (SessionError, Option<RuntimeContextAdmissionGuard>)>
     {
         let (result_tx, result_rx) = oneshot::channel();
@@ -7620,6 +7933,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                         system_messages,
                         injected_context: req.injected_context,
                         runtime: Box::new(req.runtime),
+                        run_context: Box::new(run_context),
                         event_tx: req.event_tx,
                         result_tx,
                         active_admission: Some(active_admission),
@@ -7700,6 +8014,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             None,
             Some(preclaimed_turn),
             admission_notification,
+            RuntimeTurnRunContext::default(),
         )
         .await
         .map_err(|(error, _admission)| error)?
@@ -7812,6 +8127,30 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             return Err(SessionError::NotFound { id: id.clone() });
         }
         Ok(controller)
+    }
+
+    /// [`Self::pin_controller_client_for_actor`] for a caller that must not
+    /// wait behind a turn: the session's turn finalization boundary is only
+    /// tried, never waited for. A held boundary answers
+    /// [`TryPinControllerError::TurnBoundaryHeld`] at once and nothing is
+    /// asked of the actor. Under the boundary the actor is between turns, so
+    /// it answers the pin command at once. The boundary is released before
+    /// this returns; the caller retains the returned pin.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn try_pin_controller_client_for_actor(
+        &self,
+        expected_actor: &LiveSessionActorWitness,
+    ) -> Result<meerkat_core::ControllerModelClient, TryPinControllerError> {
+        let Ok(_turn_finalization_guard) = self
+            .turn_finalization_gate_for_session(expected_actor.session_id())
+            .await
+            .try_lock_owned()
+        else {
+            return Err(TryPinControllerError::TurnBoundaryHeld);
+        };
+        self.pin_controller_client_for_actor(expected_actor)
+            .await
+            .map_err(TryPinControllerError::Session)
     }
 
     /// Attach one reviewed MCP server to the exact live actor's own router.
@@ -8269,9 +8608,8 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             })?
             .flatten();
         let mut deferred_turn_state = resumed_deferred_turn_state.clone().unwrap_or_default();
-        let resumed_session_is_deferred_template = resumed_session.is_some_and(|session| {
-            session.messages().is_empty() && resumed_deferred_turn_state.is_none()
-        });
+        let resumed_session_is_deferred_template =
+            resumed_session.is_some_and(meerkat_core::Session::is_deferred_template);
         if let Some(blob_store) = req
             .build
             .as_ref()
@@ -8659,6 +8997,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 prompt,
                 system_messages: initial_system_messages,
                 injected_context,
+                run_context: Box::default(),
                 runtime: Box::new(initial_runtime),
                 event_tx: caller_event_tx,
                 result_tx,
@@ -9834,6 +10173,18 @@ fn lock_deferred_turn_state(
     }
 }
 
+/// The live deferred-turn state a durable write of the session carries.
+///
+/// The live handle owns the deferred first turn: its phase, staged prompt and
+/// staged tool results. Every durable write of a live session (an export, a
+/// run checkpoint) stamps this value, never a copy the session's agent was
+/// built from, so the store records the first turn's start.
+pub(crate) fn live_deferred_turn_state_for_durable_write(
+    state: &Arc<std::sync::Mutex<SessionDeferredTurnState>>,
+) -> SessionDeferredTurnState {
+    lock_deferred_turn_state(state).clone()
+}
+
 fn lock_active_capacity_lease(
     lease: &Arc<std::sync::Mutex<SessionActiveCapacityLease>>,
 ) -> std::sync::MutexGuard<'_, SessionActiveCapacityLease> {
@@ -10187,6 +10538,9 @@ async fn drain_session_task_commands<A: SessionAgent>(
             SessionCommand::AppendExternalUserContent { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
             }
+            SessionCommand::DeliverStagedPromptForLiveOpen { reply_tx } => {
+                let _ = reply_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
+            }
             SessionCommand::AppendExternalAssistantOutput { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(meerkat_core::error::AgentError::Cancelled));
             }
@@ -10265,6 +10619,9 @@ async fn drain_session_task_commands<A: SessionAgent>(
                 let _ = reply_tx.send(Err(AgentError::Cancelled));
             }
             SessionCommand::AcknowledgeHeadCanonicalRuntimeBoundary { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(AgentError::Cancelled));
+            }
+            SessionCommand::AcknowledgeHeadCanonicalCompactionFinalization { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(AgentError::Cancelled));
             }
             SessionCommand::ReplaceClient { reply_tx, .. } => {
@@ -10520,11 +10877,18 @@ async fn session_task<A: SessionAgent>(
                 system_messages,
                 injected_context,
                 runtime,
+                run_context,
                 event_tx,
                 result_tx,
                 active_admission,
             } => {
                 let runtime = *runtime;
+                let RuntimeTurnRunContext {
+                    run_id: dispatched_run_id,
+                    run_start_input_ids,
+                    resume_receipt,
+                    resume_interrupted_calls,
+                } = *run_context;
                 let work_authorization = runtime.work_authorization;
                 let metadata = runtime.turn_metadata;
                 let render_metadata = metadata
@@ -10742,10 +11106,55 @@ async fn session_task<A: SessionAgent>(
                     ));
                     continue;
                 }
-                if matches!(disposition, StartTurnDisposition::RunPending) {
+                // A resumed run re-enters the run its session's cursor names.
+                // It needs the run the runtime resumed and the receipt its
+                // next checkpoint chains from, and it appends nothing: no
+                // injected context and no staged callback results, which
+                // belong to a pending continuation of an ended run.
+                let mut resume_target = None;
+                if matches!(disposition, StartTurnDisposition::ResumeRun) {
+                    let refusal = if !injected_context.is_empty() {
+                        Some(meerkat_core::error::AgentError::ConfigError(
+                            "injected_context is not supported on a resumed run".to_string(),
+                        ))
+                    } else if pending_tool_results_count > 0 {
+                        Some(meerkat_core::error::AgentError::InternalError(
+                            "a resumed run found staged callback tool results; they belong to a \
+                             pending continuation, not to an open run"
+                                .to_string(),
+                        ))
+                    } else {
+                        match (dispatched_run_id, resume_receipt) {
+                            (Some(run_id), Some(receipt)) => {
+                                resume_target = Some((run_id, receipt));
+                                None
+                            }
+                            _ => Some(meerkat_core::error::AgentError::InternalError(
+                                "a resumed run was dispatched without its run and checkpoint receipt"
+                                    .to_string(),
+                            )),
+                        }
+                    };
+                    if let Some(refusal) = refusal {
+                        restore_deferred_turn_inputs(
+                            &deferred_turn_state,
+                            consumed_deferred_inputs,
+                        );
+                        abort_admitted_turn(&control);
+                        let _ = result_tx.send(
+                            SessionTurnExecutionOutcome::without_machine_terminal(Err(refusal)),
+                        );
+                        continue;
+                    }
+                }
+                if matches!(
+                    disposition,
+                    StartTurnDisposition::RunPending | StartTurnDisposition::ResumeRun
+                ) {
                     // A pending continuation replays the existing boundary and
-                    // commits no user row, so it cannot deliver the staged
-                    // prompt: keep it pending for the next content turn.
+                    // a resumed run re-enters its open run; neither commits a
+                    // user row, so neither can deliver the staged prompt: keep
+                    // it pending for the next content turn.
                     restore_deferred_turn_inputs(
                         &deferred_turn_state,
                         consumed_deferred_inputs.take_initial_prompt(),
@@ -10787,6 +11196,10 @@ async fn session_task<A: SessionAgent>(
                 };
 
                 agent.set_skill_references(skill_references);
+                // Every runtime dispatch names the inputs it bound to its run;
+                // a direct turn names none, which also clears the previous
+                // run's.
+                agent.set_run_start_input_ids(run_start_input_ids);
                 if let Err(error) = agent.set_turn_tool_overlay(turn_tool_overlay) {
                     restore_deferred_turn_inputs(&deferred_turn_state, consumed_deferred_inputs);
                     abort_admitted_turn(&control);
@@ -10882,7 +11295,13 @@ async fn session_task<A: SessionAgent>(
                 match begin_outcome {
                     Ok((BeginOutcome::Running, projection)) => {
                         control.state_tx.send_replace(projection);
-                        let system_append = if system_messages.is_empty() {
+                        // A resumed run's batch carries the system prompts its
+                        // original start already appended: the provisional
+                        // tail its actor was seeded from holds them, so they
+                        // are not appended a second time.
+                        let system_append = if system_messages.is_empty()
+                            || matches!(disposition, StartTurnDisposition::ResumeRun)
+                        {
                             Ok(())
                         } else {
                             agent.append_system_messages(system_messages)
@@ -10983,7 +11402,7 @@ async fn session_task<A: SessionAgent>(
 
                 // Scope the pinned future so its mutable borrow of `agent` is
                 // released before we call `agent.snapshot()`.
-                let (result, resolved_projection, interrupted) = {
+                let (result, resolved_projection, interrupted, suspended) = {
                     #[cfg(not(target_arch = "wasm32"))]
                     type RunFut<'a> = std::pin::Pin<
                         Box<
@@ -11029,6 +11448,26 @@ async fn session_task<A: SessionAgent>(
                                 agent_event_tx.clone(),
                             ))
                         }
+                        StartTurnDisposition::ResumeRun => match resume_target.take() {
+                            Some((run_id, receipt)) => Box::pin(agent.resume_run_with_events(
+                                SessionAgentResumeInput {
+                                    run_id,
+                                    receipt,
+                                    work_authorization,
+                                    request_contexts,
+                                    transcript_identity,
+                                    interrupted_calls: resume_interrupted_calls,
+                                },
+                                agent_event_tx.clone(),
+                            )),
+                            // Checked before the run began; kept total rather
+                            // than assumed.
+                            None => Box::pin(async {
+                                Err::<RunResult, _>(meerkat_core::error::AgentError::InternalError(
+                                    "a resumed run lost its run and checkpoint receipt".to_string(),
+                                ))
+                            }),
+                        },
                         StartTurnDisposition::NoPendingBoundary => {
                             // Already handled above — unreachable here.
                             unreachable!("NoPendingBoundary handled before Running state")
@@ -11069,8 +11508,10 @@ async fn session_task<A: SessionAgent>(
                                 }
                             }
                             Some(event) = agent_event_rx.recv() => {
-                                run_started_observed |=
-                                    matches!(event, AgentEvent::RunStarted { .. });
+                                run_started_observed |= matches!(
+                                    event,
+                                    AgentEvent::RunStarted { .. } | AgentEvent::RunResumed { .. }
+                                );
                                 let envelope = stamp_event_envelope(
                                     &next_seq,
                                     &source,
@@ -11091,10 +11532,50 @@ async fn session_task<A: SessionAgent>(
                     // Clear the exact work context synchronously before custom
                     // cancellation callbacks or event publication can suspend.
                     agent.clear_work_authorization();
-                    let mut dropped_run_terminal = if interrupted {
+                    // An interrupt a graceful requeue stop asked as a
+                    // suspension ends the dropped run suspended: no terminal
+                    // and no closing write, so its last round commit stays its
+                    // resume point. An agent without durable rounds cannot
+                    // suspend, and its run is cancelled as for a hard
+                    // interrupt.
+                    let suspension = if interrupted
+                        && lock_turn_admission(&control.turn_admission).suspend_requested()
+                    {
+                        agent.suspend_dropped_run()
+                    } else {
+                        None
+                    };
+                    // What the dropped run's turn answers, and whether the run
+                    // still owes the cancelled terminal a hard interrupt
+                    // publishes.
+                    let (resumable_suspension, cancel_dropped) = match &suspension {
+                        Some(meerkat_core::DroppedRunSuspension::Resumable { run_id }) => {
+                            (Some(run_id.clone()), false)
+                        }
+                        // Past its final save the run's work is committed and
+                        // nothing is left to resume, and a run that takes no
+                        // round commits cannot be suspended: the suspension
+                        // cleared nothing of either, and each ends as a stop
+                        // ends it, cancelled with its terminal on the stream
+                        // (none if the run already published one). Its inputs
+                        // are never requeued; past the final save, the next
+                        // start's recovery commits that save.
+                        Some(
+                            meerkat_core::DroppedRunSuspension::PastFinalSave { .. }
+                            | meerkat_core::DroppedRunSuspension::NotResumable { .. },
+                        )
+                        | None => (None, interrupted),
+                    };
+                    let mut dropped_run_terminal = if cancel_dropped {
                         agent.cancel_dropped_run()
                     } else {
                         None
+                    };
+                    let r = match &resumable_suspension {
+                        Some(run_id) => Err(meerkat_core::error::AgentError::RunSuspended {
+                            run_id: run_id.clone(),
+                        }),
+                        None => r,
                     };
 
                     // Drain any remaining events, then publish the dropped
@@ -11104,7 +11585,10 @@ async fn session_task<A: SessionAgent>(
                         .ok()
                         .or_else(|| dropped_run_terminal.take())
                     {
-                        run_started_observed |= matches!(event, AgentEvent::RunStarted { .. });
+                        run_started_observed |= matches!(
+                            event,
+                            AgentEvent::RunStarted { .. } | AgentEvent::RunResumed { .. }
+                        );
                         let envelope = stamp_event_envelope(&next_seq, &source, event);
                         control.publish_session_event(envelope.clone()).await;
                         if event_stream_open
@@ -11118,7 +11602,12 @@ async fn session_task<A: SessionAgent>(
                         }
                     }
 
-                    (r, resolved_projection, interrupted)
+                    (
+                        r,
+                        resolved_projection,
+                        interrupted,
+                        resumable_suspension.is_some(),
+                    )
                 }; // run_fut dropped here
 
                 let (result, mut post_run_cleanup_failed) =
@@ -11126,7 +11615,10 @@ async fn session_task<A: SessionAgent>(
                         Ok(()) => (result, false),
                         Err(error) => (Err(error), true),
                     };
-                let result = if interrupted {
+                // A suspended run keeps its uncommitted compaction stages, as a
+                // crash keeps them: the next start reconciles them with the
+                // run's provisional tail.
+                let result = if interrupted && !suspended {
                     match agent.abort_uncommitted_compaction_projections().await {
                         Ok(()) => result,
                         Err(abort_error) => {
@@ -11432,6 +11924,49 @@ async fn session_task<A: SessionAgent>(
                         control.publish_session_event(envelope).await;
                         Ok(())
                     }
+                };
+                let _ = reply_tx.send(result);
+            }
+            SessionCommand::DeliverStagedPromptForLiveOpen { reply_tx } => {
+                // Consume the deferred inputs, keep only the staged prompt and
+                // restore the first-turn phase and staged tool results at
+                // once: a live open delivers the prompt, the first turn still
+                // starts the session.
+                let mut consumed = {
+                    let mut guard = lock_deferred_turn_state(&deferred_turn_state);
+                    guard.consume_for_started_turn()
+                };
+                let staged = consumed.take_initial_prompt();
+                restore_deferred_turn_inputs(&deferred_turn_state, consumed);
+                let Some(prompt) = staged
+                    .pending_initial_prompt()
+                    .map(|pending| pending.prompt.clone())
+                else {
+                    let _ = reply_tx.send(Ok(StagedPromptLiveOpenDelivery::NothingStaged));
+                    continue;
+                };
+                let result = match agent.admit_staged_prompt_for_live_open(&prompt).await {
+                    Err(refusal) => {
+                        restore_deferred_turn_inputs(&deferred_turn_state, staged);
+                        Ok(StagedPromptLiveOpenDelivery::Refused(refusal))
+                    }
+                    Ok(()) => match agent.append_external_user_content(prompt) {
+                        Ok(()) => {
+                            let snap = agent.snapshot();
+                            control.publish_summary(SessionSummaryCache {
+                                updated_at: snap.updated_at,
+                                message_count: snap.message_count,
+                                total_tokens: snap.total_tokens,
+                                usage: snap.usage,
+                                last_assistant_text: snap.last_assistant_text,
+                            });
+                            Ok(StagedPromptLiveOpenDelivery::Delivered)
+                        }
+                        Err(error) => {
+                            restore_deferred_turn_inputs(&deferred_turn_state, staged);
+                            Err(error)
+                        }
+                    },
                 };
                 let _ = reply_tx.send(result);
             }
@@ -11979,6 +12514,13 @@ async fn session_task<A: SessionAgent>(
             } => {
                 let result =
                     agent.acknowledge_head_canonical_runtime_boundary(&successor_head_token);
+                let _ = reply_tx.send(result);
+            }
+            SessionCommand::AcknowledgeHeadCanonicalCompactionFinalization {
+                committed,
+                reply_tx,
+            } => {
+                let result = agent.acknowledge_head_canonical_compaction_finalization(&committed);
                 let _ = reply_tx.send(result);
             }
         }
@@ -13815,6 +14357,9 @@ mod admission_window_tests {
         cancel_after_boundary_tx: CancelAfterBoundarySender,
         turn_admission_for_run: Arc<Mutex<Option<Arc<Mutex<TurnAdmissionSlot>>>>>,
         interrupt_before_success: bool,
+        /// Ask a suspension instead of the hard interrupt, and answer it with
+        /// this outcome from `suspend_dropped_run`.
+        suspend_before_success: Option<meerkat_core::DroppedRunSuspension>,
     }
 
     struct AdmissionProbeAgent {
@@ -13826,6 +14371,7 @@ mod admission_window_tests {
         cancel_after_boundary_tx: CancelAfterBoundarySender,
         turn_admission_for_run: Arc<Mutex<Option<Arc<Mutex<TurnAdmissionSlot>>>>>,
         interrupt_before_success: bool,
+        suspend_before_success: Option<meerkat_core::DroppedRunSuspension>,
         active_work_authorization: Option<meerkat_core::WorkAuthorizationContext>,
         transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle,
     }
@@ -13849,6 +14395,7 @@ mod admission_window_tests {
                 cancel_after_boundary_tx: self.cancel_after_boundary_tx.clone(),
                 turn_admission_for_run: Arc::clone(&self.turn_admission_for_run),
                 interrupt_before_success: self.interrupt_before_success,
+                suspend_before_success: self.suspend_before_success.clone(),
                 active_work_authorization: None,
                 transient_turn_context_state: meerkat_core::TransientTurnContextStateHandle::new(),
             })
@@ -13863,7 +14410,7 @@ mod admission_window_tests {
             _prompt: ContentInput,
             _event_tx: mpsc::Sender<AgentEvent>,
         ) -> Result<RunResult, AgentError> {
-            if self.interrupt_before_success {
+            if self.interrupt_before_success || self.suspend_before_success.is_some() {
                 let turn_admission = self
                     .turn_admission_for_run
                     .lock()
@@ -13871,8 +14418,13 @@ mod admission_window_tests {
                     .clone()
                     .expect("turn admission probe installed");
                 let mut slot = lock_turn_admission(&turn_admission);
-                slot.request_interrupt()
-                    .expect("running turn should accept interrupt probe");
+                if self.suspend_before_success.is_some() {
+                    slot.request_suspend()
+                        .expect("running turn should accept suspension probe");
+                } else {
+                    slot.request_interrupt()
+                        .expect("running turn should accept interrupt probe");
+                }
             }
             self.run_calls.fetch_add(1, Ordering::SeqCst);
             Ok(RunResult {
@@ -13935,6 +14487,10 @@ mod admission_window_tests {
         async fn abort_uncommitted_compaction_projections(&mut self) -> Result<(), AgentError> {
             self.compaction_abort_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
+        }
+
+        fn suspend_dropped_run(&mut self) -> Option<meerkat_core::DroppedRunSuspension> {
+            self.suspend_before_success.clone()
         }
 
         fn cancel_after_boundary_handle(&self) -> Option<CancelAfterBoundarySender> {
@@ -14018,6 +14574,7 @@ mod admission_window_tests {
             cancel_after_boundary_tx,
             turn_admission_for_run: Arc::new(Mutex::new(None)),
             interrupt_before_success: false,
+            suspend_before_success: None,
         }
     }
 
@@ -14055,6 +14612,7 @@ mod admission_window_tests {
                 prompt: request.prompt,
                 system_messages: request.system_prompt.into_iter().collect(),
                 injected_context: request.injected_context,
+                run_context: Box::default(),
                 runtime: Box::new(request.runtime),
                 event_tx: request.event_tx,
                 result_tx,
@@ -14211,6 +14769,106 @@ mod admission_window_tests {
         assert_eq!(run_calls.load(Ordering::SeqCst), 1);
         assert_eq!(cancel_calls.load(Ordering::SeqCst), 1);
         assert_eq!(compaction_abort_calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// A graceful requeue stop's suspension drops the turn as a hard
+    /// interrupt does, and the agent's report decides how the turn ends:
+    /// - resumable: the turn answers `RunSuspended`, publishes no cancelled
+    ///   terminal, and keeps its uncommitted compaction stages;
+    /// - past its final save: it ends as a stop ends it, cancelled with its
+    ///   terminal (RED before: no terminal reached the stream), so its inputs
+    ///   are never requeued, and its stages are aborted;
+    /// - not resumable (no round commits): the same, and the runtime never
+    ///   suspends it.
+    /// Unrun: written while Cargo is not run.
+    #[tokio::test]
+    async fn a_suspended_turn_ends_by_the_agents_report() {
+        let run_id = meerkat_core::lifecycle::RunId::new();
+        for (outcome, suspended, cancels, aborts) in [
+            (
+                meerkat_core::DroppedRunSuspension::Resumable {
+                    run_id: run_id.clone(),
+                },
+                true,
+                0,
+                0,
+            ),
+            (
+                meerkat_core::DroppedRunSuspension::PastFinalSave {
+                    run_id: run_id.clone(),
+                },
+                false,
+                1,
+                1,
+            ),
+            (
+                meerkat_core::DroppedRunSuspension::NotResumable {
+                    run_id: run_id.clone(),
+                },
+                false,
+                1,
+                1,
+            ),
+        ] {
+            let run_calls = Arc::new(AtomicUsize::new(0));
+            let cancel_calls = Arc::new(AtomicUsize::new(0));
+            let compaction_abort_calls = Arc::new(AtomicUsize::new(0));
+            let turn_admission_for_run = Arc::new(Mutex::new(None));
+            let (cancel_after_boundary_tx, _cancel_after_boundary_rx) =
+                tokio::sync::mpsc::unbounded_channel();
+            let mut builder = probe_builder(
+                Arc::clone(&run_calls),
+                Arc::clone(&cancel_calls),
+                Arc::clone(&compaction_abort_calls),
+                cancel_after_boundary_tx,
+            );
+            builder.turn_admission_for_run = Arc::clone(&turn_admission_for_run);
+            builder.suspend_before_success = Some(outcome.clone());
+            let service = EphemeralSessionService::new(builder, 1);
+            let created = service
+                .create_session(create_request())
+                .await
+                .expect("create deferred session");
+            {
+                let turn_admission = service
+                    .sessions
+                    .with_handle(&created.session_id, |handle| {
+                        Arc::clone(&handle.turn_admission)
+                    })
+                    .await
+                    .expect("session handle");
+                *turn_admission_for_run
+                    .lock()
+                    .expect("turn admission probe lock poisoned") = Some(turn_admission);
+            }
+
+            let result = service
+                .start_turn(&created.session_id, start_turn_request())
+                .await;
+
+            if suspended {
+                assert!(
+                    matches!(
+                        &result,
+                        Err(SessionError::Agent(AgentError::RunSuspended { run_id: suspended_run }))
+                            if *suspended_run == run_id
+                    ),
+                    "{outcome:?}: {result:?}"
+                );
+            } else {
+                assert!(
+                    matches!(&result, Err(SessionError::Agent(AgentError::Cancelled))),
+                    "{outcome:?}: {result:?}"
+                );
+            }
+            assert_eq!(run_calls.load(Ordering::SeqCst), 1, "{outcome:?}");
+            assert_eq!(cancel_calls.load(Ordering::SeqCst), cancels, "{outcome:?}");
+            assert_eq!(
+                compaction_abort_calls.load(Ordering::SeqCst),
+                aborts,
+                "{outcome:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -14620,6 +15278,7 @@ mod archive_shutdown_drain_tests {
                 prompt: request.prompt,
                 system_messages: request.system_prompt.into_iter().collect(),
                 injected_context: request.injected_context,
+                run_context: Box::default(),
                 runtime: Box::new(request.runtime),
                 event_tx: request.event_tx,
                 result_tx,
@@ -14850,6 +15509,7 @@ mod archive_shutdown_drain_tests {
                 prompt: request.prompt,
                 system_messages: request.system_prompt.into_iter().collect(),
                 injected_context: request.injected_context,
+                run_context: Box::default(),
                 runtime: Box::new(request.runtime),
                 event_tx: request.event_tx,
                 result_tx,
@@ -15008,6 +15668,71 @@ mod archive_shutdown_drain_tests {
             .archive(&other_session_id)
             .await
             .expect("cleanup unrelated session");
+    }
+
+    /// The non-waiting controller pin: while a turn runs (it holds the
+    /// session's turn boundary) the pin answers at once that the boundary is
+    /// held and sends nothing to the actor; once the turn ends it reaches the
+    /// idle actor.
+    #[tokio::test]
+    async fn try_pin_answers_busy_while_a_turn_runs_and_reaches_the_idle_actor() {
+        let hooks = DrainProbeHooks::new();
+        let service = Arc::new(EphemeralSessionService::new(
+            DrainProbeBuilder {
+                hooks: hooks.clone(),
+            },
+            1,
+        ));
+        let created = service
+            .create_session(create_request())
+            .await
+            .expect("create session");
+        let session_id = created.session_id;
+        let witness = service
+            .live_session_actor_witness(&session_id)
+            .await
+            .expect("live actor witness");
+
+        let turn_service = Arc::clone(&service);
+        let turn_session = session_id.clone();
+        let turn = tokio::spawn(async move {
+            turn_service
+                .start_turn(&turn_session, start_turn_request())
+                .await
+        });
+        tokio::time::timeout(WAITER_TIMEOUT, hooks.entered_run.notified())
+            .await
+            .expect("turn should enter the probe run");
+        let busy = tokio::time::timeout(
+            Duration::from_secs(2),
+            service.try_pin_controller_client_for_actor(&witness),
+        )
+        .await
+        .expect("a running turn is never waited for");
+        assert!(
+            matches!(busy, Err(TryPinControllerError::TurnBoundaryHeld)),
+            "a running turn holds the boundary: {:?}",
+            busy.as_ref().err()
+        );
+
+        hooks.release_run.add_permits(1);
+        tokio::time::timeout(WAITER_TIMEOUT, turn)
+            .await
+            .expect("turn task should finish")
+            .expect("turn task should not panic")
+            .expect("the turn completes");
+        let pinned = tokio::time::timeout(
+            WAITER_TIMEOUT,
+            service.try_pin_controller_client_for_actor(&witness),
+        )
+        .await
+        .expect("an idle actor answers");
+        assert!(
+            !matches!(pinned, Err(TryPinControllerError::TurnBoundaryHeld)),
+            "a free boundary reaches the actor: {:?}",
+            pinned.as_ref().err()
+        );
+        service.archive(&session_id).await.expect("cleanup");
     }
 
     #[tokio::test]

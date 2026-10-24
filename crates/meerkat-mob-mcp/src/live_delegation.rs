@@ -159,6 +159,13 @@ fn live_worker_failure_terminal(
         meerkat_mob::BoundedTurnFailure::Cancelled { .. } => {
             LiveDelegationWorkerTerminalKind::Cancelled
         }
+        // A graceful stop ended the worker's turn in this process: its input
+        // stays queued for the next start, or aged out before it ran. The
+        // turn did not fail.
+        meerkat_mob::BoundedTurnFailure::RequeuedAcrossStop { .. }
+        | meerkat_mob::BoundedTurnFailure::RequeueExpired { .. } => {
+            LiveDelegationWorkerTerminalKind::Cancelled
+        }
         _ => LiveDelegationWorkerTerminalKind::Failed,
     }
 }
@@ -7797,6 +7804,25 @@ mod tests {
             ),
             LiveDelegationWorkerTerminalKind::Failed,
         );
+        // A graceful stop ended the turn: its input was kept queued for the
+        // next start, or aged out before it ran. Neither is the turn's own
+        // failure.
+        for failure in [
+            meerkat_mob::BoundedTurnFailure::RequeuedAcrossStop {
+                session_id: SessionId::new(),
+                input_id: meerkat_core::lifecycle::InputId::new(),
+            },
+            meerkat_mob::BoundedTurnFailure::RequeueExpired {
+                session_id: SessionId::new(),
+                input_id: meerkat_core::lifecycle::InputId::new(),
+            },
+        ] {
+            assert_eq!(
+                live_worker_failure_terminal(&failure),
+                LiveDelegationWorkerTerminalKind::Cancelled,
+                "{failure:?}"
+            );
+        }
     }
 
     #[test]

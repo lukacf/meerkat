@@ -2560,8 +2560,17 @@ const HUNG_COMMIT_BUSY_WINDOW: Duration = Duration::from_secs(1);
 /// A forked child whose terminal boundary commit waits at the store, which
 /// never answers until the test releases it.
 async fn fork_child_whose_boundary_commit_hangs(child: &str) -> GatedChild {
-    let gated =
-        fork_child_at_its_gated_turn_measured_in(child, Some(HUNG_COMMIT_BUSY_WINDOW)).await;
+    fork_child_whose_boundary_commit_hangs_measured_in(child, HUNG_COMMIT_BUSY_WINDOW).await
+}
+
+/// [`fork_child_whose_boundary_commit_hangs`] with the store's declaration
+/// measured in `busy_window`: the member's session degrades two of them after
+/// the commit entered the store.
+async fn fork_child_whose_boundary_commit_hangs_measured_in(
+    child: &str,
+    busy_window: Duration,
+) -> GatedChild {
+    let gated = fork_child_at_its_gated_turn_measured_in(child, Some(busy_window)).await;
     gated
         .store
         .arm(meerkat_runtime::LogicalRuntimeId::for_session(
@@ -2588,22 +2597,22 @@ async fn destroy_once_the_released_commit_reports(
         .store
         .held_run()
         .expect("the held boundary commit carries its run's receipt");
-    let outcome_pending = meerkat_runtime::RuntimeDriverError::RecoveryRepairBlocked {
-        evidence_digest: None,
+    let outcome_pending = meerkat_mob::MemberReloadRefusal::RepairBlocked {
         reason: format!(
             "runtime commit of run {run_id} has not reported its durable outcome; retry the reload after it does"
         ),
-    }
-    .to_string();
-    let member = format!("{}: ", held.child.as_str());
+        evidence_digest: None,
+    };
     let mob_id = held.fixture.source_mob_id();
     loop {
         match held.fixture.state.mob_destroy(&mob_id).await {
             Err(meerkat_mob_mcp::MobMcpDestroyError::Incomplete { report })
                 if report.reloaded_members.is_empty()
+                    && report.errors.len() == 1
                     && matches!(
-                        report.errors.as_slice(),
-                        [error] if error.starts_with(&member) && error.ends_with(&outcome_pending)
+                        report.member_reload_refusals.as_slice(),
+                        [refused] if refused.member == held.child
+                            && refused.refusal == outcome_pending
                     ) =>
             {
                 tokio::time::sleep(Duration::from_millis(20)).await;
@@ -2660,6 +2669,114 @@ async fn a_destroy_behind_a_commit_the_store_never_answers_is_incomplete_until_i
     );
 }
 
+/// A destroy retried while the store still has not answered a member's
+/// boundary commit past its deadline cannot reload the degraded member: the
+/// runtime refuses the reload, repair-blocked, until the commit reports its
+/// durable outcome. The incomplete report keeps that refusal typed beside its
+/// text, in the incomplete data every surface returns, so a caller can tell a
+/// destroy to retry later from one that failed. Once the commit reports, the
+/// same destroy completes and reports no refusal.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_destroy_whose_member_reload_the_runtime_refuses_reports_the_refusal_typed() {
+    let held = fork_child_whose_boundary_commit_hangs("refused-reload-child").await;
+    let mob_id = held.fixture.source_mob_id();
+    let first = tokio::time::timeout(
+        DEGRADED_DESTROY_BOUND,
+        held.fixture.state.mob_destroy(&mob_id),
+    )
+    .await
+    .expect("the destroy answers while the store has not");
+    assert!(
+        matches!(
+            first,
+            Err(meerkat_mob_mcp::MobMcpDestroyError::Incomplete { .. })
+        ),
+        "a destroy behind the hung commit is incomplete: {first:?}"
+    );
+
+    let run_id = held
+        .store
+        .held_run()
+        .expect("the held boundary commit carries its run's receipt");
+    let refused = tokio::time::timeout(
+        DEGRADED_DESTROY_BOUND,
+        held.fixture.state.mob_destroy(&mob_id),
+    )
+    .await
+    .expect("the retried destroy answers while the store has not");
+    let report = match refused {
+        Err(meerkat_mob_mcp::MobMcpDestroyError::Incomplete { report }) => report,
+        other => panic!("a reload the runtime refuses makes the destroy incomplete: {other:?}"),
+    };
+    let member = format!("{}: ", held.child.as_str());
+    assert!(
+        matches!(report.errors.as_slice(), [error] if error.starts_with(&member)),
+        "the refused reload keeps its text entry: {report:?}"
+    );
+    assert!(
+        report.reloaded_members.is_empty(),
+        "no member was reloaded: {report:?}"
+    );
+    let data = meerkat_mob_mcp::MobMcpDestroyError::incomplete_error_data(&report);
+    assert_eq!(data["retryable"], serde_json::json!(true), "{data}");
+    assert_eq!(
+        data["destroy_report"]["member_reload_refusals"],
+        serde_json::json!([{
+            "member": held.child.as_str(),
+            "refusal": {
+                "kind": "repair_blocked",
+                "reason": format!(
+                    "runtime commit of run {run_id} has not reported its durable outcome; retry the reload after it does"
+                ),
+            },
+        }]),
+        "the incomplete data keeps the runtime's refusal typed: {data}"
+    );
+    assert!(
+        held.fixture.state.handle_for(&mob_id).await.is_ok(),
+        "the mob stays for a retry"
+    );
+
+    held.store.release();
+    let report = tokio::time::timeout(
+        DEGRADED_DESTROY_BOUND,
+        destroy_once_the_released_commit_reports(&held),
+    )
+    .await
+    .expect("the retried destroy finishes")
+    .expect("the retried destroy reloads the member and completes");
+    assert_eq!(report.reloaded_members, vec![held.child.clone()]);
+    assert!(
+        serde_json::to_value(&report)
+            .expect("the report serializes")
+            .get("member_reload_refusals")
+            .is_none(),
+        "a completed destroy reports no refusal: {report:?}"
+    );
+}
+
+/// A destroy report without a refused reload serializes exactly as it did
+/// before refusals were typed: no `member_reload_refusals` key.
+#[test]
+fn a_destroy_report_without_a_refused_reload_serializes_unchanged() {
+    let mut report = meerkat_mob::MobDestroyReport::default();
+    report.errors.push("worker-1: archive failed".to_string());
+    report
+        .reloaded_members
+        .push(AgentIdentity::from("worker-2"));
+    assert_eq!(
+        serde_json::to_string(&report).expect("the report serializes"),
+        r#"{"remote_cleanup_deadline_exceeded":false,"metadata_scrubbed":false,"events_cleared":false,"namespace_cleaned":false,"errors":["worker-1: archive failed"],"reloaded_members":["worker-2"]}"#
+    );
+    let data = meerkat_mob_mcp::MobMcpDestroyError::incomplete_error_data(&report);
+    assert!(
+        data["destroy_report"]
+            .get("member_reload_refusals")
+            .is_none(),
+        "{data}"
+    );
+}
+
 /// Closing a mob's admission if it is idle asks each member whether it has
 /// active inputs. Behind a member's boundary commit that the store never
 /// answers, that read answers busy once the member's session degrades at the
@@ -2684,6 +2801,273 @@ async fn closing_a_mob_if_idle_behind_a_commit_the_store_never_answers_answers_b
         "the member answers busy, so the mob stays open: {outcome:?}"
     );
     held.store.release();
+}
+
+/// Redrive `held`'s stuck retirement of its member once the member's released
+/// boundary commit has reported its outcome to the member's runtime.
+///
+/// Until the commit's own task reports the store's answer, the redriven
+/// retirement's reload refuses, typed and retryable, and the retirement stays
+/// stuck on exactly that cause. Only that answer is retried, within the
+/// caller's bound; any other is returned as it is.
+async fn redrive_once_the_released_commit_reports(
+    held: &GatedChild,
+    handle: &meerkat_mob::MobHandle,
+) -> Result<(), meerkat_mob::MobError> {
+    loop {
+        match handle.redrive_retirement(held.child.clone()).await {
+            Err(meerkat_mob::MobError::MemberRetirementStuck { cause, .. })
+                if cause
+                    .structured_data()
+                    .and_then(|data| data.get("kind").cloned())
+                    == Some(serde_json::json!("mob_member_reload_repair_blocked")) =>
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            other => return other,
+        }
+    }
+}
+
+/// A retire of a member whose session degraded behind a boundary commit the
+/// store has not answered cannot reload the member: the runtime refuses the
+/// reload, repair-blocked, until the commit reports its durable outcome. The
+/// retirement sticks with that refusal as its typed cause, retryable and
+/// carrying the runtime's reason, instead of an internal error that only says
+/// it in text. Once the commit reports, redriving the retirement completes it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retire_whose_member_reload_the_runtime_refuses_sticks_with_the_refusal_typed() {
+    let held = fork_child_whose_boundary_commit_hangs("retire-refused-child").await;
+    let mob_id = held.fixture.source_mob_id();
+    let handle = held.fixture.state.handle_for(&mob_id).await.unwrap();
+    tokio::time::timeout(DEGRADED_DESTROY_BOUND, handle.close_if_idle())
+        .await
+        .expect("closing if idle answers once the member's session degrades")
+        .expect("the mob answers the close");
+    let run_id = held
+        .store
+        .held_run()
+        .expect("the held boundary commit carries its run's receipt");
+
+    let refused = tokio::time::timeout(DEGRADED_DESTROY_BOUND, handle.retire(held.child.clone()))
+        .await
+        .expect("the retire answers while the store has not");
+    let (stage, cause) = match refused {
+        Err(meerkat_mob::MobError::MemberRetirementStuck { stage, cause, .. }) => (stage, cause),
+        other => panic!("a retire whose reload the runtime refuses sticks: {other:?}"),
+    };
+    assert_eq!(stage, "retire-runtime-quiesce");
+    assert_eq!(
+        cause.structured_data(),
+        Some(serde_json::json!({
+            "kind": "mob_member_reload_repair_blocked",
+            "session_id": held.child_session.to_string(),
+            "reason": format!(
+                "runtime commit of run {run_id} has not reported its durable outcome; retry the reload after it does"
+            ),
+            "retryable": true,
+            "authority_retained": true,
+            "live_shell_discarded": false,
+        })),
+        "the stuck retirement keeps the runtime's refusal typed: {cause:?}"
+    );
+    assert_eq!(
+        cause.wire_error_code(),
+        Some(meerkat_contracts::ErrorCode::SessionBusy),
+        "{cause:?}"
+    );
+
+    held.store.release();
+    tokio::time::timeout(
+        DEGRADED_DESTROY_BOUND,
+        redrive_once_the_released_commit_reports(&held, &handle),
+    )
+    .await
+    .expect("the redriven retirement finishes")
+    .expect("the redriven retirement reloads the member and retires it");
+    assert!(
+        handle
+            .get_member(&held.child)
+            .await
+            .expect("the roster answers")
+            .is_none(),
+        "the retired member left the roster"
+    );
+}
+
+/// The busy window of the rows whose retire must start before the member's
+/// session degrades: its deadline, two of them, leaves the retire's admission
+/// and first stages ample time to reach the quiesce first.
+const DEGRADING_RETIRE_BUSY_WINDOW: Duration = Duration::from_secs(3);
+
+/// Start a retire of `held`'s member before its session degrades: the
+/// retirement waits at its quiesce stage for the hung commit, and the
+/// session degrades at the store's deadline meanwhile.
+async fn retire_before_the_member_degrades(held: &GatedChild, handle: &meerkat_mob::MobHandle) {
+    let started = tokio::time::timeout(DEGRADED_DESTROY_BOUND, handle.retire(held.child.clone()))
+        .await
+        .expect("the retire answers while the store has not");
+    assert!(
+        matches!(
+            &started,
+            Err(meerkat_mob::MobError::MemberRetirementInProgress { stage, .. })
+                if stage == "retire-runtime-quiesce"
+        ),
+        "a retire started before the commit's deadline waits at its quiesce: {started:?}"
+    );
+    assert!(
+        held.runtime
+            .durability_reload_required(&held.child_session)
+            .await
+            .is_some(),
+        "the member's session degraded while the retire waited"
+    );
+}
+
+/// Retire `held`'s member until its retirement answers other than in
+/// progress, within the caller's bound.
+async fn retire_until_settled(
+    held: &GatedChild,
+    handle: &meerkat_mob::MobHandle,
+) -> Result<(), meerkat_mob::MobError> {
+    tokio::time::timeout(DEGRADED_DESTROY_BOUND, async {
+        loop {
+            match handle.retire(held.child.clone()).await {
+                Err(meerkat_mob::MobError::MemberRetirementInProgress { .. }) => {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                other => return other,
+            }
+        }
+    })
+    .await
+    .expect("the retirement settles within the bound")
+}
+
+/// A retire that started before its member's session degraded behind a
+/// boundary commit the store has not answered waits at its quiesce stage for
+/// the commit. Once the commit reports, the retirement reaches its ingress
+/// detach with the session still degraded. The stage reloads the member's
+/// registration first, as the quiesce does, and detaches the cold successor,
+/// so a plain retry completes the retirement with no manual reload. Before,
+/// the runtime refused the detach and the retirement stuck there.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retire_whose_member_degraded_while_it_waited_completes_once_the_commit_reports() {
+    let held = fork_child_whose_boundary_commit_hangs_measured_in(
+        "retire-detach-child",
+        DEGRADING_RETIRE_BUSY_WINDOW,
+    )
+    .await;
+    let handle = held
+        .fixture
+        .state
+        .handle_for(&held.fixture.source_mob_id())
+        .await
+        .unwrap();
+    retire_before_the_member_degrades(&held, &handle).await;
+    held.store.release();
+
+    retire_until_settled(&held, &handle)
+        .await
+        .expect("the retirement reloads the degraded member at its ingress detach and completes");
+    assert!(
+        handle
+            .get_member(&held.child)
+            .await
+            .expect("the roster answers")
+            .is_none(),
+        "the retired member left the roster"
+    );
+    assert!(
+        held.runtime
+            .current_session_registration_witness(&held.child_session)
+            .await
+            .is_none(),
+        "no registration of the member's session remains"
+    );
+    assert!(
+        matches!(
+            held.runtime.peer_ingress_owner(&held.child_session).await,
+            meerkat_runtime::PeerIngressOwner::Unattached
+        ),
+        "the member's session has no peer ingress owner"
+    );
+}
+
+/// A retire whose reload at its ingress detach has not settled when the
+/// caller's budget ends answers that the retirement is in progress at its
+/// ingress detach, retryable by a plain retry; it does not stick. Once the
+/// reload settles, a plain retry completes the retirement.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retire_whose_ingress_reload_is_held_answers_in_progress_until_it_settles() {
+    let held = fork_child_whose_boundary_commit_hangs_measured_in(
+        "retire-held-reload-child",
+        DEGRADING_RETIRE_BUSY_WINDOW,
+    )
+    .await;
+    let handle = held
+        .fixture
+        .state
+        .handle_for(&held.fixture.source_mob_id())
+        .await
+        .unwrap();
+    retire_before_the_member_degrades(&held, &handle).await;
+    let (reload_entered, release_reload) = held
+        .runtime
+        .arm_reload_required_discard_before_mutation_gate_test_hook(held.child_session.clone());
+    held.store.release();
+
+    tokio::time::timeout(DEGRADED_DESTROY_BOUND, async {
+        loop {
+            match handle.retire(held.child.clone()).await {
+                Err(meerkat_mob::MobError::MemberRetirementInProgress { stage, .. })
+                    if stage == "retire-ingress-detach" =>
+                {
+                    return;
+                }
+                Err(meerkat_mob::MobError::MemberRetirementInProgress { .. }) => {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                other => panic!("the retire waits on its held ingress reload: {other:?}"),
+            }
+        }
+    })
+    .await
+    .expect("the retirement reaches its ingress detach");
+    tokio::time::timeout(DEGRADED_DESTROY_BOUND, reload_entered)
+        .await
+        .expect("the ingress detach reloads the degraded member")
+        .expect("the held reload's hook stays armed until it is entered");
+    let waiting = handle.retire(held.child.clone()).await;
+    assert!(
+        matches!(
+            &waiting,
+            Err(meerkat_mob::MobError::MemberRetirementInProgress { stage, .. })
+                if stage == "retire-ingress-detach"
+        ),
+        "a retire while the reload is held is in progress, not stuck: {waiting:?}"
+    );
+    assert!(
+        waiting
+            .as_ref()
+            .is_err_and(meerkat_mob::MobError::is_retirement_in_progress),
+        "{waiting:?}"
+    );
+
+    release_reload
+        .send(())
+        .expect("the held reload waits for its release");
+    retire_until_settled(&held, &handle)
+        .await
+        .expect("a plain retry completes the retirement once the reload settles");
+    assert!(
+        handle
+            .get_member(&held.child)
+            .await
+            .expect("the roster answers")
+            .is_none(),
+        "the retired member left the roster"
+    );
 }
 
 /// Force-cancelling a member whose runtime needs a durability reload answers

@@ -589,12 +589,15 @@ mount a SQLite runtime companion for runtime authority:
 documents. Queued inputs, run-boundary receipts, ops snapshots, and
 auth-lease/OAuth-flow authority are durable under both backends.
 The `memory` backend is explicit ephemeral storage and does not survive process
-restart.
+restart. Since 0.9.5 a host can also keep a realm's durable state in its own
+database through the [host store SPI](/reference/host-store-spi).
 
 - Completed turns are persisted.
-- Crash during an in-flight turn loses at most the work the intra-turn
-  persistence hook had not yet written; any durable tail it did write is
-  preserved and recovered (see below), never discarded.
+- Since 0.9.5 a run commits after every tool round, and after a crash the
+  run continues from its last committed round under the same run id (see
+  [Durable runs](/guides/durable-runs)). A crash loses at most the round in
+  progress; any durable tail is preserved and recovered (see below), never
+  discarded.
 - SQLite-backed realms are the default persistent mode and support normal same-realm multi-process workflows. Declare `[storage] hosting = "multiprocess"` so each session is hosted by one process and deliveries route to it (see [Realms: multi-process hosting](/concepts/realms#multi-process-hosting)).
 
 Persistent session metadata is the source of truth for resumed durable session behavior unless an interactive surface supplies an explicit typed override.
@@ -608,9 +611,9 @@ operation.
 
 The selected store profile issues the physical authority:
 
-- **WholeBlob** — `session_id`, monotonic store revision, and SHA-256 of the
+- **WholeBlob** - `session_id`, monotonic store revision, and SHA-256 of the
   exact serialized row.
-- **HeadCanonical** — `session_id`, monotonic store revision, the committed
+- **HeadCanonical** - `session_id`, monotonic store revision, the committed
   boundary head, and its exact head token. The boundary head binds the
   message-row, rewrite, graph, component, and metadata prefixes.
 
@@ -705,20 +708,30 @@ an uncertain outcome or failed acknowledgement terminates the actor and
 requires durable reload. At the final boundary the store promotes that exact
 candidate. It does not construct a second document or replay the delta.
 
-A HeadCanonical run that compacts more often than `history_retained_rewrites`
-keeps also saves an intra-run checkpoint at the next model boundary after its
-own tool results, so its durable head covers those rewrites and the live
-history retires to the retention. Such a checkpoint's tail always ends with the
-run's own tool call and its results, never with a compaction summary. Intra-run
-checkpoints never prune stored rewrite rows, so the committed boundary stays
-rebuildable for recovery; the boundary commit that promotes the run applies the
-run's retention cut in the same transaction, never past the promoted head's
-row-lineage anchor. A crash after such a checkpoint recovers the run as
-interrupted (see below): its content up to the checkpoint is kept and its input
-is not run again.
+Since 0.9.5 every tool round's second commit is an intra-run checkpoint (see
+[Durable runs](/guides/durable-runs#what-a-round-commits)); the round's first
+commit stages the model's response in the session's run cursor and writes no
+transcript row. On HeadCanonical each such checkpoint moves the durable head
+over the run's rewrites, so a run that compacts more often than
+`history_retained_rewrites` keeps retires its live history to the retention.
+Such a checkpoint's tail always ends with the run's own tool call and its
+results, never with a compaction summary. Intra-run checkpoints never prune
+stored rewrite rows, so the committed boundary stays rebuildable for recovery;
+the boundary commit that promotes the run applies the run's retention cut in
+the same transaction, never past the promoted head's row-lineage anchor.
+On WholeBlob the run's first round commit after a compaction re-bases the
+run: one store call commits the session document as it stands at that
+commit, the compaction included, as the session's committed base and
+restarts the run's provisional tail on top of it, so round commits continue
+after any number of compactions. A crash between the compaction and that
+commit continues the run from its previous commit, and the compaction runs
+again. A later failure of a re-based run consumes its inputs instead of
+requeueing them, because they are already part of committed history.
+A crash after an intra-run checkpoint continues the run (see below); before
+0.9.5 it closed the run as interrupted.
 
-A crash or shutdown race can still leave a durable transcript tail — up to and
-including a fully completed turn — whose runtime boundary commit never landed.
+A crash or shutdown race can still leave a durable transcript tail (up to and
+including a fully completed turn) whose runtime boundary commit never landed.
 Durable is not the same as runtime-committed, and neither view is silently
 preferred: a cold read drives a typed, machine-owned read-source decision
 (serve the committed runtime snapshot, serve the committed store head,
@@ -727,19 +740,66 @@ recovery required, or quarantine) instead of a shell comparison.
 The recovery rule is never-discard: every store-proven durable descendant of
 the committed authority is preserved.
 
+- Since 0.9.5 a continuable tail is not closed. A tail is continuable when it
+  carries the run cursor of the open run and agrees with it (after a round's
+  first commit, the staged response is not in the transcript yet), every input
+  bound to the run is still bound to it, and the runtime is not retired. A
+  tail with no assistant row, such as one written by the first commit of a
+  run's first round, by the first commit of the round after a compaction, or
+  by a WholeBlob re-base, is continuable only on that cursor's evidence: it
+  holds no tool result, the cursor names the store-issued run id with none of
+  its staged calls in the tail, and the store proves the tail's descent.
+  Recovery then writes nothing and settles nothing,
+  and the run continues from its last committed round under the same run id
+  (see [Durable runs](/guides/durable-runs#after-a-crash)). A cursor never
+  turns a tail that would otherwise be held into a continuable one, and a
+  cursor inside a committed body never makes a run continuable. A cursor tail
+  whose bound inputs were settled, whose run has no bound inputs (a direct or
+  machine-service turn), or whose runtime was retired is closed as
+  interrupted. So is the tail of a run settled without continuing: stopped
+  before it continued, refused by a durable worker's resume gate, or kept by
+  a requeue stop past its max age. The abandonment of its inputs commits
+  first, then the tail is closed as interrupted, never discarded. A run that
+  fails and whose inputs are queued for another attempt discards its tail
+  before they requeue, so it starts over from its inputs; a cursor tail left
+  behind with requeued inputs is closed as interrupted, and the inputs its
+  cursor binds are consumed with it, so they do not run twice.
 - A completed tail (single run, `EndTurn` terminal, structurally coherent) is
   committed as a recovered run boundary in one atomic store transaction:
   recovered snapshot, boundary receipt, and input terminalization land
   together, so exactly-once holds and the delivery layer never re-runs a
   recovered turn.
 - An interrupted tail is closed as interrupted: content preserved, a typed
-  recovery notice appended, the original run terminalized — never requeued.
-- Anything else — including any tail carrying a dangling `tool_use` — is held
+  recovery notice appended, the original run terminalized, never requeued.
+  Since 0.9.5, when the tail's run cursor holds a round's staged model
+  response, the response is written into the transcript before the notice,
+  with an `outcome_uncertain` tool error result for each of its tool calls,
+  which says only that the call's outcome is unknown: the calls may have
+  run.
+- Since 0.9.5 a tail whose run cursor agrees with it settles the inputs its
+  cursor binds: the cursor binds exactly the inputs whose content the run
+  wrote into its turn, and a committed receipt of the run names more. Those
+  not ended yet are consumed with the tail, whatever run they name now. A
+  content input the cursor does not bind is not in the tail: one that names
+  no run, or the tail's run (a steer that joined after the last round
+  commit), stays queued and runs once after the tail is closed; one that
+  names another run holds the tail for reconciliation. A tail without an
+  agreeing run cursor (none, or one the classifier finds stale or cannot
+  check) settles the inputs that name its run and holds beside any other
+  content input. A cancelled run (an
+  interrupt or a run stop) is closed as interrupted when its cancellation
+  commits, under these rules.
+- Anything else, including any tail carrying a dangling `tool_use`, is held
   intact for reconciliation. A dangling call proves intent, not execution;
   its external side effect may already have fired, so recovery never closes
   it with synthetic results. A tail whose last turn stopped for a reason
   other than `EndTurn` or `ToolUse` (for example `MaxTokens` or `PauseTurn`)
-  is held the same way: that turn did not reach a natural end.
+  is held the same way: that turn did not reach a natural end. Since 0.9.5
+  an operator can resolve a tail held as ambiguous:
+  `rkat session resolve-held-tail` commits it as interrupted, keeps every
+  row, and answers each call without a result with an `outcome_uncertain`
+  tool error, which says only that its outcome is unknown (see
+  [Storage Operations](/guides/storage-operations#resolve-a-durable-tail-held-for-recovery)).
 
 A session whose transcript has rewrite occurrences (compaction) is recovered
 the same way: a completed tail becomes a recovered run boundary, an
@@ -753,8 +813,11 @@ whose live tail holds no message of the run (an empty live tail) is held, and
 so is a tail whose rewrite descent the store cannot prove. Both fail resume
 with `SESSION_DURABLE_TAIL_HELD_FOR_RECOVERY`, never with internal-error
 prose, and recovery never closes such a tail on the store-issued run identity
-alone. Meerkat's own checkpoints never write either shape: a checkpoint
-follows a model response, and the writer proves the descent before it writes.
+alone. Meerkat's own checkpoints never write either shape without a run
+cursor: a checkpoint follows a model response, and the writer proves the
+descent before it writes. Since 0.9.5, on HeadCanonical, the first commit of
+the round after a compaction writes an empty live tail with the run's cursor,
+and recovery continues the run from it as described above.
 Such a hold therefore points to a store changed outside Meerkat. The
 session's committed history stays readable and its durable tail is kept
 intact. Keep a copy of the realm's store for diagnosis, and continue the work
@@ -771,14 +834,16 @@ refused rather than committed twice.
 While a session is held or quarantined, its content is retained intact and
 resume fails typed rather than with internal-error prose:
 
-- `SESSION_DURABLE_TAIL_HELD_FOR_RECOVERY` — the durable tail exists but
+- `SESSION_DURABLE_TAIL_HELD_FOR_RECOVERY` - the durable tail exists but
   machine-authorized recovery has not promoted it yet; it awaits
-  reconciliation.
-- `SESSION_DURABLE_TAIL_RECOVERY_REFUSED` — machine-authorized recovery was
+  reconciliation. An operator resolves a tail held as ambiguous, or an
+  interrupted tail held beside inputs another run left staged or queued,
+  with `rkat session resolve-held-tail`.
+- `SESSION_DURABLE_TAIL_RECOVERY_REFUSED` - machine-authorized recovery was
   refused by conflicting persisted runtime facts (another live runtime, or
   boundary receipts that already cover or contradict the tail); retry after
   the conflicting runtime quiesces.
-- `SESSION_DURABLE_EVIDENCE_QUARANTINED` — the durable evidence is forked or
+- `SESSION_DURABLE_EVIDENCE_QUARANTINED` - the durable evidence is forked or
   unverifiable; the session is quarantined from resume.
 
 All three carry the typed `durable_resume_hold` structured payload so callers
@@ -828,6 +893,46 @@ waited for it.
   and the last cause. Nothing in that wait reloads the session (see
   [Scheduling](/guides/scheduling)).
 
+A graceful mob Shutdown that keeps queued inputs
+(`QueuedInputsOnShutdown::Requeue` on `meerkat_mob::ShutdownOptions`, and
+since 0.9.5 the default `QueuedInputsOnShutdown::RequeueDurable` for a member
+session that commits each round durably) fails the
+completion waiters of the inputs it keeps with
+`CompletionWaitError::RequeuedAcrossStop`. Such an input is neither failed nor
+consumed: it stays durably queued, and the session's next start runs it, or
+ends it abandoned with reason `requeue_expired` when it is older than the
+Shutdown's max age by then. Every start that still finds it queued (after a
+crash before it ran, say) checks its age again. Retiring, archiving or
+destroying the session before a start runs it ends it as any other queued
+input: abandoned with reason `retired` (retire, archive) or `destroyed`. Do
+not resubmit it; after the restart, the same
+idempotency key re-attaches to it. Only a durable prompt in the queue lane
+that is neither directed nor bound to an objective is kept: a member's kickoff,
+and any other objective-bound input, ends as stopped, as without the option.
+The same stop, like an unregister with `UnregisterQueuedInputs::Requeue`, also
+keeps the run in flight of a session that commits every round: the turn
+stops at once, the
+run's inputs stay bound to it with the same waiter answer and max age, and
+the run continues from its last committed round at the session's next start
+(see [Durable runs](/guides/durable-runs#graceful-stops-and-deploys)). A
+graceful shutdown that does not choose a disposition, a mob Shutdown
+included, uses this stop with a 15 minute max age for sessions that commit
+every round.
+
+- The generated wait-failure resolver classes such a wait: session not
+  running, reason `requeued_across_stop`, resumable, and the surface's
+  pre-admission released. It answers the same after the session is gone.
+- A JSON-RPC `turn/start` waiting on it answers `-32003` (session not running)
+  with `data.kind` and `data.reason` `requeued_across_stop`, `data.input_id`,
+  `data.stopped_at` and `data.resumable`.
+- REST answers `409` with code `SESSION_NOT_RUNNING` and the same `details`.
+  It is not a retryable `503`: an unkeyed retry after the restart would run
+  the input twice.
+- A mob member's bounded wait answers `BoundedTurnFailure::RequeuedAcrossStop`,
+  and a same-key replay of an input that expired answers
+  `BoundedTurnFailure::RequeueExpired`.
+- A scheduled delivery re-reads the input's own outcome, as for the cases above.
+
 An input admission whose store write never answers has the same deadline
 since 0.9.4. Past it the admission refuses with the retryable
 `RuntimeDriverError::RecoveryRepairBlocked`, naming the input, and the session
@@ -855,7 +960,7 @@ declares none.
 Every SQLite file in a realm carries a `meerkat_schema(domain, version)`
 migration ledger; stores bring their domain up to date at open under a
 pinned concurrent-open protocol, and a file whose ledger is ahead of the
-binary refuses typed (`SchemaFromTheFuture`) — a rollback candidate fails
+binary refuses typed (`SchemaFromTheFuture`) - a rollback candidate fails
 certification cleanly instead of crash-looping. Each database also has a
 sibling `<file>.mfence` lock file: store operations hold a shared
 per-operation guard, and offline maintenance (`rkat storage migrate`) takes
@@ -928,12 +1033,12 @@ generations only, and the synthesized head is the head the migration writes.
 
 <Warning>
 Downstream tooling that reads `sessions.session_json` via direct SQL sees
-empty or stale content for sessions written by 0.7.25+ binaries — silently,
+empty or stale content for sessions written by 0.7.25+ binaries, silently,
 because the column still exists. Raw table reads were never a supported
 surface; use one of the typed read paths instead:
 
-- `SessionStore::load` — full canonical session document.
-- `SessionStore::load_meta` — metadata-only projection (no transcript
+- `SessionStore::load` - full canonical session document.
+- `SessionStore::load_meta` - metadata-only projection (no transcript
   deserialization); `list` for filtered metadata.
 - The wire surfaces (`session/read`, `session/list`, REST equivalents).
 
@@ -957,12 +1062,12 @@ head-canonical representation to future O(page) history reads:
   page-serves exactly the rows the head covers.
 - **`load_rewrite_commits`** returns the ADOPTED rewrite commits
   (`idx < head.rewrite_count`), oldest first, without materializing retained
-  revision bodies. It must always equal `load_rewrites`' commits, in order —
+  revision bodies. It must always equal `load_rewrites`' commits, in order,
   including the empty set while a recorded rewrite is not yet adopted.
 
 Both verbs have conservative defaults (`None`; derive from `load_rewrites`),
-so every existing store — including delegating wrappers that do not forward
-them — degrades to the whole-load path, never to a refusal. The conformance
+so every existing store (including delegating wrappers that do not forward
+them) degrades to the whole-load path, never to a refusal. The conformance
 suite pins the contract conditionally: a store answering `None` for every
 canonical-head probe is fully conformant; a store answering `Some` must serve
 the persisted row and page-exact strand reads, and delegating wrappers must

@@ -114,8 +114,280 @@ deduplication.
 `accept_schedule_runtime_input_with_reconciliation` on the task that calls
 them; a redelivery through such a host only replays the earlier input.
 
+#### Typed mob destroy report
+
+`meerkat-contracts` types the mob destroy report on the wire:
+`MobDestroyResult.destroy_report` is a `WireMobDestroyReport` instead of a
+`serde_json::Value`, and `MobLifecycleResult.destroy_report` an
+`Option<WireMobDestroyReport>` instead of an `Option<serde_json::Value>`. The
+JSON value each surface sends is unchanged. Inside `destroy_report`, the
+members of the JSON-RPC `mob/destroy` and `mob/lifecycle` results and of the
+`@rkat/web` `Mob.lifecycle()` result now follow the report's field order, as
+the domain report serializes, instead of alphabetical order; the
+`mob_destroy_incomplete` data keeps its bytes.
+
+**Do:** compare those results as JSON values, not as bytes. In Rust, read
+`destroy_report`'s fields (`errors`, `member_reload_refusals` and the rest)
+instead of matching a `Value`, and convert a `meerkat_mob::MobDestroyReport`
+with `WireMobDestroyReport::from(&report)` where you build a result. In
+TypeScript, `mobDestroy()` returns `destroyReport` as a
+`WireMobDestroyReport`. In `@rkat/web`, `Mob.lifecycle()` rejects with a
+`MeerkatError` instead of the runtime's JSON error string: read the report of
+a destroy that did not finish with `mobDestroyIncompleteReport(error)` (in
+Python, `mob_destroy_incomplete_report(error)`) rather than parsing the error
+text.
+
+#### Queued inputs kept across a graceful stop
+
+The generated runtime machine (`meerkat-machine-kernels`,
+`generated::meerkat`) and its DSL (`meerkat-machine-schema`) gain the stop
+classifier behind the new requeue option of a graceful stop:
+
+- the input struct `BeginUnregisterSession` gains `queued_inputs` and
+  `requeue_max_age_ms`, and `State` gains `unregister_queued_inputs` and
+  `unregister_requeue_max_age_ms`;
+- the input, effect and transition enums gain `ClassifyStopInputDisposition`,
+  `StopInputDispositionClassified` and its per-phase transitions, and
+  `InputAbandonReason` gains `RequeueExpired`, each appended last;
+- `meerkat-runtime`'s `MeerkatMachineRuntimeInternalInput` gains
+  `ClassifyStopInputDisposition`, appended last;
+- the wait-failure enums gain a kept input's answer, appended last:
+  `RuntimeCompletionWaitFailureObservation::RequeuedAcrossStop`,
+  `RuntimeCompletionWaitFailurePublicErrorClass::SessionNotRunning` and
+  `RuntimeCompletionWaitFailurePublicReason::RequeuedAcrossStop` (also in
+  `meerkat-runtime`'s `meerkat_machine::dsl`), with the per-phase transitions
+  `ResolveRuntimeCompletionWaitFailureRequeuedAcrossStop*`;
+- `meerkat-rest`'s `ApiError` gains `SessionNotRunningWithData`, appended
+  last.
+
+**Do:** where you build `BeginUnregisterSession` or `State` literals, pass
+`UnregisterQueuedInputsDisposition::Stop` and `0`, the 0.9.4 behaviour, and
+add the arms (or a wildcard) where you match these enums exhaustively.
+
+#### The mob Shutdown default
+
+- `meerkat-mob`: a mob Shutdown that does not choose now keeps a durable
+  member's work. `ShutdownOptions` gains `queued_inputs`
+  (`with_queued_inputs`) of the new `#[non_exhaustive]` enum
+  `QueuedInputsOnShutdown`. Its default, `RequeueDurable`, which
+  `ShutdownOptions::default()` and `MobHandle::shutdown()` take, resolves per
+  member: `Requeue(RequeueMaxAge::DEFAULT)` for a member whose session
+  commits every round (the mob's session service keeps persistent sessions
+  and its runtime has a persistence store), and `Stop` for any other member
+  and for one already retiring. 0.9.4's Shutdown cancelled every member's
+  running turn; a Shutdown that does not choose now keeps such a member's
+  running turn and eligible queued prompts for the next start (see Other
+  behaviour changes below).
+- The generated mob machine (`meerkat-machine-kernels`, `generated::mob`)
+  and its DSL (`meerkat-machine-schema`) decide an autonomous member's case:
+  the input `ResolveAutonomousShutdownMemberAction` gains
+  `keeps_durable_run`, the string enum `AutonomousShutdownMemberActionKind`
+  gains `KeepForResume`, and the transition ids gain the per-phase
+  transitions `ResolveAutonomousShutdownMemberActionKeepForResume*`, each
+  appended last.
+
+**Do:** where a mob Shutdown must end members' work as before, pass
+`ShutdownOptions::default().with_queued_inputs(QueuedInputsOnShutdown::Stop)`,
+the 0.9.4 behaviour; do so before a downgrade. Where you build
+`ResolveAutonomousShutdownMemberAction` literals, pass
+`keeps_durable_run: false`, the 0.9.4 behaviour, and add the arms (or a
+wildcard) where you match these enums exhaustively.
+
+#### Member custody at a mob start
+
+- `meerkat-runtime`: `RuntimeBindingsError` gains the variant
+  `Hosting(SessionId, SessionError)` and is now `#[non_exhaustive]`. Binding
+  preparation for a session another runtime owner hosts, or whose hosting
+  claim cannot be taken, returns it with the typed
+  `SessionError::ServedElsewhere` or `SessionError::HostingUnavailable`
+  instead of a `PrepareFailed` message.
+- `meerkat-contracts`: `MobMemberStatusResult` gains the field
+  `custody_deferred: Option<WireMemberCustodyDeferral>`. Its restore and
+  cause vocabularies may grow: `WireMemberCustodyRestore` and
+  `WireMemberCustodyDeferralCause` have an `Unknown(String)` variant for a
+  value this version does not know, and the SDKs report such a value as
+  `{"unknown": value}` instead of failing the read.
+
+**Do:** add a wildcard arm to any exhaustive match on `RuntimeBindingsError`,
+set `custody_deferred` (`None`) where you build `MobMemberStatusResult` with a
+struct literal, and handle the `Unknown` case where you read a custody
+restore or cause.
+
+#### Per-round commits and resumed runs
+
+A run in a durable session now commits every tool round and continues after
+a crash (see [Durable Runs](/guides/durable-runs)). Integrations see:
+
+- `meerkat-core`: a `SessionCheckpointer` whose `checkpoint_run` returns
+  `Ok(None)` (nothing made durable) for a round's first commit now fails that
+  tool round before any of its tools runs; 0.9.4 accepted `Ok(None)` at every
+  checkpoint. The trait also gains `rebases_runs` (default `false`) and
+  `rebase_run`. A checkpointer that answers `false` takes no round commit
+  after a run's first compaction on a store that accepts only strict
+  continuations of the committed document; the run's last round commit
+  before the compaction stays its resume point.
+- `meerkat-runtime`: `RuntimeStore` gains
+  `commit_prepared_whole_blob_run_rebase` (default `Unsupported`) and
+  `supports_whole_blob_run_rebase` (default `false`). The session service
+  re-bases a WholeBlob run only over a store that answers `true`; over any
+  other store the run takes no round commit after its first compaction.
+- `meerkat-core`: `AgentEvent` gains `RunResumed { session_id, run_id, round,
+  resume_point }`, wire type `run_resumed`, with the new non-exhaustive
+  `RunResumePointKind` (`tools_pending`, `awaiting_model`). A resumed run
+  publishes it in place of `RunStarted`. `AgentEvent` is non-exhaustive, so a
+  Rust match already has a wildcard arm. An SDK of this version reports the
+  event in its unknown-event form; an older SDK refuses it, as for any newer
+  event.
+- `meerkat-runtime`, `meerkat-core`, `meerkat-machine-schema`,
+  `meerkat-machine-kernels`: the durable-tail recovery and runtime machine
+  vocabularies grow:
+  - `meerkat_runtime::recovery::DurableTailRecoveryOutcome` gains
+    `Continue { candidate, run_id, receipt }`;
+  - the machine enums gain `DurableTailRecoveryClass::ContinuableCandidate`,
+    `DurableTailRecoveryDisposition::ContinueRun`,
+    `DurableTailRecoveryDisposition::OperatorRepairAndCommitInterrupted`,
+    `RecoveredInputNormalizationReasonKind::ResumableRun` and
+    `InputAbandonReason::ResumeRefused` (with the `meerkat_machine::dsl`
+    bridge copies and the catalog and kernel types);
+  - the session document vocabulary gains `RunIdCardinality::NoRunRows` and
+    the `DurableTailRunCursor` type, and
+    `SessionDocumentInput::ClassifyDurableTail` and
+    `SessionDocumentMachineAuthority::classify_durable_tail` take
+    `run_cursor` and `cursor_inputs_open`;
+  - `MeerkatMachineState` gains `resumable_run_id`; `MeerkatMachineInput`
+    gains `MarkRunResumable`, `ResumeRun`, `ReleaseResumableRun`,
+    `SettleResumableRun`, `ReplayAppliedRunContributor`,
+    `SuspendRunForStop` and `AuthorizeOperatorDurableTailRepair`, and
+    `NormalizeRecoveredInputLifecycle` gains `bound_run_resumable`;
+    `MeerkatMachineEffect` gains `ResumableRunMarked`,
+    `ResumedRunAuthorized`, `ResumableRunReleased`, `ResumableRunSettled`
+    and `RunSuspendedForStop`;
+  - `meerkat-runtime`'s `MeerkatMachineRuntimeInternalInput` gains
+    `MarkRunResumable`, `ResumeRun`, `ReleaseResumableRun`,
+    `SettleResumableRun`, `SuspendRunForStop`,
+    `ReplayAppliedRunContributor` and `AuthorizeOperatorDurableTailRepair`,
+    appended last; the enum is exhaustive, so a match outside the crate
+    needs the arms;
+  - the generated transition enums gain the per-phase transitions of these
+    inputs, among them the `SuspendRunForStop` arms,
+    `ClassifyDurableTailContinuable` and
+    `ClassifyStopInputDispositionRetainResumable`. Every new value of the
+    string enums and of the generated kernel enums (`InputKind`,
+    `EffectKind`, `TransitionId`) is appended last.
+
+**Do:** return a receipt from `checkpoint_run` once the checkpoint is
+durable, and an error when it cannot be made durable. A custom checkpointer
+over a store that accepts only strict continuations implements
+`rebases_runs` and `rebase_run` to keep round commits after a compaction,
+and a `RuntimeStore` decorator forwards
+`commit_prepared_whole_blob_run_rebase` and
+`supports_whole_blob_run_rebase`. Handle `run_resumed` where you consume
+events. Where you build these machine inputs or state literals, pass
+`DurableTailRunCursor::Absent` and `false` to
+`ClassifyDurableTail`, `None` for `resumable_run_id` and `false` for
+`bound_run_resumable` (a tail without a run cursor, the 0.9.4 behaviour),
+and add the arms (or a wildcard) where you match the enums exhaustively.
+
+#### Durable workers
+
+`meerkat-mob`'s `Profile` gains `durable: bool`, and so do its wire forms
+`meerkat_contracts::WireMobProfile`, `MobProfileInput` and `PortableProfile`.
+Serde reads an omitted `durable` as `false` and writes it only when `true`,
+so stored and sent ordinary profiles keep their bytes, and the adaptive
+`LayerDecision` schema leaves it out. The wire forms refuse unknown fields,
+so a host older than 0.9.5 refuses a profile that sets `durable`. A spawn of
+a durable profile on a mob whose member sessions do not outlive the process
+(`MobSessionService::keeps_durable_member_sessions`) is refused with the new
+`MobError::NonDurableService { member_id, profile }` (wire code
+`CAPABILITY_UNAVAILABLE`, data kind `mob_non_durable_service`). A
+session-service wrapper should forward `keeps_durable_member_sessions`.
+
+**Do:** pass `durable: false` where you build these with struct literals, and
+set `durable = true` only on mobs over persistent sessions, once every host
+that reads the profile runs 0.9.5. See
+[Mobs: durable workers](/guides/mobs#durable-workers).
+
+#### Dedupe key on pending callback calls
+
+A pending callback call carries the call's dedupe key (see Other behaviour
+changes below):
+
+- `meerkat-core`: `PendingCallbackToolCall` gains
+  `dedupe_key: Option<ToolCallDedupeKey>`, the struct variant
+  `AgentError::CallbackPending` gains
+  `dedupe_key: Option<Box<ToolCallDedupeKey>>`, and
+  `CoreApplyTerminal::CallbackPending` gains
+  `dedupe_key: Option<ToolCallDedupeKey>`;
+- `meerkat-runtime`: `CompletionOutcome::CallbackPending` gains
+  `dedupe_key: Option<ToolCallDedupeKey>`;
+- `meerkat-mob`: the struct variants `MobError::CallbackPending` and
+  `BoundedTurnFailure::CallbackPending` gain
+  `dedupe_key: Option<Box<ToolCallDedupeKey>>`;
+- `meerkat-contracts`: `WirePendingToolCall` gains
+  `dedupe_key: Option<ToolCallDedupeKey>`, and `WireCallbackPending::single`
+  takes the key as its eighth argument.
+
+On the wire the field is optional and omitted when absent, so readers that
+ignore unknown fields are unaffected.
+
+A pending callback call stored with a dedupe key cannot be finalized after
+a downgrade to a runtime without the field, such as 0.9.4: its stored digest
+no longer verifies there. A call stored without a key keeps its bytes (see
+[Downgrading to 0.9.4](#downgrading-to-0-9-4)).
+
+**Do:** name the field (`dedupe_key: None` for a call outside an agent-loop
+round) where you build these with struct literals, add it or `..` to
+patterns that list every field, and pass the key to
+`WireCallbackPending::single`.
+
+#### Orphaned drains in a quiescent close
+
+`meerkat-runtime`: `RuntimeSessionQuiescentClose` is now `#[non_exhaustive]`
+and gains `ClosedOrphanedDrain`.
+`MeerkatMachine::unregister_session_registration_until_terminal_if_quiescent`
+returns it after it completes an orphaned drain or a pending finalization,
+which may abandon held inputs with reason `Stopped`. `Closed` now means only
+a genuinely quiescent close.
+
+**Do:** handle `ClosedOrphanedDrain` and add a wildcard arm where you match
+`RuntimeSessionQuiescentClose`. Where you need a close that interrupted
+nothing, do not treat `ClosedOrphanedDrain` as `Closed`.
+
+#### WebRTC to mob members
+
+`meerkat-rpc`: WebRTC to a mob member is not available in 0.9.5. The
+session-scoped `live/open` and `live/webrtc/answer` flow refuses a mob
+member's session with `INVALID_PARAMS` (-32602) and data kind
+`mob_member_session_addressed_by_id`, and `mob/member_live_open`, the route
+for a member, is WebSocket only.
+
+**Do:** open a member's live channel with `mob/member_live_open` over
+WebSocket, and keep WebRTC for sessions that are not mob members.
+
+#### Live open advisories
+
+- `meerkat-contracts`: `LiveOpenResult` gains the field
+  `advisories: Vec<WireLiveOpenAdvisory>`, left out of the wire when empty.
+  It lists what a successful `live/open` went ahead without: today
+  `staged_prompt_refused`, when a run-start hook refused the session's staged
+  create-time prompt (the prompt stays staged for the first text turn). The
+  vocabulary may grow: `WireLiveOpenAdvisory` has an `Unknown(String)` variant
+  for a value this version does not know, and the Python and TypeScript SDKs
+  keep such a value as the string the server sent instead of failing the open.
+
+**Do:** set `advisories: Vec::new()` where you build `LiveOpenResult` with a
+struct literal, and treat an advisory you do not know as informational.
+
 ### Other behaviour changes
 
+- **A Broken member no longer stops a mob start:** when a member whose
+  restore already failed at a start cannot have its custody restored because
+  another runtime owner hosts its session, its hosting claim cannot be taken,
+  or its durable tail could not be proven, the start defers that restore and
+  the mob runs. The member stays Broken, its status shows `custody_deferred`,
+  and a respawn, retire or destroy of it answers
+  `MobError::MemberCustodyDeferred` until the restore succeeds. 0.9.4 stopped
+  the whole mob. See [Mobs](/guides/mobs).
 - **Crash recovery of scheduled deliveries:** a delivery whose executor died
   after an earlier attempt recorded its dispatch is reclaimed, also past its
   misfire deadline (up to five attempts), and redelivered without a fresh
@@ -130,6 +402,87 @@ them; a redelivery through such a host only replays the earlier input.
   at-least-once: deduplicate on `delivery_idempotency_key`. See
   [Executor Lease And Crash Recovery](/guides/scheduling#executor-lease-and-crash-recovery).
 
+- **Queued prompts kept across a graceful stop:** a mob Shutdown
+  with `ShutdownOptions::with_queued_inputs(QueuedInputsOnShutdown::Requeue(max_age))`
+  (or an unregister with `UnregisterQueuedInputs::Requeue { max_age }`) keeps
+  each input still queued behind the running turn that is a durable prompt
+  in the queue lane, neither directed nor bound to an objective (so never a
+  member's kickoff). Its waiter ends with
+  `RequeuedAcrossStop`, and the next start runs it once, before new work.
+  JSON-RPC answers such a wait `-32003` and REST `409` `SESSION_NOT_RUNNING`,
+  both with `kind` `requeued_across_stop`. A
+  kept input older than `max_age` when a start finds it still queued ends as
+  `RequeueExpired` without running; every start that finds it queued checks
+  again. A graceful shutdown that does not choose now uses this option, with
+  a 15 minute max age, for sessions with per-round commits: `rkat-rpc`'s and
+  the REST server's own shutdowns, and a mob Shutdown without
+  `with_queued_inputs` (the new default
+  `QueuedInputsOnShutdown::RequeueDurable`). Choose `Stop` explicitly to keep
+  the 0.9.4 behaviour.
+  A kept input's row is written as stored input state version 8, and an
+  unregister in progress with the requeue disposition as machine lifecycle
+  record version 6; every other row and record keeps version 7 and version 5.
+  0.9.4 refuses a version 8 row with a stop mark, and a version 6 record, with
+  its typed unsupported-version error, and fails to read a version 8 row that
+  ended `RequeueExpired`, whose abandon reason it does not know. While a kept
+  input is still queued, a store written by a requeue Shutdown does not open
+  in 0.9.4, whose recovery reads every non-terminal row. Once every kept input
+  has run or expired, the store opens in 0.9.4, but each read that decodes
+  such a row still fails: the input's status, a same-key lookup that finds
+  it, and a batch compare-and-swap over it. See [Mobs](/guides/mobs).
+- **Runs continue after a crash:** a run in a durable session (`sqlite`,
+  `jsonl` or host-store realm) commits every tool round twice and, after a
+  crash, kill or restart, continues under the same run id from its last
+  committed round when its session is opened again, announced by
+  `run_resumed`. 0.9.4 ran the input again or closed the run as interrupted.
+  There is no switch. A call dispatched again carries the same dedupe key,
+  and a call whose effect may already have happened gets an
+  `outcome_uncertain` tool error instead. See
+  [Durable Runs](/guides/durable-runs).
+- **Write volume on WholeBlob realms:** a `jsonl` or host-store realm writes
+  the whole session document at each round commit, twice per tool round; a
+  `sqlite` realm writes only the round's rows. Long, tool-heavy runs on
+  `jsonl` write much more than in 0.9.4. See
+  [Storage Operations](/guides/storage-operations#write-volume-of-per-round-commits).
+- **Dedupe key for tools outside the process:** MCP `tools/call` requests
+  carry the call's dedupe key in `_meta` under
+  `io.meerkat/tool_call_dedupe_key`, and callback requests and pending
+  callback calls carry it as `dedupe_key`; the SDKs pass it to callback
+  handlers. A host `McpCallContextProvider` whose metadata uses that name is
+  refused with `McpCallContextError::Denied`. See
+  [Durable Runs: the dedupe key](/guides/durable-runs#the-dedupe-key).
+- **A requeue stop keeps a durable run in flight:** an unregister with
+  `UnregisterQueuedInputs::Requeue`, or a mob Shutdown with
+  `QueuedInputsOnShutdown::Requeue`, now suspends the run in flight of a
+  session with per-round commits instead of cancelling it: the run continues
+  from its last committed round at the next start, or, past the max age, its
+  inputs end as `RequeueExpired` and the run is closed as interrupted with
+  its committed rounds kept. A mob Shutdown keeps an autonomous member's
+  running turn the same way, with its kickoff open, unless the member is
+  retiring or host-placed. Because a graceful shutdown that does not choose
+  uses Requeue for such sessions, a deploy no longer cancels their runs in
+  flight. A REST request that waits on a run the shutdown suspends is
+  answered `409` `SESSION_NOT_RUNNING` with `kind` `requeued_across_stop`.
+  See
+  [Durable Runs: graceful stops and deploys](/guides/durable-runs#graceful-stops-and-deploys).
+- **An operator path for a held durable tail:** a session held as
+  `SESSION_DURABLE_TAIL_HELD_FOR_RECOVERY` with ambiguous evidence, such as a
+  transcript that ends in a tool call without its result, can be resolved
+  with
+  `rkat session resolve-held-tail <id> [--apply] [--runtime-store <FILE>] [--json]`
+  or `meerkat_runtime::recovery::resolve_held_durable_tail`. The dry run is
+  the default; applied, it commits the tail as interrupted with every row
+  kept and each call without a result answered `outcome_uncertain`, once
+  every host of the session is stopped. 0.9.4 had no path out of such a
+  hold. The same command resolves an interrupted tail held beside inputs
+  another run left staged or queued (a shape only pre-release builds of
+  0.9.5, or a store fault, leave): it requeues those inputs. See
+  [Storage Operations](/guides/storage-operations#resolve-a-durable-tail-held-for-recovery).
+- **Host stores:** a host can keep a realm's durable state in its own
+  database through the host store SPI (`meerkat_core::host_store`), checked
+  by the host store chapter of `meerkat-store-conformance`. See the
+  [Host Store SPI reference](/reference/host-store-spi).
+
 ### Upgrade checklist
 
 1. Pass the admission evidence to the changed `meerkat-schedule` lifecycle
@@ -141,6 +494,76 @@ them; a redelivery through such a host only replays the earlier input.
 3. Custom `SurfaceScheduleSessionHost` implementations: return `true` from
    `decides_existing_admission` only if they admit through
    `accept_schedule_runtime_input_with_reconciliation` on the calling task.
+4. Read a mob destroy report as `WireMobDestroyReport` in Rust, and a failed
+   destroy's report through the SDK accessor, not the error text.
+5. Pass `UnregisterQueuedInputsDisposition::Stop` and `0` where you build
+   `BeginUnregisterSession` or `State` of the generated runtime machine, and
+   `keeps_durable_run: false` where you build the mob machine's
+   `ResolveAutonomousShutdownMemberAction`.
+6. A graceful shutdown of a session with per-round commits now keeps its
+   queued prompts and its run in flight unless you choose `Stop` (for a mob,
+   the new default is `QueuedInputsOnShutdown::RequeueDurable`). Before a
+   downgrade, follow [Downgrading to 0.9.4](#downgrading-to-0-9-4). Treat
+   `RequeuedAcrossStop` as "runs at the next start" (do not resubmit) and
+   `RequeueExpired` as "resubmit if still wanted".
+7. Add a wildcard arm where you match `RuntimeBindingsError`, and set
+   `custody_deferred` in `MobMemberStatusResult` struct literals.
+8. Custom `SessionCheckpointer` implementations: return a receipt from
+   `checkpoint_run` once a checkpoint is durable, and implement
+   `rebases_runs` and `rebase_run` if your store accepts only strict
+   continuations. `RuntimeStore` decorators: forward the two WholeBlob run
+   re-base methods.
+9. Handle the `run_resumed` event, and pass the new fields of the recovery
+   and runtime machine inputs.
+10. Pass `durable` where you build `Profile` or its wire forms, and handle
+    `MobError::NonDurableService`.
+11. Name `dedupe_key` where you build pending callback calls, and pass the
+    key to `WireCallbackPending::single`.
+12. Handle `ClosedOrphanedDrain` where you match
+    `RuntimeSessionQuiescentClose`.
+13. Open mob members' live channels with `mob/member_live_open` over
+    WebSocket.
+14. Tools whose effects must not repeat: record and check the dedupe key, as
+    described in [Durable Runs](/guides/durable-runs#the-dedupe-key).
+15. On `jsonl` or host-store realms, check the write volume of long,
+    tool-heavy runs.
+16. Set `advisories` in `LiveOpenResult` struct literals.
+
+### Downgrading to 0.9.4
+
+Some state that 0.9.5 writes does not carry back to 0.9.4:
+
+- **Runs in flight.** 0.9.4 never continues a run. It closes a run that was
+  in flight when 0.9.5 last stopped (a crash or a kill) as interrupted, and
+  ends the run's inputs without running them again. Some of these sessions,
+  such as one whose run stopped in its first round or right after a
+  compaction, do not open in 0.9.4 at all until 0.9.5 has settled the run.
+- **Kept inputs.** 0.9.4 cannot open a store while an input that a
+  requeue stop kept is still queued, and cannot read a kept or expired
+  input's row after that (see Other behaviour changes above). This includes
+  the inputs of a run that a requeue stop kept: 0.9.4 cannot read them, so
+  it neither continues nor closes that run.
+- **Unfinished requeue stops.** A requeue stop that was killed while it
+  drained, such as a default graceful shutdown of a session with per-round
+  commits, leaves the session's lifecycle record at version 6, which 0.9.4
+  refuses when it opens that session. Opening the session on 0.9.5 finishes
+  that stop and rewrites the record in a version 0.9.4 reads.
+- **Pending callback calls.** 0.9.4 cannot finalize a pending callback
+  call stored with a dedupe key: its stored digest no longer verifies there.
+
+Before you start 0.9.4 on a state root that 0.9.5 used:
+
+1. On 0.9.5, open each session that had a run in flight at the last stop,
+   and each session whose shutdown did not finish, and let any run end.
+   Deliver the results of its pending callback calls, or cancel the run.
+2. Shut down with an explicit `Stop` (an unregister with
+   `UnregisterQueuedInputs::Stop`, or a mob Shutdown with
+   `with_queued_inputs(QueuedInputsOnShutdown::Stop)`), so that no run and
+   no queued input is kept. For `rkat-rpc` and the REST server, whose own
+   shutdown keeps the work of sessions with per-round commits, stop sending
+   work, let every run and queued input finish before you stop them, and
+   let their shutdown finish.
+3. Then start 0.9.4.
 
 ## Upgrading to 0.9.4
 

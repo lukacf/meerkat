@@ -7,7 +7,8 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
 use crate::client::{
-    openai_response_meta, parse_tool_call_arguments, web_search_message_annotations,
+    message_citations_content, openai_response_meta, parse_tool_call_arguments,
+    web_search_message_annotations,
 };
 
 fn malformed(message: impl Into<String>) -> LlmError {
@@ -114,9 +115,11 @@ pub(crate) fn lower_items<'a>(
                     })?;
                 let mut text = String::new();
                 let mut annotations = Vec::new();
+                let mut text_parts = 0;
                 for part in parts {
                     match required(part, "type")? {
                         "output_text" => {
+                            text_parts += 1;
                             text.push_str(required(part, "text")?);
                             if let Some(citations) = part
                                 .get("annotations")
@@ -147,7 +150,7 @@ pub(crate) fn lower_items<'a>(
                     blocks.push(AssistantBlock::ServerToolContent {
                         id: item.get("id").and_then(Value::as_str).map(str::to_owned),
                         kind: ServerToolKind::WebSearch,
-                        content: serde_json::json!({"type":"message_annotations","annotations":annotations}),
+                        content: message_citations_content(annotations, text_parts),
                         meta: openai_response_meta(response_id),
                     });
                 }

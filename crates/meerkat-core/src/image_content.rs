@@ -750,6 +750,7 @@ fn system_notice_block_has_inline_images(block: &crate::types::SystemNoticeBlock
         | crate::types::SystemNoticeBlock::BackgroundJob { .. }
         | crate::types::SystemNoticeBlock::Auth { .. }
         | crate::types::SystemNoticeBlock::ToolProcessInterrupted { .. }
+        | crate::types::SystemNoticeBlock::ForkBoundary(_)
         | crate::types::SystemNoticeBlock::Unknown { .. } => false,
     }
 }
@@ -821,6 +822,7 @@ impl InlineImageCollector {
                         | SystemNoticeBlock::BackgroundJob { .. }
                         | SystemNoticeBlock::Auth { .. }
                         | SystemNoticeBlock::ToolProcessInterrupted { .. }
+                        | SystemNoticeBlock::ForkBoundary(_)
                         | SystemNoticeBlock::Unknown { .. } => {}
                     }
                 }

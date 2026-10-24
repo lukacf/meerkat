@@ -8,7 +8,7 @@ icon: "book"
 
 ```python
 from meerkat import CONTRACT_VERSION
-print(CONTRACT_VERSION)  # "0.9.4"
+print(CONTRACT_VERSION)  # "0.9.5"
 ```
 
 ## Primary handles
@@ -219,11 +219,23 @@ touched), or `not_stoppable`.
 ### `send_external_event`
 
 ```python
-await client.send_external_event(session_id, event_type, payload, blocks=None)
-await session.send_external_event(event_type, payload, blocks=None)
+await client.send_external_event(session_id, event_type, payload, blocks=None, idempotency_key=None)
+await session.send_external_event(event_type, payload, blocks=None, idempotency_key=None)
 ```
 
-Returns `ExternalEventOutcome` (runtime admission outcome payload).
+Returns `ExternalEventOutcome` (runtime admission outcome payload). With
+`idempotency_key`, a retry admits nothing new: it answers `outcome_type`
+`deduplicated` and names the first admission in `existing_id`. The same key
+with other event content raises `INPUT_IDEMPOTENCY_CONFLICT`. The key is
+scoped to the session and needs a server contract of 0.9.5 or later; against
+an older server the SDK raises `CAPABILITY_UNAVAILABLE` instead of sending it.
+
+`send_mob_member_content(..., idempotency_key=None)` and `Member.send(...,
+idempotency_key=None)` take the same key, deduplicated for the member
+identity. A keyed send answers `continuation` (`delivery_id`,
+`committed_at_ms` and a `status` of `pending`, `admitted` with `session_id`
+and `input_id`, `stranded` or `refused`); see `mob/member_send` keys in the
+RPC reference.
 
 ### Transcript and input reconciliation
 
@@ -623,4 +635,26 @@ except MeerkatError as error:
     if failure is None or failure["code"] != "peer_unreachable":
         raise
     print(f"{failure['peer']} is unreachable: {failure['reason']}")
+```
+
+A mob destroy that did not finish (`mob_destroy`, or `mob_lifecycle` with
+`"destroy"`) fails with code `mob_destroy_incomplete`; its `details` carry
+the `destroy_report` and `retryable: True`.
+`mob_destroy_incomplete_report(error)` returns that report as a
+`WireMobDestroyReport`, or `None` for any other error. Retry the destroy
+later: `member_reload_refusals` names each member whose reload the runtime
+refused, with its typed `refusal` (a kind this SDK does not know reads as
+`{"kind": "unknown"}`).
+
+```python
+from meerkat import MeerkatError, mob_destroy_incomplete_report
+
+try:
+    await client.mob_destroy(mob_id)
+except MeerkatError as error:
+    report = mob_destroy_incomplete_report(error)
+    if report is None:
+        raise
+    for refused in report.member_reload_refusals or []:
+        print(f"{refused.member}: {refused.refusal['kind']}")
 ```

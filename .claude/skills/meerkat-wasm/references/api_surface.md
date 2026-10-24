@@ -108,6 +108,13 @@ These raw JSON results are JavaScript strings. The SDK's `runtime.listMobs()`
 unwraps `mobs`, and `mob.flowStatus()` unwraps `run` (or returns `null`).
 `mob.lifecycle()` retains the parsed lifecycle result; inspect its
 `destroy_report` or `stop_report` rather than discarding the cleanup receipt.
+A rejected `mob.lifecycle()` is a `MeerkatError`. A destroy that did not
+finish (here, or in `destroy_session` or `destroy_runtime`) rejects with code
+`mob_destroy_incomplete`: the raw error JSON carries `destroy_report` and
+`retryable` at its top level and the typed incomplete data
+(`{code, destroy_report, retryable}`, as JSON-RPC's `error.data`) under
+`data`, which `MeerkatError.fromWasm` keeps; `mobDestroyIncompleteReport(error)`
+reads the report typed.
 
 ### Subscriptions
 

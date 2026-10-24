@@ -28,6 +28,19 @@ impl MobActor {
         }
         #[cfg(feature = "runtime-adapter")]
         if let Some(io) = self.resume_operation_binding_io() {
+            // A member whose startup custody restore was deferred gets it
+            // re-attempted once. One that stays deferred is no resume failure:
+            // the member keeps its deferral (and its state), and the resume
+            // proceeds; any other failure is retained as for a binding below.
+            for identity in self.deferred_member_custody.identities() {
+                match self
+                    .reattempt_deferred_member_custody_unprompted(&identity)
+                    .await
+                {
+                    Ok(()) | Err(MobError::MemberCustodyDeferred { .. }) => {}
+                    Err(error) => self.retain_resume_post_commit_error(error),
+                }
+            }
             let entries = self.roster.read().await.list().cloned().collect::<Vec<_>>();
             for entry in entries {
                 // A member this resume settled as Broken has no serving
@@ -41,6 +54,11 @@ impl MobActor {
                     .member_restore_failures
                     .contains_key(&mob_dsl::AgentIdentity::from_domain(&entry.agent_identity))
                 {
+                    continue;
+                }
+                // Nothing acts on a member whose custody restore stays
+                // deferred.
+                if self.deferred_member_custody.contains(&entry.agent_identity) {
                     continue;
                 }
                 match self.prepare_restored_member_operation_binding(entry) {

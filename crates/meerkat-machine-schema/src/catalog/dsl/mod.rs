@@ -477,6 +477,26 @@ fn meerkat_queue_to_run_command_plans() -> Vec<CommandPlanSchema> {
             effect_closures: vec![],
         },
         CommandPlanSchema {
+            name: "AuthorizedResumedRun".to_owned(),
+            authority_type: "AuthorizedResumedRun".to_owned(),
+            source_inputs: vec![
+                input_variant_id("MarkRunResumable"),
+                input_variant_id("ResumeRun"),
+            ],
+            source_signals: vec![],
+            transitions: vec![
+                transition_id("MarkRunResumableInitializing"),
+                transition_id("MarkRunResumableIdle"),
+                transition_id("MarkRunResumableAttached"),
+                transition_id("ResumeRunRunning"),
+            ],
+            effects: vec![
+                effect_variant_id("ResumableRunMarked"),
+                effect_variant_id("ResumedRunAuthorized"),
+            ],
+            effect_closures: vec![],
+        },
+        CommandPlanSchema {
             name: "AuthorizedRuntimeLoopRunCommit".to_owned(),
             authority_type: "AuthorizedRuntimeLoopRunCommit".to_owned(),
             source_inputs: vec![
@@ -991,7 +1011,7 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
             ),
             NamedTypeBinding::string_enum(
                 "RunIdCardinality",
-                &["NoRunId", "SingleRunId", "MultipleRunIds"],
+                &["NoRunId", "SingleRunId", "MultipleRunIds", "NoRunRows"],
             ),
             NamedTypeBinding::string_enum(
                 "DurableTailStopReason",
@@ -1003,7 +1023,12 @@ pub fn session_document_schema_metadata() -> MachineSchemaMetadata {
                     "CompletedCandidate",
                     "InterruptedRepairableCandidate",
                     "Ambiguous",
+                    "ContinuableCandidate",
                 ],
+            ),
+            NamedTypeBinding::string_enum(
+                "DurableTailRunCursor",
+                &["Disagrees", "Absent", "Agrees"],
             ),
             NamedTypeBinding::string_enum(
                 "DurableHeadRelation",
@@ -1088,11 +1113,16 @@ pub fn session_turn_admission_schema_metadata() -> MachineSchemaMetadata {
             ),
             NamedTypeBinding::string_enum(
                 "StartTurnExecutionKind",
-                &["ContentTurn", "ResumePending"],
+                &["ContentTurn", "ResumePending", "ResumeRun"],
             ),
             NamedTypeBinding::string_enum(
                 "StartTurnDisposition",
-                &["RunContentTurn", "RunPending", "NoPendingBoundary"],
+                &[
+                    "RunContentTurn",
+                    "RunPending",
+                    "NoPendingBoundary",
+                    "ResumeRun",
+                ],
             ),
             NamedTypeBinding::string_enum("StartTurnPublicTerminal", &["NoPendingBoundary"]),
             NamedTypeBinding::string_enum(
@@ -1538,6 +1568,7 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                     "CompletedCandidate",
                     "InterruptedRepairableCandidate",
                     "Ambiguous",
+                    "ContinuableCandidate",
                 ],
             ),
             NamedTypeBinding::string_enum(
@@ -1548,6 +1579,8 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                     "RepairAndCommitInterrupted",
                     "CommitCompletedRetainInputs",
                     "HoldIntact",
+                    "ContinueRun",
+                    "OperatorRepairAndCommitInterrupted",
                 ],
             ),
             // Typed projections of the persisted machine-lifecycle row and
@@ -1849,6 +1882,7 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                     "RollbackStaged",
                     "BoundaryReceiptCommitted",
                     "MissingBoundaryReceipt",
+                    "ResumableRun",
                 ],
             ),
             NamedTypeBinding::string_enum(
@@ -1862,6 +1896,8 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                     "MaxAttemptsExhausted",
                     "NeverExecuted",
                     "ToolProcessInterrupted",
+                    "RequeueExpired",
+                    "ResumeRefused",
                 ],
             ),
             NamedTypeBinding::string_enum("InputLane", &["Queue", "Steer"]),
@@ -2643,15 +2679,23 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             ),
             NamedTypeBinding::string_enum(
                 "RuntimeCompletionWaitFailureObservation",
-                &["ChannelClosed", "AuthorityUnavailable"],
+                &[
+                    "ChannelClosed",
+                    "AuthorityUnavailable",
+                    "RequeuedAcrossStop",
+                ],
             ),
             NamedTypeBinding::string_enum(
                 "RuntimeCompletionWaitFailurePublicErrorClass",
-                &["InternalError"],
+                &["InternalError", "SessionNotRunning"],
             ),
             NamedTypeBinding::string_enum(
                 "RuntimeCompletionWaitFailurePublicReason",
-                &["CompletionChannelClosed", "CompletionAuthorityUnavailable"],
+                &[
+                    "CompletionChannelClosed",
+                    "CompletionAuthorityUnavailable",
+                    "RequeuedAcrossStop",
+                ],
             ),
             NamedTypeBinding::string_enum(
                 "RuntimeOpsLifecycleDurabilityAction",
@@ -2731,6 +2775,11 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 "RecoveredInputRecoveryDisposition",
                 &["Retain", "Discard"],
             ),
+            NamedTypeBinding::string_enum(
+                "UnregisterQueuedInputsDisposition",
+                &["Stop", "Requeue"],
+            ),
+            NamedTypeBinding::string_enum("StopInputDisposition", &["Abandon", "Retain"]),
             NamedTypeBinding::string_enum(
                 "RecoveredTerminalCompletionDisposition",
                 &["Recover", "DiscardUnrecoverable", "Blocked"],
@@ -3092,6 +3141,7 @@ runtime_internal_inputs!(
         RollbackRun,
         RollbackUnreturnedOp,
         RollbackStaged,
+        ReplayAppliedRunContributor,
         RunCancelled,
         RunCompleted,
         RunFailed,
@@ -3159,6 +3209,7 @@ runtime_internal_inputs!(
         ClassifyOperationCompletionWake,
         ClassifyOperationDurability,
         ClassifyRecoveredInputDurability,
+        ClassifyStopInputDisposition,
         ClassifyRecoveredOperationRecord,
         ClassifyRuntimeLifecycleDurability,
         ClassifyRuntimeLifecycleState,
@@ -3301,6 +3352,17 @@ runtime_internal_inputs!(
         BindLiveContextRecoveryChannel,
         CancelLiveRecoveryObligation,
         RecordLiveWebrtcAnswerAcceptedAndBindExecution,
+        // Same-run resume after a restart: the runtime marks, resumes,
+        // releases or settles the run a stored cursor names. No caller can
+        // ask for any of them.
+        MarkRunResumable,
+        ResumeRun,
+        ReleaseResumableRun,
+        SettleResumableRun,
+        SuspendRunForStop,
+        // The operator's held-tail repair, driven by recovery's
+        // resolve-held-tail primitive on its own fresh authority.
+        AuthorizeOperatorDurableTailRepair,
     ]
 );
 
@@ -3495,6 +3557,7 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                     "HeldByCurrentIncarnation",
                     "HeldByOtherLiveIncarnation",
                     "HeldByExpiredIncarnation",
+                    "HeldByEndedIncarnation",
                 ],
             ),
             NamedTypeBinding::string_enum(
@@ -4073,7 +4136,7 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum("MobMemberState", &["Active", "Retiring"]),
             NamedTypeBinding::string_enum(
                 "AutonomousShutdownMemberActionKind",
-                &["Interrupt", "SkipTerminalRetirementAnchor"],
+                &["Interrupt", "SkipTerminalRetirementAnchor", "KeepForResume"],
             ),
             NamedTypeBinding::string_enum(
                 "MemberWaitClassificationKind",
@@ -4775,14 +4838,14 @@ pub fn occurrence_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                     "ResolveDeliveryFailure",
                     "ResolveTargetProbe",
                     "ResolveDueMisfire",
-                    "ResolveReclaimExhausted",
-                    "ResolveUnprovenLateNotAdmitted",
                     "Supersede",
                     "RenewLease",
                     "LeaseExpired",
                     "ReleaseLeaseForPausedSchedule",
                     "ClassifyTransitionFailure",
                     "ClassifyStaleCompletionArrival",
+                    "ResolveReclaimExhausted",
+                    "ResolveUnprovenLateNotAdmitted",
                 ],
             ),
             NamedTypeBinding::string_enum(

@@ -685,9 +685,8 @@ impl WorkEvidenceKind {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WorkEvidenceRef {
     /// Opaque provenance/display label for the evidence. It is parsed into the
-    /// typed confirmation classification at the ingress boundary only (see
-    /// [`WorkEvidenceRef::confirmation_classification`]); no completion-policy
-    /// satisfaction decision re-reads this string. The typed
+    /// typed confirmation classification at the ingress boundary only; no
+    /// completion-policy satisfaction decision re-reads this string. The typed
     /// [`WorkEvidenceRef::confirmation_kind`] is the authoritative carrier.
     pub kind: String,
     pub id: String,

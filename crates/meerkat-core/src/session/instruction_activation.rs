@@ -333,12 +333,38 @@ pub enum ForkInstructionRefusalCause {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-#[error("{}", fork_instruction_refusal_message(.cause, .keys))]
+#[error(
+    "{}",
+    fork_instruction_refusal_message(.cause, .keys, .skills, .unreadable_skill_loads)
+)]
 #[non_exhaustive]
 pub struct ForkInstructionRefusal {
     pub cause: ForkInstructionRefusalCause,
     /// The inherited keys the refusal concerns, in (namespace, key) order.
     pub keys: Vec<(InstructionNamespace, InstructionKey)>,
+    // `SessionError` and `MobError` carry this refusal inline, so the two
+    // prompt-context fields below keep it at the size it had with one
+    // list beside `keys`: a boxed slice and a count.
+    /// The skills a prompt-context fork would carry because its source
+    /// loaded them with the built-in `load_skill` tool, in key order. Empty
+    /// for every other refusal, and then not serialized.
+    #[serde(default, skip_serializing_if = "no_skills")]
+    pub skills: Box<[crate::skills::SkillKey]>,
+    /// How many `load_skill` calls in a prompt-context fork's source have
+    /// arguments that name no skill. Their results count as loaded
+    /// skills, so the fork fails closed on them. Zero for every other
+    /// refusal, and then not serialized.
+    #[serde(default, skip_serializing_if = "no_unreadable_skill_loads")]
+    pub unreadable_skill_loads: u32,
+}
+
+fn no_skills(skills: &[crate::skills::SkillKey]) -> bool {
+    skills.is_empty()
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn no_unreadable_skill_loads(count: &u32) -> bool {
+    *count == 0
 }
 
 impl ForkInstructionRefusal {
@@ -347,26 +373,76 @@ impl ForkInstructionRefusal {
         cause: ForkInstructionRefusalCause,
         keys: Vec<(InstructionNamespace, InstructionKey)>,
     ) -> Self {
-        Self { cause, keys }
+        Self {
+            cause,
+            keys,
+            skills: Box::default(),
+            unreadable_skill_loads: 0,
+        }
+    }
+
+    /// The same refusal, naming the `load_skill` skills it concerns.
+    #[must_use]
+    pub fn with_skills(mut self, skills: Vec<crate::skills::SkillKey>) -> Self {
+        self.skills = skills.into_boxed_slice();
+        self
+    }
+
+    /// The same refusal, counting the `load_skill` calls whose arguments
+    /// name no skill.
+    #[must_use]
+    pub fn with_unreadable_skill_loads(mut self, count: u32) -> Self {
+        self.unreadable_skill_loads = count;
+        self
     }
 }
 
+#[allow(clippy::trivially_copy_pass_by_ref)]
 fn fork_instruction_refusal_message(
     cause: &ForkInstructionRefusalCause,
     keys: &[(InstructionNamespace, InstructionKey)],
+    skills: &[crate::skills::SkillKey],
+    unreadable_skill_loads: &u32,
 ) -> String {
+    let unreadable_skill_loads = *unreadable_skill_loads;
     let keys = keys
         .iter()
         .map(|(namespace, key)| format!("{namespace}/{key}"))
         .collect::<Vec<_>>()
         .join(", ");
     match cause {
-        ForkInstructionRefusalCause::PolicyRefuses => format!(
-            "fork refused: the child would inherit activated instruction keys [{keys}] and the \
-             fork instruction policy refuses them; to carry them into the child, set the host's \
-             fork_instruction_policy (inherited_instructions on a session fork call) to \
-             reactivate_inherited"
-        ),
+        ForkInstructionRefusalCause::PolicyRefuses => {
+            // Only what the child would inherit is named: a prompt-context
+            // fork can be refused for loaded skills alone.
+            let mut inherited = Vec::new();
+            if !keys.is_empty() || (skills.is_empty() && unreadable_skill_loads == 0) {
+                inherited.push(format!("activated instruction keys [{keys}]"));
+            }
+            if !skills.is_empty() {
+                inherited.push(format!(
+                    "skills loaded by the source [{}]",
+                    skills
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            match unreadable_skill_loads {
+                0 => {}
+                1 => inherited.push("1 load_skill call whose skill cannot be read".to_string()),
+                count => inherited.push(format!(
+                    "{count} load_skill calls whose skill cannot be read"
+                )),
+            }
+            format!(
+                "fork refused: the child would inherit {} and the fork instruction policy \
+                 refuses them; to carry them into the child, set the host's \
+                 fork_instruction_policy (inherited_instructions on a session fork call) to \
+                 reactivate_inherited",
+                inherited.join(" and ")
+            )
+        }
         ForkInstructionRefusalCause::NotEffectiveInSource => format!(
             "fork refused: instruction keys [{keys}] were inherited but never activated in the \
              source, so there is no effective activation to carry into the child"
@@ -459,10 +535,13 @@ fn render_origin_v1(identity: &InstructionActivationIdentity, body: &str) -> Str
     )
 }
 
-fn render_inherited_v1(
+/// An activation row a fork child copied, as the child's model reads it:
+/// a header that names the key and the row, never the body, which is
+/// effective only in the session that activated it.
+fn render_inherited_v2(
     identity: &InstructionActivationIdentity,
     child_session_id: &SessionId,
-    body: &str,
+    body_bytes: usize,
 ) -> String {
     let supersedes = identity
         .supersedes
@@ -470,7 +549,7 @@ fn render_inherited_v1(
         .map(|value| json_string(value.as_str()))
         .unwrap_or_else(|| "null".to_string());
     format!(
-        "[meerkat-inherited-instruction-v1]\nnamespace={}\nkey={}\nrevision={}\nactivation={}\nsupersedes={}\norigin_session_id={}\nchild_session_id={}\ncontent_sha256={}\nstatus=historical_only_not_active_in_child\nbody_bytes={}\n\n{}",
+        "[meerkat-inherited-instruction-v2]\nnamespace={}\nkey={}\nrevision={}\nactivation={}\nsupersedes={}\norigin_session_id={}\nchild_session_id={}\ncontent_sha256={}\nstatus=not_active_in_child\nbody_bytes={}",
         json_string(identity.revision.namespace.as_str()),
         json_string(identity.revision.key.as_str()),
         json_string(identity.revision.revision_id.as_str()),
@@ -479,8 +558,7 @@ fn render_inherited_v1(
         json_string(&identity.origin_session_id.to_string()),
         json_string(&child_session_id.to_string()),
         identity.revision.content_sha256,
-        body.len(),
-        body,
+        body_bytes,
     )
 }
 
@@ -578,7 +656,9 @@ pub fn validate_instruction_activation_messages(messages: &[Message]) -> Result<
     Ok(())
 }
 
-/// Project inherited rows as historical-only envelopes while preserving order.
+/// Project inherited rows as headers without their bodies, preserving
+/// order. A row whose bytes are not the envelope its identity names fails
+/// the projection.
 pub fn materialize_instruction_activation_messages(
     session_id: &SessionId,
     messages: &[Message],
@@ -597,7 +677,7 @@ pub fn materialize_instruction_activation_messages(
                 return Ok(message.clone());
             }
             let mut inherited = system.clone();
-            inherited.content = render_inherited_v1(identity, session_id, body);
+            inherited.content = render_inherited_v2(identity, session_id, body.len());
             Ok(Message::System(inherited))
         })
         .collect()
@@ -637,7 +717,12 @@ impl Session {
     ///
     /// The child holds the activation rows it copied with its prefix as
     /// history only. [`ForkInstructionPolicy::Refuse`] refuses a child that
-    /// inherits any. [`ForkInstructionPolicy::RequireExplicitActivation`]
+    /// inherits any, or whose copied rows hold a loaded skill (a
+    /// `load_skill` result or per-turn skill context; see
+    /// [`crate::fork_notice::SkillLoads`]). The other two policies leave
+    /// those skills to the child's fork notice, which carries them under
+    /// [`ForkInstructionPolicy::ReactivateInherited`] only.
+    /// [`ForkInstructionPolicy::RequireExplicitActivation`]
     /// leaves them for the host to activate; callers resolve it first for
     /// forks that leave no window for that ([`ForkInstructionPolicy::effective`]).
     /// [`ForkInstructionPolicy::ReactivateInherited`] appends, through the
@@ -652,22 +737,56 @@ impl Session {
         source_session_id: &SessionId,
         policy: ForkInstructionPolicy,
     ) -> Result<usize, ForkInstructionRefusal> {
+        self.apply_fork_instruction_policies(source_session_id, policy, policy)
+    }
+
+    /// [`Self::apply_fork_instruction_policy`] with the copied activation rows
+    /// under `activations`, the policy resolved for the fork's activation
+    /// window ([`ForkInstructionPolicy::effective`]), and the skills the
+    /// copied rows loaded under `skills`, the host's policy as declared: a
+    /// child runs without activating a skill, so a fork that leaves no
+    /// activation window does not refuse its skills under the default. A
+    /// refusal names what each policy refused.
+    pub fn apply_fork_instruction_policies(
+        &mut self,
+        source_session_id: &SessionId,
+        activations: ForkInstructionPolicy,
+        skills: ForkInstructionPolicy,
+    ) -> Result<usize, ForkInstructionRefusal> {
         let heads = self.inherited_activation_heads().map_err(|error| {
             ForkInstructionRefusal::new(
                 ForkInstructionRefusalCause::Activation { code: error.code() },
                 Vec::new(),
             )
         })?;
+        let skill_loads = crate::fork_notice::skill_loads(self.messages());
+        let refuse_keys = activations == ForkInstructionPolicy::Refuse && !heads.is_empty();
+        let refuse_skills = skills == ForkInstructionPolicy::Refuse && !skill_loads.is_empty();
+        if refuse_keys || refuse_skills {
+            let keys = if refuse_keys {
+                heads.keys().cloned().collect()
+            } else {
+                Vec::new()
+            };
+            let refusal =
+                ForkInstructionRefusal::new(ForkInstructionRefusalCause::PolicyRefuses, keys);
+            return Err(if refuse_skills {
+                refusal
+                    .with_skills(skill_loads.skills.into_iter().collect())
+                    .with_unreadable_skill_loads(skill_loads.unreadable)
+            } else {
+                refusal
+            });
+        }
         if heads.is_empty() {
             return Ok(0);
         }
         let keys = heads.keys().cloned().collect::<Vec<_>>();
-        match policy {
-            ForkInstructionPolicy::RequireExplicitActivation => Ok(0),
-            ForkInstructionPolicy::Refuse => Err(ForkInstructionRefusal::new(
-                ForkInstructionRefusalCause::PolicyRefuses,
-                keys,
-            )),
+        match activations {
+            // A `refuse` fork with inherited keys was refused above.
+            ForkInstructionPolicy::RequireExplicitActivation | ForkInstructionPolicy::Refuse => {
+                Ok(0)
+            }
             ForkInstructionPolicy::ReactivateInherited => {
                 let not_effective = heads
                     .iter()
@@ -1198,7 +1317,9 @@ mod tests {
         assert!(matches!(
             &projected[0],
             Message::System(system)
-                if system.content.starts_with("[meerkat-inherited-instruction-v1]")
+                if system.content.starts_with("[meerkat-inherited-instruction-v2]")
+                    && system.content.ends_with("status=not_active_in_child\nbody_bytes=10")
+                    && !system.content.contains("policy one")
         ));
         assert_eq!(
             inherited_instruction_keys_requiring_activation(child.id(), child.messages()).len(),
@@ -1792,7 +1913,7 @@ mod tests {
             })
             .count();
         assert_eq!(activation_rows, 1);
-        let projected = session.messages_for_model_boundary();
+        let projected = session.messages_for_model_boundary().unwrap();
         assert!(matches!(
             &projected[0],
             Message::System(system)
@@ -1907,5 +2028,251 @@ mod tests {
         assert_eq!(duplicate.identity, appended.identity);
         assert_eq!(duplicate.activation_ordinal, appended.activation_ordinal);
         assert_eq!(duplicate.projection_witness, read.projection_witness);
+    }
+
+    const SKILL_SOURCE: &str = "6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b";
+    const LOADED_BODY: &str = "LOADED-SKILL-BODY-MARKER";
+    const CONTEXT_BODY: &str = "PER-TURN-SKILL-CONTEXT-MARKER";
+
+    fn skill_key() -> crate::skills::SkillKey {
+        crate::skills::SkillKey::new(
+            crate::skills::SourceUuid::parse(SKILL_SOURCE).unwrap(),
+            crate::skills::SkillName::parse("pdf-processing").unwrap(),
+        )
+    }
+
+    fn load_args() -> String {
+        serde_json::json!({"source_uuid": SKILL_SOURCE, "skill_name": "pdf-processing"}).to_string()
+    }
+
+    /// A session that loaded a skill with the built-in `load_skill` tool
+    /// (the call named by `args`) and was given the same skill's per-turn
+    /// context in a later user row.
+    fn source_that_loaded_a_skill(args: &str) -> Session {
+        let mut source = Session::new();
+        source.push(Message::User(UserMessage::text("load the skill")));
+        source.push(Message::BlockAssistant(
+            crate::types::BlockAssistantMessage::new(
+                vec![crate::types::AssistantBlock::ToolUse {
+                    id: "load-1".to_string(),
+                    name: crate::skills::LOAD_SKILL_TOOL_NAME.to_string(),
+                    args: serde_json::value::RawValue::from_string(args.to_string()).unwrap(),
+                    meta: None,
+                }],
+                crate::types::StopReason::ToolUse,
+            ),
+        ));
+        source.push(Message::ToolResults {
+            results: vec![crate::types::ToolResult::new(
+                "load-1".to_string(),
+                LOADED_BODY.to_string(),
+                false,
+            )],
+            created_at: crate::types::message_timestamp_now(),
+        });
+        let mut with_context = UserMessage::text("a turn with skill context");
+        with_context
+            .content
+            .push(crate::types::ContentBlock::SkillContext {
+                skill_key: skill_key(),
+                text: CONTEXT_BODY.to_string(),
+            });
+        source.push(Message::User(with_context));
+        source
+    }
+
+    /// The durable fork child of `source` after its first run delivered its
+    /// fork notice, which removed or carried the source's skill.
+    fn durable_child_with_notice(source: &Session, carried: bool) -> Session {
+        let mut child = source.fork();
+        let seed = crate::fork_notice::ForkSeed {
+            fork: crate::fork_notice::ForkNoticeKind::Transcript,
+            source: crate::fork_notice::ForkNoticeSource {
+                member: None,
+                session_id: Some(source.id().clone()),
+            },
+            planned_context: None,
+            source_instructions: Vec::new(),
+            instructions_carried: Vec::new(),
+            skills_removed: if carried {
+                Vec::new()
+            } else {
+                vec![skill_key()]
+            },
+            skills_carried: if carried {
+                vec![skill_key()]
+            } else {
+                Vec::new()
+            },
+            injected_rows_removed: 0,
+            injected_rows_carried: 0,
+            earlier_rows_omitted: 0,
+            source_tools: crate::fork_notice::ForkSeedSourceTools::NotRead {
+                reason: crate::fork_notice::ForkToolsNotComparedReason::SourceNotLive,
+            },
+        };
+        let notice = seed.notice(child.id().clone(), &BTreeSet::new(), &BTreeSet::new());
+        child.push(Message::SystemNotice(
+            crate::types::SystemNoticeMessage::fork_boundary(notice),
+        ));
+        child.push(Message::User(UserMessage::text("the child's task")));
+        child
+    }
+
+    /// What the model reads of `session`, as wire JSON.
+    fn model_boundary_json(session: &Session) -> String {
+        serde_json::to_string(
+            &session
+                .messages_for_model_boundary_prefix(session.messages().len())
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// A model request never carries an activation row that does not hold the
+    /// body its identity names: the projection fails closed and names the
+    /// session, instead of passing the stored bytes on.
+    #[test]
+    fn a_malformed_activation_projection_refuses_the_model_request() {
+        let mut session = Session::new();
+        session
+            .activate_instruction(request(
+                "policy one",
+                "act-1",
+                InstructionActivationExpectation::Absent,
+                None,
+            ))
+            .unwrap();
+        let mut rows = session.messages().to_vec();
+        let Some(Message::System(system)) = rows.iter_mut().find(
+            |row| matches!(row, Message::System(system) if system.instruction_activation.is_some()),
+        ) else {
+            panic!("the activation row");
+        };
+        system.content = system.content.replace("policy one", "policy edited");
+        let count = rows.len();
+        session.messages = crate::session::TranscriptMessages::from_vec(rows);
+        let error = session
+            .messages_for_model_boundary_prefix(count)
+            .expect_err("the projection refuses a row that does not hold its body");
+        assert!(
+            error.to_string().contains(&session.id().to_string()),
+            "the refusal names the session: {error}"
+        );
+    }
+
+    /// Under the default policy a durable fork child's model reads neither
+    /// the body of a skill its source loaded with `load_skill` nor the
+    /// source's per-turn skill context: each copied row names the skill.
+    /// The source still reads both.
+    #[test]
+    fn a_durable_fork_child_projection_carries_no_copied_skill_body_by_default() {
+        let source = source_that_loaded_a_skill(&load_args());
+        let child = durable_child_with_notice(&source, false);
+        let projected = model_boundary_json(&child);
+        assert!(
+            !projected.contains(LOADED_BODY) && !projected.contains(CONTEXT_BODY),
+            "no copied skill body reaches the child's model: {projected}"
+        );
+        assert!(
+            projected.contains(&format!(
+                "skill {} was loaded here; its body is not carried into this fork",
+                skill_key()
+            )),
+            "the copied result names the skill: {projected}"
+        );
+        let source_projected = model_boundary_json(&source);
+        assert!(
+            source_projected.contains(LOADED_BODY) && source_projected.contains(CONTEXT_BODY),
+            "the source keeps its own skill bodies: {source_projected}"
+        );
+    }
+
+    /// Under `reactivate_inherited` the notice carries the skill, and the
+    /// child's model reads the copied bodies.
+    #[test]
+    fn reactivate_inherited_keeps_copied_skill_bodies_in_a_durable_fork_child() {
+        let source = source_that_loaded_a_skill(&load_args());
+        let child = durable_child_with_notice(&source, true);
+        let projected = model_boundary_json(&child);
+        assert!(
+            projected.contains(LOADED_BODY) && projected.contains(CONTEXT_BODY),
+            "a carried skill keeps its bodies: {projected}"
+        );
+    }
+
+    /// Under `refuse` a durable fork whose copied rows hold a loaded skill is
+    /// refused like one that copied an activation, naming the skill, and the
+    /// child is left as it was.
+    #[test]
+    fn the_refuse_policy_refuses_a_durable_fork_that_copied_a_skill_load() {
+        let source = source_that_loaded_a_skill(&load_args());
+        let mut child = source.fork();
+        let before = child.messages().to_vec();
+        let refusal = child
+            .apply_fork_instruction_policy(source.id(), crate::ForkInstructionPolicy::Refuse)
+            .expect_err("a copied skill load is refused under refuse");
+        assert_eq!(refusal.cause, ForkInstructionRefusalCause::PolicyRefuses);
+        assert!(refusal.keys.is_empty(), "{refusal:?}");
+        assert_eq!(refusal.skills.as_ref(), [skill_key()].as_slice());
+        assert_eq!(refusal.unreadable_skill_loads, 0);
+        assert_eq!(
+            child.messages(),
+            before.as_slice(),
+            "a refusal changes nothing"
+        );
+    }
+
+    /// A copied `load_skill` call whose arguments name no skill still counts
+    /// under `refuse`: the fork fails closed on it.
+    #[test]
+    fn the_refuse_policy_counts_a_copied_skill_load_that_names_no_skill() {
+        let source = source_that_loaded_a_skill(r#"{"skill":"nameless"}"#);
+        let mut child = source.fork();
+        let refusal = child
+            .apply_fork_instruction_policy(source.id(), crate::ForkInstructionPolicy::Refuse)
+            .expect_err("an unreadable copied skill load is refused under refuse");
+        assert_eq!(refusal.unreadable_skill_loads, 1, "{refusal:?}");
+        assert_eq!(
+            refusal.skills.as_ref(),
+            [skill_key()].as_slice(),
+            "the per-turn context still names its skill"
+        );
+    }
+
+    /// The projection's refusal is typed and names the session, and a turn
+    /// reads it as malformed activation history.
+    #[test]
+    fn a_malformed_activation_row_fails_the_projection_typed() {
+        let mut session = Session::new();
+        session
+            .activate_instruction(request(
+                "policy one",
+                "act-1",
+                InstructionActivationExpectation::Absent,
+                None,
+            ))
+            .unwrap();
+        let mut rows = session.messages().to_vec();
+        let Some(Message::System(system)) = rows.iter_mut().find(
+            |row| matches!(row, Message::System(system) if system.instruction_activation.is_some()),
+        ) else {
+            panic!("the activation row");
+        };
+        system.content = system.content.replace("policy one", "policy edited");
+        session.messages = crate::session::TranscriptMessages::from_vec(rows);
+        let error = session
+            .messages_for_model_boundary()
+            .expect_err("the projection fails closed");
+        assert_eq!(&error.session_id, session.id());
+        assert!(
+            matches!(
+                crate::error::AgentError::from(error),
+                crate::error::AgentError::InstructionActivation(
+                    InstructionActivationError::MalformedHistory(_)
+                )
+            ),
+            "a turn reads the refusal as malformed activation history"
+        );
     }
 }

@@ -127,7 +127,7 @@ pub struct Diagnostic {
     pub code: DiagnosticCode,
     /// Human-readable description.
     pub message: String,
-    /// Optional path-like location (e.g. "profiles.worker.skills[0]").
+    /// Optional path-like location (e.g. `profiles.worker.skills[0]`).
     pub location: Option<String>,
     /// Severity of this diagnostic.
     pub severity: DiagnosticSeverity,
@@ -515,6 +515,7 @@ mod tests {
             max_inline_peer_notifications: None,
             output_schema: None,
             provider_params: None,
+            durable: false,
         }
     }
 

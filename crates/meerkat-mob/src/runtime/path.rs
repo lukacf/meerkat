@@ -36,7 +36,7 @@ pub(super) struct FlowRef {
     pub(super) json_path: Vec<String>,
 }
 
-/// Reasons a flow reference expression failed to parse into a [`FlowRef`].
+/// Reasons a flow reference expression failed to parse into a `FlowRef`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FlowRefParseError {
     /// The expression was empty or began with an unrecognized root segment.
@@ -113,7 +113,7 @@ impl FlowRef {
 /// "not present".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PathResolveError {
-    /// The reference expression itself could not be parsed into a [`FlowRef`].
+    /// The reference expression itself could not be parsed into a `FlowRef`.
     UnparsableReference {
         path: String,
         reason: FlowRefParseError,

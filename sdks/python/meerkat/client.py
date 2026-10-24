@@ -192,6 +192,7 @@ from .generated.types import (
     WireHostBindPhase,
     WireHostCapabilityFlags,
     WireLiveChannelCapabilities,
+    WireLiveOpenAdvisory,
     WireMemberHistoryPageBody,
     WireMemberLaunchMode,
     WireMemberProgressSnapshot,
@@ -202,6 +203,8 @@ from .generated.types import (
     WireReachability,
     WireMemberPreviewUnavailable,
     WireMemberRegistrationHookCall,
+    WireMemberCustodyDeferralCause,
+    WireMemberCustodyRestore,
     WireExternalRouteInstallObligation,
     WireRouteInstallObligation,
     WireRuntimeBinding,
@@ -236,6 +239,7 @@ from .mob import (
     MobKickoffMemberSnapshot,
     MobLifecycleAction,
     MobMember,
+    MobMemberCustodyDeferral,
     MobMemberRef,
     MobMemberSnapshot,
     MobPeerConnectivity,
@@ -477,6 +481,25 @@ class _RkatRpcRelease:
     binary_name: str
     archive_sha256: str
     binary_sha256: str
+
+
+# The first server contract that keeps a caller idempotency key. An older
+# server ignores the field on session/external_event and admits the call
+# unkeyed, so the SDK refuses to send a key to it.
+_CALLER_IDEMPOTENCY_KEY_MIN_CONTRACT = (0, 9, 5)
+
+# The first server contract that takes `session_events` on the requests that
+# start a turn. An older server refuses the field on turn/start, so the SDK
+# sends it only to a server that reports this contract or later.
+_TURN_SESSION_EVENTS_OPT_OUT_MIN_CONTRACT = (0, 9, 5)
+
+
+def _contract_parts(version: str) -> tuple[int, ...] | None:
+    core = version.split("-", 1)[0].split("+", 1)[0]
+    try:
+        return tuple(int(part) for part in core.split("."))
+    except ValueError:
+        return None
 
 
 def _is_sha256_hex(value: object) -> bool:
@@ -795,6 +818,7 @@ class MeerkatClient:
         self._request_id = 0
         self._capabilities: list[Capability] | None = None
         self._methods: set[str] = set()
+        self._server_contract_version = ""
         self._dispatcher: _StdoutDispatcher | None = None
         self._stderr_tail: _StderrTail | None = None
         self._tool_registry = ToolRegistry()
@@ -819,6 +843,10 @@ class MeerkatClient:
             @client.tool("search", description="Search the web")
             async def handle_search(arguments: dict) -> str:
                 return f"Results for {arguments.get('q', '')}"
+
+        A handler that declares a ``dedupe_key`` parameter also receives the
+        call's :class:`ToolCallDedupeKey` (``None`` when the call has none). A
+        resumed run that dispatches the same call again sends the same key.
         """
 
         def decorator(fn: Any) -> Any:
@@ -987,6 +1015,7 @@ class MeerkatClient:
         if isinstance(result, ServerCapabilities):  # pragma: no cover - typing aid
             result = result.__dict__
         server_version = result.get("contract_version", "")
+        self._server_contract_version = str(server_version)
         if not self._check_version_compatible(server_version, CONTRACT_VERSION):
             raise MeerkatError(
                 "VERSION_MISMATCH",
@@ -1590,6 +1619,7 @@ class MeerkatClient:
             shell_env=shell_env,
             external_tools=external_tools,
         )
+        self._opt_out_of_turn_session_events(params)
         raw = await self._request("session/create", params)
         result = self._parse_run_result(raw)
         return Session(self, result)
@@ -1843,6 +1873,28 @@ class MeerkatClient:
         result = await self._request("session/read", {"session_id": session_id})
         return self._parse_session_details(result)
 
+    def _opt_out_of_turn_session_events(self, params: dict[str, Any]) -> None:
+        """Ask the server not to write this turn's events as ``session/event``.
+
+        A call that does not stream its turn reads only the run result, so
+        those copies would be parsed and dropped. Sent only to a server whose
+        contract takes the field.
+        """
+        parts = _contract_parts(self._server_contract_version)
+        if parts is not None and parts >= _TURN_SESSION_EVENTS_OPT_OUT_MIN_CONTRACT:
+            params["session_events"] = False
+
+    def _require_caller_idempotency_key_support(self) -> None:
+        """Refuse a caller key before sending it to a server that would drop it."""
+        parts = _contract_parts(self._server_contract_version)
+        if parts is None or parts < _CALLER_IDEMPOTENCY_KEY_MIN_CONTRACT:
+            minimum = ".".join(str(part) for part in _CALLER_IDEMPOTENCY_KEY_MIN_CONTRACT)
+            raise CapabilityUnavailableError(
+                "CAPABILITY_UNAVAILABLE",
+                f"idempotency_key needs a server contract >= {minimum}; "
+                f"this server reports {self._server_contract_version or 'none'}",
+            )
+
     async def send_external_event(
         self,
         session_id: str,
@@ -1850,8 +1902,17 @@ class MeerkatClient:
         payload: Any,
         *,
         blocks: list[ContentBlock] | None = None,
+        idempotency_key: str | None = None,
     ) -> ExternalEventOutcome:
-        """Append a durable external event input to a session runtime."""
+        """Append a durable external event input to a session runtime.
+
+        With ``idempotency_key`` a retry admits nothing new: it answers
+        ``outcome_type`` ``deduplicated`` naming the first admission in
+        ``existing_id``. The same key with other event content raises the
+        typed ``INPUT_IDEMPOTENCY_CONFLICT`` refusal. Object key order inside
+        ``payload`` does not matter. The key is scoped to the session and kept
+        for its life; it needs a server contract of 0.9.5 or later.
+        """
         params: dict[str, Any] = {
             "session_id": session_id,
             "kind": "generic_json",
@@ -1860,6 +1921,9 @@ class MeerkatClient:
         }
         if blocks is not None:
             params["blocks"] = blocks
+        if idempotency_key is not None:
+            self._require_caller_idempotency_key_support()
+            params["idempotency_key"] = idempotency_key
         return await self._request("session/external_event", params)
 
     async def send_peer_response_terminal(
@@ -3109,17 +3173,36 @@ class MeerkatClient:
         *,
         handling_mode: Literal["queue", "steer"] = "queue",
         render_metadata: RenderMetadata | None = None,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        result = await self._request(
-            "mob/member_send",
-            {
-                "mob_id": mob_id,
-                "agent_identity": agent_identity,
-                "content": content,
-                "handling_mode": handling_mode,
-                "render_metadata": render_metadata,
-            },
-        )
+        """Send content to a mob member.
+
+        With ``idempotency_key`` the send is deduplicated for the member
+        identity (it survives a respawn and a re-creation of the mob under
+        the same id; keys never expire) and committed as a member
+        continuation. The answer then carries ``continuation``: a receipt and
+        a delivery status, not a turn. ``delivery_id`` and ``committed_at_ms``
+        repeat on every replay; ``status`` may advance (``pending``,
+        ``admitted`` with ``session_id`` and ``input_id``, ``stranded`` or
+        ``refused``). ``admitted`` means queued in that session; follow it with
+        ``session/input_status``. ``stranded`` is final: resend under a new
+        key. A ``pending`` that survives a server restart is not proof of loss;
+        do not resend it under a new key. A keyed send is admitted with system
+        origin, is ordered only among keyed sends, refuses ``render_metadata``,
+        is refused on a governed runtime, and needs a server contract of 0.9.5
+        or later.
+        """
+        params: dict[str, Any] = {
+            "mob_id": mob_id,
+            "agent_identity": agent_identity,
+            "content": content,
+            "handling_mode": handling_mode,
+            "render_metadata": render_metadata,
+        }
+        if idempotency_key is not None:
+            self._require_caller_idempotency_key_support()
+            params["idempotency_key"] = idempotency_key
+        result = await self._request("mob/member_send", params)
         member_ref = result.get("member_ref")
         if not isinstance(member_ref, str) or not member_ref:
             raise MeerkatError(
@@ -3144,7 +3227,7 @@ class MeerkatClient:
                 "INVALID_RESPONSE",
                 "Invalid mob/member_send response: missing agent_identity",
             )
-        return {
+        receipt: dict[str, Any] = {
             "mob_id": resolved_mob_id,
             "agent_identity": resolved_identity,
             "member_ref": member_ref,
@@ -3152,6 +3235,53 @@ class MeerkatClient:
                 receipt_handling_mode,
                 "Invalid mob/member_send response: invalid handling_mode",
             ),
+        }
+        continuation = result.get("continuation")
+        if continuation is not None:
+            receipt["continuation"] = self._parse_member_send_continuation(continuation)
+        elif idempotency_key is not None:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                "Invalid mob/member_send response: a keyed send answers its continuation",
+            )
+        return receipt
+
+    @staticmethod
+    def _parse_member_send_continuation(raw: Any) -> dict[str, Any]:
+        context = "Invalid mob/member_send response: invalid continuation"
+        if not isinstance(raw, dict):
+            raise MeerkatError("INVALID_RESPONSE", context)
+        delivery_id = raw.get("delivery_id")
+        committed_at_ms = raw.get("committed_at_ms")
+        status = raw.get("status")
+        if (
+            not isinstance(delivery_id, str)
+            or not delivery_id
+            or isinstance(committed_at_ms, bool)
+            or not isinstance(committed_at_ms, int)
+            or not isinstance(status, dict)
+        ):
+            raise MeerkatError("INVALID_RESPONSE", context)
+        state = status.get("state")
+        parsed: dict[str, Any] = {"state": state}
+        if state == "admitted":
+            session_id = status.get("session_id")
+            input_id = status.get("input_id")
+            if not isinstance(session_id, str) or not isinstance(input_id, str):
+                raise MeerkatError("INVALID_RESPONSE", context)
+            parsed["session_id"] = session_id
+            parsed["input_id"] = input_id
+        elif state == "refused":
+            reason = status.get("reason")
+            if not isinstance(reason, str):
+                raise MeerkatError("INVALID_RESPONSE", context)
+            parsed["reason"] = reason
+        elif state not in ("pending", "stranded"):
+            raise MeerkatError("INVALID_RESPONSE", context)
+        return {
+            "delivery_id": delivery_id,
+            "committed_at_ms": committed_at_ms,
+            "status": parsed,
         }
 
     async def spawn_mob_member(
@@ -3872,7 +4002,9 @@ class MeerkatClient:
             provider_params=provider_params,
             auth_binding=auth_binding,
         )
-        return await self._request("mob/turn_start", _wire_value(params))
+        wire = _wire_value(params)
+        self._opt_out_of_turn_session_events(wire)
+        return await self._request("mob/turn_start", wire)
 
     async def mob_member_status(
         self, mob_id: str, agent_identity: str
@@ -3895,6 +4027,9 @@ class MeerkatClient:
             result, "Invalid mob/member_status response"
         )
         registration_refusal = self._parse_member_registration_refusal(
+            result, "Invalid mob/member_status response"
+        )
+        custody_deferred = self._parse_member_custody_deferral(
             result, "Invalid mob/member_status response"
         )
         return {
@@ -3973,6 +4108,11 @@ class MeerkatClient:
                 if registration_refusal is not None
                 else {}
             ),
+            **(
+                {"custody_deferred": custody_deferred}
+                if custody_deferred is not None
+                else {}
+            ),
         }
 
     async def wait_mob_kickoff(
@@ -4011,6 +4151,9 @@ class MeerkatClient:
                 entry, "Invalid mob/wait_kickoff response"
             )
             registration_refusal = self._parse_member_registration_refusal(
+                entry, "Invalid mob/wait_kickoff response"
+            )
+            custody_deferred = self._parse_member_custody_deferral(
                 entry, "Invalid mob/wait_kickoff response"
             )
             normalized.append(
@@ -4059,6 +4202,11 @@ class MeerkatClient:
                     **(
                         {"registration_refusal": registration_refusal}
                         if registration_refusal is not None
+                        else {}
+                    ),
+                    **(
+                        {"custody_deferred": custody_deferred}
+                        if custody_deferred is not None
                         else {}
                     ),
                 }
@@ -4103,6 +4251,9 @@ class MeerkatClient:
             registration_refusal = self._parse_member_registration_refusal(
                 entry, "Invalid mob/wait_ready response"
             )
+            custody_deferred = self._parse_member_custody_deferral(
+                entry, "Invalid mob/wait_ready response"
+            )
             normalized.append(
                 {
                     "agent_identity": self._require_string_field(
@@ -4149,6 +4300,11 @@ class MeerkatClient:
                     **(
                         {"registration_refusal": registration_refusal}
                         if registration_refusal is not None
+                        else {}
+                    ),
+                    **(
+                        {"custody_deferred": custody_deferred}
+                        if custody_deferred is not None
                         else {}
                     ),
                 }
@@ -4717,6 +4873,7 @@ class MeerkatClient:
             params["provider_params"] = provider_params
         if auth_binding is not None:
             params["auth_binding"] = _wire_value(auth_binding)
+        self._opt_out_of_turn_session_events(params)
         raw = await self._request("turn/start", params)
         return self._parse_run_result(raw)
 
@@ -5018,7 +5175,12 @@ class MeerkatClient:
         Wraps `live/open`.
 
         Returns a dict shaped like `meerkat.types.LiveOpenResult` with keys
-        `channel_id`, `transport`, `capabilities`, and `continuity`. The
+        `channel_id`, `transport`, `capabilities`, and `continuity`, and
+        `advisories` when the open went ahead without something (for
+        example `"staged_prompt_refused"`: a run-start hook refused the
+        session's staged create-time prompt, which stays staged for its first
+        text turn). The advisory vocabulary may grow; an unknown advisory is
+        passed through as the string the server sent. The
         `capabilities` value is shaped like
         `meerkat.types.WireLiveChannelCapabilities` (typed booleans:
         `audio_in`, `audio_out`, `text_in`, `text_out`, `image_in`,
@@ -6733,9 +6895,22 @@ class MeerkatClient:
                 required_payload,
                 context,
             )
+        elif provider == "gemini_function_call":
+            MeerkatClient._require_present_string_field(meta, "provider_id", context)
+            MeerkatClient._validate_nullable_response_string(meta, "thoughtSignature", context)
         elif provider == "open_ai":
             MeerkatClient._require_present_string_field(meta, "id", context)
             for field in ("encrypted_content", "phase", "response_id"):
+                MeerkatClient._validate_nullable_response_string(
+                    meta,
+                    field,
+                    context,
+                )
+        elif provider == "open_ai_assistant_message":
+            MeerkatClient._require_present_string_field(meta, "id", context)
+            # The phase is advisory: a phase this SDK does not know is kept
+            # as given, never refused.
+            for field in ("phase", "response_id"):
                 MeerkatClient._validate_nullable_response_string(
                     meta,
                     field,
@@ -7534,9 +7709,29 @@ class MeerkatClient:
         return continuity
 
     @staticmethod
+    def _parse_live_open_advisories(
+        result: dict[str, Any], context: str
+    ) -> list[WireLiveOpenAdvisory]:
+        """Return what a successful open went ahead without.
+
+        The server omits the field when there is nothing to report, read as
+        ``[]``. The vocabulary may grow: an advisory this SDK does not know is
+        kept as the string the server sent, so a newer server never fails the
+        open. A field that is not a list of non-empty strings is malformed and
+        fails closed.
+        """
+        return list(
+            MeerkatClient._parse_nonempty_string_list(
+                MeerkatClient._require_list_field(result, "advisories", context),
+                f"{context}: advisories",
+            )
+        )
+
+    @staticmethod
     def _parse_live_open_result(raw: Any, context: str) -> LiveOpenResult:
         result = MeerkatClient._require_dict(raw, "result", context)
         return LiveOpenResult(
+            advisories=MeerkatClient._parse_live_open_advisories(result, context),
             capabilities=MeerkatClient._parse_live_channel_capabilities(
                 result.get("capabilities"),
                 f"{context}: capabilities",
@@ -8131,6 +8326,50 @@ class MeerkatClient:
                 "INVALID_RESPONSE", f"{context}: invalid registration_refusal"
             )
         return cast(WireMemberRegistrationHookCall, value)
+
+    @staticmethod
+    def _parse_member_custody_deferral(
+        raw: dict[str, Any], context: str
+    ) -> MobMemberCustodyDeferral | None:
+        """Return the member's custody restore a mob start deferred.
+
+        Absent or ``null`` means no restore is deferred. The field is
+        advisory and its vocabularies may grow: a ``restore`` or ``cause``
+        this SDK does not know is read as ``{"unknown": <the value>}``, and a
+        field it does not know is ignored, so a newer server never fails the
+        read. A value that is not an object, or a restore or cause that is
+        not a string, is malformed and fails closed.
+        """
+        value = raw.get("custody_deferred")
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise MeerkatError(
+                "INVALID_RESPONSE", f"{context}: invalid custody_deferred"
+            )
+        restore = value.get("restore")
+        if not isinstance(restore, str):
+            raise MeerkatError(
+                "INVALID_RESPONSE", f"{context}: invalid custody_deferred.restore"
+            )
+        cause = value.get("cause")
+        if not isinstance(cause, str):
+            raise MeerkatError(
+                "INVALID_RESPONSE", f"{context}: invalid custody_deferred.cause"
+            )
+        return {
+            "restore": (
+                cast(WireMemberCustodyRestore, restore)
+                if restore in {"startup_binding", "cleanup_delivery"}
+                else {"unknown": restore}
+            ),
+            "cause": (
+                cast(WireMemberCustodyDeferralCause, cause)
+                if cause
+                in {"served_elsewhere", "hosting_unavailable", "durable_tail_unprovable"}
+                else {"unknown": cause}
+            ),
+        }
 
     @staticmethod
     def _optional_string_field(

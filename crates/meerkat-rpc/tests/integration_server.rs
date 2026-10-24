@@ -2182,6 +2182,156 @@ mod tcp_callback_ownership {
         run_case(3).await;
     }
 
+    /// The base64 bytes of the image the `snap` callback tool returns.
+    const SNAP_IMAGE: &str = "U05BUC1JTUFHRS1PTkUtQ09QWQ==";
+
+    /// One tool result image reaches the client once. The turn's request
+    /// opts out of its `session/event` copies, so the server writes none of
+    /// them; the session-wide subscription carries every event once; and the
+    /// tool's execution fact carries no copy of the result body. Before, the
+    /// same turn wrote the image four times: on both tool events, each as a
+    /// `session/event` and as a `session/stream_event`.
+    #[tokio::test]
+    async fn an_opted_out_turns_image_tool_result_reaches_the_client_once() {
+        let mut h = Harness::new();
+        h.provider.plan(
+            "show the image",
+            [
+                Step::Call {
+                    tool: "snap",
+                    call_id: "call-snap",
+                },
+                Step::Finish { gate: None },
+            ],
+        );
+        let (_index, mut c) = h.connect().await;
+        c.register("snap").await;
+        let session = c.create().await;
+        let opened = c
+            .request(5, "session/stream_open", json!({"session_id": session}))
+            .await;
+        let stream_id = opened["stream_id"].as_str().unwrap().to_owned();
+        c.send(json!({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "turn/start",
+            "params": {"session_id": session, "prompt": "show the image", "session_events": false}
+        }))
+        .await;
+
+        // Every frame until the turn's response and the subscription's
+        // run_completed, answering the tool's callback with the image.
+        let mut frames = Vec::new();
+        let mut responded = false;
+        let mut stream_completed = false;
+        tokio::time::timeout(LIMIT, async {
+            while !(responded && stream_completed) {
+                let frame = c.frames.recv().await.expect("TCP closed mid-turn");
+                if frame["method"] == "tool/execute" {
+                    c.send(json!({
+                        "jsonrpc": "2.0",
+                        "id": frame["id"],
+                        "result": {
+                            "content": [{
+                                "type": "image",
+                                "media_type": "image/png",
+                                "source": "inline",
+                                "data": SNAP_IMAGE
+                            }],
+                            "is_error": false
+                        }
+                    }))
+                    .await;
+                } else if frame["id"] == json!(6) {
+                    assert!(frame["error"].is_null(), "turn/start failed: {frame}");
+                    responded = true;
+                } else if frame["method"] == "session/stream_event"
+                    && frame["params"]["event"]["payload"]["type"] == "run_completed"
+                {
+                    stream_completed = true;
+                }
+                frames.push(frame);
+            }
+        })
+        .await
+        .expect("the turn finishes and its stream delivers run_completed");
+
+        let session_events = frames
+            .iter()
+            .filter(|frame| frame["method"] == "session/event")
+            .count();
+        assert_eq!(
+            session_events, 0,
+            "the opted-out turn wrote session/event copies"
+        );
+        let copies: Vec<&Value> = frames
+            .iter()
+            .filter(|frame| frame.to_string().contains(SNAP_IMAGE))
+            .collect();
+        assert_eq!(
+            copies.len(),
+            1,
+            "the image reached the client {} times: {copies:?}",
+            copies.len()
+        );
+        assert_eq!(copies[0]["method"], "session/stream_event", "{}", copies[0]);
+        assert_eq!(copies[0]["params"]["stream_id"], json!(stream_id));
+        assert_eq!(
+            copies[0]["params"]["event"]["payload"]["type"], "tool_result_received",
+            "{}",
+            copies[0]
+        );
+        let completion = frames
+            .iter()
+            .find(|frame| {
+                frame["method"] == "session/stream_event"
+                    && frame["params"]["event"]["payload"]["type"] == "tool_execution_completed"
+            })
+            .expect("the subscription carries the tool's execution fact");
+        assert!(
+            completion["params"]["event"]["payload"]
+                .get("content")
+                .is_none(),
+            "the execution fact carries no result body: {completion}"
+        );
+    }
+
+    /// A `turn/start` without the opt-out still writes its events as
+    /// `session/event` notifications.
+    #[tokio::test]
+    async fn a_default_turn_start_still_writes_session_events() {
+        let mut h = Harness::new();
+        h.provider.plan("plain turn", [Step::Finish { gate: None }]);
+        let (_index, mut c) = h.connect().await;
+        let session = c.create().await;
+        c.send(json!({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "turn/start",
+            "params": {"session_id": session, "prompt": "plain turn"}
+        }))
+        .await;
+        let mut session_events = 0;
+        tokio::time::timeout(LIMIT, async {
+            loop {
+                let frame = c.frames.recv().await.expect("TCP closed mid-turn");
+                if frame["method"] == "session/event" {
+                    session_events += 1;
+                }
+                if frame["id"] == json!(6) {
+                    assert!(frame["error"].is_null(), "turn/start failed: {frame}");
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("the turn finishes");
+        assert!(
+            session_events > 0,
+            "a default turn/start wrote no session/event"
+        );
+    }
+
     /// The `durable` detached callback tool as a connection registers it:
     /// one runner and contract, and the description that tells two
     /// declarations apart.

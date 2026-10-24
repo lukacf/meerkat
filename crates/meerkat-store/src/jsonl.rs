@@ -1627,6 +1627,7 @@ mod tests {
             "unexpected error: {error}"
         );
 
+        foreign.unlock().expect("release the foreign fence");
         drop(foreign);
         store.save(&session).await?;
         let loaded = store.load(session.id()).await?.expect("session persists");

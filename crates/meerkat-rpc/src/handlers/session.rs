@@ -339,6 +339,12 @@ pub struct CreateSessionParams {
     /// Request-only host context for the immediate first turn.
     #[serde(default)]
     pub transient_turn_context: Option<meerkat_core::lifecycle::run_primitive::TurnRequestContext>,
+    /// `false`: the immediate first turn's events are not written as
+    /// `session/event` notifications, as on `turn/start`. Absent or `true`
+    /// keeps them; a deferred create runs no turn and ignores it. Since 0.9.5;
+    /// an older server ignores the field.
+    #[serde(default)]
+    pub session_events: Option<bool>,
     /// Controls whether the first turn runs immediately or is deferred.
     /// Defaults to `run_immediately` when absent.
     #[serde(default)]
@@ -859,6 +865,7 @@ pub(crate) async fn create_session_with_params_on_route_and_configured_mcp(
     });
 
     // Start the initial turn — route through runtime for V9 consistency
+    let session_events = params.session_events.unwrap_or(true);
     let result = if params.keep_alive {
         let runtime_for_turn = Arc::clone(&runtime);
         let sid_for_turn = session_id.clone();
@@ -880,6 +887,7 @@ pub(crate) async fn create_session_with_params_on_route_and_configured_mcp(
                     None,
                     initial_turn_overrides_for_turn,
                     request_context_for_turn,
+                    session_events,
                 )
                 .await
             {
@@ -925,6 +933,7 @@ pub(crate) async fn create_session_with_params_on_route_and_configured_mcp(
                 None,
                 initial_turn_overrides,
                 request_context.clone(),
+                session_events,
             )
             .await
         {

@@ -120,7 +120,9 @@ export class LiveChannel {
    * `channel_id` for subsequent operations.
    *
    * The returned {@link LiveOpenResult} contains `transport` (URL + token
-   * for the caller to connect externally), `capabilities`, and `continuity`.
+   * for the caller to connect externally), `capabilities`, and `continuity`,
+   * and `advisories` when the open went ahead without something, such as a
+   * staged create-time prompt a run-start hook refused.
    * When `seedMaxChars` is set, any whole-turn truncation is surfaced as
    * degraded continuity; full canonical image sidecars remain attached.
    */

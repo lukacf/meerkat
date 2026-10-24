@@ -109,6 +109,9 @@ MOB_RPC_CONTRACT_TYPES = [
     "WireMobLifecycleFailure",
     "MobStatusResult",
     "MobLifecycleParams",
+    "WireMobDestroyMemberRefusal",
+    "WireMobDestroyReport",
+    "WireMobDestroyIncompleteData",
     "MobLifecycleResult",
     "MobSpawnParams",
     "MobSpawnResult",
@@ -121,6 +124,7 @@ MOB_RPC_CONTRACT_TYPES = [
     "MobSpawnReceiptWire",
     "MobMemberListEntryWire",
     "WireMemberProgressSnapshot",
+    "WireMemberCustodyDeferral",
     "WireMobToolConfig",
     "WireMobProfile",
     "WireMobRun",
@@ -166,6 +170,9 @@ MOB_RPC_CONTRACT_TYPES = [
     "MobEventsParams",
     "MobEventsResult",
     "MobMemberSendParams",
+    # The keyed member-send receipt, listed before the result that carries
+    # it; its status union is an alias (MOB_RPC_CONTRACT_ALIAS_TYPES).
+    "WireContinuationReceipt",
     "MobMemberSendResult",
     "MobIngressInteractionParams",
     "MobIngressInteractionResult",
@@ -554,6 +561,7 @@ MOB_RPC_CONTRACT_ALIAS_TYPES = [
     "WireToolFilter",
     "WireMemberState",
     "WireMobMemberStatus",
+    "WireMemberReloadRefusal",
     "WireMobRuntimeMode",
     "MobSpawnManyFailureCause",
     "MobSpawnManyResultStatus",
@@ -582,6 +590,12 @@ MOB_RPC_CONTRACT_ALIAS_TYPES = [
     # named alias so the handwritten SDK status parsers can type it.
     "WireMemberPreviewUnavailable",
     "WireMemberRegistrationHookCall",
+    # The keyed member-send delivery status: a tagged union, so SDK clients
+    # branch on `state`. An alias, not a contract type: the object emitter
+    # would turn the union into an empty `{}` interface.
+    "WireContinuationStatus",
+    "WireMemberCustodyRestore",
+    "WireMemberCustodyDeferralCause",
     "WireMobRunStatus",
     # Closed usage-attribution vocabulary on the run-result accounting block.
     # An alias, not a contract type: the object emitter would turn a
@@ -759,6 +773,9 @@ MOB_RPC_PROMOTED_SCHEMA_DEFS = frozenset(
         # unreachable peer rows to opaque object maps.
         "WirePeerConnectivitySnapshot",
         "WireUnreachablePeer",
+        # The keyed member-send receipt is a schema-local `$defs` entry of
+        # `MobMemberSendResult`; promoted so `continuation` stays typed.
+        "WireContinuationReceipt",
         # A `mob/list` row's failure: keep it typed instead of widening it to
         # an opaque object map.
         "WireMobLifecycleFailure",
@@ -919,6 +936,9 @@ def _promote_nested_schema_def(name: str) -> bool:
         # the schema-local `$defs` as anonymous `dict[str, Any]` / `unknown`.
         "WireLiveChannelCapabilities",
         "WireLiveContinuityMode",
+        # Keep `LiveOpenResult.advisories` entries named: an open vocabulary
+        # (known values plus any string), so a reader keeps unknown advisories.
+        "WireLiveOpenAdvisory",
         # G8 (P2): promote `WireLiveTransportBootstrap` so `LiveOpenResult.transport`
         # carries the typed discriminated-union shape into SDK codegen instead
         # of falling back to `Record<string, unknown>` / `dict[str, Any]`.
@@ -3981,6 +4001,11 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         wire_schema,
         "Wire projection of LiveTransportBootstrap (internally-tagged on `transport`).",
     )
+    append_python_alias(
+        "WireLiveOpenAdvisory",
+        wire_schema,
+        "An advisory on a successful live/open (an open vocabulary).",
+    )
     append_python_dataclass("LiveOpenResult", wire_schema, "Response payload for live/open.")
     append_python_dataclass(
         "LiveWebrtcAnswerParams",
@@ -4882,6 +4907,7 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     # G8 (P2): typed wire mirror for `LiveOpenResult.transport`
     # (discriminated union on `transport`).
     append_typescript_alias("WireLiveTransportBootstrap", wire_schema)
+    append_typescript_alias("WireLiveOpenAdvisory", wire_schema)
     append_typescript_interface("LiveOpenResult", wire_schema)
     append_typescript_interface("LiveWebrtcAnswerParams", wire_schema)
     append_typescript_interface("LiveWebrtcAnswerResult", wire_schema)
@@ -7309,6 +7335,8 @@ def generate_web_mob_types(schemas: dict, output_dir: Path) -> None:
     append_interface("MobRespawnResult")
     append_interface("MobEventsResult")
     append_alias("WireHandlingMode")
+    append_alias("WireContinuationStatus")
+    append_interface("WireContinuationReceipt")
     append_interface("MobMemberSendResult")
     append_alias("WireWorkExecutionLifecyclePhase")
     append_interface("WireWorkGraphFlowWorkRef")
@@ -7330,8 +7358,15 @@ def generate_web_mob_types(schemas: dict, output_dir: Path) -> None:
     append_interface("WireResolvedModelCapabilities")
     append_alias("WireMemberPreviewUnavailable")
     append_alias("WireMemberRegistrationHookCall")
+    append_alias("WireMemberCustodyRestore")
+    append_alias("WireMemberCustodyDeferralCause")
+    append_interface("WireMemberCustodyDeferral")
     append_interface("MobMemberStatusResult")
     append_interface("MobAppendSystemContextResult")
+    append_alias("WireMemberReloadRefusal")
+    append_interface("WireMobDestroyMemberRefusal")
+    append_interface("WireMobDestroyReport")
+    append_interface("WireMobDestroyIncompleteData")
     append_interface("MobLifecycleResult")
     append_alias("ApplicationToolPolicyBinding")
     append_alias("ToolCategoryOverride")

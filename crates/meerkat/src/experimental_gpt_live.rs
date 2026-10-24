@@ -21884,8 +21884,9 @@ mod tests {
                         );
                     }
                     expected_rows.extend(segments);
-                    let context = serde_json::to_string(&observed.messages_for_model_boundary())
-                        .expect("project retained dialogue");
+                    let context =
+                        serde_json::to_string(&observed.messages_for_model_boundary().unwrap())
+                            .expect("project retained dialogue");
                     assert!(context.contains("First spoken checkpoint."));
                     assert!(context.contains("spoken_unmeasured"));
                     last_turn = assistant;
@@ -22008,14 +22009,14 @@ mod tests {
                     caption_items, committed_items,
                     "every provisional caption key names exactly one committed row"
                 );
-                let voice_context = original_context.messages_for_model_boundary();
+                let voice_context = original_context.messages_for_model_boundary().unwrap();
                 let rendered = serde_json::to_string(&voice_context).expect("live context");
                 assert!(rendered.contains("First spoken checkpoint."));
                 assert!(rendered.contains("Interrupted by the close mid-turn."));
                 assert!(rendered.contains("spoken_unmeasured"));
                 assert_eq!(
                     voice_context,
-                    original_context.messages_for_model_boundary(),
+                    original_context.messages_for_model_boundary().unwrap(),
                     "observation projection is deterministic for summary equality"
                 );
                 assert!(

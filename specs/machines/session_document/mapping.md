@@ -328,6 +328,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `ClassifyDurableTailRepairable`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ClassifyDurableTailContinuable`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 - `ClassifyDurableTailAmbiguous`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)

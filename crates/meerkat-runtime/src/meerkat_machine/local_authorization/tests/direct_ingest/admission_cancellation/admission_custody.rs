@@ -390,3 +390,50 @@ async fn real_persistent_commit_with_lost_acknowledgement_keeps_custody_uncertai
         "unsettled durable owner remains fail-closed"
     );
 }
+
+/// The session-level custody accept (no attachment fence) settles the
+/// supplied custody from the same native admission: an accepted keyed
+/// governed prompt settles `Admitted`, and its exact replay deduplicates onto
+/// the same input and settles `Admitted` under the exact-prompt contract. An
+/// input without a stable key is refused before admission and settles
+/// `NotAdmitted`.
+#[tokio::test(flavor = "current_thread")]
+async fn session_custody_accept_settles_from_native_admission_and_its_exact_replay() {
+    let (machine, mut session, input, _key) = fixture().await;
+    let id = input.id().clone();
+
+    let (first, first_log) = custody();
+    let (accepted, _) = machine
+        .accept_input_with_completion_and_custody(&session.session, input.clone(), first)
+        .await
+        .expect("a keyed governed prompt is admitted");
+    assert!(
+        matches!(&accepted, AcceptOutcome::Accepted { input_id, .. } if *input_id == id),
+        "{accepted:?}"
+    );
+    assert_eq!(observed(&first_log), vec![Settlement::Admitted]);
+
+    let (replay, replay_log) = custody();
+    let (deduplicated, _) = machine
+        .accept_input_with_completion_and_custody(&session.session, input.clone(), replay)
+        .await
+        .expect("an exact replay is answered");
+    assert!(
+        matches!(&deduplicated, AcceptOutcome::Deduplicated { existing_id, .. } if *existing_id == id),
+        "{deduplicated:?}"
+    );
+    assert_eq!(observed(&replay_log), vec![Settlement::Admitted]);
+
+    let mut unkeyed = input.clone();
+    unkeyed.header_mut().idempotency_key = None;
+    let (refused, refused_log) = custody();
+    assert!(
+        machine
+            .accept_input_with_completion_and_custody(&session.session, unkeyed, refused)
+            .await
+            .is_err(),
+        "the exact-prompt contract needs a stable key"
+    );
+    assert_eq!(observed(&refused_log), vec![Settlement::NotAdmitted]);
+    complete_same_input(&machine, &mut session, &id, Route::WithCompletion).await;
+}

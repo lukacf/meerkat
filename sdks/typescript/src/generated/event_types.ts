@@ -20,7 +20,14 @@ import type {
   ContentInput,
   DeferredCatalogDelta,
   ExternalToolDeltaPhase,
+  ForkBoundaryNotice,
+  ForkNoticeKind,
+  ForkNoticeSource,
+  ForkNoticeSystemPrompt,
+  ForkNoticeTools,
+  ForkToolsNotComparedReason,
   GeminiImageMetadata,
+  InstructionKeyRef,
   InteractionId,
   InterruptedInputKind,
   InterruptedToolRunDisposition,
@@ -30,6 +37,7 @@ import type {
   LiveContextObservationId,
   McpAttachmentRestoreWireOutcome,
   MeerkatSchema,
+  MobMemberBinding,
   OpenAiImageMetadata,
   OperationId,
   OutputSchema,
@@ -990,15 +998,42 @@ export type ModelFallbackSkippedTarget = {
 export type OperationObservationPhase = "outcome";
 
 /**
+ * Deduplication key a tool sees for one call of one round of one run.
+ *
+ * A resumed run dispatches the calls of a round whose results were not
+ * committed again, under the same key, so a tool with external effects can
+ * recognize a repeat. A round that had no committed model response is asked
+ * of the model again, and a provider may reuse a call id for a different
+ * call; the digest of the call's tool name and arguments keeps such calls
+ * apart, so a repeat is only a call with the same name and arguments.
+ *
+ * Build it with [`ToolCallDedupeKey::new`], which computes the digest, so
+ * every producer derives the same key for the same call.
+ *
+ * Every kind of tool receives it unchanged: an in-process tool from
+ * [`crate::ToolDispatchContext::tool_call_dedupe_key`], an MCP tool as the
+ * `tools/call` `_meta` entry [`crate::TOOL_CALL_DEDUPE_KEY_META_KEY`], and a
+ * callback tool as the `dedupe_key` of its request or pending call. A call
+ * outside an agent-loop round has no key.
+ */
+export interface ToolCallDedupeKey {
+  call_digest: string;
+  call_id: string;
+  round: number;
+  run_id: RunId;
+}
+
+/**
  * One externally routed callback tool call inside a suspended assistant
  * tool-use batch.
  */
-export interface PendingCallbackToolCall {
+export type PendingCallbackToolCall = {
   args: unknown;
+  dedupe_key?: ToolCallDedupeKey | null;
   settlement_failures?: ToolDispatchSettlementFailure[];
   tool_name: string;
   tool_use_id: string;
-}
+};
 
 /**
  * Reasoning/effort control level, the shared typed vocabulary behind both
@@ -1069,6 +1104,11 @@ export type RunInput = {
 } | {
   kind: "pending_tool_results";
 };
+
+/**
+ * Where a resumed run continues, as [`AgentEvent::RunResumed`] reports it.
+ */
+export type RunResumePointKind = "tools_pending" | "awaiting_model";
 
 /**
  * Warnings emitted during schema lowering.
@@ -1493,7 +1533,6 @@ export type AgentEvent = {
   name: string;
   type: "tool_execution_started";
 } | {
-  content: ContentBlock[];
   duration_ms: number;
   id: string;
   is_error: boolean;
@@ -1650,6 +1689,12 @@ export type AgentEvent = {
   requested: ReasoningBatchDisposition;
   turn_number?: number | null;
   type: "request_reasoning_lowered";
+} | {
+  resume_point: RunResumePointKind;
+  round: number;
+  run_id: RunId;
+  session_id: SessionId;
+  type: "run_resumed";
 };
 
 /**

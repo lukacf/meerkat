@@ -319,6 +319,27 @@ impl MobMcpScheduleHost {
     pub(crate) fn from_runtime(runtime: Arc<dyn ScheduleMobRuntime>) -> Self {
         Self { runtime }
     }
+
+    /// Whether `mob_id` holds a durable external-delivery record of
+    /// `idempotency_key`, read without beginning a delivery: the proof an
+    /// unproven late redelivery needs before it goes down the ordinary
+    /// delivery path, which answers from that record. A record that cannot
+    /// be read leaves the occurrence reclaimable.
+    async fn late_redelivery_is_recorded(
+        &self,
+        mob_id: &MobId,
+        idempotency_key: &str,
+    ) -> Result<bool, ScheduleDomainError> {
+        self.runtime
+            .load_external_delivery(mob_id, idempotency_key)
+            .await
+            .map(|record| record.is_some())
+            .map_err(|error| ScheduleDomainError::DeliveryRepairDeferred {
+                detail: format!(
+                    "durable mob external-delivery record is unavailable for a late redelivery: {error}"
+                ),
+            })
+    }
 }
 
 #[async_trait]
@@ -402,20 +423,15 @@ impl SurfaceScheduleMobHost for MobMcpScheduleHost {
         binding: &MobTargetBinding,
         existing: ExistingDelivery,
     ) -> Result<ExistingDeliveryAnswer, ScheduleDomainError> {
-        if existing != ExistingDelivery::Admitted {
-            let mob_id = MobId::from(mob_binding_mob_id(binding));
-            let record = self
-                .runtime
-                .load_external_delivery(&mob_id, &schedule_identity.idempotency_key)
-                .await
-                .map_err(|error| ScheduleDomainError::DeliveryRepairDeferred {
-                    detail: format!(
-                        "durable mob external-delivery record is unavailable for a late redelivery: {error}"
-                    ),
-                })?;
-            if record.is_none() {
-                return Ok(ExistingDeliveryAnswer::NotAdmittedPastDeadline);
-            }
+        if existing != ExistingDelivery::Admitted
+            && !self
+                .late_redelivery_is_recorded(
+                    &MobId::from(mob_binding_mob_id(binding)),
+                    &schedule_identity.idempotency_key,
+                )
+                .await?
+        {
+            return Ok(ExistingDeliveryAnswer::NotAdmittedPastDeadline);
         }
         self.deliver_mob_target(occurrence, schedule_identity, binding)
             .await
@@ -834,6 +850,40 @@ impl SurfaceScheduleMobHost for MobMcpScheduleHost {
                 }),
             ),
         )))
+    }
+
+    /// The same for a mob member's stable identity: an unproven late
+    /// redelivery answers from the durable external-delivery record that
+    /// [`Self::deliver_identity_target`] begins under the same stable
+    /// identity. A record goes down that ordinary path, which answers from
+    /// it without a second effect; no record means the mob never admitted
+    /// the delivery, and nothing is delivered or recorded. An admitted one,
+    /// and an identity this host does not own, answer as the trait's
+    /// default does.
+    async fn deliver_existing_identity_target(
+        &self,
+        occurrence: &Occurrence,
+        schedule_identity: &ScheduleDeliveryIdentity,
+        binding: &IdentityTargetBinding,
+        existing: ExistingDelivery,
+    ) -> Result<Option<ExistingDeliveryAnswer>, ScheduleDomainError> {
+        let Some(member_identity) = parse_mob_member_schedule_identity(binding.identity()) else {
+            return Ok(None);
+        };
+        if existing != ExistingDelivery::Admitted
+            && !self
+                .late_redelivery_is_recorded(
+                    &MobId::from(member_identity.mob_id.as_str()),
+                    &schedule_identity.idempotency_key,
+                )
+                .await?
+        {
+            return Ok(Some(ExistingDeliveryAnswer::NotAdmittedPastDeadline));
+        }
+        Ok(self
+            .deliver_identity_target(occurrence, schedule_identity, binding)
+            .await?
+            .map(ExistingDeliveryAnswer::Dispatch))
     }
 }
 
@@ -1859,6 +1909,165 @@ mod tests {
             runtime.sent_members.lock().expect("sent lock").len(),
             1,
             "the replay sends nothing a second time"
+        );
+    }
+
+    fn deploy_monitor_identity_prompt() -> IdentityTargetBinding {
+        IdentityTargetBinding::resumable(
+            meerkat::surface::mob_member_schedule_identity(&meerkat_core::MobMemberBinding {
+                mob_id: "ops".to_string(),
+                role: "worker".to_string(),
+                member: "deploy-monitor".to_string(),
+            }),
+            ScheduledSessionAction::Prompt {
+                prompt: ContentInput::Text("Check deploy state.".to_string()),
+                system_prompt: None,
+                render_metadata: None,
+                skill_refs: Vec::new(),
+                additional_instructions: Vec::new(),
+            },
+        )
+    }
+
+    /// An unproven late redelivery to a mob member's identity the mob holds
+    /// no durable record of: the mob never admitted it, so the host answers
+    /// not admitted, sends nothing and records nothing. An identity that is
+    /// not a mob member's stays the session host's.
+    #[tokio::test]
+    async fn unproven_late_identity_redelivery_without_a_record_delivers_nothing() {
+        let runtime = Arc::new(RecordingMobRuntime::default());
+        runtime.with_member("deploy-monitor");
+        let host = MobMcpScheduleHost::from_runtime(runtime.clone());
+        let binding = deploy_monitor_identity_prompt();
+        let occurrence =
+            sample_occurrence_for_target(TargetBinding::Identity(Box::new(binding.clone())));
+        let identity = sample_delivery_identity(&occurrence);
+
+        let answer = host
+            .deliver_existing_identity_target(
+                &occurrence,
+                &identity,
+                &binding,
+                ExistingDelivery::UnprovenLate,
+            )
+            .await
+            .expect("the record read answers")
+            .expect("the mob host owns a mob member's identity");
+        assert!(matches!(
+            answer,
+            ExistingDeliveryAnswer::NotAdmittedPastDeadline
+        ));
+        assert!(runtime.sent_members.lock().expect("sent lock").is_empty());
+        assert!(
+            runtime
+                .load_external_delivery(&MobId::from("ops"), &identity.idempotency_key)
+                .await
+                .expect("load")
+                .is_none(),
+            "the record read begins no delivery record"
+        );
+
+        let session_identity = IdentityTargetBinding::resumable(
+            "domain:security",
+            ScheduledSessionAction::Prompt {
+                prompt: ContentInput::Text("Check deploy state.".to_string()),
+                system_prompt: None,
+                render_metadata: None,
+                skill_refs: Vec::new(),
+                additional_instructions: Vec::new(),
+            },
+        );
+        assert!(
+            host.deliver_existing_identity_target(
+                &occurrence,
+                &identity,
+                &session_identity,
+                ExistingDelivery::UnprovenLate,
+            )
+            .await
+            .expect("an identity the host does not own answers")
+            .is_none(),
+            "an identity that is not a mob member's is left to the session host"
+        );
+    }
+
+    /// The same redelivery with a durable record (the mob admitted the
+    /// identity delivery, Begin and member effect, before the executor
+    /// died): it goes down the ordinary identity path and answers from the
+    /// record, as a deduplicated admission (no second Begun record) with no
+    /// second member effect. The trait default answered not admitted
+    /// without reading the record, and the occurrence ended misfired while
+    /// the member ran the prompt.
+    #[tokio::test]
+    async fn unproven_late_identity_redelivery_with_a_record_replays_it() {
+        let runtime = Arc::new(RecordingMobRuntime::default());
+        runtime.with_member("deploy-monitor");
+        let host = MobMcpScheduleHost::from_runtime(runtime.clone());
+        let binding = deploy_monitor_identity_prompt();
+        let occurrence =
+            sample_occurrence_for_target(TargetBinding::Identity(Box::new(binding.clone())));
+        let identity = sample_delivery_identity(&occurrence);
+        let (delivery_identity, intent) = mob_delivery_intent(
+            MobId::from("ops"),
+            &identity,
+            MobExternalDeliveryTargetKind::MemberSend,
+            binding.stable_key().expect("stable binding key"),
+        )
+        .expect("valid test delivery intent");
+        assert_eq!(
+            runtime
+                .begin_external_delivery(&intent)
+                .await
+                .expect("the first attempt's Begin"),
+            MobExternalDeliveryBeginOutcome::Begun
+        );
+        runtime
+            .member_send(
+                &MobId::from("ops"),
+                AgentIdentity::from("deploy-monitor"),
+                ContentInput::Text("Check deploy state.".to_string()),
+                None,
+                delivery_identity,
+            )
+            .await
+            .expect("the first attempt's member effect");
+
+        let answer = host
+            .deliver_existing_identity_target(
+                &occurrence,
+                &identity,
+                &binding,
+                ExistingDelivery::UnprovenLate,
+            )
+            .await
+            .expect("the replay answers")
+            .expect("the mob host owns a mob member's identity");
+        let ExistingDeliveryAnswer::Dispatch(dispatch) = answer else {
+            panic!("a recorded identity delivery replays from its record");
+        };
+        assert_eq!(
+            dispatch.receipt.runtime_outcome,
+            Some(meerkat_schedule::RuntimeDeliveryOutcome::AdmissionDeduplicated),
+            "the replay's Begin answered from the first attempt's record"
+        );
+        assert_eq!(
+            dispatch.completion.await.expect("replay completion").phase,
+            meerkat::OccurrencePhase::Completed
+        );
+        assert_eq!(
+            runtime.sent_members.lock().expect("sent lock").len(),
+            1,
+            "the replay sends nothing a second time"
+        );
+        assert_eq!(
+            runtime
+                .load_external_delivery(&MobId::from("ops"), &identity.idempotency_key)
+                .await
+                .expect("load")
+                .expect("the first attempt's record")
+                .intent,
+            intent,
+            "the record is the first attempt's"
         );
     }
 

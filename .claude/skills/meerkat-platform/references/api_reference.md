@@ -68,6 +68,7 @@ rkat session delete <ID>
 rkat session interrupt <ID>
 rkat session export-atif <ID> [--output <FILE>]   # ATIF trajectory; default realm trajectory dir
 rkat session repair-wholeblob <ID> [--apply [--accept-shorter]] [--runtime-store <FILE>] [--json]  # diagnose by default
+rkat session resolve-held-tail <ID> [--apply] [--runtime-store <FILE>] [--json]  # report by default
 rkat blob get <BLOB-ID> [--output <FILE>] [--json]
 rkat realm current|list|show|create|delete|prune ...
 rkat realm govern|grant|revoke-grant <REALM> ...  # governed realms (see below)

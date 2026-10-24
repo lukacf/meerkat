@@ -408,6 +408,13 @@ fn session_error_code(err: &meerkat_core::SessionError) -> ErrorCode {
         {
             ErrorCode::InvalidParams
         }
+        // A session-scoped surface refused to restore a mob member's
+        // session: the caller addressed the wrong surface.
+        meerkat_core::SessionError::FailedWithData { .. }
+            if err.is_mob_member_session_addressed_by_id() =>
+        {
+            ErrorCode::InvalidParams
+        }
         meerkat_core::SessionError::ForkInstructionRefused(_) => ErrorCode::ForkInstructionRefused,
         meerkat_core::SessionError::Store(_)
         | meerkat_core::SessionError::FailedWithData { .. } => ErrorCode::InternalError,
@@ -436,6 +443,11 @@ pub fn session_transport_error_code(error: &meerkat_core::SessionError) -> Error
         // A fork refused because its source cannot give a runnable child
         // refuses the caller's request; it is not a service fault.
         SessionError::FailedWithData { .. } if error.is_fork_source_build_state_missing() => {
+            ErrorCode::InvalidParams
+        }
+        // A session-scoped surface refused to restore a mob member's session:
+        // the caller addressed the wrong surface; the member's mob owns it.
+        SessionError::FailedWithData { .. } if error.is_mob_member_session_addressed_by_id() => {
             ErrorCode::InvalidParams
         }
         // A durable resume hold is not a service fault: the session exists,

@@ -40,6 +40,8 @@ from .generated.types import (
     WireReachability,
     WireMemberPreviewUnavailable,
     WireMemberRegistrationHookCall,
+    WireMemberCustodyDeferralCause,
+    WireMemberCustodyRestore,
     WireRuntimeBinding,
     WireToolAccessPolicy,
     WireToolFilter,
@@ -86,6 +88,25 @@ RenderMetadata = TypedDict(
     {"class": RenderClass, "salience": NotRequired[RenderSalience]},
 )
 
+MemberSendContinuationStatus = TypedDict(
+    "MemberSendContinuationStatus",
+    {
+        "state": Literal["pending", "admitted", "stranded", "refused"],
+        "session_id": NotRequired[str],
+        "input_id": NotRequired[str],
+        "reason": NotRequired[str],
+    },
+)
+
+MemberSendContinuation = TypedDict(
+    "MemberSendContinuation",
+    {
+        "delivery_id": str,
+        "committed_at_ms": int,
+        "status": MemberSendContinuationStatus,
+    },
+)
+
 MemberDeliveryReceipt = TypedDict(
     "MemberDeliveryReceipt",
     {
@@ -93,6 +114,7 @@ MemberDeliveryReceipt = TypedDict(
         "agent_identity": str,
         "member_ref": MobMemberRef,
         "handling_mode": Literal["queue", "steer"],
+        "continuation": NotRequired[MemberSendContinuation],
     },
 )
 
@@ -176,6 +198,21 @@ MobMemberLifecycleCapabilities = TypedDict(
     },
 )
 
+# A custody restore or cause this SDK does not know, as the server sent it:
+# the deferral vocabularies may grow, and an unknown value is surfaced, not
+# refused.
+MobMemberCustodyUnknown = TypedDict("MobMemberCustodyUnknown", {"unknown": str})
+
+# A member's custody restore a mob start deferred: the restore and the cause
+# its last attempt met.
+MobMemberCustodyDeferral = TypedDict(
+    "MobMemberCustodyDeferral",
+    {
+        "restore": WireMemberCustodyRestore | MobMemberCustodyUnknown,
+        "cause": WireMemberCustodyDeferralCause | MobMemberCustodyUnknown,
+    },
+)
+
 MobMemberSnapshot = TypedDict(
     "MobMemberSnapshot",
     {
@@ -209,6 +246,10 @@ MobMemberSnapshot = TypedDict(
         # hook call that refused it. The member stays broken until an
         # explicit repair.
         "registration_refusal": NotRequired[WireMemberRegistrationHookCall],
+        # Set when a mob start deferred the member's custody restore instead
+        # of failing the whole start: the restore and the cause its last
+        # attempt met. Every operation on the member re-attempts it first.
+        "custody_deferred": NotRequired[MobMemberCustodyDeferral],
     },
 )
 
@@ -229,6 +270,7 @@ MobKickoffMemberSnapshot = TypedDict(
         # As on MobMemberSnapshot.
         "preview_unavailable": NotRequired[WireMemberPreviewUnavailable],
         "registration_refusal": NotRequired[WireMemberRegistrationHookCall],
+        "custody_deferred": NotRequired[MobMemberCustodyDeferral],
     },
 )
 
@@ -319,13 +361,20 @@ class Member:
         *,
         handling_mode: Literal["queue", "steer"] = "queue",
         render_metadata: RenderMetadata | None = None,
+        idempotency_key: str | None = None,
     ) -> MemberDeliveryReceipt:
+        """Send content to this member.
+
+        With ``idempotency_key`` the send is deduplicated for the member
+        identity, see :meth:`MeerkatClient.send_mob_member_content`.
+        """
         return await self._mob._client.send_mob_member_content(
             self._mob.id,
             self.agent_identity,
             content,
             handling_mode=handling_mode,
             render_metadata=render_metadata,
+            idempotency_key=idempotency_key,
         )
 
     async def events(self) -> EventSubscription:

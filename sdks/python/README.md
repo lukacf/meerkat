@@ -123,8 +123,8 @@ Both use integer unix timestamps for `created_at` and `updated_at`.
 
 - `await client.inject_context(session_id, text, source=..., idempotency_key=...)`
 - `await session.inject_context(...)`
-- `await client.send_external_event(session_id, event_type, payload, blocks=None)`
-- `await session.send_external_event(event_type, payload, blocks=None)`
+- `await client.send_external_event(session_id, event_type, payload, blocks=None, idempotency_key=None)`
+- `await session.send_external_event(event_type, payload, blocks=None, idempotency_key=None)`
 
 ### Turns and streaming
 
@@ -271,6 +271,22 @@ feature.
 - `await client.delete_mob_profile(name, expected_revision=...)`
 
 ## Streaming
+
+`client.subscribe_session_events(...)`, `subscribe_mob_member_events(...)`,
+and `subscribe_mob_events(...)` return a standalone `EventSubscription`.
+After delivering earlier queued events, its iterator raises
+`EventSubscriptionError` (a `MeerkatError`) when the runtime's `stream_end`
+contains an error. Error-free `remote_end` and `explicit_close` notifications
+end iteration normally. Catching this error does not cancel the agent run.
+
+The error retains the server's `code`, `message`, and full `terminal_outcome`,
+including unknown codes and outcomes. The subscription also exposes
+`terminal_outcome`. Both expose `last_rpc_sequence` and `last_event_seq` for
+the last event delivered to the caller. The former is the RPC notification's
+sequence; the latter is the canonical envelope's `seq` (the nested envelope
+for mob events). These values are not interchangeable or replay cursors.
+Missing sequence values stay `None`. This API reports stream errors; it does
+not automatically reopen a stream or replay missing events.
 
 `session.stream(...)` and `client.create_session_streaming(...)` return `EventStream`, an async context manager yielding typed event dataclasses (`TextDelta`, `TurnCompleted`, `ToolExecutionCompleted`, etc.).
 

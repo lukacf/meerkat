@@ -1663,10 +1663,15 @@ impl SqliteScheduleStore {
                             };
                             write_receipt_in_txn(&tx, &receipt)?;
                             let expired = mutator.occurrence().clone();
-                            // A machine refusal of the follow-up claim is this
+                            // The machine refuses the follow-up claim at the
+                            // reclaim cap past the misfire deadline by design:
+                            // the expired row then classifies as exhausted, and
+                            // this scan resolves it with no fault. The evidence
+                            // read above still holds, since the expiry's receipt
+                            // is no dispatch evidence. Any other refusal is this
                             // row's typed fault, never a silent skip: the expiry
-                            // above stays committed and the row re-enters the
-                            // scan on the next tick.
+                            // stays committed and the row re-enters the scan on
+                            // the next tick.
                             let claim_mutator = match claim_occurrence_for_sqlite(
                                 expired,
                                 &request,
@@ -1677,12 +1682,28 @@ impl SqliteScheduleStore {
                                 Err(error) => {
                                     let write = mutator.into_authorized_write();
                                     write_occurrence_in_txn(&tx, write.occurrence())?;
+                                    let expired = write.occurrence().clone();
                                     transition_writes.push(write);
-                                    row_faults.push(claim_row_fault(
-                                        &occurrence,
-                                        ScheduleStoreRowFaultKind::DueClassification,
-                                        format!("lease-expiry reclaim: {error}"),
-                                    ));
+                                    match expired
+                                        .classify_due_action(store_now_utc, admission_evidence)
+                                    {
+                                        Ok(Some(OccurrenceDueAction::ReclaimExhausted)) => {
+                                            match resolve_reclaim_exhausted_in_txn(
+                                                &tx,
+                                                &expired,
+                                                admission_evidence,
+                                                store_now_utc,
+                                            )? {
+                                                Ok(write) => transition_writes.push(write),
+                                                Err(fault) => row_faults.push(fault),
+                                            }
+                                        }
+                                        _ => row_faults.push(claim_row_fault(
+                                            &occurrence,
+                                            ScheduleStoreRowFaultKind::DueClassification,
+                                            format!("lease-expiry reclaim: {error}"),
+                                        )),
+                                    }
                                     continue;
                                 }
                             };
@@ -2881,12 +2902,13 @@ fn resolve_due_terminal_in_txn(
 
 /// What one row's receipt history proves about its earlier attempts' target
 /// admission ([`AdmissionEvidence::from_receipt_stages`]). The receipts have
-/// no stage column, so this decodes each receipt of the occurrence through
-/// the tolerant JSON column codec (TEXT or BLOB), read through the
-/// `(occurrence_id, recorded_at_ms)` index inside the claim transaction. A
-/// row that was never claimed (`attempt_count == 0`) has no dispatch receipt
-/// and is not read. A receipt that does not decode is the row's typed fault
-/// (`Ok(Err(fault))`), never skipped; a store read failure returns `Err`.
+/// no stage column, so this decodes the stage of each receipt of the
+/// occurrence ([`StoredReceiptStage`]) through the tolerant JSON column codec
+/// (TEXT or BLOB), read through the `(occurrence_id, recorded_at_ms)` index
+/// inside the claim transaction. A row that was never claimed
+/// (`attempt_count == 0`) has no dispatch receipt and is not read. A receipt
+/// whose stage does not decode is the row's typed fault (`Ok(Err(fault))`),
+/// never skipped; a store read failure returns `Err`.
 fn read_admission_evidence_in_txn(
     tx: &rusqlite::Transaction<'_>,
     occurrence: &Occurrence,
@@ -2903,7 +2925,7 @@ fn read_admission_evidence_in_txn(
     let mut stages = Vec::new();
     for row in rows {
         let bytes = row?;
-        match serde_json::from_slice::<DeliveryReceipt>(&bytes) {
+        match serde_json::from_slice::<StoredReceiptStage>(&bytes) {
             Ok(receipt) => stages.push(receipt.stage),
             Err(error) => {
                 return Ok(Err(claim_row_fault(
@@ -2915,6 +2937,16 @@ fn read_admission_evidence_in_txn(
         }
     }
     Ok(Ok(AdmissionEvidence::from_receipt_stages(stages)))
+}
+
+/// The one field of a stored [`DeliveryReceipt`] the admission evidence
+/// reads. Its other fields are skipped unread, so a receipt whose other
+/// fields this build cannot decode (a newer release's variant, a corrupt
+/// timestamp) still yields its stage and no longer pins its row as a fault;
+/// a stage that does not decode still does.
+#[derive(serde::Deserialize)]
+struct StoredReceiptStage {
+    stage: meerkat_schedule::DeliveryReceiptStage,
 }
 
 fn write_receipt_in_txn(

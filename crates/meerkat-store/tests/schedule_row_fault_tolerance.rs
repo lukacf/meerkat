@@ -21,12 +21,13 @@ use meerkat_core::{ContentInput, SessionId};
 use meerkat_schedule::{
     ADMITTED_RECLAIM_ATTEMPT_CAP, AcquireScheduleExecutorLeaseOutcome,
     AcquireScheduleExecutorLeaseRequest, AdmissionEvidence, ClaimDueRequest, ClaimDueResult,
-    CreateScheduleRequest, DeliveryAdmissionOutcome, IntervalTriggerSpec, MemoryScheduleStore,
-    MisfirePolicy, MissingTargetPolicy, Occurrence, OccurrenceFailureClass, OccurrenceId,
-    OccurrenceLifecycleEffect, OccurrenceLifecycleInput, OccurrenceOrdinal, OccurrencePhase,
-    OverlapPolicy, RuntimeDeliveryOutcome, Schedule, ScheduleFilter, ScheduleLifecycleInput,
-    SchedulePhase, ScheduleService, ScheduleStore, ScheduleStoreRowFaultKind,
-    ScheduledSessionAction, SessionTargetBinding, TargetBinding, TriggerSpec,
+    CreateScheduleRequest, DeliveryAdmissionOutcome, DeliveryReceiptStage, IntervalTriggerSpec,
+    MemoryScheduleStore, MisfirePolicy, MissingTargetPolicy, Occurrence, OccurrenceFailureClass,
+    OccurrenceId, OccurrenceLifecycleEffect, OccurrenceLifecycleInput, OccurrenceOrdinal,
+    OccurrencePhase, OverlapPolicy, RuntimeDeliveryOutcome, Schedule, ScheduleFilter,
+    ScheduleLifecycleInput, SchedulePhase, ScheduleService, ScheduleStore,
+    ScheduleStoreRowFaultKind, ScheduledSessionAction, SessionTargetBinding, TargetBinding,
+    TriggerSpec,
 };
 use meerkat_store::SqliteScheduleStore;
 use rusqlite::{Connection, params};
@@ -960,6 +961,9 @@ async fn both_stores_derive_the_same_admission_evidence_from_the_receipt_history
 /// An admitted occurrence is reclaimed past its misfire deadline once per
 /// lapsed lease until its attempts reach the cap; then it ends
 /// delivery_failed with lease_lost and the exhausted detail, never misfired.
+/// The scan that expires the last lapsed lease resolves the exhaustion
+/// itself, with no row fault: the refused reclaim at the cap is the
+/// machine's design, not a row incident.
 #[tokio::test]
 async fn an_admitted_occurrence_that_used_up_its_reclaims_ends_lease_lost() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -978,25 +982,54 @@ async fn an_admitted_occurrence_that_used_up_its_reclaims_ends_lease_lost() {
             assert_eq!(occurrence.attempt_count, attempt);
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        // At the cap the lapsed lease is not reclaimed again, and the
-        // exhaustion resolves within the next scans.
-        let mut occurrence = current_occurrence(store, &occurrence_id).await;
-        for _ in 0..3 {
-            let _ = claim_due_in(store, Duration::seconds(60)).await;
-            occurrence = current_occurrence(store, &occurrence_id).await;
-            assert!(
-                occurrence.attempt_count <= ADMITTED_RECLAIM_ATTEMPT_CAP,
-                "never a reclaim past the cap"
-            );
-            assert_ne!(occurrence.phase, OccurrencePhase::Misfired);
-            if occurrence.phase == OccurrencePhase::DeliveryFailed {
-                break;
-            }
-        }
+        // At the cap one scan expires the lapsed lease and resolves the
+        // exhaustion: no reclaim past the cap, and no row fault for the
+        // refused reclaim.
+        let result = claim_due_in(store, Duration::seconds(60)).await;
+        assert!(
+            result.row_faults.is_empty(),
+            "{:?}: {:?}",
+            store.kind(),
+            result.row_faults
+        );
+        let effects: Vec<OccurrenceLifecycleEffect> = result
+            .transitions
+            .iter()
+            .filter(|commit| commit.successor().occurrence_id == occurrence_id)
+            .flat_map(|commit| commit.effects().iter().cloned())
+            .collect();
+        assert!(
+            effects.contains(&OccurrenceLifecycleEffect::LeaseExpired),
+            "{:?}: {effects:?}",
+            store.kind()
+        );
+        assert!(
+            effects.contains(&OccurrenceLifecycleEffect::DeliveryFailed),
+            "{:?}: {effects:?}",
+            store.kind()
+        );
+        let occurrence = current_occurrence(store, &occurrence_id).await;
         assert_eq!(
             occurrence.phase,
             OccurrencePhase::DeliveryFailed,
             "{:?}",
+            store.kind()
+        );
+        assert_eq!(occurrence.attempt_count, ADMITTED_RECLAIM_ATTEMPT_CAP);
+        // The last attempt keeps both receipts: its lease expiry and the
+        // exhaustion.
+        let last_attempt: Vec<DeliveryReceiptStage> = store
+            .list_receipts(&occurrence_id)
+            .await
+            .expect("list receipts")
+            .into_iter()
+            .filter(|receipt| receipt.attempt == ADMITTED_RECLAIM_ATTEMPT_CAP)
+            .map(|receipt| receipt.stage)
+            .collect();
+        assert!(
+            last_attempt.contains(&DeliveryReceiptStage::LeaseExpired)
+                && last_attempt.contains(&DeliveryReceiptStage::DeliveryFailed),
+            "{:?}: {last_attempt:?}",
             store.kind()
         );
         assert_eq!(
@@ -1014,54 +1047,151 @@ async fn an_admitted_occurrence_that_used_up_its_reclaims_ends_lease_lost() {
     }
 }
 
-/// A receipt row of the history that does not decode is the occurrence's
-/// typed fault in the claim scan, never read as missing evidence: the row is
-/// neither reclaimed nor misfired, and its neighbors still claim.
-#[tokio::test]
-async fn an_undecodable_receipt_in_the_history_is_the_rows_typed_fault() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("schedules.sqlite3");
-    let store = SqliteScheduleStore::open(&path).expect("open store");
-    let occurrence_id =
-        lapse_past_the_deadline_after(&store, FirstAttempt::DispatchAccepted, "poisoned-history")
-            .await;
-    let conn = Connection::open(&path).expect("open sqlite");
+/// Rewrite the stored JSON of `occurrence_id`'s `dispatch_accepted` receipt
+/// to the bytes `rewrite` makes of it.
+fn rewrite_admission_receipt(
+    path: &std::path::Path,
+    occurrence_id: &OccurrenceId,
+    rewrite: fn(serde_json::Value) -> Vec<u8>,
+) {
+    let conn = Connection::open(path).expect("open sqlite");
+    let receipts: Vec<(String, Vec<u8>)> = conn
+        .prepare(
+            "SELECT receipt_id, CAST(receipt_json AS BLOB) FROM schedule_receipts WHERE occurrence_id = ?1",
+        )
+        .expect("prepare the receipt read")
+        .query_map(params![occurrence_id.to_string()], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .expect("read the receipt history")
+        .collect::<Result<_, _>>()
+        .expect("read the receipt rows");
+    let mut admissions = receipts.into_iter().filter_map(|(receipt_id, json)| {
+        serde_json::from_slice::<serde_json::Value>(&json)
+            .ok()
+            .filter(|receipt| receipt["stage"] == "dispatch_accepted")
+            .map(|receipt| (receipt_id, receipt))
+    });
+    let (receipt_id, receipt) = admissions.next().expect("the admission receipt");
+    assert!(admissions.next().is_none(), "one admission receipt");
     let changed = conn
         .execute(
-            "UPDATE schedule_receipts SET receipt_json = ?2 WHERE occurrence_id = ?1",
-            params![occurrence_id.to_string(), b"{not json".as_slice()],
+            "UPDATE schedule_receipts SET receipt_json = ?2 WHERE receipt_id = ?1",
+            params![receipt_id, rewrite(receipt)],
         )
-        .expect("poison the receipt history");
-    assert!(changed >= 1);
-    let neighbor_schedule = commit_schedule(&store, "healthy-neighbor").await;
-    let neighbor = commit_due_occurrence(&store, &neighbor_schedule).await;
+        .expect("rewrite the admission receipt");
+    assert_eq!(changed, 1);
+}
 
-    let result = claim_due_in(&store, Duration::seconds(60)).await;
-    assert_eq!(result.row_faults.len(), 1);
-    assert_eq!(
-        result.row_faults[0].kind,
-        ScheduleStoreRowFaultKind::Deserialization
-    );
-    assert_eq!(
-        result.row_faults[0].occurrence_id.as_deref(),
-        Some(occurrence_id.to_string().as_str())
-    );
-    assert!(
-        result.row_faults[0].detail.contains("receipt history"),
-        "{}",
-        result.row_faults[0].detail
-    );
-    assert!(
-        result
-            .transitions
-            .iter()
-            .any(|commit| commit.successor().occurrence_id == neighbor.occurrence_id),
-        "the healthy neighbor still claims"
-    );
-    // The faulted row keeps its first attempt untouched: still Dispatching
-    // after its recorded admission, its lapsed lease neither expired nor
-    // reclaimed.
-    let untouched = current_occurrence(&store, &occurrence_id).await;
-    assert_eq!(untouched.phase, OccurrencePhase::Dispatching);
-    assert_eq!(untouched.attempt_count, 1);
+/// A receipt of the history whose stage does not decode is the occurrence's
+/// typed fault in the claim scan, never read as missing evidence: the row is
+/// neither reclaimed nor misfired, and its neighbors still claim. The
+/// admission receipt is made undecodable three ways: bytes that are not JSON,
+/// a stage this release does not know, and no stage. Skipping it would read
+/// the history as an unproven dispatch and reclaim the row.
+#[tokio::test]
+async fn a_receipt_whose_stage_does_not_decode_is_the_rows_typed_fault() {
+    let cases: [(&str, fn(serde_json::Value) -> Vec<u8>); 3] = [
+        ("bytes that are not JSON", |_| b"{not json".to_vec()),
+        ("a stage this release does not know", |mut receipt| {
+            receipt["stage"] = serde_json::json!("a_stage_of_a_newer_release");
+            serde_json::to_vec(&receipt).expect("encode the receipt")
+        }),
+        ("no stage", |mut receipt| {
+            receipt
+                .as_object_mut()
+                .expect("a receipt object")
+                .remove("stage");
+            serde_json::to_vec(&receipt).expect("encode the receipt")
+        }),
+    ];
+    for (case, rewrite) in cases {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("schedules.sqlite3");
+        let store = SqliteScheduleStore::open(&path).expect("open store");
+        let occurrence_id = lapse_past_the_deadline_after(
+            &store,
+            FirstAttempt::DispatchAccepted,
+            "poisoned-history",
+        )
+        .await;
+        rewrite_admission_receipt(&path, &occurrence_id, rewrite);
+        let neighbor_schedule = commit_schedule(&store, "healthy-neighbor").await;
+        let neighbor = commit_due_occurrence(&store, &neighbor_schedule).await;
+
+        let result = claim_due_in(&store, Duration::seconds(60)).await;
+        assert_eq!(result.row_faults.len(), 1, "{case}");
+        assert_eq!(
+            result.row_faults[0].kind,
+            ScheduleStoreRowFaultKind::Deserialization,
+            "{case}"
+        );
+        assert_eq!(
+            result.row_faults[0].occurrence_id.as_deref(),
+            Some(occurrence_id.to_string().as_str()),
+            "{case}"
+        );
+        assert!(
+            result.row_faults[0].detail.contains("receipt history"),
+            "{case}: {}",
+            result.row_faults[0].detail
+        );
+        assert!(
+            result
+                .transitions
+                .iter()
+                .any(|commit| commit.successor().occurrence_id == neighbor.occurrence_id),
+            "{case}: the healthy neighbor still claims"
+        );
+        // The faulted row keeps its first attempt untouched: still
+        // Dispatching after its recorded admission, its lapsed lease neither
+        // expired nor reclaimed.
+        let untouched = current_occurrence(&store, &occurrence_id).await;
+        assert_eq!(untouched.phase, OccurrencePhase::Dispatching, "{case}");
+        assert_eq!(untouched.attempt_count, 1, "{case}");
+    }
+}
+
+/// A receipt whose other fields this build cannot decode (a runtime outcome
+/// of a newer release, a corrupt timestamp) still yields its stage: the
+/// admission evidence reads, and the lapsed row is reclaimed as an admitted
+/// delivery with no row fault. Decoding the whole receipt pinned such a row
+/// as a fault on every scan, never claimed, misfired or exhausted.
+#[tokio::test]
+async fn a_receipt_whose_other_fields_do_not_decode_still_yields_its_stage() {
+    let cases: [(&str, fn(serde_json::Value) -> Vec<u8>); 2] = [
+        ("a runtime outcome of a newer release", |mut receipt| {
+            receipt["runtime_outcome"] =
+                serde_json::json!({ "kind": "an_outcome_of_a_newer_release" });
+            serde_json::to_vec(&receipt).expect("encode the receipt")
+        }),
+        ("a corrupt timestamp", |mut receipt| {
+            receipt["recorded_at_utc"] = serde_json::json!("not a timestamp");
+            serde_json::to_vec(&receipt).expect("encode the receipt")
+        }),
+    ];
+    for (case, rewrite) in cases {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("schedules.sqlite3");
+        let store = SqliteScheduleStore::open(&path).expect("open store");
+        let occurrence_id = lapse_past_the_deadline_after(
+            &store,
+            FirstAttempt::DispatchAccepted,
+            "newer-receipt-fields",
+        )
+        .await;
+        rewrite_admission_receipt(&path, &occurrence_id, rewrite);
+
+        assert_eq!(
+            reclaim_scan(&store, &occurrence_id).await,
+            ReclaimView {
+                phase: OccurrencePhase::Claimed,
+                attempt_count: 2,
+                reclaimed_after_admission: true,
+                reclaimed_after_unproven_dispatch: false,
+                row_faults: 0,
+            },
+            "{case}"
+        );
+    }
 }

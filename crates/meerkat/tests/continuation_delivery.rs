@@ -57,6 +57,32 @@ struct RecordingSink {
     resumed: Mutex<Vec<(SessionId, InputId, RetainedWorkIdentity)>>,
     /// Forces the governed admission's verdict.
     resume_verdict: Mutex<Option<ContinuationAdmitError>>,
+    /// Governed host originals admitted, in order: (session, input).
+    governed_admitted: Mutex<Vec<(SessionId, InputId)>>,
+    /// The bound inputs handed to the governed admission, in order.
+    governed_inputs: Mutex<Vec<meerkat_runtime::Input>>,
+    /// Forces the governed host original admission's native answer.
+    governed_verdict: Mutex<Option<GovernedVerdict>>,
+    /// Sessions prepared for a governed admission, in order.
+    prepared: Mutex<Vec<SessionId>>,
+    /// The rows each session holds, by input id.
+    held_by_id: Mutex<HashMap<(SessionId, InputId), StoredInputState>>,
+}
+
+/// A scripted native answer to a governed host original admission, with the
+/// custody settlement native admission would record for it.
+#[derive(Debug, Clone)]
+enum GovernedVerdict {
+    /// An actual denial: settled `NotAdmitted`.
+    Denied,
+    /// Malformed facts: settled `NotAdmitted`.
+    Malformed,
+    /// Not ready: settled `NotAdmitted`.
+    NotReady,
+    /// The store write may have committed: settled `Uncertain`.
+    Uncertain,
+    /// An exact replay onto this existing input: settled `Admitted`.
+    DeduplicatedOnto(InputId),
 }
 
 impl RecordingSink {
@@ -83,10 +109,32 @@ impl RecordingSink {
             .as_ref()
             .expect("keyed")
             .to_string();
-        self.known.lock().expect("lock").insert(
-            (session.clone(), key),
+        let row = StoredInputState::accepted_for_test(input).expect("row");
+        self.held_by_id
+            .lock()
+            .expect("lock")
+            .insert((session.clone(), input.id().clone()), row.clone());
+        self.known
+            .lock()
+            .expect("lock")
+            .insert((session.clone(), key), row);
+    }
+
+    /// `session` holds `input` under its id only, as a governed admission is
+    /// stored under its qualified key: a raw-key lookup misses it.
+    fn holds_by_id_only(&self, session: &SessionId, input: &meerkat_runtime::Input) {
+        self.held_by_id.lock().expect("lock").insert(
+            (session.clone(), input.id().clone()),
             StoredInputState::accepted_for_test(input).expect("row"),
         );
+    }
+
+    fn governed_admissions(&self) -> Vec<(SessionId, InputId)> {
+        self.governed_admitted.lock().expect("lock").clone()
+    }
+
+    fn governed_inputs(&self) -> Vec<meerkat_runtime::Input> {
+        self.governed_inputs.lock().expect("lock").clone()
     }
 
     /// `session` holds a row under `key` recorded without any replay
@@ -199,6 +247,93 @@ impl ContinuationDeliverySink for RecordingSink {
         ));
         Ok(input.id().clone())
     }
+
+    fn admits_governed(&self) -> bool {
+        self.governed
+    }
+
+    async fn prepare_governed(&self, session: &SessionId) -> Result<(), ContinuationAdmitError> {
+        self.prepared.lock().expect("lock").push(session.clone());
+        Ok(())
+    }
+
+    async fn admit_governed(
+        &self,
+        session: &SessionId,
+        input: meerkat_runtime::Input,
+        custody: Box<dyn meerkat_runtime::input_admission_custody::NativeInputAdmissionCustody>,
+    ) -> Result<meerkat::GovernedAdmissionOutcome, meerkat_runtime::RuntimeDriverError> {
+        use meerkat_runtime::input_admission_custody::NativeInputAdmissionSettlement as Settled;
+        assert!(
+            self.governed,
+            "only a governed runtime admits a governed host original"
+        );
+        self.governed_inputs
+            .lock()
+            .expect("lock")
+            .push(input.clone());
+        let refused = |kind| meerkat_runtime::RuntimeDriverError::InputRefused {
+            refusal: meerkat_core::OperationRefused::new(kind),
+        };
+        let verdict = self.governed_verdict.lock().expect("lock").clone();
+        match verdict {
+            Some(GovernedVerdict::Denied) => {
+                let _ = custody.settle(Settled::NotAdmitted);
+                Err(refused(meerkat_core::OperationRefusalKind::Denied))
+            }
+            Some(GovernedVerdict::Malformed) => {
+                let _ = custody.settle(Settled::NotAdmitted);
+                Err(refused(meerkat_core::OperationRefusalKind::MalformedFacts))
+            }
+            Some(GovernedVerdict::NotReady) => {
+                let _ = custody.settle(Settled::NotAdmitted);
+                Err(
+                    meerkat_runtime::RuntimeDriverError::ControllerReadinessUnavailable {
+                        reason:
+                            meerkat_core::authorization::ControllerReadinessFailure::PolicyUnavailable,
+                    },
+                )
+            }
+            Some(GovernedVerdict::Uncertain) => {
+                let _ = custody.settle(Settled::Uncertain);
+                Err(meerkat_runtime::RuntimeDriverError::Internal(
+                    "the admission's store write outcome is unknown".into(),
+                ))
+            }
+            Some(GovernedVerdict::DeduplicatedOnto(existing)) => {
+                let _ = custody.settle(Settled::Admitted);
+                Ok(meerkat::GovernedAdmissionOutcome::Deduplicated(existing))
+            }
+            None => {
+                let header = input.header();
+                assert!(
+                    header.authority_association.is_some() && header.ingress_context.is_some(),
+                    "a governed host original carries its binding"
+                );
+                let input_id = input.id().clone();
+                self.governed_admitted
+                    .lock()
+                    .expect("lock")
+                    .push((session.clone(), input_id.clone()));
+                self.already_holds(session, &input);
+                let _ = custody.settle(Settled::Admitted);
+                Ok(meerkat::GovernedAdmissionOutcome::Accepted(input_id))
+            }
+        }
+    }
+
+    async fn admitted_input_by_id(
+        &self,
+        session: &SessionId,
+        input_id: &InputId,
+    ) -> Result<Option<StoredInputState>, String> {
+        Ok(self
+            .held_by_id
+            .lock()
+            .expect("lock")
+            .get(&(session.clone(), input_id.clone()))
+            .cloned())
+    }
 }
 
 /// A host whose address resolution the test moves (a repoint, an unserved
@@ -207,6 +342,8 @@ struct Host {
     sink: Option<Arc<RecordingSink>>,
     resolutions: Mutex<HashMap<LogicalRuntimeId, AddressResolution>>,
     job_source: Option<Arc<FakeJobs>>,
+    /// A sink other than the recording one, when set.
+    other_sink: Option<Arc<dyn ContinuationDeliverySink>>,
 }
 
 impl Host {
@@ -215,6 +352,7 @@ impl Host {
             sink,
             resolutions: Mutex::new(HashMap::new()),
             job_source: None,
+            other_sink: None,
         })
     }
 
@@ -223,6 +361,16 @@ impl Host {
             sink: Some(sink),
             resolutions: Mutex::new(HashMap::new()),
             job_source: Some(jobs),
+            other_sink: None,
+        })
+    }
+
+    fn with_other_sink(sink: Arc<dyn ContinuationDeliverySink>, jobs: Arc<FakeJobs>) -> Arc<Self> {
+        Arc::new(Self {
+            sink: None,
+            resolutions: Mutex::new(HashMap::new()),
+            job_source: Some(jobs),
+            other_sink: Some(sink),
         })
     }
 
@@ -265,6 +413,9 @@ impl RuntimeDeliveryHost for Host {
         &self,
         _session_id: &SessionId,
     ) -> Option<Arc<dyn ContinuationDeliverySink>> {
+        if let Some(other) = &self.other_sink {
+            return Some(Arc::clone(other));
+        }
         self.sink
             .clone()
             .map(|sink| sink as Arc<dyn ContinuationDeliverySink>)
@@ -295,6 +446,11 @@ struct FakeJobs {
             tokio::sync::oneshot::Receiver<()>,
         )>,
     >,
+    /// The host originals this owner holds in its `Host` namespace, by
+    /// producer id.
+    originals: Mutex<HashMap<String, meerkat::HostOriginalFacts>>,
+    /// The binder this owner offers for its `Host` namespace.
+    binder: Mutex<Option<Arc<governed_fixture::FakeBinder>>>,
 }
 
 impl FakeJobs {
@@ -319,6 +475,27 @@ impl FakeJobs {
 
     fn lookups(&self) -> usize {
         self.lookups.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn owns_namespace(&self, namespace: &str) -> bool {
+        matches!(
+            self.producer.lock().expect("lock").as_ref(),
+            Some(ContinuationProducer::Host { namespace: owned }) if owned == namespace
+        )
+    }
+
+    fn change_original(
+        &self,
+        producer_id: &str,
+        change: impl FnOnce(&mut meerkat::HostOriginalFacts),
+    ) {
+        change(
+            self.originals
+                .lock()
+                .expect("lock")
+                .get_mut(producer_id)
+                .expect("host original"),
+        );
     }
 
     /// Park the next lookup once it decided its answer: the owner asking is
@@ -374,6 +551,44 @@ impl RetainedJobSource for FakeJobs {
             let _ = release.await;
         }
         answer
+    }
+
+    async fn host_original(
+        &self,
+        namespace: &str,
+        producer_id: &str,
+    ) -> meerkat::HostOriginalLookup {
+        self.lookups
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Some(error) = self.unavailable.lock().expect("lock").clone() {
+            return meerkat::HostOriginalLookup::Unavailable(error);
+        }
+        if !self.owns_namespace(namespace) {
+            return meerkat::HostOriginalLookup::Absent;
+        }
+        self.originals
+            .lock()
+            .expect("lock")
+            .get(producer_id)
+            .cloned()
+            .map_or(
+                meerkat::HostOriginalLookup::Absent,
+                meerkat::HostOriginalLookup::Found,
+            )
+    }
+
+    fn host_original_binder(
+        &self,
+        namespace: &str,
+    ) -> Option<Arc<dyn meerkat::HostOriginalBinder>> {
+        if !self.owns_namespace(namespace) {
+            return None;
+        }
+        self.binder
+            .lock()
+            .expect("lock")
+            .clone()
+            .map(|binder| binder as Arc<dyn meerkat::HostOriginalBinder>)
     }
 }
 
@@ -3808,6 +4023,70 @@ fn a_retained_admission_keeps_a_typed_readiness_cause() {
     );
 }
 
+/// A governed host original's native admission keeps its typed outcome: an
+/// actual denial is `AuthorityDenied` and malformed facts
+/// `NoAdmissibleWorkBinding` (both terminal), a re-prepare or a readiness
+/// failure is not ready with its cause, and anything else is retryable.
+#[test]
+fn a_governed_admission_keeps_its_typed_outcome() {
+    use meerkat::GovernedAdmissionOutcome;
+    use meerkat_core::OperationRefusalKind;
+    use meerkat_core::authorization::ControllerReadinessFailure;
+    use meerkat_runtime::RuntimeDeliveryRefusalReason::{AuthorityDenied, NoAdmissibleWorkBinding};
+    let refused = |kind| {
+        Err(meerkat_runtime::RuntimeDriverError::InputRefused {
+            refusal: meerkat_core::OperationRefused::new(kind),
+        })
+    };
+    let input = InputId::new();
+    assert_eq!(
+        meerkat::governed_admission_outcome(Ok(GovernedAdmissionOutcome::Accepted(input.clone()))),
+        Ok(input.clone())
+    );
+    assert_eq!(
+        meerkat::governed_admission_outcome(Ok(GovernedAdmissionOutcome::Deduplicated(
+            input.clone()
+        ))),
+        Ok(input)
+    );
+    assert_eq!(
+        meerkat::governed_admission_outcome(refused(OperationRefusalKind::Denied)),
+        Err(ContinuationAdmitError::Refused(AuthorityDenied))
+    );
+    assert_eq!(
+        meerkat::governed_admission_outcome(refused(OperationRefusalKind::MalformedFacts)),
+        Err(ContinuationAdmitError::Refused(NoAdmissibleWorkBinding))
+    );
+    assert_eq!(
+        meerkat::governed_admission_outcome(refused(OperationRefusalKind::ReprepareRequired)),
+        Err(ContinuationAdmitError::NotReady(
+            ControllerReadinessFailure::PolicyChanged
+        ))
+    );
+    assert_eq!(
+        meerkat::governed_admission_outcome(Err(
+            meerkat_runtime::RuntimeDriverError::ControllerReadinessUnavailable {
+                reason: ControllerReadinessFailure::TurnBoundaryHeld,
+            }
+        )),
+        Err(ContinuationAdmitError::NotReady(
+            ControllerReadinessFailure::TurnBoundaryHeld
+        ))
+    );
+    assert!(matches!(
+        meerkat::governed_admission_outcome(Err(meerkat_runtime::RuntimeDriverError::Internal(
+            "the store is offline".into()
+        ))),
+        Err(ContinuationAdmitError::Failed(_))
+    ));
+    assert!(matches!(
+        meerkat::governed_admission_outcome(Ok(GovernedAdmissionOutcome::NotAccepted(
+            "rejected".into()
+        ))),
+        Err(ContinuationAdmitError::Failed(_))
+    ));
+}
+
 async fn status_of(fixture: &Fixture, owner: &ContinuationOwner, key: &str) -> ContinuationStatus {
     fixture
         .continuations
@@ -3904,4 +4183,3229 @@ fn team_incarnation() -> meerkat_core::service::MobIncarnationId {
     "6a1d3c58-2f0e-4b7a-9c41-8e5d2b0f7a13"
         .parse()
         .expect("canonical mob incarnation id")
+}
+
+// ---------------------------------------------------------------------------
+// Retired addresses: a reservation left on an address that retired is
+// settled from the reserved session's ledger, and a stranded answer is
+// final: no admission follows it.
+// ---------------------------------------------------------------------------
+
+/// Retirements the test records, read by the delivery host and by the status
+/// read's resolver alike, as one host's records are.
+#[derive(Default)]
+struct Retirements(Mutex<std::collections::HashSet<LogicalRuntimeId>>);
+
+impl Retirements {
+    fn retire(&self, address: &LogicalRuntimeId) {
+        self.0.lock().expect("lock").insert(address.clone());
+    }
+
+    fn retired(&self, address: &LogicalRuntimeId) -> bool {
+        self.0.lock().expect("lock").contains(address)
+    }
+}
+
+/// The status read's resolver: session addresses, retired once recorded.
+/// `before_observe` runs inside the next observation, before it answers.
+struct RetiringResolver {
+    retirements: Arc<Retirements>,
+    before_observe: Mutex<Option<futures::future::BoxFuture<'static, ()>>>,
+}
+
+#[async_trait::async_trait]
+impl meerkat::ContinuationAddressResolver for RetiringResolver {
+    async fn current_address(
+        &self,
+        owner: &ContinuationOwner,
+    ) -> Result<Option<LogicalRuntimeId>, String> {
+        // A member of the mob `team`, at its first generation.
+        if let ContinuationOwner::Member { mob_id, identity } = owner {
+            return meerkat::member_delivery_address(mob_id, team_incarnation(), identity, 1)
+                .map(Some)
+                .map_err(|error| error.to_string());
+        }
+        meerkat::ContinuationAddressResolver::current_address(&SessionAddressResolver, owner).await
+    }
+
+    async fn resolve_address(
+        &self,
+        address: &LogicalRuntimeId,
+    ) -> Result<AddressResolution, String> {
+        if self.retirements.retired(address) {
+            return Ok(AddressResolution::Retired);
+        }
+        meerkat::ContinuationAddressResolver::resolve_address(&SessionAddressResolver, address)
+            .await
+    }
+
+    async fn observe_address(
+        &self,
+        address: &LogicalRuntimeId,
+    ) -> Result<meerkat::AddressObservation, String> {
+        let hook = self.before_observe.lock().expect("lock").take();
+        if let Some(hook) = hook {
+            hook.await;
+        }
+        Ok(if self.retirements.retired(address) {
+            meerkat::AddressObservation::Retired
+        } else {
+            meerkat::AddressObservation::MayServe
+        })
+    }
+}
+
+/// A delivery host over the same retirements: a retired address resolves
+/// Retired. A session in `elsewhere` is another runtime owner's. The next
+/// route asked can be parked: the pass has resolved its address then, and
+/// has reserved nothing yet.
+struct RetiringHost {
+    sink: Arc<RecordingSink>,
+    retirements: Arc<Retirements>,
+    /// The committed owner of host namespaces, when the host composes one.
+    job_source: Option<Arc<FakeJobs>>,
+    /// Addresses served by another session than their own (a repoint).
+    served_by: Mutex<HashMap<LogicalRuntimeId, SessionId>>,
+    elsewhere: Mutex<std::collections::HashSet<SessionId>>,
+    held_route: Mutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
+}
+
+impl RetiringHost {
+    fn new(sink: Arc<RecordingSink>, retirements: Arc<Retirements>) -> Arc<Self> {
+        Self::composed(sink, retirements, None)
+    }
+
+    /// As [`Self::new`], with `jobs` as the host's job source.
+    fn with_jobs(
+        sink: Arc<RecordingSink>,
+        retirements: Arc<Retirements>,
+        jobs: Arc<FakeJobs>,
+    ) -> Arc<Self> {
+        Self::composed(sink, retirements, Some(jobs))
+    }
+
+    fn composed(
+        sink: Arc<RecordingSink>,
+        retirements: Arc<Retirements>,
+        job_source: Option<Arc<FakeJobs>>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            sink,
+            retirements,
+            job_source,
+            served_by: Mutex::new(HashMap::new()),
+            elsewhere: Mutex::new(std::collections::HashSet::new()),
+            held_route: Mutex::new(None),
+        })
+    }
+
+    fn serve(&self, address: &LogicalRuntimeId, session: SessionId) {
+        self.served_by
+            .lock()
+            .expect("lock")
+            .insert(address.clone(), session);
+    }
+
+    /// Park the next route asked. The first receiver fires when it parks;
+    /// the route answers once the sender fires.
+    fn hold_next_route(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *self.held_route.lock().expect("lock") = Some((entered_tx, release_rx));
+        (entered_rx, release_tx)
+    }
+}
+
+#[async_trait::async_trait]
+impl RuntimeDeliveryHost for RetiringHost {
+    async fn delivery_route(&self, session_id: &SessionId) -> Option<meerkat::DeliveryRoute> {
+        let held = self.held_route.lock().expect("lock").take();
+        if let Some((entered, release)) = held {
+            let _ = entered.send(());
+            let _ = release.await;
+        }
+        if self.elsewhere.lock().expect("lock").contains(session_id) {
+            return Some(meerkat::DeliveryRoute::ServedElsewhere);
+        }
+        Some(meerkat::DeliveryRoute::ServedHere(Arc::new(NoJobs)))
+    }
+
+    async fn claim_cold_delivery(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<Result<meerkat_runtime::HostingClaim, meerkat_runtime::HostingRefused>> {
+        Some(meerkat_runtime::grant_session_hosting(
+            &meerkat_runtime::HostingCapability::ProcessLocal,
+            &meerkat_runtime::HostingOwner::mint(),
+            session_id,
+        ))
+    }
+
+    async fn resolve_address(&self, address: &LogicalRuntimeId) -> AddressResolution {
+        if self.retirements.retired(address) {
+            return AddressResolution::Retired;
+        }
+        if let Some(session) = self.served_by.lock().expect("lock").get(address) {
+            return AddressResolution::Session(session.clone());
+        }
+        meerkat::default_address_resolution(address)
+    }
+
+    async fn continuation_sink(
+        &self,
+        _session_id: &SessionId,
+    ) -> Option<Arc<dyn ContinuationDeliverySink>> {
+        Some(self.sink.clone() as Arc<dyn ContinuationDeliverySink>)
+    }
+
+    fn retained_job_source(&self) -> Option<Arc<dyn RetainedJobSource>> {
+        self.job_source
+            .clone()
+            .map(|jobs| jobs as Arc<dyn RetainedJobSource>)
+    }
+}
+
+/// A fixture whose status read observes `retirements` through `resolver`.
+struct RetiringFixture {
+    fixture: Fixture,
+    retirements: Arc<Retirements>,
+    resolver: Arc<RetiringResolver>,
+}
+
+impl RetiringFixture {
+    fn on(store: Arc<dyn RuntimeStore>, dir: Option<tempfile::TempDir>) -> Self {
+        let retirements = Arc::new(Retirements::default());
+        let resolver = Arc::new(RetiringResolver {
+            retirements: Arc::clone(&retirements),
+            before_observe: Mutex::new(None),
+        });
+        let inbox = RuntimeDeliveryInbox::new(store);
+        Self {
+            fixture: Fixture {
+                continuations: ContinuationOwnerService::new(
+                    inbox.clone(),
+                    resolver.clone(),
+                    Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
+                ),
+                inbox,
+                _dir: dir,
+            },
+            retirements,
+            resolver,
+        }
+    }
+
+    fn memory() -> Self {
+        Self::on(Arc::new(InMemoryRuntimeStore::new()), None)
+    }
+
+    #[cfg(feature = "sqlite-store")]
+    fn sqlite() -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = meerkat_runtime::SqliteRuntimeStore::new(dir.path().join("runtime.sqlite3"))
+            .expect("open sqlite runtime store");
+        Self::on(Arc::new(store), Some(dir))
+    }
+
+    async fn status(&self, owner: &ContinuationOwner, key: &str) -> ContinuationStatus {
+        self.fixture
+            .continuations
+            .continuation_status(owner, &ContinuationKey::new(key).expect("key"))
+            .await
+            .expect("status")
+    }
+
+    async fn admission_entry(
+        &self,
+        address: &LogicalRuntimeId,
+        delivery_id: &str,
+    ) -> Option<ContinuationAdmission> {
+        self.fixture
+            .inbox
+            .continuation_admission(
+                address,
+                &RuntimeDeliveryId::new(delivery_id.to_string()).expect("id"),
+            )
+            .await
+            .expect("admission index read")
+    }
+}
+
+/// Wait for the owner's first pass, its reconcile, which visits every
+/// runtime with a pending row.
+async fn wait_for_reconcile(passes: &mut watch::Receiver<RuntimeDeliveryPass>) {
+    wait_for_pass(passes, "the reconcile pass", |pass| pass.generation >= 1).await;
+}
+
+/// A drain resolved the address, then the address retired and a status read
+/// answered stranded. The drain, released, must admit nothing, so a resend
+/// under a new key is the only delivery.
+#[tokio::test]
+async fn a_drain_that_resolved_before_the_retire_admits_nothing_after_a_stranded_answer() {
+    let cut = RetiringFixture::memory();
+    let sink = Arc::new(RecordingSink::default());
+    let session = SessionId::new();
+    let owner = ContinuationOwner::Session {
+        session_id: session.clone(),
+    };
+    let receipt = cut
+        .fixture
+        .continuations
+        .submit(&owner, delivery("task-1", host_producer()), 1)
+        .await
+        .expect("commit");
+    let address = LogicalRuntimeId::new(receipt.address.clone());
+
+    let host = RetiringHost::new(sink.clone(), Arc::clone(&cut.retirements));
+    let (entered, release) = host.hold_next_route();
+    let handle = cut.fixture.owner().arm(host).expect("arm");
+    let mut passes = handle.subscribe_passes();
+    tokio::time::timeout(EVENT_GUARD, entered)
+        .await
+        .expect("the drain reached the session's route")
+        .expect("route hold");
+
+    cut.retirements.retire(&address);
+    let stranded = cut.status(&owner, "task-1").await;
+    assert!(
+        matches!(stranded, ContinuationStatus::Stranded { .. }),
+        "never admitted, and the address retired: {stranded:?}"
+    );
+
+    release.send(()).expect("release the drain");
+    wait_for_reconcile(&mut passes).await;
+    assert!(
+        sink.admissions().is_empty(),
+        "nothing is admitted after a stranded answer: {:?}",
+        sink.admissions()
+    );
+    let still = cut.status(&owner, "task-1").await;
+    assert!(
+        matches!(still, ContinuationStatus::Stranded { .. }),
+        "a stranded continuation stays stranded: {still:?}"
+    );
+}
+
+/// The same through a repoint: a crash left a reservation in s1, and the
+/// pass resolved the address to s2. The address retires while the drain is
+/// held. Released, the drain repoints to s2, observes the retire and
+/// releases the repointed reservation: nothing is admitted.
+#[tokio::test]
+async fn a_drain_that_repoints_after_the_retire_releases_the_repointed_reservation() {
+    let cut = RetiringFixture::memory();
+    let sink = Arc::new(RecordingSink::default());
+    let (s1, s2) = (SessionId::new(), SessionId::new());
+    let owner = ContinuationOwner::Session {
+        session_id: s1.clone(),
+    };
+    let receipt = cut
+        .fixture
+        .continuations
+        .submit(&owner, delivery("task-1", host_producer()), 1)
+        .await
+        .expect("commit");
+    let address = LogicalRuntimeId::new(receipt.address.clone());
+    cut.fixture
+        .admission(
+            &address,
+            &receipt.delivery_id,
+            ContinuationAdmissionTransition::Reserve {
+                session_id: s1.clone(),
+                input_id: InputId::new(),
+            },
+        )
+        .await;
+
+    let host = RetiringHost::new(sink.clone(), Arc::clone(&cut.retirements));
+    host.serve(&address, s2.clone());
+    let (entered, release) = host.hold_next_route();
+    let handle = cut.fixture.owner().arm(host).expect("arm");
+    let mut passes = handle.subscribe_passes();
+    tokio::time::timeout(EVENT_GUARD, entered)
+        .await
+        .expect("the drain reached the serving session's route")
+        .expect("route hold");
+
+    cut.retirements.retire(&address);
+    let reserved = cut.status(&owner, "task-1").await;
+    assert!(
+        matches!(reserved, ContinuationStatus::Pending { admitted: None, .. }),
+        "a reservation exists, so the read is not stranded: {reserved:?}"
+    );
+
+    release.send(()).expect("release the drain");
+    wait_for_reconcile(&mut passes).await;
+    assert!(
+        sink.admissions().is_empty(),
+        "nothing is admitted after the retire: {:?}",
+        sink.admissions()
+    );
+    assert_eq!(
+        cut.admission_entry(&address, &receipt.delivery_id).await,
+        None,
+        "the repointed reservation is released"
+    );
+    let stranded = cut.status(&owner, "task-1").await;
+    assert!(
+        matches!(stranded, ContinuationStatus::Stranded { .. }),
+        "never admitted, and the address retired: {stranded:?}"
+    );
+}
+
+/// A reservation the drain left before a crash, whose input never reached
+/// the reserved session, on an address that retired since: the owner settles
+/// it from that session's ledger, and the continuation reads stranded.
+async fn a_reservation_left_on_a_retired_address_without_its_input_reads_stranded(
+    cut: RetiringFixture,
+) {
+    let sink = Arc::new(RecordingSink::default());
+    let session = SessionId::new();
+    let owner = ContinuationOwner::Session {
+        session_id: session.clone(),
+    };
+    let receipt = cut
+        .fixture
+        .continuations
+        .submit(&owner, delivery("task-1", host_producer()), 1)
+        .await
+        .expect("commit");
+    let address = LogicalRuntimeId::new(receipt.address.clone());
+    cut.fixture
+        .admission(
+            &address,
+            &receipt.delivery_id,
+            ContinuationAdmissionTransition::Reserve {
+                session_id: session.clone(),
+                input_id: InputId::new(),
+            },
+        )
+        .await;
+    cut.retirements.retire(&address);
+
+    let handle = cut
+        .fixture
+        .owner()
+        .arm(RetiringHost::new(
+            sink.clone(),
+            Arc::clone(&cut.retirements),
+        ))
+        .expect("arm");
+    let mut passes = handle.subscribe_passes();
+    wait_for_reconcile(&mut passes).await;
+
+    let status = cut.status(&owner, "task-1").await;
+    assert!(
+        matches!(status, ContinuationStatus::Stranded { .. }),
+        "the reserved session never held the input: {status:?}"
+    );
+    assert!(sink.admissions().is_empty(), "nothing is admitted");
+    assert_eq!(
+        cut.admission_entry(&address, &receipt.delivery_id).await,
+        None,
+        "the reservation is released"
+    );
+}
+
+/// As above, but the input reached the reserved session before the crash:
+/// the owner records that admission, and the continuation reads admitted.
+async fn a_reservation_left_on_a_retired_address_with_its_input_reads_admitted(
+    cut: RetiringFixture,
+) {
+    let sink = Arc::new(RecordingSink::default());
+    let session = SessionId::new();
+    let owner = ContinuationOwner::Session {
+        session_id: session.clone(),
+    };
+    let receipt = cut
+        .fixture
+        .continuations
+        .submit(&owner, delivery("task-1", host_producer()), 1)
+        .await
+        .expect("commit");
+    let address = LogicalRuntimeId::new(receipt.address.clone());
+    let reserved = InputId::new();
+    cut.fixture
+        .admission(
+            &address,
+            &receipt.delivery_id,
+            ContinuationAdmissionTransition::Reserve {
+                session_id: session.clone(),
+                input_id: reserved.clone(),
+            },
+        )
+        .await;
+    sink.already_holds(
+        &session,
+        &continuation_input(reserved.clone(), &receipt.delivery_id, "result"),
+    );
+    cut.retirements.retire(&address);
+
+    let handle = cut
+        .fixture
+        .owner()
+        .arm(RetiringHost::new(
+            sink.clone(),
+            Arc::clone(&cut.retirements),
+        ))
+        .expect("arm");
+    let mut passes = handle.subscribe_passes();
+    wait_for_reconcile(&mut passes).await;
+
+    let status = cut.status(&owner, "task-1").await;
+    assert_eq!(
+        status,
+        ContinuationStatus::Pending {
+            receipt,
+            sequence: 1,
+            admitted: Some((session, reserved)),
+        },
+        "the reserved session holds the input"
+    );
+    assert!(sink.admissions().is_empty(), "nothing is admitted again");
+}
+
+/// As above, but the reserved session holds ANOTHER input under the
+/// admission key: never this delivery by key alone. The owner keeps the
+/// reservation, reports the conflict in its pass, and the continuation stays
+/// pending; nothing is applied.
+async fn a_reservation_left_on_a_retired_address_beside_another_input_stays_pending(
+    cut: RetiringFixture,
+) {
+    let sink = Arc::new(RecordingSink::default());
+    let session = SessionId::new();
+    let owner = ContinuationOwner::Session {
+        session_id: session.clone(),
+    };
+    let receipt = cut
+        .fixture
+        .continuations
+        .submit(&owner, delivery("task-1", host_producer()), 1)
+        .await
+        .expect("commit");
+    let address = LogicalRuntimeId::new(receipt.address.clone());
+    let reserved = InputId::new();
+    cut.fixture
+        .admission(
+            &address,
+            &receipt.delivery_id,
+            ContinuationAdmissionTransition::Reserve {
+                session_id: session.clone(),
+                input_id: reserved.clone(),
+            },
+        )
+        .await;
+    sink.holds_legacy_row(&session, &receipt.delivery_id);
+    cut.retirements.retire(&address);
+
+    let handle = cut
+        .fixture
+        .owner()
+        .arm(RetiringHost::new(
+            sink.clone(),
+            Arc::clone(&cut.retirements),
+        ))
+        .expect("arm");
+    let mut passes = handle.subscribe_passes();
+    let pass = wait_for_pass(&mut passes, "the reconcile pass", |pass| {
+        pass.generation >= 1
+    })
+    .await;
+    assert!(
+        pass.failures
+            .iter()
+            .any(|failure| failure.contains(&receipt.delivery_id)),
+        "the conflict is reported: {:?}",
+        pass.failures
+    );
+
+    let status = cut.status(&owner, "task-1").await;
+    assert!(
+        matches!(status, ContinuationStatus::Pending { admitted: None, .. }),
+        "another input is never this delivery: {status:?}"
+    );
+    assert_eq!(
+        cut.admission_entry(&address, &receipt.delivery_id).await,
+        Some(ContinuationAdmission::Reserved {
+            session_id: session,
+            input_id: reserved,
+        }),
+        "the reservation stays"
+    );
+    assert!(sink.admissions().is_empty(), "nothing is admitted");
+}
+
+macro_rules! retired_cut {
+    ($case:ident) => {
+        mod $case {
+            #[tokio::test]
+            async fn memory() {
+                super::$case(super::RetiringFixture::memory()).await;
+            }
+
+            #[cfg(feature = "sqlite-store")]
+            #[tokio::test]
+            async fn sqlite() {
+                super::$case(super::RetiringFixture::sqlite()).await;
+            }
+        }
+    };
+}
+
+retired_cut!(a_reservation_left_on_a_retired_address_without_its_input_reads_stranded);
+retired_cut!(a_reservation_left_on_a_retired_address_with_its_input_reads_admitted);
+retired_cut!(a_reservation_left_on_a_retired_address_beside_another_input_stays_pending);
+
+/// A reservation that lands between a status read's entry read and its
+/// observation of the retirement is seen: the read answers pending, never
+/// stranded. The owner then settles it from the reserved session's ledger.
+#[tokio::test]
+async fn a_reservation_made_while_the_status_observes_the_retire_reads_pending() {
+    let cut = RetiringFixture::memory();
+    let sink = Arc::new(RecordingSink::default());
+    let session = SessionId::new();
+    let owner = ContinuationOwner::Session {
+        session_id: session.clone(),
+    };
+    let receipt = cut
+        .fixture
+        .continuations
+        .submit(&owner, delivery("task-1", host_producer()), 1)
+        .await
+        .expect("commit");
+    let address = LogicalRuntimeId::new(receipt.address.clone());
+    cut.retirements.retire(&address);
+
+    let inbox = cut.fixture.inbox.clone();
+    let hook_address = address.clone();
+    let delivery_id = RuntimeDeliveryId::new(receipt.delivery_id.clone()).expect("id");
+    let hook_session = session.clone();
+    *cut.resolver.before_observe.lock().expect("lock") = Some(Box::pin(async move {
+        let outcome = inbox
+            .transition_continuation_admission(
+                &hook_address,
+                &delivery_id,
+                ContinuationAdmissionTransition::Reserve {
+                    session_id: hook_session,
+                    input_id: InputId::new(),
+                },
+            )
+            .await
+            .expect("admission index write");
+        assert!(
+            matches!(outcome, ContinuationAdmissionOutcome::Transitioned(_)),
+            "{outcome:?}"
+        );
+    }));
+    let status = cut.status(&owner, "task-1").await;
+    assert!(
+        matches!(status, ContinuationStatus::Pending { admitted: None, .. }),
+        "a reservation exists, so the read is not stranded: {status:?}"
+    );
+
+    let handle = cut
+        .fixture
+        .owner()
+        .arm(RetiringHost::new(
+            sink.clone(),
+            Arc::clone(&cut.retirements),
+        ))
+        .expect("arm");
+    let mut passes = handle.subscribe_passes();
+    wait_for_reconcile(&mut passes).await;
+    let settled = cut.status(&owner, "task-1").await;
+    assert!(
+        matches!(settled, ContinuationStatus::Stranded { .. }),
+        "the reserved session never held the input: {settled:?}"
+    );
+    assert!(sink.admissions().is_empty(), "nothing is admitted");
+}
+
+/// The owner settles a reservation only under the reserved session's
+/// custody: a session another runtime owner serves keeps its reservation
+/// for that owner, and the continuation stays pending.
+#[tokio::test]
+async fn a_reservation_on_a_retired_address_is_left_to_the_host_that_serves_its_session() {
+    let cut = RetiringFixture::memory();
+    let sink = Arc::new(RecordingSink::default());
+    let session = SessionId::new();
+    let owner = ContinuationOwner::Session {
+        session_id: session.clone(),
+    };
+    let receipt = cut
+        .fixture
+        .continuations
+        .submit(&owner, delivery("task-1", host_producer()), 1)
+        .await
+        .expect("commit");
+    let address = LogicalRuntimeId::new(receipt.address.clone());
+    let reserved = InputId::new();
+    cut.fixture
+        .admission(
+            &address,
+            &receipt.delivery_id,
+            ContinuationAdmissionTransition::Reserve {
+                session_id: session.clone(),
+                input_id: reserved.clone(),
+            },
+        )
+        .await;
+    cut.retirements.retire(&address);
+
+    let host = RetiringHost::new(sink.clone(), Arc::clone(&cut.retirements));
+    host.elsewhere.lock().expect("lock").insert(session.clone());
+    let handle = cut.fixture.owner().arm(host).expect("arm");
+    let mut passes = handle.subscribe_passes();
+    wait_for_reconcile(&mut passes).await;
+
+    let status = cut.status(&owner, "task-1").await;
+    assert!(
+        matches!(status, ContinuationStatus::Pending { admitted: None, .. }),
+        "another host serves the reserved session: {status:?}"
+    );
+    assert_eq!(
+        cut.admission_entry(&address, &receipt.delivery_id).await,
+        Some(ContinuationAdmission::Reserved {
+            session_id: session,
+            input_id: reserved,
+        }),
+        "the reservation is left to that host"
+    );
+    assert!(sink.admissions().is_empty(), "nothing is admitted");
+}
+
+/// A live address still drains, once, through the observation that follows
+/// its reservation.
+#[tokio::test]
+async fn a_live_address_still_drains_once_through_the_post_reserve_observation() {
+    let cut = RetiringFixture::memory();
+    let sink = Arc::new(RecordingSink::default());
+    let session = SessionId::new();
+    let owner = ContinuationOwner::Session {
+        session_id: session.clone(),
+    };
+    let handle = cut
+        .fixture
+        .owner()
+        .arm(RetiringHost::new(
+            sink.clone(),
+            Arc::clone(&cut.retirements),
+        ))
+        .expect("arm");
+    let mut passes = handle.subscribe_passes();
+    let receipt = cut
+        .fixture
+        .continuations
+        .submit(&owner, delivery("task-1", host_producer()), 1)
+        .await
+        .expect("commit");
+    let status = wait_for_status(&cut.fixture, &owner, "task-1", &mut passes, |status| {
+        matches!(status, ContinuationStatus::Applied { .. })
+    })
+    .await;
+    let admissions = sink.admissions();
+    assert_eq!(admissions.len(), 1, "admitted exactly once: {admissions:?}");
+    assert_eq!(
+        status,
+        ContinuationStatus::Applied {
+            receipt,
+            session,
+            input: admissions[0].2.clone(),
+        }
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Host-originated continuations on a governed runtime.
+//
+// The rows below assert behaviour only. Everything that depends on how a
+// host continuation is committed with its namespace's committed owner, how
+// that owner holds or disowns it, and what a governed sink admitted lives in
+// `host_continuation_shape`, the one place that changes when the governed
+// admission shape lands.
+// ---------------------------------------------------------------------------
+
+const INGEST_NAMESPACE: &str = "app.ingest";
+const OBSERVATION: &str = "observation-1";
+const OBSERVATION_DIGEST: &str = "sha256:observation-1";
+const OBSERVATION_KEY: &str = "ingest:observation-1";
+
+fn ingest_producer() -> ContinuationProducer {
+    ContinuationProducer::Host {
+        namespace: INGEST_NAMESPACE.into(),
+    }
+}
+
+/// One external observation, delivered under its host namespace.
+fn observation_delivery() -> ContinuationDelivery {
+    ContinuationDelivery {
+        key: ContinuationKey::new(OBSERVATION_KEY).expect("key"),
+        result: ContinuationResultRef {
+            producer: ingest_producer(),
+            producer_id: OBSERVATION.into(),
+            result_digest: OBSERVATION_DIGEST.into(),
+            summary: None,
+        },
+        body: "a new item arrived".into(),
+        handling: ContinuationHandling::Queue,
+    }
+}
+
+/// The namespace's committed owner, holding the observation owed to
+/// `session`.
+fn ingest_owner(session: &SessionId) -> Arc<FakeJobs> {
+    host_continuation_shape::owner_of(session)
+}
+
+/// Commit a permitted job notification behind the first row of `address`.
+async fn a_permitted_delivery_behind(
+    fixture: &Fixture,
+    address: &LogicalRuntimeId,
+    session: &SessionId,
+) {
+    let job_id = meerkat::JobId::generated();
+    fixture
+        .inbox
+        .submit(
+            address,
+            meerkat_runtime::RuntimeDeliverySubmission::new(
+                RuntimeDeliveryId::new("job:permitted:1").expect("id"),
+                meerkat_runtime::RuntimeDeliveryKind::JobNotification,
+                job_id.as_str(),
+                1,
+                "lineage",
+                serde_json::to_vec(&meerkat::JobNotificationDeliveryPayload {
+                    job_id: job_id.clone(),
+                    delivery_sequence: 1,
+                    origin_session_id: session.clone(),
+                    interaction_lineage_id: meerkat::InteractionLineageId::new(),
+                    targets: Vec::new(),
+                    notification: meerkat::JobNotification::new(
+                        "n-1", "n-1", "progress", "halfway",
+                    )
+                    .expect("notification"),
+                })
+                .expect("encode"),
+            )
+            .expect("submission"),
+        )
+        .await
+        .expect("a permitted delivery behind it");
+}
+
+/// The observation's status once the owner admitted or settled it.
+async fn settled_observation(
+    fixture: &Fixture,
+    owner: &ContinuationOwner,
+    passes: &mut watch::Receiver<RuntimeDeliveryPass>,
+) -> ContinuationStatus {
+    wait_for_status(fixture, owner, OBSERVATION_KEY, passes, |status| {
+        matches!(
+            status,
+            ContinuationStatus::Applied { .. }
+                | ContinuationStatus::Refused { .. }
+                | ContinuationStatus::Stranded { .. }
+        )
+    })
+    .await
+}
+
+/// On a governed runtime a host continuation that its namespace's committed
+/// owner confirms is admitted exactly once, into the session it is owed to,
+/// and never as an authority-free input. The owner is asked again at
+/// admission: a confirmation read at commit time is not enough.
+#[tokio::test]
+async fn a_confirmed_host_continuation_is_admitted_once_on_a_governed_runtime() {
+    let fixture = Fixture::new();
+    let session = SessionId::new();
+    let owner = ContinuationOwner::Session {
+        session_id: session.clone(),
+    };
+    let jobs = ingest_owner(&session);
+    let receipt = host_continuation_shape::commit(
+        &fixture.continuations,
+        &owner,
+        observation_delivery(),
+        &jobs,
+    )
+    .await
+    .expect("commit the host continuation from its namespace owner");
+    let asked_at_commit = jobs.lookups();
+    let sink = Arc::new(RecordingSink::governed());
+    let handle = fixture
+        .owner()
+        .arm(Host::with_jobs(sink.clone(), Arc::clone(&jobs)))
+        .expect("arm");
+    let mut passes = handle.subscribe_passes();
+    let (applied, admitted_session, input) =
+        match settled_observation(&fixture, &owner, &mut passes).await {
+            ContinuationStatus::Applied {
+                receipt,
+                session,
+                input,
+            } => (receipt, session, input),
+            other => panic!(
+                "a confirmed host continuation is admitted on a governed runtime, got {other:?}"
+            ),
+        };
+    assert_eq!(applied, receipt);
+    assert_eq!(admitted_session, session);
+    assert_eq!(
+        host_continuation_shape::admitted(&sink),
+        vec![(session.clone(), input)],
+        "admitted exactly once, into the session it is owed to"
+    );
+    assert!(
+        sink.admissions().is_empty(),
+        "never admitted as an authority-free input"
+    );
+    assert!(
+        jobs.lookups() > asked_at_commit,
+        "the namespace owner confirmed it again at admission"
+    );
+}
+
+/// A host continuation its namespace's committed owner does not confirm
+/// exactly is refused with the existing typed reason before anything is
+/// reserved or admitted, and the delivery behind it proceeds.
+async fn an_unconfirmed_host_continuation_is_refused(disown: host_continuation_shape::Disown) {
+    let fixture = Fixture::new();
+    let session = SessionId::new();
+    let owner = ContinuationOwner::Session {
+        session_id: session.clone(),
+    };
+    let jobs = ingest_owner(&session);
+    let receipt = host_continuation_shape::commit(
+        &fixture.continuations,
+        &owner,
+        observation_delivery(),
+        &jobs,
+    )
+    .await
+    .expect("commit while the namespace owner holds it");
+    host_continuation_shape::disown(&jobs, disown);
+    let address = LogicalRuntimeId::new(receipt.address.clone());
+    a_permitted_delivery_behind(&fixture, &address, &session).await;
+    let sink = Arc::new(RecordingSink::governed());
+    let handle = fixture
+        .owner()
+        .arm(Host::with_jobs(sink.clone(), Arc::clone(&jobs)))
+        .expect("arm");
+    let mut passes = handle.subscribe_passes();
+    let pass = wait_for_pass(
+        &mut passes,
+        "the unconfirmed host continuation settled",
+        |pass| pass.refused > 0,
+    )
+    .await;
+    assert_eq!(
+        pass.applied, 1,
+        "{disown:?}: the permitted delivery behind it is delivered"
+    );
+    assert!(
+        host_continuation_shape::admitted(&sink).is_empty()
+            && sink.admissions().is_empty()
+            && sink.resumes().is_empty(),
+        "{disown:?}: nothing was admitted"
+    );
+    assert_eq!(
+        fixture
+            .inbox
+            .continuation_admission(
+                &address,
+                &RuntimeDeliveryId::new(receipt.delivery_id.clone()).expect("id"),
+            )
+            .await
+            .expect("admission index"),
+        None,
+        "{disown:?}: nothing was reserved"
+    );
+    assert_eq!(
+        status_of(&fixture, &owner, OBSERVATION_KEY).await,
+        ContinuationStatus::Refused {
+            receipt,
+            sequence: 1,
+            reason: meerkat_runtime::RuntimeDeliveryRefusalReason::NoAdmissibleWorkBinding
+        },
+        "{disown:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_host_continuation_of_a_namespace_its_owner_does_not_hold_is_refused() {
+    an_unconfirmed_host_continuation_is_refused(host_continuation_shape::Disown::OtherNamespace)
+        .await;
+}
+
+#[tokio::test]
+async fn a_host_continuation_its_owner_holds_for_another_owner_is_refused() {
+    an_unconfirmed_host_continuation_is_refused(host_continuation_shape::Disown::OtherOwner).await;
+}
+
+#[tokio::test]
+async fn a_host_continuation_with_other_content_than_its_owner_committed_is_refused() {
+    an_unconfirmed_host_continuation_is_refused(host_continuation_shape::Disown::OtherResult).await;
+}
+
+#[tokio::test]
+async fn a_host_continuation_its_owner_no_longer_holds_is_refused() {
+    an_unconfirmed_host_continuation_is_refused(host_continuation_shape::Disown::Forgotten).await;
+}
+
+/// A namespace owner that cannot be read now decides nothing: the host
+/// continuation stays pending (never settled, never admitted) and is
+/// admitted once the owner answers again.
+#[tokio::test]
+async fn an_unreadable_namespace_owner_keeps_the_host_continuation_pending_until_it_answers() {
+    let fixture = Fixture::new();
+    let session = SessionId::new();
+    let owner = ContinuationOwner::Session {
+        session_id: session.clone(),
+    };
+    let jobs = ingest_owner(&session);
+    let receipt = host_continuation_shape::commit(
+        &fixture.continuations,
+        &owner,
+        observation_delivery(),
+        &jobs,
+    )
+    .await
+    .expect("commit the host continuation from its namespace owner");
+    *jobs.unavailable.lock().expect("lock") = Some("the namespace owner is offline".into());
+    let sink = Arc::new(RecordingSink::governed());
+    let (attachments, attachment_commits) = watch::channel(0_u64);
+    let handle = fixture
+        .owner()
+        .with_attachment_commits(attachment_commits)
+        .arm(Host::with_jobs(sink.clone(), Arc::clone(&jobs)))
+        .expect("arm");
+    let mut passes = handle.subscribe_passes();
+    let pass = wait_for_pass(
+        &mut passes,
+        "the host continuation blocked or settled",
+        |pass| pass.refused > 0 || !pass.blocked_runtimes.is_empty(),
+    )
+    .await;
+    assert_eq!(
+        pass.refused, 0,
+        "an owner that cannot be read decides nothing: {:?}",
+        pass.failures
+    );
+    assert!(
+        host_continuation_shape::admitted(&sink).is_empty() && sink.admissions().is_empty(),
+        "nothing is admitted while its owner cannot be read"
+    );
+    assert!(
+        matches!(
+            status_of(&fixture, &owner, OBSERVATION_KEY).await,
+            ContinuationStatus::Pending { .. }
+        ),
+        "pending, never settled"
+    );
+
+    *jobs.unavailable.lock().expect("lock") = None;
+    attachments.send_modify(|generation| *generation += 1);
+    let status = settled_observation(&fixture, &owner, &mut passes).await;
+    assert!(
+        matches!(&status, ContinuationStatus::Applied { receipt: applied, .. } if *applied == receipt),
+        "admitted once the owner confirms it, got {status:?}"
+    );
+    assert_eq!(host_continuation_shape::admitted(&sink).len(), 1);
+}
+
+/// Without a native work authorization host nothing changes: a host
+/// continuation, committed from its namespace owner or plainly, is admitted
+/// as the authority-free input it always was, and the namespace owner is
+/// never asked at admission (here it no longer even holds the namespace).
+#[tokio::test]
+async fn an_ungoverned_runtime_admits_host_continuations_as_before() {
+    let fixture = Fixture::new();
+    let session = SessionId::new();
+    let owner = ContinuationOwner::Session {
+        session_id: session.clone(),
+    };
+    let jobs = ingest_owner(&session);
+    let owned = host_continuation_shape::commit(
+        &fixture.continuations,
+        &owner,
+        observation_delivery(),
+        &jobs,
+    )
+    .await
+    .expect("commit the host continuation from its namespace owner");
+    let plain = fixture
+        .continuations
+        .submit(&owner, delivery("task-1", host_producer()), 1)
+        .await
+        .expect("commit a plain host continuation");
+    host_continuation_shape::disown(&jobs, host_continuation_shape::Disown::OtherNamespace);
+    let asked = jobs.lookups();
+    let sink = Arc::new(RecordingSink::default());
+    let handle = fixture
+        .owner()
+        .arm(Host::with_jobs(sink.clone(), Arc::clone(&jobs)))
+        .expect("arm");
+    let mut passes = handle.subscribe_passes();
+    let owned_status = settled_observation(&fixture, &owner, &mut passes).await;
+    let plain_status = wait_for_status(&fixture, &owner, "task-1", &mut passes, |status| {
+        matches!(status, ContinuationStatus::Applied { .. })
+    })
+    .await;
+    assert!(
+        matches!(&owned_status, ContinuationStatus::Applied { receipt, session: admitted, .. } if *receipt == owned && *admitted == session),
+        "{owned_status:?}"
+    );
+    assert!(
+        matches!(&plain_status, ContinuationStatus::Applied { receipt, session: admitted, .. } if *receipt == plain && *admitted == session),
+        "{plain_status:?}"
+    );
+    let admissions = sink.admissions();
+    assert_eq!(admissions.len(), 2, "each admitted once: {admissions:?}");
+    assert!(
+        admissions
+            .iter()
+            .all(|(admitted_session, _, _)| *admitted_session == session),
+        "into the owner's session: {admissions:?}"
+    );
+    assert!(
+        host_continuation_shape::admitted(&sink).is_empty(),
+        "no governed admission without a native work authorization host"
+    );
+    assert_eq!(
+        jobs.lookups(),
+        asked,
+        "the namespace owner is never asked at admission"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Governed host originals: the binder, the host's custody, recovery by the
+// reserved input id, and the refusals decided before anything is asked.
+// ---------------------------------------------------------------------------
+
+/// The observation committed for its session from its namespace owner, and
+/// what the rows below read about it.
+struct Observation {
+    fixture: Fixture,
+    session: SessionId,
+    owner: ContinuationOwner,
+    jobs: Arc<FakeJobs>,
+    receipt: meerkat::ContinuationReceipt,
+}
+
+/// A delivery owner armed over one host, woken by hand.
+struct Armed {
+    _handle: meerkat::RuntimeDeliveryOwnerHandle,
+    passes: watch::Receiver<RuntimeDeliveryPass>,
+    attachments: watch::Sender<u64>,
+}
+
+impl Armed {
+    /// Wake the owner as an attachment commit does: blocked rows retry.
+    fn wake(&self) {
+        self.attachments.send_modify(|generation| *generation += 1);
+    }
+}
+
+impl Observation {
+    async fn committed() -> Self {
+        let fixture = Fixture::new();
+        let session = SessionId::new();
+        let owner = ContinuationOwner::Session {
+            session_id: session.clone(),
+        };
+        let jobs = ingest_owner(&session);
+        let receipt = host_continuation_shape::commit(
+            &fixture.continuations,
+            &owner,
+            observation_delivery(),
+            &jobs,
+        )
+        .await
+        .expect("commit the observation from its namespace owner");
+        Self {
+            fixture,
+            session,
+            owner,
+            jobs,
+            receipt,
+        }
+    }
+
+    fn address(&self) -> LogicalRuntimeId {
+        LogicalRuntimeId::new(self.receipt.address.clone())
+    }
+
+    fn delivery_id(&self) -> RuntimeDeliveryId {
+        RuntimeDeliveryId::new(self.receipt.delivery_id.clone()).expect("id")
+    }
+
+    fn binder(&self) -> Arc<FakeBinder> {
+        binder_of(&self.jobs)
+    }
+
+    /// Core's exact continuation input for the observation under `input_id`.
+    fn input(&self, input_id: InputId) -> meerkat_runtime::Input {
+        continuation_input(input_id, &self.receipt.delivery_id, "a new item arrived")
+    }
+
+    /// The observation as its binder binds it now for `session`, under
+    /// `input_id`.
+    fn bound_for(&self, session: &SessionId, input_id: InputId) -> meerkat_runtime::Input {
+        self.binder().bind_now(
+            &governed_fixture::original_work(),
+            session,
+            self.input(input_id),
+        )
+    }
+
+    async fn reserve(&self, session: &SessionId, input_id: &InputId) {
+        self.fixture
+            .admission(
+                &self.address(),
+                &self.receipt.delivery_id,
+                ContinuationAdmissionTransition::Reserve {
+                    session_id: session.clone(),
+                    input_id: input_id.clone(),
+                },
+            )
+            .await;
+    }
+
+    async fn index(&self) -> Option<ContinuationAdmission> {
+        self.fixture
+            .inbox
+            .continuation_admission(&self.address(), &self.delivery_id())
+            .await
+            .expect("admission index")
+    }
+
+    async fn status(&self) -> ContinuationStatus {
+        status_of(&self.fixture, &self.owner, OBSERVATION_KEY).await
+    }
+
+    fn arm(&self, host: Arc<dyn RuntimeDeliveryHost>) -> Armed {
+        let (attachments, attachment_commits) = watch::channel(0_u64);
+        let handle = self
+            .fixture
+            .owner()
+            .with_attachment_commits(attachment_commits)
+            .arm(host)
+            .expect("arm");
+        Armed {
+            passes: handle.subscribe_passes(),
+            _handle: handle,
+            attachments,
+        }
+    }
+
+    /// Arm over `sink`, with the namespace owner as the host's job source.
+    fn arm_over(&self, sink: &Arc<RecordingSink>) -> Armed {
+        self.arm(Host::with_jobs(Arc::clone(sink), Arc::clone(&self.jobs)))
+    }
+
+    async fn settled(&self, armed: &mut Armed) -> ContinuationStatus {
+        settled_observation(&self.fixture, &self.owner, &mut armed.passes).await
+    }
+
+    /// The first pass that blocked (or settled) the observation's runtime.
+    async fn blocked(&self, armed: &mut Armed, what: &str) -> RuntimeDeliveryPass {
+        let address = self.address();
+        wait_for_pass(&mut armed.passes, what, |pass| {
+            pass.refused > 0 || pass.blocked_runtimes.contains(&address)
+        })
+        .await
+    }
+
+    fn refused(&self, reason: meerkat_runtime::RuntimeDeliveryRefusalReason) -> ContinuationStatus {
+        ContinuationStatus::Refused {
+            receipt: self.receipt.clone(),
+            sequence: 1,
+            reason,
+        }
+    }
+
+    fn applied(&self, session: &SessionId, input: &InputId) -> ContinuationStatus {
+        ContinuationStatus::Applied {
+            receipt: self.receipt.clone(),
+            session: session.clone(),
+            input: input.clone(),
+        }
+    }
+}
+
+fn custody_untouched(binder: &FakeBinder) -> bool {
+    binder.log.accepted.lock().expect("lock").is_empty()
+        && binder.log.retained.lock().expect("lock").is_empty()
+        && binder.log.dropped.load(std::sync::atomic::Ordering::SeqCst) == 0
+}
+
+fn custody_dropped_once(binder: &FakeBinder) -> bool {
+    binder.log.accepted.lock().expect("lock").is_empty()
+        && binder.log.retained.lock().expect("lock").is_empty()
+        && binder.log.dropped.load(std::sync::atomic::Ordering::SeqCst) == 1
+}
+
+/// The binder is handed Core's exact continuation input (its id, the
+/// admission key and the content, with no authority of its own) and the
+/// admitting session, made live first; it binds once, and native admission
+/// accepts exactly that bound input. The host's custody is promoted once, for
+/// that admission, and never dropped or retained.
+#[tokio::test]
+async fn a_host_original_is_bound_from_cores_exact_input_and_its_custody_promoted_once() {
+    let observation = Observation::committed().await;
+    let sink = Arc::new(RecordingSink::governed());
+    let mut armed = observation.arm_over(&sink);
+    let status = observation.settled(&mut armed).await;
+    let ContinuationStatus::Applied { session, input, .. } = status else {
+        panic!("a confirmed host original is admitted, got {status:?}");
+    };
+    assert_eq!(session, observation.session);
+    let binder = observation.binder();
+    let calls = binder.calls.lock().expect("lock").clone();
+    assert_eq!(calls.len(), 1, "bound once");
+    let (original, bound_for, handed) = &calls[0];
+    assert_eq!(original.namespace, INGEST_NAMESPACE);
+    assert_eq!(original.producer_id, OBSERVATION);
+    assert_eq!(original.owner, observation.owner);
+    assert!(
+        original.original_work == governed_fixture::original_work(),
+        "the original its namespace owner confirmed"
+    );
+    assert_eq!(bound_for, &observation.session);
+    assert_eq!(handed.id(), &input, "Core's own input id");
+    assert_eq!(
+        handed
+            .header()
+            .idempotency_key
+            .as_ref()
+            .map(ToString::to_string),
+        Some(observation.receipt.delivery_id.clone()),
+        "the admission key"
+    );
+    assert!(
+        handed.header().authority_association.is_none()
+            && handed.header().ingress_context.is_none(),
+        "handed over with no authority of its own"
+    );
+    let expected =
+        StoredInputState::accepted_for_test(&observation.input(input.clone())).expect("row");
+    meerkat_runtime::verify_exact_replay(&expected.state, handed)
+        .expect("the handed input is Core's exact continuation input");
+    let admitted = sink.governed_inputs();
+    assert_eq!(admitted.len(), 1, "admitted once");
+    assert_eq!(admitted[0].id(), &input, "the bound input, under Core's id");
+    assert!(
+        admitted[0].header().authority_association.is_some()
+            && admitted[0].header().ingress_context.is_some(),
+        "admitted with its binding"
+    );
+    assert_eq!(
+        sink.prepared.lock().expect("lock").clone(),
+        vec![observation.session.clone()],
+        "the session was made live before the bind"
+    );
+    let accepted = binder.log.accepted.lock().expect("lock").clone();
+    assert_eq!(accepted.len(), 1, "custody promoted once");
+    assert_eq!(
+        (
+            accepted[0].session.clone(),
+            accepted[0].input.clone(),
+            accepted[0].deduplicated
+        ),
+        (observation.session.clone(), input, false)
+    );
+    assert_eq!(
+        binder.log.dropped.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert!(binder.log.retained.lock().expect("lock").is_empty());
+}
+
+/// An observation reserved with its admitted row in the reserved session is
+/// applied by the reserved id, verified with the row's OWN recorded binding,
+/// and nobody is asked: not the namespace owner (which here holds it no
+/// more) and not the binder (which here would bind another destination
+/// generation, or deny). It is never refused later and never admitted again,
+/// also when the owner moved to another session since.
+async fn a_reserved_observation_with_its_admitted_row(sink: Arc<RecordingSink>, repointed: bool) {
+    let observation = Observation::committed().await;
+    let admitted = InputId::new();
+    let bound = observation.bound_for(&observation.session, admitted.clone());
+    sink.holds_by_id_only(&observation.session, &bound);
+    observation.reserve(&observation.session, &admitted).await;
+    host_continuation_shape::disown(
+        &observation.jobs,
+        host_continuation_shape::Disown::Forgotten,
+    );
+    let binder = observation.binder();
+    binder
+        .generation
+        .store(2, std::sync::atomic::Ordering::SeqCst);
+    *binder.verdict.lock().expect("lock") = Some(meerkat::HostOriginalRefusal::Denied);
+    let asked = observation.jobs.lookups();
+    let host = Host::with_jobs(Arc::clone(&sink), Arc::clone(&observation.jobs));
+    if repointed {
+        host.resolve(
+            &observation.address(),
+            AddressResolution::Session(SessionId::new()),
+        );
+    }
+    let mut armed = observation.arm(host);
+    let status = observation.settled(&mut armed).await;
+    assert_eq!(status, observation.applied(&observation.session, &admitted));
+    assert!(
+        sink.governed_inputs().is_empty() && sink.admissions().is_empty(),
+        "never admitted again"
+    );
+    assert_eq!(binder.calls(), 0, "the binder is not asked");
+    assert_eq!(
+        observation.jobs.lookups(),
+        asked,
+        "the namespace owner is not asked"
+    );
+}
+
+#[tokio::test]
+async fn a_reserved_host_original_with_its_admitted_row_is_applied_by_id_and_nobody_is_asked() {
+    a_reserved_observation_with_its_admitted_row(Arc::new(RecordingSink::governed()), false).await;
+}
+
+#[tokio::test]
+async fn a_host_original_admitted_before_a_repoint_is_applied_where_it_was_admitted() {
+    a_reserved_observation_with_its_admitted_row(Arc::new(RecordingSink::governed()), true).await;
+}
+
+/// A governed admission drained later by a sink that governs nothing is
+/// still found by its reserved id (its stored key is the qualified one, so a
+/// lookup by the raw admission key finds nothing) and applied, never
+/// admitted again.
+#[tokio::test]
+async fn an_ungoverned_drain_applies_a_governed_admission_by_its_reserved_id() {
+    a_reserved_observation_with_its_admitted_row(Arc::new(RecordingSink::default()), false).await;
+}
+
+/// An admission an ungoverned sink made (with no binding) and a governed
+/// drain later: applied by the reserved id with the row's own (absent)
+/// binding, never refused by the governed static checks and nobody is asked.
+#[tokio::test]
+async fn a_governed_drain_applies_an_ungoverned_admission_by_its_reserved_id() {
+    let observation = Observation::committed().await;
+    let admitted = InputId::new();
+    let sink = Arc::new(RecordingSink::governed());
+    sink.already_holds(&observation.session, &observation.input(admitted.clone()));
+    observation.reserve(&observation.session, &admitted).await;
+    host_continuation_shape::disown(
+        &observation.jobs,
+        host_continuation_shape::Disown::Forgotten,
+    );
+    let asked = observation.jobs.lookups();
+    let mut armed = observation.arm_over(&sink);
+    let status = observation.settled(&mut armed).await;
+    assert_eq!(status, observation.applied(&observation.session, &admitted));
+    assert!(sink.governed_inputs().is_empty() && sink.admissions().is_empty());
+    assert_eq!(observation.binder().calls(), 0);
+    assert_eq!(observation.jobs.lookups(), asked);
+}
+
+/// A reserved observation whose session holds no row under the reserved id
+/// was never admitted: it is bound fresh, for the destination's CURRENT
+/// generation, and admitted exactly once under the reserved id; after a
+/// repoint, into the session that serves its owner now.
+async fn a_reserved_observation_without_its_row(repointed: bool) {
+    let observation = Observation::committed().await;
+    let reserved = InputId::new();
+    let reserved_in = if repointed {
+        SessionId::new()
+    } else {
+        observation.session.clone()
+    };
+    observation.reserve(&reserved_in, &reserved).await;
+    let binder = observation.binder();
+    binder
+        .generation
+        .store(2, std::sync::atomic::Ordering::SeqCst);
+    let sink = Arc::new(RecordingSink::governed());
+    let mut armed = observation.arm_over(&sink);
+    let status = observation.settled(&mut armed).await;
+    assert_eq!(status, observation.applied(&observation.session, &reserved));
+    assert_eq!(
+        sink.governed_admissions(),
+        vec![(observation.session.clone(), reserved.clone())],
+        "admitted once, under the reserved id, where the owner is served now"
+    );
+    assert_eq!(binder.calls(), 1, "bound once");
+    let admitted = sink.governed_inputs();
+    assert_eq!(
+        admitted[0]
+            .header()
+            .authority_association
+            .as_ref()
+            .expect("bound")
+            .candidate()
+            .target
+            .context_generation,
+        2,
+        "bound fresh, for the destination's current generation"
+    );
+}
+
+#[tokio::test]
+async fn a_reserved_host_original_without_its_row_is_bound_fresh_and_admitted_once() {
+    a_reserved_observation_without_its_row(false).await;
+}
+
+#[tokio::test]
+async fn a_reserved_host_original_without_its_row_follows_a_repoint_and_is_admitted_once() {
+    a_reserved_observation_without_its_row(true).await;
+}
+
+/// An observation the admission index already applied is acknowledged
+/// whatever its namespace owner says now (here: it holds nothing and offers
+/// no binder), and nothing is asked or admitted.
+#[tokio::test]
+async fn an_applied_host_original_is_acknowledged_whatever_its_owner_says_now() {
+    let observation = Observation::committed().await;
+    let admitted = InputId::new();
+    observation.reserve(&observation.session, &admitted).await;
+    observation
+        .fixture
+        .admission(
+            &observation.address(),
+            &observation.receipt.delivery_id,
+            ContinuationAdmissionTransition::Apply {
+                session_id: observation.session.clone(),
+                input_id: admitted.clone(),
+            },
+        )
+        .await;
+    host_continuation_shape::disown(
+        &observation.jobs,
+        host_continuation_shape::Disown::Forgotten,
+    );
+    *observation.jobs.binder.lock().expect("lock") = None;
+    let asked = observation.jobs.lookups();
+    let sink = Arc::new(RecordingSink::governed());
+    let mut armed = observation.arm_over(&sink);
+    let status = observation.settled(&mut armed).await;
+    assert_eq!(status, observation.applied(&observation.session, &admitted));
+    assert!(sink.governed_inputs().is_empty() && sink.admissions().is_empty());
+    assert_eq!(observation.jobs.lookups(), asked);
+}
+
+/// The namespace owner's facts bind the exact delivery: the same namespace,
+/// producer id, result digest and owner with another body, or under another
+/// key, is refused before anything is bound or reserved.
+async fn an_observation_its_owner_now_describes_otherwise(
+    change: impl FnOnce(&mut meerkat::HostOriginalFacts),
+) {
+    let observation = Observation::committed().await;
+    observation.jobs.change_original(OBSERVATION, change);
+    let sink = Arc::new(RecordingSink::governed());
+    let mut armed = observation.arm_over(&sink);
+    let status = observation.settled(&mut armed).await;
+    assert_eq!(
+        status,
+        observation.refused(meerkat_runtime::RuntimeDeliveryRefusalReason::NoAdmissibleWorkBinding)
+    );
+    assert_eq!(observation.binder().calls(), 0, "never bound");
+    assert!(sink.governed_inputs().is_empty());
+    assert_eq!(observation.index().await, None, "nothing was reserved");
+}
+
+#[tokio::test]
+async fn a_host_original_whose_owner_holds_another_body_is_refused_unbound() {
+    an_observation_its_owner_now_describes_otherwise(|facts| {
+        facts.delivery.body = "another body".into();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_host_original_whose_owner_holds_it_under_another_key_is_refused_unbound() {
+    an_observation_its_owner_now_describes_otherwise(|facts| {
+        facts.delivery.key = ContinuationKey::new("ingest:another").expect("key");
+    })
+    .await;
+}
+
+/// Another external observation of the ingest namespace.
+fn another_observation(producer_id: &str) -> ContinuationDelivery {
+    ContinuationDelivery {
+        key: ContinuationKey::new(format!("ingest:{producer_id}")).expect("key"),
+        result: ContinuationResultRef {
+            producer: ingest_producer(),
+            producer_id: producer_id.into(),
+            result_digest: format!("sha256:{producer_id}"),
+            summary: None,
+        },
+        body: "another item arrived".into(),
+        handling: ContinuationHandling::Queue,
+    }
+}
+
+/// One original committed for two owners (the namespace owner first held it
+/// for one, then for the other): only the row of the owner its namespace
+/// owner confirms now is admitted. The other row has the same content and is
+/// refused through the key ledger, which binds the confirmed owner's key to
+/// the confirmed owner's row only.
+#[tokio::test]
+async fn one_original_committed_for_two_owners_admits_only_the_confirmed_owners_row() {
+    let fixture = Fixture::new();
+    let first = SessionId::new();
+    let second = SessionId::new();
+    let first_owner = ContinuationOwner::Session {
+        session_id: first.clone(),
+    };
+    let second_owner = ContinuationOwner::Session {
+        session_id: second.clone(),
+    };
+    let jobs = ingest_owner(&first);
+    let first_receipt = host_continuation_shape::commit(
+        &fixture.continuations,
+        &first_owner,
+        observation_delivery(),
+        &jobs,
+    )
+    .await
+    .expect("commit for the first owner");
+    jobs.change_original(OBSERVATION, |facts| facts.owner = second_owner.clone());
+    host_continuation_shape::commit(
+        &fixture.continuations,
+        &second_owner,
+        observation_delivery(),
+        &jobs,
+    )
+    .await
+    .expect("commit for the second owner");
+    let sink = Arc::new(RecordingSink::governed());
+    let handle = fixture
+        .owner()
+        .arm(Host::with_jobs(sink.clone(), Arc::clone(&jobs)))
+        .expect("arm");
+    let mut passes = handle.subscribe_passes();
+    let confirmed = wait_for_status(
+        &fixture,
+        &second_owner,
+        OBSERVATION_KEY,
+        &mut passes,
+        |status| matches!(status, ContinuationStatus::Applied { .. }),
+    )
+    .await;
+    let unconfirmed = wait_for_status(
+        &fixture,
+        &first_owner,
+        OBSERVATION_KEY,
+        &mut passes,
+        |status| matches!(status, ContinuationStatus::Refused { .. }),
+    )
+    .await;
+    assert_eq!(
+        unconfirmed,
+        ContinuationStatus::Refused {
+            receipt: first_receipt,
+            sequence: 1,
+            reason: meerkat_runtime::RuntimeDeliveryRefusalReason::NoAdmissibleWorkBinding
+        }
+    );
+    let ContinuationStatus::Applied { input, .. } = confirmed else {
+        unreachable!("waited for Applied");
+    };
+    assert_eq!(sink.governed_admissions(), vec![(second.clone(), input)]);
+    assert!(
+        binder_of(&jobs)
+            .calls
+            .lock()
+            .expect("lock")
+            .iter()
+            .all(|(_, session, _)| *session == second),
+        "bound only for the confirmed owner's session"
+    );
+}
+
+/// A binding that is not exactly Core's input with only its association set
+/// and a matching trusted ingress observation attached is refused
+/// `NoAdmissibleWorkBinding` before anything is reserved or handed to native
+/// admission, and the host's custody is dropped (withdrawn), never promoted
+/// or retained. One case per field a binder could get wrong.
+#[tokio::test]
+async fn a_tampered_binding_is_refused_before_admission_and_its_custody_dropped() {
+    let mut mismatches = Vec::new();
+    for tamper in [
+        Tamper::Content,
+        Tamper::Key,
+        Tamper::Id,
+        Tamper::NoAssociation,
+        Tamper::NoIngress,
+        Tamper::OtherRuntime,
+        Tamper::OtherOriginal,
+        Tamper::NoControllerLineage,
+        Tamper::IngressRequester,
+        Tamper::NoController,
+    ] {
+        let observation = Observation::committed().await;
+        let binder = observation.binder();
+        *binder.tamper.lock().expect("lock") = Some(tamper);
+        let sink = Arc::new(RecordingSink::governed());
+        let mut armed = observation.arm_over(&sink);
+        let status = observation.settled(&mut armed).await;
+        if status
+            != observation
+                .refused(meerkat_runtime::RuntimeDeliveryRefusalReason::NoAdmissibleWorkBinding)
+        {
+            mismatches.push(format!("{tamper:?}: {status:?}"));
+        }
+        if !sink.governed_inputs().is_empty() {
+            mismatches.push(format!("{tamper:?}: handed to native admission"));
+        }
+        if observation.index().await.is_some() {
+            mismatches.push(format!("{tamper:?}: reserved"));
+        }
+        if !custody_dropped_once(&binder) {
+            mismatches.push(format!("{tamper:?}: the custody was not dropped once"));
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
+/// Native admission that may have committed (settled `Uncertain`) leaves the
+/// observation pending with the host's custody retained unresolved, never
+/// promoted or dropped. The next attempt recovers it by the reserved id once
+/// the session holds that admission: applied, and nothing is bound or
+/// admitted again.
+#[tokio::test]
+async fn an_uncertain_native_admission_retains_the_custody_and_recovers_by_the_reserved_id() {
+    let observation = Observation::committed().await;
+    let sink = Arc::new(RecordingSink::governed());
+    *sink.governed_verdict.lock().expect("lock") = Some(GovernedVerdict::Uncertain);
+    let mut armed = observation.arm_over(&sink);
+    let pass = observation
+        .blocked(&mut armed, "the uncertain admission blocked")
+        .await;
+    assert_eq!(pass.refused, 0, "never refused: {:?}", pass.failures);
+    let binder = observation.binder();
+    assert_eq!(
+        binder.log.retained.lock().expect("lock").len(),
+        1,
+        "custody retained unresolved"
+    );
+    assert!(binder.log.accepted.lock().expect("lock").is_empty());
+    assert_eq!(
+        binder.log.dropped.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "never dropped"
+    );
+    let handed = sink.governed_inputs();
+    assert_eq!(handed.len(), 1);
+    let reserved = handed[0].id().clone();
+    assert_eq!(
+        observation.index().await,
+        Some(ContinuationAdmission::Reserved {
+            session_id: observation.session.clone(),
+            input_id: reserved.clone(),
+        })
+    );
+    assert!(matches!(
+        observation.status().await,
+        ContinuationStatus::Pending { .. }
+    ));
+
+    // The admission had committed: the session holds it under the reserved id.
+    sink.holds_by_id_only(&observation.session, &handed[0]);
+    *sink.governed_verdict.lock().expect("lock") = None;
+    let bound = binder.calls();
+    armed.wake();
+    let status = observation.settled(&mut armed).await;
+    assert_eq!(status, observation.applied(&observation.session, &reserved));
+    assert!(
+        sink.governed_admissions().is_empty(),
+        "never admitted again"
+    );
+    assert_eq!(binder.calls(), bound, "recovery binds nothing");
+}
+
+/// Commit a host original row that no submitter API writes (forced into the
+/// inbox): `delivery` with the marker, and `retained_work` when given.
+async fn forced_host_original(
+    fixture: &Fixture,
+    session: &SessionId,
+    delivery: &ContinuationDelivery,
+    retained_work: Option<RetainedWorkIdentity>,
+) -> (LogicalRuntimeId, RuntimeDeliveryId) {
+    let address = LogicalRuntimeId::for_session(session);
+    let delivery_id = RuntimeDeliveryId::new("continuation:forced-host-original").expect("id");
+    let mut payload = serde_json::to_value(delivery).expect("encode");
+    payload["host_original"] = serde_json::Value::Bool(true);
+    if let Some(identity) = retained_work {
+        payload["retained_work"] = serde_json::to_value(identity).expect("encode");
+    }
+    fixture
+        .inbox
+        .submit(
+            &address,
+            meerkat_runtime::RuntimeDeliverySubmission::new(
+                delivery_id.clone(),
+                meerkat_runtime::RuntimeDeliveryKind::Continuation,
+                "host:forced",
+                1,
+                delivery.key.as_str(),
+                serde_json::to_vec(&payload).expect("encode"),
+            )
+            .expect("submission"),
+        )
+        .await
+        .expect("commit the forced row");
+    (address, delivery_id)
+}
+
+/// A host original row no submitter API commits is refused
+/// `NoAdmissibleWorkBinding` on both postures before its namespace owner or
+/// binder is asked: one in a reserved namespace (here on a host whose bound
+/// source claims that namespace, holds the row exactly and offers a binder),
+/// one with retained work, and one of a non-host producer.
+#[tokio::test]
+async fn a_forced_host_original_row_is_refused_on_both_postures_without_asking_anyone() {
+    let reserved = ContinuationDelivery {
+        result: ContinuationResultRef {
+            producer: ContinuationProducer::Host {
+                namespace: "meerkat.consent".into(),
+            },
+            ..observation_delivery().result
+        },
+        ..observation_delivery()
+    };
+    let cases = [
+        ("a reserved namespace", reserved, None),
+        (
+            "retained work",
+            observation_delivery(),
+            Some(work_identity("forced")),
+        ),
+        (
+            "a non-host producer",
+            fork_completion("job-9", "sha256:result"),
+            None,
+        ),
+    ];
+    let mut mismatches = Vec::new();
+    for (case, delivery, retained_work) in cases {
+        for governed in [true, false] {
+            let fixture = Fixture::new();
+            let session = SessionId::new();
+            let jobs = ingest_owner(&session);
+            if matches!(delivery.result.producer, ContinuationProducer::Host { .. }) {
+                *jobs.producer.lock().expect("lock") = Some(delivery.result.producer.clone());
+                jobs.change_original(OBSERVATION, |facts| facts.delivery = delivery.clone());
+            }
+            let (address, delivery_id) =
+                forced_host_original(&fixture, &session, &delivery, retained_work.clone()).await;
+            let sink = Arc::new(if governed {
+                RecordingSink::governed()
+            } else {
+                RecordingSink::default()
+            });
+            let asked = jobs.lookups();
+            let handle = fixture
+                .owner()
+                .arm(Host::with_jobs(sink.clone(), Arc::clone(&jobs)))
+                .expect("arm");
+            let mut passes = handle.subscribe_passes();
+            wait_for_pass(&mut passes, "the forced row settled", |pass| {
+                pass.refused > 0 || pass.applied > 0 || !pass.blocked_runtimes.is_empty()
+            })
+            .await;
+            let status = fixture
+                .inbox
+                .delivery_status(&address, &delivery_id)
+                .await
+                .expect("delivery status");
+            if !matches!(
+                status,
+                meerkat_runtime::RuntimeDeliveryStatus::Refused {
+                    reason: meerkat_runtime::RuntimeDeliveryRefusalReason::NoAdmissibleWorkBinding,
+                    ..
+                }
+            ) {
+                mismatches.push(format!("{case}, governed {governed}: {status:?}"));
+            }
+            if !sink.admissions().is_empty() || !sink.governed_inputs().is_empty() {
+                mismatches.push(format!("{case}, governed {governed}: admitted"));
+            }
+            if binder_of(&jobs).calls() != 0 || jobs.lookups() != asked {
+                mismatches.push(format!("{case}, governed {governed}: asked"));
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
+/// A steering host original committed while the runtime was ungoverned is
+/// refused typed on a governed runtime, never bound, and the delivery behind
+/// it proceeds: a governed host original joins its owner after the current
+/// turn (queue) only.
+#[tokio::test]
+async fn a_steering_host_original_is_refused_on_a_governed_runtime_and_the_row_behind_proceeds() {
+    let fixture = Fixture::new();
+    let session = SessionId::new();
+    let owner = ContinuationOwner::Session {
+        session_id: session.clone(),
+    };
+    let jobs = ingest_owner(&session);
+    let steering = ContinuationDelivery {
+        handling: ContinuationHandling::Steer,
+        ..observation_delivery()
+    };
+    jobs.change_original(OBSERVATION, |facts| facts.delivery = steering.clone());
+    let receipt = host_continuation_shape::commit(&fixture.continuations, &owner, steering, &jobs)
+        .await
+        .expect("an ungoverned runtime commits a steering host original");
+    let address = LogicalRuntimeId::new(receipt.address.clone());
+    a_permitted_delivery_behind(&fixture, &address, &session).await;
+    let sink = Arc::new(RecordingSink::governed());
+    let handle = fixture
+        .owner()
+        .arm(Host::with_jobs(sink.clone(), Arc::clone(&jobs)))
+        .expect("arm");
+    let mut passes = handle.subscribe_passes();
+    let pass = wait_for_pass(&mut passes, "the steering row settled", |pass| {
+        pass.refused > 0
+    })
+    .await;
+    assert_eq!(pass.applied, 1, "the delivery behind it proceeds");
+    assert_eq!(
+        status_of(&fixture, &owner, OBSERVATION_KEY).await,
+        ContinuationStatus::Refused {
+            receipt,
+            sequence: 1,
+            reason: meerkat_runtime::RuntimeDeliveryRefusalReason::NoAdmissibleWorkBinding
+        }
+    );
+    assert_eq!(binder_of(&jobs).calls(), 0, "never bound");
+    assert!(sink.governed_inputs().is_empty());
+}
+
+/// A governed sink that admits governed host originals but keeps the default
+/// by-id read: it cannot tell whether a reserved id was admitted.
+#[derive(Default)]
+struct NoByIdSink {
+    governed_admissions: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl ContinuationDeliverySink for NoByIdSink {
+    async fn admit(
+        &self,
+        _session: &SessionId,
+        _input: meerkat_runtime::Input,
+    ) -> Result<InputId, String> {
+        panic!("a governed runtime never receives an unbound continuation")
+    }
+
+    async fn admitted_input(
+        &self,
+        _session: &SessionId,
+        _admission_key: &str,
+    ) -> Result<Option<StoredInputState>, String> {
+        Ok(None)
+    }
+
+    fn governs_work_authority(&self) -> bool {
+        true
+    }
+
+    fn admits_governed(&self) -> bool {
+        true
+    }
+
+    async fn admit_governed(
+        &self,
+        _session: &SessionId,
+        input: meerkat_runtime::Input,
+        custody: Box<dyn meerkat_runtime::input_admission_custody::NativeInputAdmissionCustody>,
+    ) -> Result<meerkat::GovernedAdmissionOutcome, meerkat_runtime::RuntimeDriverError> {
+        self.governed_admissions
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let _ = custody.settle(
+            meerkat_runtime::input_admission_custody::NativeInputAdmissionSettlement::Admitted,
+        );
+        Ok(meerkat::GovernedAdmissionOutcome::Accepted(
+            input.id().clone(),
+        ))
+    }
+}
+
+/// A sink that cannot read an input by its id leaves a reserved observation
+/// pending: an unknown answer is never read as "nothing was admitted", so it
+/// is never bound or admitted again.
+#[tokio::test]
+async fn a_sink_without_a_by_id_read_keeps_a_reserved_host_original_pending() {
+    let observation = Observation::committed().await;
+    let reserved = InputId::new();
+    observation.reserve(&observation.session, &reserved).await;
+    let sink = Arc::new(NoByIdSink::default());
+    let mut armed = observation.arm(Host::with_other_sink(
+        sink.clone(),
+        Arc::clone(&observation.jobs),
+    ));
+    let pass = observation
+        .blocked(&mut armed, "the reserved observation blocked")
+        .await;
+    assert_eq!(pass.refused, 0, "never refused: {:?}", pass.failures);
+    assert_eq!(
+        sink.governed_admissions
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "never admitted again"
+    );
+    assert_eq!(observation.binder().calls(), 0, "never bound");
+    assert!(matches!(
+        observation.status().await,
+        ContinuationStatus::Pending { .. }
+    ));
+    assert_eq!(
+        observation.index().await,
+        Some(ContinuationAdmission::Reserved {
+            session_id: observation.session.clone(),
+            input_id: reserved,
+        })
+    );
+}
+
+/// A native replay that deduplicates onto an existing input stands for the
+/// observation only as its exact admission: applied as that input, with the
+/// retry's custody withdrawn (dropped), never promoted. Onto another input it
+/// is a visible conflict that stays pending.
+async fn a_deduplicated_observation(exact: bool) {
+    let observation = Observation::committed().await;
+    let existing = InputId::new();
+    let sink = Arc::new(RecordingSink::governed());
+    let held = if exact {
+        observation.bound_for(&observation.session, existing.clone())
+    } else {
+        observation.binder().bind_now(
+            &governed_fixture::original_work(),
+            &observation.session,
+            continuation_input(
+                existing.clone(),
+                &observation.receipt.delivery_id,
+                "another body",
+            ),
+        )
+    };
+    sink.holds_by_id_only(&observation.session, &held);
+    *sink.governed_verdict.lock().expect("lock") =
+        Some(GovernedVerdict::DeduplicatedOnto(existing.clone()));
+    let mut armed = observation.arm_over(&sink);
+    let binder = observation.binder();
+    if exact {
+        let status = observation.settled(&mut armed).await;
+        assert_eq!(status, observation.applied(&observation.session, &existing));
+    } else {
+        let pass = observation
+            .blocked(&mut armed, "the conflicting replay blocked")
+            .await;
+        assert_eq!(
+            pass.refused, 0,
+            "a conflict is never settled: {:?}",
+            pass.failures
+        );
+        assert!(matches!(
+            observation.status().await,
+            ContinuationStatus::Pending { .. }
+        ));
+    }
+    assert!(
+        custody_dropped_once(&binder),
+        "the retry's custody is dropped"
+    );
+    assert!(
+        sink.governed_admissions().is_empty(),
+        "nothing new admitted"
+    );
+}
+
+#[tokio::test]
+async fn a_deduplicated_host_original_is_applied_as_the_existing_input_and_its_custody_dropped() {
+    a_deduplicated_observation(true).await;
+}
+
+#[tokio::test]
+async fn a_host_original_deduplicated_onto_another_input_is_a_visible_conflict() {
+    a_deduplicated_observation(false).await;
+}
+
+/// A host custody that cannot be promoted after its admission never blocks
+/// the observation: it is applied and acknowledged (the failure is reported
+/// in tracing).
+#[tokio::test]
+async fn a_failed_custody_promotion_still_applies_the_admitted_host_original() {
+    let observation = Observation::committed().await;
+    let binder = observation.binder();
+    *binder.accept_error.lock().expect("lock") = Some("the host's custody store is offline".into());
+    let sink = Arc::new(RecordingSink::governed());
+    let mut armed = observation.arm_over(&sink);
+    let status = observation.settled(&mut armed).await;
+    let admitted = sink.governed_admissions();
+    assert_eq!(admitted.len(), 1);
+    assert_eq!(
+        status,
+        observation.applied(&observation.session, &admitted[0].1)
+    );
+    assert_eq!(binder.log.accepted.lock().expect("lock").len(), 1);
+    assert_eq!(
+        binder.log.dropped.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+}
+
+/// A binder that cannot bind for one runtime now (its turn boundary is held)
+/// keeps only that runtime's observation pending, typed; another runtime's
+/// observation is admitted in the same pass, and the first is admitted once
+/// the binder can bind.
+#[tokio::test]
+async fn a_binder_not_ready_for_one_runtime_never_delays_another() {
+    let fixture = Fixture::new();
+    let busy = SessionId::new();
+    let idle = SessionId::new();
+    let busy_owner = ContinuationOwner::Session {
+        session_id: busy.clone(),
+    };
+    let idle_owner = ContinuationOwner::Session {
+        session_id: idle.clone(),
+    };
+    let jobs = ingest_owner(&busy);
+    let second = another_observation("observation-2");
+    jobs.originals.lock().expect("lock").insert(
+        "observation-2".into(),
+        meerkat::HostOriginalFacts::new(
+            idle_owner.clone(),
+            second.clone(),
+            governed_fixture::original_work(),
+        ),
+    );
+    host_continuation_shape::commit(
+        &fixture.continuations,
+        &busy_owner,
+        observation_delivery(),
+        &jobs,
+    )
+    .await
+    .expect("commit for the busy session");
+    host_continuation_shape::commit(&fixture.continuations, &idle_owner, second, &jobs)
+        .await
+        .expect("commit for the idle session");
+    let binder = binder_of(&jobs);
+    binder.not_ready.lock().expect("lock").push(busy.clone());
+    let sink = Arc::new(RecordingSink::governed());
+    let (attachments, attachment_commits) = watch::channel(0_u64);
+    let handle = fixture
+        .owner()
+        .with_attachment_commits(attachment_commits)
+        .arm(Host::with_jobs(sink.clone(), Arc::clone(&jobs)))
+        .expect("arm");
+    let mut passes = handle.subscribe_passes();
+    let pass = wait_for_pass(&mut passes, "one admitted while the other waits", |pass| {
+        pass.applied >= 1
+            && pass
+                .failures
+                .iter()
+                .any(|line| line.contains("NotReady(TurnBoundaryHeld)"))
+    })
+    .await;
+    assert_eq!(pass.refused, 0, "never refused: {:?}", pass.failures);
+    assert_eq!(
+        sink.governed_admissions()
+            .into_iter()
+            .map(|(session, _)| session)
+            .collect::<Vec<_>>(),
+        vec![idle.clone()]
+    );
+    assert!(matches!(
+        status_of(&fixture, &busy_owner, OBSERVATION_KEY).await,
+        ContinuationStatus::Pending { .. }
+    ));
+    binder.not_ready.lock().expect("lock").clear();
+    attachments.send_modify(|generation| *generation += 1);
+    wait_for_status(
+        &fixture,
+        &busy_owner,
+        OBSERVATION_KEY,
+        &mut passes,
+        |status| matches!(status, ContinuationStatus::Applied { .. }),
+    )
+    .await;
+    assert_eq!(sink.governed_admissions().len(), 2);
+}
+
+/// Native admission that is not ready (a realm whose owners are not
+/// installed answers `PolicyUnavailable`) keeps the observation pending with
+/// its typed cause, never refused, and drops the custody; once ready it is
+/// admitted under the id reserved for it.
+#[tokio::test]
+async fn a_native_readiness_failure_keeps_the_host_original_pending_until_ready() {
+    let observation = Observation::committed().await;
+    let sink = Arc::new(RecordingSink::governed());
+    *sink.governed_verdict.lock().expect("lock") = Some(GovernedVerdict::NotReady);
+    let mut armed = observation.arm_over(&sink);
+    let pass = wait_for_pass(&mut armed.passes, "pending with its typed cause", |pass| {
+        pass.refused > 0
+            || pass
+                .failures
+                .iter()
+                .any(|line| line.contains("NotReady(PolicyUnavailable)"))
+    })
+    .await;
+    assert_eq!(pass.refused, 0, "never refused: {:?}", pass.failures);
+    let binder = observation.binder();
+    assert!(custody_dropped_once(&binder), "nothing was admitted");
+    let reserved = sink.governed_inputs()[0].id().clone();
+    *sink.governed_verdict.lock().expect("lock") = None;
+    armed.wake();
+    let status = observation.settled(&mut armed).await;
+    assert_eq!(status, observation.applied(&observation.session, &reserved));
+    assert_eq!(
+        sink.governed_admissions(),
+        vec![(observation.session.clone(), reserved)]
+    );
+}
+
+/// The binder's verdicts: `Denied` refuses the observation for good
+/// (`AuthorityDenied`); `NotOwned`, and a namespace owner that offers no
+/// binder, refuse it `NoAdmissibleWorkBinding`; a binder that cannot be read
+/// keeps it pending. Nothing is reserved or admitted, and no custody exists.
+#[tokio::test]
+async fn the_binders_verdicts_settle_or_keep_the_host_original_pending() {
+    use meerkat_runtime::RuntimeDeliveryRefusalReason::{AuthorityDenied, NoAdmissibleWorkBinding};
+    let cases = [
+        (
+            "denied",
+            Some(meerkat::HostOriginalRefusal::Denied),
+            true,
+            Some(AuthorityDenied),
+        ),
+        (
+            "not owned",
+            Some(meerkat::HostOriginalRefusal::NotOwned),
+            true,
+            Some(NoAdmissibleWorkBinding),
+        ),
+        ("no binder", None, false, Some(NoAdmissibleWorkBinding)),
+        (
+            "unavailable",
+            Some(meerkat::HostOriginalRefusal::Unavailable(
+                "the host is restarting".into(),
+            )),
+            true,
+            None,
+        ),
+    ];
+    let mut mismatches = Vec::new();
+    for (case, verdict, offers_binder, refused) in cases {
+        let observation = Observation::committed().await;
+        let binder = observation.binder();
+        *binder.verdict.lock().expect("lock") = verdict;
+        if !offers_binder {
+            *observation.jobs.binder.lock().expect("lock") = None;
+        }
+        let sink = Arc::new(RecordingSink::governed());
+        let mut armed = observation.arm_over(&sink);
+        let status = match refused {
+            Some(_) => observation.settled(&mut armed).await,
+            None => {
+                observation
+                    .blocked(&mut armed, "the observation blocked")
+                    .await;
+                observation.status().await
+            }
+        };
+        let expected = match refused {
+            Some(reason) => {
+                matches!(&status, ContinuationStatus::Refused { reason: settled, .. } if *settled == reason)
+            }
+            None => matches!(status, ContinuationStatus::Pending { .. }),
+        };
+        if !expected {
+            mismatches.push(format!("{case}: {status:?}"));
+        }
+        if !sink.governed_inputs().is_empty() || observation.index().await.is_some() {
+            mismatches.push(format!("{case}: reserved or admitted"));
+        }
+        if !custody_untouched(&binder) {
+            mismatches.push(format!("{case}: a custody exists"));
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
+/// Native admission's actual verdicts settle the observation with their
+/// typed reason (a denial `AuthorityDenied`, malformed facts
+/// `NoAdmissibleWorkBinding`), and the custody is dropped, never promoted.
+#[tokio::test]
+async fn native_refusals_settle_the_host_original_and_drop_its_custody() {
+    use meerkat_runtime::RuntimeDeliveryRefusalReason::{AuthorityDenied, NoAdmissibleWorkBinding};
+    let mut mismatches = Vec::new();
+    for (verdict, reason) in [
+        (GovernedVerdict::Denied, AuthorityDenied),
+        (GovernedVerdict::Malformed, NoAdmissibleWorkBinding),
+    ] {
+        let observation = Observation::committed().await;
+        let sink = Arc::new(RecordingSink::governed());
+        *sink.governed_verdict.lock().expect("lock") = Some(verdict.clone());
+        let mut armed = observation.arm_over(&sink);
+        let status = observation.settled(&mut armed).await;
+        if status != observation.refused(reason) {
+            mismatches.push(format!("{verdict:?}: {status:?}"));
+        }
+        if !custody_dropped_once(&observation.binder()) {
+            mismatches.push(format!("{verdict:?}: the custody was not dropped once"));
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
+/// On a governed runtime with no namespace owner bound yet, a host original
+/// decides nothing: it stays pending (never settled) and is admitted once the
+/// host binds its continuation services.
+#[tokio::test]
+async fn without_a_bound_namespace_owner_a_host_original_stays_pending_until_bound() {
+    let observation = Observation::committed().await;
+    let sink = Arc::new(RecordingSink::governed());
+    let bindings = Arc::new(meerkat::ContinuationHostBindings::default());
+    let handle = observation
+        .fixture
+        .owner()
+        .with_source_changes(bindings.subscribe_source_changes())
+        .arm(Arc::new(BindingsHost {
+            bindings: Arc::clone(&bindings),
+            sink: sink.clone(),
+        }))
+        .expect("arm");
+    let mut armed = Armed {
+        passes: handle.subscribe_passes(),
+        _handle: handle,
+        attachments: watch::channel(0_u64).0,
+    };
+    let pass = observation
+        .blocked(&mut armed, "the unbound observation blocked")
+        .await;
+    assert_eq!(pass.refused, 0, "never settled: {:?}", pass.failures);
+    assert!(sink.governed_inputs().is_empty());
+    let _binding = bindings
+        .bind(Arc::new(SessionAddressResolver), observation.jobs.clone())
+        .expect("bind");
+    let status = observation.settled(&mut armed).await;
+    assert!(
+        matches!(&status, ContinuationStatus::Applied { session, .. } if *session == observation.session),
+        "{status:?}"
+    );
+    assert_eq!(sink.governed_admissions().len(), 1);
+}
+
+/// The setup signal reads the BOUND composition: an ungoverned runtime admits
+/// as before; a governed one without bound services is unbound; a reserved
+/// namespace (whatever the source claims) or a namespace the source offers no
+/// binder for is not offered; otherwise it is the binder's precheck now. It
+/// asks the precheck once per question and never confirms, binds or admits.
+#[tokio::test]
+async fn host_original_readiness_reads_the_bound_composition_and_never_binds() {
+    use meerkat::{HostOriginalBinderReadiness as Binder, HostOriginalReadiness as Readiness};
+    use meerkat_core::authorization::ControllerReadinessFailure;
+    let session = SessionId::new();
+    let owner = ContinuationOwner::Session {
+        session_id: session.clone(),
+    };
+    let ungoverned = meerkat_runtime::MeerkatMachine::ephemeral();
+    let governed = meerkat_runtime::MeerkatMachine::ephemeral()
+        .with_native_work_authorization_host(Arc::new(RefusingWorkAuthority))
+        .expect("install the native work authorization host");
+    let bindings = meerkat::ContinuationHostBindings::default();
+    assert_eq!(
+        bindings
+            .host_original_readiness(&governed, INGEST_NAMESPACE, &owner)
+            .await,
+        Readiness::Unbound
+    );
+    let jobs = ingest_owner(&session);
+    let _binding = bindings
+        .bind(Arc::new(SessionAddressResolver), jobs.clone())
+        .expect("bind");
+    let binder = binder_of(&jobs);
+    assert_eq!(
+        bindings
+            .host_original_readiness(&ungoverned, INGEST_NAMESPACE, &owner)
+            .await,
+        Readiness::Ungoverned
+    );
+    assert_eq!(
+        bindings
+            .host_original_readiness(&governed, INGEST_NAMESPACE, &owner)
+            .await,
+        Readiness::Offered(Binder::Ready)
+    );
+    assert_eq!(
+        bindings
+            .host_original_readiness(&governed, "app.other", &owner)
+            .await,
+        Readiness::NotOffered,
+        "a namespace the source offers no binder for"
+    );
+    *binder.readiness.lock().expect("lock") = Some(Binder::Denied);
+    assert_eq!(
+        bindings
+            .host_original_readiness(&governed, INGEST_NAMESPACE, &owner)
+            .await,
+        Readiness::Offered(Binder::Denied)
+    );
+    *binder.readiness.lock().expect("lock") = Some(Binder::NotReady(
+        ControllerReadinessFailure::TurnBoundaryHeld,
+    ));
+    assert_eq!(
+        bindings
+            .host_original_readiness(&governed, INGEST_NAMESPACE, &owner)
+            .await,
+        Readiness::Offered(Binder::NotReady(
+            ControllerReadinessFailure::TurnBoundaryHeld
+        ))
+    );
+    *jobs.producer.lock().expect("lock") = Some(ContinuationProducer::Host {
+        namespace: "meerkat.consent".into(),
+    });
+    assert_eq!(
+        bindings
+            .host_original_readiness(&governed, "meerkat.consent", &owner)
+            .await,
+        Readiness::NotOffered,
+        "a reserved namespace is never offered, whatever the source claims"
+    );
+    assert_eq!(
+        binder
+            .readiness_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        3,
+        "one precheck per offered question, none for the reserved namespace"
+    );
+    assert_eq!(binder.calls(), 0, "never binds");
+    assert_eq!(jobs.lookups(), 0, "never confirms an original");
+}
+
+/// The only code of the host continuation rows that depends on the governed
+/// admission shape: how a host continuation is committed from its
+/// namespace's committed owner, how that owner holds or disowns it, and what
+/// a governed sink admitted. The rows above assert behaviour only and do not
+/// change when the shape lands.
+///
+/// The shape: a host original is committed through
+/// `ContinuationOwnerService::submit_host_original` from its namespace
+/// owner's record, confirmed again by the bound owner at each admission, and
+/// bound by the owner's binder for the admitting session.
+mod host_continuation_shape {
+    use super::*;
+
+    /// How a row makes the namespace owner stop confirming a committed host
+    /// continuation.
+    #[derive(Debug, Clone, Copy)]
+    pub(super) enum Disown {
+        /// The owner holds another namespace.
+        OtherNamespace,
+        /// The owner holds it for another owner.
+        OtherOwner,
+        /// The owner committed other content.
+        OtherResult,
+        /// The owner holds it no more.
+        Forgotten,
+    }
+
+    /// The namespace's committed owner, holding the observation owed to
+    /// `session` and offering a binder for its namespace.
+    pub(super) fn owner_of(session: &SessionId) -> Arc<FakeJobs> {
+        let jobs = Arc::new(FakeJobs::default());
+        *jobs.producer.lock().expect("lock") = Some(ingest_producer());
+        jobs.originals.lock().expect("lock").insert(
+            OBSERVATION.to_string(),
+            meerkat::HostOriginalFacts::new(
+                ContinuationOwner::Session {
+                    session_id: session.clone(),
+                },
+                observation_delivery(),
+                super::governed_fixture::original_work(),
+            ),
+        );
+        *jobs.binder.lock().expect("lock") = Some(Arc::new(FakeBinder::default()));
+        jobs
+    }
+
+    pub(super) fn disown(jobs: &FakeJobs, disown: Disown) {
+        match disown {
+            Disown::OtherNamespace => {
+                *jobs.producer.lock().expect("lock") = Some(ContinuationProducer::Host {
+                    namespace: "app.other".into(),
+                });
+            }
+            Disown::OtherOwner => jobs.change_original(OBSERVATION, |facts| {
+                facts.owner = ContinuationOwner::Session {
+                    session_id: SessionId::new(),
+                };
+            }),
+            Disown::OtherResult => jobs.change_original(OBSERVATION, |facts| {
+                facts.delivery.result.result_digest = "sha256:another-observation".into();
+            }),
+            Disown::Forgotten => {
+                jobs.originals.lock().expect("lock").remove(OBSERVATION);
+            }
+        }
+    }
+
+    /// Commit `delivery` for `owner` from its namespace owner's record.
+    pub(super) async fn commit(
+        continuations: &ContinuationOwnerService,
+        owner: &ContinuationOwner,
+        delivery: ContinuationDelivery,
+        jobs: &FakeJobs,
+    ) -> Result<meerkat::ContinuationReceipt, meerkat::ContinuationSubmitError> {
+        let ContinuationProducer::Host { namespace } = &delivery.result.producer else {
+            return Err(meerkat::ContinuationSubmitError::Invalid(
+                "not a host".into(),
+            ));
+        };
+        let record = meerkat::HostOriginalRecord::from_owner(
+            jobs,
+            namespace.clone(),
+            delivery.result.producer_id.clone(),
+        )
+        .await
+        .map_err(meerkat::ContinuationSubmitError::Unavailable)?
+        .ok_or(meerkat::ContinuationSubmitError::NoAdmissibleWorkBinding)?;
+        continuations
+            .submit_host_original(owner, delivery, &record, 1)
+            .await
+    }
+
+    /// What `sink` admitted through a governed admission, in order: the
+    /// session and the input.
+    pub(super) fn admitted(sink: &RecordingSink) -> Vec<(SessionId, InputId)> {
+        sink.governed_admissions()
+    }
+}
+
+/// A trusted host's governed claims and binder, as test data: an
+/// association naming the admitting session's runtime and the confirmed
+/// original, a trusted ingress observation and a pinned controller client.
+mod governed_fixture {
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    use super::*;
+    use meerkat_authorization_contracts::constraints::{
+        AudienceRef, ExecutionRestrictions, ResourceDomain,
+    };
+    use meerkat_authorization_contracts::evidence::{
+        EvidenceDigest, EvidenceId, HistoricalEvidenceRef,
+    };
+    use meerkat_authorization_contracts::protocol::ContractRequirements;
+    use meerkat_authorization_contracts::resource::ResourceRef;
+    use meerkat_authorization_contracts::work_association::{
+        GrantLineageRef, InputAuthorityAssociation, InputAuthorityAssociationCandidate,
+        NativeWorkTarget, QualifiedIngressNamespace, WorkAuthorityBasis,
+    };
+    use meerkat_core::connection::RealmId;
+    use meerkat_core::{PrincipalKind, PrincipalRef, TrustDomainId};
+
+    pub(super) fn id(value: &str) -> EvidenceId {
+        EvidenceId::new(value).expect("fixture id")
+    }
+
+    pub(super) fn principal(value: &str) -> PrincipalRef {
+        PrincipalRef::in_domain(
+            PrincipalKind::ServiceAccount,
+            value,
+            TrustDomainId::new("host-test").expect("domain"),
+        )
+        .expect("qualified")
+    }
+
+    fn evidence(value: &str) -> HistoricalEvidenceRef {
+        HistoricalEvidenceRef {
+            resource: ResourceRef {
+                domain: ResourceDomain {
+                    authority: principal("source-owner"),
+                    namespace: "observations".into(),
+                },
+                resource_id: value.into(),
+            },
+            revision: id("r1"),
+            digest: EvidenceDigest::from_array([7; 32]),
+        }
+    }
+
+    fn realm() -> RealmId {
+        RealmId::parse("host-test").expect("realm")
+    }
+
+    /// The original whose authority the observation's binding names.
+    pub(super) fn original_work() -> meerkat_runtime::OriginalWorkRef {
+        meerkat_runtime::OriginalWorkRef {
+            authority: principal("source-owner"),
+            work: id("observation-1"),
+        }
+    }
+
+    pub(super) fn selection() -> meerkat_core::ControllerModelSelection {
+        meerkat_core::ControllerModelSelection::new(
+            meerkat_core::SessionLlmIdentity {
+                model: "controller".into(),
+                provider: meerkat_core::Provider::OpenAI,
+                self_hosted_server_id: None,
+                provider_params: None,
+                auth_binding: None,
+            },
+            serde_json::from_value(serde_json::json!({"realm": "host-test", "account": "member"}))
+                .expect("credential identity"),
+            "profile".into(),
+            "fixture".into(),
+        )
+    }
+
+    /// A pinned controller that never runs a model.
+    struct Controller(meerkat_core::ControllerModelSelection);
+
+    #[async_trait::async_trait]
+    impl meerkat_core::AgentLlmClient for Controller {
+        fn controller_model_selection(&self) -> Option<meerkat_core::ControllerModelSelection> {
+            Some(self.0.clone())
+        }
+
+        async fn stream_response(
+            &self,
+            _: &[meerkat_core::Message],
+            _: &[Arc<meerkat_core::ToolDef>],
+            _: u32,
+            _: Option<f32>,
+            _: Option<&meerkat_core::ProviderParamsOverride>,
+        ) -> Result<meerkat_core::LlmStreamResult, meerkat_core::AgentError> {
+            panic!("the host original fixture never runs a model")
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            self.0.provider()
+        }
+
+        fn model(&self) -> &str {
+            self.0.model()
+        }
+    }
+
+    /// What a binder may get wrong, one field at a time.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) enum Tamper {
+        Content,
+        Key,
+        Id,
+        NoAssociation,
+        NoIngress,
+        OtherRuntime,
+        OtherOriginal,
+        NoControllerLineage,
+        IngressRequester,
+        NoController,
+    }
+
+    /// The host's custody record of what happened to the settlements it
+    /// handed over.
+    #[derive(Default)]
+    pub(super) struct SettlementLog {
+        pub(super) accepted: Mutex<Vec<meerkat::HostOriginalAdmission>>,
+        pub(super) dropped: AtomicUsize,
+        pub(super) retained: Mutex<Vec<String>>,
+    }
+
+    struct Settlement {
+        log: Arc<SettlementLog>,
+        settled: bool,
+        accept_error: Option<String>,
+    }
+
+    impl meerkat::HostOriginalSettlement for Settlement {
+        fn accepted(
+            mut self: Box<Self>,
+            admission: &meerkat::HostOriginalAdmission,
+        ) -> Result<(), String> {
+            self.settled = true;
+            self.log
+                .accepted
+                .lock()
+                .expect("lock")
+                .push(admission.clone());
+            match self.accept_error.take() {
+                Some(error) => Err(error),
+                None => Ok(()),
+            }
+        }
+    }
+
+    impl Drop for Settlement {
+        fn drop(&mut self) {
+            if !self.settled {
+                self.log.dropped.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    /// A trusted host's binder of the observation namespace.
+    #[derive(Default)]
+    pub(super) struct FakeBinder {
+        pub(super) log: Arc<SettlementLog>,
+        /// Every bind asked: what Core confirmed, the session and the input
+        /// it handed over.
+        pub(super) calls: Mutex<Vec<(meerkat::HostOriginalRef, SessionId, meerkat_runtime::Input)>>,
+        pub(super) verdict: Mutex<Option<meerkat::HostOriginalRefusal>>,
+        /// Sessions the binder cannot bind now (a held turn boundary).
+        pub(super) not_ready: Mutex<Vec<SessionId>>,
+        pub(super) tamper: Mutex<Option<Tamper>>,
+        /// The destination generation the binding names.
+        pub(super) generation: AtomicU64,
+        pub(super) accept_error: Mutex<Option<String>>,
+        pub(super) readiness: Mutex<Option<meerkat::HostOriginalBinderReadiness>>,
+        pub(super) readiness_calls: AtomicUsize,
+        unresolved: Mutex<Vec<Box<dyn meerkat::HostOriginalSettlement>>>,
+    }
+
+    impl FakeBinder {
+        pub(super) fn calls(&self) -> usize {
+            self.calls.lock().expect("lock").len()
+        }
+
+        /// Bind `input` for `session` as a correct host would, naming
+        /// `original_work`.
+        pub(super) fn bind_now(
+            &self,
+            original_work: &meerkat_runtime::OriginalWorkRef,
+            session: &SessionId,
+            input: meerkat_runtime::Input,
+        ) -> meerkat_runtime::Input {
+            bind_input(
+                original_work,
+                session,
+                input,
+                self.generation.load(Ordering::SeqCst),
+                None,
+            )
+        }
+    }
+
+    pub(super) fn association(
+        session: &SessionId,
+        original_work: &meerkat_runtime::OriginalWorkRef,
+        generation: u64,
+        tamper: Option<Tamper>,
+    ) -> InputAuthorityAssociation {
+        let runtime = if tamper == Some(Tamper::OtherRuntime) {
+            LogicalRuntimeId::for_session(&SessionId::new()).to_string()
+        } else {
+            LogicalRuntimeId::for_session(session).to_string()
+        };
+        let original_work = if tamper == Some(Tamper::OtherOriginal) {
+            meerkat_runtime::OriginalWorkRef {
+                authority: principal("source-owner"),
+                work: id("another-observation"),
+            }
+        } else {
+            original_work.clone()
+        };
+        let controller_grant_lineage = if tamper == Some(Tamper::NoControllerLineage) {
+            Vec::new()
+        } else {
+            vec![GrantLineageRef {
+                root_authority: principal("grant-owner"),
+                authority_namespace: id("controller"),
+                authority_generation: 1,
+                authority_incarnation: serde_json::from_value(serde_json::json!(
+                    "00000000-0000-4000-8000-000000000001"
+                ))
+                .expect("fixture incarnation"),
+                grant_id: id("controller-leaf"),
+                issued_revision: 1,
+            }]
+        };
+        InputAuthorityAssociation::new(InputAuthorityAssociationCandidate {
+            requester: principal("commissioner"),
+            ingress_actor: principal("collector"),
+            represented_subject: None,
+            original_authentication: evidence("observation-authentication"),
+            logical_executor: principal("member"),
+            target: NativeWorkTarget {
+                logical_owner: principal("host"),
+                logical_runtime: id(&runtime),
+                context: id("context"),
+                context_generation: generation,
+                audience: AudienceRef::Principal {
+                    principal: principal("audience"),
+                },
+            },
+            original_work,
+            root_event: evidence("observation"),
+            contributing_work: Vec::new(),
+            authority_basis: WorkAuthorityBasis::HostPolicy {
+                policy: evidence("ingest-policy"),
+            },
+            controller_grant_lineage,
+            controller_model: Some(selection()),
+            controller_ceiling: ExecutionRestrictions::unrestricted(),
+            admitted_ceiling: ExecutionRestrictions::unrestricted(),
+            source_observations: Vec::new(),
+            ingress_namespace: QualifiedIngressNamespace {
+                realm: realm(),
+                ingress: ResourceDomain {
+                    authority: principal("collector"),
+                    namespace: "observations".into(),
+                },
+                occurrence_scope: id("occurrence"),
+            },
+            contract: ContractRequirements::local_governed_v1(),
+        })
+        .expect("well-formed claims")
+    }
+
+    /// Bind `input` as a host does: set only the association, then attach a
+    /// trusted ingress observation and the pinned controller to the final
+    /// input. `tamper` makes one deliberate mistake.
+    pub(super) fn bind_input(
+        original_work: &meerkat_runtime::OriginalWorkRef,
+        session: &SessionId,
+        input: meerkat_runtime::Input,
+        generation: u64,
+        tamper: Option<Tamper>,
+    ) -> meerkat_runtime::Input {
+        let meerkat_runtime::Input::Prompt(mut prompt) = input else {
+            panic!("a continuation is a prompt");
+        };
+        if tamper != Some(Tamper::NoAssociation) {
+            prompt.header.authority_association =
+                Some(association(session, original_work, generation, tamper));
+        }
+        match tamper {
+            Some(Tamper::Content) => prompt.content = "another body".into(),
+            Some(Tamper::Key) => {
+                prompt.header.idempotency_key =
+                    Some(meerkat_runtime::IdempotencyKey::new("another-key"));
+            }
+            Some(Tamper::Id) => prompt.header.id = InputId::new(),
+            _ => {}
+        }
+        let input = meerkat_runtime::Input::Prompt(prompt);
+        if tamper == Some(Tamper::NoIngress) {
+            return input;
+        }
+        let requester = if tamper == Some(Tamper::IngressRequester) {
+            principal("someone-else")
+        } else {
+            principal("commissioner")
+        };
+        let ingress = meerkat_runtime::input_authority::NativeIngressContext::from_trusted_ingress(
+            &input,
+            requester,
+            principal("collector"),
+            realm(),
+            evidence("observation-authentication"),
+        )
+        .expect("ingress");
+        let ingress =
+            if tamper == Some(Tamper::NoController) || tamper == Some(Tamper::NoAssociation) {
+                ingress
+            } else {
+                ingress
+                    .with_controller_client(
+                        &input,
+                        meerkat_core::ControllerModelClient::new(
+                            selection(),
+                            Arc::new(Controller(selection())),
+                        ),
+                    )
+                    .expect("the pinned controller")
+            };
+        input
+            .with_ingress_context(ingress)
+            .expect("bound to the final input")
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat::HostOriginalBinder for FakeBinder {
+        async fn bind(
+            &self,
+            original: &meerkat::HostOriginalRef,
+            session: &SessionId,
+            input: meerkat_runtime::Input,
+        ) -> Result<meerkat::BoundHostOriginal, meerkat::HostOriginalRefusal> {
+            self.calls.lock().expect("lock").push((
+                original.clone(),
+                session.clone(),
+                input.clone(),
+            ));
+            if self.not_ready.lock().expect("lock").contains(session) {
+                return Err(meerkat::HostOriginalRefusal::NotReady(
+                    meerkat_core::authorization::ControllerReadinessFailure::TurnBoundaryHeld,
+                ));
+            }
+            if let Some(verdict) = self.verdict.lock().expect("lock").clone() {
+                return Err(verdict);
+            }
+            let tamper = *self.tamper.lock().expect("lock");
+            let bound = bind_input(
+                &original.original_work,
+                session,
+                input,
+                self.generation.load(Ordering::SeqCst),
+                tamper,
+            );
+            Ok(meerkat::BoundHostOriginal::new(
+                bound,
+                Box::new(Settlement {
+                    log: Arc::clone(&self.log),
+                    settled: false,
+                    accept_error: self.accept_error.lock().expect("lock").clone(),
+                }),
+            ))
+        }
+
+        async fn readiness(
+            &self,
+            _namespace: &str,
+            _owner: &ContinuationOwner,
+        ) -> meerkat::HostOriginalBinderReadiness {
+            self.readiness_calls.fetch_add(1, Ordering::SeqCst);
+            self.readiness
+                .lock()
+                .expect("lock")
+                .clone()
+                .unwrap_or(meerkat::HostOriginalBinderReadiness::Ready)
+        }
+
+        fn retain_unresolved(
+            &self,
+            settlement: Box<dyn meerkat::HostOriginalSettlement>,
+            detail: &str,
+        ) {
+            self.log
+                .retained
+                .lock()
+                .expect("lock")
+                .push(detail.to_string());
+            // Kept, never dropped: the host settles it later from the
+            // runtime's own record.
+            self.unresolved.lock().expect("lock").push(settlement);
+        }
+    }
+}
+
+use governed_fixture::{FakeBinder, Tamper};
+
+/// The binder the namespace owner offers.
+fn binder_of(jobs: &FakeJobs) -> Arc<FakeBinder> {
+    jobs.binder.lock().expect("lock").clone().expect("a binder")
+}
+
+// ---------------------------------------------------------------------------
+// Retired addresses meet governed host originals: a stranded answer stays
+// final on the binder's path too, and a reservation left on a retired address
+// is settled by the reserved id, as the drain recovers it.
+// ---------------------------------------------------------------------------
+
+/// The member `lead` of the mob `team`, owed the observation.
+fn lead_of_team() -> ContinuationOwner {
+    ContinuationOwner::Member {
+        mob_id: "team".into(),
+        identity: "lead".into(),
+    }
+}
+
+/// The observation committed for the member `lead`, whose namespace owner
+/// holds it for that member, on a fixture whose status read sees the
+/// retirements: the receipt and the owner.
+async fn a_member_observation(
+    cut: &RetiringFixture,
+    session: &SessionId,
+) -> (meerkat::ContinuationReceipt, Arc<FakeJobs>) {
+    let jobs = ingest_owner(session);
+    jobs.change_original(OBSERVATION, |facts| facts.owner = lead_of_team());
+    let receipt = host_continuation_shape::commit(
+        &cut.fixture.continuations,
+        &lead_of_team(),
+        observation_delivery(),
+        &jobs,
+    )
+    .await
+    .expect("commit the member's observation from its namespace owner");
+    assert!(
+        LogicalRuntimeId::new(receipt.address.clone())
+            .member_address()
+            .expect("address")
+            .is_some(),
+        "the observation is owed at a member address"
+    );
+    (receipt, jobs)
+}
+
+/// The drain resolved the member's address and parked at its session's
+/// route; then the address retired (a respawn, or the mob created again
+/// under its id) and a status read answered stranded. Released, the drain
+/// binds the observation and reserves it, observes the retire before native
+/// admission, releases the reservation and withdraws the binder's custody:
+/// nothing is admitted after the stranded answer.
+#[tokio::test]
+async fn a_member_host_original_whose_address_retires_before_native_admission_admits_nothing() {
+    let cut = RetiringFixture::memory();
+    let session = SessionId::new();
+    let (receipt, jobs) = a_member_observation(&cut, &session).await;
+    let address = LogicalRuntimeId::new(receipt.address.clone());
+    let sink = Arc::new(RecordingSink::governed());
+    let host = RetiringHost::with_jobs(
+        sink.clone(),
+        Arc::clone(&cut.retirements),
+        Arc::clone(&jobs),
+    );
+    host.serve(&address, session.clone());
+    let (entered, release) = host.hold_next_route();
+    let handle = cut.fixture.owner().arm(host).expect("arm");
+    let mut passes = handle.subscribe_passes();
+    tokio::time::timeout(EVENT_GUARD, entered)
+        .await
+        .expect("the drain reached the member's session route")
+        .expect("route hold");
+
+    cut.retirements.retire(&address);
+    let stranded = cut.status(&lead_of_team(), OBSERVATION_KEY).await;
+    assert!(
+        matches!(stranded, ContinuationStatus::Stranded { .. }),
+        "never admitted, and the address retired: {stranded:?}"
+    );
+
+    release.send(()).expect("release the drain");
+    wait_for_reconcile(&mut passes).await;
+    assert!(
+        sink.governed_inputs().is_empty(),
+        "nothing reaches native admission after a stranded answer: {:?}",
+        sink.governed_admissions()
+    );
+    assert_eq!(
+        cut.admission_entry(&address, &receipt.delivery_id).await,
+        None,
+        "the reservation is released"
+    );
+    let binder = binder_of(&jobs);
+    assert_eq!(binder.calls(), 1, "bound once, before the observation");
+    assert!(
+        custody_dropped_once(&binder),
+        "the binder's custody is withdrawn, never promoted or retained"
+    );
+    let still = cut.status(&lead_of_team(), OBSERVATION_KEY).await;
+    assert!(
+        matches!(still, ContinuationStatus::Stranded { .. }),
+        "a stranded continuation stays stranded: {still:?}"
+    );
+}
+
+/// The same through a repoint: an earlier attempt left a reservation in s1
+/// with nothing admitted, and the member's address now resolves to s2. The
+/// address retires while the drain is parked, so a status read sees the
+/// reservation and answers pending. Released, the drain repoints the reserved
+/// id to s2, binds for s2, observes the retire, releases the repointed
+/// reservation and withdraws the custody: nothing is admitted, and the
+/// continuation reads stranded.
+#[tokio::test]
+async fn a_repointed_member_host_original_whose_address_retires_releases_its_reservation() {
+    let cut = RetiringFixture::memory();
+    let (s1, s2) = (SessionId::new(), SessionId::new());
+    let (receipt, jobs) = a_member_observation(&cut, &s2).await;
+    let address = LogicalRuntimeId::new(receipt.address.clone());
+    cut.fixture
+        .admission(
+            &address,
+            &receipt.delivery_id,
+            ContinuationAdmissionTransition::Reserve {
+                session_id: s1.clone(),
+                input_id: InputId::new(),
+            },
+        )
+        .await;
+    let sink = Arc::new(RecordingSink::governed());
+    let host = RetiringHost::with_jobs(
+        sink.clone(),
+        Arc::clone(&cut.retirements),
+        Arc::clone(&jobs),
+    );
+    host.serve(&address, s2.clone());
+    let (entered, release) = host.hold_next_route();
+    let handle = cut.fixture.owner().arm(host).expect("arm");
+    let mut passes = handle.subscribe_passes();
+    tokio::time::timeout(EVENT_GUARD, entered)
+        .await
+        .expect("the drain reached the serving session's route")
+        .expect("route hold");
+
+    cut.retirements.retire(&address);
+    let reserved = cut.status(&lead_of_team(), OBSERVATION_KEY).await;
+    assert!(
+        matches!(reserved, ContinuationStatus::Pending { admitted: None, .. }),
+        "a reservation exists, so the read is not stranded: {reserved:?}"
+    );
+
+    release.send(()).expect("release the drain");
+    wait_for_reconcile(&mut passes).await;
+    assert!(
+        sink.governed_inputs().is_empty(),
+        "nothing reaches native admission after the retire: {:?}",
+        sink.governed_admissions()
+    );
+    assert_eq!(
+        cut.admission_entry(&address, &receipt.delivery_id).await,
+        None,
+        "the repointed reservation is released"
+    );
+    let binder = binder_of(&jobs);
+    assert_eq!(binder.calls(), 1, "bound once, for s2");
+    assert!(
+        custody_dropped_once(&binder),
+        "the binder's custody is withdrawn, never promoted or retained"
+    );
+    let stranded = cut.status(&lead_of_team(), OBSERVATION_KEY).await;
+    assert!(
+        matches!(stranded, ContinuationStatus::Stranded { .. }),
+        "never admitted, and the address retired: {stranded:?}"
+    );
+}
+
+/// A reservation an attempt left before a crash, on a member address that
+/// retired since, whose bound observation reached the reserved session under
+/// the reserved id. A governed admission is indexed under its qualified key,
+/// so only a read by the reserved id finds it: the owner reads it so,
+/// verifies it with the row's own recorded binding and records it, and the
+/// continuation reads admitted. Nobody is asked, and nothing is admitted
+/// again.
+#[tokio::test]
+async fn a_governed_reservation_on_a_retired_address_with_its_bound_row_reads_admitted() {
+    let cut = RetiringFixture::memory();
+    let session = SessionId::new();
+    let (receipt, jobs) = a_member_observation(&cut, &session).await;
+    let address = LogicalRuntimeId::new(receipt.address.clone());
+    let reserved = InputId::new();
+    cut.fixture
+        .admission(
+            &address,
+            &receipt.delivery_id,
+            ContinuationAdmissionTransition::Reserve {
+                session_id: session.clone(),
+                input_id: reserved.clone(),
+            },
+        )
+        .await;
+    let sink = Arc::new(RecordingSink::governed());
+    let binder = binder_of(&jobs);
+    sink.holds_by_id_only(
+        &session,
+        &binder.bind_now(
+            &governed_fixture::original_work(),
+            &session,
+            continuation_input(reserved.clone(), &receipt.delivery_id, "a new item arrived"),
+        ),
+    );
+    cut.retirements.retire(&address);
+
+    let handle = cut
+        .fixture
+        .owner()
+        .arm(RetiringHost::with_jobs(
+            sink.clone(),
+            Arc::clone(&cut.retirements),
+            Arc::clone(&jobs),
+        ))
+        .expect("arm");
+    let mut passes = handle.subscribe_passes();
+    wait_for_reconcile(&mut passes).await;
+
+    assert_eq!(
+        cut.status(&lead_of_team(), OBSERVATION_KEY).await,
+        ContinuationStatus::Pending {
+            receipt,
+            sequence: 1,
+            admitted: Some((session, reserved)),
+        },
+        "the reserved session holds the bound observation"
+    );
+    assert!(
+        sink.governed_inputs().is_empty(),
+        "nothing is admitted again"
+    );
+    assert_eq!(binder.calls(), 0, "the binder is never asked");
+    assert!(custody_untouched(&binder), "no custody is made or moved");
+}
+
+/// Pins the documented corner of the settle: the reserved session holds the
+/// bound observation under ANOTHER input id (native admission deduplicated
+/// the retry onto it, and the attempt crashed before it applied that id).
+/// A governed admission is indexed under its qualified key, which only a
+/// fresh bind derives, and a retired address is never bound again, so
+/// neither the reserved id nor the raw key finds it: the owner releases the
+/// reservation, and the continuation reads stranded. Keeping the reservation
+/// instead would leave every governed reservation without its row pending
+/// forever, so changing this is a reviewed decision.
+#[tokio::test]
+async fn a_governed_reservation_on_a_retired_address_deduplicated_onto_another_input_reads_stranded()
+ {
+    let cut = RetiringFixture::memory();
+    let session = SessionId::new();
+    let (receipt, jobs) = a_member_observation(&cut, &session).await;
+    let address = LogicalRuntimeId::new(receipt.address.clone());
+    cut.fixture
+        .admission(
+            &address,
+            &receipt.delivery_id,
+            ContinuationAdmissionTransition::Reserve {
+                session_id: session.clone(),
+                input_id: InputId::new(),
+            },
+        )
+        .await;
+    let sink = Arc::new(RecordingSink::governed());
+    let binder = binder_of(&jobs);
+    sink.holds_by_id_only(
+        &session,
+        &binder.bind_now(
+            &governed_fixture::original_work(),
+            &session,
+            continuation_input(InputId::new(), &receipt.delivery_id, "a new item arrived"),
+        ),
+    );
+    cut.retirements.retire(&address);
+
+    let handle = cut
+        .fixture
+        .owner()
+        .arm(RetiringHost::with_jobs(
+            sink.clone(),
+            Arc::clone(&cut.retirements),
+            Arc::clone(&jobs),
+        ))
+        .expect("arm");
+    let mut passes = handle.subscribe_passes();
+    wait_for_reconcile(&mut passes).await;
+
+    let status = cut.status(&lead_of_team(), OBSERVATION_KEY).await;
+    assert!(
+        matches!(status, ContinuationStatus::Stranded { .. }),
+        "neither read finds the deduplicated input: {status:?}"
+    );
+    assert_eq!(
+        cut.admission_entry(&address, &receipt.delivery_id).await,
+        None,
+        "the reservation is released"
+    );
+    assert!(sink.governed_inputs().is_empty(), "nothing is admitted");
+    assert_eq!(binder.calls(), 0, "the binder is never asked");
 }

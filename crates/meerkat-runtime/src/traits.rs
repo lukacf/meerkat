@@ -238,6 +238,11 @@ pub enum RuntimeDriverError {
         "scoped context generation {requested} does not advance past the bound generation {bound}"
     )]
     ScopedContextGenerationNotAdvanced { bound: u64, requested: u64 },
+
+    /// An unregister's queued-input disposition was refused before anything
+    /// started: its requeue max age is under one millisecond or over the cap.
+    #[error("unregister queued-input disposition refused: {0}")]
+    QueuedInputsRefused(crate::meerkat_machine::UnregisterQueuedInputsError),
 }
 
 impl RuntimeDriverError {

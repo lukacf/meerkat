@@ -1887,3 +1887,201 @@ async fn an_outcome_binds_only_as_the_hosts_external_event() {
     assert_eq!(text, FINAL);
     realm.close(vec![session]).await;
 }
+
+/// A stock governed realm never admits a host original. The record is a
+/// consistency check at submit, so a source holding the observation exactly
+/// lets it commit. Drained before the host binds its continuation services
+/// (the stock delivery host composes consent notices), the observation stays
+/// pending, as the setup signal (`Unbound`) says. Once the host binds a
+/// source that holds it but offers no binder (the stock composition offers
+/// none), it is refused `NoAdmissibleWorkBinding` and the signal reads
+/// `NotOffered`. It is never bound or admitted, and nothing runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stock_governed_realm_never_admits_a_host_original() {
+    use meerkat::{
+        ContinuationDelivery, ContinuationHandling, ContinuationKey, ContinuationOwner,
+        ContinuationOwnerService, ContinuationProducer, ContinuationResultRef, ContinuationStatus,
+        HostOriginalFacts, HostOriginalLookup, HostOriginalReadiness, HostOriginalRecord,
+        RetainedJobLookup, RetainedJobSource,
+    };
+
+    /// Holds the observation exactly, for the submit-time consistency check.
+    struct Holds(HostOriginalFacts);
+
+    #[async_trait]
+    impl RetainedJobSource for Holds {
+        async fn retained_job(
+            &self,
+            _producer: &ContinuationProducer,
+            _job_id: &str,
+        ) -> RetainedJobLookup {
+            RetainedJobLookup::Absent
+        }
+
+        async fn host_original(&self, _namespace: &str, _producer_id: &str) -> HostOriginalLookup {
+            HostOriginalLookup::Found(self.0.clone())
+        }
+    }
+
+    let _turn = CONTROLLER_CREDENTIAL.lock().await;
+    let root = tempfile::tempdir().expect("state root");
+    let log = root.path().join("records.log");
+    provision(root.path(), &log, "controller-host-original").await;
+    let model = ScriptedModel::new("controller-host-original", Vec::new());
+    let realm = open_as(root.path(), DEFAULT_STOCK_AGENT, model.clone()).await;
+    let session = realm.session(Vec::new()).await;
+    let owner = ContinuationOwner::Session {
+        session_id: session.session_id.clone(),
+    };
+    let delivery = ContinuationDelivery {
+        key: ContinuationKey::new("ingest:observation-1").expect("key"),
+        result: ContinuationResultRef {
+            producer: ContinuationProducer::Host {
+                namespace: "app.ingest".into(),
+            },
+            producer_id: "observation-1".into(),
+            result_digest: "sha256:observation-1".into(),
+            summary: None,
+        },
+        body: "a new item arrived".into(),
+        handling: ContinuationHandling::Queue,
+    };
+    let source = Holds(HostOriginalFacts::new(
+        owner.clone(),
+        delivery.clone(),
+        meerkat_runtime::OriginalWorkRef {
+            authority: PrincipalRef::in_domain(
+                PrincipalKind::ServiceAccount,
+                "source-owner",
+                TrustDomainId::new("stock-prompt").expect("domain"),
+            )
+            .expect("qualified"),
+            work: meerkat_authorization_contracts::evidence::EvidenceId::new("observation-1")
+                .expect("id"),
+        },
+    ));
+    let record = HostOriginalRecord::from_owner(&source, "app.ingest", "observation-1")
+        .await
+        .expect("read the source")
+        .expect("the source holds the observation");
+    let inbox = meerkat_runtime::RuntimeDeliveryInbox::new(Arc::new(
+        meerkat_runtime::InMemoryRuntimeStore::new(),
+    ));
+    let continuations = ContinuationOwnerService::new(
+        inbox.clone(),
+        Arc::new(meerkat::SessionAddressResolver),
+        Arc::clone(&realm.machine),
+    );
+    continuations
+        .submit_host_original(&owner, delivery, &record, 1)
+        .await
+        .expect("the record is a consistency check at submit");
+
+    let bindings = Arc::new(meerkat::ContinuationHostBindings::default());
+    assert_eq!(
+        bindings
+            .host_original_readiness(&realm.machine, "app.ingest", &owner)
+            .await,
+        HostOriginalReadiness::Unbound,
+        "the stock composition binds no continuation services"
+    );
+    let lock_dir = root.path().join("hosting");
+    let domain = meerkat_core::session_hosting::HostingPaths {
+        hosting_lock_dir: lock_dir.clone(),
+        cold_delivery_lock: lock_dir.join("cold-delivery.lock"),
+        database: None,
+    }
+    .domain_ref();
+    let host = meerkat::surface::SessionServiceDeliveryHost::new(
+        &realm.service,
+        &realm.machine,
+        meerkat::DetachedJobService::new(Arc::new(meerkat::MemoryDetachedJobStore::new())),
+        None,
+    )
+    .with_continuation_bindings(Arc::clone(&bindings))
+    .with_consent_notices(Arc::new(meerkat::ConsentNoticeProjector::new(
+        Arc::new(meerkat_core::ApprovalService::new()),
+        domain,
+        inbox.clone(),
+        &realm.machine,
+    )));
+    let handle =
+        meerkat::RuntimeDeliveryOwner::new(Arc::new(meerkat::MemoryDetachedJobStore::new()), inbox)
+            .with_source_changes(bindings.subscribe_source_changes())
+            .arm(Arc::new(host))
+            .expect("arm the stock delivery owner");
+    let mut passes = handle.subscribe_passes();
+    let key = ContinuationKey::new("ingest:observation-1").expect("key");
+    let drained = tokio::time::timeout(
+        WAIT,
+        passes.wait_for(|pass| pass.refused > 0 || !pass.blocked_runtimes.is_empty()),
+    )
+    .await
+    .expect("the arming reconcile drained the observation")
+    .expect("owner pass channel")
+    .clone();
+    assert_eq!(
+        drained.refused, 0,
+        "pending before the host binds, never refused: {:?}",
+        drained.failures
+    );
+    assert!(matches!(
+        continuations
+            .continuation_status(&owner, &key)
+            .await
+            .expect("status"),
+        ContinuationStatus::Pending { .. }
+    ));
+
+    // The host binds its services: a source that holds the observation
+    // exactly but, as the stock composition, offers no binder.
+    let _binding = bindings
+        .bind(Arc::new(meerkat::SessionAddressResolver), Arc::new(source))
+        .expect("bind the host's continuation services");
+    assert_eq!(
+        bindings
+            .host_original_readiness(&realm.machine, "app.ingest", &owner)
+            .await,
+        HostOriginalReadiness::NotOffered
+    );
+    let status = tokio::time::timeout(WAIT, async {
+        loop {
+            let status = continuations
+                .continuation_status(&owner, &key)
+                .await
+                .expect("status");
+            if matches!(
+                status,
+                ContinuationStatus::Applied { .. } | ContinuationStatus::Refused { .. }
+            ) {
+                return status;
+            }
+            passes.changed().await.expect("owner pass channel");
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("settled; last pass {:?}", passes.borrow().clone()));
+    assert!(
+        matches!(
+            status,
+            ContinuationStatus::Refused {
+                reason: meerkat_runtime::RuntimeDeliveryRefusalReason::NoAdmissibleWorkBinding,
+                ..
+            }
+        ),
+        "{status:?}"
+    );
+    assert!(
+        realm
+            .machine
+            .list_active_inputs(&session.session_id)
+            .await
+            .expect("active inputs")
+            .is_empty(),
+        "nothing was admitted"
+    );
+    assert!(model.requests().is_empty(), "nothing ran");
+    drop(continuations);
+    drop(handle);
+    realm.close(vec![session]).await;
+}

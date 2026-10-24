@@ -145,6 +145,8 @@ fn local_serving_reads_the_registry_and_never_takes_the_lock() {
             session_id: session.clone()
         })
     );
+    // The close is the point: it stands for the peer process exiting, whose
+    // lock the kernel releases with its files.
     drop(peer);
     grant_session_hosting(&capability, &owner, &session).expect("free once the peer released it");
 }
@@ -212,6 +214,8 @@ fn only_a_cross_process_exclusion_proves_owner_loss() {
             session_id: session.clone()
         })
     );
+    // The close is the point: it stands for the peer process dying, whose
+    // lock the kernel releases with its files.
     drop(peer);
     let claim = grant_session_hosting(&capability, &owner, &session).expect("the peer is gone");
     assert_eq!(claim.acquisition(), HostingAcquisition::AcquiredFresh);

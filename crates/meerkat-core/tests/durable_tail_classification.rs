@@ -21,12 +21,23 @@
 //! Rewrite rows carry no run identity. A rewrite descendant whose live tail
 //! holds no run-stamped message observes no run id, so it is held as
 //! Ambiguous rather than closed on the provisional's run identity alone.
+//!
+//! A durable session's run cursor adds one class and one attribution:
+//!
+//! - Continuable: the Repairable shape with a cursor that agrees with the
+//!   transcript and whose bound inputs are all still bound to the run. A
+//!   cursor never upgrades another shape, never sits on an EndTurn shape,
+//!   and a disagreeing cursor holds.
+//! - A tail with no run rows at all (no assistant message, no tool result)
+//!   carries no run id. On a strict continuation the store-issued provisional
+//!   binding attributes it; on a rewrite descendant only an agreeing cursor
+//!   does. Attributed, it takes the Repairable or Continuable arm.
 
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 use meerkat_core::session_document::{
-    DurableHeadRelation, DurableTailRecoveryClass, DurableTailStopReason, RunIdCardinality,
-    SessionDocumentEffect, SessionDocumentKey, SessionDocumentMachineAuthority,
+    DurableHeadRelation, DurableTailRecoveryClass, DurableTailRunCursor, DurableTailStopReason,
+    RunIdCardinality, SessionDocumentEffect, SessionDocumentKey, SessionDocumentMachineAuthority,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -39,6 +50,31 @@ fn classify_with_candidate(
     orphan_tool_result_count: u64,
     messages_after_terminal: bool,
 ) -> (String, DurableTailRecoveryClass) {
+    classify_with_cursor(
+        candidate_id,
+        relation,
+        run_id_cardinality,
+        terminal_stop_reason,
+        dangling_tool_use_count,
+        orphan_tool_result_count,
+        messages_after_terminal,
+        DurableTailRunCursor::Absent,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn classify_with_cursor(
+    candidate_id: &str,
+    relation: DurableHeadRelation,
+    run_id_cardinality: RunIdCardinality,
+    terminal_stop_reason: DurableTailStopReason,
+    dangling_tool_use_count: u64,
+    orphan_tool_result_count: u64,
+    messages_after_terminal: bool,
+    run_cursor: DurableTailRunCursor,
+    cursor_inputs_open: bool,
+) -> (String, DurableTailRecoveryClass) {
     let mut authority = SessionDocumentMachineAuthority::new();
     let effects = authority
         .classify_durable_tail(
@@ -50,6 +86,8 @@ fn classify_with_candidate(
             dangling_tool_use_count,
             orphan_tool_result_count,
             messages_after_terminal,
+            run_cursor,
+            cursor_inputs_open,
         )
         .expect("ClassifyDurableTail must be total");
     let mut classified = effects.into_iter().filter_map(|effect| match effect {
@@ -497,4 +535,223 @@ fn classification_is_total_disjoint_and_matches_the_truth_table() {
             }
         }
     }
+}
+
+/// The run-cursor truth table, unrun until the candidate's validation (the
+/// policy forbids Cargo while the batch is implemented). The oracle restates
+/// the documented partition; the classifier must be total and disjoint over
+/// every combination, including the shapes the shell never produces (a tail
+/// with no run rows always has an Absent stop).
+#[test]
+fn run_cursor_classification_is_total_disjoint_and_matches_the_truth_table() {
+    let cardinalities = [
+        RunIdCardinality::NoRunId,
+        RunIdCardinality::SingleRunId,
+        RunIdCardinality::MultipleRunIds,
+        RunIdCardinality::NoRunRows,
+    ];
+    let stops = [
+        DurableTailStopReason::Absent,
+        DurableTailStopReason::EndTurn,
+        DurableTailStopReason::ToolUse,
+        DurableTailStopReason::Other,
+    ];
+    let cursors = [
+        DurableTailRunCursor::Disagrees,
+        DurableTailRunCursor::Absent,
+        DurableTailRunCursor::Agrees,
+    ];
+    for relation in RELATIONS {
+        for cardinality in cardinalities {
+            for stop in stops {
+                for dangling in [0u64, 1] {
+                    for orphans in [0u64, 1] {
+                        for after_terminal in [false, true] {
+                            for cursor in cursors {
+                                for inputs_bound in [false, true] {
+                                    let got = classify_with_cursor(
+                                        "candidate-under-test",
+                                        relation,
+                                        cardinality,
+                                        stop,
+                                        dangling,
+                                        orphans,
+                                        after_terminal,
+                                        cursor,
+                                        inputs_bound,
+                                    )
+                                    .1;
+                                    let attributed = cardinality == RunIdCardinality::SingleRunId
+                                        || (cardinality == RunIdCardinality::NoRunRows
+                                            && stop == DurableTailStopReason::Absent
+                                            && (relation
+                                                == DurableHeadRelation::VerifiedStrictDescendant
+                                                || cursor == DurableTailRunCursor::Agrees));
+                                    let coherent = is_verified_descendant(relation)
+                                        && attributed
+                                        && dangling == 0
+                                        && orphans == 0
+                                        && !after_terminal
+                                        && cursor != DurableTailRunCursor::Disagrees;
+                                    let expected = if coherent {
+                                        match (stop, cursor) {
+                                            (
+                                                DurableTailStopReason::EndTurn,
+                                                DurableTailRunCursor::Absent,
+                                            ) => DurableTailRecoveryClass::CompletedCandidate,
+                                            (
+                                                DurableTailStopReason::ToolUse
+                                                | DurableTailStopReason::Absent,
+                                                DurableTailRunCursor::Agrees,
+                                            ) if inputs_bound => {
+                                                DurableTailRecoveryClass::ContinuableCandidate
+                                            }
+                                            (
+                                                DurableTailStopReason::ToolUse
+                                                | DurableTailStopReason::Absent,
+                                                DurableTailRunCursor::Absent
+                                                | DurableTailRunCursor::Agrees,
+                                            ) => {
+                                                DurableTailRecoveryClass::InterruptedRepairableCandidate
+                                            }
+                                            _ => DurableTailRecoveryClass::Ambiguous,
+                                        }
+                                    } else {
+                                        DurableTailRecoveryClass::Ambiguous
+                                    };
+                                    assert_eq!(
+                                        got, expected,
+                                        "truth-table mismatch: relation={relation:?} \
+                                         cardinality={cardinality:?} stop={stop:?} \
+                                         dangling={dangling} orphans={orphans} \
+                                         after_terminal={after_terminal} cursor={cursor:?} \
+                                         inputs_bound={inputs_bound}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The run cursor classification rows, as explicit cases.
+#[test]
+fn run_cursor_named_rows() {
+    let strict = DurableHeadRelation::VerifiedStrictDescendant;
+    let rewrite = DurableHeadRelation::VerifiedRewriteDescendant;
+    let absent = DurableTailStopReason::Absent;
+    let case = |relation, cardinality, stop, cursor, bound| {
+        classify_with_cursor(
+            "candidate-under-test",
+            relation,
+            cardinality,
+            stop,
+            0,
+            0,
+            false,
+            cursor,
+            bound,
+        )
+        .1
+    };
+    // Round zero's first commit, and a metadata-only tail: no run rows, an
+    // agreeing cursor, bound inputs.
+    assert_eq!(
+        case(
+            strict,
+            RunIdCardinality::NoRunRows,
+            absent,
+            DurableTailRunCursor::Agrees,
+            true
+        ),
+        DurableTailRecoveryClass::ContinuableCandidate
+    );
+    // A run's closing save before any assistant row: no run rows, no cursor.
+    assert_eq!(
+        case(
+            strict,
+            RunIdCardinality::NoRunRows,
+            absent,
+            DurableTailRunCursor::Absent,
+            false
+        ),
+        DurableTailRecoveryClass::InterruptedRepairableCandidate
+    );
+    // After a rewrite only an agreeing cursor attributes a tail with no run rows.
+    assert_eq!(
+        case(
+            rewrite,
+            RunIdCardinality::NoRunRows,
+            absent,
+            DurableTailRunCursor::Absent,
+            false
+        ),
+        DurableTailRecoveryClass::Ambiguous
+    );
+    assert_eq!(
+        case(
+            rewrite,
+            RunIdCardinality::NoRunRows,
+            absent,
+            DurableTailRunCursor::Agrees,
+            true
+        ),
+        DurableTailRecoveryClass::ContinuableCandidate
+    );
+    // Settled or requeued bound inputs, or an empty bound set: repaired.
+    assert_eq!(
+        case(
+            strict,
+            RunIdCardinality::NoRunRows,
+            absent,
+            DurableTailRunCursor::Agrees,
+            false
+        ),
+        DurableTailRecoveryClass::InterruptedRepairableCandidate
+    );
+    assert_eq!(
+        case(
+            strict,
+            RunIdCardinality::SingleRunId,
+            DurableTailStopReason::ToolUse,
+            DurableTailRunCursor::Agrees,
+            false
+        ),
+        DurableTailRecoveryClass::InterruptedRepairableCandidate
+    );
+    // An unstamped assistant row is no run rows' shape: held.
+    assert_eq!(
+        case(
+            strict,
+            RunIdCardinality::NoRunId,
+            absent,
+            DurableTailRunCursor::Agrees,
+            true
+        ),
+        DurableTailRecoveryClass::Ambiguous
+    );
+    // A disagreeing cursor holds, and a cursor never sits on an EndTurn shape.
+    assert_eq!(
+        case(
+            strict,
+            RunIdCardinality::SingleRunId,
+            DurableTailStopReason::ToolUse,
+            DurableTailRunCursor::Disagrees,
+            true
+        ),
+        DurableTailRecoveryClass::Ambiguous
+    );
+    assert_eq!(
+        case(
+            strict,
+            RunIdCardinality::SingleRunId,
+            DurableTailStopReason::EndTurn,
+            DurableTailRunCursor::Agrees,
+            true
+        ),
+        DurableTailRecoveryClass::Ambiguous
+    );
 }

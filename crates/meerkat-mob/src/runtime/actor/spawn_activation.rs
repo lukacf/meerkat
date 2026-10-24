@@ -258,6 +258,14 @@ impl SpawnActivationWorkerContext {
     /// operation-scoped admission the spawn kickoff depends on — but runs it
     /// through the detached readiness helper, whose #37 revival re-enters the
     /// actor that is now free to answer it.
+    ///
+    /// A placed member's first turn is delivered to its host through the
+    /// placed ingress lane an ordinary member send uses
+    /// ([`MobActor::admit_placed_ingress_turn`]). No carrier intent covers a
+    /// turn-driven placed initial message, so the kickoff custody that keeps
+    /// an autonomous placed kickoff across a controller crash does not cover
+    /// it: a crash before the delivery loses it. A failed delivery unwinds
+    /// the spawn and fires no placed revival.
     async fn realize_initial_turn(
         &self,
         agent_identity: &AgentIdentity,
@@ -298,7 +306,7 @@ impl SpawnActivationWorkerContext {
                 req,
                 completion_tx,
                 llm_identity_applied_tx,
-                placed_identity,
+                placed_identity: _,
                 placed_incarnation,
                 placed_input_id,
             } => {
@@ -313,15 +321,24 @@ impl SpawnActivationWorkerContext {
                     )
                     .await?;
                 }
-                debug_assert_eq!(placed_identity.is_some(), placed_incarnation.is_some());
-                let result = match (placed_incarnation, placed_input_id) {
-                    (Some(_), _) | (None, Some(_)) => {
-                        // A placed member's kickoff rides the durable placed
-                        // delivery lane, never this local admission.
-                        Err(MobError::Internal(format!(
-                            "turn-driven spawn kickoff for '{agent_identity}' resolved to a placed admission"
-                        )))
+                // A placed first turn rides the ordinary placed ingress lane
+                // (see the rustdoc above): no carrier intent covers it, and a
+                // failure unwinds the spawn without a revival trigger.
+                match (placed_incarnation, placed_input_id) {
+                    (Some(expected_member), Some(input_id)) => {
+                        MobActor::admit_placed_ingress_turn(
+                            &self.provisioner,
+                            member_ref,
+                            req,
+                            completion_tx.is_some() || llm_identity_applied_tx.is_some(),
+                            expected_member,
+                            input_id,
+                        )
+                        .await
                     }
+                    (Some(_), None) | (None, Some(_)) => Err(MobError::Internal(
+                        "turn admission placement/transport fields drifted".to_string(),
+                    )),
                     (None, None) => {
                         if let Some(completion_tx) = completion_tx {
                             self.provisioner
@@ -340,15 +357,7 @@ impl SpawnActivationWorkerContext {
                             self.provisioner.admit_turn(&member_ref, *req).await
                         }
                     }
-                };
-                if let Err(error) = &result {
-                    MobActor::fire_placed_revival_trigger(
-                        placed_identity.map(|identity| (self.command_tx.clone(), identity)),
-                        error,
-                    )
-                    .await;
                 }
-                result
             }
             SubmitWorkDispatchCompletion::AwaitTurnCompletion { .. } => {
                 Err(MobError::Internal(format!(
@@ -427,7 +436,7 @@ impl SpawnActivationWorkerContext {
                 "autonomous member '{agent_identity}' requires admission-capable substrate (runtime adapter)"
             ))
         })?;
-        let (_outcome, completion_handle) = adapter
+        let (outcome, completion_handle) = adapter
             .accept_input_with_completion(&bridge_session_id, input)
             .await
             .map_err(|e| {
@@ -435,36 +444,24 @@ impl SpawnActivationWorkerContext {
                     "autonomous prompt admission failed for '{agent_identity}': {e}"
                 ))
             })?;
-        let log_id = agent_identity.clone();
-        let completion_command_tx = self.command_tx.clone();
-        let handle = tokio::spawn(async move {
-            if let Some(h) = completion_handle {
-                let outcome = h.wait().await;
-                let (ack_tx, ack_rx) = oneshot::channel();
-                if completion_command_tx
-                    .send(RoutedMobCommand::internal(
-                        MobCommand::KickoffOutcomeResolved {
-                            agent_identity: log_id.clone(),
-                            outcome,
-                            ack_tx,
-                        },
-                    ))
-                    .await
-                    .is_err()
-                {
-                    tracing::warn!(
-                        agent_identity = %log_id,
-                        "mob actor dropped before kickoff outcome could be recorded"
-                    );
-                } else {
-                    let _ = ack_rx.await;
-                }
-            }
-        });
+        // An admission deduplicated under the incarnation's kickoff key
+        // against an input that is already terminal answers no completion;
+        // that input's receipt answers the kickoff instead.
+        let completion = super::KickoffCompletion::of_admission(
+            &adapter,
+            &bridge_session_id,
+            &outcome,
+            completion_handle,
+        );
+        let waiter = super::spawn_kickoff_outcome_waiter(
+            self.command_tx.clone(),
+            agent_identity.clone(),
+            completion,
+        );
         self.autonomous_initial_turns
             .lock()
             .await
-            .insert(agent_identity.clone(), InitialTurnHandle { handle });
+            .insert(agent_identity.clone(), waiter);
         tracing::debug!(agent_identity = %agent_identity, "autonomous member started");
         Ok(())
     }
@@ -586,6 +583,9 @@ pub(in crate::runtime) struct SpawnActivationQuiescence {
     pub(in crate::runtime) inflight_stages: usize,
     pub(in crate::runtime) deferred_outcomes: usize,
     pub(in crate::runtime) members: Vec<AgentIdentity>,
+    /// Compensations retained unsettled after a failed activation. They are
+    /// not activation custody, but they block graph-scoped controls too.
+    pub(in crate::runtime) retained_cleanups: usize,
 }
 
 /// A compensation that could not be completed by the failing owner.
@@ -733,6 +733,7 @@ impl MobActor {
     pub(in crate::runtime) fn spawn_activation_quiescence(&self) -> SpawnActivationQuiescence {
         let mut census = SpawnActivationQuiescence {
             total: self.pending_spawn_activations.len(),
+            retained_cleanups: self.retained_spawn_activation_cleanups.len(),
             ..SpawnActivationQuiescence::default()
         };
         for pending in self.pending_spawn_activations.values() {
@@ -799,6 +800,7 @@ impl MobActor {
             custody_inflight_stages = census.inflight_stages,
             custody_deferred_outcomes = census.deferred_outcomes,
             custody_members = ?census.members,
+            retained_cleanups = census.retained_cleanups,
             "parking spawn activation while a graph-scoped control owns the mob"
         );
     }
@@ -2578,12 +2580,15 @@ impl MobActor {
                 self.dsl_authority.state(),
                 &pending.state.agent_identity,
             )
-            && !pending.state.suppress_autonomous_initial_prompt
         {
             // PLACED autonomous member: the loop runs on the MEMBER host
             // (ADJ-23 residency) and the kickoff prompt rides the placed
             // delivery lane, so activation only opens the durable obligation.
-            if let Err(error) = Box::pin(self.kickoff_placed_member(&mut pending.state)).await {
+            // A plain resume whose member host reported the adopted session's
+            // first turn as started waived the kickoff: nothing is opened.
+            if !pending.state.suppress_autonomous_initial_prompt
+                && let Err(error) = Box::pin(self.kickoff_placed_member(&mut pending.state)).await
+            {
                 return SpawnActivationStep::Done(Box::new(Err(error)));
             }
             pending.phase = SpawnActivationPhase::Commit;
@@ -2722,8 +2727,10 @@ impl MobActor {
 
         pending.phase = SpawnActivationPhase::Commit;
         if pending.state.suppress_autonomous_initial_prompt {
-            // Identity reconciliation resumed an authoritative transcript:
-            // the runtime is up and must not receive a manufactured kickoff.
+            // Identity reconciliation, or a plain resume of a session whose
+            // first turn already started, resumed an authoritative
+            // transcript: the runtime is up and must not receive a
+            // manufactured kickoff.
             tracing::debug!(
                 agent_identity = %agent_identity,
                 "autonomous member runtime resumed without a fresh kickoff"
@@ -2788,7 +2795,11 @@ impl MobActor {
                 source: meerkat_runtime::InputOrigin::Operator,
                 durability: meerkat_runtime::InputDurability::Durable,
                 visibility: meerkat_runtime::InputVisibility::default(),
-                idempotency_key: None,
+                // One per incarnation: a start after a Shutdown that kept
+                // this kickoff's run finds the input by it.
+                idempotency_key: Some(super::local_kickoff_idempotency_key(
+                    &state.agent_runtime_id,
+                )),
                 supersession_key: None,
                 correlation_id: None,
             },
@@ -3044,6 +3055,7 @@ impl MobActor {
                 rollback_authority: None,
                 materialized_ack: None,
                 failed_restore_peer_ids: Vec::new(),
+                adopted_first_turn: None,
             },
             failed_restore_peer_ids: std::mem::take(&mut state.failed_restore_peer_ids),
         })

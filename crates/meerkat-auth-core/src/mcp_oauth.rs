@@ -33,6 +33,9 @@ use crate::connector_oauth::{
 use crate::http_egress::{
     HttpEgressError, HttpEgressProfile, HttpEgressRefusal, HttpEgressUnavailable,
 };
+/// What a failed login start left of the attempt it tried to admit;
+/// [`McpOAuthStartFailure`] carries it.
+pub use crate::oauth_flow::OAuthStartAdmission;
 use crate::oauth_flow::{
     OAuthBrowserFlowCompletion, OAuthBrowserFlowIdentity, OAuthFlowAuthority, OAuthFlowError,
 };
@@ -226,7 +229,7 @@ pub enum McpAuthMode {
 /// identity — not re-hashed independently at every key-derivation site. The
 /// `<slug>-<digest>` binding slug is the single owned projection of the
 /// `(server_name, server_url)` pair; `token_key` and `lease_key` both delegate
-/// to [`binding_slug`](Self::binding_slug) so the token realm key and the
+/// to `binding_slug` so the token realm key and the
 /// `AuthMachine` lease key are guaranteed structurally identical for the same
 /// server.
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -1417,6 +1420,54 @@ pub enum McpOAuthLoginDisposition {
     Joined,
 }
 
+/// A login start that failed: the error the start returns, and what this
+/// call left of the attempt it tried to admit
+/// ([`McpOAuthAuthority::login_start_with_admission`]).
+///
+/// The admission speaks of this call only. [`OAuthStartAdmission::NotAdmitted`]
+/// says this call admitted nothing; another attempt for the target can still
+/// be pending, such as one another start admitted or the one this start
+/// would have joined. A pending read ([`McpOAuthAuthority::pending_attempt`])
+/// or a logout answers for those.
+/// [`OAuthStartAdmission::RetirementUnconfirmed`] names the attempt for
+/// [`McpOAuthAuthority::cancel_attempt_by_ref`].
+#[derive(Debug, thiserror::Error)]
+#[error("{error}")]
+pub struct McpOAuthStartFailure {
+    pub error: McpOAuthError,
+    pub admission: OAuthStartAdmission,
+}
+
+impl McpOAuthStartFailure {
+    fn not_admitted(error: McpOAuthError) -> Self {
+        Self {
+            error,
+            admission: OAuthStartAdmission::NotAdmitted,
+        }
+    }
+}
+
+/// What a start prepared before the flow owner's start: the projection of
+/// an attempt it joined, or an attempt to admit.
+enum PreparedAttempt<'a> {
+    Joined(McpOAuthLoginStart),
+    Ready(ReadyAttempt<'a>),
+}
+
+/// A start whose every step before the flow owner's start passed. It holds
+/// the target's start-or-join lock until the start returns.
+struct ReadyAttempt<'a> {
+    authority: &'a dyn OAuthFlowAuthority,
+    _admission: tokio::sync::OwnedMutexGuard<()>,
+    target: McpServerIdentity,
+    binding: AuthBindingRef,
+    credential_identity: meerkat_core::AuthCredentialIdentity,
+    discovery: StoredMcpOAuthDiscovery,
+    client: StoredMcpOAuthClient,
+    offline_access: bool,
+    identity: OAuthBrowserFlowIdentity,
+}
+
 impl std::fmt::Debug for McpOAuthLoginStart {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("McpOAuthLoginStart")
@@ -2325,6 +2376,20 @@ impl McpOAuthAuthority {
         redirect_uri: &str,
         www_authenticate: Option<&str>,
     ) -> Result<McpOAuthLoginStart, McpOAuthError> {
+        self.login_start_with_admission(target, redirect_uri, www_authenticate)
+            .await
+            .map_err(|failure| failure.error)
+    }
+
+    /// [`Self::login_start`] that, when it fails, also says what this call
+    /// left of the attempt it tried to admit ([`McpOAuthStartFailure`]). The
+    /// error is the one [`Self::login_start`] returns.
+    pub async fn login_start_with_admission(
+        &self,
+        target: &McpServerIdentity,
+        redirect_uri: &str,
+        www_authenticate: Option<&str>,
+    ) -> Result<McpOAuthLoginStart, McpOAuthStartFailure> {
         self.admit_attempt(
             target,
             redirect_uri,
@@ -2375,7 +2440,24 @@ impl McpOAuthAuthority {
         base: &McpRegisteredRedirectBase,
         www_authenticate: Option<&str>,
     ) -> Result<McpOAuthLoginStart, McpOAuthError> {
-        let redirect = self.registered_redirect_uri(target, base)?;
+        self.login_start_registered_with_admission(target, base, www_authenticate)
+            .await
+            .map_err(|failure| failure.error)
+    }
+
+    /// [`Self::login_start_registered`] that, when it fails, also says what
+    /// this call left of the attempt it tried to admit
+    /// ([`McpOAuthStartFailure`]). The error is the one
+    /// [`Self::login_start_registered`] returns.
+    pub async fn login_start_registered_with_admission(
+        &self,
+        target: &McpServerIdentity,
+        base: &McpRegisteredRedirectBase,
+        www_authenticate: Option<&str>,
+    ) -> Result<McpOAuthLoginStart, McpOAuthStartFailure> {
+        let redirect = self
+            .registered_redirect_uri(target, base)
+            .map_err(McpOAuthStartFailure::not_admitted)?;
         self.admit_attempt(
             target,
             &redirect,
@@ -2385,13 +2467,77 @@ impl McpOAuthAuthority {
         .await
     }
 
+    /// Admit one attempt, or join the one pending. Every step before the
+    /// flow owner's start admits nothing; the start reports what it left of
+    /// the attempt it tried to admit, and nothing after it can fail.
     async fn admit_attempt(
         &self,
         target: &McpServerIdentity,
         redirect_uri: &str,
         mode: RedirectMode,
         www_authenticate: Option<&str>,
-    ) -> Result<McpOAuthLoginStart, McpOAuthError> {
+    ) -> Result<McpOAuthLoginStart, McpOAuthStartFailure> {
+        let ready = match self
+            .prepare_attempt(target, redirect_uri, mode, www_authenticate)
+            .await
+        {
+            Ok(PreparedAttempt::Joined(joined)) => return Ok(joined),
+            Ok(PreparedAttempt::Ready(ready)) => ready,
+            Err(error) => return Err(McpOAuthStartFailure::not_admitted(error)),
+        };
+        let ReadyAttempt {
+            authority,
+            _admission,
+            target,
+            binding,
+            credential_identity,
+            discovery,
+            client,
+            offline_access,
+            identity,
+        } = ready;
+        let pkce = PkcePair::generate_s256();
+        let state = authority
+            .start_with_admission(
+                credential_identity,
+                identity.clone(),
+                redirect_uri.to_owned(),
+                pkce.verifier.secret().to_owned(),
+            )
+            .map_err(|failure| McpOAuthStartFailure {
+                error: McpOAuthError::Flow(failure.error),
+                admission: failure.admission,
+            })?;
+        // This attempt passed its strategy preflight (or needs none); a
+        // later join reuses this receipt instead of repeating discovery.
+        retain_preflight_receipt(&state);
+        let expires_at = std::time::Instant::now() + MCP_INTERACTIVE_LOGIN_TIMEOUT;
+        let authorize_url = authorize_endpoints(&discovery, &client, offline_access)
+            .authorize_url_with_pkce(&pkce.challenge, &state);
+        let host_attempt_handle = (mode == RedirectMode::Registered)
+            .then(|| mcp_remote_attempt_handle(&binding, &state, redirect_uri));
+        Ok(McpOAuthLoginStart {
+            target,
+            authorize_url,
+            state,
+            redirect_uri: redirect_uri.to_owned(),
+            disposition: McpOAuthLoginDisposition::Started,
+            host_attempt_handle,
+            identity,
+            expires_at,
+        })
+    }
+
+    /// Every step of a start before the flow owner's start, under the
+    /// target's start-or-join lock: the projection of an attempt it joins,
+    /// or what the admission needs.
+    async fn prepare_attempt(
+        &self,
+        target: &McpServerIdentity,
+        redirect_uri: &str,
+        mode: RedirectMode,
+        www_authenticate: Option<&str>,
+    ) -> Result<PreparedAttempt<'_>, McpOAuthError> {
         let target = &self.scoped(target)?;
         self.validate_interactive_selection(target)?;
         let (authority, strategy) = self
@@ -2435,7 +2581,7 @@ impl McpOAuthAuthority {
                 .join_pending_attempt(target, &state, record, start_deadline)
                 .await?
             {
-                return Ok(joined);
+                return Ok(PreparedAttempt::Joined(joined));
             }
         }
         // The slot's current credential decides what this attempt may
@@ -2535,34 +2681,17 @@ impl McpOAuthAuthority {
             });
         }
         discovery.scopes = facts.scopes.iter().cloned().collect();
-        let pkce = PkcePair::generate_s256();
-        let identity: OAuthBrowserFlowIdentity = descriptor.clone().into();
-        let state = authority
-            .start(
-                credential_identity,
-                identity.clone(),
-                redirect_uri.to_owned(),
-                pkce.verifier.secret().to_owned(),
-            )
-            .map_err(McpOAuthError::Flow)?;
-        // This attempt passed its strategy preflight (or needs none); a
-        // later join reuses this receipt instead of repeating discovery.
-        retain_preflight_receipt(&state);
-        let expires_at = std::time::Instant::now() + MCP_INTERACTIVE_LOGIN_TIMEOUT;
-        let authorize_url = authorize_endpoints(&discovery, &client, requested.offline_access)
-            .authorize_url_with_pkce(&pkce.challenge, &state);
-        let host_attempt_handle = (mode == RedirectMode::Registered)
-            .then(|| mcp_remote_attempt_handle(&binding, &state, redirect_uri));
-        Ok(McpOAuthLoginStart {
+        Ok(PreparedAttempt::Ready(ReadyAttempt {
+            authority: authority.as_ref(),
+            _admission,
             target: target.clone(),
-            authorize_url,
-            state,
-            redirect_uri: redirect_uri.to_owned(),
-            disposition: McpOAuthLoginDisposition::Started,
-            host_attempt_handle,
-            identity,
-            expires_at,
-        })
+            binding,
+            credential_identity,
+            discovery,
+            client,
+            offline_access: requested.offline_access,
+            identity: descriptor.into(),
+        }))
     }
 
     /// The `McpOauth` credential currently in `target`'s slot, if any, with
@@ -3163,8 +3292,13 @@ impl McpOAuthAuthority {
 
     /// Typed cancel by the non-secret reference a [`Self::pending_attempt`]
     /// read reported, for a host that no longer holds the attempt's state:
-    /// retire the attempt pending for `target` under that reference. Local
-    /// only; an unknown or stale reference is refused.
+    /// retire the attempt pending for `target` under that reference. A
+    /// reference to an attempt the flow owner holds without its payload
+    /// (one a start could not retire, reported as
+    /// [`OAuthStartAdmission::RetirementUnconfirmed`]) retires that attempt
+    /// and any durable entry for it, although no pending read reports it.
+    /// Local only; an unknown or stale reference is refused, and then
+    /// nothing with that reference is held.
     pub fn cancel_attempt_by_ref(
         &self,
         target: &McpServerIdentity,
@@ -3177,23 +3311,30 @@ impl McpOAuthAuthority {
             .ok_or(ConnectorOAuthRefusal::VerificationUnavailable)?;
         let credential_identity: meerkat_core::AuthCredentialIdentity =
             target.auth_binding_ref()?.into();
-        let (state, record) = authority
+        if let Some((state, record)) = authority
             .pending_connector_browser_attempt(&credential_identity)
             .map_err(McpOAuthError::Flow)?
-            .ok_or(McpOAuthError::Flow(OAuthFlowError::Missing))?;
-        if OAuthBrowserActionRef::project(&state).as_str() != attempt_ref
-            || !pending_attempt_matches(target, &record)
+            && OAuthBrowserActionRef::project(&state).as_str() == attempt_ref
         {
+            if !pending_attempt_matches(target, &record) {
+                return Err(McpOAuthError::Flow(OAuthFlowError::Missing));
+            }
+            return retire_attempt(
+                authority.as_ref(),
+                &state,
+                &credential_identity,
+                record.provider,
+                &record.redirect_uri,
+            )
+            .map_err(McpOAuthError::Flow);
+        }
+        let retired =
+            retire_unpayloaded_attempt(authority.as_ref(), &credential_identity, attempt_ref)
+                .map_err(McpOAuthError::Flow)?;
+        if retired == 0 {
             return Err(McpOAuthError::Flow(OAuthFlowError::Missing));
         }
-        retire_attempt(
-            authority.as_ref(),
-            &state,
-            &credential_identity,
-            record.provider,
-            &record.redirect_uri,
-        )
-        .map_err(McpOAuthError::Flow)
+        Ok(())
     }
 
     /// Disconnect `target`: retire every browser attempt pending for its
@@ -4312,7 +4453,7 @@ fn verify_stored_account(
     }
 }
 
-/// See [`verify_stored_account`]. Hosts use it to project status from a
+/// See `verify_stored_account`. Hosts use it to project status from a
 /// stored credential without admitting it.
 pub fn stored_credential_matches_selection(
     target: &McpServerIdentity,
@@ -4509,13 +4650,31 @@ fn retire_attempt(
     Ok(())
 }
 
+/// Retire the attempt with reference `attempt_ref` that the flow owner holds
+/// for `target` without its payload
+/// ([`OAuthFlowAuthority::retire_unpayloaded_browser_attempts`]), and wake
+/// its local waits. Returns how many attempts were retired.
+fn retire_unpayloaded_attempt(
+    authority: &dyn OAuthFlowAuthority,
+    target: &meerkat_core::AuthCredentialIdentity,
+    attempt_ref: &str,
+) -> Result<usize, OAuthFlowError> {
+    let retired = authority.retire_unpayloaded_browser_attempts(target, Some(attempt_ref))?;
+    for retired_ref in &retired {
+        wake_attempt_waiters_by_ref(retired_ref.as_str());
+    }
+    Ok(retired.len())
+}
+
 /// Wake every waiter of the attempt admitted under `state`. Only a confirmed
 /// retirement calls it.
 fn wake_attempt_waiters(state: &str) {
-    if let Some((_, sender)) = attempt_wakers()
-        .lock()
-        .get(OAuthBrowserActionRef::project(state).as_str())
-    {
+    wake_attempt_waiters_by_ref(OAuthBrowserActionRef::project(state).as_str());
+}
+
+/// Wake every waiter of the attempt with reference `attempt_ref`.
+fn wake_attempt_waiters_by_ref(attempt_ref: &str) {
+    if let Some((_, sender)) = attempt_wakers().lock().get(attempt_ref) {
         sender.send_replace(true);
     }
 }

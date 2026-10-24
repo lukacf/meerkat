@@ -119,7 +119,10 @@ finally:
 </CodeGroup>
 
 `live/open` returns a `LiveOpenResult` containing a discriminated transport
-bootstrap, `WireLiveChannelCapabilities`, and `WireLiveContinuityMode`. Omitted
+bootstrap, `WireLiveChannelCapabilities`, and `WireLiveContinuityMode`, plus
+`advisories` (left out when empty) naming what the open went ahead without,
+such as `staged_prompt_refused`. The advisory vocabulary may grow; an unknown
+advisory is informational, never an error. Omitted
 `transport` prefers WebSocket when its listener is configured and otherwise
 selects WebRTC when that is the only enabled transport. Request
 `"transport": "websocket"` or `"transport": "webrtc"` when the choice must be
@@ -1271,8 +1274,7 @@ least one release.
 
 - **Ordinary/default composition uses OpenAI Realtime.** Its provider integration is OpenAI's Realtime API (`gpt-realtime-2`), not Azure OpenAI (`azure_openai`) or other providers. Public `gpt-live-1` uses the separate host-composed `openai-live` / execution-identity / WebRTC path above; the private experimental path is deprecated.
 - **One live channel per session.** A session has at most one live channel at a time. For per-member live channels in mobs, open channels against individual member sessions.
-- **Deferred sessions are model-gated.** `live/open` may materialize a deferred session whose resolved model is realtime-capable; a deferred non-realtime session is rejected before channel creation.
-- **The live seed carries no staged prompt.** When `live/open` materializes a deferred session (`initial_turn: "deferred"`), the session's create-time prompt stays staged: the realtime model does not see it. It lands with the session's first later text turn (`turn/start`), after any live rows.
+- **Deferred sessions are model-gated.** `live/open` may materialize a deferred session whose resolved model is realtime-capable; a deferred non-realtime session is rejected before channel creation. When the open materializes a deferred session, or opens one whose create-time prompt is still staged, the prompt reaches the realtime model as the session's first user row: the run-start hooks admit it once, and a later text turn does not deliver it again. A hook that refuses it keeps it staged for the first text turn; the open goes ahead without it and reports `staged_prompt_refused` in the result's `advisories`.
 - **Live rows wait for a running member turn.** Transcript rows commit in arrival order behind a running turn of the member, so the persisted transcript can lag the conversation by that turn's length (on a WebSocket or WebRTC channel, by each member turn queued behind it while turns run back to back; that channel's voice and events keep flowing meanwhile); rows handed to a channel close are held in memory until they commit and are lost if the process exits first, and a row released mid-close can commit ahead of an earlier held row (see [Transcript rows while the member's turn runs](#transcript-rows-while-the-members-turn-runs)).
 - **Ordinary Realtime refresh is not instruction/history replay.** Supported mutable settings such as visible tools can refresh; canonical `System`-sequence changes, model/provider swaps, and canonical transcript or user-content-registry rewrites require `live/close` + `live/open`. The adapter remains fixed to PCM 24 kHz mono, including after reopen.
 - **GPT Live may delegate a question asked over its own playback.** Public `gpt-live-1` sessions use client delegation for the whole session, and the provider's delegation events carry no typed reason, so Meerkat cannot keep a single turn native. A question that starts while the assistant is still speaking, before the cue for a delegated result has been sent, can be routed to the executor even when it asks about the conversation itself. The user then hears the answer late, in the same voice, once the executor's turn has finished and its result has been spoken after at least 1.6 s of output silence; occasionally the voice instead resumes its earlier readout and never answers, and the question has to be asked again.

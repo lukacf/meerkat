@@ -164,6 +164,7 @@ fn mob_definition(deny: &[&str]) -> MobDefinition {
             max_inline_peer_notifications: None,
             output_schema: None,
             provider_params: None,
+            durable: false,
         })),
     );
     let mut definition = MobDefinition::explicit(MobId::from(format!(
@@ -214,7 +215,7 @@ async fn a_denied_tool_of_an_enabled_family_is_gated_for_the_member() {
 
     let mut shell_result = None;
     while let Ok(envelope) = events_rx.try_recv() {
-        if let AgentEvent::ToolExecutionCompleted {
+        if let AgentEvent::ToolResultReceived {
             name,
             is_error,
             content,

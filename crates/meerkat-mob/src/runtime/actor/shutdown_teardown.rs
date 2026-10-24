@@ -82,6 +82,33 @@ impl MobActor {
             let ticket = self.next_autonomous_stop_ticket;
             self.next_autonomous_stop_ticket = ticket.wrapping_add(1);
             let deadline = Instant::now() + self.shutdown_wait_budget();
+            // The Shutdown's choice applies to every unregister it begins for
+            // a member it keeps: a bound member's session. Its default
+            // resolves per session: a session that commits each round keeps
+            // its running turn and eligible queued inputs for the next start
+            // (`member_sessions_commit_each_round`; every session this
+            // teardown unregisters lives on the mob's own service and
+            // runtime). A run that commits no rounds (a live bridge run) is
+            // still cancelled by the runtime stop. A retiring member's session
+            // is not expected to resume, so its queued inputs end stopped, as
+            // its retirement would end them. An unregister an earlier Shutdown
+            // left with its coordinator keeps the choice it began with; this
+            // one's applies only if that coordinator ends without
+            // unregistering and the unregister is begun again.
+            let requested = self
+                .shutdown_queued_inputs
+                .unregister_queued_inputs(self.member_sessions_commit_each_round());
+            let targets = targets
+                .into_iter()
+                .map(|(session_id, retained)| {
+                    let queued_inputs = if bound.contains_key(&session_id) {
+                        requested
+                    } else {
+                        meerkat_runtime::UnregisterQueuedInputs::Stop
+                    };
+                    (session_id, retained, queued_inputs)
+                })
+                .collect::<Vec<_>>();
             tracing::info!(
                 mob_id = %self.definition.id,
                 sessions = targets.len(),
@@ -113,7 +140,7 @@ impl MobActor {
             });
             self.actor_io_tasks.spawn(async move {
                 let settled = futures::future::join_all(targets.into_iter().map(
-                    |(session_id, retained)| {
+                    |(session_id, retained, queued_inputs)| {
                         let adapter = Arc::clone(&adapter);
                         let ops_adapter = Arc::clone(&ops_adapter);
                         let lease_release = Arc::clone(&lease_release);
@@ -124,6 +151,7 @@ impl MobActor {
                                 &session_id,
                                 retained,
                                 deadline,
+                                queued_inputs,
                             )
                             .await;
                             // Shutdown is done with the member for good
@@ -435,9 +463,12 @@ impl ShutdownLeaseRelease {
 }
 
 /// Unregister one session through its exact-registration runtime authority,
-/// within `deadline`. Never forces an unregister the runtime refuses or has
-/// not completed: that is reported `Pending` with the stage it stands at,
-/// and with a settlement that follows the exact registration afterwards. A
+/// within `deadline`, with `queued_inputs` deciding the session's queued
+/// inputs when this call begins the unregister (a settlement that begins it
+/// later carries the same choice). Never forces an unregister the runtime
+/// refuses or has not completed: that is reported `Pending` with the stage
+/// it stands at, and with a settlement that follows the exact registration
+/// afterwards. A
 /// durability-degraded registration goes through the runtime's
 /// reload-required discard first, as retire and destroy do, and the cold
 /// successor that discard returns as published is the registration
@@ -450,6 +481,7 @@ pub(in crate::runtime) async fn teardown_session(
     session_id: &SessionId,
     retained: Option<meerkat_runtime::RuntimeSessionUnregisterObserver>,
     deadline: Instant,
+    queued_inputs: meerkat_runtime::UnregisterQueuedInputs,
 ) -> ShutdownUnregisterOutcome {
     use super::super::provisioner::{DegradedUnregisterStep, MemberSessionDisposalArc};
 
@@ -466,6 +498,7 @@ pub(in crate::runtime) async fn teardown_session(
                 registration,
                 published_use,
                 observer,
+                queued_inputs,
             )
         };
     // The use of a successor the teardown's own discard published, as the
@@ -520,7 +553,10 @@ pub(in crate::runtime) async fn teardown_session(
             // is bounded too: a held transaction is reported, not waited on.
             let admitted = crate::tokio::time::timeout(
                 remaining(),
-                adapter.observe_unregister_session_registration_if_current(&registration),
+                adapter.observe_unregister_session_registration_with_queued_inputs_if_current(
+                    &registration,
+                    queued_inputs,
+                ),
             )
             .await;
             match admitted {
@@ -606,7 +642,8 @@ pub(in crate::runtime) async fn teardown_session(
 /// Shutdown returns. The settlement admits the unregister, or runs the
 /// reload-required discard, only while the registration's use is still the
 /// one it has here, as Shutdown hands it back: `published_use` for a
-/// successor the teardown's own discard published, otherwise read now.
+/// successor the teardown's own discard published, otherwise read now. An
+/// unregister the settlement begins carries the Shutdown's `queued_inputs`.
 #[cfg(feature = "runtime-adapter")]
 async fn pending_unregister(
     adapter: &Arc<meerkat_runtime::MeerkatMachine>,
@@ -615,6 +652,7 @@ async fn pending_unregister(
     registration: meerkat_runtime::RuntimeSessionRegistrationWitness,
     published_use: Option<meerkat_runtime::RuntimeSessionRegistrationUse>,
     observer: Option<meerkat_runtime::RuntimeSessionUnregisterObserver>,
+    queued_inputs: meerkat_runtime::UnregisterQueuedInputs,
 ) -> ShutdownUnregisterOutcome {
     let registration_use = match published_use {
         Some(published) => Some(published),
@@ -628,7 +666,8 @@ async fn pending_unregister(
             observer.clone(),
             adapter,
             Some(ops_adapter),
-        ),
+        )
+        .with_queued_inputs(queued_inputs),
         observer,
     }
 }

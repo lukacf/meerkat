@@ -412,6 +412,89 @@ impl std::fmt::Display for MemberRegistrationHookCall {
     }
 }
 
+/// Why role-targets admission refused a flow run.
+///
+/// The verdict is computed once, inside the mob actor command that admits the
+/// run, from MobMachine's own member facts, before anything is written,
+/// provisioned or dispatched. On the wire it rides the error data as a closed
+/// vocabulary, `{"kind": "<variant>", ...fields}`, so no caller reads the
+/// message text to tell a binding refusal from other invalid params.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum FlowRoleTargetRefusal {
+    /// A bound role is not the role of any step of the flow.
+    RoleNotInFlow { role: ProfileName },
+    /// A role that a step of the flow dispatches to is not bound.
+    RoleUnbound { role: ProfileName },
+    /// A quorum step needs more producers than its role's bound set holds.
+    QuorumExceedsBoundSet {
+        step_id: StepId,
+        required: u8,
+        bound: usize,
+    },
+    /// A bound identity is not a member of this mob.
+    NotAMember {
+        role: ProfileName,
+        member: AgentIdentity,
+    },
+    /// A bound member holds a different role.
+    RoleMismatch {
+        role: ProfileName,
+        member: AgentIdentity,
+        member_role: ProfileName,
+    },
+    /// A bound member holds the role but is not Active.
+    NotActive {
+        role: ProfileName,
+        member: AgentIdentity,
+        status: crate::runtime::MobMemberStatus,
+    },
+}
+
+impl std::fmt::Display for FlowRoleTargetRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RoleNotInFlow { role } => {
+                write!(f, "role '{role}' is not the role of any step of the flow")
+            }
+            Self::RoleUnbound { role } => {
+                write!(f, "role '{role}' is used by the flow but not bound")
+            }
+            Self::QuorumExceedsBoundSet {
+                step_id,
+                required,
+                bound,
+            } => write!(
+                f,
+                "step '{step_id}' needs a quorum of {required} but its role binds {bound} members"
+            ),
+            Self::NotAMember { role, member } => {
+                write!(
+                    f,
+                    "member '{member}' bound to role '{role}' is not a member of this mob"
+                )
+            }
+            Self::RoleMismatch {
+                role,
+                member,
+                member_role,
+            } => write!(
+                f,
+                "member '{member}' bound to role '{role}' holds role '{member_role}'"
+            ),
+            Self::NotActive {
+                role,
+                member,
+                status,
+            } => write!(
+                f,
+                "member '{member}' bound to role '{role}' is not active (status {status:?})"
+            ),
+        }
+    }
+}
+
 /// Errors returned by mob operations.
 ///
 /// Non-exhaustive: a later release can add a refusal without breaking a
@@ -646,7 +729,9 @@ pub enum MobError {
     /// The member's retirement durably started and then stopped at `stage`
     /// with the typed `cause`. The member stays `Retiring`, owned by the mob
     /// actor's stuck-retirement registry. Retrying a plain retirement does not
-    /// drive it; `MobHandle::redrive_retirement` or a mob resume does.
+    /// drive it; `MobHandle::redrive_retirement` or a mob resume does. Its
+    /// structured data carries the cause's text as `cause` and, when the
+    /// cause has structured data, that data as `cause_data`.
     #[error("member retirement for '{member_id}' is stuck at {stage}: {cause}")]
     MemberRetirementStuck {
         member_id: AgentIdentity,
@@ -770,6 +855,20 @@ pub enum MobError {
     /// only the restart releases.
     #[error("mob '{mob_id}' fail-stopped after an uncertain durable mutation: {cause}")]
     DurabilityFailStop { mob_id: MobId, cause: Arc<MobError> },
+
+    /// Member `member_id`'s session `session_id` has a durable tail past its
+    /// committed runtime boundary that the store-owned recovery could not
+    /// prove: the recovery kept the tail intact, so the session still reads
+    /// as a revision conflict at that boundary. Nothing was written; the tail
+    /// stays for reconciliation. The structured data carries the
+    /// `tail_held_for_recovery` resume hold.
+    #[error(
+        "member {member_id} session {session_id} has a durable tail its recovery could not prove; the tail is kept for reconciliation"
+    )]
+    MemberDurableTailUnprovable {
+        member_id: AgentIdentity,
+        session_id: meerkat_core::types::SessionId,
+    },
 
     /// The member's runtime registration is durability-degraded: a durable
     /// commit could not be reconciled with the live shell, so the runtime
@@ -979,6 +1078,39 @@ pub enum MobError {
         required: u8,
         available: usize,
     },
+
+    /// Role-targets admission refused a flow run. Nothing was written,
+    /// provisioned or dispatched.
+    #[error("flow '{flow_id}' role targets refused: {refusal}")]
+    FlowRoleTargetsRefused {
+        flow_id: FlowId,
+        refusal: FlowRoleTargetRefusal,
+    },
+
+    /// A step of a role-targeted run can no longer meet its collection policy
+    /// with the bound members of its role that are still Active and still
+    /// hold the role. The run fails before the step dispatches any turn: a
+    /// bound run never substitutes another member and never waits for one.
+    #[error(
+        "bound targets unavailable for step {step_id} of run {run_id}: required {required}, available [{}], unavailable [{}]",
+        format_identities(.available),
+        format_identities(.unavailable)
+    )]
+    BoundFlowTargetsUnavailable {
+        run_id: RunId,
+        step_id: StepId,
+        required: usize,
+        available: Vec<AgentIdentity>,
+        unavailable: Vec<AgentIdentity>,
+    },
+
+    /// A keyed flow run admission named a key whose run was admitted with
+    /// other activation params or other role targets. The first run stands;
+    /// no second run was admitted.
+    #[error(
+        "flow run '{run_id}' of flow '{flow_id}' was admitted under this idempotency key with other activation params or role targets"
+    )]
+    FlowRunIdempotencyConflict { run_id: RunId, flow_id: FlowId },
 
     /// Topology policy denied a dispatch edge.
     #[error("topology violation: {from_role} -> {to_role}")]
@@ -1234,6 +1366,11 @@ pub enum MobError {
         tool_use_id: String,
         tool_name: String,
         args: serde_json::Value,
+        /// The call's dedupe key, as on
+        /// [`meerkat_core::error::PendingCallbackToolCall`]: a host answering
+        /// the call sees the same key if a resumed run asks again. Boxed so
+        /// the error stays small.
+        dedupe_key: Option<Box<meerkat_core::ToolCallDedupeKey>>,
     },
     /// A member turn is waiting on one exact multi-callback result set.
     #[error(
@@ -1515,6 +1652,39 @@ pub enum MobError {
         refusal: meerkat_core::ForkInstructionRefusal,
     },
 
+    /// A prompt-context fork of `source_member_id` was refused before
+    /// anything was spawned: the newest row of its planned context does not
+    /// fit the fork context budget for the child's model.
+    #[error(
+        "fork of member '{source_member_id}' refused: its newest context row with the \
+         fork context framing needs {required_bytes} bytes, more than the \
+         {max_bytes}-byte fork context budget; fork with last_messages or from a \
+         source with shorter rows"
+    )]
+    ForkContextTooLarge {
+        source_member_id: AgentIdentity,
+        max_bytes: usize,
+        /// The bytes the newest row needs together with the fork context
+        /// framing (header, fork notice and end marker).
+        required_bytes: usize,
+    },
+
+    /// A placed spawn that asks its member host `host_id` what it serves (a
+    /// prompt-context fork child, or a plain resume) was not spawned: the
+    /// `HostFeatures` probe failed with `cause` (a timeout, the transport,
+    /// admission). Nothing was recorded for the member. A host that does
+    /// not know the probe is not a failure: a fork child gets the context
+    /// as a prefix of its first prompt, and a resume keeps its first turn.
+    /// It is classified as `cause` everywhere: the failure class, the wire
+    /// code and detail, the rejection cause and the structured data are the
+    /// cause's. A spawn-time probe holds no durable resume and refuses no
+    /// runtime effect.
+    #[error("HostFeatures probe of member host '{host_id}' failed: {cause}")]
+    HostFeaturesProbeFailed {
+        host_id: String,
+        cause: Arc<MobError>,
+    },
+
     /// A restored member's host refused its registration at `call`. The
     /// refused registration is gone: removed exactly through the canonical
     /// unregister when the revival did not insert it, so the inputs its
@@ -1593,6 +1763,329 @@ pub enum MobError {
         agent_identity: String,
         reason: String,
     },
+
+    /// A member retirement's durability reload of the member session was
+    /// refused by the runtime as repair-blocked
+    /// (`RuntimeDriverError::RecoveryRepairBlocked`), for example while a
+    /// boundary commit past its deadline has not reported its durable
+    /// outcome. Retryable: once the runtime's evidence settles, a redrive of
+    /// the retirement reloads the member and continues. A retirement's
+    /// ingress detach that the runtime refuses as repair-blocked, because the
+    /// member session degraded after the stage's reload check, answers it
+    /// too, with the refusal's own fields. The retire path answers it,
+    /// usually as the cause of a stuck retirement;
+    /// `MobHandle::reload_member_registration` answers
+    /// [`MobError::MemberReloadRefused`] for the same runtime refusal, and a
+    /// caller treats both alike. The fields mirror the destroy report's
+    /// `MemberReloadRefusal::RepairBlocked`.
+    #[error("member session {session_id} reload is repair-blocked: {reason}")]
+    MemberReloadRepairBlocked {
+        session_id: meerkat_core::types::SessionId,
+        reason: String,
+        evidence_digest: Option<String>,
+    },
+
+    /// A member's operator authority ceiling
+    /// ([`crate::MemberOperatorAuthorityCeiling`]) was refused. Nothing was
+    /// spawned; a refused respawn retired nothing and the member keeps
+    /// running.
+    #[error("operator authority ceiling for member {agent_identity} refused: {reason}")]
+    OperatorAuthorityCeilingRefused {
+        agent_identity: AgentIdentity,
+        reason: OperatorAuthorityCeilingRefusal,
+    },
+
+    /// A keyed member send (a member send with a caller idempotency key) was
+    /// refused, or its answer could not be made; nothing new was committed.
+    #[error("keyed send to member '{identity}': {refusal}")]
+    MemberSendIdempotency {
+        identity: AgentIdentity,
+        refusal: MemberSendIdempotencyRefusal,
+    },
+
+    /// A graceful Shutdown kept the member input durably queued: it runs on
+    /// the mob's next start. It is not failed. Do not resubmit it; a
+    /// same-key replay after the restart re-attaches to it.
+    #[error(
+        "input {input_id} in session {session_id} stays queued across the stop and runs on the next start; re-attach with the same delivery key, do not resubmit"
+    )]
+    MemberInputRequeuedAcrossStop {
+        session_id: meerkat_core::SessionId,
+        input_id: meerkat_core::InputId,
+    },
+
+    /// An input a graceful Shutdown kept queued was older than its requeue
+    /// bound when the mob's next start recovered it, so it ended without
+    /// running. Resubmitting it is now correct.
+    #[error(
+        "input {input_id} in session {session_id} was requeued across a stop but expired before it ran; resubmit it"
+    )]
+    MemberInputRequeueExpired {
+        session_id: meerkat_core::SessionId,
+        input_id: meerkat_core::InputId,
+    },
+
+    /// The mob's startup could not restore `restore` for member `member_id`'s
+    /// session `session_id` (for example while another runtime owner on the
+    /// realm hosts the session), so it deferred that restore instead of
+    /// failing the whole start, and an operation that acts on the member
+    /// re-attempted it first. `cause` is the typed failure of that
+    /// re-attempt, and every typed classifier answers as for the cause.
+    /// Nothing acted on the member's session. The mob re-attempts the restore
+    /// on its own backoff, and the operation can pass once the cause clears
+    /// (for a session another runtime owner hosts, once that owner stops or
+    /// releases it).
+    #[error(
+        "member {member_id} session {session_id} has its {restore} deferred until it can be restored: {cause}"
+    )]
+    MemberCustodyDeferred {
+        member_id: AgentIdentity,
+        session_id: meerkat_core::types::SessionId,
+        restore: MemberCustodyRestore,
+        cause: Arc<MobError>,
+    },
+
+    /// A spawn of member `member_id` from profile `profile`, which declares
+    /// `durable = true`, on a mob whose member sessions do not outlive the
+    /// process ([`crate::MobSessionService::keeps_durable_member_sessions`]).
+    /// A durable member must survive a restart on its session, so the spawn
+    /// is refused before anything is created. Run the mob on a persistent
+    /// realm, or drop `durable` from the profile.
+    #[error(
+        "member {member_id} uses durable profile '{profile}', but the mob's member sessions do not outlive the process: run the mob on a persistent realm, or drop `durable` from the profile"
+    )]
+    NonDurableService {
+        member_id: AgentIdentity,
+        profile: ProfileName,
+    },
+}
+
+/// Why a member's operator authority ceiling was refused
+/// ([`MobError::OperatorAuthorityCeilingRefused`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OperatorAuthorityCeilingRefusal {
+    /// The ceiling narrows the spawn profiles and keeps manage scope. Manage
+    /// scope admits every profile, so that narrowing could not hold: narrow
+    /// the spawn profiles without manage scope.
+    SpawnProfilesWithManage,
+    /// The spawn has no placement. A ceiling bounds the authority the
+    /// controlling host records for a placed member; a local member's
+    /// operator authority is set by its own session build.
+    UnplacedMember,
+}
+
+impl std::fmt::Display for OperatorAuthorityCeilingRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SpawnProfilesWithManage => f.write_str(
+                "it narrows the spawn profiles but keeps manage scope, which admits every \
+                 profile; narrow the spawn profiles without manage scope",
+            ),
+            Self::UnplacedMember => f.write_str(
+                "the member is not placed on a member host; a ceiling bounds only a placed \
+                 member's recorded authority",
+            ),
+        }
+    }
+}
+
+/// Why a keyed member send was refused or could not be answered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MemberSendIdempotencyRefusal {
+    /// The key is not canonical key text.
+    InvalidKey { detail: String },
+    /// The key is bound to other content; the first delivery stands.
+    Conflict {
+        delivery_id: String,
+        committed_at_ms: u64,
+    },
+    /// No continuation service is bound on this host, so it cannot keep the
+    /// key for the member identity.
+    NoContinuationService,
+    /// The runtime admits work through a native work authorization host,
+    /// which refuses continuations.
+    GovernedRuntime,
+    /// The continuation authority cannot be read now. The commit, if any,
+    /// stands: retry the same key.
+    Unavailable { detail: String },
+    /// The continuation authority holds facts that cannot all be true.
+    Inconsistent { detail: String },
+}
+
+impl std::fmt::Display for MemberSendIdempotencyRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidKey { detail } => f.write_str(detail),
+            Self::Conflict { delivery_id, .. } => write!(
+                f,
+                "the idempotency key is bound to other content (delivery {delivery_id})"
+            ),
+            Self::NoContinuationService => {
+                f.write_str("this host binds no continuation service to keep the key")
+            }
+            Self::GovernedRuntime => f.write_str("a governed runtime refuses keyed member sends"),
+            Self::Unavailable { detail } => {
+                write!(f, "continuation status unavailable: {detail}")
+            }
+            Self::Inconsistent { detail } => {
+                write!(f, "continuation authority is inconsistent: {detail}")
+            }
+        }
+    }
+}
+
+impl MemberSendIdempotencyRefusal {
+    /// The typed wire kind of this refusal.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::InvalidKey { .. } => "invalid_idempotency_key",
+            Self::Conflict { .. } => "input_idempotency_conflict",
+            Self::NoContinuationService | Self::GovernedRuntime => "idempotency_unavailable",
+            Self::Unavailable { .. } => "continuation_status_unavailable",
+            Self::Inconsistent { .. } => "continuation_status_inconsistent",
+        }
+    }
+
+    fn structured_data(&self) -> serde_json::Value {
+        match self {
+            Self::Conflict {
+                delivery_id,
+                committed_at_ms,
+            } => serde_json::json!({
+                "kind": self.kind(),
+                "delivery_id": delivery_id,
+                "committed_at_ms": committed_at_ms,
+            }),
+            Self::NoContinuationService => serde_json::json!({
+                "kind": self.kind(),
+                "cause": "no_continuation_service",
+            }),
+            Self::GovernedRuntime => serde_json::json!({
+                "kind": self.kind(),
+                "cause": "governed_runtime",
+            }),
+            Self::InvalidKey { .. } | Self::Unavailable { .. } | Self::Inconsistent { .. } => {
+                serde_json::json!({ "kind": self.kind() })
+            }
+        }
+    }
+
+    /// The wire class: an invalid key and a conflict stay invalid params; an
+    /// unavailable door is a capability gap; an unreadable status is
+    /// retryable; an inconsistent one is internal and not retryable.
+    fn error_code(&self) -> Option<meerkat_contracts::ErrorCode> {
+        match self {
+            Self::InvalidKey { .. } | Self::Conflict { .. } => None,
+            Self::NoContinuationService | Self::GovernedRuntime => {
+                Some(meerkat_contracts::ErrorCode::CapabilityUnavailable)
+            }
+            Self::Unavailable { .. } => {
+                Some(meerkat_contracts::ErrorCode::SessionRuntimeUnavailable)
+            }
+            Self::Inconsistent { .. } => Some(meerkat_contracts::ErrorCode::InternalError),
+        }
+    }
+}
+
+/// Which startup restore of a member's custody was deferred (see
+/// [`MobError::MemberCustodyDeferred`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum MemberCustodyRestore {
+    /// The member's operation binding, restored for a member whose restore
+    /// failed at this start.
+    StartupBinding,
+    /// A retiring member's local cleanup delivery custody.
+    CleanupDelivery,
+}
+
+impl MemberCustodyRestore {
+    /// Stable token in structured data.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::StartupBinding => "startup_binding",
+            Self::CleanupDelivery => "cleanup_delivery",
+        }
+    }
+}
+
+impl std::fmt::Display for MemberCustodyRestore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::StartupBinding => "operation binding restore",
+            Self::CleanupDelivery => "cleanup delivery restore",
+        })
+    }
+}
+
+/// The cause a member's deferred custody restore last met: the reason it
+/// stays deferred. Only these causes defer a restore; any other failure
+/// fails the operation that re-attempted it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum MemberCustodyDeferralCause {
+    /// Another runtime owner on the realm hosts the member's session.
+    ServedElsewhere,
+    /// The member session's hosting claim cannot be taken on this realm.
+    HostingUnavailable,
+    /// The member's durable tail could not be proven, and its recovery kept
+    /// it ([`MobError::MemberDurableTailUnprovable`]).
+    DurableTailUnprovable,
+}
+
+impl MemberCustodyDeferralCause {
+    /// The deferral cause `error` is, if a failed custody restore may be
+    /// deferred for it: the typed hosting refusals and the unprovable durable
+    /// tail. `None` for any other failure.
+    #[must_use]
+    pub fn of(error: &MobError) -> Option<Self> {
+        match error {
+            MobError::SessionError(meerkat_core::SessionError::ServedElsewhere { .. }) => {
+                Some(Self::ServedElsewhere)
+            }
+            MobError::SessionError(meerkat_core::SessionError::HostingUnavailable { .. }) => {
+                Some(Self::HostingUnavailable)
+            }
+            MobError::MemberDurableTailUnprovable { .. } => Some(Self::DurableTailUnprovable),
+            _ => None,
+        }
+    }
+
+    /// Stable token in structured data and on the wire.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ServedElsewhere => "served_elsewhere",
+            Self::HostingUnavailable => "hosting_unavailable",
+            Self::DurableTailUnprovable => "durable_tail_unprovable",
+        }
+    }
+}
+
+/// A member's custody restore a mob start deferred instead of failing the
+/// whole start, as the member's status shows it: which restore, and the cause
+/// its last attempt met. Every operation on the member re-attempts the
+/// restore first, and the deferral clears once one succeeds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[non_exhaustive]
+pub struct MemberCustodyDeferral {
+    /// The deferred restore.
+    pub restore: MemberCustodyRestore,
+    /// The cause its last attempt met.
+    pub cause: MemberCustodyDeferralCause,
+}
+
+impl MemberCustodyDeferral {
+    /// The deferral of `restore` whose last attempt met `cause`, when the
+    /// cause may defer a restore.
+    #[must_use]
+    pub fn new(restore: MemberCustodyRestore, cause: &MobError) -> Option<Self> {
+        MemberCustodyDeferralCause::of(cause).map(|cause| Self { restore, cause })
+    }
 }
 
 /// The stable token of the runtime verdict a member's destination install
@@ -1765,6 +2258,14 @@ fn format_diagnostics(diagnostics: &[Diagnostic]) -> String {
         .join("; ")
 }
 
+fn format_identities(identities: &[AgentIdentity]) -> String {
+    identities
+        .iter()
+        .map(AgentIdentity::as_str)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn format_member_restore_target(session_id: Option<&meerkat_core::types::SessionId>) -> String {
     match session_id {
         Some(session_id) => format!("session {session_id}"),
@@ -1883,6 +2384,33 @@ impl MobError {
         }
     }
 
+    /// Structured-data `kind` of [`Self::MemberReloadRepairBlocked`].
+    pub(crate) const MEMBER_RELOAD_REPAIR_BLOCKED_KIND: &'static str =
+        "mob_member_reload_repair_blocked";
+
+    /// The structured data of [`Self::MemberReloadRepairBlocked`]. A
+    /// retirement stage carries the refusal across its `SessionError`
+    /// boundary as this data, and the retirement maps it back to the
+    /// variant.
+    pub(crate) fn member_reload_repair_blocked_data(
+        session_id: &meerkat_core::types::SessionId,
+        reason: &str,
+        evidence_digest: Option<&str>,
+    ) -> serde_json::Value {
+        let mut data = serde_json::json!({
+            "kind": Self::MEMBER_RELOAD_REPAIR_BLOCKED_KIND,
+            "session_id": session_id.to_string(),
+            "reason": reason,
+            "retryable": true,
+            "authority_retained": true,
+            "live_shell_discarded": false,
+        });
+        if let (Some(digest), Some(fields)) = (evidence_digest, data.as_object_mut()) {
+            fields.insert("evidence_digest".to_string(), digest.into());
+        }
+        data
+    }
+
     /// Structured data carried by an underlying domain error.
     ///
     /// Session materialization failures use this to preserve typed
@@ -1890,9 +2418,36 @@ impl MobError {
     /// layer to reclassify authentication itself.
     pub fn structured_data(&self) -> Option<serde_json::Value> {
         match self {
+            Self::MemberSendIdempotency { refusal, .. } => Some(refusal.structured_data()),
+            Self::FlowRoleTargetsRefused { flow_id, refusal } => Some(serde_json::json!({
+                "kind": "flow_role_targets_refused",
+                "flow_id": flow_id.as_str(),
+                "refusal": refusal,
+            })),
+            Self::BoundFlowTargetsUnavailable {
+                run_id,
+                step_id,
+                required,
+                available,
+                unavailable,
+            } => Some(serde_json::json!({
+                "kind": "bound_flow_targets_unavailable",
+                "run_id": run_id.to_string(),
+                "step_id": step_id.as_str(),
+                "required": required,
+                "available": available,
+                "unavailable": unavailable,
+            })),
+            Self::FlowRunIdempotencyConflict { run_id, flow_id } => Some(serde_json::json!({
+                "kind": "flow_run_idempotency_conflict",
+                "run_id": run_id.to_string(),
+                "flow_id": flow_id.as_str(),
+            })),
             Self::SharedRetirementFailure(error) | Self::SharedLifecycleFailure(error) => {
                 error.structured_data()
             }
+            // A failed probe is classified by what failed it.
+            Self::HostFeaturesProbeFailed { cause, .. } => cause.structured_data(),
             Self::SessionError(error) => meerkat_contracts::error::session_error_details(error),
             Self::ForkInstructionRefused {
                 source_member_id,
@@ -1901,6 +2456,16 @@ impl MobError {
                 "kind": meerkat_core::service::SessionError::FORK_INSTRUCTION_REFUSED_KIND,
                 "fork_instruction_refusal": refusal,
                 "source_member_id": source_member_id.as_str(),
+            })),
+            Self::ForkContextTooLarge {
+                source_member_id,
+                max_bytes,
+                required_bytes,
+            } => Some(serde_json::json!({
+                "kind": "fork_context_too_large",
+                "source_member_id": source_member_id.as_str(),
+                "max_bytes": max_bytes,
+                "required_bytes": required_bytes,
             })),
             // A restore failure that IS a typed resume hold projects the hold
             // under meerkat's own key, so a wire caller classifies the Broken
@@ -1956,6 +2521,55 @@ impl MobError {
                 }
                 Some(data)
             }
+            Self::MemberDurableTailUnprovable {
+                member_id,
+                session_id,
+            } => Some(serde_json::json!({
+                "kind": "mob_member_durable_tail_unprovable",
+                "member_id": member_id.as_str(),
+                "session_id": session_id.to_string(),
+                meerkat_core::service::SessionError::DURABLE_RESUME_HOLD_KEY:
+                    meerkat_core::service::DurableResumeHold::TailHeldForRecovery.as_str(),
+                "content_retained": true,
+                "retryable": false,
+            })),
+            // As for a startup recovery failure: the member, its session and
+            // the deferred restore are this variant's own facts; the cause
+            // keeps its structured data under "cause_data" (when it has some)
+            // and its durable resume hold is lifted to the top level.
+            Self::MemberCustodyDeferred {
+                member_id,
+                session_id,
+                restore,
+                cause,
+            } => {
+                let mut data = serde_json::json!({
+                    "kind": "mob_member_custody_deferred",
+                    "member_id": member_id.as_str(),
+                    "session_id": session_id.to_string(),
+                    "restore": restore.as_str(),
+                    "cause": cause.to_string(),
+                });
+                if let Some(object) = data.as_object_mut() {
+                    if let Some(cause_data) = cause.structured_data() {
+                        object.insert("cause_data".to_string(), cause_data);
+                    }
+                    if let Some(hold) = cause.durable_resume_hold() {
+                        object.insert(
+                            meerkat_core::service::SessionError::DURABLE_RESUME_HOLD_KEY
+                                .to_string(),
+                            serde_json::Value::from(hold.as_str()),
+                        );
+                    }
+                }
+                Some(data)
+            }
+            Self::NonDurableService { member_id, profile } => Some(serde_json::json!({
+                "kind": "mob_non_durable_service",
+                "member_id": member_id.as_str(),
+                "profile": profile.as_str(),
+                "retryable": false,
+            })),
             Self::MemberRegistrationRefused {
                 member_id,
                 session_id,
@@ -2018,15 +2632,25 @@ impl MobError {
                 member_id,
                 stage,
                 cause,
-            } => Some(serde_json::json!({
-                "kind": "mob_retirement_stuck",
-                "member_id": member_id.as_str(),
-                "stage": stage,
-                "cause": cause.to_string(),
-                "retryable": false,
-                "redrive": true,
-                "authority_retained": true,
-            })),
+            } => {
+                let mut data = serde_json::json!({
+                    "kind": "mob_retirement_stuck",
+                    "member_id": member_id.as_str(),
+                    "stage": stage,
+                    "cause": cause.to_string(),
+                    "retryable": false,
+                    "redrive": true,
+                    "authority_retained": true,
+                });
+                // The cause's own data, so a client routes on its kind
+                // rather than on the cause's text.
+                if let (Some(cause_data), Some(fields)) =
+                    (cause.structured_data(), data.as_object_mut())
+                {
+                    fields.insert("cause_data".to_string(), cause_data);
+                }
+                Some(data)
+            }
             Self::MemberRetirementAdmissionPending { member_id, stage } => {
                 Some(serde_json::json!({
                     "kind": "mob_retirement_admission_pending",
@@ -2114,6 +2738,15 @@ impl MobError {
                 "authority_retained": true,
                 "live_shell_discarded": false,
             })),
+            Self::MemberReloadRepairBlocked {
+                session_id,
+                reason,
+                evidence_digest,
+            } => Some(Self::member_reload_repair_blocked_data(
+                session_id,
+                reason,
+                evidence_digest.as_deref(),
+            )),
             Self::MemberReloadTimedOut { session_id, stage } => Some(serde_json::json!({
                 "kind": "mob_member_reload_timed_out",
                 "session_id": session_id.to_string(),
@@ -2159,6 +2792,15 @@ impl MobError {
         }
     }
 
+    /// Whether a member's custody restore at mob start failed for a cause
+    /// that can clear without this owner acting: another runtime owner hosts
+    /// the session, its hosting claim is unavailable, or its durable tail is
+    /// kept unprovable. Only these causes let the start defer that member
+    /// instead of failing; every other cause stays fatal.
+    pub(crate) fn is_deferrable_custody_cause(&self) -> bool {
+        MemberCustodyDeferralCause::of(self).is_some()
+    }
+
     /// meerkat's typed durable resume hold carried by this error, if any:
     /// the session is intact and withheld (a held tail, a refused recovery,
     /// quarantined evidence, or a WholeBlob document that needs the
@@ -2175,6 +2817,7 @@ impl MobError {
             Self::SharedRetirementFailure(error)
             | Self::SharedLifecycleFailure(error)
             | Self::MemberRetirementStuck { cause: error, .. }
+            | Self::MemberCustodyDeferred { cause: error, .. }
             | Self::MemberStartupRecoveryFailed { cause: error, .. } => error.durable_resume_hold(),
             // Restart, do not park: the cause's hold belongs to a mutation
             // the stopped actor never retries.
@@ -2197,7 +2840,9 @@ impl MobError {
             .or_else(|| match self {
                 Self::SharedRetirementFailure(error)
                 | Self::SharedLifecycleFailure(error)
+                | Self::MemberCustodyDeferred { cause: error, .. }
                 | Self::MemberStartupRecoveryFailed { cause: error, .. } => error.wire_error_code(),
+                Self::HostFeaturesProbeFailed { cause, .. } => cause.wire_error_code(),
                 // The close's answer (AdmissionClosed carries no code).
                 Self::DurabilityFailStop { .. } => None,
                 Self::SessionError(
@@ -2210,6 +2855,11 @@ impl MobError {
                 // A member that cannot be scope-bound (no native session
                 // binding) does not support scope-bound delivery at all.
                 Self::DeliveryScopeUnavailable { .. } => {
+                    Some(meerkat_contracts::ErrorCode::CapabilityUnavailable)
+                }
+                // A durable profile needs persistent sessions, a capability
+                // the mob's session service does not have.
+                Self::NonDurableService { .. } => {
                     Some(meerkat_contracts::ErrorCode::CapabilityUnavailable)
                 }
                 error if error.is_held_before_activation() => {
@@ -2226,6 +2876,7 @@ impl MobError {
                 | Self::MemberAdmissionBacklogFull { .. }
                 | Self::ActorCommandTimedOut { .. }
                 | Self::MemberReloadRefused { .. }
+                | Self::MemberReloadRepairBlocked { .. }
                 | Self::MemberReloadTimedOut { .. } => {
                     Some(meerkat_contracts::ErrorCode::SessionBusy)
                 }
@@ -2244,6 +2895,10 @@ impl MobError {
                 Self::ForkInstructionRefused { .. } => {
                     Some(meerkat_contracts::ErrorCode::ForkInstructionRefused)
                 }
+                Self::ForkContextTooLarge { .. } => {
+                    Some(meerkat_contracts::ErrorCode::InvalidParams)
+                }
+                Self::MemberSendIdempotency { refusal, .. } => refusal.error_code(),
                 _ => None,
             })
     }
@@ -2253,9 +2908,11 @@ impl MobError {
             Self::SharedRetirementFailure(error)
             | Self::SharedLifecycleFailure(error)
             | Self::MemberRetirementStuck { cause: error, .. }
+            | Self::MemberCustodyDeferred { cause: error, .. }
             | Self::MemberStartupRecoveryFailed { cause: error, .. } => {
                 error.bridge_rejection_cause()
             }
+            Self::HostFeaturesProbeFailed { cause, .. } => cause.bridge_rejection_cause(),
             Self::DurabilityFailStop { .. } => None,
             // Cloned: `BridgeRejectionCause` carries payload variants since V4.
             Self::BridgeCommandRejected { cause, .. } => Some(cause.clone()),
@@ -2282,6 +2939,7 @@ impl MobError {
             Self::SharedRetirementFailure(error)
             | Self::SharedLifecycleFailure(error)
             | Self::MemberRetirementStuck { cause: error, .. }
+            | Self::MemberCustodyDeferred { cause: error, .. }
             | Self::MemberStartupRecoveryFailed { cause: error, .. } => {
                 error.is_closed_runtime_effect_refusal()
             }
@@ -2365,7 +3023,10 @@ impl MobError {
         match self {
             Self::SharedRetirementFailure(error)
             | Self::SharedLifecycleFailure(error)
+            | Self::MemberCustodyDeferred { cause: error, .. }
             | Self::MemberStartupRecoveryFailed { cause: error, .. } => error.failure_class(),
+            // A failed probe is classified by what failed it.
+            Self::HostFeaturesProbeFailed { cause, .. } => cause.failure_class(),
             // The close's answer: AdmissionClosed falls to MobRejected.
             Self::DurabilityFailStop { .. } => MobFailureClass::MobRejected,
             Self::MobNotFound(_)
@@ -2380,6 +3041,10 @@ impl MobError {
             // (a live handle's `current` is final).
             | Self::IncarnationDestroyed { .. }
             | Self::IncarnationMismatch { .. } => MobFailureClass::TargetMissing,
+            // The same verdict as a resume refused at an unprovable committed
+            // boundary: the tail stays until its recovery or an operator
+            // resolves it, never a plain busy/backoff retry.
+            Self::MemberDurableTailUnprovable { .. } => MobFailureClass::RuntimeRejected,
             Self::SessionUnavailableForResume { reason, .. } => match reason {
                 SessionResumeUnavailableReason::Absent => MobFailureClass::TargetMissing,
                 SessionResumeUnavailableReason::ArchivedNotRevivable => {
@@ -2415,8 +3080,12 @@ impl MobError {
             | Self::BridgeRequestTimedOut { .. }
             | Self::ActorCommandTimedOut { .. }
             | Self::MemberReloadRefused { .. }
+            | Self::MemberReloadRepairBlocked { .. }
             | Self::MemberReloadTimedOut { .. }
-            | Self::FlowTurnTimedOut => MobFailureClass::Transport,
+            | Self::FlowTurnTimedOut
+            // The input aged out before it ran: nothing was delivered, and
+            // resubmitting it is correct.
+            | Self::MemberInputRequeueExpired { .. } => MobFailureClass::Transport,
             Self::Internal(_)
             | Self::WorkInputCompletionUnavailable { .. }
             | Self::ExternalMemberCleanupUncertain { .. }
@@ -2447,6 +3116,9 @@ impl MobError {
             | Self::DirectMemberAdoptionPending { .. }
             | Self::WorkInputIdempotencyConflict { .. }
             | Self::MemberInputRefused { .. }
+            // The runtime holds the input queued for the next start: it
+            // completes then, never by a resubmission now.
+            | Self::MemberInputRequeuedAcrossStop { .. }
             | Self::RuntimeEffectRefused { .. }
             // The host refused the restored member: only an explicit repair
             // brings it back.
@@ -2478,7 +3150,10 @@ impl MobError {
         match self {
             Self::SharedRetirementFailure(error)
             | Self::SharedLifecycleFailure(error)
+            | Self::MemberCustodyDeferred { cause: error, .. }
             | Self::MemberStartupRecoveryFailed { cause: error, .. } => error.wire_detail(),
+            // A probe that timed out projects the timeout's detail.
+            Self::HostFeaturesProbeFailed { cause, .. } => cause.wire_detail(),
             Self::DurabilityFailStop { .. } => None,
             Self::ScopeDenied(denial) => Some(WireMobErrorDetail::ScopeDenied(
                 WireScopeDeniedDetail::from(denial),
@@ -2796,6 +3471,114 @@ mod tests {
     }
 
     #[test]
+    fn member_reload_repair_blocked_projects_typed_retryable_data() {
+        let session_id = meerkat_core::types::SessionId::new();
+        let refused = MobError::MemberReloadRepairBlocked {
+            session_id: session_id.clone(),
+            reason: "commit outcome not reported".to_string(),
+            evidence_digest: None,
+        };
+        assert_eq!(
+            refused.to_string(),
+            format!(
+                "member session {session_id} reload is repair-blocked: commit outcome not reported"
+            )
+        );
+        assert_eq!(
+            refused.structured_data(),
+            Some(serde_json::json!({
+                "kind": "mob_member_reload_repair_blocked",
+                "session_id": session_id.to_string(),
+                "reason": "commit outcome not reported",
+                "retryable": true,
+                "authority_retained": true,
+                "live_shell_discarded": false,
+            }))
+        );
+        assert_eq!(
+            refused.wire_error_code(),
+            Some(meerkat_contracts::ErrorCode::SessionBusy)
+        );
+        assert_eq!(refused.failure_class(), MobFailureClass::Transport);
+        assert!(!refused.is_retirement_in_progress());
+        let with_digest = MobError::MemberReloadRepairBlocked {
+            session_id,
+            reason: "commit outcome not reported".to_string(),
+            evidence_digest: Some("digest".to_string()),
+        };
+        assert_eq!(
+            with_digest
+                .structured_data()
+                .and_then(|data| data.get("evidence_digest").cloned()),
+            Some(serde_json::json!("digest"))
+        );
+    }
+
+    /// A stuck retirement's wire data carries its cause's structured data
+    /// beside the cause's text, so a client tells "redrive later" from
+    /// "reload the member, then redrive" without parsing text. A cause
+    /// without structured data adds no key, and the rest is unchanged.
+    #[test]
+    fn a_stuck_retirement_carries_its_typed_cause_data_beside_its_text() {
+        let member_id = AgentIdentity::from("member");
+        let typed_causes = [
+            MobError::MemberReloadRepairBlocked {
+                session_id: meerkat_core::types::SessionId::new(),
+                reason: "commit outcome not reported".to_string(),
+                evidence_digest: None,
+            },
+            MobError::MemberReloadRequired {
+                member_id: member_id.clone(),
+                reason: "durability reload required".to_string(),
+            },
+        ];
+        for cause in typed_causes {
+            let cause_text = cause.to_string();
+            let cause_data = cause
+                .structured_data()
+                .expect("a typed cause has structured data");
+            let stuck = MobError::MemberRetirementStuck {
+                member_id: member_id.clone(),
+                stage: "retire-ingress-detach".to_string(),
+                cause: Arc::new(cause),
+            };
+            assert_eq!(
+                stuck.structured_data(),
+                Some(serde_json::json!({
+                    "kind": "mob_retirement_stuck",
+                    "member_id": "member",
+                    "stage": "retire-ingress-detach",
+                    "cause": cause_text,
+                    "cause_data": cause_data,
+                    "retryable": false,
+                    "redrive": true,
+                    "authority_retained": true,
+                }))
+            );
+        }
+        let untyped = MobError::Internal("failed to detach peer ingress".to_string());
+        let cause_text = untyped.to_string();
+        let stuck = MobError::MemberRetirementStuck {
+            member_id,
+            stage: "retire-ingress-detach".to_string(),
+            cause: Arc::new(untyped),
+        };
+        assert_eq!(
+            stuck.structured_data(),
+            Some(serde_json::json!({
+                "kind": "mob_retirement_stuck",
+                "member_id": "member",
+                "stage": "retire-ingress-detach",
+                "cause": cause_text,
+                "retryable": false,
+                "redrive": true,
+                "authority_retained": true,
+            })),
+            "a cause without structured data adds no cause_data key"
+        );
+    }
+
+    #[test]
     fn actor_command_timeout_projects_observation_without_execution_or_retry_verdict() {
         for stage in ["actor_command_admission", "actor_command_reply"] {
             let error = MobError::ActorCommandTimedOut {
@@ -2812,6 +3595,109 @@ mod tests {
                 }))
             );
         }
+    }
+
+    /// A deferred member custody restore classifies as its cause on every
+    /// typed classifier, as a startup recovery failure does. Its structured
+    /// data names the member, its session and the deferred restore, keeps the
+    /// cause's data when it has some and lifts the cause's hold; whether a
+    /// retry can pass is the cause's. It is no retirement in progress.
+    #[test]
+    fn a_deferred_member_custody_classifies_as_its_cause() {
+        use meerkat_core::service::SessionError;
+        let session_id = meerkat_core::types::SessionId::new();
+        type MakeCause = fn(&meerkat_core::types::SessionId) -> SessionError;
+        let causes: [MakeCause; 3] = [
+            |id| SessionError::ServedElsewhere { id: id.clone() },
+            |id| SessionError::HostingUnavailable { id: id.clone() },
+            |id| SessionError::DurableTailHeldForRecovery { id: id.clone() },
+        ];
+        for make_cause in causes {
+            let bare = MobError::SessionError(make_cause(&session_id));
+            let deferred = MobError::MemberCustodyDeferred {
+                member_id: AgentIdentity::from("w-1"),
+                session_id: session_id.clone(),
+                restore: MemberCustodyRestore::CleanupDelivery,
+                cause: Arc::new(MobError::SessionError(make_cause(&session_id))),
+            };
+            assert_eq!(deferred.durable_resume_hold(), bare.durable_resume_hold());
+            assert_eq!(deferred.wire_error_code(), bare.wire_error_code());
+            assert_eq!(deferred.failure_class(), bare.failure_class());
+            assert_eq!(
+                format!("{:?}", deferred.wire_detail()),
+                format!("{:?}", bare.wire_detail())
+            );
+            assert_eq!(
+                format!("{:?}", deferred.bridge_rejection_cause()),
+                format!("{:?}", bare.bridge_rejection_cause())
+            );
+            assert_eq!(
+                deferred.is_closed_runtime_effect_refusal(),
+                bare.is_closed_runtime_effect_refusal()
+            );
+            assert!(!deferred.is_retirement_in_progress());
+            let data = deferred.structured_data().expect("structured data");
+            assert_eq!(data["kind"], "mob_member_custody_deferred");
+            assert_eq!(data["member_id"], "w-1");
+            assert_eq!(data["session_id"], session_id.to_string());
+            assert_eq!(data["restore"], "cleanup_delivery");
+            assert!(
+                data.get("retryable").is_none(),
+                "whether a retry can pass is the cause's: {data}"
+            );
+            assert_eq!(data["cause"], bare.to_string());
+            assert_eq!(
+                data.get("cause_data"),
+                bare.structured_data().as_ref(),
+                "the cause's data, only when it has some"
+            );
+            let hold_key = SessionError::DURABLE_RESUME_HOLD_KEY;
+            assert_eq!(
+                data.get(hold_key).and_then(serde_json::Value::as_str),
+                bare.durable_resume_hold().map(|hold| hold.as_str()),
+                "the top-level hold is the cause's"
+            );
+            let rendered = deferred.to_string();
+            assert!(
+                rendered.contains("w-1")
+                    && rendered.contains(&session_id.to_string())
+                    && rendered.contains("cleanup delivery restore"),
+                "the message names the member, its session and the restore: {rendered}"
+            );
+        }
+        // A durable tail its recovery kept unprovable: the deferral carries
+        // its hold and its failure class, and its data as `cause_data`.
+        let unprovable_tail = || MobError::MemberDurableTailUnprovable {
+            member_id: AgentIdentity::from("w-1"),
+            session_id: session_id.clone(),
+        };
+        let unprovable = unprovable_tail();
+        let deferred = MobError::MemberCustodyDeferred {
+            member_id: AgentIdentity::from("w-1"),
+            session_id: session_id.clone(),
+            restore: MemberCustodyRestore::CleanupDelivery,
+            cause: Arc::new(unprovable_tail()),
+        };
+        assert_eq!(
+            deferred.durable_resume_hold(),
+            Some(meerkat_core::service::DurableResumeHold::TailHeldForRecovery)
+        );
+        assert_eq!(deferred.failure_class(), unprovable.failure_class());
+        assert_eq!(deferred.wire_error_code(), unprovable.wire_error_code());
+        let data = deferred.structured_data().expect("structured data");
+        assert_eq!(
+            data.get("cause_data"),
+            unprovable.structured_data().as_ref()
+        );
+        let untyped = MobError::MemberCustodyDeferred {
+            member_id: AgentIdentity::from("w-1"),
+            session_id,
+            restore: MemberCustodyRestore::StartupBinding,
+            cause: Arc::new(MobError::Internal("restore failed".to_string())),
+        };
+        let data = untyped.structured_data().expect("structured data");
+        assert_eq!(data["restore"], "startup_binding");
+        assert!(data.get("cause_data").is_none(), "{data}");
     }
 
     /// A member's startup recovery failure, shared with every handle,
@@ -3108,10 +3994,122 @@ mod tests {
         }
     }
 
+    /// A durable tail its recovery kept is a typed tail hold: it carries the
+    /// resume hold, lifts it through the startup failure that wraps it, and
+    /// is never a plain retry.
+    #[test]
+    fn an_unprovable_durable_tail_is_a_typed_tail_hold() {
+        let session_id = meerkat_core::SessionId::new();
+        let unprovable = MobError::MemberDurableTailUnprovable {
+            member_id: AgentIdentity::from("w-1"),
+            session_id: session_id.clone(),
+        };
+        assert_eq!(
+            unprovable.durable_resume_hold(),
+            Some(meerkat_core::service::DurableResumeHold::TailHeldForRecovery)
+        );
+        assert_eq!(unprovable.failure_class(), MobFailureClass::RuntimeRejected);
+        let data = unprovable
+            .structured_data()
+            .expect("the unprovable tail carries structured data");
+        assert_eq!(data["kind"], "mob_member_durable_tail_unprovable");
+        assert_eq!(data["member_id"], "w-1");
+        assert_eq!(data["session_id"], session_id.to_string());
+        assert_eq!(data["content_retained"], true);
+        let wrapped = MobError::MemberStartupRecoveryFailed {
+            member_id: AgentIdentity::from("w-1"),
+            session_id,
+            cause: Arc::new(unprovable),
+        };
+        assert_eq!(
+            wrapped.durable_resume_hold(),
+            Some(meerkat_core::service::DurableResumeHold::TailHeldForRecovery),
+            "the startup failure lifts its cause's hold"
+        );
+    }
+
+    /// Only a hosting refusal or an unprovable tail lets the start defer a
+    /// member's custody; every other cause, a bare revision conflict
+    /// included, stays fatal.
+    #[test]
+    fn only_hosting_refusals_and_an_unprovable_tail_defer_custody() {
+        let id = meerkat_core::SessionId::new();
+        for deferrable in [
+            MobError::SessionError(meerkat_core::service::SessionError::ServedElsewhere {
+                id: id.clone(),
+            }),
+            MobError::SessionError(meerkat_core::service::SessionError::HostingUnavailable {
+                id: id.clone(),
+            }),
+            MobError::MemberDurableTailUnprovable {
+                member_id: AgentIdentity::from("w-1"),
+                session_id: id.clone(),
+            },
+        ] {
+            assert!(
+                deferrable.is_deferrable_custody_cause(),
+                "{deferrable} defers the member"
+            );
+        }
+        for fatal in [
+            MobError::Internal("local cleanup delivery tuple diverges".to_string()),
+            MobError::SessionError(meerkat_core::service::SessionError::Store(Box::new(
+                meerkat_core::SessionStoreError::TranscriptRevisionConflict {
+                    id: id.clone(),
+                    expected: "a".to_string(),
+                    actual: "b".to_string(),
+                },
+            ))),
+            MobError::SessionError(meerkat_core::service::SessionError::NotFound {
+                id: id.clone(),
+            }),
+            MobError::MemberStartupRecoveryFailed {
+                member_id: AgentIdentity::from("w-1"),
+                session_id: id.clone(),
+                cause: Arc::new(MobError::SessionError(
+                    meerkat_core::service::SessionError::ServedElsewhere { id: id.clone() },
+                )),
+            },
+        ] {
+            assert!(!fatal.is_deferrable_custody_cause(), "{fatal} stays fatal");
+        }
+    }
+
+    /// A durable profile's spawn on a mob without persistent sessions is
+    /// refused typed: a closed refusal under the existing
+    /// `CAPABILITY_UNAVAILABLE` code, naming the member and the profile,
+    /// never retryable as is.
+    #[test]
+    fn a_durable_profile_on_a_non_persistent_mob_is_a_typed_refusal() {
+        let error = MobError::NonDurableService {
+            member_id: AgentIdentity::from("w-1"),
+            profile: ProfileName::from("worker"),
+        };
+        assert_eq!(
+            error.wire_error_code(),
+            Some(meerkat_contracts::ErrorCode::CapabilityUnavailable)
+        );
+        assert_eq!(error.failure_class(), MobFailureClass::MobRejected);
+        let data = error.structured_data().expect("structured data");
+        assert_eq!(data["kind"], "mob_non_durable_service");
+        assert_eq!(data["member_id"], "w-1");
+        assert_eq!(data["profile"], "worker");
+        assert_eq!(data["retryable"], false);
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("w-1") && rendered.contains("worker"),
+            "{rendered}"
+        );
+    }
+
     #[test]
     fn test_all_variants_exist() {
         // Ensures all variants are constructible.
         let _variants: Vec<MobError> = vec![
+            MobError::MemberDurableTailUnprovable {
+                member_id: AgentIdentity::from("m"),
+                session_id: meerkat_core::SessionId::new(),
+            },
             MobError::ProfileNotFound(ProfileName::from("p")),
             MobError::MemberNotFound(AgentIdentity::from("m")),
             MobError::MemberAlreadyExists(AgentIdentity::from("m")),
@@ -3175,9 +4173,24 @@ mod tests {
                 session_id: meerkat_core::types::SessionId::new(),
                 reason: "durable authority unreadable".to_string(),
             },
+            MobError::MemberReloadRepairBlocked {
+                session_id: meerkat_core::types::SessionId::new(),
+                reason: "commit outcome not reported".to_string(),
+                evidence_digest: None,
+            },
             MobError::RespawnPredecessorRestrictionsUnavailable {
                 agent_identity: "worker".to_string(),
                 reason: "no inherited tool restriction evidence".to_string(),
+            },
+            MobError::MemberCustodyDeferred {
+                member_id: AgentIdentity::from("m"),
+                session_id: meerkat_core::types::SessionId::new(),
+                restore: MemberCustodyRestore::CleanupDelivery,
+                cause: Arc::new(MobError::Internal("deferred".to_string())),
+            },
+            MobError::NonDurableService {
+                member_id: AgentIdentity::from("m"),
+                profile: ProfileName::from("worker"),
             },
             MobError::MemberReloadTimedOut {
                 session_id: meerkat_core::types::SessionId::new(),
@@ -3377,6 +4390,7 @@ mod tests {
                     tool_use_id: "call-1".to_string(),
                     tool_name: "t".to_string(),
                     args: serde_json::Value::Null,
+                    dedupe_key: None,
                 },
                 MobFailureClass::RuntimeRejected,
             ),
@@ -3828,5 +4842,81 @@ mod tests {
             not_advanced.failure_class(),
             MobFailureClass::RuntimeRejected
         );
+    }
+
+    /// A keyed member send's refusals keep one wire class each, the mapping
+    /// the rpc reference states: an invalid key and a conflict name no code of
+    /// their own (the RPC answers invalid params), a host that cannot keep
+    /// the key is a capability gap naming its cause, an unreadable status is
+    /// retryable, and an inconsistent one is internal. None carries a wire
+    /// detail, so the RPC renders the code and the structured data.
+    #[test]
+    fn keyed_member_send_refusals_keep_their_wire_codes_and_kinds() {
+        use MemberSendIdempotencyRefusal as Refusal;
+        use meerkat_contracts::ErrorCode;
+
+        let cases = [
+            (
+                Refusal::InvalidKey {
+                    detail: "the key is empty".to_string(),
+                },
+                None,
+                serde_json::json!({"kind": "invalid_idempotency_key"}),
+            ),
+            (
+                Refusal::Conflict {
+                    delivery_id: "delivery-1".to_string(),
+                    committed_at_ms: 7,
+                },
+                None,
+                serde_json::json!({
+                    "kind": "input_idempotency_conflict",
+                    "delivery_id": "delivery-1",
+                    "committed_at_ms": 7,
+                }),
+            ),
+            (
+                Refusal::NoContinuationService,
+                Some(ErrorCode::CapabilityUnavailable),
+                serde_json::json!({
+                    "kind": "idempotency_unavailable",
+                    "cause": "no_continuation_service",
+                }),
+            ),
+            (
+                Refusal::GovernedRuntime,
+                Some(ErrorCode::CapabilityUnavailable),
+                serde_json::json!({
+                    "kind": "idempotency_unavailable",
+                    "cause": "governed_runtime",
+                }),
+            ),
+            (
+                Refusal::Unavailable {
+                    detail: "the store is busy".to_string(),
+                },
+                Some(ErrorCode::SessionRuntimeUnavailable),
+                serde_json::json!({"kind": "continuation_status_unavailable"}),
+            ),
+            (
+                Refusal::Inconsistent {
+                    detail: "two receipts for one key".to_string(),
+                },
+                Some(ErrorCode::InternalError),
+                serde_json::json!({"kind": "continuation_status_inconsistent"}),
+            ),
+        ];
+        for (refusal, code, data) in cases {
+            let error = MobError::MemberSendIdempotency {
+                identity: AgentIdentity::from("member"),
+                refusal,
+            };
+            assert!(error.wire_detail().is_none(), "{error}");
+            assert_eq!(error.wire_error_code(), code, "{error}");
+            assert_eq!(error.structured_data(), Some(data), "{error}");
+        }
+        assert_eq!(ErrorCode::CapabilityUnavailable.jsonrpc_code(), -32020);
+        assert_eq!(ErrorCode::SessionRuntimeUnavailable.jsonrpc_code(), -32032);
+        assert_eq!(ErrorCode::InternalError.jsonrpc_code(), -32603);
     }
 }

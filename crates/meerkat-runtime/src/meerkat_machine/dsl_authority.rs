@@ -152,6 +152,17 @@ pub(crate) fn current_run_id_from_authority(
         .and_then(current_run_id_from_dsl)
 }
 
+/// The run the live authority keeps resumable after a restart, if any.
+pub(crate) fn resumable_run_id_from_authority(
+    authority: &mm_dsl::MeerkatMachineAuthority,
+) -> Option<RunId> {
+    authority
+        .state()
+        .resumable_run_id
+        .as_ref()
+        .and_then(current_run_id_from_dsl)
+}
+
 pub(crate) fn pre_run_phase_from_authority(
     authority: &mm_dsl::MeerkatMachineAuthority,
 ) -> Option<RuntimeState> {

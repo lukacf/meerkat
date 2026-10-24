@@ -293,6 +293,7 @@ fn profile_from_wire(profile: WireMobProfile) -> Result<Profile, meerkat_core::S
         max_inline_peer_notifications: profile.max_inline_peer_notifications,
         output_schema,
         provider_params: profile.provider_params.map(Into::into),
+        durable: profile.durable,
     })
 }
 
@@ -1237,15 +1238,9 @@ pub async fn handle_lifecycle(
             Err(MobMcpDestroyError::Mob(err)) => return mob_call_error(id, &err),
         },
     };
-    let destroy_report = match destroy_report {
-        Some(report) => match serde_json::to_value(&report) {
-            Ok(value) => Some(value),
-            Err(err) => {
-                return invalid_params(id, format!("destroy report serialize: {err}"));
-            }
-        },
-        None => None,
-    };
+    let destroy_report = destroy_report
+        .as_ref()
+        .map(meerkat_contracts::WireMobDestroyReport::from);
     RpcResponse::success(
         id,
         MobLifecycleResult {
@@ -1292,6 +1287,40 @@ pub async fn handle_member_send(
         Ok(content) => content,
         Err(error) => return invalid_params(id, error),
     };
+    if let Some(key) = params.idempotency_key.as_deref() {
+        // A keyed send is a member continuation, which has no render slot.
+        if params.render_metadata.is_some() {
+            return invalid_params(id, "render_metadata does not combine with idempotency_key");
+        }
+        return match state
+            .mob_member_send_keyed(
+                &mob_id,
+                agent_identity.clone(),
+                content,
+                params.handling_mode.into(),
+                key,
+            )
+            .await
+        {
+            Ok(continuation) => {
+                let identity_str = agent_identity.to_string();
+                RpcResponse::success(
+                    id,
+                    MobMemberSendResult {
+                        mob_id: mob_id.to_string(),
+                        agent_identity: identity_str.clone(),
+                        member_ref: meerkat_contracts::WireMemberRef::encode(
+                            mob_id.as_str(),
+                            &identity_str,
+                        ),
+                        handling_mode: params.handling_mode,
+                        continuation: Some(continuation),
+                    },
+                )
+            }
+            Err(err) => mob_call_error(id, &err),
+        };
+    }
     match state
         .mob_member_send(
             &mob_id,
@@ -1314,6 +1343,7 @@ pub async fn handle_member_send(
                         &identity_str,
                     ),
                     handling_mode: receipt.handling_mode.into(),
+                    continuation: None,
                 },
             )
         }
@@ -1382,6 +1412,7 @@ pub async fn handle_ingress_interaction(
         agent_identity: identity_str.clone(),
         member_ref: meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity_str),
         handling_mode: receipt.handling_mode.into(),
+        continuation: None,
     };
     RpcResponse::success(
         id,
@@ -1993,25 +2024,14 @@ pub async fn handle_destroy(
         Err(resp) => return resp,
     };
     match state.mob_destroy(&mob_id).await {
-        Ok(report) => {
-            let report_value = match serde_json::to_value(&report) {
-                Ok(v) => v,
-                Err(err) => {
-                    return invalid_params(
-                        id,
-                        format!("failed to serialize MobDestroyReport: {err}"),
-                    );
-                }
-            };
-            RpcResponse::success(
-                id,
-                MobDestroyResult {
-                    mob_id: mob_id.to_string(),
-                    ok: true,
-                    destroy_report: report_value,
-                },
-            )
-        }
+        Ok(report) => RpcResponse::success(
+            id,
+            MobDestroyResult {
+                mob_id: mob_id.to_string(),
+                ok: true,
+                destroy_report: meerkat_contracts::WireMobDestroyReport::from(&report),
+            },
+        ),
         Err(MobMcpDestroyError::Incomplete { report }) => destroy_incomplete_response(id, &report),
         Err(MobMcpDestroyError::Mob(err)) => mob_call_error(id, &err),
     }
@@ -2931,6 +2951,7 @@ pub async fn handle_mob_turn_start(
         auth_binding: lower_turn_metadata_override(mob_params.auth_binding),
         injected_context,
         transient_turn_context: mob_params.transient_turn_context,
+        session_events: mob_params.session_events,
     };
 
     super::turn::start_turn_with_params(
@@ -3574,6 +3595,35 @@ mod tests {
     };
     use std::sync::Arc;
 
+    /// A spawn's override profile keeps its durable worker flag across the
+    /// wire form, both ways.
+    #[test]
+    fn override_profile_keeps_the_durable_worker_flag_across_the_wire() {
+        let durable: Profile = serde_json::from_value(serde_json::json!({
+            "model": "claude-sonnet-4-5",
+            "durable": true
+        }))
+        .expect("durable profile");
+        let wire = meerkat_mob::profile_to_wire(&durable);
+        assert!(wire.durable);
+        assert!(profile_from_wire(wire).expect("decode").durable);
+
+        let ordinary: Profile = serde_json::from_value(serde_json::json!({
+            "model": "claude-sonnet-4-5"
+        }))
+        .expect("ordinary profile");
+        let wire = meerkat_mob::profile_to_wire(&ordinary);
+        assert!(!wire.durable);
+        assert!(
+            serde_json::to_value(&wire)
+                .expect("encode")
+                .get("durable")
+                .is_none(),
+            "an ordinary wire profile does not write the field"
+        );
+        assert!(!profile_from_wire(wire).expect("decode").durable);
+    }
+
     fn rpc_destroy_test_definition(mob_id: &MobId) -> MobDefinition {
         let mut profiles = BTreeMap::new();
         profiles.insert(
@@ -3595,6 +3645,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
+                durable: false,
             })),
         );
         let mut definition = MobDefinition::explicit(mob_id.clone());
@@ -4404,6 +4455,7 @@ mod tests {
             auth_binding: lower_turn_metadata_override(mob_params.auth_binding),
             injected_context: None,
             transient_turn_context: mob_params.transient_turn_context,
+            session_events: mob_params.session_events,
         };
 
         assert_eq!(turn_params.session_id, "resolved-session-123");

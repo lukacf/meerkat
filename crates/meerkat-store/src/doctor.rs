@@ -29,7 +29,7 @@
 //!
 //! # Storage census
 //!
-//! [`census_storage_footprint`] measures what each session actually costs on
+//! `census_storage_footprint` measures what each session actually costs on
 //! disk — durable bytes against live-transcript bytes, the
 //! `session_strand_messages` pool split into live prefixes and retained
 //! copies (with `session_strand_links` supersessions counted so a
@@ -101,6 +101,10 @@ pub const FINDING_BACKUP_ARTIFACT: &str = "backup-artifact";
 /// per-operation guards), or its `*.mpresence` presence-lock sibling (created
 /// by kept connections and by maintenance at every database it fences).
 pub const FINDING_MAINTENANCE_FENCE_LOCK: &str = "maintenance-fence-lock";
+/// A mob store's incarnation custody lock file under `mobs/`
+/// (`<mob store>.incarnation-custody`; inventory). The process running the
+/// mob holds it for its whole life; never remove it.
+pub const FINDING_MOB_INCARNATION_CUSTODY_LOCK: &str = "mob-incarnation-custody-lock";
 /// Session hosting lock files under `hosting/` (inventory; derived runtime
 /// files held by the process hosting each session, never durable state).
 pub const FINDING_SESSION_HOSTING_LOCKS: &str = "session-hosting-locks";
@@ -2927,6 +2931,37 @@ fn sweep_artifacts(realm_dir: &Path, realm: &str, diagnosis: &mut StorageDiagnos
             }
         }
     }
+
+    // Incarnation custody locks next to the per-mob databases.
+    if let Ok(entries) = std::fs::read_dir(realm_dir.join("mobs")) {
+        let mut locks: Vec<PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.is_file()
+                    && path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|name| {
+                            name.ends_with(crate::migrate::MOB_INCARNATION_CUSTODY_LOCK_SUFFIX)
+                        })
+            })
+            .collect();
+        locks.sort();
+        for lock in locks {
+            diagnosis.findings.push(
+                StorageFinding::new(
+                    FindingSeverity::Info,
+                    FINDING_MOB_INCARNATION_CUSTODY_LOCK,
+                    "mob incarnation custody lock file (held for its whole life by the process \
+                     running the mob; never remove it: a recreated lock would let another \
+                     process take over the identity leases of a mob that still runs)",
+                )
+                .with_path(lock)
+                .with_realm(realm),
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3874,6 +3909,31 @@ mod tests {
             ]
         );
         // Artifact findings are inventory-grade or warnings, never errors.
+        assert!(!diagnosis.has_errors(), "{diagnosis:?}");
+    }
+
+    /// A mob store's incarnation custody lock is inventoried, as an info
+    /// finding with its path, and is no error.
+    #[tokio::test]
+    async fn a_mob_incarnation_custody_lock_is_inventoried() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("realms");
+        let realm_dir = write_manifest(&root, "custody", "sqlite");
+        let mobs = realm_dir.join("mobs");
+        std::fs::create_dir_all(&mobs).unwrap();
+        let lock = mobs.join("alpha.db.incarnation-custody");
+        std::fs::write(&lock, b"").unwrap();
+
+        let diagnosis = diagnose_disk_roots(&scope(&[&root])).await;
+        let custody: Vec<_> = diagnosis
+            .findings
+            .iter()
+            .filter(|f| f.code == FINDING_MOB_INCARNATION_CUSTODY_LOCK)
+            .collect();
+        assert_eq!(custody.len(), 1, "{diagnosis:?}");
+        assert_eq!(custody[0].severity, FindingSeverity::Info);
+        assert_eq!(custody[0].path.as_deref(), Some(lock.as_path()));
+        assert!(lock.is_file());
         assert!(!diagnosis.has_errors(), "{diagnosis:?}");
     }
 

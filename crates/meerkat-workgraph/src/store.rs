@@ -6429,6 +6429,7 @@ mod tests {
         }
 
         // Releasing the fence restores service over the same committed store.
+        foreign.unlock().expect("release the foreign fence");
         drop(foreign);
         assert_eq!(
             store

@@ -23,7 +23,7 @@ use meerkat_auth_core::mcp_oauth::{
     McpOAuthAttemptCleanup, McpOAuthAuthority, McpOAuthBrowserLaunch, McpOAuthCallback,
     McpOAuthCeremonyContext, McpOAuthError, McpOAuthListenerCleanup, McpOAuthLoginDisposition,
     McpOAuthLoginStart, McpOAuthLoopbackBegin, McpOAuthPendingLogin, McpOAuthRegisteredCallback,
-    McpRegisteredRedirectBase, McpServerIdentity, McpStoredCredentialPhase,
+    McpRegisteredRedirectBase, McpServerIdentity, McpStoredCredentialPhase, OAuthStartAdmission,
 };
 use meerkat_auth_core::oauth_flow::OAuthFlowError;
 use meerkat_core::generated::auth_lease_durable_lifecycle_marker as durable_marker;
@@ -5858,12 +5858,14 @@ async fn a_fresh_process_retires_the_persisted_attempt_before_starting() {
 
 // --- Pending login: admission read-back fault and seam-level absence --------
 
-/// The runtime flow owner with two injectable faults: the read-back of an
-/// admitted attempt fails, or a retirement reports the attempt absent.
+/// The runtime flow owner with three injectable faults: the read-back of an
+/// admitted attempt fails, a retirement reports the attempt absent, or a
+/// start fails and reports the given admission.
 struct FaultInjectingFlows {
     inner: Arc<RuntimeOAuthFlowHandle>,
     fail_admitted_read: std::sync::atomic::AtomicBool,
     expire_reports_missing: std::sync::atomic::AtomicBool,
+    failed_start: Mutex<Option<OAuthStartAdmission>>,
 }
 
 mod fault_injecting_flows {
@@ -5871,7 +5873,7 @@ mod fault_injecting_flows {
     use meerkat_auth_core::oauth_flow::{
         OAuthBrowserFlowCompletion, OAuthBrowserFlowIdentity, OAuthDeviceFlowRecord,
         OAuthDevicePollLease, OAuthFlowAuthority, OAuthFlowError, OAuthFlowRecord,
-        OAuthProviderIdentity,
+        OAuthFlowStartFailure, OAuthProviderIdentity,
     };
     use meerkat_core::AuthCredentialIdentity;
     use std::sync::atomic::Ordering;
@@ -5895,6 +5897,25 @@ mod fault_injecting_flows {
         ) -> Result<String, OAuthFlowError> {
             self.inner
                 .start(target, provider, redirect_uri, pkce_verifier)
+        }
+        fn start_with_admission(
+            &self,
+            target: AuthCredentialIdentity,
+            provider: OAuthBrowserFlowIdentity,
+            redirect_uri: String,
+            pkce_verifier: String,
+        ) -> Result<String, OAuthFlowStartFailure> {
+            if let Some(admission) = self.failed_start.lock().clone() {
+                return Err(OAuthFlowStartFailure {
+                    error: OAuthFlowError::PersistenceFailed {
+                        operation: "admit_oauth_browser_flow",
+                        detail: "injected start fault".into(),
+                    },
+                    admission,
+                });
+            }
+            self.inner
+                .start_with_admission(target, provider, redirect_uri, pkce_verifier)
         }
         fn start_with_nonce(
             &self,
@@ -6000,6 +6021,7 @@ fn fault_injecting_authority(
         ),
         fail_admitted_read: std::sync::atomic::AtomicBool::new(false),
         expire_reports_missing: std::sync::atomic::AtomicBool::new(false),
+        failed_start: Mutex::new(None),
     });
     let authority = McpOAuthAuthority::with_http(
         ProviderAuthPersistence::new(
@@ -8079,5 +8101,179 @@ async fn stored_credential_status_agrees_with_use_for_every_stored_shape() {
             status.phase,
             "{name}: use after status {used:?}"
         );
+    }
+}
+
+// --- What a failed start admitted -------------------------------------------
+
+/// A start refused before its flow owner's start admitted nothing and says
+/// so, beside the error the existing start returns for it. Nothing is
+/// pending afterwards.
+#[tokio::test]
+async fn a_refused_mcp_start_admitted_nothing() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+
+    // No account selected: refused before discovery, on both redirects.
+    let unselected =
+        McpServerIdentity::from_server_config("start-unselected", format!("{base}/mcp"));
+    let failure = authority
+        .login_start_with_admission(&unselected, SPLIT_REDIRECT, None)
+        .await
+        .expect_err("an unselected target is refused");
+    assert!(
+        matches!(failure.error, McpOAuthError::AccountSelectionRequired),
+        "{failure:?}"
+    );
+    assert_eq!(failure.admission, OAuthStartAdmission::NotAdmitted);
+    let failure = authority
+        .login_start_registered_with_admission(&unselected, &registered_base(), None)
+        .await
+        .expect_err("an unselected target is refused");
+    assert!(
+        matches!(failure.error, McpOAuthError::AccountSelectionRequired),
+        "{failure:?}"
+    );
+    assert_eq!(failure.admission, OAuthStartAdmission::NotAdmitted);
+    assert!(matches!(
+        authority
+            .login_start(&unselected, SPLIT_REDIRECT, None)
+            .await,
+        Err(McpOAuthError::AccountSelectionRequired)
+    ));
+
+    // A redirect that is not loopback: refused before any network.
+    let target = split_target(&base, "start-bad-redirect");
+    let failure = authority
+        .login_start_with_admission(&target, "https://app.example/callback", None)
+        .await
+        .expect_err("a redirect that is not loopback is refused");
+    assert!(
+        matches!(
+            failure.error,
+            McpOAuthError::Verification(ConnectorOAuthRefusal::InvalidDescriptor)
+        ),
+        "{failure:?}"
+    );
+    assert_eq!(failure.admission, OAuthStartAdmission::NotAdmitted);
+    assert!(matches!(
+        authority
+            .login_start(&target, "https://app.example/callback", None)
+            .await,
+        Err(McpOAuthError::Verification(
+            ConnectorOAuthRefusal::InvalidDescriptor
+        ))
+    ));
+    assert_eq!(authority.pending_attempt(&target).unwrap(), None);
+
+    // Discovery fails: the authorization-server metadata redirects.
+    let target = split_target(&base, "start-discovery-fails");
+    state
+        .redirect_authorization_metadata
+        .store(true, Ordering::SeqCst);
+    let failure = authority
+        .login_start_with_admission(&target, SPLIT_REDIRECT, None)
+        .await
+        .expect_err("discovery fails");
+    assert_eq!(failure.admission, OAuthStartAdmission::NotAdmitted);
+    let existing = authority
+        .login_start(&target, SPLIT_REDIRECT, None)
+        .await
+        .expect_err("discovery fails");
+    assert_eq!(format!("{:?}", failure.error), format!("{existing:?}"));
+    state
+        .redirect_authorization_metadata
+        .store(false, Ordering::SeqCst);
+    assert_eq!(authority.pending_attempt(&target).unwrap(), None);
+    assert!(state.registration_requests.lock().is_empty());
+}
+
+/// The scope of `NotAdmitted`: a start that fails while joining
+/// the pending attempt admitted nothing and says so, and the attempt it
+/// would have joined stays pending for its own start.
+#[tokio::test]
+async fn a_start_that_cannot_join_admitted_nothing_and_the_pending_attempt_stays() {
+    let (base, state) = spawn_oauth_fixture().await;
+    let authority = split_authority(&state, Arc::new(EphemeralTokenStore::new()));
+    let target = split_target(&base, "start-join-fails");
+    let first = authority
+        .login_start_with_admission(&target, SPLIT_REDIRECT, None)
+        .await
+        .unwrap();
+    assert_eq!(first.disposition, McpOAuthLoginDisposition::Started);
+
+    const JOINING_REDIRECT: &str = "http://127.0.0.1:10/mcp/oauth/callback";
+    state
+        .redirect_authorization_metadata
+        .store(true, Ordering::SeqCst);
+    let failure = authority
+        .login_start_with_admission(&target, JOINING_REDIRECT, None)
+        .await
+        .expect_err("the join's metadata fetch fails");
+    assert_eq!(failure.admission, OAuthStartAdmission::NotAdmitted);
+    let existing = authority
+        .login_start(&target, JOINING_REDIRECT, None)
+        .await
+        .expect_err("the join's metadata fetch fails");
+    assert_eq!(format!("{:?}", failure.error), format!("{existing:?}"));
+    state
+        .redirect_authorization_metadata
+        .store(false, Ordering::SeqCst);
+
+    assert_eq!(
+        authority
+            .pending_attempt(&target)
+            .unwrap()
+            .map(|pending| pending.attempt_ref),
+        Some(first.attempt_ref())
+    );
+    let joined = authority
+        .login_start_with_admission(&target, JOINING_REDIRECT, None)
+        .await
+        .unwrap();
+    assert_eq!(joined.disposition, McpOAuthLoginDisposition::Joined);
+    assert_eq!(joined.state, first.state);
+    authority.login_cancel(&target, &first).unwrap();
+    assert_eq!(authority.pending_attempt(&target).unwrap(), None);
+}
+
+/// The flow owner's account of a failed start reaches the caller as it is,
+/// and the existing start returns the same error.
+#[tokio::test]
+async fn a_failed_start_reports_its_flow_owners_admission() {
+    let (base, _state) = spawn_oauth_fixture().await;
+    let runtime_store = memory_runtime_store();
+    let (authority, flows) = fault_injecting_authority(&runtime_store);
+    for (index, admission) in [
+        OAuthStartAdmission::Retired,
+        OAuthStartAdmission::RetirementUnconfirmed {
+            attempt_ref: OAuthBrowserActionRef::project("reported-state"),
+        },
+        OAuthStartAdmission::Unknown,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let target = split_target(&base, &format!("start-reported-{index}"));
+        *flows.failed_start.lock() = Some(admission.clone());
+        let failure = authority
+            .login_start_with_admission(&target, SPLIT_REDIRECT, None)
+            .await
+            .expect_err("the flow owner's start fails");
+        assert_eq!(failure.admission, admission);
+        assert!(
+            matches!(
+                failure.error,
+                McpOAuthError::Flow(OAuthFlowError::PersistenceFailed { .. })
+            ),
+            "{failure:?}"
+        );
+        assert!(matches!(
+            authority.login_start(&target, SPLIT_REDIRECT, None).await,
+            Err(McpOAuthError::Flow(
+                OAuthFlowError::PersistenceFailed { .. }
+            ))
+        ));
+        *flows.failed_start.lock() = None;
     }
 }

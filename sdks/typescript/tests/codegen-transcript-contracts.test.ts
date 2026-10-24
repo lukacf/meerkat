@@ -94,6 +94,9 @@ const providerMetas: WireProviderMeta[] = [
   { provider: "anthropic_redacted", data: "redacted" },
   { provider: "anthropic_compaction", content: "compact" },
   { provider: "gemini", thoughtSignature: "thought" },
+  { provider: "gemini_function_call", provider_id: "native-call" },
+  { provider: "gemini_function_call", provider_id: "native-call", thoughtSignature: "thought" },
+  { provider: "gemini_function_call", provider_id: "native-call", thoughtSignature: null },
   {
     provider: "open_ai",
     id: "item-1",
@@ -135,6 +138,12 @@ const nullableRewriteMessage: TranscriptRewriteMessage = {
 
 // @ts-expect-error anthropic metadata requires its signature payload.
 const invalidAnthropicMeta: WireProviderMeta = { provider: "anthropic" };
+// @ts-expect-error Gemini call metadata requires the provider_id payload.
+const missingGeminiProviderId: WireProviderMeta = { provider: "gemini_function_call" };
+// @ts-expect-error the previous id-only metadata does not supply provider_id.
+const oldGeminiProviderId: WireProviderMeta = { provider: "gemini_function_call", id: "native-call" };
+// @ts-expect-error the provider-issued ID is an opaque string.
+const invalidGeminiProviderId: WireProviderMeta = { provider: "gemini_function_call", provider_id: 7 };
 // @ts-expect-error provider metadata is a closed wire vocabulary.
 const invalidProviderMeta: WireProviderMeta = { provider: "future" };
 const invalidAssistantPhase: WireProviderMeta = {
@@ -175,6 +184,9 @@ void nullableServerToolId;
 void nullableImageProviderMeta;
 void nullableRewriteMessage;
 void invalidAnthropicMeta;
+void missingGeminiProviderId;
+void oldGeminiProviderId;
+void invalidGeminiProviderId;
 void invalidProviderMeta;
 void invalidAssistantPhase;
 void invalidReasoningNull;

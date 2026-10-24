@@ -108,9 +108,15 @@ describe("E2E Smoke: TypeScript SDK package against scripted stream RPC", () => 
   it("surfaces terminal_error on the packaged standalone subscription API", async () => {
     const sub = await client.subscribeSessionEvents("terminal-error-session");
     const iterator = sub[Symbol.asyncIterator]();
-    const first = await iterator.next();
-
-    assert.equal(first.done, true);
+    const { EventSubscriptionError, MeerkatError } = await import("../dist/index.js");
+    await assert.rejects(iterator.next(), (error) => {
+      assert.ok(error instanceof EventSubscriptionError);
+      assert.ok(error instanceof MeerkatError);
+      assert.equal(error.code, "stream_queue_overflow");
+      assert.equal(error.lastRpcSequence, undefined);
+      assert.equal(error.lastEventSeq, undefined);
+      return true;
+    });
     assert.equal(sub.terminalOutcome?.outcome, "terminal_error");
     assert.equal(sub.terminalOutcome?.error?.code, "stream_queue_overflow");
   });

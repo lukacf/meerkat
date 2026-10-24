@@ -748,12 +748,29 @@ describe("Typed Events", () => {
     }
   });
 
-  it("should parse tool_execution_completed", () => {
+  it("should parse tool_execution_completed without a result body", () => {
     const event = parseEvent({
       type: "tool_execution_completed",
       id: "t1",
       name: "search",
-      result: "found it",
+      is_error: false,
+      duration_ms: 42,
+    });
+    assert.equal(event.type, "tool_execution_completed");
+    if (event.type === "tool_execution_completed") {
+      assert.equal(event.name, "search");
+      assert.equal(event.durationMs, 42);
+      assert.equal(event.isError, false);
+      // The execution fact carries no body: it is on tool_result_received.
+      assert.equal("content" in event, false);
+    }
+  });
+
+  it("should ignore an older server's body on tool_execution_completed", () => {
+    const event = parseEvent({
+      type: "tool_execution_completed",
+      id: "t1",
+      name: "search",
       content: [
         { type: "text", text: "found it" },
         { type: "image", media_type: "image/png", source: "inline", data: "AAAA" },
@@ -763,13 +780,11 @@ describe("Typed Events", () => {
     });
     assert.equal(event.type, "tool_execution_completed");
     if (event.type === "tool_execution_completed") {
-      assert.equal(event.name, "search");
-      assert.equal(event.durationMs, 42);
-      assert.equal(event.isError, false);
-      assert.deepEqual(event.content, [
-        { type: "text", text: "found it" },
-        { type: "image", media_type: "image/png", source: "inline", data: "AAAA" },
-      ]);
+      assert.deepEqual(
+        [event.id, event.name, event.isError, event.durationMs],
+        ["t1", "search", false, 42],
+      );
+      assert.equal("content" in event, false);
     }
   });
 
@@ -790,13 +805,11 @@ describe("Typed Events", () => {
 
   it("should preserve malformed tool result content blocks", () => {
     const event = parseEvent({
-      type: "tool_execution_completed",
+      type: "tool_result_received",
       id: "t1",
       name: "search",
-      result: "found it",
       content: "not blocks",
       is_error: false,
-      duration_ms: 42,
     });
 
     assert.equal(event.type, "malformed_event");
@@ -810,13 +823,11 @@ describe("Typed Events", () => {
       type: "tool_execution_completed",
       id: "t1",
       name: "search",
-      content: [{ type: "text", text: "found it" }],
     });
     const malformed = parseEvent({
       type: "tool_execution_completed",
       id: "t1",
       name: "search",
-      content: [{ type: "text", text: "found it" }],
       is_error: "false",
     });
 
@@ -827,8 +838,6 @@ describe("Typed Events", () => {
       assert.equal(malformed.isError, undefined);
       assert.equal(missing.durationMs, undefined);
       assert.equal(malformed.durationMs, undefined);
-      assert.deepEqual(missing.content, [{ type: "text", text: "found it" }]);
-      assert.deepEqual(malformed.content, [{ type: "text", text: "found it" }]);
     }
   });
 
@@ -5164,6 +5173,137 @@ describe("Mob surface fail-closed status parsing (DOGMA Rule 6)", () => {
       }
     });
 
+    for (const restore of ["startup_binding", "cleanup_delivery"]) {
+      for (const cause of ["served_elsewhere", "hosting_unavailable", "durable_tail_unprovable"]) {
+        it(`surfaces custody_deferred ${restore}/${cause}`, async () => {
+          const client = memberStatusClient(
+            validResponse({ status: "broken", custody_deferred: { restore, cause } }),
+          );
+          const result = await client.mobMemberStatus("mob-1", "worker-1");
+          assert.deepEqual(result.custodyDeferred, { restore, cause });
+          assert.equal(result.status, "broken");
+        });
+      }
+    }
+
+    it("omits custodyDeferred when the wire omits or nulls it", async () => {
+      for (const response of [validResponse(), validResponse({ custody_deferred: null })]) {
+        const result = await memberStatusClient(response).mobMemberStatus("mob-1", "worker-1");
+        assert.equal(Object.prototype.hasOwnProperty.call(result, "custodyDeferred"), false);
+      }
+    });
+
+    it("rejects a malformed custody_deferred", async () => {
+      for (const deferral of [
+        "startup_binding",
+        ["startup_binding"],
+        { restore: 7, cause: "served_elsewhere" },
+        { restore: "startup_binding", cause: { kind: "busy" } },
+        { cause: "served_elsewhere" },
+      ]) {
+        const client = memberStatusClient(
+          validResponse({ status: "broken", custody_deferred: deferral }),
+        );
+        await assert.rejects(
+          () => client.mobMemberStatus("mob-1", "worker-1"),
+          (error) =>
+            error instanceof MeerkatError &&
+            error.code === "INVALID_RESPONSE" &&
+            /custody_deferred/.test(String(error.message)),
+        );
+      }
+    });
+
+    it("reads an unknown custody_deferred restore as unknown", async () => {
+      const client = memberStatusClient(
+        validResponse({
+          status: "broken",
+          custody_deferred: { restore: "warm_handoff", cause: "served_elsewhere" },
+        }),
+      );
+      const result = await client.mobMemberStatus("mob-1", "worker-1");
+      assert.deepEqual(result.custodyDeferred, {
+        restore: { unknown: "warm_handoff" },
+        cause: "served_elsewhere",
+      });
+    });
+
+    it("reads an unknown custody_deferred cause as unknown", async () => {
+      const client = memberStatusClient(
+        validResponse({
+          status: "broken",
+          custody_deferred: { restore: "startup_binding", cause: "quota_paused" },
+        }),
+      );
+      const result = await client.mobMemberStatus("mob-1", "worker-1");
+      assert.deepEqual(result.custodyDeferred, {
+        restore: "startup_binding",
+        cause: { unknown: "quota_paused" },
+      });
+    });
+
+    it("ignores a custody_deferred field it does not know", async () => {
+      const client = memberStatusClient(
+        validResponse({
+          status: "broken",
+          custody_deferred: { restore: "startup_binding", cause: "served_elsewhere", attempts: 2 },
+        }),
+      );
+      const result = await client.mobMemberStatus("mob-1", "worker-1");
+      assert.deepEqual(result.custodyDeferred, {
+        restore: "startup_binding",
+        cause: "served_elsewhere",
+      });
+    });
+
+    it("reads an unknown custody_deferral on wait_kickoff and wait_ready members", async () => {
+      const client = new MeerkatClient();
+      client.request = async () => ({
+        members: [
+          {
+            agent_identity: "lead",
+            status: "broken",
+            tokens_used: 0,
+            is_final: false,
+            custody_deferred: { restore: "warm_handoff", cause: "quota_paused" },
+          },
+        ],
+      });
+      for (const members of [
+        await client.waitMobKickoff("mob-1"),
+        await client.waitMobReady("mob-1"),
+      ]) {
+        assert.deepEqual(members[0].custodyDeferred, {
+          restore: { unknown: "warm_handoff" },
+          cause: { unknown: "quota_paused" },
+        });
+      }
+    });
+
+    it("carries custody_deferred on wait_kickoff and wait_ready members", async () => {
+      const deferral = { restore: "startup_binding", cause: "served_elsewhere" };
+      const client = new MeerkatClient();
+      client.request = async () => ({
+        members: [
+          {
+            agent_identity: "lead",
+            status: "broken",
+            tokens_used: 0,
+            is_final: false,
+            custody_deferred: deferral,
+          },
+          { agent_identity: "writer", status: "active", tokens_used: 7, is_final: false },
+        ],
+      });
+      for (const members of [
+        await client.waitMobKickoff("mob-1"),
+        await client.waitMobReady("mob-1"),
+      ]) {
+        assert.deepEqual(members[0].custodyDeferred, deferral);
+        assert.equal(Object.prototype.hasOwnProperty.call(members[1], "custodyDeferred"), false);
+      }
+    });
+
     it("rejects an absent status instead of fabricating 'unknown'", async () => {
       const response = validResponse();
       delete response.status;
@@ -6812,4 +6952,137 @@ describe("Compaction summary source", () => {
       );
     }
   });
+});
+
+describe("Caller idempotency keys", () => {
+  const memberReceipt = (continuation) => ({
+    mob_id: "mob-1",
+    agent_identity: "reviewer-1",
+    member_ref: makeMemberRef("mob-1", "reviewer-1"),
+    handling_mode: "queue",
+    ...(continuation === undefined ? {} : { continuation }),
+  });
+
+  it("passes an external event key to a 0.9.5 server", async () => {
+    const client = new MeerkatClient();
+    client._serverContractVersion = "0.9.5";
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      return { outcome_type: "deduplicated", existing_id: "input-1" };
+    };
+
+    const outcome = await client.sendExternalEvent(
+      "s1",
+      "inbox.item",
+      { id: 1 },
+      { idempotencyKey: "item-1" },
+    );
+
+    assert.equal(outcome.outcome_type, "deduplicated");
+    assert.equal(calls[0].method, "session/external_event");
+    assert.equal(calls[0].params.idempotency_key, "item-1");
+  });
+
+  it("refuses a key against an older server before sending it", async () => {
+    const client = new MeerkatClient();
+    client._serverContractVersion = "0.9.4";
+    const calls = [];
+    client.request = async (method) => {
+      calls.push(method);
+      return {};
+    };
+
+    await assert.rejects(
+      () => client.sendExternalEvent("s1", "inbox.item", {}, { idempotencyKey: "item-1" }),
+      (error) =>
+        error instanceof CapabilityUnavailableError &&
+        error.code === "CAPABILITY_UNAVAILABLE" &&
+        String(error.message).includes("0.9.5"),
+    );
+    await assert.rejects(
+      () =>
+        new Mob(client, "mob-1").member("reviewer-1").send("x", { idempotencyKey: "item-1" }),
+      (error) => error instanceof CapabilityUnavailableError,
+    );
+    assert.deepEqual(calls, [], "a key an older server would drop is never sent");
+  });
+
+  it("sends no key and checks no contract without one", async () => {
+    const client = new MeerkatClient();
+    client._serverContractVersion = "0.9.4";
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      return memberReceipt(undefined);
+    };
+
+    await new Mob(client, "mob-1").member("reviewer-1").send("x");
+    assert.equal("idempotency_key" in calls[0].params, false);
+  });
+
+  it("parses the keyed member-send continuation", async () => {
+    const client = new MeerkatClient();
+    client._serverContractVersion = "0.10.0";
+    const calls = [];
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      return memberReceipt({
+        delivery_id: "continuation:abc",
+        committed_at_ms: 1792000000000,
+        status: { state: "admitted", session_id: "s-1", input_id: "i-1" },
+      });
+    };
+
+    const receipt = await new Mob(client, "mob-1")
+      .member("reviewer-1")
+      .send("Ingest item 1.", { idempotencyKey: "item-1" });
+
+    assert.equal(calls[0].params.idempotency_key, "item-1");
+    assert.deepEqual(receipt.continuation, {
+      deliveryId: "continuation:abc",
+      committedAtMs: 1792000000000,
+      status: { state: "admitted", sessionId: "s-1", inputId: "i-1" },
+    });
+  });
+
+  for (const [status, parsed] of [
+    [{ state: "pending" }, { state: "pending" }],
+    [{ state: "stranded" }, { state: "stranded" }],
+    [
+      { state: "refused", reason: "authority_denied" },
+      { state: "refused", reason: "authority_denied" },
+    ],
+  ]) {
+    it(`parses a ${status.state} continuation`, async () => {
+      const client = new MeerkatClient();
+      client._serverContractVersion = "0.9.5";
+      client.request = async () =>
+        memberReceipt({ delivery_id: "d", committed_at_ms: 1, status });
+      const receipt = await new Mob(client, "mob-1")
+        .member("reviewer-1")
+        .send("x", { idempotencyKey: "item-1" });
+      assert.deepEqual(receipt.continuation.status, parsed);
+    });
+  }
+
+  for (const continuation of [
+    undefined,
+    { delivery_id: "", committed_at_ms: 1, status: { state: "pending" } },
+    { delivery_id: "d", committed_at_ms: 1.5, status: { state: "pending" } },
+    { delivery_id: "d", committed_at_ms: 1, status: { state: "lost" } },
+    { delivery_id: "d", committed_at_ms: 1, status: { state: "admitted" } },
+    { delivery_id: "d", committed_at_ms: 1, status: { state: "refused" } },
+  ]) {
+    it(`refuses a malformed keyed answer: ${JSON.stringify(continuation)}`, async () => {
+      const client = new MeerkatClient();
+      client._serverContractVersion = "0.9.5";
+      client.request = async () => memberReceipt(continuation);
+      await assert.rejects(
+        () =>
+          new Mob(client, "mob-1").member("reviewer-1").send("x", { idempotencyKey: "item-1" }),
+        (error) => error instanceof MeerkatError && error.code === "INVALID_RESPONSE",
+      );
+    });
+  }
 });

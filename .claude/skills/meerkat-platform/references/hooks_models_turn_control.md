@@ -65,8 +65,10 @@ and the run's inputs end abandoned as cancelled, not retried. A persistent
 session drops the run's uncommitted work; the next turn continues from the
 last committed transcript. Interrupt and stop do not target background shell
 jobs (use `jobs/cancel` or the `shell_job_cancel` tool). `rkat-rpc` on
-SIGTERM, Ctrl-C or stdin EOF cancels tracked in-flight requests after a short
-drain, then exits.
+SIGTERM, Ctrl-C or stdin EOF cancels the tracked in-flight requests of
+sessions without per-round commits after a short drain; the run in flight of
+a session with per-round commits is suspended and continues at the session's
+next open (see the durable runs guide). Then it exits.
 
 ## Agent loop behaviour
 
@@ -106,7 +108,10 @@ timestamp_ms, payload}`; `payload.type` is the event type.
 - Run: `run_started` (`identity.run_id`), `run_completed` (`result`, `usage`,
   `extraction_required`, `terminal_cause_kind?`), `run_failed`
   (`error_report {class, reason, message}`), `extraction_succeeded`,
-  `extraction_failed`.
+  `extraction_failed`; since 0.9.5 `run_resumed` (`run_id`, `round`,
+  `resume_point` `tools_pending` or `awaiting_model`) when a run continues
+  after a restart (durable runs in
+  `references/sessions_runtime_surfaces_sessions.md`).
 - Model output: `turn_started`, `text_delta`, `text_complete`,
   `reasoning_delta`, `reasoning_complete`, `server_tool_content`,
   `assistant_image_appended`, `turn_completed` (`stop_reason`, `usage?`; once
@@ -114,7 +119,9 @@ timestamp_ms, payload}`; `payload.type` is the event type.
 - Tools: `tool_call_requested`, `tool_execution_started`,
   `tool_execution_completed`, `tool_result_received`,
     `tool_execution_timed_out` (since 0.9.1; 0.9.0 never emitted it),
-  `tool_config_changed`.
+  `tool_config_changed`. Since 0.9.5 `tool_execution_completed` carries
+  `is_error` and `duration_ms` but no result body: `tool_result_received`
+  with the same `id` is the only event with `content`.
 - Hooks: `hook_started`, `hook_completed`, `hook_failed`, `hook_denied`,
   `hook_launch_refused`.
 - Model operations: `compaction_started`, `compaction_completed`,

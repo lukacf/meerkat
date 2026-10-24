@@ -73,6 +73,54 @@ hint):
 | `jsonl` | Inspectable session files; schedules are disabled on this backend |
 | `memory` | Explicitly ephemeral; nothing survives the process |
 
+Since 0.9.5 every tool round of a durable run commits twice (durable runs in
+`references/sessions_runtime_surfaces_sessions.md`). On `sqlite` a commit
+writes the round's rows; on `jsonl` (WholeBlob) it writes the whole session
+document, so long, tool-heavy runs belong on `sqlite`.
+
+Host stores (0.9.5): a Rust host can keep a realm's durable state in its own
+database by implementing `meerkat_core::host_store::HostStore` (`acquire_fence`,
+`renew_fence`, `fence_timing`, `load_head`, `list_heads`, `read_rows`,
+`commit`). Core builds the realm's stores over it and stays its only writer.
+Contract, obligations and conformance: `docs/reference/host-store-spi.mdx`.
+
+- Fence: opening acquires it exclusively, and a live holder makes the open
+  fail with `Held { holder, remaining }`. A takeover supersedes the holder,
+  then waits out what remained of its lease before serving anything. Core
+  renews every renew interval (default 10 s, at least 1 s) under a lease
+  (default 30 s, from 3 intervals to 1 hour) that the store sizes with
+  `fence_timing()`. It makes no model call, dispatches nothing and writes
+  nothing unless its last successful acquire or renew started less than the
+  lease minus the self-fence margin ago. The margin defaults to one interval;
+  a store declares its own with `FenceTiming::try_with_margin`, at least
+  `renew interval + 2 x visibility lag`, and the window must stay at least
+  two intervals. A store also declares its longest commit
+  (`try_with_max_commit_latency`, default 2 s, at most the lease): a fenced
+  write that meets a commit in flight waits up to that long before it backs
+  off. `FencedOut` stops every write until the realm is reopened;
+  after any other failed renew, or a lease that ran out, the holder writes
+  and dispatches nothing until it re-acquires the fence, which it does by
+  itself before its next write (a later renew never restores it); if
+  another process took the fence or committed meanwhile, the realm stops
+  until it is reopened.
+- Opening lists every head once. A session body loads at open only when
+  recovery must act on it (unsettled inputs, an open run cursor, a current
+  run), otherwise on first use, and stays loaded until the session is
+  archived.
+- Limits: 8 MiB of heads and rows per batch, 1 MiB per row. Core writes
+  large values first as digest-keyed chunk scopes, then one commit batch that
+  refers to them; a change that cannot fit fails whole with a typed size
+  error, never truncated or partly committed. An unknown commit outcome is
+  settled before the
+  scope's next version. A refused batch, or one still unknown after the retry
+  budget, poisons the scopes it touched until the realm is reopened.
+- The runtime store is WholeBlob, with the cost above; the run's next round
+  commit after a compaction re-bases the run rather than stopping its
+  commits. An interactive OAuth login in
+  progress is process-local: after a restart or a takeover, start it again;
+  completed credentials are kept.
+- Test a store with the host store chapter of `meerkat-store-conformance`.
+
 On a JSONL realm, if the session index (`sessions_jsonl/session_index.sqlite3`)
 fails to update after a committed save or delete, the write stays committed
 but session listing refuses with `refusing session.list: projection
@@ -153,12 +201,13 @@ Upgrade every process that shares a realm together.
 | 0.8.52 | Runtime delivery schema v3 |
 | 0.9.0 | Stored runtime input state version 6 (versions 3 to 5 are read and rewritten) |
 | 0.9.4 | Stored runtime input state version 7 (versions 3 to 6 are read; every row written is version 7) |
+| 0.9.5 | Stored runtime input state version 8 for a row that carries a stop mark or the `RequeueExpired` reason (a requeue Shutdown); every other row is still version 7. Machine lifecycle record version 6 for an unregister in progress with the requeue disposition; every other record is still version 5 |
 
 Since 0.9.4 every input row a binary writes is version 7, including a row it
 read at an older version. 0.9.3 and older refuse a version 7 row before
 installing state (the stored bytes stay in place), so once a 0.9.4 binary has
 written any input row there is no downgrade to 0.9.3. Upgrade every process
-that shares a runtime store together. Likewise a HeadCanonical session that
+that shares a runtime store together. 0.9.4 refuses a version 8 row with a stop mark, or a version 6 lifecycle record, with its typed unsupported-version error, and fails to read a version 8 row that ended `RequeueExpired` (an abandon reason it does not know), so a store that a requeue Shutdown wrote does not open in 0.9.4. Likewise a HeadCanonical session that
 records a failed realtime response writes realtime sidecar event schema 4,
 which 0.9.3 and earlier refuse ("unsupported realtime event schema 4").
 A session whose last turn 0.9.2 or 0.9.3 committed but never finalized (for

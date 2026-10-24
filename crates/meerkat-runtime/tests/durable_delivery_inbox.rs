@@ -850,6 +850,158 @@ async fn sqlite_admission_index_moves_only_by_typed_transitions_and_survives_reo
     .await;
 }
 
+/// A release removes only the exact reservation it names, in the store's own
+/// write transaction: never an applied entry, another session's or another
+/// input's reservation, or no entry, and a released entry stays absent after
+/// a reopen.
+async fn admission_index_release_removes_only_the_exact_reservation(
+    store: Arc<dyn RuntimeStore>,
+    reopen: impl Fn() -> Arc<dyn RuntimeStore>,
+) {
+    use meerkat_core::lifecycle::InputId;
+    use meerkat_core::types::SessionId;
+    use meerkat_runtime::{
+        ContinuationAdmission, ContinuationAdmissionOutcome as Outcome,
+        ContinuationAdmissionTransition as T,
+    };
+
+    let address = LogicalRuntimeId::new("rt:session:admission-release");
+    let released = "continuation:admission-release";
+    let applied = "continuation:admission-release-applied";
+    let (s1, s2) = (SessionId::new(), SessionId::new());
+    let (i1, i2) = (InputId::new(), InputId::new());
+    let step = |delivery: &'static str, transition: T| {
+        let store = store.clone();
+        let address = address.clone();
+        async move {
+            store
+                .transition_continuation_admission(&address, delivery, transition)
+                .await
+                .expect("admission index transition")
+        }
+    };
+    let release = |session_id: &SessionId, input_id: &InputId| T::Release {
+        session_id: session_id.clone(),
+        input_id: input_id.clone(),
+    };
+
+    assert_eq!(
+        step(released, release(&s1, &i1)).await,
+        Outcome::Rejected { current: None },
+        "no entry is no reservation"
+    );
+    let reserved = ContinuationAdmission::Reserved {
+        session_id: s1.clone(),
+        input_id: i1.clone(),
+    };
+    assert_eq!(
+        step(
+            released,
+            T::Reserve {
+                session_id: s1.clone(),
+                input_id: i1.clone(),
+            }
+        )
+        .await,
+        Outcome::Transitioned(reserved.clone())
+    );
+    for (wrong, why) in [
+        (release(&s2, &i1), "another session's release"),
+        (release(&s1, &i2), "another input's release"),
+    ] {
+        assert_eq!(
+            step(released, wrong).await,
+            Outcome::Rejected {
+                current: Some(reserved.clone()),
+            },
+            "{why} is refused"
+        );
+    }
+    assert_eq!(step(released, release(&s1, &i1)).await, Outcome::Released);
+    assert_eq!(
+        store
+            .load_continuation_admission(&address, released)
+            .await
+            .expect("load"),
+        None,
+        "the released entry is gone"
+    );
+    assert_eq!(
+        step(released, release(&s1, &i1)).await,
+        Outcome::Rejected { current: None },
+        "a release is not repeatable"
+    );
+
+    let applied_s2 = ContinuationAdmission::Applied {
+        session_id: s2.clone(),
+        input_id: i2.clone(),
+    };
+    step(
+        applied,
+        T::Reserve {
+            session_id: s2.clone(),
+            input_id: i2.clone(),
+        },
+    )
+    .await;
+    assert_eq!(
+        step(
+            applied,
+            T::Apply {
+                session_id: s2.clone(),
+                input_id: i2.clone(),
+            }
+        )
+        .await,
+        Outcome::Transitioned(applied_s2.clone())
+    );
+    assert_eq!(
+        step(applied, release(&s2, &i2)).await,
+        Outcome::Rejected {
+            current: Some(applied_s2.clone()),
+        },
+        "an applied admission is never released"
+    );
+
+    let reopened = reopen();
+    assert_eq!(
+        reopened
+            .load_continuation_admission(&address, released)
+            .await
+            .expect("load after reopen"),
+        None,
+        "a released entry stays absent"
+    );
+    assert_eq!(
+        reopened
+            .load_continuation_admission(&address, applied)
+            .await
+            .expect("load after reopen"),
+        Some(applied_s2)
+    );
+}
+
+#[tokio::test]
+async fn memory_admission_index_release_removes_only_the_exact_reservation() {
+    let store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+    let reopen_store = store.clone();
+    admission_index_release_removes_only_the_exact_reservation(store, move || reopen_store.clone())
+        .await;
+}
+
+#[cfg(feature = "sqlite-store")]
+#[tokio::test]
+async fn sqlite_admission_index_release_removes_only_the_exact_reservation_and_survives_reopen() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("runtime.sqlite3");
+    let store: Arc<dyn RuntimeStore> =
+        Arc::new(meerkat_runtime::store::SqliteRuntimeStore::new(&path).expect("open"));
+    admission_index_release_removes_only_the_exact_reservation(store, move || {
+        Arc::new(meerkat_runtime::store::SqliteRuntimeStore::new(&path).expect("reopen"))
+    })
+    .await;
+}
+
 /// Refused settlement: only the row at the cursor, never one acknowledged out
 /// of band, never applied afterwards; repeating it observes it; the cursor
 /// passes it so the next row applies; and the verdict survives a reopen.

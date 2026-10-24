@@ -4113,6 +4113,25 @@ fn coupling_invariants() -> Vec<CouplingInvariantEntry> {
             "roster projection helpers + lifecycle rollback + ownership-ledger",
             EntryStatus::Closed,
         ),
+        // Recorded debt, expiring at the 0.9.6 MobMachine revision: flow target
+        // selection (the role-wide selection included) and role-targets
+        // admission are handwritten predicates over machine-owned member
+        // facts. Target shape: the run's role targets and step roles enter the
+        // RunFlow machine input, machine guards admit them, and the machine
+        // emits each step's available bound subset or a typed refusal.
+        invariant(
+            "mob_flow_target_selection_alignment",
+            Subsystem::Mob,
+            &[
+                "MobRun.role_targets",
+                "MobMachine member_profile_names",
+                "MobMachine member lifecycle",
+            ],
+            "a flow step dispatches only to Active holders of its role, and a role-targeted run only to the members admitted for that role; admission (one actor predicate, inside the run-flow command, before any durable write) and per-step selection (the flow engine re-check over list_runnable_members) are handwritten predicates over machine-owned member facts, recorded debt that expires at the 0.9.6 MobMachine revision, when bound-target admission and selection become MobMachine inputs",
+            "FlowRoleTargets admitted run input + MobMachine member_profile_names and member lifecycle",
+            "one shared actor predicate for admission + list_runnable_members re-check at every step execution + typed InsufficientTargets terminal + ownership-ledger debt expiring at 0.9.6",
+            EntryStatus::Closed,
+        ),
     ]
 }
 

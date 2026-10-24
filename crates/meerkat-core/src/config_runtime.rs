@@ -351,6 +351,12 @@ async fn write_generation_at(state_path: &Path, generation: u64) -> Result<(), C
 /// OS releases a lock when its file closes, including when the holder's
 /// process dies, so an abandoned lock needs no recovery and a lock file nobody
 /// holds is no obstacle.
+///
+/// A holder releases its custody explicitly before its file closes
+/// ([`release_custody`]): the lock belongs to the open file description, and
+/// a process spawned meanwhile holds a copy of the holder's descriptor until
+/// it executes its program, which would keep a custody released by the close
+/// alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Custody {
     Shared,
@@ -376,11 +382,26 @@ fn try_custody(path: &Path, custody: Custody) -> std::io::Result<Option<std::fs:
             Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
             Err(std::fs::TryLockError::Error(error)) => return Err(error),
         }
-        if locks_path(&file, path)? {
-            return Ok(Some(file));
+        match locks_path(&file, path) {
+            Ok(true) => return Ok(Some(file)),
+            // Another file is at the path now: release this one, open again.
+            Ok(false) => release_custody(&file),
+            Err(error) => {
+                release_custody(&file);
+                return Err(error);
+            }
         }
     }
     Ok(None)
+}
+
+/// Release the custody held through `file`, before it closes. The lock
+/// belongs to the open file description, which every copy of the descriptor
+/// shares; unlocking releases it for all of them, so a copy a process spawned
+/// meanwhile still holds keeps nothing. Every custody opened its own
+/// description ([`try_custody`]), so this releases no other holder's custody.
+fn release_custody(file: &std::fs::File) {
+    let _ = file.unlock();
 }
 
 /// Take `custody` of the lock file at `path`, waiting up to `timeout` for an
@@ -415,7 +436,7 @@ fn locks_path(file: &std::fs::File, path: &Path) -> std::io::Result<bool> {
     }
 }
 
-/// A config document's exclusive (writer) custody; see [`Custody`]. Every
+/// A config document's exclusive (writer) custody; see `Custody`. Every
 /// `ConfigRuntime` writer holds it across the document mutation and the
 /// generation publication.
 pub struct ConfigWriterLock {
@@ -428,6 +449,12 @@ impl std::fmt::Debug for ConfigWriterLock {
         f.debug_struct("ConfigWriterLock")
             .field("path", &self.path)
             .finish_non_exhaustive()
+    }
+}
+
+impl Drop for ConfigWriterLock {
+    fn drop(&mut self) {
+        release_custody(&self._file);
     }
 }
 
@@ -456,7 +483,7 @@ impl ConfigWriterLock {
     }
 }
 
-/// A config document's shared (reader) custody; see [`Custody`]. It excludes
+/// A config document's shared (reader) custody; see `Custody`. It excludes
 /// writers for as long as it is held, and never other readers.
 pub struct ConfigReadLock {
     path: PathBuf,
@@ -468,6 +495,12 @@ impl std::fmt::Debug for ConfigReadLock {
         f.debug_struct("ConfigReadLock")
             .field("path", &self.path)
             .finish_non_exhaustive()
+    }
+}
+
+impl Drop for ConfigReadLock {
+    fn drop(&mut self) {
+        release_custody(&self._file);
     }
 }
 
@@ -689,6 +722,38 @@ tier = \"r2\"\n";
         ConfigWriterLock::try_hold(&path)
             .unwrap()
             .expect("free once the last reader released");
+    }
+
+    /// Custody belongs to the open file description, which every copy of the
+    /// holder's descriptor shares: one this process holds, and the one a
+    /// process spawned meanwhile holds until it executes its program.
+    /// Releasing custody unlocks it, so a released custody is free while such
+    /// copies are still open, for writers and readers alike.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_released_custody_is_free_while_a_copy_of_its_descriptor_is_open() {
+        use crate::process_isolation_tests::DescriptorCopy;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config_state.lock");
+
+        let writer = ConfigWriterLock::acquire(&path).await.unwrap();
+        let copy = writer._file.try_clone().unwrap();
+        let spawned = DescriptorCopy::spawn(&writer._file);
+        drop(writer);
+        let writer = ConfigWriterLock::try_hold(&path)
+            .unwrap()
+            .expect("a released writer custody is free while copies of its descriptor are open");
+        drop(writer);
+        drop((copy, spawned));
+
+        let reader = ConfigReadLock::acquire(&path).await.unwrap();
+        let copy = reader._file.try_clone().unwrap();
+        let spawned = DescriptorCopy::spawn(&reader._file);
+        drop(reader);
+        ConfigWriterLock::try_hold(&path)
+            .unwrap()
+            .expect("a released reader custody is free while copies of its descriptor are open");
+        drop((copy, spawned));
     }
 
     #[tokio::test]

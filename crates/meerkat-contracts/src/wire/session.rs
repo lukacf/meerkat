@@ -482,6 +482,15 @@ pub enum WireProviderMeta {
         #[serde(rename = "thoughtSignature")]
         thought_signature: String,
     },
+    GeminiFunctionCall {
+        provider_id: String,
+        #[serde(
+            default,
+            rename = "thoughtSignature",
+            skip_serializing_if = "Option::is_none"
+        )]
+        thought_signature: Option<String>,
+    },
     OpenAi {
         id: String,
         #[serde(default)]
@@ -514,6 +523,13 @@ impl From<ProviderMeta> for WireProviderMeta {
             ProviderMeta::AnthropicRedacted { data } => Self::AnthropicRedacted { data },
             ProviderMeta::AnthropicCompaction { content } => Self::AnthropicCompaction { content },
             ProviderMeta::Gemini { thought_signature } => Self::Gemini { thought_signature },
+            ProviderMeta::GeminiFunctionCall {
+                provider_id,
+                thought_signature,
+            } => Self::GeminiFunctionCall {
+                provider_id,
+                thought_signature,
+            },
             ProviderMeta::OpenAi {
                 id,
                 encrypted_content,
@@ -1068,6 +1084,13 @@ fn wire_provider_meta_to_core(value: WireProviderMeta) -> Option<ProviderMeta> {
         WireProviderMeta::Gemini { thought_signature } => {
             Some(ProviderMeta::Gemini { thought_signature })
         }
+        WireProviderMeta::GeminiFunctionCall {
+            provider_id,
+            thought_signature,
+        } => Some(ProviderMeta::GeminiFunctionCall {
+            provider_id,
+            thought_signature,
+        }),
         WireProviderMeta::OpenAi {
             id,
             encrypted_content,
@@ -3291,6 +3314,46 @@ mod tests {
             // `ToolUse.args` via byte-equivalence on the underlying JSON).
             assert_eq!(case, back, "round trip lost data for {snapshot}");
         }
+    }
+
+    #[test]
+    fn gemini_native_call_metadata_roundtrips_through_wire_json() {
+        for thought_signature in [None, Some("opaque-signature".to_string())] {
+            let block = AssistantBlock::ToolUse {
+                id: "fc_0".into(),
+                name: "lookup".into(),
+                args: serde_json::value::to_raw_value(&serde_json::json!({"key": 1})).unwrap(),
+                meta: Some(Box::new(ProviderMeta::GeminiFunctionCall {
+                    provider_id: "native-call".into(),
+                    thought_signature,
+                })),
+            };
+            let wire: WireAssistantBlock = block.clone().into();
+            let value = serde_json::to_value(wire).unwrap();
+            assert_eq!(value["data"]["id"], "fc_0");
+            assert_eq!(value["data"]["meta"]["provider"], "gemini_function_call");
+            assert_eq!(value["data"]["meta"]["provider_id"], "native-call");
+            assert!(value["data"]["meta"].get("id").is_none());
+            let wire: WireAssistantBlock = serde_json::from_value(value).unwrap();
+            assert_eq!(AssistantBlock::try_from(wire).unwrap(), block);
+        }
+    }
+
+    #[test]
+    fn gemini_wire_metadata_requires_provider_id_and_preserves_legacy_signature() {
+        for value in [
+            serde_json::json!({"provider": "gemini_function_call"}),
+            serde_json::json!({"provider": "gemini_function_call", "id": "native-call"}),
+            serde_json::json!({"provider": "gemini_function_call", "id": "native-call", "thoughtSignature": "signature"}),
+            serde_json::json!({"provider": "gemini_function_call", "provider_id": null}),
+            serde_json::json!({"provider": "gemini_function_call", "provider_id": 7}),
+        ] {
+            assert!(serde_json::from_value::<WireProviderMeta>(value).is_err());
+        }
+        let legacy = serde_json::json!({"provider": "gemini", "thoughtSignature": "old"});
+        let wire: WireProviderMeta = serde_json::from_value(legacy.clone()).unwrap();
+        let core = wire_provider_meta_to_core(wire).unwrap();
+        assert_eq!(serde_json::to_value(core).unwrap(), legacy);
     }
 
     /// R7-4 (P3 dogma): the wire enum must carry an explicit `Unknown`

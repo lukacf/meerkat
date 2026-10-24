@@ -66,6 +66,9 @@ fn the_fence_is_refused_while_a_connection_is_kept_and_taken_once_it_closes() {
     // A refused fence holds nothing: ordinary operations go on.
     OperationGuard::for_database(&db).expect("guarded operations go on");
 
+    // Released as a kept connection releases its presence: unlocked, then
+    // closed.
+    kept.unlock().expect("release the presence");
     drop(kept);
     let fence = ExclusiveFence::try_acquire(&db)
         .expect("io")
@@ -99,6 +102,9 @@ fn a_kept_connections_next_read_is_refused_while_the_fence_waits_for_it() {
     );
 
     let closed = Instant::now();
+    // Released as a kept connection releases its presence: unlocked, then
+    // closed.
+    kept.unlock().expect("release the presence");
     drop(kept);
     let fence = waiting
         .join()

@@ -61,8 +61,8 @@ use meerkat_providers::mcp_oauth::{
     McpAccountSelection, McpOAuthAccountStrategy, McpOAuthAuthority, McpOAuthCallback,
     McpOAuthError, McpOAuthLoginComplete, McpOAuthLoginStart, McpOAuthLoopbackBegin,
     McpOAuthNetworkBounds, McpOAuthPendingAttempt, McpOAuthRegisteredCallback,
-    McpRegisteredRedirectBase, McpServerIdentity, McpStoredCredentialPhase,
-    OidcUserInfoAccountStrategy,
+    McpOAuthStartFailure, McpRegisteredRedirectBase, McpServerIdentity, McpStoredCredentialPhase,
+    OAuthStartAdmission, OidcUserInfoAccountStrategy,
 };
 use meerkat_providers::oauth_flow::{
     OAuthFlowError, OAuthTargetValidationError, oauth_provider_resolution,
@@ -660,6 +660,36 @@ pub enum HostAuthError {
     Connector(#[from] ConnectorLoginError),
     #[error("invalid connector target: {0}")]
     ConnectorTarget(String),
+}
+
+/// A hosted MCP login start that failed: the error the start returns, and
+/// what this call left of the attempt it tried to admit. The admission
+/// speaks of this call only (see [`McpOAuthStartFailure`]):
+/// [`OAuthStartAdmission::NotAdmitted`] says this call admitted nothing,
+/// while another attempt for the target can still be pending.
+#[derive(Debug, thiserror::Error)]
+#[error("{error}")]
+pub struct HostMcpStartFailure {
+    pub error: HostAuthError,
+    pub admission: OAuthStartAdmission,
+}
+
+impl HostMcpStartFailure {
+    fn not_admitted(error: HostAuthError) -> Self {
+        Self {
+            error,
+            admission: OAuthStartAdmission::NotAdmitted,
+        }
+    }
+}
+
+impl From<McpOAuthStartFailure> for HostMcpStartFailure {
+    fn from(failure: McpOAuthStartFailure) -> Self {
+        Self {
+            error: failure.error.into(),
+            admission: failure.admission,
+        }
+    }
 }
 
 /// Fixed public text for an infrastructure failure. The internal detail
@@ -1277,9 +1307,25 @@ impl HostAuthService {
         redirect_uri: &str,
         www_authenticate: Option<&str>,
     ) -> Result<McpOAuthLoginStart, HostAuthError> {
+        self.mcp_login_start_with_admission(target, redirect_uri, www_authenticate)
+            .await
+            .map_err(|failure| failure.error)
+    }
+
+    /// [`Self::mcp_login_start`] that, when it fails, also says what this
+    /// call left of the attempt it tried to admit ([`HostMcpStartFailure`]).
+    /// The error is the one [`Self::mcp_login_start`] returns. See
+    /// [`McpOAuthAuthority::login_start_with_admission`].
+    pub async fn mcp_login_start_with_admission(
+        &self,
+        target: &McpServerIdentity,
+        redirect_uri: &str,
+        www_authenticate: Option<&str>,
+    ) -> Result<McpOAuthLoginStart, HostMcpStartFailure> {
         Ok(self
-            .mcp_oauth_authority()?
-            .login_start(target, redirect_uri, www_authenticate)
+            .mcp_oauth_authority()
+            .map_err(HostMcpStartFailure::not_admitted)?
+            .login_start_with_admission(target, redirect_uri, www_authenticate)
             .await?)
     }
 
@@ -1296,15 +1342,36 @@ impl HostAuthService {
         target: &McpServerIdentity,
         www_authenticate: Option<&str>,
     ) -> Result<McpOAuthLoginStart, HostAuthError> {
+        self.mcp_login_start_registered_with_admission(target, www_authenticate)
+            .await
+            .map_err(|failure| failure.error)
+    }
+
+    /// [`Self::mcp_login_start_registered`] that, when it fails, also says
+    /// what this call left of the attempt it tried to admit
+    /// ([`HostMcpStartFailure`]). The error is the one
+    /// [`Self::mcp_login_start_registered`] returns. A host that must claim
+    /// a clean cleanup reads the admission: `NotAdmitted` and `Retired`
+    /// leave nothing of this call's attempt, and `RetirementUnconfirmed`
+    /// names the attempt for [`Self::mcp_login_cancel_by_attempt_ref`]. See
+    /// [`McpOAuthAuthority::login_start_registered_with_admission`].
+    pub async fn mcp_login_start_registered_with_admission(
+        &self,
+        target: &McpServerIdentity,
+        www_authenticate: Option<&str>,
+    ) -> Result<McpOAuthLoginStart, HostMcpStartFailure> {
         let Some(base) = &self.mcp_registered_redirect_base else {
-            return Err(McpOAuthError::Verification(
-                meerkat_providers::connector_oauth::ConnectorOAuthRefusal::InvalidDescriptor,
-            )
-            .into());
+            return Err(HostMcpStartFailure::not_admitted(
+                McpOAuthError::Verification(
+                    meerkat_providers::connector_oauth::ConnectorOAuthRefusal::InvalidDescriptor,
+                )
+                .into(),
+            ));
         };
         Ok(self
-            .mcp_oauth_authority()?
-            .login_start_registered(target, base, www_authenticate)
+            .mcp_oauth_authority()
+            .map_err(HostMcpStartFailure::not_admitted)?
+            .login_start_registered_with_admission(target, base, www_authenticate)
             .await?)
     }
 

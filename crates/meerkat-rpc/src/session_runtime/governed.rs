@@ -791,11 +791,20 @@ impl SessionRuntime {
         let Some(handle) = handle else {
             return Err(runtime_driver_error_to_rpc(unsupported()));
         };
+        let waited_input_id = match &outcome {
+            AcceptOutcome::Accepted { input_id, .. } => Some(input_id.clone()),
+            AcceptOutcome::Deduplicated { existing_id, .. } => Some(existing_id.clone()),
+            _ => None,
+        };
         let outcome = match handle.try_wait().await {
             Ok(outcome) => outcome,
             Err(error) => {
                 return Err(self
-                    .runtime_completion_wait_error_to_rpc_error(error, session_id)
+                    .runtime_completion_wait_error_to_rpc_error(
+                        error,
+                        session_id,
+                        waited_input_id.as_ref(),
+                    )
                     .await);
             }
         };

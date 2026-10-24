@@ -467,9 +467,9 @@ pub fn trusted_search_path(
 /// could change), from `environment` (the host's own): every variable
 /// except one that makes the launched program, or a program it starts, load
 /// code or startup options from somewhere else
-/// ([`is_load_injection_variable`]), which is dropped, with the paths a
+/// (`is_load_injection_variable`), which is dropped, with the paths a
 /// confined process could change taken out of the values
-/// ([`trusted_variable_value`]): `PATH` without its relative directories
+/// (`trusted_variable_value`): `PATH` without its relative directories
 /// and the directories `untrusted` names, any other list of absolute paths
 /// likewise, and a value that is one path `untrusted` names dropped. A
 /// variable left without a value is dropped, so the platform's default
@@ -494,7 +494,7 @@ pub fn trusted_environment(
 /// Give `command` the environment an operator configured for it
 /// (`configured`, such as a credential command's `env`). Under a host that
 /// confines its agents' launches (`untrusted` given) each value loses the
-/// paths a confined process could change ([`trusted_variable_value`]), and
+/// paths a confined process could change (`trusted_variable_value`), and
 /// a configured variable left without a value is not passed on at all.
 /// A configured variable is the operator's own, so no name is refused for
 /// itself, and without such a host every value passes as configured.
@@ -899,6 +899,41 @@ mod tests {
         );
     }
 
+    /// Why the rows that write a program and run it run alone: a program a
+    /// process still holds open for writing does not run ("Text file busy"),
+    /// and a process another test spawns holds a copy of every descriptor
+    /// of this binary, the row's write descriptor included, until it executes
+    /// its own program.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_program_open_for_writing_does_not_run() {
+        crate::process_isolation_tests::alone_in_child_process(
+            "confinement::tests::a_program_open_for_writing_does_not_run",
+            || {
+                use std::os::unix::fs::PermissionsExt;
+                let temp = tempfile::tempdir().unwrap();
+                let program = temp.path().join("busy");
+                std::fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
+                std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+                let writer = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&program)
+                    .unwrap();
+                #[allow(clippy::disallowed_methods)] // the row runs a program it wrote
+                let busy = std::process::Command::new(&program).status();
+                assert_eq!(
+                    busy.map_err(|error| error.kind()).err(),
+                    Some(std::io::ErrorKind::ExecutableFileBusy),
+                    "a program open for writing does not run"
+                );
+                drop(writer);
+                #[allow(clippy::disallowed_methods)] // the row runs a program it wrote
+                let status = std::process::Command::new(&program).status().unwrap();
+                assert!(status.success(), "it runs once the writer is gone");
+            },
+        );
+    }
+
     /// A program planted in a directory a confined process can write, ahead
     /// of the trusted one on the host's `PATH`, never runs: the exemption
     /// (here the browser opener) finds the trusted program, and a program
@@ -906,54 +941,60 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_program_planted_on_the_path_is_not_run() {
-        use std::os::unix::fs::PermissionsExt;
-        let temp = tempfile::tempdir().unwrap();
-        let base = temp.path().canonicalize().unwrap();
-        let writable = base.join("writable");
-        let trusted = base.join("trusted");
-        let mut markers = Vec::new();
-        for (dir, name) in [
-            (&writable, "xdg-open"),
-            (&trusted, "xdg-open"),
-            (&writable, "only-planted"),
-        ] {
-            std::fs::create_dir_all(dir).unwrap();
-            let marker = base.join(format!(
-                "{}-{name}",
-                dir.file_name().unwrap().to_string_lossy()
-            ));
-            let program = dir.join(name);
-            std::fs::write(
-                &program,
-                format!("#!/bin/sh\nprintf ran > '{}'\n", marker.display()),
-            )
-            .unwrap();
-            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-            markers.push(marker);
-        }
-        let search_path = std::env::join_paths([&writable, &trusted]).unwrap();
-        let untrusted = move |path: &Path, _: bool| path.starts_with(&writable);
+        crate::process_isolation_tests::alone_in_child_process(
+            "confinement::tests::a_program_planted_on_the_path_is_not_run",
+            || {
+                use std::os::unix::fs::PermissionsExt;
+                let temp = tempfile::tempdir().unwrap();
+                let base = temp.path().canonicalize().unwrap();
+                let writable = base.join("writable");
+                let trusted = base.join("trusted");
+                let mut markers = Vec::new();
+                for (dir, name) in [
+                    (&writable, "xdg-open"),
+                    (&trusted, "xdg-open"),
+                    (&writable, "only-planted"),
+                ] {
+                    std::fs::create_dir_all(dir).unwrap();
+                    let marker = base.join(format!(
+                        "{}-{name}",
+                        dir.file_name().unwrap().to_string_lossy()
+                    ));
+                    let program = dir.join(name);
+                    std::fs::write(
+                        &program,
+                        format!("#!/bin/sh\nprintf ran > '{}'\n", marker.display()),
+                    )
+                    .unwrap();
+                    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+                        .unwrap();
+                    markers.push(marker);
+                }
+                let search_path = std::env::join_paths([&writable, &trusted]).unwrap();
+                let untrusted = move |path: &Path, _: bool| path.starts_with(&writable);
 
-        let environment = || vec![(std::ffi::OsString::from("PATH"), search_path.clone())];
-        let status = HostLaunchExemption::browser_opener_in(
-            "https://example.invalid/authorize",
-            environment(),
-            Some(&untrusted),
-        )
-        .status()
-        .unwrap();
-        assert!(status.success());
-        assert!(!markers[0].exists(), "the planted opener never ran");
-        assert!(markers[1].exists(), "the trusted opener ran");
-
-        assert!(
-            HostLaunchExemption::GitSkillSource
-                .launch_in("only-planted", environment(), Some(&untrusted))
+                let environment = || vec![(std::ffi::OsString::from("PATH"), search_path.clone())];
+                let status = HostLaunchExemption::browser_opener_in(
+                    "https://example.invalid/authorize",
+                    environment(),
+                    Some(&untrusted),
+                )
                 .status()
-                .is_err(),
-            "a program only an untrusted directory holds is not found"
+                .unwrap();
+                assert!(status.success());
+                assert!(!markers[0].exists(), "the planted opener never ran");
+                assert!(markers[1].exists(), "the trusted opener ran");
+
+                assert!(
+                    HostLaunchExemption::GitSkillSource
+                        .launch_in("only-planted", environment(), Some(&untrusted))
+                        .status()
+                        .is_err(),
+                    "a program only an untrusted directory holds is not found"
+                );
+                assert!(!markers[2].exists());
+            },
         );
-        assert!(!markers[2].exists());
     }
 
     /// Where neither `/bin/stty` nor `/usr/bin/stty` exists (NixOS keeps
@@ -965,53 +1006,63 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn terminal_control_finds_stty_on_the_path_where_no_fixed_path_holds_it() {
-        use std::os::unix::fs::PermissionsExt;
-        let temp = tempfile::tempdir().unwrap();
-        let base = temp.path().canonicalize().unwrap();
-        let writable = base.join("writable");
-        let trusted = base.join("trusted");
-        let mut markers = Vec::new();
-        for dir in [&writable, &trusted] {
-            std::fs::create_dir_all(dir).unwrap();
-            let marker = base.join(format!(
-                "{}-stty-ran",
-                dir.file_name().unwrap().to_string_lossy()
-            ));
-            let program = dir.join("stty");
-            std::fs::write(
-                &program,
-                format!("#!/bin/sh\nprintf ran > '{}'\n", marker.display()),
-            )
-            .unwrap();
-            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-            markers.push(marker);
-        }
-        let absent = [base.join("bin/stty"), base.join("usr/bin/stty")];
-        let installed = [absent[0].as_path(), absent[1].as_path()];
+        crate::process_isolation_tests::alone_in_child_process(
+            "confinement::tests::terminal_control_finds_stty_on_the_path_where_no_fixed_path_holds_it",
+            || {
+                use std::os::unix::fs::PermissionsExt;
+                let temp = tempfile::tempdir().unwrap();
+                let base = temp.path().canonicalize().unwrap();
+                let writable = base.join("writable");
+                let trusted = base.join("trusted");
+                let mut markers = Vec::new();
+                for dir in [&writable, &trusted] {
+                    std::fs::create_dir_all(dir).unwrap();
+                    let marker = base.join(format!(
+                        "{}-stty-ran",
+                        dir.file_name().unwrap().to_string_lossy()
+                    ));
+                    let program = dir.join("stty");
+                    std::fs::write(
+                        &program,
+                        format!("#!/bin/sh\nprintf ran > '{}'\n", marker.display()),
+                    )
+                    .unwrap();
+                    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+                        .unwrap();
+                    markers.push(marker);
+                }
+                let absent = [base.join("bin/stty"), base.join("usr/bin/stty")];
+                let installed = [absent[0].as_path(), absent[1].as_path()];
 
-        let environment = vec![(
-            std::ffi::OsString::from("PATH"),
-            trusted.clone().into_os_string(),
-        )];
-        let status = HostLaunchExemption::terminal_control_in(&installed, environment, None)
-            .status()
-            .unwrap();
-        assert!(status.success(), "the stty on the PATH ran: {status}");
-        assert!(markers[1].exists(), "the stty on the PATH ran");
-        std::fs::remove_file(&markers[1]).unwrap();
+                let environment = vec![(
+                    std::ffi::OsString::from("PATH"),
+                    trusted.clone().into_os_string(),
+                )];
+                let status =
+                    HostLaunchExemption::terminal_control_in(&installed, environment, None)
+                        .status()
+                        .unwrap();
+                assert!(status.success(), "the stty on the PATH ran: {status}");
+                assert!(markers[1].exists(), "the stty on the PATH ran");
+                std::fs::remove_file(&markers[1]).unwrap();
 
-        let environment = vec![(
-            std::ffi::OsString::from("PATH"),
-            std::env::join_paths([&writable, &trusted]).unwrap(),
-        )];
-        let untrusted = move |path: &Path, _: bool| path.starts_with(&writable);
-        let status =
-            HostLaunchExemption::terminal_control_in(&installed, environment, Some(&untrusted))
+                let environment = vec![(
+                    std::ffi::OsString::from("PATH"),
+                    std::env::join_paths([&writable, &trusted]).unwrap(),
+                )];
+                let untrusted = move |path: &Path, _: bool| path.starts_with(&writable);
+                let status = HostLaunchExemption::terminal_control_in(
+                    &installed,
+                    environment,
+                    Some(&untrusted),
+                )
                 .status()
                 .unwrap();
-        assert!(status.success(), "the trusted stty ran: {status}");
-        assert!(!markers[0].exists(), "the planted stty never ran");
-        assert!(markers[1].exists(), "the trusted stty ran");
+                assert!(status.success(), "the trusted stty ran: {status}");
+                assert!(!markers[0].exists(), "the planted stty never ran");
+                assert!(markers[1].exists(), "the trusted stty ran");
+            },
+        );
     }
 
     /// A host launch exemption inherits no variable that makes a program

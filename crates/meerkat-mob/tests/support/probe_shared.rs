@@ -288,6 +288,18 @@ impl PeerCommsEndpoint {
     ) -> Result<BridgeReply, String> {
         let params = serde_json::to_value(command)
             .map_err(|error| format!("serialize bridge command: {error}"))?;
+        self.send_bridge_params_raw(recipient, params, timeout)
+            .await
+    }
+
+    /// [`Self::send_bridge_command_raw`] for a command built as JSON, such
+    /// as one carrying a field the command types of this build lack.
+    pub async fn send_bridge_params_raw(
+        &self,
+        recipient: &TrustedPeerDescriptor,
+        params: serde_json::Value,
+        timeout: Duration,
+    ) -> Result<BridgeReply, String> {
         let to =
             meerkat_core::PeerRoute::with_display_name(recipient.peer_id, recipient.name.clone());
         let advertised = meerkat_core::comms::PeerAddress::parse(self.runtime.advertised_address())
@@ -533,6 +545,7 @@ pub fn portable_member_spec_for_raw_probe(
             max_inline_peer_notifications: None,
             output_schema: None,
             provider_params: None,
+            durable: false,
         },
         definition_extract: PortableDefinitionExtract {
             models: std::collections::BTreeMap::new(),
@@ -584,6 +597,8 @@ pub fn raw_materialize_member_command(
         spec_digest,
         launch,
         forked_participant_attachment: None,
+        prompt_context_fork: None,
+        report_adopted_first_turn: false,
     }))
 }
 

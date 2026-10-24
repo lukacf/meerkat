@@ -1752,7 +1752,7 @@ impl AnthropicClient {
                 )
             };
             let mut stream = stream_result?;
-            let mut buffer = String::with_capacity(SSE_BUFFER_CAPACITY);
+            let mut lines = meerkat_llm_core::streaming::Utf8LineBuffer::with_capacity(SSE_BUFFER_CAPACITY);
             let mut current_tool_id: Option<String> = None;
             let mut current_tool_name: Option<String> = None;
             let mut accumulated_tool_args = String::new();
@@ -2207,15 +2207,15 @@ impl AnthropicClient {
 
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk.map_err(|_| LlmError::ConnectionReset)?;
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                lines.push(&chunk);
 
                 chunk_yielded.set(false);
                 let mut chunk_consumed_line = false;
-                while let Some(newline_pos) = buffer.find('\n') {
+                while let Some(line) = lines.next_line() {
                     chunk_consumed_line = true;
-                    let line = buffer[..newline_pos].trim();
+                    let line = line?;
+                    let line = line.trim();
                     handle_line!(line);
-                    buffer.drain(..=newline_pos);
                 }
                 // A chunk whose lines produced no semantic event is still wire
                 // liveness (keepalive comments, `event:` lines, ping/bookkeeping
@@ -2226,10 +2226,12 @@ impl AnthropicClient {
                 }
             }
 
-            if !buffer.is_empty() {
+            // The bytes after the last line break, decoded as strictly as
+            // every complete line.
+            if let Some(tail) = lines.finish()? {
                 chunk_yielded.set(false);
                 let mut trailing_consumed_line = false;
-                for line in buffer.lines() {
+                for line in tail.lines() {
                     trailing_consumed_line = true;
                     let line = line.trim();
                     handle_line!(line);
@@ -5232,6 +5234,193 @@ mod tests {
             axum::serve(listener, app).await.expect("serve test server");
         });
         (format!("http://{addr}"), handle)
+    }
+
+    /// Serves each element of `chunks` as a separate paced HTTP body chunk of
+    /// raw bytes, so one character can straddle two network reads.
+    async fn paced_byte_sse(State(chunks): State<Vec<Vec<u8>>>) -> impl IntoResponse {
+        let body_stream = async_stream::stream! {
+            for chunk in chunks {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                yield Ok::<_, std::convert::Infallible>(axum::body::Bytes::from(chunk));
+            }
+        };
+        (
+            [("content-type", "text/event-stream")],
+            axum::body::Body::from_stream(body_stream),
+        )
+    }
+
+    async fn spawn_anthropic_paced_byte_server(
+        chunks: Vec<Vec<u8>>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new()
+            .route("/v1/messages", post(paced_byte_sse))
+            .with_state(chunks);
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test server");
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    /// `payload` cut into two network chunks inside each multi-byte character
+    /// of `text` (a 3-byte one 1|2 and 2|1, a 4-byte one 1|3, 2|2 and 3|1),
+    /// and on each side of the line break that ends the line holding `text`.
+    fn utf8_split_cases(payload: &str, text: &str) -> Vec<(String, Vec<Vec<u8>>)> {
+        let bytes = payload.as_bytes();
+        let start = payload.find(text).expect("payload holds the text");
+        let mut cases = Vec::new();
+        for (offset, ch) in text.char_indices().filter(|(_, ch)| ch.len_utf8() > 1) {
+            for split in 1..ch.len_utf8() {
+                let at = start + offset + split;
+                cases.push((
+                    format!(
+                        "U+{:04X} split {split}|{}",
+                        ch as u32,
+                        ch.len_utf8() - split
+                    ),
+                    vec![bytes[..at].to_vec(), bytes[at..].to_vec()],
+                ));
+            }
+        }
+        let line_end = start + payload[start..].find('\n').expect("a line break");
+        for (side, at) in [("before", line_end), ("after", line_end + 1)] {
+            cases.push((
+                format!("chunk boundary {side} the line break"),
+                vec![bytes[..at].to_vec(), bytes[at..].to_vec()],
+            ));
+        }
+        cases
+    }
+
+    /// The streamed text and terminal outcome of one paced byte stream.
+    async fn stream_paced_bytes(chunks: Vec<Vec<u8>>) -> (String, Option<LlmDoneOutcome>) {
+        let (base_url, server) = spawn_anthropic_paced_byte_server(chunks).await;
+        let client = AnthropicClient::builder("test-key".to_string())
+            .base_url(base_url)
+            .build()
+            .unwrap();
+        let request = LlmRequest::new(
+            "claude-sonnet-4-5",
+            vec![Message::User(UserMessage::text("hello".to_string()))],
+        );
+        let mut stream = client.stream(&request);
+        let mut text = String::new();
+        let mut done = None;
+        while let Some(event) = stream.next().await {
+            match event.expect("stream event") {
+                LlmEvent::TextDelta { delta, .. } => text.push_str(&delta),
+                LlmEvent::Done { outcome } => {
+                    done = Some(outcome);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        server.abort();
+        (text, done)
+    }
+
+    const SPLIT_TEXT: &str = "don\u{2019}t panic \u{1F642}";
+
+    fn split_text_payload(text_json: &str) -> String {
+        let delta = format!(
+            r#"data: {{"type":"content_block_delta","delta":{{"type":"text_delta","text":"{text_json}"}}}}"#
+        );
+        [
+            r#"data: {"type":"message_start","message":{"usage":{"input_tokens":3,"output_tokens":0}}}"#,
+            r#"data: {"type":"content_block_start","content_block":{"type":"text","text":""}}"#,
+            delta.as_str(),
+            r#"data: {"type":"content_block_stop"}"#,
+            r#"data: {"type":"message_delta","usage":{"output_tokens":5},"delta":{"stop_reason":"end_turn"}}"#,
+            r#"data: {"type":"message_stop"}"#,
+            "",
+        ]
+        .join("\n")
+    }
+
+    /// A character split across network chunks reaches the text exactly,
+    /// never as U+FFFD, wherever the chunk boundary falls. (Fails-old: each
+    /// chunk was decoded on its own, so a split character became U+FFFD.)
+    #[tokio::test]
+    async fn stream_text_split_inside_a_multibyte_character_arrives_exact() {
+        let payload = split_text_payload(SPLIT_TEXT);
+        let mut failures = Vec::new();
+        for (case, chunks) in utf8_split_cases(&payload, SPLIT_TEXT) {
+            let (text, done) = stream_paced_bytes(chunks).await;
+            if text != SPLIT_TEXT || !matches!(done, Some(LlmDoneOutcome::Success { .. })) {
+                failures.push(format!("{case}: {text:?} {done:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// A complete line that is not valid UTF-8 fails the stream as a parse
+    /// error; its bytes are never replaced with U+FFFD. (Fails-old: the
+    /// invalid byte became U+FFFD in the text and the turn succeeded.)
+    #[tokio::test]
+    async fn stream_line_with_invalid_utf8_is_a_stream_parse_error() {
+        let mut payload = split_text_payload("bad \u{0001} byte").into_bytes();
+        let marker = payload
+            .iter()
+            .position(|byte| *byte == 0x01)
+            .expect("marker byte");
+        payload[marker] = 0xFF;
+        let (text, done) = stream_paced_bytes(vec![payload]).await;
+        assert!(!text.contains('\u{FFFD}'), "{text:?}");
+        assert!(
+            matches!(
+                &done,
+                Some(LlmDoneOutcome::Error {
+                    error: LlmError::StreamParseError { .. }
+                })
+            ),
+            "{done:?}"
+        );
+    }
+
+    /// The bytes after the last line break are still read as a last line,
+    /// decoded as strictly as every complete line: a valid one ends the turn
+    /// as before, and one that is not valid UTF-8 fails the stream as a
+    /// parse error. (Fails-old: the invalid byte became U+FFFD in the text.)
+    #[tokio::test]
+    async fn stream_last_line_without_a_line_break_is_decoded_strictly() {
+        let mut whole = split_text_payload(SPLIT_TEXT);
+        assert_eq!(whole.pop(), Some('\n'));
+        let (text, done) = stream_paced_bytes(vec![whole.into_bytes()]).await;
+        assert_eq!(text, SPLIT_TEXT);
+        assert!(
+            matches!(done, Some(LlmDoneOutcome::Success { .. })),
+            "{done:?}"
+        );
+
+        let mut cut = split_text_payload("bad \u{0001} byte").into_bytes();
+        let marker = cut
+            .iter()
+            .position(|byte| *byte == 0x01)
+            .expect("marker byte");
+        cut[marker] = 0xFF;
+        let line_end = marker
+            + cut[marker..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .expect("a line break");
+        cut.truncate(line_end);
+        let (text, done) = stream_paced_bytes(vec![cut]).await;
+        assert!(!text.contains('\u{FFFD}'), "{text:?}");
+        assert!(
+            matches!(
+                &done,
+                Some(LlmDoneOutcome::Error {
+                    error: LlmError::StreamParseError { .. }
+                })
+            ),
+            "{done:?}"
+        );
     }
 
     /// Watchdog liveness regression: SSE keepalive comments and `ping` events

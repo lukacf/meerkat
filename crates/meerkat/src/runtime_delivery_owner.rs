@@ -138,6 +138,30 @@ pub trait RuntimeDeliveryHost: Send + Sync {
         default_address_resolution(address)
     }
 
+    /// Observe the incarnation behind a continuation delivery address
+    /// without serving it, as a continuation status read does. The drain
+    /// calls it after a row's reservation and before its admission: Retired
+    /// releases the reservation and admits nothing, which is what makes a
+    /// stranded status final. So it must agree on Retired with the status
+    /// read of the same continuations
+    /// ([`crate::ContinuationOwnerService::continuation_status`]): hosts with
+    /// bound continuation services delegate to
+    /// [`crate::ContinuationHostBindings::observe_address`]. The default is
+    /// derived from [`Self::resolve_address`] (Retired stays Retired, and
+    /// anything else may serve), which can revive a member. `Err` when the
+    /// address cannot be observed now: the row stays blocked.
+    async fn observe_address(
+        &self,
+        address: &LogicalRuntimeId,
+    ) -> Result<crate::AddressObservation, String> {
+        Ok(match self.resolve_address(address).await {
+            crate::AddressResolution::Retired => crate::AddressObservation::Retired,
+            crate::AddressResolution::Session(_) | crate::AddressResolution::NotServed => {
+                crate::AddressObservation::MayServe
+            }
+        })
+    }
+
     /// The sink that admits continuation deliveries into `session_id`, if
     /// this host admits continuations. Without one, continuation rows stay
     /// visibly blocked as an unsupported kind.
@@ -1332,6 +1356,16 @@ async fn run_pass(
                 blocked.insert(runtime_id, None);
                 continue;
             }
+            Ok(ServingSession::Retired(first)) => {
+                owner.awaiting.remove(&runtime_id);
+                blocked.remove(&runtime_id);
+                match settle_retired_reservation(owner, &runtime_id, &first).await {
+                    Ok(None) => {}
+                    Ok(Some(failure)) => pass.failures.push(failure),
+                    Err(_) => return None,
+                }
+                continue;
+            }
             Ok(ServingSession::NothingToDrain) => {
                 owner.awaiting.remove(&runtime_id);
                 blocked.remove(&runtime_id);
@@ -1357,11 +1391,13 @@ async fn run_pass(
             applier = applier.with_address_session(session_id.clone());
         }
         if let Some(continuations) = owner.host.continuation_sink(&session_id).await {
-            applier = applier.with_continuations(
-                continuations,
-                session_id.clone(),
-                owner.host.retained_job_source(),
-            );
+            applier = applier
+                .with_continuations(
+                    continuations,
+                    session_id.clone(),
+                    owner.host.retained_job_source(),
+                )
+                .with_address_observer(Arc::clone(&owner.host));
         }
         loop {
             match applier.apply_pending(&runtime_id, DELIVERY_PAGE).await {
@@ -1377,6 +1413,14 @@ async fn run_pass(
                         ));
                     }
                     if let Some(row) = drain.blocked {
+                        if row.reason == crate::BlockedDeliveryReason::AddressRetired {
+                            // The address retired after this pass resolved it:
+                            // the drain released its reservation and admitted
+                            // nothing, and nothing drains the address again.
+                            blocked.remove(&runtime_id);
+                            owner.awaiting.remove(&runtime_id);
+                            break;
+                        }
                         blocked.insert(runtime_id.clone(), Some(session_id.clone()));
                         owner.awaiting.remove(&runtime_id);
                         pass.failures.push(format!(
@@ -1421,6 +1465,82 @@ async fn run_pass(
     })
 }
 
+/// Settle the reservation `first`, the first pending row of the retired
+/// continuation address `runtime_id`, holds, from the reserved session's
+/// input ledger. Only the first row can hold one: the drain reserves rows in
+/// order and stops at the first it cannot finish. The owner settles it only
+/// under that session's custody (it routes here, or this process holds its
+/// cold claim), so no admission into the session is in flight; a session
+/// another runtime owner serves is that owner's to settle. Present: applied,
+/// and the delivery reads admitted. Absent: released, and it reads
+/// stranded. Another input under the key: the reservation stays, reported.
+///
+/// `Ok(Some)` names a failure to report; `Err` once the host is gone.
+async fn settle_retired_reservation(
+    owner: &OwnerLoop,
+    runtime_id: &LogicalRuntimeId,
+    first: &meerkat_runtime::RuntimeDeliveryRecord,
+) -> Result<Option<String>, JobOutboxProjectionError> {
+    let delivery_id = first.submission.delivery_id();
+    let (session_id, input_id) = match owner
+        .ownership
+        .inbox()
+        .continuation_admission(runtime_id, delivery_id)
+        .await
+    {
+        Ok(Some(meerkat_runtime::ContinuationAdmission::Reserved {
+            session_id,
+            input_id,
+        })) => (session_id, input_id),
+        Ok(_) => return Ok(None),
+        Err(error) => {
+            return Ok(Some(format!(
+                "the admission of delivery {delivery_id} on retired address {runtime_id} \
+                 could not be read: {error}"
+            )));
+        }
+    };
+    let _cold_claim = match owner
+        .router
+        .route(&session_id)
+        .await
+        .ok_or(JobOutboxProjectionError::DeliveryHostGone)?
+    {
+        DeliveryRoute::ServedHere(_) => None,
+        DeliveryRoute::Unserved(_) if owner.cold.applies_cold_deliveries() => {
+            match owner
+                .router
+                .claim_cold(&session_id)
+                .await
+                .ok_or(JobOutboxProjectionError::DeliveryHostGone)?
+            {
+                Ok(claim) => Some(claim),
+                Err(_) => return Ok(None),
+            }
+        }
+        DeliveryRoute::Unserved(_) | DeliveryRoute::ServedElsewhere => return Ok(None),
+    };
+    let Some(sink) = owner.host.continuation_sink(&session_id).await else {
+        return Ok(None);
+    };
+    match crate::continuation::settle_retired_reservation(
+        owner.ownership.inbox(),
+        runtime_id,
+        first,
+        &*sink,
+        &session_id,
+        &input_id,
+    )
+    .await
+    {
+        Ok(_) => Ok(None),
+        Err(error) => Ok(Some(format!(
+            "the reservation of delivery {delivery_id} on retired address {runtime_id} in \
+             session {session_id} stays: {error}"
+        ))),
+    }
+}
+
 enum ServingSession {
     /// A job row's provenance session.
     Session(SessionId),
@@ -1433,6 +1553,10 @@ enum ServingSession {
     /// No pending row this owner drains: empty, foreign, or a retired owner
     /// whose rows are stranded.
     NothingToDrain,
+    /// A retired continuation address whose first pending row is a
+    /// continuation: nothing drains it, and the owner settles a reservation
+    /// that row holds ([`settle_retired_reservation`]).
+    Retired(Box<meerkat_runtime::RuntimeDeliveryRecord>),
 }
 
 /// The session that drains `runtime_id` now: a member's delivery address and
@@ -1462,6 +1586,11 @@ async fn serving_session(
         return Ok(match owner.host.resolve_address(runtime_id).await {
             crate::AddressResolution::Session(session_id) => ServingSession::Address(session_id),
             crate::AddressResolution::NotServed => ServingSession::NotServed,
+            crate::AddressResolution::Retired
+                if first.submission.kind() == RuntimeDeliveryKind::Continuation =>
+            {
+                ServingSession::Retired(Box::new(first))
+            }
             crate::AddressResolution::Retired => ServingSession::NothingToDrain,
         });
     }

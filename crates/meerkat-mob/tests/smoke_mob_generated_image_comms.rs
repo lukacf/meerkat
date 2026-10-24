@@ -84,6 +84,7 @@ fn generated_image_comms_profile(
         max_inline_peer_notifications: None,
         output_schema: None,
         provider_params: None,
+        durable: false,
     }
 }
 
@@ -141,6 +142,7 @@ fn image_relay_profile(model: &str, peer_description: &str, image_generation: bo
         max_inline_peer_notifications: None,
         output_schema: None,
         provider_params: None,
+        durable: false,
     }
 }
 

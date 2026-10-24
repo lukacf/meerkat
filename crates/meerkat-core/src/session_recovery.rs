@@ -678,6 +678,7 @@ pub fn resolve_effective_turn_config(
         // Fork lineage is set only by the mob runtime when it seats a durable
         // fork; a session recovery build is never one.
         fork_source: None,
+        prompt_context_fork_source: None,
         additional_instructions: build_state.additional_instructions.clone(),
         initial_metadata_entries: std::collections::BTreeMap::new(),
         initial_tool_filter: None,

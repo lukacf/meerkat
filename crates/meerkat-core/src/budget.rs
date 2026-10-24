@@ -264,6 +264,24 @@ impl Budget {
         *self.turn_time_warned.get_mut() = false;
     }
 
+    /// Re-arm the per-turn horizon for a run that resumes after a restart.
+    ///
+    /// `elapsed` is the wall clock the run had already used when its last
+    /// round committed. The horizon counts it as spent, so the resumed run
+    /// continues the remaining budget instead of a fresh one; the time the
+    /// host was down is not charged. An `elapsed` this clock cannot represent
+    /// re-arms a fresh horizon.
+    pub fn resume_turn(&mut self, elapsed: Duration) {
+        let now = DeadlineInstant::now();
+        self.turn_start = now.checked_sub(elapsed).unwrap_or(now);
+        *self.turn_time_warned.get_mut() = false;
+    }
+
+    /// Wall clock the current turn horizon has used since it was armed.
+    pub fn turn_elapsed(&self) -> Duration {
+        self.turn_start.elapsed()
+    }
+
     /// Create an unlimited budget
     pub fn unlimited() -> Self {
         Self::new(BudgetLimits::unlimited())
@@ -867,6 +885,28 @@ mod tests {
             .expect("the turn horizon expires exactly at its limit");
         assert_eq!(exceeded.dimension, BudgetDimension::Time);
         assert_eq!(budget.remaining_duration(), Some(Duration::ZERO));
+    }
+
+    /// A run resumed after a restart continues its turn horizon from the
+    /// time the run had already used: only the rest of the limit remains, and
+    /// the time the host was down is not charged.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test(start_paused = true)]
+    async fn a_resumed_turn_continues_the_horizon_its_run_had_used() {
+        let mut budget =
+            Budget::new(BudgetLimits::default().with_max_turn_duration(Duration::from_secs(10)));
+        budget.resume_turn(Duration::from_secs(8));
+
+        assert_eq!(budget.turn_elapsed(), Duration::from_secs(8));
+        assert_eq!(budget.observe(), BudgetObservation::WithinLimit);
+        assert_eq!(budget.remaining_duration(), Some(Duration::from_secs(2)));
+
+        tokio::time::advance(Duration::from_secs(2)).await;
+        let exceeded = budget
+            .observe()
+            .exceeded()
+            .expect("the resumed horizon expires at the rest of its limit");
+        assert_eq!(exceeded.dimension, BudgetDimension::Time);
     }
 
     /// `begin_turn` re-arms the turn horizon and ONLY the turn horizon. This

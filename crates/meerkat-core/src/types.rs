@@ -865,6 +865,19 @@ pub enum ProviderMeta {
         #[serde(rename = "thoughtSignature")]
         thought_signature: String,
     },
+    /// Gemini-issued function-call identity for replay and response pairing.
+    /// The enclosing tool-use ID remains Meerkat's internal correlation key.
+    GeminiFunctionCall {
+        /// Opaque `functionCall.id` supplied by the provider, never a fallback.
+        provider_id: String,
+        /// A signature belongs to the call part, not its function response.
+        #[serde(
+            default,
+            rename = "thoughtSignature",
+            skip_serializing_if = "Option::is_none"
+        )]
+        thought_signature: Option<String>,
+    },
     /// OpenAI reasoning item metadata for stateless replay.
     /// The `id`, `encrypted_content`, and `phase` fields must be preserved
     /// verbatim when present so Responses API output items can be replayed.
@@ -2595,6 +2608,11 @@ pub enum SystemNoticeBlock {
         cessation: crate::tool_process::ToolProcessCessation,
         disposition: crate::tool_process::InterruptedToolRunDisposition,
     },
+    /// What a fork child was given of its source, delivered once before its
+    /// first input ([`crate::fork_notice`]). Its `summary` is the notice as
+    /// the model reads it, so a reader that does not know this block type
+    /// still shows it as an unknown notice.
+    ForkBoundary(Box<crate::fork_notice::ForkBoundaryNotice>),
     Unknown {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         summary: Option<String>,
@@ -2697,6 +2715,7 @@ enum SystemNoticeBlockKnown {
         cessation: crate::tool_process::ToolProcessCessation,
         disposition: crate::tool_process::InterruptedToolRunDisposition,
     },
+    ForkBoundary(Box<crate::fork_notice::ForkBoundaryNotice>),
     Unknown {
         #[serde(default)]
         summary: Option<String>,
@@ -2826,6 +2845,7 @@ impl From<SystemNoticeBlockKnown> for SystemNoticeBlock {
                 cessation,
                 disposition,
             },
+            SystemNoticeBlockKnown::ForkBoundary(notice) => Self::ForkBoundary(notice),
             SystemNoticeBlockKnown::Unknown { summary, payload } => {
                 Self::Unknown { summary, payload }
             }
@@ -2854,6 +2874,14 @@ impl<'de> Deserialize<'de> for SystemNoticeBlock {
             ) => serde_json::from_value::<SystemNoticeBlockKnown>(value)
                 .map(Into::into)
                 .map_err(serde::de::Error::custom),
+            // A fork notice a later release writes may hold a value this
+            // release does not know (a new fork kind or tools-not-compared
+            // reason). It decodes as an unknown block with its summary, so
+            // the transcript that holds it still loads.
+            Some("fork_boundary") => Ok(serde_json::from_value::<SystemNoticeBlockKnown>(
+                value.clone(),
+            )
+            .map_or_else(|_| Self::unknown_from_value(value), Into::into)),
             Some(_) => Ok(Self::unknown_from_value(value)),
             None => Err(serde::de::Error::custom("missing system notice block type")),
         }
@@ -2905,6 +2933,7 @@ impl SystemNoticeBlock {
             | Self::Auth { detail, .. }
             | Self::RuntimeNotice { detail, .. } => detail.as_deref(),
             Self::ToolConfig { .. } | Self::ToolProcessInterrupted { .. } => None,
+            Self::ForkBoundary(notice) => Some(notice.summary.as_str()),
         }
     }
 
@@ -3052,7 +3081,7 @@ impl SystemNoticeBlock {
                     sender_taint,
                     Some(crate::comms::SenderContentTaint::Tainted)
                 ) {
-                    lines.push("[sender declared this content tainted]".to_string());
+                    lines.push(crate::interaction::SENDER_TAINT_MARKER.to_string());
                 }
                 lines.join("\n")
             }
@@ -3370,6 +3399,16 @@ impl SystemNoticeMessage {
                     .to_string(),
             ),
             blocks,
+        )
+    }
+
+    /// The fork notice a fork child is given once, before its first input
+    /// ([`crate::fork_notice`]). It renders as an ordinary system notice.
+    pub fn fork_boundary(notice: crate::fork_notice::ForkBoundaryNotice) -> Self {
+        Self::with_block(
+            SystemNoticeKind::Generic,
+            None,
+            SystemNoticeBlock::ForkBoundary(Box::new(notice)),
         )
     }
 

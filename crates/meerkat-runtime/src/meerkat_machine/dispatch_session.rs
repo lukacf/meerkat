@@ -2905,7 +2905,7 @@ impl MeerkatMachine {
                 RuntimeDriverError::MaterializationRegistrationOwned { session_id } => {
                     RuntimeBindingsError::RegistrationOwned(session_id)
                 }
-                error => RuntimeBindingsError::PrepareFailed(session_id.clone(), error.to_string()),
+                error => RuntimeBindingsError::from_preparation_error(session_id.clone(), &error),
             })?;
         let MeerkatMachineCommandResult::Bindings(bindings) = result else {
             return Err(RuntimeBindingsError::SessionNotFound(session_id));

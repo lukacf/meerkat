@@ -91,6 +91,14 @@ pub struct StartTurnParams {
     /// Request-only host context for this runtime-owned logical turn.
     #[serde(default)]
     pub transient_turn_context: Option<meerkat_core::lifecycle::run_primitive::TurnRequestContext>,
+    /// `false`: this turn's events are not written as `session/event`
+    /// notifications. A caller that reads them from a `session/stream_open`
+    /// subscription, or not at all, sends it so each event reaches it once.
+    /// Absent or `true` keeps today's behaviour. If another input shares the
+    /// turn and its request wants the events, they are written. Since 0.9.5;
+    /// an older server refuses the field.
+    #[serde(default)]
+    pub session_events: Option<bool>,
 }
 
 /// Where a session's build settings are set, for a refusal on a turn.
@@ -352,6 +360,7 @@ pub async fn start_turn_with_params(
                 Some(overrides)
             },
             request_context,
+            params.session_events.unwrap_or(true),
         )
         .await
     {

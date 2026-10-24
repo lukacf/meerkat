@@ -272,6 +272,15 @@ pub enum RuntimeExecutionKind {
     ContentTurn,
     /// Explicit continuation that resumes pending work at a boundary.
     ResumePending,
+    /// The continuation of a run that a durable session left open when its
+    /// process stopped. The run keeps its id and its bound inputs, and the
+    /// agent re-enters its loop from the session's run cursor instead of
+    /// appending those inputs again.
+    ///
+    /// Only the runtime's resumed-run step dispatches this kind. It is a
+    /// dispatch kind, never an admission kind: no input is admitted or
+    /// stored with it.
+    ResumeRun,
 }
 
 /// Machine-owned apply intent for terminal peer responses.
@@ -2899,6 +2908,7 @@ mod tests {
         for kind in [
             RuntimeExecutionKind::ContentTurn,
             RuntimeExecutionKind::ResumePending,
+            RuntimeExecutionKind::ResumeRun,
         ] {
             let json = serde_json::to_value(kind).unwrap();
             let parsed: RuntimeExecutionKind = serde_json::from_value(json.clone()).unwrap();
@@ -2912,6 +2922,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(RuntimeExecutionKind::ResumePending).unwrap(),
             serde_json::Value::String("resume_pending".into())
+        );
+        assert_eq!(
+            serde_json::to_value(RuntimeExecutionKind::ResumeRun).unwrap(),
+            serde_json::Value::String("resume_run".into())
         );
     }
 

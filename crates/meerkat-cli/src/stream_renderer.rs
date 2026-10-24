@@ -453,12 +453,10 @@ fn render_event(
 
         AgentEvent::ToolExecutionCompleted {
             name,
-            content,
             is_error,
             duration_ms,
             ..
         } => {
-            let result = meerkat_core::types::text_content(content);
             let (marker, color) = if *is_error {
                 ("✗", RED)
             } else {
@@ -479,6 +477,12 @@ fn render_event(
                     reset(ansi)
                 ),
             );
+        }
+
+        // The result body is on the result event, which follows the
+        // execution fact: its preview goes under the status line.
+        AgentEvent::ToolResultReceived { content, .. } => {
+            let result = meerkat_core::types::text_content(content);
             if !result.is_empty() {
                 let preview = preview_tool_result(
                     &result,

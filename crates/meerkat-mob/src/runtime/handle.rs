@@ -94,6 +94,20 @@ fn agent_event_subscription_error(
     }
 }
 
+/// Where a durable member fork reads its source's application context from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForkSourceAppContextRead {
+    /// The source session's durable build state, read before the fork.
+    SourceSession,
+    /// The same read, for a fork from the source's own running turn. Once
+    /// that turn has committed a round, its HeadCanonical provisional tail
+    /// sits ahead of the committed snapshot and the read refuses with
+    /// `TranscriptRevisionConflict`; the context is then read from the
+    /// committed child after the fork, which the durable fork gives the
+    /// snapshot's build state.
+    SourceSessionOrForkChild,
+}
+
 /// Type a durable member fork's session failure. A fork refused because of
 /// inherited instruction activations names its source member; everything else
 /// keeps its session error.
@@ -1325,6 +1339,11 @@ pub struct MobMemberSnapshot {
     /// the member is Broken until an explicit repair. Absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub registration_refusal: Option<crate::MemberRegistrationHookCall>,
+    /// The member's custody restore a mob start deferred instead of failing
+    /// the whole start, and the cause its last attempt met. Every operation
+    /// on the member re-attempts it first. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custody_deferred: Option<crate::MemberCustodyDeferral>,
 }
 
 /// Whether the member currently owns an open execution run.
@@ -1537,7 +1556,36 @@ impl MobMemberSnapshot {
             non_portable_disabled: self.non_portable_disabled.clone(),
             preview_unavailable: self.preview_unavailable.map(wire_preview_unavailable),
             registration_refusal: self.registration_refusal.map(wire_registration_hook_call),
+            custody_deferred: self.custody_deferred.map(wire_custody_deferral),
         })
+    }
+}
+
+/// Project a domain [`crate::MemberCustodyDeferral`] into its closed wire
+/// twin.
+fn wire_custody_deferral(
+    deferral: crate::MemberCustodyDeferral,
+) -> meerkat_contracts::WireMemberCustodyDeferral {
+    meerkat_contracts::WireMemberCustodyDeferral {
+        restore: match deferral.restore {
+            crate::MemberCustodyRestore::StartupBinding => {
+                meerkat_contracts::WireMemberCustodyRestore::StartupBinding
+            }
+            crate::MemberCustodyRestore::CleanupDelivery => {
+                meerkat_contracts::WireMemberCustodyRestore::CleanupDelivery
+            }
+        },
+        cause: match deferral.cause {
+            crate::MemberCustodyDeferralCause::ServedElsewhere => {
+                meerkat_contracts::WireMemberCustodyDeferralCause::ServedElsewhere
+            }
+            crate::MemberCustodyDeferralCause::HostingUnavailable => {
+                meerkat_contracts::WireMemberCustodyDeferralCause::HostingUnavailable
+            }
+            crate::MemberCustodyDeferralCause::DurableTailUnprovable => {
+                meerkat_contracts::WireMemberCustodyDeferralCause::DurableTailUnprovable
+            }
+        },
     }
 }
 
@@ -1656,6 +1704,7 @@ pub fn profile_to_wire(profile: &crate::Profile) -> meerkat_contracts::WireMobPr
             .as_ref()
             .map(|schema| schema.as_value().clone()),
         provider_params: profile.provider_params.clone().map(Into::into),
+        durable: profile.durable,
     }
 }
 
@@ -2207,11 +2256,199 @@ pub struct MobDestroyReport {
     /// retirement recorded what became of that input.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reloaded_members: Vec<AgentIdentity>,
+    /// Members whose durability reload the runtime refused, typed. A
+    /// `repair_blocked` refusal is retryable: the same destroy can complete
+    /// once the runtime's evidence settles, for example once a boundary
+    /// commit past its outcome deadline has reported its outcome. Each
+    /// member here also has its entry in `errors`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub member_reload_refusals: Vec<MobDestroyMemberRefusal>,
+}
+
+/// A member whose durability reload the runtime refused during a destroy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct MobDestroyMemberRefusal {
+    /// The member the destroy could not reload.
+    pub member: AgentIdentity,
+    /// The runtime's typed refusal.
+    pub refusal: MemberReloadRefusal,
+}
+
+/// The runtime's typed refusal of a member's durability reload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum MemberReloadRefusal {
+    /// The runtime's recovery is repair-blocked for now
+    /// (`RuntimeDriverError::RecoveryRepairBlocked`): retry later.
+    RepairBlocked {
+        reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        evidence_digest: Option<String>,
+    },
+}
+
+impl From<&MobDestroyReport> for meerkat_contracts::WireMobDestroyReport {
+    fn from(report: &MobDestroyReport) -> Self {
+        // Every field, with no `..`: a new report field does not compile
+        // until the wire report carries it.
+        let MobDestroyReport {
+            force_destroyed_members,
+            orphaned_remote_members,
+            remote_cleanup_deadline_exceeded,
+            metadata_scrubbed,
+            events_cleared,
+            namespace_cleaned,
+            errors,
+            reloaded_members,
+            member_reload_refusals,
+        } = report;
+        let members = |members: &[AgentIdentity]| -> Vec<String> {
+            members.iter().map(ToString::to_string).collect()
+        };
+        Self {
+            force_destroyed_members: members(force_destroyed_members),
+            orphaned_remote_members: members(orphaned_remote_members),
+            remote_cleanup_deadline_exceeded: *remote_cleanup_deadline_exceeded,
+            metadata_scrubbed: *metadata_scrubbed,
+            events_cleared: *events_cleared,
+            namespace_cleaned: *namespace_cleaned,
+            errors: errors.clone(),
+            reloaded_members: members(reloaded_members),
+            member_reload_refusals: member_reload_refusals.iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<&MobDestroyMemberRefusal> for meerkat_contracts::WireMobDestroyMemberRefusal {
+    fn from(refusal: &MobDestroyMemberRefusal) -> Self {
+        let MobDestroyMemberRefusal { member, refusal } = refusal;
+        Self {
+            member: member.to_string(),
+            refusal: refusal.into(),
+        }
+    }
+}
+
+impl From<&MemberReloadRefusal> for meerkat_contracts::WireMemberReloadRefusal {
+    fn from(refusal: &MemberReloadRefusal) -> Self {
+        // Exhaustive within this crate: a new refusal kind does not compile
+        // until it is mapped, and nothing maps to the wire's `Unknown`.
+        match refusal {
+            MemberReloadRefusal::RepairBlocked {
+                reason,
+                evidence_digest,
+            } => Self::RepairBlocked {
+                reason: reason.clone(),
+                evidence_digest: evidence_digest.clone(),
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod destroy_report_wire_tests {
+    use super::{AgentIdentity, MemberReloadRefusal, MobDestroyMemberRefusal, MobDestroyReport};
+    use meerkat_contracts::WireMobDestroyReport;
+
+    fn assert_wire_matches_domain(report: &MobDestroyReport) {
+        let wire = WireMobDestroyReport::from(report);
+        let domain_json = serde_json::to_string(report).expect("domain report serializes");
+        assert_eq!(
+            serde_json::to_string(&wire).expect("wire report serializes"),
+            domain_json
+        );
+        assert_eq!(
+            serde_json::from_str::<WireMobDestroyReport>(&domain_json)
+                .expect("the domain JSON parses as the wire report"),
+            wire
+        );
+    }
+
+    #[test]
+    fn the_wire_destroy_report_serializes_byte_identical_to_the_domain_report() {
+        assert_wire_matches_domain(&MobDestroyReport::default());
+        assert_wire_matches_domain(&MobDestroyReport {
+            force_destroyed_members: vec![AgentIdentity::from("forced")],
+            orphaned_remote_members: vec![AgentIdentity::from("orphaned")],
+            remote_cleanup_deadline_exceeded: true,
+            metadata_scrubbed: true,
+            events_cleared: true,
+            namespace_cleaned: true,
+            errors: vec!["cleanup failed".to_string()],
+            reloaded_members: vec![AgentIdentity::from("reloaded")],
+            member_reload_refusals: vec![
+                MobDestroyMemberRefusal {
+                    member: AgentIdentity::from("refused"),
+                    refusal: MemberReloadRefusal::RepairBlocked {
+                        reason: "commit outcome not reported".to_string(),
+                        evidence_digest: Some("digest".to_string()),
+                    },
+                },
+                MobDestroyMemberRefusal {
+                    member: AgentIdentity::from("refused-without-digest"),
+                    refusal: MemberReloadRefusal::RepairBlocked {
+                        reason: "commit outcome not reported".to_string(),
+                        evidence_digest: None,
+                    },
+                },
+            ],
+        });
+    }
+}
+
+#[cfg(feature = "runtime-adapter")]
+impl MemberReloadRefusal {
+    /// The refusal a destroy report keeps typed for the runtime's `error`:
+    /// only a repair-blocked recovery. Every other error stays text only.
+    pub(crate) fn from_runtime_refusal(
+        error: &meerkat_runtime::RuntimeDriverError,
+    ) -> Option<Self> {
+        match error {
+            meerkat_runtime::RuntimeDriverError::RecoveryRepairBlocked {
+                evidence_digest,
+                reason,
+            } => Some(Self::RepairBlocked {
+                reason: reason.clone(),
+                evidence_digest: evidence_digest.clone(),
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// A member's durability reload that failed during a destroy: its entry in
+/// the report's `errors` and, when the runtime refused the reload typed, that
+/// refusal.
+#[cfg(feature = "runtime-adapter")]
+#[derive(Debug)]
+pub(crate) struct MemberReloadFailure {
+    pub(crate) message: String,
+    pub(crate) refusal: Option<MemberReloadRefusal>,
 }
 
 impl MobDestroyReport {
     pub(crate) fn push_error(&mut self, error: impl Into<String>) {
         self.errors.push(error.into());
+    }
+
+    /// Record `member`'s failed reload: its text in `errors` and, when the
+    /// runtime refused it typed, the refusal in `member_reload_refusals`.
+    #[cfg(feature = "runtime-adapter")]
+    pub(crate) fn push_member_reload_failure(
+        &mut self,
+        member: &AgentIdentity,
+        failure: MemberReloadFailure,
+    ) {
+        let MemberReloadFailure { message, refusal } = failure;
+        self.errors.push(message);
+        if let Some(refusal) = refusal {
+            self.member_reload_refusals.push(MobDestroyMemberRefusal {
+                member: member.clone(),
+                refusal,
+            });
+        }
     }
 
     fn error_summary(&self) -> String {
@@ -2316,6 +2553,59 @@ pub struct PreviousMemberCleanupReport {
     pub destroy_error: Option<String>,
 }
 
+/// Whether the existing session a plain resume adopted still owes the
+/// member's first turn.
+///
+/// The session service owns the answer: a deferred create that resumes a
+/// session keeps its stored first-turn phase, and marks a deferred template
+/// ([`meerkat_core::Session::is_deferred_template`]) pending. The first turn
+/// is owed exactly when one of those leaves it pending, and the turn that
+/// delivers it moves the phase to consumed, so it is delivered once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AdoptedFirstTurn {
+    /// The session's first turn never started.
+    Owed,
+    /// The session's first turn started, or the session was not created
+    /// with a deferred first turn.
+    Started,
+}
+
+impl From<AdoptedFirstTurn> for super::bridge_protocol::BridgeAdoptedFirstTurn {
+    fn from(first_turn: AdoptedFirstTurn) -> Self {
+        match first_turn {
+            AdoptedFirstTurn::Owed => Self::Owed,
+            AdoptedFirstTurn::Started => Self::Started,
+        }
+    }
+}
+
+impl From<super::bridge_protocol::BridgeAdoptedFirstTurn> for AdoptedFirstTurn {
+    fn from(first_turn: super::bridge_protocol::BridgeAdoptedFirstTurn) -> Self {
+        match first_turn {
+            super::bridge_protocol::BridgeAdoptedFirstTurn::Owed => Self::Owed,
+            super::bridge_protocol::BridgeAdoptedFirstTurn::Started => Self::Started,
+        }
+    }
+}
+
+impl AdoptedFirstTurn {
+    /// Read the stored session a resume loaded. A deferred-turn state the
+    /// session service would refuse reads as `Started`: it never
+    /// manufactures a first turn.
+    pub(crate) fn of(session: &meerkat_core::Session) -> Self {
+        let stored_pending = matches!(
+            session.try_deferred_turn_state(),
+            Ok(Some(state))
+                if state.first_turn_phase() == meerkat_core::DeferredFirstTurnPhase::Pending
+        );
+        if stored_pending || session.is_deferred_template() {
+            Self::Owed
+        } else {
+            Self::Started
+        }
+    }
+}
+
 /// Receipt returned by a successful member spawn.
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
@@ -2345,6 +2635,11 @@ pub(crate) struct MemberSpawnReceipt {
     /// deferred placed-spawn reply. Empty for ordinary spawns.
     #[serde(skip)]
     pub(crate) failed_restore_peer_ids: Vec<crate::ids::RespawnTopologyPeerId>,
+    /// For a plain resume ([`SpawnSource::Resume`]), whether the existing
+    /// session it adopted still owes the member's first turn, read from the
+    /// session the resume loaded. `None` for every other spawn.
+    #[serde(skip)]
+    pub(crate) adopted_first_turn: Option<AdoptedFirstTurn>,
 }
 
 /// Public result from a successful member spawn.
@@ -2480,12 +2775,19 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         MobError::MemberProvisionFailed { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::Internal
         }
-        // Durable-fork provisioning and refusal and bounded helper projection
-        // are separate composite operations. None can originate from a
+        // Durable-fork provisioning and bounded helper projection are
+        // separate composite operations that cannot originate from a
         // spawn-many row, so exposing a session/transport classification here
         // would invent a modeled spawn cause that MobMachine never observed.
+        // A spawn-many fork row can be refused before anything is spawned by
+        // the host's fork instruction policy or by the fork context budget;
+        // MobMachine models no spawn cause for either, so they stay Internal
+        // here and the row's typed code and structured data name the refusal.
+        // A failed fork-context probe is classified by what failed it.
+        MobError::HostFeaturesProbeFailed { cause, .. } => spawn_many_failure_observation(cause),
         MobError::ForkMemberProvisionFailed { .. }
         | MobError::ForkInstructionRefused { .. }
+        | MobError::ForkContextTooLarge { .. }
         | MobError::InvalidBoundedHelperResult { .. }
         | MobError::ForkJobOwnerNotSource { .. }
         | MobError::BoundedHelperResultUnavailable { .. }
@@ -2503,6 +2805,11 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         // A destination install the runtime refused is the wiring failure
         // it was before it was typed.
         MobError::MemberDestinationNotInstalled { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::WiringError
+        }
+        // A refused ceiling is a refused spawn request, like any other spec
+        // the spawn cannot wire.
+        MobError::OperatorAuthorityCeilingRefused { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::WiringError
         }
         MobError::SupervisorRotationIncomplete { .. } => {
@@ -2526,13 +2833,19 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
             mob_dsl::MobSpawnManyFailureObservationKind::MemberRestoreFailed
         }
         // Never a spawn outcome today (a spawn on a stopped actor gets
-        // ActorCommandChannelClosed); were it one, it classifies as its cause.
-        MobError::MemberStartupRecoveryFailed { cause, .. } => {
+        // ActorCommandChannelClosed, and a spawn acts on no deferred member);
+        // were either one, it classifies as its cause.
+        MobError::MemberStartupRecoveryFailed { cause, .. }
+        | MobError::MemberCustodyDeferred { cause, .. } => {
             spawn_many_failure_observation(cause.as_ref())
         }
         // A degraded or detached runtime registration is a session fault of
         // the existing member; the spawn row records it as its session cause.
-        MobError::MemberReloadRequired { .. } | MobError::MemberRuntimeDetached { .. } => {
+        // A durable tail kept unprovable is a fault of the member's session;
+        // never a spawn outcome today, it classifies as a session error.
+        MobError::MemberReloadRequired { .. }
+        | MobError::MemberRuntimeDetached { .. }
+        | MobError::MemberDurableTailUnprovable { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::SessionError
         }
         // Delivery-lane backpressure, bounded actor sends and reload verdicts
@@ -2543,8 +2856,11 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         | MobError::MemberInputRefused { .. }
         | MobError::GovernedInputUnbound { .. }
         | MobError::WorkInputCompletionUnavailable { .. }
+        | MobError::MemberInputRequeuedAcrossStop { .. }
+        | MobError::MemberInputRequeueExpired { .. }
         | MobError::ActorCommandTimedOut { .. }
         | MobError::MemberReloadRefused { .. }
+        | MobError::MemberReloadRepairBlocked { .. }
         | MobError::MemberReloadTimedOut { .. }
         | MobError::HeldSpawnUnsupported { .. }
         | MobError::HeldSpawnAborted { .. }
@@ -2602,7 +2918,10 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
             mob_dsl::MobSpawnManyFailureObservationKind::SupervisorEscalation
         }
         MobError::UnsupportedForMode { .. }
-        | MobError::ResumeProviderParamsRequireResume { .. } => {
+        | MobError::ResumeProviderParamsRequireResume { .. }
+        // A durable profile is a spawn this mob's session service cannot
+        // honour, the same family as an unsupported runtime mode.
+        | MobError::NonDurableService { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::UnsupportedForMode
         }
         MobError::MissingMemberCapability { .. } => {
@@ -2707,6 +3026,14 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         MobError::MemberCommsName(_) | MobError::ConditionEval { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::Internal
         }
+        // Role-targets admission, bound-target dispatch and keyed flow run
+        // refusals belong to flow runs; spawn-many provisioning never admits
+        // or runs a flow. Classify as Internal to keep the match total.
+        MobError::FlowRoleTargetsRefused { .. }
+        | MobError::BoundFlowTargetsUnavailable { .. }
+        | MobError::FlowRunIdempotencyConflict { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::Internal
+        }
         // Flow-step dispatch classification never runs during spawn-many
         // provisioning (it is the flow lane's admission gate). Classify as
         // Internal to keep the match total.
@@ -2742,6 +3069,11 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         | MobError::ForkedParticipantAttachedSpawnSpecRejected { .. }
         | MobError::ForkedParticipantAttachmentCustodyUnrecorded { .. }
         | MobError::ForkedParticipantAttachmentReleaseUnproven { .. } => {
+            mob_dsl::MobSpawnManyFailureObservationKind::Internal
+        }
+        // A keyed member send is a delivery verb, never a spawn-many
+        // provisioning step. Classify as Internal to keep the match total.
+        MobError::MemberSendIdempotency { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::Internal
         }
     }
@@ -2993,6 +3325,17 @@ pub(crate) enum ExactTurnTerminal {
     Runtime(meerkat_runtime::completion::CompletionOutcome),
     DirectSessionError(meerkat_core::service::SessionError),
     PlacedBounded(meerkat_contracts::wire::supervisor_bridge::BridgeBoundedTurnResult),
+    /// A graceful stop kept the admitted input durably queued for the next
+    /// start ([`meerkat_runtime::completion::CompletionWaitError::RequeuedAcrossStop`]).
+    RequeuedAcrossStop {
+        input_id: meerkat_core::lifecycle::InputId,
+    },
+    /// The next start ended an input a graceful stop had kept queued, as
+    /// older than its requeue bound
+    /// ([`meerkat_runtime::InputAbandonReason::RequeueExpired`]).
+    RequeueExpired {
+        input_id: meerkat_core::lifecycle::InputId,
+    },
 }
 
 pub(crate) type ExactTurnCompletionSender =
@@ -4021,6 +4364,10 @@ pub enum BoundedTurnFailure {
         tool_use_id: String,
         tool_name: String,
         args: serde_json::Value,
+        /// The call's dedupe key, as on
+        /// [`meerkat_core::error::PendingCallbackToolCall`]; boxed so the
+        /// failure stays small.
+        dedupe_key: Option<Box<meerkat_core::ToolCallDedupeKey>>,
     },
     CallbackBatchPending {
         session_id: SessionId,
@@ -4074,6 +4421,20 @@ pub enum BoundedTurnFailure {
     CompletionPlumbing {
         admitted_session_id: SessionId,
         error: MobError,
+    },
+    /// A graceful Shutdown kept this queued input durably queued: it runs on
+    /// the mob's next start. Do not resubmit it; a same-key replay after the
+    /// restart re-attaches to it.
+    RequeuedAcrossStop {
+        session_id: SessionId,
+        input_id: meerkat_core::lifecycle::InputId,
+    },
+    /// An input a graceful Shutdown kept queued was older than its requeue
+    /// bound when the next start recovered it, so it ended without running.
+    /// Resubmitting it is now correct.
+    RequeueExpired {
+        session_id: SessionId,
+        input_id: meerkat_core::lifecycle::InputId,
     },
 }
 
@@ -4174,6 +4535,20 @@ impl std::fmt::Display for BoundedTurnFailure {
                     "exact turn completion plumbing for admitted session '{admitted_session_id}' failed: {error}"
                 )
             }
+            Self::RequeuedAcrossStop {
+                session_id,
+                input_id,
+            } => write!(
+                f,
+                "input '{input_id}' for session '{session_id}' stays queued across the stop and runs on the next start; re-attach with the same delivery key, do not resubmit"
+            ),
+            Self::RequeueExpired {
+                session_id,
+                input_id,
+            } => write!(
+                f,
+                "input '{input_id}' for session '{session_id}' was requeued across a stop but expired before it ran; resubmit it"
+            ),
         }
     }
 }
@@ -4514,6 +4889,10 @@ async fn receive_exact_turn_completion<R: Clone>(
     }
 }
 
+#[allow(
+    clippy::result_large_err,
+    reason = "the typed bounded-turn failure, its MobError included, is the turn's answer to the caller"
+)]
 fn bounded_exact_turn_result(
     completion: ExactTurnCompletion,
     admitted_session_id: &SessionId,
@@ -4527,6 +4906,16 @@ fn bounded_exact_turn_result(
         ExactTurnTerminal::DirectSessionError(error) => {
             Err(bounded_direct_session_failure(error, session_id, spec))
         }
+        ExactTurnTerminal::RequeuedAcrossStop { input_id } => {
+            Err(BoundedTurnFailure::RequeuedAcrossStop {
+                session_id,
+                input_id,
+            })
+        }
+        ExactTurnTerminal::RequeueExpired { input_id } => Err(BoundedTurnFailure::RequeueExpired {
+            session_id,
+            input_id,
+        }),
         ExactTurnTerminal::PlacedBounded(result) => {
             let result_session_id = SessionId::parse(&result.session_id).map_err(|_| {
                 BoundedTurnFailure::ResultAttributionMismatch {
@@ -4573,6 +4962,10 @@ fn bounded_exact_turn_result(
     }
 }
 
+#[allow(
+    clippy::result_large_err,
+    reason = "the typed bounded-turn failure, its MobError included, is the turn's answer to the caller"
+)]
 pub(super) fn bounded_runtime_turn_result(
     outcome: meerkat_runtime::completion::CompletionOutcome,
     admitted_session_id: &SessionId,
@@ -4588,12 +4981,14 @@ pub(super) fn bounded_runtime_turn_result(
             tool_use_id,
             tool_name,
             args,
+            dedupe_key,
         } => {
             return Err(BoundedTurnFailure::CallbackPending {
                 session_id,
                 tool_use_id,
                 tool_name,
                 args,
+                dedupe_key: dedupe_key.map(Box::new),
             });
         }
         meerkat_runtime::completion::CompletionOutcome::CallbackBatchPending {
@@ -4681,12 +5076,14 @@ fn bounded_direct_session_failure(
                 tool_use_id,
                 tool_name,
                 args,
+                dedupe_key,
             },
         ) => BoundedTurnFailure::CallbackPending {
             session_id,
             tool_use_id,
             tool_name,
             args,
+            dedupe_key,
         },
         meerkat_core::service::SessionError::Agent(
             meerkat_core::error::AgentError::CallbackBatchPending { pending_tool_calls },
@@ -4735,6 +5132,18 @@ pub(crate) fn legacy_exact_turn_result(
             return Err(legacy_direct_session_error(&session_id, error));
         }
         ExactTurnTerminal::PlacedBounded(_) => return Ok(None),
+        ExactTurnTerminal::RequeuedAcrossStop { input_id } => {
+            return Err(MobError::MemberInputRequeuedAcrossStop {
+                session_id,
+                input_id,
+            });
+        }
+        ExactTurnTerminal::RequeueExpired { input_id } => {
+            return Err(MobError::MemberInputRequeueExpired {
+                session_id,
+                input_id,
+            });
+        }
     };
     match outcome {
         meerkat_runtime::completion::CompletionOutcome::Completed(result) => Ok(Some(result)),
@@ -4743,11 +5152,13 @@ pub(crate) fn legacy_exact_turn_result(
             tool_use_id,
             tool_name,
             args,
+            dedupe_key,
         } => Err(MobError::CallbackPending {
             session_id,
             tool_use_id,
             tool_name,
             args,
+            dedupe_key: dedupe_key.map(Box::new),
         }),
         meerkat_runtime::completion::CompletionOutcome::CallbackBatchPending {
             pending_tool_calls,
@@ -4792,12 +5203,14 @@ pub(crate) fn legacy_direct_session_error(
                 tool_use_id,
                 tool_name,
                 args,
+                dedupe_key,
             },
         ) => MobError::CallbackPending {
             session_id: session_id.clone(),
             tool_use_id,
             tool_name,
             args,
+            dedupe_key,
         },
         meerkat_core::service::SessionError::Agent(
             meerkat_core::error::AgentError::CallbackBatchPending { pending_tool_calls },
@@ -5773,6 +6186,9 @@ pub struct MobHandle {
     #[cfg(feature = "runtime-adapter")]
     pub(super) runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
     pub(super) restore_diagnostics: Arc<RwLock<HashMap<AgentIdentity, RestoreFailureDiagnostic>>>,
+    /// The member custody restores a start deferred, as the actor publishes
+    /// them; member status reads show a member's entry.
+    pub(super) custody_deferrals: MemberCustodyDeferrals,
     pub(super) supervisor_bridge: Arc<MobSupervisorBridge>,
     /// Read-only projection of the actor-owned MobMachine state. The actor is
     /// the sole writer; handles use this only for non-blocking status/list
@@ -6050,6 +6466,12 @@ impl MobHandle {
     }
 }
 
+/// The member custody restores a start deferred, keyed by member: the
+/// actor's deferral registry publishes each entry's restore and last cause
+/// here, and member status reads show them. Volatile, as the registry is.
+pub(crate) type MemberCustodyDeferrals =
+    Arc<std::sync::RwLock<BTreeMap<AgentIdentity, crate::MemberCustodyDeferral>>>;
+
 #[derive(Debug, Clone)]
 pub(crate) struct RestoreFailureDiagnostic {
     pub(crate) bridge_session_id: Option<SessionId>,
@@ -6267,6 +6689,22 @@ pub enum SpawnContinuityIntent {
     },
 }
 
+impl SpawnContinuityIntent {
+    /// The intent a spawn of `profile` takes. An explicit durable intent on
+    /// the spawn wins. Otherwise a profile that declares `durable = true`
+    /// turns the default ephemeral intent into a durable identity keyed by
+    /// the member's identity, as identity convergence keys it.
+    #[must_use]
+    pub(crate) fn for_profile(self, profile: &crate::Profile, identity: &AgentIdentity) -> Self {
+        match self {
+            Self::Ephemeral if profile.durable => Self::DurableIdentity {
+                continuity_key: identity.as_str().to_string(),
+            },
+            other => other,
+        }
+    }
+}
+
 /// Build-boundary context supplied to [`SpawnMemberCustomizer`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -6416,6 +6854,25 @@ pub struct SpawnMemberSpec {
     /// `role_name` remains a roster/topology label.
     pub role_name: ProfileName,
     pub identity: AgentIdentity,
+    /// The member's first turn.
+    ///
+    /// A fresh `AutonomousHost` member runs exactly one kickoff turn (one
+    /// model request) when it is spawned: on this message, or without one on
+    /// a fallback role prompt (`You have been spawned as '<identity>' (role:
+    /// <role>) in mob '<mob>'.`). A member that must start idle should be
+    /// `TurnDriven`. A fresh `TurnDriven` member runs this message as its
+    /// first turn, and nothing without one.
+    ///
+    /// A resume of an existing session
+    /// ([`crate::launch::MemberLaunchMode::Resume`]) delivers that first
+    /// turn only while the session's first turn has never started, and then
+    /// once. Otherwise the resume runs no kickoff and does not deliver this
+    /// message: the session's transcript already holds the member's start,
+    /// and a first turn that started and was interrupted is not re-run.
+    /// A placed member (`placement` set) follows the same rule: its member
+    /// host reports whether the adopted session's first turn started. A
+    /// member host of 0.9.4 or earlier reports nothing, and a resume there
+    /// still runs the first turn.
     pub initial_message: Option<ContentInput>,
     pub runtime_mode: Option<crate::MobRuntimeMode>,
     pub backend: Option<MobBackendKind>,
@@ -6553,6 +7010,17 @@ pub struct SpawnMemberSpec {
     /// by the capability-attached spawn after it proves the inheritance names
     /// the capability's own source.
     pub(crate) fork_build_inheritance: Option<super::ForkBuildInheritance>,
+    /// The most operator authority this placed member may hold, set through
+    /// [`SpawnMemberSpec::with_operator_authority_ceiling`]. `None` keeps the
+    /// default authority, except on a respawn, which keeps the authority its
+    /// predecessor recorded.
+    pub(crate) operator_authority_ceiling: Option<super::MemberOperatorAuthorityCeiling>,
+    /// The upper bound a member-initiated spawn inherits from the member that
+    /// asked for it: that member's recorded operator authority. Set only by
+    /// the member operator upcall lane and never taken from caller-supplied
+    /// arguments; the spawn folds it into `operator_authority_ceiling` after
+    /// the customizer, so nothing can widen past it.
+    pub(crate) inherited_operator_authority_bound: Option<super::MemberOperatorAuthorityCeiling>,
 }
 
 impl std::fmt::Debug for SpawnMemberSpec {
@@ -6601,6 +7069,14 @@ impl std::fmt::Debug for SpawnMemberSpec {
             .field("fork_source", &self.fork_source)
             .field("fork_overlay", &self.fork_overlay)
             .field("fork_build_inheritance", &self.fork_build_inheritance)
+            .field(
+                "operator_authority_ceiling",
+                &self.operator_authority_ceiling,
+            )
+            .field(
+                "inherited_operator_authority_bound",
+                &self.inherited_operator_authority_bound,
+            )
             .finish()
     }
 }
@@ -6661,6 +7137,8 @@ impl SpawnMemberSpec {
             fork_source: None,
             fork_overlay: super::ForkOverlayOrigin::default(),
             fork_build_inheritance: None,
+            operator_authority_ceiling: None,
+            inherited_operator_authority_bound: None,
         }
     }
 
@@ -6692,6 +7170,41 @@ impl SpawnMemberSpec {
     pub fn with_placement(mut self, host: crate::machines::mob_machine::HostId) -> Self {
         self.placement = Some(host);
         self
+    }
+
+    /// Bound the operator authority this placed member is compiled with (see
+    /// [`super::MemberOperatorAuthorityCeiling`]).
+    ///
+    /// The controlling host records the lowered authority with the member and
+    /// admits the member's operator upcalls against it, across restarts. A
+    /// spawn without a placement refuses a ceiling
+    /// ([`crate::OperatorAuthorityCeilingRefusal::UnplacedMember`]).
+    ///
+    /// A respawn of a placed member keeps the authority its predecessor
+    /// recorded. A ceiling set on the respawn request, here or by a spawn
+    /// customizer, replaces it, wider or narrower.
+    #[must_use]
+    pub fn with_operator_authority_ceiling(
+        mut self,
+        ceiling: super::MemberOperatorAuthorityCeiling,
+    ) -> Self {
+        self.operator_authority_ceiling = Some(ceiling);
+        self
+    }
+
+    /// [`Self::with_operator_authority_ceiling`] for a spawn customizer, which
+    /// edits the request in place.
+    pub fn set_operator_authority_ceiling(
+        &mut self,
+        ceiling: super::MemberOperatorAuthorityCeiling,
+    ) {
+        self.operator_authority_ceiling = Some(ceiling);
+    }
+
+    /// The operator authority ceiling this request carries. On a respawn of a
+    /// placed member, a customizer sees the one the predecessor recorded.
+    pub fn operator_authority_ceiling(&self) -> Option<&super::MemberOperatorAuthorityCeiling> {
+        self.operator_authority_ceiling.as_ref()
     }
 
     /// Set the per-member auth binding (deferral §1).
@@ -7111,6 +7624,19 @@ impl MobHandle {
             .await
             .get(agent_identity)
             .cloned()
+    }
+
+    /// The custody restore a start deferred for `agent_identity`, as the
+    /// actor's deferral registry published it.
+    fn custody_deferral_for(
+        &self,
+        agent_identity: &AgentIdentity,
+    ) -> Option<crate::MemberCustodyDeferral> {
+        let view = match self.custody_deferrals.read() {
+            Ok(view) => view,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        view.get(agent_identity).copied()
     }
 
     fn restore_failure_error(
@@ -7906,6 +8432,7 @@ impl MobHandle {
                 external_delivery_intent,
                 scoped_event_tx,
                 exact_operation,
+                role_targets,
             } => {
                 let run_id = self
                     .send_actor_command(|reply_tx| MobCommand::RunFlow {
@@ -7915,6 +8442,7 @@ impl MobHandle {
                         external_delivery_intent,
                         scoped_event_tx,
                         exact_operation,
+                        role_targets,
                         reply_tx,
                     })
                     .await??;
@@ -8379,9 +8907,16 @@ impl MobHandle {
                     .await??;
                 Ok(MobMachineCommandResult::Unit)
             }
-            MobMachineCommand::Shutdown { deadline } => {
-                self.send_actor_command(|reply_tx| MobCommand::Shutdown { deadline, reply_tx })
-                    .await??;
+            MobMachineCommand::Shutdown {
+                deadline,
+                queued_inputs,
+            } => {
+                self.send_actor_command(|reply_tx| MobCommand::Shutdown {
+                    deadline,
+                    queued_inputs,
+                    reply_tx,
+                })
+                .await??;
                 Ok(MobMachineCommandResult::Unit)
             }
             MobMachineCommand::ForceCancel { agent_identity } => {
@@ -10479,7 +11014,7 @@ impl MobHandle {
 
     /// List all members including those in `Retiring` state.
     ///
-    /// The `state` field on each [`RosterEntry`] is projected from
+    /// The `state` field on each `RosterEntry` is projected from
     /// `MobMachineState`, not from the event roster's compatibility mirror.
     pub async fn list_all_members(&self) -> Vec<RosterEntry> {
         self.project_all_roster_entries_from_machine_state().await
@@ -10738,8 +11273,8 @@ impl MobHandle {
     /// Application code acting on a mob should prefer the identity-native
     /// [`MobHandle`] APIs: [`MobHandle::member`] to acquire a
     /// capability-bearing handle, [`MemberHandle::internal_turn`] to deliver
-    /// content without the RPC turn-start dance, [`MobHandle::peer_send`]
-    /// / [`MobHandle::member_send`] for peer comms, etc. Those hide the
+    /// content without the RPC turn-start dance, [`MobHandle::send_peer_message`]
+    /// / [`MemberHandle::send_peer_message`] for peer comms, etc. Those hide the
     /// session_id entirely.
     ///
     /// # Dogma fit (A8)
@@ -11176,7 +11711,7 @@ impl MobHandle {
     /// Subscribe to agent events for all active members (point-in-time snapshot).
     ///
     /// Returns one stream per active member that has a live bridge binding. Members
-    /// spawned after this call are not included — use [`subscribe_mob_events`]
+    /// spawned after this call are not included - use [`Self::subscribe_mob_events`]
     /// for a continuously updated view.
     pub async fn subscribe_all_agent_events(
         &self,
@@ -11202,7 +11737,7 @@ impl MobHandle {
     /// Subscribe to a continuously-updated, mob-level event bus.
     ///
     /// Spawns an independent task that merges per-member session streams,
-    /// tags each event with [`AttributedEvent`], and tracks roster changes
+    /// tags each event with [`AttributedEvent`](crate::AttributedEvent), and tracks roster changes
     /// (spawns/retires) automatically. Drop the returned handle to stop
     /// the router.
     pub async fn subscribe_mob_events(
@@ -11241,6 +11776,69 @@ impl MobHandle {
         self.run_flow_with_stream(flow_id, params, None).await
     }
 
+    /// Start a flow run whose roles dispatch only to the members bound to
+    /// them, and return its run ID.
+    ///
+    /// `role_targets` must bind every role a step of the flow dispatches to.
+    /// The mob actor admits the binding once, before anything is written,
+    /// provisioned or dispatched: every bound identity must be a member of
+    /// this mob, hold that role and be Active, or the run is refused with a
+    /// typed `MobError::FlowRoleTargetsRefused`. The admitted binding is
+    /// fixed for the run and recorded on `MobRun::role_targets`. Each
+    /// execution of a step dispatches only to its role's bound members that
+    /// are still Active and still hold the role; when they can no longer meet
+    /// the step's collection policy, the run fails with the
+    /// `InsufficientTargets` failure class before that step dispatches any
+    /// turn. No flow member is provisioned for a bound run; an installed
+    /// embedder flow-target barrier still runs first, as for every run.
+    pub async fn run_flow_with_role_targets(
+        &self,
+        flow_id: FlowId,
+        params: serde_json::Value,
+        role_targets: crate::run::FlowRoleTargets,
+        scoped_event_tx: Option<mpsc::Sender<meerkat_core::ScopedAgentEvent>>,
+    ) -> Result<RunId, MobError> {
+        self.run_flow_with_stream_and_external_identity(
+            flow_id,
+            params,
+            scoped_event_tx,
+            None,
+            None,
+            Some(Arc::new(role_targets)),
+        )
+        .await
+    }
+
+    /// [`Self::run_flow_with_role_targets`] under a caller idempotency key,
+    /// in one admission.
+    ///
+    /// The run id is derived from this mob, the flow and the key, so a replay
+    /// with the same activation params and role targets returns the same run,
+    /// in flight or terminal, without admitting it again. After a restart
+    /// that is the run the recovery canceled with `ExecutionCustodyLost`; it
+    /// is not run again, so a new attempt takes a new key. The same key with
+    /// other activation params or other role targets is refused with
+    /// `MobError::FlowRunIdempotencyConflict`, never a second run. A new key
+    /// admits the binding exactly as [`Self::run_flow_with_role_targets`]
+    /// does.
+    pub async fn run_flow_with_role_targets_and_external_identity(
+        &self,
+        flow_id: FlowId,
+        params: serde_json::Value,
+        role_targets: crate::run::FlowRoleTargets,
+        identity: &crate::store::MobExternalDeliveryIdentity,
+    ) -> Result<RunId, MobError> {
+        self.run_flow_with_stream_and_external_identity(
+            flow_id,
+            params,
+            None,
+            Some(identity),
+            None,
+            Some(Arc::new(role_targets)),
+        )
+        .await
+    }
+
     /// Admit one exact Flow run after registering its terminal waiter.
     ///
     /// The caller must construct `spec` before invoking this method, so an
@@ -11266,7 +11864,7 @@ impl MobHandle {
         if let Some(provisioner) = provisioner {
             provisioner().await?;
         }
-        self.ensure_flow_targets_provisioned(&flow_id).await?;
+        self.ensure_flow_targets_provisioned(&flow_id, None).await?;
 
         let run_id = RunId::new();
         let correlation = FlowOperationCorrelation {
@@ -11297,6 +11895,7 @@ impl MobHandle {
                 external_delivery_intent: None,
                 scoped_event_tx: None,
                 exact_operation: Some(exact_operation.clone()),
+                role_targets: None,
             })
             .await;
         match admission {
@@ -11535,8 +12134,37 @@ impl MobHandle {
         params: serde_json::Value,
         scoped_event_tx: Option<mpsc::Sender<meerkat_core::ScopedAgentEvent>>,
     ) -> Result<RunId, MobError> {
-        self.run_flow_with_stream_and_external_identity(flow_id, params, scoped_event_tx, None)
-            .await
+        self.run_flow_with_stream_and_external_identity(
+            flow_id,
+            params,
+            scoped_event_tx,
+            None,
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// [`Self::run_flow`] for a member-initiated run: every member the run
+    /// provisions carries `provision_bound`, the requesting member's recorded
+    /// operator authority, as the upper bound of its own (a provision that
+    /// would be local is therefore refused, see
+    /// [`super::MemberOperatorAuthorityCeiling`]).
+    pub(crate) async fn run_flow_with_provision_bound(
+        &self,
+        flow_id: FlowId,
+        params: serde_json::Value,
+        provision_bound: Option<&super::MemberOperatorAuthorityCeiling>,
+    ) -> Result<RunId, MobError> {
+        self.run_flow_with_stream_and_external_identity(
+            flow_id,
+            params,
+            None,
+            None,
+            provision_bound,
+            None,
+        )
+        .await
     }
 
     /// Start or recover the one durable flow run selected by an external
@@ -11547,8 +12175,15 @@ impl MobHandle {
         params: serde_json::Value,
         identity: &crate::store::MobExternalDeliveryIdentity,
     ) -> Result<RunId, MobError> {
-        self.run_flow_with_stream_and_external_identity(flow_id, params, None, Some(identity))
-            .await
+        self.run_flow_with_stream_and_external_identity(
+            flow_id,
+            params,
+            None,
+            Some(identity),
+            None,
+            None,
+        )
+        .await
     }
 
     /// Prepare the Flow target, then let the Mob actor persist the exact
@@ -11581,7 +12216,7 @@ impl MobHandle {
         if let Some(provisioner) = provisioner {
             provisioner().await?;
         }
-        self.ensure_flow_targets_provisioned(&flow_id).await?;
+        self.ensure_flow_targets_provisioned(&flow_id, None).await?;
 
         let run_id = RunId::for_external_delivery(
             &self.definition.id,
@@ -11596,6 +12231,7 @@ impl MobHandle {
                 external_delivery_intent: Some(intent.clone()),
                 scoped_event_tx: None,
                 exact_operation: None,
+                role_targets: None,
             })
             .await
         {
@@ -11627,6 +12263,8 @@ impl MobHandle {
         params: serde_json::Value,
         scoped_event_tx: Option<mpsc::Sender<meerkat_core::ScopedAgentEvent>>,
         identity: Option<&crate::store::MobExternalDeliveryIdentity>,
+        provision_bound: Option<&super::MemberOperatorAuthorityCeiling>,
+        role_targets: Option<Arc<crate::run::FlowRoleTargets>>,
     ) -> Result<RunId, MobError> {
         self.execute_machine_command(MobMachineCommand::PreviewRunFlowAdmission)
             .await?;
@@ -11644,7 +12282,16 @@ impl MobHandle {
         if let Some(provisioner) = provisioner {
             provisioner().await?;
         }
-        self.ensure_flow_targets_provisioned(&flow_id).await?;
+        // A role-targeted run dispatches only to the existing members it was
+        // admitted with, so no flow member is provisioned for it: a refused
+        // binding leaves no member behind. The embedder barrier above still
+        // runs first, as for every run; it is the embedder's flow-boundary
+        // policy, not a membership decision. Membership is judged once, by
+        // the actor's admission, never here.
+        if role_targets.is_none() {
+            self.ensure_flow_targets_provisioned(&flow_id, provision_bound)
+                .await?;
+        }
         let run_id = match identity {
             Some(identity) => {
                 identity.validate()?;
@@ -11664,6 +12311,7 @@ impl MobHandle {
                 external_delivery_intent: None,
                 scoped_event_tx,
                 exact_operation: None,
+                role_targets,
             })
             .await?
         {
@@ -11674,7 +12322,15 @@ impl MobHandle {
         }
     }
 
-    async fn ensure_flow_targets_provisioned(&self, flow_id: &FlowId) -> Result<(), MobError> {
+    /// Provision a member for every role of `flow_id` that has no runnable
+    /// target. A member-initiated run passes its requester's recorded
+    /// operator authority as `provision_bound`, which each provisioned spawn
+    /// folds into its ceiling like a member's own spawn.
+    async fn ensure_flow_targets_provisioned(
+        &self,
+        flow_id: &FlowId,
+        provision_bound: Option<&super::MemberOperatorAuthorityCeiling>,
+    ) -> Result<(), MobError> {
         let Some(flow) = self.definition.flows.get(flow_id) else {
             return Err(MobError::FlowNotFound(flow_id.clone()));
         };
@@ -11700,12 +12356,11 @@ impl MobHandle {
             if self.get_member(&identity).await?.is_some() {
                 continue;
             }
-            self.spawn_spec_internal_with_source(
-                SpawnMemberSpec::new(role, identity)
-                    .with_runtime_mode(crate::MobRuntimeMode::TurnDriven),
-                SpawnSource::FlowProvisioning,
-            )
-            .await?;
+            let mut provision = SpawnMemberSpec::new(role, identity)
+                .with_runtime_mode(crate::MobRuntimeMode::TurnDriven);
+            provision.inherited_operator_authority_bound = provision_bound.cloned();
+            self.spawn_spec_internal_with_source(provision, SpawnSource::FlowProvisioning)
+                .await?;
         }
         Ok(())
     }
@@ -14046,7 +14701,7 @@ impl MobHandle {
     /// context: the member reads it as a typed injected-context message, and
     /// no conversational user row is synthesized, so nothing downstream (a
     /// live channel's mirror, a transcript view) mistakes it for human input.
-    /// Exact runtime-input custody like [`Self::start_runtime_work_with_delivery_identity_bounded`];
+    /// Exact runtime-input custody like `Self::start_runtime_work_with_delivery_identity_bounded`;
     /// retry only with the SAME delivery identity.
     #[cfg(feature = "runtime-adapter")]
     pub async fn start_injected_context_work_for_identity_bounded(
@@ -15180,11 +15835,22 @@ impl MobHandle {
     /// the member's exact registration afterwards) and Shutdown returns.
     /// Without a deadline the member lifecycle hang guard is the failure
     /// bound. Durable state stays re-drivable on the next start either way.
+    ///
+    /// `options.queued_inputs` chooses what happens to a member's running
+    /// turn and the inputs still queued behind it. The default,
+    /// [`QueuedInputsOnShutdown::RequeueDurable`](super::QueuedInputsOnShutdown::RequeueDurable),
+    /// keeps them for the mob's next start for a member whose session
+    /// commits each round durably (its run resumes at its last committed
+    /// round, and its eligible queued inputs run after it), and ends them as
+    /// stopped for any other member;
+    /// [`QueuedInputsOnShutdown::Stop`](super::QueuedInputsOnShutdown::Stop)
+    /// ends them as stopped for every member, as before 0.9.5.
     pub async fn shutdown_with_report(
         &self,
         options: super::ShutdownOptions,
     ) -> Result<super::MobShutdownReport, MobError> {
-        self.shutdown_until(options.deadline).await?;
+        self.shutdown_until(options.deadline, options.queued_inputs)
+            .await?;
         Ok(self
             .lifecycle_observations
             .last_shutdown_report()
@@ -15214,11 +15880,21 @@ impl MobHandle {
     /// keeps its `Retiring` state and that retirement is driven again on the
     /// mob's next start. Members the Shutdown could not settle are logged at
     /// warn; use [`Self::shutdown_with_report`] for the per-member account.
+    ///
+    /// The Shutdown takes the default
+    /// [`QueuedInputsOnShutdown::RequeueDurable`](super::QueuedInputsOnShutdown::RequeueDurable)
+    /// for members' running turns and queued inputs, as
+    /// [`Self::shutdown_with_report`] with default options does.
     pub async fn shutdown(&self) -> Result<(), MobError> {
-        self.shutdown_until(None).await
+        self.shutdown_until(None, super::QueuedInputsOnShutdown::default())
+            .await
     }
 
-    async fn shutdown_until(&self, caller_deadline: Option<Instant>) -> Result<(), MobError> {
+    async fn shutdown_until(
+        &self,
+        caller_deadline: Option<Instant>,
+        queued_inputs: super::QueuedInputsOnShutdown,
+    ) -> Result<(), MobError> {
         let now = tokio::time::Instant::now();
         let default_guard = now + DEFAULT_KICKOFF_WAIT_TIMEOUT;
         let hang_guard = caller_deadline.map_or(default_guard, |caller| {
@@ -15229,6 +15905,7 @@ impl MobHandle {
             match self
                 .execute_machine_command(MobMachineCommand::Shutdown {
                     deadline: caller_deadline,
+                    queued_inputs,
                 })
                 .await
             {
@@ -15250,6 +15927,7 @@ impl MobHandle {
     pub(super) async fn shutdown_once_for_test(&self) -> Result<(), MobError> {
         self.send_actor_command(|reply_tx| MobCommand::Shutdown {
             deadline: None,
+            queued_inputs: super::QueuedInputsOnShutdown::Stop,
             reply_tx,
         })
         .await?
@@ -15724,6 +16402,7 @@ impl MobHandle {
                 .await??
             }
         };
+        snapshot.custody_deferred = self.custody_deferral_for(identity);
         snapshot.peer_connectivity = match tokio::time::timeout(
             Duration::from_secs(2),
             self.project_member_peer_connectivity(identity, &snapshot),
@@ -16243,6 +16922,7 @@ impl MobHandle {
             cache_identity: None,
             source_admission,
             inherited_instructions: self.fork_instruction_policy.effective(activation_window),
+            declared_instructions: self.fork_instruction_policy,
         };
         Ok((source_session_id, fork_target))
     }
@@ -16282,8 +16962,13 @@ impl MobHandle {
                 });
             }
         }
-        self.resolve_fork_build_inheritance(source_identity, source_session_id)
-            .await
+        self.resolve_fork_build_inheritance(
+            source_identity,
+            source_session_id,
+            ForkSourceAppContextRead::SourceSession,
+        )
+        .await
+        .map(|(inheritance, _)| inheritance)
     }
 
     /// Resolve the source's build inheritance from this mob's own records:
@@ -16298,11 +16983,17 @@ impl MobHandle {
     /// (`fork_off`), that read would wait for the very turn that is waiting on
     /// the fork. A durable service reads the build state from its store and
     /// never waits on the session task or the turn.
+    ///
+    /// With [`ForkSourceAppContextRead::SourceSessionOrForkChild`] a source
+    /// read refused by its own running turn's tail leaves the inheritance
+    /// without an application context, and the second value is `true`: the
+    /// caller reads the context back from the committed child.
     async fn resolve_fork_build_inheritance(
         &self,
         source_identity: &AgentIdentity,
         source_session_id: &meerkat_core::SessionId,
-    ) -> Result<super::ForkBuildInheritance, MobError> {
+        app_context_read: ForkSourceAppContextRead,
+    ) -> Result<(super::ForkBuildInheritance, bool), MobError> {
         if !self.session_service.supports_persistent_sessions() {
             return Err(MobError::from(
                 super::session_service::durable_fork_unsupported(),
@@ -16326,11 +17017,21 @@ impl MobHandle {
         // its current build ran with (the factory persists it at every build).
         // A source with no loadable durable session has no persisted context;
         // whether such a source can be forked at all is the fork owner's call.
-        let app_context = match self
+        let (source_session, app_context_from_fork_child) = match self
             .session_service
             .load_persisted_session(source_session_id)
-            .await?
+            .await
         {
+            Ok(session) => (session, false),
+            Err(error)
+                if app_context_read == ForkSourceAppContextRead::SourceSessionOrForkChild
+                    && super::actor::is_transcript_revision_conflict(&error) =>
+            {
+                (None, true)
+            }
+            Err(error) => return Err(MobError::from(error)),
+        };
+        let app_context = match source_session {
             Some(session) => session
                 .try_build_state()
                 .map_err(|error| {
@@ -16364,7 +17065,7 @@ impl MobHandle {
             external_tools_origin,
         );
         inheritance.creation_source = Some(creation_source);
-        Ok(inheritance)
+        Ok((inheritance, app_context_from_fork_child))
     }
 
     /// Seat an already committed durable fork as a new mob member through the
@@ -16520,7 +17221,13 @@ impl MobHandle {
     ///
     /// The child inherits its source's build inputs: `member` leaves with the
     /// source's [`super::ForkBuildInheritance`] applied, resolved before the
-    /// fork commits so a failure leaves nothing durable behind.
+    /// fork commits so a failure leaves nothing durable behind. One exception:
+    /// in a fork from the source's own running turn
+    /// ([`meerkat_core::DurableForkSourceAdmission::CallerTurn`]) whose
+    /// source read meets that turn's round-commit tail, the application
+    /// context is read from the committed child after the fork, so a failure
+    /// of that read leaves the committed child unseated, as a seat failure
+    /// after the fork does.
     async fn fork_source_session(
         &self,
         source_identity: &AgentIdentity,
@@ -16548,10 +17255,27 @@ impl MobHandle {
             self.refuse_fork_source_with_admitted_work(source_identity, &source_session_id)
                 .await?;
         }
-        self.resolve_fork_build_inheritance(source_identity, &source_session_id)
-            .await?
-            .apply_to(member);
-        self.session_service
+        // In a fork from the source's own running turn, once that turn has
+        // committed a round, its provisional tail sits ahead of the committed
+        // snapshot and the committed read of the source refuses. The durable
+        // fork still cuts the branch at that snapshot and gives the child the
+        // snapshot's build state (`fork_child_projection` keeps `app_context`
+        // verbatim), so the application context is then read back from the
+        // committed child, under the same rule: a context the request states
+        // wins.
+        let app_context_read =
+            if source_admission == meerkat_core::DurableForkSourceAdmission::CallerTurn {
+                ForkSourceAppContextRead::SourceSessionOrForkChild
+            } else {
+                ForkSourceAppContextRead::SourceSession
+            };
+        let context_requested = member.context.is_some();
+        let (inheritance, app_context_from_fork_child) = self
+            .resolve_fork_build_inheritance(source_identity, &source_session_id, app_context_read)
+            .await?;
+        inheritance.apply_to(member);
+        let fork = self
+            .session_service
             .fork_persisted_session(
                 &source_session_id,
                 message_count,
@@ -16565,7 +17289,36 @@ impl MobHandle {
                     cause: crate::error::ForkSourceUnavailableCause::Running,
                 },
                 error => fork_session_error(source_identity, error),
-            })
+            })?;
+        if app_context_from_fork_child && !context_requested {
+            member.context = self.fork_child_app_context(&fork.session_id).await?;
+        }
+        Ok(fork)
+    }
+
+    /// The application context of a committed fork child's durable build
+    /// state: its source's committed snapshot's, carried verbatim by the
+    /// durable fork.
+    async fn fork_child_app_context(
+        &self,
+        child_session_id: &meerkat_core::SessionId,
+    ) -> Result<Option<serde_json::Value>, MobError> {
+        let Some(child) = self
+            .session_service
+            .load_persisted_session(child_session_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(child
+            .try_build_state()
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "fork child session '{child_session_id}' has a corrupt durable build \
+                     state: {error}"
+                ))
+            })?
+            .and_then(|state| state.app_context))
     }
 
     /// Persist a real transcript fork, provision its child member, and run the
@@ -19345,6 +20098,59 @@ mod tests {
     use super::*;
     use crate::ids::Generation;
 
+    /// A durable profile turns a spawn's default ephemeral intent into a
+    /// durable identity keyed by the member's identity. An explicit durable
+    /// intent keeps its own key, and an ordinary profile changes nothing.
+    #[test]
+    fn a_durable_profile_turns_the_default_intent_into_a_durable_identity() {
+        let identity = AgentIdentity::from("worker-1");
+        let ordinary: crate::Profile =
+            toml::from_str("model = \"claude-sonnet-4-5\"\n").expect("ordinary profile");
+        let durable: crate::Profile =
+            toml::from_str("model = \"claude-sonnet-4-5\"\ndurable = true\n")
+                .expect("durable profile");
+        let explicit = SpawnContinuityIntent::DurableIdentity {
+            continuity_key: "work-item-7".to_string(),
+        };
+
+        assert_eq!(
+            SpawnContinuityIntent::Ephemeral.for_profile(&durable, &identity),
+            SpawnContinuityIntent::DurableIdentity {
+                continuity_key: "worker-1".to_string(),
+            }
+        );
+        assert_eq!(
+            SpawnContinuityIntent::Ephemeral.for_profile(&ordinary, &identity),
+            SpawnContinuityIntent::Ephemeral
+        );
+        assert_eq!(explicit.clone().for_profile(&durable, &identity), explicit);
+        assert_eq!(explicit.clone().for_profile(&ordinary, &identity), explicit);
+    }
+
+    /// A failed fork-context probe is classified by what failed it: a
+    /// probe whose bridge request timed out is a transport failure, as
+    /// the timeout itself is, and `spawn_many` observes it as one.
+    #[test]
+    fn a_probe_failed_by_a_bridge_timeout_is_a_transport_failure() {
+        let timeout = || MobError::BridgeRequestTimedOut {
+            request_envelope_id: "probe-envelope".to_string(),
+            timeout_ms: 10_000,
+        };
+        let failed = MobError::HostFeaturesProbeFailed {
+            host_id: "host-a".to_string(),
+            cause: Arc::new(timeout()),
+        };
+        assert_eq!(
+            failed.failure_class(),
+            crate::error::MobFailureClass::Transport
+        );
+        assert_eq!(failed.failure_class(), timeout().failure_class());
+        assert_eq!(
+            spawn_many_failure_observation(&failed),
+            mob_dsl::MobSpawnManyFailureObservationKind::CommsError
+        );
+    }
+
     /// A scoped retire's refusal travels as a step outcome, so a joiner keeps
     /// seeing a stale fence or a moved session that the actor answered as a
     /// shared retirement failure, and a stuck retirement as stuck.
@@ -19462,6 +20268,7 @@ mod tests {
             non_portable_disabled: None,
             preview_unavailable: None,
             registration_refusal: None,
+            custody_deferred: None,
         }
         .with_current_bridge_session_id(Some(sid.clone()));
         let snapshot_value =
@@ -19504,6 +20311,7 @@ mod tests {
             non_portable_disabled: None,
             preview_unavailable: None,
             registration_refusal: None,
+            custody_deferred: None,
         };
 
         let snapshot_value =
@@ -19548,6 +20356,7 @@ mod tests {
             non_portable_disabled: None,
             preview_unavailable: None,
             registration_refusal: None,
+            custody_deferred: None,
         };
         assert_eq!(
             snapshot.agent_identity(),
@@ -20687,6 +21496,7 @@ mod tests {
                     tool_use_id: "call-81".to_string(),
                     tool_name: "ask_user".to_string(),
                     args: serde_json::json!({"question": "continue?"}),
+                    dedupe_key: None,
                 },
             ),
             callback_session.clone(),
@@ -20710,6 +21520,7 @@ mod tests {
             tool_name: "ask_batch".to_string(),
             args: serde_json::json!({"question": "continue all?"}),
             settlement_failures: Vec::new(),
+            dedupe_key: None,
         }];
         let batch = bounded_direct_session_failure(
             meerkat_core::service::SessionError::Agent(
@@ -20814,6 +21625,136 @@ mod tests {
             }
             other => panic!("expected bounded direct extraction failure, got {other:?}"),
         }
+    }
+
+    /// A member turn's single pending callback call keeps its dedupe key on
+    /// the mob's typed failures, from the runtime completion and from a
+    /// direct session error, for a bounded waiter and for the legacy mob
+    /// error alike, so a host answering the call sees the key. (Unrun until
+    /// the candidate's validation.)
+    #[test]
+    fn a_member_callback_pending_failure_keeps_the_dedupe_key() {
+        let spec = BoundedResultSpec::new("callback-key", 64).expect("bounded spec");
+        let session_id = exact_turn_test_session(91);
+        let arguments =
+            serde_json::value::RawValue::from_string(r#"{"question":"continue?"}"#.to_string())
+                .expect("valid arguments");
+        let key = meerkat_core::ToolCallDedupeKey::new(
+            meerkat_core::RunId::new(),
+            1,
+            "call-91",
+            "ask_user",
+            &arguments,
+        )
+        .expect("valid dedupe key");
+        let outcome = || meerkat_runtime::completion::CompletionOutcome::CallbackPending {
+            tool_use_id: "call-91".to_string(),
+            tool_name: "ask_user".to_string(),
+            args: serde_json::json!({"question": "continue?"}),
+            dedupe_key: Some(key.clone()),
+        };
+        let agent_error = || {
+            meerkat_core::service::SessionError::Agent(
+                meerkat_core::error::AgentError::CallbackPending {
+                    tool_use_id: "call-91".to_string(),
+                    tool_name: "ask_user".to_string(),
+                    args: serde_json::json!({"question": "continue?"}),
+                    dedupe_key: Some(Box::new(key.clone())),
+                },
+            )
+        };
+
+        let bounded_failures = [
+            bounded_runtime_turn_result(outcome(), &session_id, session_id.clone(), &spec)
+                .expect_err("a pending callback call is a bounded failure"),
+            bounded_direct_session_failure(agent_error(), session_id.clone(), &spec),
+        ];
+        for failure in bounded_failures {
+            match failure {
+                BoundedTurnFailure::CallbackPending {
+                    tool_use_id,
+                    dedupe_key,
+                    ..
+                } => {
+                    assert_eq!(tool_use_id, "call-91");
+                    assert_eq!(dedupe_key.as_deref(), Some(&key));
+                }
+                other => panic!("expected a bounded callback-pending failure, got {other:?}"),
+            }
+        }
+
+        let mob_errors = [
+            legacy_exact_turn_result(ExactTurnCompletion {
+                session_id: session_id.clone(),
+                terminal: ExactTurnTerminal::Runtime(outcome()),
+            })
+            .expect_err("a pending callback call is a mob error"),
+            legacy_direct_session_error(&session_id, agent_error()),
+        ];
+        for error in mob_errors {
+            match error {
+                MobError::CallbackPending {
+                    tool_use_id,
+                    dedupe_key,
+                    ..
+                } => {
+                    assert_eq!(tool_use_id, "call-91");
+                    assert_eq!(dedupe_key.as_deref(), Some(&key));
+                }
+                other => panic!("expected a callback-pending mob error, got {other:?}"),
+            }
+        }
+    }
+
+    /// A graceful stop's requeue answers reach a bounded waiter typed, with
+    /// the admitted session and the input: kept queued for the next start,
+    /// or expired at that start. Never completion plumbing, never an
+    /// abandoned reason string.
+    #[test]
+    fn requeue_terminals_reach_a_bounded_waiter_typed() {
+        let session_id = SessionId::new();
+        let input_id = meerkat_core::lifecycle::InputId::new();
+        let spec = BoundedResultSpec::new("requeue", 64).expect("bounded spec");
+        let kept = bounded_exact_turn_result(
+            ExactTurnCompletion {
+                session_id: session_id.clone(),
+                terminal: ExactTurnTerminal::RequeuedAcrossStop {
+                    input_id: input_id.clone(),
+                },
+            },
+            &session_id,
+            &spec,
+        );
+        assert!(
+            matches!(
+                &kept,
+                Err(BoundedTurnFailure::RequeuedAcrossStop {
+                    session_id: kept_session,
+                    input_id: kept_input,
+                }) if kept_session == &session_id && kept_input == &input_id
+            ),
+            "{kept:?}"
+        );
+        let expired = bounded_exact_turn_result(
+            ExactTurnCompletion {
+                session_id: session_id.clone(),
+                terminal: ExactTurnTerminal::RequeueExpired {
+                    input_id: input_id.clone(),
+                },
+            },
+            &session_id,
+            &spec,
+        );
+        assert!(
+            matches!(
+                &expired,
+                Err(BoundedTurnFailure::RequeueExpired {
+                    session_id: expired_session,
+                    input_id: expired_input,
+                }) if expired_session == &session_id && expired_input == &input_id
+            ),
+            "{expired:?}"
+        );
     }
 
     #[test]

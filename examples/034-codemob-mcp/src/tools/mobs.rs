@@ -143,6 +143,7 @@ impl UserMobConfig {
                     max_inline_peer_notifications: None,
                     output_schema: None,
                     provider_params: provider_params.cloned(),
+                    durable: false,
                 })),
             );
             skills.insert(

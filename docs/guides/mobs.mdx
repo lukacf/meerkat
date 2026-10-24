@@ -119,6 +119,41 @@ part of a mob definition:
   key that was effective in the source, and the child runs at once.
 - `refuse`: every fork whose child would inherit an activation is refused.
 
+A durable fork child's model never reads the body of an activation it
+copied: it sees a line naming the key, and reads a body only from the
+child's own activation. Skills the source loaded with `load_skill`, or was
+given as per-turn skill context, follow the same policy as the host set it:
+under the default each copied skill is named without its body, under
+`refuse` the fork is refused, and under `reactivate_inherited` they are
+carried. A fork that leaves no activation window applies this as set, so
+under the default it strips the skills instead of refusing.
+
+`fork_helper` (a member spawned with `MemberLaunchMode::Fork`) starts a
+fresh session instead and gives it the source's recent conversation as
+context. The same policy decides what of it the child gets, by each row's
+type. The source's system prompt and host system context are never
+carried. Under the default, the source's activated instructions, the
+skills it loaded with `load_skill` (each named in their place) and
+host-injected context such as memory recall are left out; under `refuse`
+a fork whose context holds an activation or a loaded skill is refused;
+under `reactivate_inherited` they are carried. A peer message in that
+conversation keeps its sender, its text and its sender's taint marker; a
+peer request or response keeps its sender and a preview of its params or
+result (a response also its status). Neither keeps the ids or instructions
+to answer it: the child is not its addressee.
+The context fits a byte budget, newest rows first, and a fork whose newest
+row alone does not fit is refused with `fork_context_too_large`.
+
+A fork child is told what it was given. Before its first input it gets a
+fork notice (a `fork_boundary` system notice) that names its source and,
+by name only, the instructions and tools it lost or gained and what its
+context carried. A `fork_helper` child gets its context the same way, as
+one row before its first input, so a turn-driven helper sees it in its
+task turn. A child placed on a member host gets them the same way when
+its host serves prompt-context fork children (a host of this release
+does); a host of 0.9.4 or earlier gives it the context and the notice as
+the start of its first prompt instead.
+
 ## Define A Mob
 
 A small mob definition has profiles and optional wiring:
@@ -597,6 +632,20 @@ Spawn defaults matter:
 
 Autonomous members run as long-lived peers. `turn_driven` members are useful
 when a host wants explicit dispatch control.
+
+A fresh `autonomous_host` member runs exactly one kickoff turn (one model
+request) when it is spawned: on its `initial_message`, or without one on a
+fallback role prompt. A member that must start idle should be `turn_driven`; it
+runs `initial_message` as its first turn, and nothing without one.
+
+A resume of an existing session (a `resume` launch mode) delivers that first
+turn only while the session's first turn has never started, and then once.
+Otherwise the resume runs no kickoff and does not deliver `initial_message`: the
+transcript already holds the member's start, and a first turn that started and
+was interrupted is not re-run. A placed member (`placement` set) follows the
+same rule: its member host reports whether the adopted session's first turn
+started. A member host of 0.9.4 or earlier reports nothing, and a resume there
+still runs the first turn.
 
 ### Trusted Rust member build overrides
 
@@ -1124,7 +1173,7 @@ attempted; the first failure is reported, and a retry converges. Members
 spawned by other means are not affected.
 
 `rkat mob force-cancel <MOB_ID> <AGENT_IDENTITY>` (RPC `mob/force_cancel`)
-cooperatively cancels a member's in-flight turn without retiring it — the
+cooperatively cancels a member's in-flight turn without retiring it - the
 member stays in the roster and can take new turns. As the operator remedy for
 a wedged member it is legal whenever the mob is running and idempotent:
 cancelling a member whose runtime is no longer live, or one already retiring,
@@ -1159,6 +1208,50 @@ Retirement, respawn, and registration reload wait behind the affected member's
 in-flight resume work. Cleanup failures retain exact retry authority; an
 unproven cleanup is not a successful cancellation. Compensation preserves
 durable session documents and refuses to remove a successor attachment.
+
+A mob restarted over a persistent store after its process crashed, was killed
+or exited without a Shutdown takes its adopted identities' reconcile leases at
+once, so each identity's admission reopens as soon as it converges. The
+process proves that its predecessor ended with an exclusive lock on the mob
+store's `.incarnation-custody` file, which it holds until it exits; never
+delete that file while a process may use the store (`rkat storage doctor`
+lists it as `mob-incarnation-custody-lock`, and `rkat storage prune` leaves
+it). A restart in the same process, a restart while another process holds the
+lock, a lease taken without the lock, and a store without a file wait for the
+earlier lease to expire (up to 30 s), as before 0.9.5.
+
+### Durable workers
+
+Since 0.9.5 a profile can make its members durable workers:
+
+```toml
+[profiles.worker]
+model = "claude-sonnet-4-6"
+durable = true
+```
+
+A spawn of a durable profile records the member with a durable identity
+(`SpawnContinuityIntent::DurableIdentity`, keyed by its `AgentIdentity`), so
+after a restart a host finds the worker with `durable_identity_members` (see
+the next section) and re-attaches it. A durable worker needs a mob whose
+member sessions outlive the process. The session service says so through
+`keeps_durable_member_sessions`, which defaults to
+`supports_persistent_sessions`; a host that runs the persistent session
+service over in-memory stores answers it `false`. On any other mob the spawn
+is refused with `NonDurableService` (error code `CAPABILITY_UNAVAILABLE`,
+structured data kind `mob_non_durable_service`) before anything is created,
+instead of spawning a worker that would not survive a restart. `durable` lives
+on the profile only, with no separate spawn flag, and an explicit continuity
+intent on a Rust spawn wins over it. A host older than 0.9.5 refuses a profile
+that sets it.
+
+A durable worker restarts like every member of a persisted mob: it is rebuilt
+on its session, and a run it was in continues from its last committed round
+(see [Durable runs](/guides/durable-runs#after-a-crash)). A host that tracks
+work outside the session, such as a work item another worker may have claimed
+meanwhile, can stop such a run from continuing with a resume gate
+(`MobBuilder::with_durable_resume_gate`); see
+[Durable runs: resume gate](/guides/durable-runs#resume-gate).
 
 ### Member binding history (Rust hosts)
 
@@ -1197,8 +1290,8 @@ When a mob start's durable recovery fails before the actor admits a command
 (`DurabilityFailStop`), `MobHandle::status` and `MobHandle::resume` return the
 failure, typed, as `MobError::SharedLifecycleFailure`. For a member's session
 it is `MobError::MemberStartupRecoveryFailed`, which names the member, its
-session and the cause, for example `SessionError::ServedElsewhere` while
-another runtime owner on the realm hosts the session. Other commands fail with
+session and the cause, for example a store error while the start restores a
+retiring member's cleanup delivery. Other commands fail with
 `ActorCommandChannelClosed`. An actor that fail-stops later, on a durable
 mutation whose outcome stayed uncertain, reports `MobError::DurabilityFailStop`
 the same way: its `cause` is that mutation's own error, the first one when
@@ -1220,6 +1313,21 @@ MCP `meerkat_mob_list` tool and the SDKs' mob listings give such a mob's row a
 typed `failure` (`cause`, `message`, `code`, `structured_data`): present
 means the mob's actor has stopped; `status` is the last machine phase. Before
 0.9.5 the row read `Running`.
+
+A member the start cannot restore because another runtime owner on the realm
+hosts its session, its hosting claim cannot be taken, or its durable tail could
+not be proven does not fail the start when it is retiring, or when its restore
+already failed (it is Broken). The start defers that member's custody restore:
+the mob runs, the member stays Retiring or Broken with its session untouched,
+and `MobHandle::member_status` shows the deferral as `custody_deferred` (the
+restore and the cause its last attempt met; both vocabularies may grow, and
+the SDKs report a value they do not know as unknown instead of failing the
+read). A retire, `redrive_retirement`, respawn or destroy of the member
+re-attempts the restore first and answers `MobError::MemberCustodyDeferred`
+while it still cannot restore; an explicit resume re-attempts it once and still
+succeeds. The mob also re-attempts the restore on its own: once it succeeds, a
+retiring member's retirement completes, and a respawn rebuilds a Broken
+member. Any other restore failure still stops the start.
 
 While a Shutdown drains, a command the close refuses (spawn, respawn, work, a
 flow run, wiring, a host bind, a live commit, resume, reset or reload) fails
@@ -1252,6 +1360,67 @@ Shutdown report such a member's run and run starts as `ReloadRequired` instead
 of failing on it, and a Shutdown holds every member's run starts, reporting the
 first failure in roster order.
 
+Since 0.9.5 a graceful Shutdown keeps a durable member's work for the mob's
+next start. `MobHandle::shutdown()` and `ShutdownOptions::default()` take the
+default `QueuedInputsOnShutdown::RequeueDurable`, which resolves per member:
+`QueuedInputsOnShutdown::Requeue(RequeueMaxAge::DEFAULT)`, a 15 minute max
+age, for a member whose session commits every round (the mob's session
+service keeps persistent sessions and its runtime has a persistence store),
+and `QueuedInputsOnShutdown::Stop`, the 0.9.4 behaviour, for any other
+member. A member already retiring is stopped either way. To choose for every
+member alike, pass
+`ShutdownOptions::default().with_queued_inputs(QueuedInputsOnShutdown::Requeue(max_age))`,
+where `max_age` is a `RequeueMaxAge` (`RequeueMaxAge::new(duration)` refuses
+a bound under one millisecond, zero included, or over 24 hours with
+`ShutdownOptionsError`), or `.with_queued_inputs(QueuedInputsOnShutdown::Stop)`,
+which ends every queued input as stopped and cancels running turns, as in
+0.9.4.
+
+Under `Requeue` the Shutdown holds a member's run starts and does not cancel
+its running turn. The member's runtime stop suspends a run that commits
+every round at its last committed round: the run's inputs stay bound to it,
+with the waiter answer and the max age below, and the run continues from
+that round at the next start, before the kept queued inputs run (see
+[Durable runs: graceful stops and deploys](/guides/durable-runs#graceful-stops-and-deploys)).
+An autonomous member keeps its running turn the same way, and its kickoff
+stays open: the next start resumes the run under the same objective, and
+when that run is the kickoff's, the kickoff resolves when it ends. A
+retiring or host-placed autonomous member is still interrupted, with its
+kickoff closed. A draining deploy that first stops the mob with
+`MobHandle::stop_with_options(StopOptions::default().leave_runs_running())`
+and drains with `MobHandle::drain_stopped_runs` leaves such a member's
+kickoff open as well, so the Shutdown that follows decides: its default
+keeps the kickoff and the run for the next start, and
+`with_queued_inputs(QueuedInputsOnShutdown::Stop)` closes the kickoff and
+cancels the run. If no Shutdown follows, the kickoff stays open and resolves
+when its run ends. A plain Stop, which interrupts runs, still closes the
+kickoff. The runtime stop still cancels a run that commits no rounds,
+such as a live bridge run: that turn's own input ends cancelled, and its
+user message is not in what a kept input's turn sees.
+
+A member input still queued behind the running turn is kept when it is a
+durable prompt in the queue lane that is neither directed nor bound to an
+objective, as a host human input submitted with `HandlingMode::Queue` is. It
+stays in the member's input store, its waiter ends with
+`BoundedTurnFailure::RequeuedAcrossStop`, and the mob's next start runs it
+once, in admission order, before new work; a same-key replay after the
+restart re-attaches to its result. Do not resubmit it. If it is older than
+`max_age`, measured from its admission, when a start finds it still queued
+(every such start checks again), it ends as abandoned (`requeue_expired`)
+without running, and a same-key replay answers
+`BoundedTurnFailure::RequeueExpired`: resubmit it if it is still wanted.
+Steer, ephemeral, event, directed and objective-bound inputs that are not
+bound to the running turn's run, and peer messages, end as stopped. A
+member's kickoff is bound to its objective, so a kickoff still queued at a
+requeue Shutdown ends as stopped and is recorded failed, as with `Stop`.
+Keeping queued inputs is guaranteed only for a member whose run starts the
+Shutdown holds (`MemberRunStarts::Held`): a member that cannot hold them may
+start a queued input once its running turn is cancelled, and that input then
+belongs to the cancelled run. 0.9.4 cannot open a store that holds a kept
+input still queued or a kept run, and cannot read a kept or expired input's
+row after it ran or expired (see [Upgrading](/guides/upgrading)): shut a mob
+down with `QueuedInputsOnShutdown::Stop` before you downgrade it.
+
 A mob restored with an unfinished destroy starts with admission closed before
 `MobBuilder::resume` returns its handle, so nothing is spawned into it while the
 destroy is retried. A recorded placed lifecycle intent, such as a Reset, is not
@@ -1263,6 +1432,46 @@ Since 0.9.4 a destroy whose member's boundary commit fails while the destroy
 waits on that member's ingress detach reloads the member from its durable
 store, retries its retirement once, and names it in
 `MobDestroyReport::reloaded_members`; 0.9.3 answered `Incomplete`.
+
+A destroy also reloads, before it starts, every member whose runtime requires
+a durability reload. When the runtime refuses such a reload as repair-blocked,
+for example while a boundary commit past its deadline has not reported its
+durable outcome, the destroy answers `Incomplete`. Since 0.9.5 its report also
+lists the member in `MobDestroyReport::member_reload_refusals`
+(`{"member": ..., "refusal": {"kind": "repair_blocked", "reason": ...}}`
+in the `destroy_report` of the `mob_destroy_incomplete` data): retry the
+destroy later. The SDKs read that report typed, as a `WireMobDestroyReport`:
+`mob_destroy_incomplete_report(error)` in Python and
+`mobDestroyIncompleteReport(error)` in TypeScript and `@rkat/web`. A refusal
+in the reload pass before the destroy starts leaves the mob unchanged. A
+refusal later in the destroy comes after its cleanup has begun: the mob's
+admission is closed, and some members may already be retired. A member that
+degrades only after those reloads, and whose reload the runtime refuses while
+the destroy archives its session, is listed the same way; its `errors` entry
+then carries the text of `MobError::MemberReloadRepairBlocked`. Any other
+reload failure stays text in `errors` only.
+
+A retire reloads such a member as well, at its quiesce stage. When the runtime
+refuses that reload as repair-blocked, the retirement sticks: `retire` answers
+`MobError::MemberRetirementStuck`, and since 0.9.5 its cause is
+`MobError::MemberReloadRepairBlocked` (`session_id`, `reason`,
+`evidence_digest`; structured data kind `mob_member_reload_repair_blocked`
+with `retryable: true`, wire code `SessionBusy`) instead of a session error
+with the refusal as text. Redrive the retirement with
+`MobHandle::redrive_retirement` once the boundary commit has reported its
+outcome; the redrive reloads the member and completes the retirement.
+
+A retire that started before the member degraded waits at its quiesce stage
+on the boundary commit instead, and reaches its ingress detach once the
+commit reports, with the member still degraded. Since 0.9.5 the ingress
+detach reloads the member as the quiesce does and retires the cold successor,
+so the retirement completes: retry a retire that answered
+`MemberRetirementInProgress`. When the runtime refuses that reload as
+repair-blocked, or the member degrades just after the stage's reload check,
+the retirement sticks with the same `MemberReloadRepairBlocked` cause; redrive
+it. Since 0.9.5 the stuck error's own data (kind `mob_retirement_stuck`)
+carries the cause's data as `cause_data`, so a client routes on the cause's
+kind rather than on its text.
 
 ### Admission in custom Rust session services
 
@@ -1381,6 +1590,72 @@ not a controller-local `session/*` handle. Drive the member by
 `agent_identity`, and read its transcript with `mob/member_history`. Generic
 session history, transcript revision, and transcript edit operations are not
 proxied across hosts in v1.
+
+### Placed-member operator authority
+
+A placed member's mob operator tools (`spawn_member`, `list_members`,
+`retire_member` and the rest) are upcalls to the controlling host, which
+admits each one against the operator authority it recorded when it compiled
+the member. A session build hook on the member host does not change that
+authority.
+
+A placed member whose profile enables mob tools and that has no ceiling keeps
+manage scope over its mob, including the privileged spawn arguments: it can
+spawn any profile of the mob, with a runtime mode, a launch mode or a
+requested tool access policy, and it can list and retire every member. That
+is more than a local member gets by default, which holds no manage scope.
+
+Controllers narrow a placed member by setting a ceiling on its spawn request.
+In a Rust host, set it with `SpawnMemberSpec::with_operator_authority_ceiling`,
+or from a `SpawnMemberCustomizer` with `set_operator_authority_ceiling`:
+
+```rust
+use meerkat_mob::MemberOperatorAuthorityCeiling;
+
+let spec = SpawnMemberSpec::new("analyst", "west-analyst-1")
+    .with_placement(host_id)
+    .with_operator_authority_ceiling(
+        MemberOperatorAuthorityCeiling::unrestricted()
+            .without_manage()
+            .with_spawn_profiles(["worker"]),
+    );
+```
+
+A ceiling only lowers the default authority:
+
+- `without_manage()` drops manage scope. The member then spawns only the
+  profiles it holds, never with a privileged spawn argument, and it is refused
+  the operator tools that need manage scope, such as `list_members` and
+  `retire_member`.
+- `with_spawn_profiles(...)` keeps only the listed profiles (a profile the mob
+  does not define is ignored). It needs `without_manage()`, because manage
+  scope admits every profile: a ceiling with both is refused with
+  `MobError::OperatorAuthorityCeilingRefused` (`SpawnProfilesWithManage`).
+- `without_create()` and `without_mutate()` drop create and profile-mutation
+  authority.
+
+The controlling host records the lowered authority with the member, so it
+holds across controlling restarts and member revivals. A respawn (`respawn` or
+`respawn_with_successor_spec`) keeps it: a spawn customizer sees the recorded
+ceiling on the respawn request, and a ceiling set on that request replaces it.
+When the record cannot be read, the respawn is refused before anything is
+retired.
+
+A ceiling also bounds every member that member spawns itself (its
+`spawn_member` and `spawn_many_members` calls): the child is compiled with at
+most the authority recorded for the member that asked for it. A ceiling on the
+child's own spawn request, or one a spawn customizer sets, can narrow that
+bound but never widen it, so a narrowed member cannot regain authority through
+a member it spawns, and the bound holds across the child's restarts and
+respawns. A member without a ceiling bounds its children by nothing more than
+the default. A flow run needs manage scope. When a member that has it but
+carries a ceiling starts a flow that would provision a member, the run is
+refused before it starts: flow provisions are local, and no ceiling can bound
+a local member. Its flows whose roles already have members still run.
+
+A ceiling on a spawn without a placement is refused (`UnplacedMember`), since
+a local member's operator authority is set by its own session build. The
+JSON-RPC, REST and SDK spawn surfaces do not carry a ceiling.
 
 ### Placed-member portability
 

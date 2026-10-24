@@ -149,6 +149,11 @@ pub enum BlockedDeliveryReason {
     /// example an original whose admission its source owner has not settled
     /// yet); it is retried on the next wake for its runtime.
     NotReady(meerkat_core::authorization::ControllerReadinessFailure),
+    /// Its continuation's delivery address retired after the pass resolved
+    /// it: the drain released its reservation and admitted nothing. Not a
+    /// failure: the delivery reads stranded, and nothing drains the address
+    /// again.
+    AddressRetired,
 }
 
 /// A continuation delivery settled as refused this pass: a terminal policy
@@ -193,6 +198,7 @@ fn blocked_delivery(
         JobOutboxProjectionError::NotReady { reason, .. } => {
             BlockedDeliveryReason::NotReady(*reason)
         }
+        JobOutboxProjectionError::AddressRetired { .. } => BlockedDeliveryReason::AddressRetired,
         _ => BlockedDeliveryReason::ApplyFailed,
     };
     BlockedRuntimeJobDelivery {
@@ -332,6 +338,10 @@ pub struct JobRuntimeDeliveryApplier {
         meerkat_core::SessionId,
         Option<Arc<dyn crate::RetainedJobSource>>,
     )>,
+    /// Observes a continuation row's delivery address after its reservation
+    /// and before its admission ([`Self::with_address_observer`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    address_observer: Option<Arc<dyn crate::RuntimeDeliveryHost>>,
 }
 
 impl std::fmt::Debug for JobRuntimeDeliveryApplier {
@@ -354,6 +364,8 @@ impl JobRuntimeDeliveryApplier {
             address_session: None,
             #[cfg(not(target_arch = "wasm32"))]
             continuations: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            address_observer: None,
         }
     }
 
@@ -374,6 +386,8 @@ impl JobRuntimeDeliveryApplier {
             address_session: None,
             #[cfg(not(target_arch = "wasm32"))]
             continuations: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            address_observer: None,
         }
     }
 
@@ -407,6 +421,18 @@ impl JobRuntimeDeliveryApplier {
         job_source: Option<Arc<dyn crate::RetainedJobSource>>,
     ) -> Self {
         self.continuations = Some((sink, session, job_source));
+        self
+    }
+
+    /// Observe a continuation row's delivery address through `host` after
+    /// the row's reservation and before its admission: an address that
+    /// retired since the owner resolved it gets its reservation released and
+    /// nothing admitted. The delivery owner sets its own host, whose
+    /// observation agrees on Retired with the continuation status read.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn with_address_observer(mut self, host: Arc<dyn crate::RuntimeDeliveryHost>) -> Self {
+        self.address_observer = Some(host);
         self
     }
 
@@ -616,6 +642,7 @@ impl JobRuntimeDeliveryApplier {
             &**sink,
             session,
             job_source.as_deref(),
+            self.address_observer.as_deref(),
         )
         .await?;
         self.runtime_inbox
@@ -1162,6 +1189,12 @@ pub enum JobOutboxProjectionError {
         delivery_id: String,
         reason: meerkat_core::authorization::ControllerReadinessFailure,
     },
+    /// A continuation delivery whose address retired after the pass resolved
+    /// it: the drain released its reservation and admitted nothing, so the
+    /// delivery reads stranded. The drain reports it as
+    /// [`BlockedDeliveryReason::AddressRetired`], never as a failure.
+    #[error("delivery {delivery_id} was not admitted: its delivery address retired")]
+    AddressRetired { delivery_id: String },
 }
 
 #[derive(Clone)]

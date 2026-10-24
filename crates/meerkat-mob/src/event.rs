@@ -478,14 +478,14 @@ pub enum MobEventKind {
     ///
     /// Replaces `MeerkatSpawned` in the public contract. Carries
     /// [`AgentIdentity`], [`Generation`], [`FenceToken`], and
-    /// [`AgentRuntimeId`] instead of [`AgentIdentity`] / [`MemberRef`].
+    /// [`AgentRuntimeId`] instead of [`AgentIdentity`] / `MemberRef`.
     ///
     /// Unlike the other `Member*` variants which use inline struct fields,
     /// this variant wraps a named [`MemberSpawnedEvent`] struct. The reason
     /// is load-bearing and not cosmetic: [`MemberSpawnedEvent`] carries
     /// `#[serde(skip)]` bridge-member, placed-carrier, and exact peer-endpoint
     /// fields used by in-crate event replay (see
-    /// [`encode_stored_mob_event`] / [`decode_stored_mob_event`]) that is
+    /// `encode_stored_mob_event` / `decode_stored_mob_event`) that is
     /// deliberately omitted from the public wire shape. A named struct
     /// keeps the internal replay facts, their `#[serde(skip)]` attributes,
     /// and the constructor/`with_*` helpers self-contained. Inline variant
@@ -1769,6 +1769,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
+                durable: false,
             })),
         );
         definition
@@ -2499,6 +2500,7 @@ mod tests {
             max_inline_peer_notifications: None,
             output_schema: None,
             provider_params: None,
+            durable: false,
         }
     }
 

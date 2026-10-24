@@ -1822,7 +1822,7 @@ mod tests {
             meerkat_contracts::RealtimeTurningMode::ProviderManaged,
             identity,
             Vec::new(),
-            session.messages_for_model_boundary(),
+            session.messages_for_model_boundary().unwrap(),
             session.messages(),
         )
         .unwrap();
@@ -1892,7 +1892,7 @@ mod tests {
             config.turning_mode,
             config.llm_identity.clone(),
             Vec::new(),
-            session.messages_for_model_boundary(),
+            session.messages_for_model_boundary().unwrap(),
             session.messages(),
         )
         .unwrap();
@@ -1941,7 +1941,7 @@ mod tests {
             config.turning_mode,
             config.llm_identity,
             Vec::new(),
-            session.messages_for_model_boundary(),
+            session.messages_for_model_boundary().unwrap(),
             session.messages(),
         )
         .unwrap();

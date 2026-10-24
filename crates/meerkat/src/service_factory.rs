@@ -18,8 +18,9 @@ use meerkat_session::EphemeralSessionService;
 use meerkat_session::ephemeral::{
     HeadCanonicalRuntimeBoundaryAcknowledgeOutcome, HeadCanonicalRuntimeBoundaryAuthority,
     HeadCanonicalRuntimeBoundaryPrepareRequest, ObservedSessionTailKind,
-    PreparedHeadCanonicalRuntimeBoundary, SessionAgent, SessionAgentBuilder, SessionAgentTurnInput,
-    SessionSnapshot, SessionTranscriptAuthoritySnapshot,
+    PreparedHeadCanonicalRuntimeBoundary, SessionAgent, SessionAgentBuilder,
+    SessionAgentResumeInput, SessionAgentTurnInput, SessionSnapshot,
+    SessionTranscriptAuthoritySnapshot,
 };
 use std::sync::Arc;
 
@@ -333,6 +334,56 @@ impl SessionAgent for FactoryAgent {
         self.agent
             .run_pending_with_events_and_work_authorization(event_tx, work_authorization)
             .await
+    }
+
+    async fn resume_run_with_events(
+        &mut self,
+        input: SessionAgentResumeInput,
+        event_tx: mpsc::Sender<AgentEvent>,
+    ) -> Result<RunResult, meerkat_core::error::AgentError> {
+        // The runtime resumes the run its registration found open; the
+        // session it seeded the actor from must carry that run's cursor.
+        let cursor = self
+            .agent
+            .session()
+            .try_run_cursor()
+            .map_err(|error| {
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "the session's run cursor is unreadable: {error}"
+                ))
+            })?
+            .ok_or_else(|| {
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "run {} was dispatched to resume, but the session carries no run cursor",
+                    input.run_id
+                ))
+            })?;
+        if cursor.run_id != input.run_id {
+            return Err(meerkat_core::error::AgentError::InternalError(format!(
+                "run {} was dispatched to resume, but the session's run cursor names run {}",
+                input.run_id, cursor.run_id
+            )));
+        }
+        self.agent.set_runtime_execution_kind(Some(
+            meerkat_core::lifecycle::RuntimeExecutionKind::ResumeRun,
+        ));
+        self.agent
+            .set_active_transcript_identity(input.transcript_identity);
+        self.agent
+            .set_active_turn_request_contexts(input.request_contexts);
+        self.agent
+            .resume_run(
+                cursor,
+                input.receipt,
+                Some(event_tx),
+                input.work_authorization,
+                input.interrupted_calls,
+            )
+            .await
+    }
+
+    fn set_run_start_input_ids(&mut self, input_ids: Vec<meerkat_core::lifecycle::InputId>) {
+        self.agent.set_run_start_input_ids(input_ids);
     }
 
     fn clear_work_authorization(&mut self) {
@@ -657,6 +708,10 @@ impl SessionAgent for FactoryAgent {
         self.agent.cancel_dropped_run()
     }
 
+    fn suspend_dropped_run(&mut self) -> Option<meerkat_core::DroppedRunSuspension> {
+        self.agent.suspend_dropped_run()
+    }
+
     fn cancel_after_boundary_handle(&self) -> Option<meerkat_core::CancelAfterBoundarySender> {
         Some(self.agent.cancel_after_boundary_handle())
     }
@@ -862,6 +917,20 @@ impl SessionAgent for FactoryAgent {
         Ok(prepared)
     }
 
+    fn acknowledge_head_canonical_compaction_finalization(
+        &mut self,
+        committed: &meerkat_core::SessionHeadMetadataIdentity,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        self.agent
+            .session_mut()
+            .acknowledge_head_canonical_compaction_finalization(committed)
+            .map_err(|error| {
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "the live session could not adopt its HeadCanonical compaction finalization: {error}"
+                ))
+            })
+    }
+
     fn acknowledge_head_canonical_runtime_boundary(
         &mut self,
         successor_head_token: &str,
@@ -920,6 +989,13 @@ impl SessionAgent for FactoryAgent {
 
     fn observed_session_tail(&self) -> ObservedSessionTailKind {
         meerkat_core::pending_continuation::observe_session_tail(self.agent.session().messages())
+    }
+
+    async fn admit_staged_prompt_for_live_open(
+        &mut self,
+        prompt: &meerkat_core::types::ContentInput,
+    ) -> Result<(), meerkat_core::error::AgentError> {
+        self.agent.admit_staged_prompt_for_live_open(prompt).await
     }
 
     fn append_external_user_content(
@@ -1774,7 +1850,16 @@ impl FactoryAgentBuilder {
     ) -> Result<FactoryAgent, SessionError> {
         let mut build_config = AgentBuildConfig::from_create_session_request(req, event_tx);
         build_config.external_tools = external_tools;
-        if self.wait_for_mcp {
+        // A session seeded from an open run's provisional tail carries the
+        // run's cursor, and its first turn re-dispatches the round's staged
+        // tool calls: its tool surface is connected first. Committed bodies
+        // never carry a cursor.
+        let resumes_open_run = req
+            .build
+            .as_ref()
+            .and_then(|build| build.resume_session.as_ref())
+            .is_some_and(|session| matches!(session.try_run_cursor(), Ok(Some(_))));
+        if self.wait_for_mcp || resumes_open_run {
             build_config.wait_for_mcp = true;
         }
 
@@ -5184,6 +5269,15 @@ mod tests {
 #[allow(clippy::expect_used)]
 mod tool_application_tests;
 
+#[cfg(all(test, feature = "session-store", not(target_arch = "wasm32")))]
+#[allow(clippy::expect_used)]
+mod host_store_fence_tests;
+#[cfg(all(test, feature = "session-store", not(target_arch = "wasm32")))]
+#[allow(clippy::expect_used, clippy::panic)]
+mod interrupt_tail_tests;
+#[cfg(all(test, feature = "session-store", not(target_arch = "wasm32")))]
+#[allow(clippy::expect_used, clippy::panic)]
+mod run_tail_host_tests;
 #[cfg(all(test, feature = "session-store", not(target_arch = "wasm32")))]
 #[allow(clippy::expect_used)]
 mod staged_prompt_tests;

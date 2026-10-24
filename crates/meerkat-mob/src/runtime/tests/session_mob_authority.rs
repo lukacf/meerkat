@@ -646,3 +646,158 @@ async fn the_binding_reaches_member_tools_through_a_gateway_and_a_composite() {
         "spawning after the authority was removed",
     );
 }
+
+/// The start of the warning a restore build logs when the member's settled
+/// authority holds operator facts its persisted record did not.
+const REGAINED_AUTHORITY_WARNING: &str = "restored mob member holds mob operator authority";
+
+fn regained_authority_warnings(captured: &CapturedWarnings) -> Vec<CapturedFields> {
+    captured
+        .lock()
+        .expect("captured warnings lock")
+        .iter()
+        .filter(|fields| {
+            fields
+                .get("message")
+                .is_some_and(|message| message.contains(REGAINED_AUTHORITY_WARNING))
+        })
+        .cloned()
+        .collect()
+}
+
+/// The member's session as a store hands it back: its recorded authority is
+/// the unsealed record a restore build reads.
+fn stored_session(session: &meerkat_core::Session) -> meerkat_core::Session {
+    serde_json::from_value(serde_json::to_value(session).expect("session encodes"))
+        .expect("session decodes")
+}
+
+/// What the warning reported across one restore of the worker.
+struct RestoreWarnings {
+    first_build: Vec<CapturedFields>,
+    restore_build: Vec<CapturedFields>,
+    session_id: SessionId,
+    mob_id: String,
+}
+
+/// Build the worker once, narrowed by the host's hook when `narrow_first`,
+/// then restore it from its stored session, narrowed again when
+/// `narrow_restore`.
+async fn warnings_across_a_restore(narrow_first: bool, narrow_restore: bool) -> RestoreWarnings {
+    let (handle, service, session_id) = mob_with_spawned_worker().await;
+    let tools = recorded_member_tools(&service, &session_id).await;
+    let mob_id = handle.definition().id.to_string();
+    // A second registered Dispatch, alive as long as the capture, so a
+    // callsite's interest never comes from another thread's default alone.
+    let _anchor = tracing::Dispatch::new(tracing_subscriber::Registry::default());
+    let (captured, _guard) = capture_warnings();
+
+    let mut first = worker_build_config(&handle, MEMBER, Arc::clone(&tools)).await;
+    if narrow_first {
+        narrow_to_worker(&mut first, &mob_id);
+    }
+    let (_first_dir, first_agent) = build_through_factory(first, None).await;
+    let first_build = regained_authority_warnings(&captured);
+    let stored = stored_session(first_agent.session());
+    let restored_session = stored.id().clone();
+    // The first build's agent holds the session identity until it is gone,
+    // as a process that stopped would have released it.
+    drop(first_agent);
+
+    let mut restore = worker_build_config(&handle, MEMBER, Arc::clone(&tools)).await;
+    restore.resume_session = Some(stored);
+    if narrow_restore {
+        narrow_to_worker(&mut restore, &mob_id);
+    }
+    let (_restore_dir, _restore_agent) = build_through_factory(restore, None).await;
+    let restore_build = regained_authority_warnings(&captured)
+        .into_iter()
+        .skip(first_build.len())
+        .collect();
+    RestoreWarnings {
+        first_build,
+        restore_build,
+        session_id: restored_session,
+        mob_id,
+    }
+}
+
+/// A member narrowed by the host on an earlier build and restored without
+/// the narrowing regains the `lead` profile: the restore build warns once,
+/// naming only the mob, the member, the session and the regained facts.
+#[tokio::test]
+async fn a_restored_member_that_regains_operator_authority_warns_once() {
+    let warnings = warnings_across_a_restore(true, false).await;
+    assert!(
+        warnings.first_build.is_empty(),
+        "a first build never warns: {:?}",
+        warnings.first_build
+    );
+    assert_eq!(
+        warnings.restore_build.len(),
+        1,
+        "the restore build warns exactly once: {:?}",
+        warnings.restore_build
+    );
+    let warning = &warnings.restore_build[0];
+    let field = |name: &str| warning.get(name).map(String::as_str);
+    assert_eq!(field("mob_id"), Some(warnings.mob_id.as_str()));
+    assert_eq!(field("member"), Some(MEMBER));
+    assert_eq!(
+        field("session_id"),
+        Some(warnings.session_id.to_string().as_str())
+    );
+    assert_eq!(
+        field("regained_spawn_profiles"),
+        Some(format!("{{{:?}: {{\"lead\"}}}}", warnings.mob_id).as_str())
+    );
+    assert_eq!(field("regained_manage_scope"), Some("{}"));
+    assert_eq!(field("regained_create"), Some("false"));
+    assert_eq!(field("regained_mutate"), Some("false"));
+    let named = warning.keys().map(String::as_str).collect::<Vec<_>>();
+    assert_eq!(
+        named,
+        vec![
+            "member",
+            "message",
+            "mob_id",
+            "regained_create",
+            "regained_manage_scope",
+            "regained_mutate",
+            "regained_spawn_profiles",
+            "session_id",
+            "tracing.level",
+        ],
+        "the warning names nothing else"
+    );
+}
+
+/// A restore the host narrows again holds nothing its record lacked.
+#[tokio::test]
+async fn a_restored_member_narrowed_again_does_not_warn() {
+    let warnings = warnings_across_a_restore(true, true).await;
+    assert!(
+        warnings.first_build.is_empty() && warnings.restore_build.is_empty(),
+        "first build {:?}, restore build {:?}",
+        warnings.first_build,
+        warnings.restore_build
+    );
+}
+
+/// A first build has no persisted record to compare with, so it never warns
+/// (the narrowed first builds of the two rows above do not either), and a
+/// member never narrowed regains nothing when it is restored.
+#[tokio::test]
+async fn a_first_build_does_not_warn() {
+    let warnings = warnings_across_a_restore(false, false).await;
+    assert!(
+        warnings.first_build.is_empty(),
+        "a first build never warns: {:?}",
+        warnings.first_build
+    );
+    assert!(
+        warnings.restore_build.is_empty(),
+        "a restore with the same authority does not warn: {:?}",
+        warnings.restore_build
+    );
+}

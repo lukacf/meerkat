@@ -1,0 +1,436 @@
+{
+ "description": "ci.yml run 39919235188, a pull request, attempt 2: the Actions jobs API's listing of that attempt and both attempts' starts, trimmed to the fields the CI gate's lane execution budget reads. Its MCP confinement positive lane ran because the change touched the lane's inputs and changed its definition.",
+ "run_id": 39919235188,
+ "attempts": [
+  {
+   "attempt": 1,
+   "run_started_at": "2026-10-23T07:39:33Z"
+  },
+  {
+   "attempt": 2,
+   "run_started_at": "2026-10-23T08:10:25Z"
+  }
+ ],
+ "jobs": [
+  {
+   "name": "Bounded TLC audits (audits-b)",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T08:10:29Z",
+   "completed_at": "2026-10-23T08:21:46Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "wasm32 check",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:40:17Z",
+   "completed_at": "2026-10-23T07:56:47Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Feature combinations (${{ matrix.name }})",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T08:10:27Z",
+   "completed_at": "2026-10-23T07:40:15Z",
+   "conclusion": "skipped"
+  },
+  {
+   "name": "Main unit tests (${{ matrix.name }})",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T08:10:27Z",
+   "completed_at": "2026-10-23T07:40:15Z",
+   "conclusion": "skipped"
+  },
+  {
+   "name": "Unit tests (meerkat+6)",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:40:17Z",
+   "completed_at": "2026-10-23T07:54:48Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Python + TypeScript SDK suites",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:40:22Z",
+   "completed_at": "2026-10-23T07:41:20Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Clippy (surface-build-fixtures+5)",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:40:17Z",
+   "completed_at": "2026-10-23T07:46:49Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Bounded TLC audits (audits-c)",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:40:17Z",
+   "completed_at": "2026-10-23T07:46:33Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Clippy (mob)",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:40:17Z",
+   "completed_at": "2026-10-23T07:50:32Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Stagger the short rows",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:40:17Z",
+   "completed_at": "2026-10-23T07:40:20Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Unit tests (core+3)",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:40:17Z",
+   "completed_at": "2026-10-23T07:48:01Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Clippy (meerkat)",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:40:17Z",
+   "completed_at": "2026-10-23T07:56:01Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Main unit build (${{ matrix.name }})",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T08:10:27Z",
+   "completed_at": "2026-10-23T07:40:15Z",
+   "conclusion": "skipped"
+  },
+  {
+   "name": "Unit tests (surface-build-fixtures+3)",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:40:17Z",
+   "completed_at": "2026-10-23T07:51:02Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "MCP confinement positive (Linux)",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:40:17Z",
+   "completed_at": "2026-10-23T08:09:37Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Unit tests (tools+3)",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:40:17Z",
+   "completed_at": "2026-10-23T07:47:26Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Unit tests (session+3)",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:40:17Z",
+   "completed_at": "2026-10-23T07:48:31Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Closure check (${{ needs.changes.outputs.closure_count }} crates)",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T08:10:27Z",
+   "completed_at": "2026-10-23T07:40:20Z",
+   "conclusion": "skipped"
+  },
+  {
+   "name": "Unit tests (authorization+4)",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:40:17Z",
+   "completed_at": "2026-10-23T07:50:31Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Main unit tests (${{ matrix.name }})",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T08:10:27Z",
+   "completed_at": "2026-10-23T07:40:20Z",
+   "conclusion": "skipped"
+  },
+  {
+   "name": "Bazel graph check",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:44:28Z",
+   "completed_at": "2026-10-23T07:46:15Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Integration tests (xtask)",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:40:22Z",
+   "completed_at": "2026-10-23T07:51:44Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Clippy (authorization+7)",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:46:09Z",
+   "completed_at": "2026-10-23T07:52:46Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Unit tests (xtask)",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:40:17Z",
+   "completed_at": "2026-10-23T07:49:48Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Clippy (runtime+7)",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:40:22Z",
+   "completed_at": "2026-10-23T07:50:30Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Feature combinations (${{ matrix.name }})",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T08:10:27Z",
+   "completed_at": "2026-10-23T07:40:20Z",
+   "conclusion": "skipped"
+  },
+  {
+   "name": "Clippy (mob-mcp+2)",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:40:22Z",
+   "completed_at": "2026-10-23T07:52:04Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Clippy (machine-codegen)",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:40:22Z",
+   "completed_at": "2026-10-23T07:42:52Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Example web suites",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:40:22Z",
+   "completed_at": "2026-10-23T07:40:36Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Integration tests (standalone-turn-lifecycle)",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:45:36Z",
+   "completed_at": "2026-10-23T07:55:44Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Integration tests (runtime)",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:45:06Z",
+   "completed_at": "2026-10-23T07:53:44Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Unit tests (live[webrtc])",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:40:17Z",
+   "completed_at": "2026-10-23T07:45:34Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Unit tests (openai[realtime])",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:40:17Z",
+   "completed_at": "2026-10-23T07:48:30Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Main unit tests (${{ matrix.name }})",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T08:10:27Z",
+   "completed_at": "2026-10-23T07:40:15Z",
+   "conclusion": "skipped"
+  },
+  {
+   "name": "Unit tests (openai[live])",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:40:17Z",
+   "completed_at": "2026-10-23T07:48:57Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "WASM timer ownership",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T08:10:27Z",
+   "completed_at": "2026-10-23T07:40:20Z",
+   "conclusion": "skipped"
+  },
+  {
+   "name": "Unit tests (session[live])",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:40:17Z",
+   "completed_at": "2026-10-23T07:49:15Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Closure tests (${{ matrix.name }})",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T08:10:27Z",
+   "completed_at": "2026-10-23T07:40:20Z",
+   "conclusion": "skipped"
+  },
+  {
+   "name": "Clippy (openai+7)",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:40:22Z",
+   "completed_at": "2026-10-23T07:46:04Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Governed JSONL",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T08:10:27Z",
+   "completed_at": "2026-10-23T07:40:20Z",
+   "conclusion": "skipped"
+  },
+  {
+   "name": "Unit tests (runtime+4)",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:40:17Z",
+   "completed_at": "2026-10-23T07:51:58Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Clippy (core+10)",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:40:38Z",
+   "completed_at": "2026-10-23T07:47:10Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Integration tests (machine-kernels)",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:46:06Z",
+   "completed_at": "2026-10-23T07:51:01Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Clippy (rest+2)",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:40:31Z",
+   "completed_at": "2026-10-23T07:54:24Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Integration tests (meerkat-governed-realm)",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:40:22Z",
+   "completed_at": "2026-10-23T07:50:40Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Unit tests (xtask[machine-authority])",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:40:17Z",
+   "completed_at": "2026-10-23T07:46:08Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Integration tests (meerkat-store-restart)",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:45:50Z",
+   "completed_at": "2026-10-23T07:58:09Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Unit tests (auth-core[cloud])",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:40:17Z",
+   "completed_at": "2026-10-23T07:46:13Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Integration tests (reader machine-schema:test:docs_machine_authority_alignment)",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:40:22Z",
+   "completed_at": "2026-10-23T07:44:26Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Integration tests (authorization)",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:41:21Z",
+   "completed_at": "2026-10-23T07:54:33Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Unit tests (anthropic[cloud])",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:40:17Z",
+   "completed_at": "2026-10-23T07:45:48Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Unit tests (machine-kernels[test-oracle])",
+   "created_at": "2026-10-23T08:10:27Z",
+   "started_at": "2026-10-23T07:40:17Z",
+   "completed_at": "2026-10-23T07:45:04Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Format + governance",
+   "created_at": "2026-10-23T08:10:32Z",
+   "started_at": "2026-10-23T07:39:36Z",
+   "completed_at": "2026-10-23T07:53:43Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Unit tests (openai+7)",
+   "created_at": "2026-10-23T08:10:32Z",
+   "started_at": "2026-10-23T07:40:17Z",
+   "completed_at": "2026-10-23T07:49:27Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Closure tests (${{ matrix.name }})",
+   "created_at": "2026-10-23T08:10:33Z",
+   "started_at": "2026-10-23T08:10:33Z",
+   "completed_at": "2026-10-23T07:40:15Z",
+   "conclusion": "skipped"
+  },
+  {
+   "name": "Typed governance gates",
+   "created_at": "2026-10-23T08:10:34Z",
+   "started_at": "2026-10-23T07:40:17Z",
+   "completed_at": "2026-10-23T07:52:28Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Change classification",
+   "created_at": "2026-10-23T08:10:35Z",
+   "started_at": "2026-10-23T07:39:36Z",
+   "completed_at": "2026-10-23T07:40:14Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Generation ratchets",
+   "created_at": "2026-10-23T08:10:35Z",
+   "started_at": "2026-10-23T07:42:53Z",
+   "completed_at": "2026-10-23T07:52:48Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "Bounded TLC audits (audits-a)",
+   "created_at": "2026-10-23T08:10:37Z",
+   "started_at": "2026-10-23T07:40:17Z",
+   "completed_at": "2026-10-23T07:52:17Z",
+   "conclusion": "success"
+  },
+  {
+   "name": "CI gate",
+   "created_at": "2026-10-23T08:21:46Z",
+   "started_at": "2026-10-23T08:21:49Z",
+   "completed_at": "2026-10-23T08:22:02Z",
+   "conclusion": "failure"
+  }
+ ]
+}

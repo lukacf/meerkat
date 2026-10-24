@@ -1433,7 +1433,7 @@ impl ExactSizeIterator for TranscriptRewriteCommits<'_> {}
 /// How many recent rewrite occurrences a transcript graph keeps bodies for.
 ///
 /// Older occurrences are retired by
-/// [`TranscriptHistoryState::retire_occurrences_beyond`]: their commits and
+/// `TranscriptHistoryState::retire_occurrences_beyond`: their commits and
 /// prefix digests stay as audit authority, their bodies go. The default keeps
 /// [`TranscriptHistoryRetention::DEFAULT_RETAINED_REWRITES`] occurrences.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

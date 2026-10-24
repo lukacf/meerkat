@@ -977,10 +977,6 @@ pub enum OccurrenceLifecycleInputVariant {
     ResolveTargetProbe,
     #[serde(rename = "ResolveDueMisfire")]
     ResolveDueMisfire,
-    #[serde(rename = "ResolveReclaimExhausted")]
-    ResolveReclaimExhausted,
-    #[serde(rename = "ResolveUnprovenLateNotAdmitted")]
-    ResolveUnprovenLateNotAdmitted,
     #[serde(rename = "Supersede")]
     Supersede,
     #[serde(rename = "RenewLease")]
@@ -993,6 +989,10 @@ pub enum OccurrenceLifecycleInputVariant {
     ClassifyTransitionFailure,
     #[serde(rename = "ClassifyStaleCompletionArrival")]
     ClassifyStaleCompletionArrival,
+    #[serde(rename = "ResolveReclaimExhausted")]
+    ResolveReclaimExhausted,
+    #[serde(rename = "ResolveUnprovenLateNotAdmitted")]
+    ResolveUnprovenLateNotAdmitted,
 }
 impl OccurrenceLifecycleInputVariant {
     pub fn as_str(&self) -> &'static str {
@@ -1014,14 +1014,14 @@ impl OccurrenceLifecycleInputVariant {
             Self::ResolveDeliveryFailure => "ResolveDeliveryFailure",
             Self::ResolveTargetProbe => "ResolveTargetProbe",
             Self::ResolveDueMisfire => "ResolveDueMisfire",
-            Self::ResolveReclaimExhausted => "ResolveReclaimExhausted",
-            Self::ResolveUnprovenLateNotAdmitted => "ResolveUnprovenLateNotAdmitted",
             Self::Supersede => "Supersede",
             Self::RenewLease => "RenewLease",
             Self::LeaseExpired => "LeaseExpired",
             Self::ReleaseLeaseForPausedSchedule => "ReleaseLeaseForPausedSchedule",
             Self::ClassifyTransitionFailure => "ClassifyTransitionFailure",
             Self::ClassifyStaleCompletionArrival => "ClassifyStaleCompletionArrival",
+            Self::ResolveReclaimExhausted => "ResolveReclaimExhausted",
+            Self::ResolveUnprovenLateNotAdmitted => "ResolveUnprovenLateNotAdmitted",
         }
     }
 }
@@ -1046,14 +1046,14 @@ impl std::convert::TryFrom<&str> for OccurrenceLifecycleInputVariant {
             "ResolveDeliveryFailure" => Ok(Self::ResolveDeliveryFailure),
             "ResolveTargetProbe" => Ok(Self::ResolveTargetProbe),
             "ResolveDueMisfire" => Ok(Self::ResolveDueMisfire),
-            "ResolveReclaimExhausted" => Ok(Self::ResolveReclaimExhausted),
-            "ResolveUnprovenLateNotAdmitted" => Ok(Self::ResolveUnprovenLateNotAdmitted),
             "Supersede" => Ok(Self::Supersede),
             "RenewLease" => Ok(Self::RenewLease),
             "LeaseExpired" => Ok(Self::LeaseExpired),
             "ReleaseLeaseForPausedSchedule" => Ok(Self::ReleaseLeaseForPausedSchedule),
             "ClassifyTransitionFailure" => Ok(Self::ClassifyTransitionFailure),
             "ClassifyStaleCompletionArrival" => Ok(Self::ClassifyStaleCompletionArrival),
+            "ResolveReclaimExhausted" => Ok(Self::ResolveReclaimExhausted),
+            "ResolveUnprovenLateNotAdmitted" => Ok(Self::ResolveUnprovenLateNotAdmitted),
             other => Err(format!(
                 "invalid OccurrenceLifecycleInputVariant value `{other}`"
             )),
@@ -1797,18 +1797,6 @@ pub mod inputs {
         pub at_utc_ms: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ResolveReclaimExhausted {
-        pub admission_evidence: AdmissionEvidence,
-        pub detail: Option<String>,
-        pub at_utc_ms: u64,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ResolveUnprovenLateNotAdmitted {
-        pub admission_evidence: AdmissionEvidence,
-        pub detail: Option<String>,
-        pub at_utc_ms: u64,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Supersede {
         pub superseded_by_revision: u64,
         pub at_utc_ms: u64,
@@ -1836,6 +1824,18 @@ pub mod inputs {
     pub struct ClassifyStaleCompletionArrival {
         pub trigger: OccurrenceLifecycleInputVariant,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveReclaimExhausted {
+        pub admission_evidence: AdmissionEvidence,
+        pub detail: Option<String>,
+        pub at_utc_ms: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveUnprovenLateNotAdmitted {
+        pub admission_evidence: AdmissionEvidence,
+        pub detail: Option<String>,
+        pub at_utc_ms: u64,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1857,14 +1857,14 @@ pub enum Input {
     ResolveDeliveryFailure(inputs::ResolveDeliveryFailure),
     ResolveTargetProbe(inputs::ResolveTargetProbe),
     ResolveDueMisfire(inputs::ResolveDueMisfire),
-    ResolveReclaimExhausted(inputs::ResolveReclaimExhausted),
-    ResolveUnprovenLateNotAdmitted(inputs::ResolveUnprovenLateNotAdmitted),
     Supersede(inputs::Supersede),
     RenewLease(inputs::RenewLease),
     LeaseExpired(inputs::LeaseExpired),
     ReleaseLeaseForPausedSchedule(inputs::ReleaseLeaseForPausedSchedule),
     ClassifyTransitionFailure(inputs::ClassifyTransitionFailure),
     ClassifyStaleCompletionArrival(inputs::ClassifyStaleCompletionArrival),
+    ResolveReclaimExhausted(inputs::ResolveReclaimExhausted),
+    ResolveUnprovenLateNotAdmitted(inputs::ResolveUnprovenLateNotAdmitted),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -1890,14 +1890,14 @@ impl Input {
             Self::ResolveDeliveryFailure(_) => InputKind::ResolveDeliveryFailure,
             Self::ResolveTargetProbe(_) => InputKind::ResolveTargetProbe,
             Self::ResolveDueMisfire(_) => InputKind::ResolveDueMisfire,
-            Self::ResolveReclaimExhausted(_) => InputKind::ResolveReclaimExhausted,
-            Self::ResolveUnprovenLateNotAdmitted(_) => InputKind::ResolveUnprovenLateNotAdmitted,
             Self::Supersede(_) => InputKind::Supersede,
             Self::RenewLease(_) => InputKind::RenewLease,
             Self::LeaseExpired(_) => InputKind::LeaseExpired,
             Self::ReleaseLeaseForPausedSchedule(_) => InputKind::ReleaseLeaseForPausedSchedule,
             Self::ClassifyTransitionFailure(_) => InputKind::ClassifyTransitionFailure,
             Self::ClassifyStaleCompletionArrival(_) => InputKind::ClassifyStaleCompletionArrival,
+            Self::ResolveReclaimExhausted(_) => InputKind::ResolveReclaimExhausted,
+            Self::ResolveUnprovenLateNotAdmitted(_) => InputKind::ResolveUnprovenLateNotAdmitted,
         }
     }
 }
@@ -1920,14 +1920,14 @@ pub enum InputKind {
     ResolveDeliveryFailure,
     ResolveTargetProbe,
     ResolveDueMisfire,
-    ResolveReclaimExhausted,
-    ResolveUnprovenLateNotAdmitted,
     Supersede,
     RenewLease,
     LeaseExpired,
     ReleaseLeaseForPausedSchedule,
     ClassifyTransitionFailure,
     ClassifyStaleCompletionArrival,
+    ResolveReclaimExhausted,
+    ResolveUnprovenLateNotAdmitted,
 }
 
 pub mod effects {
@@ -1962,12 +1962,6 @@ pub mod effects {
     pub struct DueMisfireRequired {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct DueLeaseExpired {}
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct DueReclaimExhausted {}
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ReclaimedAfterAdmission {}
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ReclaimedAfterUnprovenDispatch {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct OccurrenceTerminalityClassified {
         pub terminal: bool,
@@ -2004,6 +1998,12 @@ pub mod effects {
         pub phase: OccurrenceLifecycleState,
         pub trigger: OccurrenceLifecycleInputVariant,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct DueReclaimExhausted {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ReclaimedAfterAdmission {}
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ReclaimedAfterUnprovenDispatch {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -2021,9 +2021,6 @@ pub enum Effect {
     DueClaimEligible(effects::DueClaimEligible),
     DueMisfireRequired(effects::DueMisfireRequired),
     DueLeaseExpired(effects::DueLeaseExpired),
-    DueReclaimExhausted(effects::DueReclaimExhausted),
-    ReclaimedAfterAdmission(effects::ReclaimedAfterAdmission),
-    ReclaimedAfterUnprovenDispatch(effects::ReclaimedAfterUnprovenDispatch),
     OccurrenceTerminalityClassified(effects::OccurrenceTerminalityClassified),
     ClaimedDispatchDispositionClassified(effects::ClaimedDispatchDispositionClassified),
     CompletionSupersessionClassified(effects::CompletionSupersessionClassified),
@@ -2033,6 +2030,9 @@ pub enum Effect {
     TransitionFailureClassified(effects::TransitionFailureClassified),
     LateCompletionResolutionRecorded(effects::LateCompletionResolutionRecorded),
     StaleCompletionArrivalClassified(effects::StaleCompletionArrivalClassified),
+    DueReclaimExhausted(effects::DueReclaimExhausted),
+    ReclaimedAfterAdmission(effects::ReclaimedAfterAdmission),
+    ReclaimedAfterUnprovenDispatch(effects::ReclaimedAfterUnprovenDispatch),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -2049,9 +2049,6 @@ pub enum EffectKind {
     DueClaimEligible,
     DueMisfireRequired,
     DueLeaseExpired,
-    DueReclaimExhausted,
-    ReclaimedAfterAdmission,
-    ReclaimedAfterUnprovenDispatch,
     OccurrenceTerminalityClassified,
     ClaimedDispatchDispositionClassified,
     CompletionSupersessionClassified,
@@ -2061,6 +2058,9 @@ pub enum EffectKind {
     TransitionFailureClassified,
     LateCompletionResolutionRecorded,
     StaleCompletionArrivalClassified,
+    DueReclaimExhausted,
+    ReclaimedAfterAdmission,
+    ReclaimedAfterUnprovenDispatch,
 }
 
 #[allow(non_camel_case_types)]
@@ -2187,7 +2187,6 @@ pub enum TransitionId {
     ClassifyDuePendingFuture,
     ClassifyDuePendingMisfire,
     ClassifyDuePendingClaimEligible,
-    ClassifyDuePendingReclaimExhausted,
     ClassifyDueClaimedLeaseExpired,
     ClassifyDueDispatchingLeaseExpired,
     ClassifyDueAwaitingCompletionLeaseExpired,
@@ -2230,8 +2229,6 @@ pub enum TransitionId {
     RecordReceiptSuperseded,
     RecordReceiptDeliveryFailed,
     ClaimPending,
-    ClaimPendingAfterAdmission,
-    ClaimPendingAfterUnprovenDispatch,
     DispatchStartedFromClaimed,
     DispatchAcceptedFromDispatching,
     DispatchDeduplicatedFromDispatching,
@@ -2254,15 +2251,10 @@ pub enum TransitionId {
     DeliveryFailureScheduleMandateUnavailable,
     TargetProbeReadyClaimed,
     TargetProbeBusyAllowedByPolicy,
-    TargetProbeBusyExistingRedelivery,
     TargetProbeBusySkipByPolicy,
     TargetProbeMissingSkipByPolicy,
     TargetProbeMissingMisfireByPolicy,
     DueMisfirePending,
-    ReclaimExhaustedAfterAdmission,
-    ReclaimExhaustedAfterUnprovenDispatch,
-    UnprovenLateNotAdmittedFromClaimed,
-    UnprovenLateNotAdmittedFromDispatching,
     SupersedePendingOrLive,
     SupersedeAlreadySuperseded,
     LateCompleteAfterSupersession,
@@ -2281,6 +2273,14 @@ pub enum TransitionId {
     ReleaseLeaseForPausedScheduleFromDispatching,
     ReleaseLeaseForPausedScheduleFromAwaitingCompletion,
     ReleaseLeaseForPausedScheduleAfterSupersession,
+    ClassifyDuePendingReclaimExhausted,
+    ClaimPendingAfterAdmission,
+    ClaimPendingAfterUnprovenDispatch,
+    TargetProbeBusyExistingRedelivery,
+    ReclaimExhaustedAfterAdmission,
+    ReclaimExhaustedAfterUnprovenDispatch,
+    UnprovenLateNotAdmittedFromClaimed,
+    UnprovenLateNotAdmittedFromDispatching,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

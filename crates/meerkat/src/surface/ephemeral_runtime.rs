@@ -349,11 +349,13 @@ pub fn ephemeral_runtime_completion_result(
             tool_use_id,
             tool_name,
             args,
+            dedupe_key,
         } => {
             return Err(SessionError::Agent(AgentError::CallbackPending {
                 tool_use_id,
                 tool_name,
                 args,
+                dedupe_key: dedupe_key.map(Box::new),
             }));
         }
         CompletionOutcome::CallbackBatchPending { pending_tool_calls } => {

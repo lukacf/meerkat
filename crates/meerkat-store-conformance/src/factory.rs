@@ -20,6 +20,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use meerkat_core::host_store::HostStore;
 use meerkat_core::{ArtifactStore, BlobStore, SessionStore};
 
 use crate::failure::ConformanceFailure;
@@ -52,6 +53,28 @@ pub trait ArtifactStoreFactory: Send + Sync {
     /// Open an artifact-store handle over this factory's underlying storage.
     /// Same reopen contract as [`SessionStoreFactory::open`].
     async fn open(&self) -> Result<Arc<dyn ArtifactStore>, ConformanceFailure>;
+}
+
+/// Produces handles to one host store realm, for the host store chapter.
+///
+/// Each [`HostStoreFactory::open`] call stands for a new process: a new
+/// handle over the SAME realm, holding nothing of the handles before it. The
+/// chapter kills a "process" by dropping its handle (and any commit it has in
+/// flight) and opens another; the realm outlives every handle. For a remote
+/// backend that is a new client over the same dataset; for the in-memory
+/// reference store it is another handle on one shared instance.
+///
+/// The realm starts empty: no scopes and no fence token acquired.
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+pub trait HostStoreFactory: Send + Sync {
+    /// Open a new handle over this factory's realm.
+    async fn open(&self) -> Result<Arc<dyn HostStore>, ConformanceFailure>;
+
+    /// Let every recorded fence lease in the realm run out, as if the lease
+    /// ([`HostStore::fence_timing`]) had passed with no renew: advance the
+    /// store's clock, or wait the lease out.
+    async fn lapse_fence_leases(&self) -> Result<(), ConformanceFailure>;
 }
 
 /// Adapter turning an async closure into a [`SessionStoreFactory`].

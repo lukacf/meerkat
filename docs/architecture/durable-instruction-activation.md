@@ -120,11 +120,17 @@ body_bytes=<decimal>
 <exact-utf8-body>
 ```
 
-The inherited v1 projection changes only the first line to
-`[meerkat-inherited-instruction-v1]`, inserts
-`child_session_id=<json-string>` after `origin_session_id`, and inserts
-`status=historical_only_not_active_in_child` before `body_bytes`. These exact
-algorithms remain available for every persisted `render_version = 1` row.
+A fork child's model reads a row it inherited through the v2 projection:
+the first line becomes `[meerkat-inherited-instruction-v2]`,
+`child_session_id=<json-string>` follows `origin_session_id`,
+`status=not_active_in_child` precedes `body_bytes`, and the projection ends
+after `body_bytes=<decimal>`, with no body. A body reaches a model only from
+a row effective in that session: its own activation or re-activation. The
+projection exists at the model boundary only; the stored row keeps the
+envelope above, which stays the exact form of every persisted
+`render_version = 1` row, and a row whose bytes do not match its identity
+fails the projection and refuses the model request. Releases up to 0.9.4
+rendered a v1 projection that kept the body.
 
 The sealed identity contains:
 

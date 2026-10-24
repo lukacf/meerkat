@@ -78,6 +78,29 @@ pub enum CompletionWaitError {
         "the durable outcome of run {run_id} is unknown: its store did not answer within its commit deadline; read the input after its session reloads"
     )]
     DurableOutcomeUnknown { run_id: RunId },
+    /// The input was still queued when its runtime stopped, and the stop's
+    /// unregister kept it durably queued for the next start
+    /// ([`UnregisterQueuedInputs::Requeue`](crate::UnregisterQueuedInputs::Requeue)).
+    /// It is neither failed nor consumed: the next start runs it, or ends it
+    /// as abandoned with reason `requeue_expired` when it is older than the
+    /// stop's max age by then. Do not resubmit it; read it after the restart.
+    #[error(
+        "the input stays queued across the runtime stop at {stopped_at} and runs on the next start; do not resubmit it"
+    )]
+    RequeuedAcrossStop {
+        /// When the stop kept the input queued.
+        stopped_at: chrono::DateTime<chrono::Utc>,
+    },
+    /// The input joined run `run_id` at a model boundary, and a round commit
+    /// of the run wrote its content into the run's provisional tail. The run
+    /// was cancelled, and its tail was closed as an interrupted run with
+    /// every committed row kept: the input was consumed with the run, its
+    /// content is in the session's committed history, and it does not run
+    /// again. Do not resubmit it.
+    #[error(
+        "the input joined run {run_id}, whose committed rounds took its content; the run was closed as interrupted, so it does not run again"
+    )]
+    ConsumedWithInterruptedRun { run_id: RunId },
 }
 
 impl CompletionWaitError {
@@ -93,8 +116,12 @@ impl CompletionWaitError {
             Self::AttachmentReplaced
             | Self::AuthorityUnavailable(_)
             | Self::BoundaryRolledBack { .. }
-            | Self::DurableOutcomeUnknown { .. } => Some(
+            | Self::DurableOutcomeUnknown { .. }
+            | Self::ConsumedWithInterruptedRun { .. } => Some(
                 crate::meerkat_machine::dsl::RuntimeCompletionWaitFailureObservation::AuthorityUnavailable,
+            ),
+            Self::RequeuedAcrossStop { .. } => Some(
+                crate::meerkat_machine::dsl::RuntimeCompletionWaitFailureObservation::RequeuedAcrossStop,
             ),
             Self::DisclosureRefused { .. } => None,
         }
@@ -126,6 +153,32 @@ impl CompletionWaitError {
     pub const fn is_durable_outcome_unknown(&self) -> bool {
         matches!(self, Self::DurableOutcomeUnknown { .. })
     }
+
+    /// Stable typed predicate: a stop kept the input durably queued for the
+    /// next start. The input is not failed.
+    #[must_use]
+    pub const fn is_requeued_across_stop(&self) -> bool {
+        matches!(self, Self::RequeuedAcrossStop { .. })
+    }
+
+    /// Stable typed predicate: the input was consumed with a cancelled run
+    /// whose committed round holds its content, and the run was closed as
+    /// interrupted. The input does not run again.
+    #[must_use]
+    pub const fn is_consumed_with_interrupted_run(&self) -> bool {
+        matches!(self, Self::ConsumedWithInterruptedRun { .. })
+    }
+
+    /// When the stop kept the input queued, for a
+    /// [`RequeuedAcrossStop`](Self::RequeuedAcrossStop) answer; `None` for
+    /// every other failure.
+    #[must_use]
+    pub fn requeued_stopped_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        match self {
+            Self::RequeuedAcrossStop { stopped_at } => Some(*stopped_at),
+            _ => None,
+        }
+    }
 }
 
 /// Outcome delivered to a completion waiter.
@@ -142,6 +195,10 @@ pub enum CompletionOutcome {
         tool_use_id: String,
         tool_name: String,
         args: Value,
+        /// The call's dedupe key, as on
+        /// [`meerkat_core::error::PendingCallbackToolCall`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dedupe_key: Option<meerkat_core::ToolCallDedupeKey>,
     },
     /// One assistant tool-use batch is waiting on multiple external callbacks.
     CallbackBatchPending {
@@ -248,6 +305,7 @@ pub fn interaction_terminal_event(
             tool_use_id,
             tool_name,
             args,
+            dedupe_key,
         } => AgentEvent::InteractionCallbackPending {
             interaction_id,
             pending_tool_calls: vec![meerkat_core::error::PendingCallbackToolCall {
@@ -255,6 +313,7 @@ pub fn interaction_terminal_event(
                 tool_name: tool_name.clone(),
                 args: args.clone(),
                 settlement_failures: Vec::new(),
+                dedupe_key,
             }],
             tool_name,
             args,
@@ -266,6 +325,7 @@ pub fn interaction_terminal_event(
                     tool_name: "callback_batch".to_string(),
                     args: Value::Null,
                     settlement_failures: Vec::new(),
+                    dedupe_key: None,
                 },
             );
             AgentEvent::InteractionCallbackPending {
@@ -792,6 +852,7 @@ impl CompletionHandle {
                 tool_use_id,
                 tool_name,
                 args,
+                dedupe_key: None,
             },
             crate::meerkat_machine::dsl::RuntimeCompletionResultClass::CallbackPending,
             crate::meerkat_machine::dsl::RuntimeCompletionTerminalObservation::CallbackPending,
@@ -931,10 +992,12 @@ fn authorized_completion_outcome(
                 tool_use_id,
                 tool_name,
                 args,
+                dedupe_key,
             }) => CompletionOutcome::CallbackPending {
                 tool_use_id: tool_use_id.clone(),
                 tool_name: tool_name.clone(),
                 args: args.clone(),
+                dedupe_key: dedupe_key.clone(),
             },
             Some(CoreApplyTerminal::CallbackBatchPending { pending_tool_calls }) => {
                 CompletionOutcome::CallbackBatchPending {
@@ -1685,6 +1748,7 @@ impl CompletionRegistry {
                     tool_use_id,
                     tool_name,
                     args,
+                    dedupe_key: None,
                 },
                 cleanup_observation,
                 None,
@@ -1906,15 +1970,48 @@ impl CompletionRegistry {
         }
     }
 
-    pub(crate) fn fail_inputs<I>(&mut self, input_ids: I, error: CompletionWaitError)
+    /// Fail the waiters of `input_ids` with `error`. Returns how many of the
+    /// inputs had waiters.
+    pub(crate) fn fail_inputs<I>(&mut self, input_ids: I, error: CompletionWaitError) -> usize
     where
         I: IntoIterator<Item = InputId>,
     {
+        let mut failed = 0;
         for input_id in input_ids {
             if let Some(senders) = self.take_waiters(&input_id) {
                 Self::send_error(senders, error.clone());
+                failed += 1;
             }
         }
+        failed
+    }
+
+    /// Answer every waiter still registered when an unregister's drain
+    /// resumes after the stop terminalization. A waiter of an input the stop
+    /// kept queued for the next start gets
+    /// [`CompletionWaitError::RequeuedAcrossStop`] with the stop's time; every
+    /// other one gets `AuthorityUnavailable`, since the terminalization has
+    /// already published every terminal recipient. Returns how many kept
+    /// inputs still had waiters here.
+    pub(crate) fn drain_unregistered_waiters<I>(&mut self, kept: I) -> usize
+    where
+        I: IntoIterator<Item = (InputId, chrono::DateTime<chrono::Utc>)>,
+    {
+        let mut late = 0;
+        for (input_id, stopped_at) in kept {
+            late += self.fail_inputs(
+                [input_id],
+                CompletionWaitError::RequeuedAcrossStop { stopped_at },
+            );
+        }
+        self.fail_not_pending_waiters(
+            |_| false,
+            CompletionWaitError::AuthorityUnavailable(
+                "runtime session unregistered after canonical terminal recipients resolved"
+                    .to_string(),
+            ),
+        );
+        late
     }
 
     /// Fail waiter plumbing whose input IDs are no longer pending after a
@@ -2055,12 +2152,14 @@ mod tests {
                 tool_name: "ask_a".to_string(),
                 args: serde_json::json!({"tool_use_id": "call-a", "question": "a"}),
                 settlement_failures: Vec::new(),
+                dedupe_key: None,
             },
             meerkat_core::error::PendingCallbackToolCall {
                 tool_use_id: "call-b".to_string(),
                 tool_name: "ask_b".to_string(),
                 args: serde_json::json!({"tool_use_id": "call-b", "question": "b"}),
                 settlement_failures: Vec::new(),
+                dedupe_key: None,
             },
         ];
 
@@ -2083,6 +2182,45 @@ mod tests {
         assert_eq!(tool_name, "ask_a");
         assert_eq!(args, calls[0].args);
         assert_eq!(pending_tool_calls, calls);
+    }
+
+    /// A single pending callback call's dedupe key reaches the
+    /// `interaction_callback_pending` event's pending call unchanged, and a
+    /// call without one projects none. (Unrun until the candidate's
+    /// validation.)
+    #[test]
+    fn callback_terminal_event_carries_the_pending_call_dedupe_key() {
+        let interaction_id = meerkat_core::interaction::InteractionId(uuid::Uuid::new_v4());
+        let arguments =
+            serde_json::value::RawValue::from_string(r#"{"question":"a"}"#.to_string()).unwrap();
+        let key = meerkat_core::ToolCallDedupeKey::new(
+            meerkat_core::RunId::new(),
+            5,
+            "call-a",
+            "ask_a",
+            &arguments,
+        )
+        .unwrap();
+        for dedupe_key in [Some(key), None] {
+            let event = interaction_terminal_event(
+                interaction_id,
+                CompletionOutcome::CallbackPending {
+                    tool_use_id: "call-a".to_string(),
+                    tool_name: "ask_a".to_string(),
+                    args: serde_json::json!({"question": "a"}),
+                    dedupe_key: dedupe_key.clone(),
+                },
+            );
+            let meerkat_core::event::AgentEvent::InteractionCallbackPending {
+                pending_tool_calls,
+                ..
+            } = event
+            else {
+                panic!("expected callback-pending interaction event");
+            };
+            assert_eq!(pending_tool_calls.len(), 1);
+            assert_eq!(pending_tool_calls[0].dedupe_key, dedupe_key);
+        }
     }
 
     #[tokio::test]
@@ -2108,6 +2246,40 @@ mod tests {
             CompletionOutcome::Completed(r) => assert_eq!(r.text, "hello"),
             other => panic!("Expected Completed, got {other:?}"),
         }
+    }
+
+    /// The unregister drain answers each waiter of an input the stop kept
+    /// queued with the requeued answer and the stop's time, never with the
+    /// unregistered failure; every other leftover waiter gets that failure.
+    #[tokio::test]
+    async fn the_unregister_drain_answers_a_kept_inputs_waiters_as_requeued() {
+        let mut registry = CompletionRegistry::new();
+        let kept = InputId::new();
+        let other = InputId::new();
+        let kept_waiters = [
+            registry.register(kept.clone()),
+            registry.register(kept.clone()),
+        ];
+        let other_waiter = registry.register(other);
+        let stopped_at = chrono::Utc::now();
+
+        let late = registry.drain_unregistered_waiters([(kept, stopped_at)]);
+
+        assert_eq!(late, 1, "the kept input still had waiters at the drain");
+        for waiter in kept_waiters {
+            match waiter.try_wait().await {
+                Err(error) => assert_eq!(
+                    error,
+                    CompletionWaitError::RequeuedAcrossStop { stopped_at }
+                ),
+                Ok(outcome) => panic!("a kept input's waiter completed: {outcome:?}"),
+            }
+        }
+        match other_waiter.try_wait().await {
+            Err(CompletionWaitError::AuthorityUnavailable(_)) => {}
+            other => panic!("expected the unregistered failure, got {other:?}"),
+        }
+        assert!(!registry.debug_has_waiters());
     }
 
     #[tokio::test]
@@ -2476,6 +2648,68 @@ mod tests {
         assert!(!authority.resumable);
     }
 
+    /// A graceful stop answers a kept input's waiter while its session
+    /// unregisters. The generated arm for that failure reads no session
+    /// state, so it answers the same before and after the session is gone:
+    /// release the pre-admission, session not running, requeued across the
+    /// stop, resumable. The waiter's error carries the stop's time.
+    #[tokio::test]
+    async fn wait_failure_authority_resolves_a_kept_input_with_or_without_its_session() {
+        use crate::meerkat_machine::dsl::{
+            RuntimeCompletionWaitFailureObservation, RuntimeCompletionWaitFailurePublicErrorClass,
+            RuntimeCompletionWaitFailurePublicReason,
+        };
+
+        let adapter = crate::meerkat_machine::MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+        let stopped_at = chrono::Utc::now();
+        let requeued = CompletionWaitError::RequeuedAcrossStop { stopped_at };
+        assert_eq!(
+            requeued.wait_failure_observation(),
+            Some(RuntimeCompletionWaitFailureObservation::RequeuedAcrossStop)
+        );
+        assert_eq!(requeued.requeued_stopped_at(), Some(stopped_at));
+        assert_eq!(
+            CompletionWaitError::ChannelClosed.requeued_stopped_at(),
+            None
+        );
+
+        for registered in [false, true] {
+            if registered {
+                adapter
+                    .prepare_bindings(session_id.clone())
+                    .await
+                    .expect("session should prepare runtime bindings");
+            }
+            let authority = adapter
+                .resolve_runtime_completion_wait_failure(&session_id, &requeued)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("registered={registered}: a kept input's wait must resolve: {error:?}")
+                });
+            assert!(
+                authority.releases_pre_admission(),
+                "registered={registered}"
+            );
+            assert_eq!(
+                authority.failure,
+                RuntimeCompletionWaitFailureObservation::RequeuedAcrossStop,
+                "registered={registered}"
+            );
+            assert_eq!(
+                authority.public_error_class,
+                RuntimeCompletionWaitFailurePublicErrorClass::SessionNotRunning,
+                "registered={registered}"
+            );
+            assert_eq!(
+                authority.public_reason,
+                RuntimeCompletionWaitFailurePublicReason::RequeuedAcrossStop,
+                "registered={registered}"
+            );
+            assert!(authority.resumable, "registered={registered}");
+        }
+    }
+
     #[tokio::test]
     async fn wait_failure_authority_rejects_missing_session_authority() {
         let adapter = crate::meerkat_machine::MeerkatMachine::ephemeral();
@@ -2813,6 +3047,7 @@ mod tests {
                 tool_use_id,
                 tool_name,
                 args,
+                ..
             } => {
                 assert_eq!(tool_use_id, "call-1");
                 assert_eq!(tool_name, "browser");

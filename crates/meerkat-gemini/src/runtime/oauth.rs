@@ -10,7 +10,7 @@
 //!
 //! Gemini CLI's `OAUTH_CLIENT_SECRET` is embedded because it's an
 //! "installed application" per
-//! https://developers.google.com/identity/protocols/oauth2#installed —
+//! <https://developers.google.com/identity/protocols/oauth2#installed> -
 //! the secret is considered non-sensitive in this flow.
 
 use std::sync::Arc;

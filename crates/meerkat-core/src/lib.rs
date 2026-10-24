@@ -53,7 +53,7 @@ pub mod authorization;
 pub mod blob;
 pub mod budget;
 pub mod call_origin;
-pub use call_origin::{CALL_ORIGIN_META_KEY, WireCallOrigin};
+pub use call_origin::{CALL_ORIGIN_META_KEY, TOOL_CALL_DEDUPE_KEY_META_KEY, WireCallOrigin};
 pub mod comms;
 pub mod compact;
 pub mod completion_feed;
@@ -74,11 +74,13 @@ pub mod event;
 pub mod event_injector;
 pub mod event_tap;
 pub mod exact_operation;
+pub mod fork_notice;
 pub mod gateway;
 pub mod generated;
 pub mod governance_config;
 pub mod handles;
 pub mod hooks;
+pub mod host_store;
 pub mod image_content;
 pub mod image_generation;
 pub mod interaction;
@@ -103,6 +105,9 @@ pub mod panic_payload;
 pub mod peer_correlation;
 pub mod peer_meta;
 pub mod persistence_contract;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[allow(clippy::panic)] // test helper: a child that cannot start fails the test
+mod process_isolation_tests;
 pub mod secret_entropy;
 pub use generated::approval_lifecycle;
 pub use generated::session_document;
@@ -170,7 +175,7 @@ pub use agent::{
     AgentLlmRequestAttempt, AgentOwnedRelease, AgentRunner, AgentSessionStore, AgentToolDispatcher,
     BindOutcome, CancelAfterBoundaryCommand, CancelAfterBoundarySender, CommsCapabilityError,
     CommsRuntime, CurrentTurnContent, CurrentTurnImageRef, DefaultSystemPromptPolicy,
-    DispatcherCapabilities, ExternalToolUpdate, FilteredToolDispatcher,
+    DispatcherCapabilities, DroppedRunSuspension, ExternalToolUpdate, FilteredToolDispatcher,
     LiveBridgeNoncommittingRunPermit, LiveBridgePreparedOperation, LiveBridgeToolDispatchAdmission,
     LlmStreamResult, ObservedCommsSender, RequestAttemptAuthority, SnapshotProjectionError,
     StickyModelFallbackActivationProof, ToolDispatchContext, dispatch_retained_consent_attempt,
@@ -289,11 +294,11 @@ pub use event::{
     AgentErrorClass, AgentErrorReport, AgentEvent, AssistantImageEvent, BudgetType,
     CompactionFailureReason, CompactionFitByteEvidence, CompactionFitTokenEvidence,
     CompactionPreservedHistoryFit, EventEnvelope, EventSourceIdentity, ExternalToolDelta,
-    ExternalToolDeltaPhase, InteractionFailureReason, LiveChannelCloseReason, ScopedAgentEvent,
-    SkillResolutionFailureReason, StreamScopeFrame, StreamTruncationReason, StructuredOutputOrigin,
-    ToolCallArguments, ToolCallArgumentsError, ToolConfigChangeOperation, ToolConfigChangeStatus,
-    ToolConfigChangedPayload, ToolConfigLifecycleBit, TurnErrorMetadata, VerboseEventConfig,
-    agent_event_type, compare_event_envelopes, format_verbose_event,
+    ExternalToolDeltaPhase, InteractionFailureReason, LiveChannelCloseReason, RunResumePointKind,
+    ScopedAgentEvent, SkillResolutionFailureReason, StreamScopeFrame, StreamTruncationReason,
+    StructuredOutputOrigin, ToolCallArguments, ToolCallArgumentsError, ToolConfigChangeOperation,
+    ToolConfigChangeStatus, ToolConfigChangedPayload, ToolConfigLifecycleBit, TurnErrorMetadata,
+    VerboseEventConfig, agent_event_type, compare_event_envelopes, format_verbose_event,
     format_verbose_event_with_config, turn_usage_summary, usage_summary,
 };
 pub use event_injector::{EventInjector, EventInjectorError};
@@ -506,10 +511,10 @@ pub use service::{
     DurableForkSourceAdmission, DurableSessionForkTarget, ForkBuildSource, ForkCacheInheritance,
     ForkCacheInheritanceInstall, ForkCacheInheritanceUnavailableReason, ForkPoint, ForkPointError,
     LiveFinalTranscriptCommitAtTurnBoundary, MobToolsBuildArgs, MobToolsFactory,
-    PublicTurnToolOverlay, SessionBuildIntent, SessionBuildOptions, SessionControlError,
-    SessionError, SessionForkAtRequest, SessionForkReplaceRequest, SessionForkResult,
-    SessionHistoryPage, SessionHistoryQuery, SessionInfo, SessionQuery, SessionService,
-    SessionServiceCommsExt, SessionServiceControlExt, SessionServiceHistoryExt,
+    PromptContextForkSource, PublicTurnToolOverlay, SessionBuildIntent, SessionBuildOptions,
+    SessionControlError, SessionError, SessionForkAtRequest, SessionForkReplaceRequest,
+    SessionForkResult, SessionHistoryPage, SessionHistoryQuery, SessionInfo, SessionQuery,
+    SessionService, SessionServiceCommsExt, SessionServiceControlExt, SessionServiceHistoryExt,
     SessionServiceTranscriptEditExt, SessionSummary, SessionTranscriptRestoreRevisionRequest,
     SessionTranscriptRevisionList, SessionTranscriptRevisionListEntry,
     SessionTranscriptRevisionListQuery, SessionTranscriptRevisionPage,
@@ -534,23 +539,25 @@ pub use session::{
     InstructionActivationProjectionWitness, InstructionActivationReadPage,
     InstructionActivationReadQuery, InstructionActivationReceipt, InstructionActivationRecord,
     InstructionActivationRequest, InvalidSessionLineageId,
-    MAX_INSTRUCTION_ACTIVATION_LINEAGE_BYTES, MAX_INSTRUCTION_BODY_BYTES, PendingDeferredPrompt,
-    PendingToolResultsMessage, PersistedSessionMetadataView, PredecessorRestrictionsError,
-    PredecessorToolRestrictions, PreparedTransientTurnContextBoundary, ProviderNativeToolPolicy,
-    Released0810ImportError, Released0810ImportEvidence, Released0810ImportReceipt,
-    RetainedTranscriptRevisionRows, RetiredTranscriptGraphBase, RetiredTranscriptPrefix,
-    SESSION_BUILD_STATE_KEY, SESSION_DEFERRED_TURN_STATE_KEY, SESSION_LIFECYCLE_TERMINAL_KEY,
-    SESSION_METADATA_SCHEMA_VERSION, SESSION_TOOL_VISIBILITY_STATE_KEY,
-    SESSION_TRANSCRIPT_HISTORY_STATE_KEY, SESSION_TRANSCRIPT_REWRITE_PREFIX_AUTHORITY_KEY,
-    SESSION_VERSION, SerializedSessionArtifact, Session, SessionBuildState,
-    SessionDeferredTurnState, SessionGeneration, SessionHeadMetadataCell,
-    SessionHeadMetadataCellIdentity, SessionHeadMetadataDigest, SessionHeadMetadataIdentity,
-    SessionHeadMetadataProjection, SessionHeadMetadataValueDigest, SessionLifecycleTerminal,
-    SessionLineageId, SessionLlmIdentity, SessionLlmIdentityOverride,
+    MAX_INSTRUCTION_ACTIVATION_LINEAGE_BYTES, MAX_INSTRUCTION_BODY_BYTES,
+    ModelBoundaryProjectionError, PendingDeferredPrompt, PendingToolResultsMessage,
+    PersistedSessionMetadataView, PredecessorRestrictionsError, PredecessorToolRestrictions,
+    PreparedTransientTurnContextBoundary, ProviderNativeToolPolicy, Released0810ImportError,
+    Released0810ImportEvidence, Released0810ImportReceipt, RetainedTranscriptRevisionRows,
+    RetiredTranscriptGraphBase, RetiredTranscriptPrefix, RoundPendingOperation, RunLoopCarryOver,
+    RunResumePoint, RunUsageCarryOver, SESSION_BUILD_STATE_KEY, SESSION_DEFERRED_TURN_STATE_KEY,
+    SESSION_LIFECYCLE_TERMINAL_KEY, SESSION_METADATA_SCHEMA_VERSION, SESSION_RUN_CURSOR_KEY,
+    SESSION_TOOL_VISIBILITY_STATE_KEY, SESSION_TRANSCRIPT_HISTORY_STATE_KEY,
+    SESSION_TRANSCRIPT_REWRITE_PREFIX_AUTHORITY_KEY, SESSION_VERSION, SerializedSessionArtifact,
+    Session, SessionBuildState, SessionDeferredTurnState, SessionGeneration,
+    SessionHeadMetadataCell, SessionHeadMetadataCellIdentity, SessionHeadMetadataDigest,
+    SessionHeadMetadataIdentity, SessionHeadMetadataProjection, SessionHeadMetadataValueDigest,
+    SessionLifecycleTerminal, SessionLineageId, SessionLlmIdentity, SessionLlmIdentityOverride,
     SessionLlmIdentityOverrideError, SessionLlmRequestPolicy, SessionMeta, SessionMetadata,
-    SessionMetadataDocument, SessionToolVisibilityState, SessionTooling, SystemMessageAppendError,
-    SystemPromptUpdateError, SystemPromptUpdateRequest, SystemPromptUpdateResult,
-    SystemPromptUpdateStatus, ToolCategoryOverride, ToolCategoryOverrides, ToolVisibilityWitness,
+    SessionMetadataDocument, SessionRunCursor, SessionToolVisibilityState, SessionTooling,
+    StagedModelRoutingCarryOver, SystemMessageAppendError, SystemPromptUpdateError,
+    SystemPromptUpdateRequest, SystemPromptUpdateResult, SystemPromptUpdateStatus,
+    ToolCallDedupeKey, ToolCategoryOverride, ToolCategoryOverrides, ToolVisibilityWitness,
     TranscriptEndpointWitness, TranscriptGraphPrefixAccumulator, TranscriptHistoryRetention,
     TranscriptHistoryState, TranscriptParentAdvance, TranscriptRevisionBody,
     TranscriptRevisionEdge, TranscriptRewriteAuditReceiptBatch, TranscriptRewriteCommit,
@@ -563,7 +570,7 @@ pub use session::{
     resolve_resumed_session_auth_binding, resolve_resumed_session_llm_identity,
     resolve_session_auth_binding, resolve_session_llm_identity_override,
     session_metadata_document_from_slice, session_metadata_schema_version, session_version,
-    transcript_history_full_body_materializations, transcript_messages_digest,
+    tool_call_digest, transcript_history_full_body_materializations, transcript_messages_digest,
     transcript_rewrite_prefix_digest, try_lifecycle_terminal_from_map,
     try_session_metadata_from_map, try_tool_visibility_state_from_map,
     validate_current_persisted_transcript_history_slice,

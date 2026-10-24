@@ -548,7 +548,7 @@ pub struct ForkedParticipantProvenance {
 /// Immutable, authenticated capability reference handed to a holder.
 ///
 /// Fields are private: a holder holds a value it can read but cannot widen.
-/// The only in-crate mint is [`ForkedParticipantRef::new_source_owned`], and
+/// The only in-crate mint is `ForkedParticipantRef::new_source_owned`, and
 /// deserialization runs every field's own validation, so a tampered wire
 /// capability either fails to parse or fails the store's full-reference
 /// comparison.

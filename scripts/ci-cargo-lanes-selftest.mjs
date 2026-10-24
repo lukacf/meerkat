@@ -242,8 +242,16 @@ function assertEventSplit(plan, label) {
       assert.equal(shard.targets, "--all-targets", `${label}: ${shard.name} lints every target on the push`);
     }
     assert.equal(plan.closure_check, plan.rust_changed, `${label}: the push checks the closure on a Rust change`);
+    assert.equal(plan.rustdoc, plan.rust_changed, `${label}: the push runs the workspace rustdoc on a Rust change`);
     assert.equal(plan.governed_jsonl, plan.rust_changed, `${label}: the push runs governed JSONL on a Rust change`);
     assert.equal(plan.mcp_confinement_positive, plan.rust_changed, `${label}: the push runs the confinement lane on a Rust change`);
+    // Every Rust change is an ordinary reason: the CI gate keeps such a lane
+    // in a pull request's budget (a push enforces none).
+    assert.deepEqual(
+      plan.guard_lane_reasons,
+      plan.rust_changed ? { governed_jsonl: ["every_rust_change"], mcp_confinement_positive: ["every_rust_change"] } : {},
+      `${label}: the push's guard lane reasons`,
+    );
     return;
   }
   assert.equal(plan.event, "pull_request", `${label}: event`);
@@ -252,6 +260,7 @@ function assertEventSplit(plan, label) {
   assert.deepEqual(plan.closure_test_rows, [], `${label}: no closure-tests row in a pull request`);
   assert.deepEqual(plan.feature_check_jobs, [], `${label}: no feature-combination job in a pull request`);
   assert.equal(plan.closure_check, false, `${label}: no closure check in a pull request`);
+  assert.equal(plan.rustdoc, false, `${label}: no workspace rustdoc in a pull request`);
   // An exact-profile lane runs in a pull request exactly when it touches
   // that lane's own inputs or changes its definition; otherwise the push
   // runs it.
@@ -260,8 +269,23 @@ function assertEventSplit(plan, label) {
       plan.rust_changed && (touchesGuardLane(lane, plan.changed_paths) || plan.guard_definitions_changed.includes(lane));
     assert.equal(plan[lane], runs, `${label}: ${lane} runs in a pull request only on its own inputs or definition`);
     assert.equal(deferred[lane], plan.rust_changed && !runs, `${label}: ${lane} deferral`);
+    // The reason the plan exports for the CI gate's budget is the one that
+    // planned the lane; an unknown diff is the only other one.
+    const reasons = plan.guard_lane_reasons[lane];
+    assert.equal(reasons !== undefined, plan[lane], `${label}: ${lane} has a reason exactly when it runs`);
+    if (reasons && reasons.join() !== "diff_unknown") {
+      assert.deepEqual(
+        reasons,
+        [
+          ...(plan.guard_definitions_changed.includes(lane) ? ["definition_changed"] : []),
+          ...(touchesGuardLane(lane, plan.changed_paths) ? ["inputs_changed"] : []),
+        ],
+        `${label}: ${lane}'s reasons`,
+      );
+    }
   }
   assert.equal(deferred.closure_check, plan.rust_changed);
+  assert.equal(deferred.rustdoc, plan.rust_changed);
   for (const suite of plan.integration_suites) {
     assert.equal(chain(suite.packages[0]), false, `${label}: integration suite ${suite.name} compiles meerkat-mob`);
   }
@@ -628,6 +652,11 @@ function assertArchivedLanes(plan, label) {
       const plan = planFor([path], ["--event", "pull_request", "--base-tree", baseTree]);
       assert.deepEqual(plan.guard_definitions_changed, lanes, `${label}: changed definitions`);
       for (const lane of Object.keys(GUARD_LANE_INPUTS)) assert.equal(plan[lane], lanes.includes(lane), `${label}: ${lane}`);
+      assert.deepEqual(
+        plan.guard_lane_reasons,
+        Object.fromEntries(lanes.map((lane) => [lane, ["definition_changed"]])),
+        `${label}: the definition is the reason (none for a comment or an edit elsewhere)`,
+      );
       assertLanes(plan, label);
     }
   } finally {
@@ -641,6 +670,39 @@ function assertArchivedLanes(plan, label) {
   assert.equal(unknown.diff, "no diff base supplied");
   assert.deepEqual(unknown.guard_definitions_changed, Object.keys(GUARD_LANE_INPUTS), "no diff: every definition may have changed");
   for (const lane of Object.keys(GUARD_LANE_INPUTS)) assert.equal(unknown[lane], true, `no diff: ${lane} runs`);
+  // Its only reason is the unknown diff, never a changed definition: the CI
+  // gate keeps it in the budget.
+  assert.equal(unknown.mode, "workspace");
+  assert.deepEqual(
+    unknown.guard_lane_reasons,
+    { governed_jsonl: ["diff_unknown"], mcp_confinement_positive: ["diff_unknown"] },
+    "no diff: every lane runs for the unknown diff alone",
+  );
+  // A workspace-mode pull request with a known diff runs a guard lane for
+  // its inputs or definition like any other pull request: a Makefile change
+  // plans the whole workspace, and so does Cargo.toml.
+  const bothTree = mkdtempSync(join(tmpdir(), "ci-lanes-guard-reasons-"));
+  try {
+    const makefile = readFileSync(resolve(root, "Makefile"), "utf8");
+    const count = makefile.match(/^CONFINEMENT_MCP_POSITIVE_COUNT := (\d+)$/m);
+    assert.ok(count, "the Makefile counts the confinement lane's MCP cases");
+    writeFileSync(join(bothTree, "Makefile"), makefile.replace(count[0], `CONFINEMENT_MCP_POSITIVE_COUNT := ${Number(count[1]) + 1}`));
+    const both = planFor(["Makefile", "crates/meerkat-mcp/src/process_confinement_tests.rs"], ["--event", "pull_request", "--base-tree", bothTree]);
+    assert.equal(both.mode, "workspace", "a Makefile change plans the workspace");
+    assert.deepEqual(
+      both.guard_lane_reasons,
+      { mcp_confinement_positive: ["definition_changed", "inputs_changed"] },
+      "a lane whose definition and inputs both changed carries both reasons",
+    );
+    assertLanes(both, "a definition and an input of the confinement lane");
+  } finally {
+    rmSync(bothTree, { recursive: true, force: true });
+  }
+  const inputs = planFor(["Cargo.toml", "crates/meerkat-rpc/src/governed_jsonl/tests.rs"], ["--event", "pull_request"]);
+  assert.equal(inputs.mode, "workspace", "a Cargo.toml change plans the workspace");
+  assert.deepEqual(inputs.guard_lane_reasons, { governed_jsonl: ["inputs_changed"] }, "a workspace-mode pull request's inputs reason");
+  assert.equal(inputs.governed_jsonl, true);
+  assert.equal(inputs.mcp_confinement_positive, false);
 }
 
 // The default nextest profile's selection in every TOML spelling: a change to
@@ -907,10 +969,12 @@ for (const path of [
   assert.equal(github.status, 0, github.stderr);
   const lines = Object.fromEntries(github.stdout.trim().split("\n").map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]));
   assert.equal(lines.event, "pull_request");
-  for (const key of ["closure_check", "governed_jsonl", "mcp_confinement_positive"]) assert.equal(lines[key], "false", key);
+  for (const key of ["closure_check", "rustdoc", "governed_jsonl", "mcp_confinement_positive"]) assert.equal(lines[key], "false", key);
+  assert.equal(lines.guard_lane_reasons, "{}", "no guard lane ran, so no reason");
   assert.equal(lines.closure_test_count, "0");
   assert.equal(lines.feature_check_count, "0");
   assert.match(lines.deferred_to_push, /^17 closure-tests rows; the closure check; \d+ feature-combination jobs; /);
+  assert.match(lines.deferred_to_push, /; the workspace rustdoc$/);
   assert.match(lines.deferred_to_push, /; the Clippy of meerkat-integration-tests, meerkat-rpc, rkat \(mob chain invalidated\); /);
   // A packages-mode pull request lints a chain head itself (lib and bin
   // targets) while meerkat-mob's build stays cached: a change to the heads,
@@ -973,7 +1037,12 @@ for (const path of [
   );
   assert.equal(pushLines.event, "push");
   assert.equal(pushLines.deferred_to_push, "");
-  for (const key of ["closure_check", "governed_jsonl", "mcp_confinement_positive"]) assert.equal(pushLines[key], "true", key);
+  for (const key of ["closure_check", "rustdoc", "governed_jsonl", "mcp_confinement_positive"]) assert.equal(pushLines[key], "true", key);
+  assert.deepEqual(
+    JSON.parse(pushLines.guard_lane_reasons),
+    { governed_jsonl: ["every_rust_change"], mcp_confinement_positive: ["every_rust_change"] },
+    "the push's reasons, as the gate reads them",
+  );
   // A change to the web runtime's own inputs still runs its lanes in the
   // pull request.
   for (const path of ["crates/meerkat-web-runtime/src/lib.rs", "sdks/web/src/runtime.ts", "crates/meerkat-contracts/src/lib.rs"]) {
@@ -1369,8 +1438,10 @@ for (const path of [
     "closure_count",
     "closure_flags",
     "closure_check",
+    "rustdoc",
     "governed_jsonl",
     "mcp_confinement_positive",
+    "guard_lane_reasons",
     "deferred_to_push",
     "shard_count",
     "shard_matrix",
@@ -1887,7 +1958,7 @@ for (const path of [
   for (const job of ["ratchets", "integration", "governed-jsonl", "closure-check", "sdk-host", "example-web", "wasm-timers", "bazel-graph"]) {
     assert.ok(jobLines(workflow, job).includes("    needs: [changes, stagger]"), `${job} is a short lane: it waits for the stagger job`);
   }
-  for (const job of ["wasm-check", "governance-gates", "mcp-confinement-positive", "tlc-audits", "main-unit-archive-build", "clippy", "main-unit", "closure-tests", "feature-check"]) {
+  for (const job of ["wasm-check", "governance-gates", "mcp-confinement-positive", "tlc-audits", "main-unit-archive-build", "clippy", "main-unit", "closure-tests", "feature-check", "rustdoc"]) {
     assert.ok(jobLines(workflow, job).includes("    needs: changes"), `${job} starts with the first wave`);
   }
   const gate = jobLines(workflow, "gate");

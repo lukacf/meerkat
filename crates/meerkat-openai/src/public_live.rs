@@ -1618,7 +1618,7 @@ impl PublicLiveBrokerSession {
     /// [`Self::append_thinking_context`] (same token, fragment receipts,
     /// rejection and close semantics), but never inside a voiced response.
     /// While the model's response is audible the append is reserved now and
-    /// sent once the response has ended ([`OUTPUT_SILENCE_RELEASE_MS`] of
+    /// sent once the response has ended (`OUTPUT_SILENCE_RELEASE_MS` of
     /// output silence on the provider's output audio frames), in append
     /// order; with the model silent it goes at once. A close before the
     /// release leaves it unsent and settles it as interrupted by close, like
@@ -1714,7 +1714,7 @@ impl PublicLiveBrokerSession {
     /// is held by another result, the delivery waits for the channel's
     /// summary acknowledgement, or another release guard refuses it for
     /// now. The notice is the finished notice of a result held behind the
-    /// user's floor ([`delegation_finished_pending_notice_sections`]), bound
+    /// user's floor (`delegation_finished_pending_notice_sections`), bound
     /// to the delegation on the instructions lane, and handed to the sender
     /// under the state lock, like that one, so a result of the delegation
     /// appended later can only follow it. It replaces a still-due
@@ -1723,7 +1723,7 @@ impl PublicLiveBrokerSession {
     /// own notices, its receipt is the caller's.
     ///
     /// It goes at once while the user holds the floor or the model is
-    /// silent ([`SessionState::finished_notice_may_go_now`]). While the
+    /// silent (`SessionState::finished_notice_may_go_now`). While the
     /// model speaks it waits, reserved under the caller's token: an
     /// instructions append mid-answer can cut the answer off. The frame loop
     /// sends it at the first frame where the response has ended or the user
@@ -1828,7 +1828,7 @@ impl PublicLiveBrokerSession {
     /// arrived, tell the user only that you asked. Both are reserved and
     /// placed under one state lock, so they are sent in that order or held
     /// behind the user's floor in that order. The result's cue then reads
-    /// the awaiting-peer form of the result cue ([`result_cue_text`]) instead of the outcome form. The
+    /// the awaiting-peer form of the result cue (`result_cue_text`) instead of the outcome form. The
     /// member's answer reaches the channel later as its own row, through the
     /// session lane like any committed reply.
     pub async fn append_delegation_result_awaiting_peer_replies(

@@ -50,8 +50,13 @@ live_comms_mobs_live.md and comms in live_comms_mobs_comms.md.
   the background; wait for `MobStopped`.
 - Rust `MobHandle::stop()` returns a `MobStopReport`.
   `shutdown_with_report(ShutdownOptions)` cancels in-flight runs immediately
-  and reports each member. Since 0.9.4 an admitted Shutdown closes admission
-  first (reason `Shutdown`): while it runs, commands the close refuses fail
+  and reports each member, except that since 0.9.5 its default
+  (`QueuedInputsOnShutdown::RequeueDurable`) suspends the running turn of a
+  member whose session commits every round for the next start (except a
+  retiring member, a retiring or host-placed autonomous member, and a run
+  without round commits; see `references/mobs.md`). Since 0.9.4 an admitted
+  Shutdown closes admission first (reason `Shutdown`): while it runs,
+  commands the close refuses fail
   with `AdmissionClosed` and every other request (stop, destroy, complete,
   retirement, reads, `status()`) gets the retryable
   `MobError::ShutdownInProgress` (wire `SESSION_BUSY`, data kind
@@ -128,7 +133,9 @@ succeeds after it. `MobError` is `#[non_exhaustive]`. Details in
   answers retryable `SESSION_BUSY` with data `{kind:
   "mob_retirement_in_progress", stage}` while the mob keeps driving it. A
   retirement that stops on an error stays `Retiring` and reports
-  `mob_retirement_stuck` (`redrive: true`); archiving the member's session
+  `mob_retirement_stuck` (`redrive: true`; since 0.9.5 its `cause_data` is
+  the cause's own data, such as `mob_member_reload_repair_blocked`: redrive
+  later); archiving the member's session
   (`session/archive`, REST `DELETE /sessions/{id}`, MCP `meerkat_archive`)
   re-drives it once per request.
 - `rkat mob respawn <MOB_ID> <AGENT_IDENTITY> [--initial-message <MSG>]`

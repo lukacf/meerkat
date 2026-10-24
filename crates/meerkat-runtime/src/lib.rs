@@ -102,6 +102,7 @@ pub mod protocol_supervisor_trust_publish;
 #[path = "generated/protocol_supervisor_trust_revoke.rs"]
 pub mod protocol_supervisor_trust_revoke;
 pub mod recovery;
+pub mod resumed_run_admission;
 pub mod retained_work;
 pub(crate) mod run_progress;
 pub mod run_stop;
@@ -587,9 +588,10 @@ pub use handles::{
     RuntimeTurnStateHandle,
 };
 pub use identifiers::{
+    CALLER_IDEMPOTENCY_KEY_MAX_BYTES, CALLER_IDEMPOTENCY_KEY_NAMESPACE, CanonicalKeyTextError,
     CausationId, ConversationId, CorrelationId, EventCodeId, IdempotencyKey, InputKind, KindId,
     LogicalRuntimeId, LogicalRuntimeIdError, MemberDeliveryAddress, PolicyVersion,
-    ProjectionRuleId, RuntimeEventId, SchemaId, SupersessionKey,
+    ProjectionRuleId, RuntimeEventId, SchemaId, SupersessionKey, validate_canonical_key_text,
 };
 pub use ingress_types::{ContentShape, RequestId, ReservationKey};
 pub use input::{
@@ -605,6 +607,10 @@ pub use input_state::{
     InputTerminalOutcome, PolicySnapshot, ReconstructionSource, verify_exact_replay,
     verify_exact_resume_replay,
 };
+/// The source-owned original work a governed input's authority association
+/// names, re-exported so a host or the facade can name it without its own
+/// dependency on the authorization contracts crate.
+pub use meerkat_authorization_contracts::work_association::OriginalWorkRef;
 pub use meerkat_core::types::HandlingMode;
 pub use meerkat_machine::McpObservationRefusal;
 #[cfg(not(target_arch = "wasm32"))]
@@ -633,9 +639,9 @@ pub use meerkat_machine::{
     RuntimeSessionRegistrationWitness, RuntimeSessionUnregisterAdmission,
     RuntimeSessionUnregisterObserver, RuntimeSessionUnregisterUseAdmission,
     SessionDurabilityReloadRequired, StagedCustodyRelease, StagedMeerkatMachine,
-    StandaloneSessionRuntimeAuthorities, classify_runtime_lifecycle_state,
-    classify_runtime_loop_queue_admission, standalone_session_runtime_authorities,
-    standalone_tool_visibility_owner,
+    StandaloneSessionRuntimeAuthorities, UnregisterQueuedInputs, UnregisterQueuedInputsError,
+    classify_runtime_lifecycle_state, classify_runtime_loop_queue_admission,
+    standalone_session_runtime_authorities, standalone_tool_visibility_owner,
 };
 pub use meerkat_machine_types::{
     CommittedModelRoutingHandoff, HydratedSessionLlmState, ImageOperationRoutingRequest,
@@ -668,6 +674,11 @@ pub use meerkat_machine_types::{
 pub use ops_lifecycle::{
     OpsLifecycleConfig, OpsLifecyclePersistenceRequest, PersistedOpsSnapshot,
     RuntimeOpsLifecycleRegistry,
+};
+pub use resumed_run_admission::{
+    RESUMED_RUN_ADMISSION_ATTEMPT_TIMEOUT, RESUMED_RUN_ADMISSION_ATTEMPTS,
+    RESUMED_RUN_ADMISSION_RETRY_DELAY, ResumedRunAdmission, ResumedRunAdmissionDecision,
+    ResumedRunAdmissionRequest,
 };
 pub use run_stop::{RunStopContributor, RunStopReceipt};
 #[cfg(not(target_arch = "wasm32"))]
@@ -1144,8 +1155,8 @@ pub use service_ext::{SessionServiceRuntimeExt, persistent_runtime_pre_dequeue_h
 pub use store::{
     CommittedRecoveryBoundary, CommittedWholeBlobMetadata, CommittedWholeBlobProvisionalTail,
     CommittedWholeBlobSnapshot, CommittingWholeBlobSession, ContinuationAdmission,
-    ContinuationAdmissionOutcome, ContinuationAdmissionTransition, ContinuationKeyBinding,
-    DeliveryGenerationReader, FencedPreparedRuntimeSessionCommitOutcome,
+    ContinuationAdmissionEntry, ContinuationAdmissionOutcome, ContinuationAdmissionTransition,
+    ContinuationKeyBinding, DeliveryGenerationReader, FencedPreparedRuntimeSessionCommitOutcome,
     HeadCanonicalProvisionalTailAuthority, HeadCanonicalRuntimeAuthorityActivation,
     HeadCanonicalStoreAuthority, InMemoryRuntimeStore, InputIdempotencyIndexConstraint,
     InputStateRow, KEPT_DELIVERY_READER_IDLE, KeyedRuntimeDeliveryCasOutcome,
@@ -1155,11 +1166,13 @@ pub use store::{
     PreparedRuntimeSessionCommit, PreparedRuntimeSessionCommitKind,
     PreparedRuntimeSessionCommitOutcome, PreparedRuntimeSessionCommitResult,
     PreparedWholeBlobProvisionalTail, PreparedWholeBlobRewriteBoundary,
-    PreparedWholeBlobRewriteStoreParts, RecoveryCommitStatus, RuntimeDeliveryAuthorityCasOutcome,
+    PreparedWholeBlobRewriteStoreParts, PreparedWholeBlobRunRebase,
+    PreparedWholeBlobRunRebaseStoreParts, RecoveryCommitStatus, RuntimeDeliveryAuthorityCasOutcome,
     RuntimeDeliveryAuthorityRecord, RuntimeDeliveryStoreRecord, RuntimeSessionAuthority,
     RuntimeSessionPersistenceProfile, RuntimeStore, RuntimeStoreError, RuntimeStoreWriteFence,
     RuntimeStoreWriteFenceOutcome, SerializedSessionSnapshot, VerifiedCommittedWholeBlobPayload,
-    WholeBlobCommittedTranscriptFacts, WholeBlobProvisionalTailAuthority, WholeBlobStoreAuthority,
+    WholeBlobCommittedTranscriptFacts, WholeBlobProvisionalTailAuthority,
+    WholeBlobRunRebaseOutcome, WholeBlobStoreAuthority,
     reuse_or_load_committed_whole_blob_snapshot,
 };
 #[cfg(feature = "sqlite-store")]

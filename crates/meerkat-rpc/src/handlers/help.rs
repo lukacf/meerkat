@@ -63,6 +63,9 @@ fn help_create_session_params(
         prompt: ContentInput::Text(prompt),
         injected_context: None,
         transient_turn_context: None,
+        // Today's behaviour: the help turn's events are written as
+        // session/event.
+        session_events: None,
         initial_turn: None,
         model: request.model,
         provider: request.provider,

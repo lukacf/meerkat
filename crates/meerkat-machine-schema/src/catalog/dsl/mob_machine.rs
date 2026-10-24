@@ -1403,13 +1403,20 @@ macro_rules! mob_catalog_machine_dsl {
             Shutdown,
             // Shutdown observes mechanical session/runtime carriers for one
             // exact autonomous roster incarnation. MobMachine owns the
-            // semantic choice: interrupt a live member, or skip a
+            // semantic choice: interrupt a live member, keep a live durable
+            // member's running turn for the next start, or skip a
             // disposal-complete Retiring row retained only to retry terminal
             // journal publication. Disposal may be either a Mob-owned archive
             // or a host-owned runtime release. Placed release completion is an
             // exact durable event observation supplied by the shell; peer-only
             // completion is already represented in machine-owned checkpoint
-            // and supervisor-revocation markers.
+            // and supervisor-revocation markers. `keeps_durable_run` is the
+            // shell's observation that the member's local session commits
+            // each round and that this stop keeps such a member's run: a
+            // Shutdown that unregisters the session with a requeue (the
+            // runtime stop then suspends its running turn instead of ending
+            // it), or a Stop that leaves runs running (the Shutdown that
+            // follows decides).
             ResolveAutonomousShutdownMemberAction {
                 agent_identity: AgentIdentity,
                 agent_runtime_id: AgentRuntimeId,
@@ -1421,6 +1428,7 @@ macro_rules! mob_catalog_machine_dsl {
                 runtime_residue_present: bool,
                 archive_authority_known: bool,
                 placed_release_confirmed: bool,
+                keeps_durable_run: bool,
             },
             ForceCancel { agent_identity: AgentIdentity },
             KickoffMarkPending { member_id: AgentIdentity, objective_id: String },
@@ -2195,6 +2203,7 @@ macro_rules! mob_catalog_machine_dsl {
                     } else {
                         if lease == IdentityLeaseCondition::Missing
                             || lease == IdentityLeaseCondition::HeldByExpiredIncarnation
+                            || lease == IdentityLeaseCondition::HeldByEndedIncarnation
                         {
                             IdentityReconcileDecision::AcquireLease
                         } else {
@@ -4012,8 +4021,13 @@ macro_rules! mob_catalog_machine_dsl {
         // carriers. A peer-only member needs machine-owned remote-retired and
         // supervisor-revoked markers. A placed member needs its retained exact
         // carrier plus the shell's current-epoch exact release terminal. These
-        // are terminal-journal retry anchors; all other current incarnations
-        // remain interruptible. A stale identity incarnation or runtime mode
+        // are terminal-journal retry anchors. Every other current incarnation
+        // is interrupted, unless the stop keeps a durable member's run
+        // (`keeps_durable_run`) and the member is not Retiring: that member is
+        // kept, its kickoff left open and its running turn left to the runtime
+        // stop (the KeepForResume arm, appended at the end of the list). A
+        // Retiring member is still interrupted. A stale identity incarnation
+        // or runtime mode
         // no-matches; incomplete carrier observations fail closed to
         // Interrupt.
         transition ResolveAutonomousShutdownMemberActionLocalTerminalRetryAnchor {
@@ -4028,7 +4042,8 @@ macro_rules! mob_catalog_machine_dsl {
                 session_projection_visible,
                 runtime_residue_present,
                 archive_authority_known,
-                placed_release_confirmed
+                placed_release_confirmed,
+                keeps_durable_run
             }
             guard "exact_runtime" {
                 self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id)
@@ -4098,7 +4113,8 @@ macro_rules! mob_catalog_machine_dsl {
                 session_projection_visible,
                 runtime_residue_present,
                 archive_authority_known,
-                placed_release_confirmed
+                placed_release_confirmed,
+                keeps_durable_run
             }
             guard "exact_runtime" {
                 self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id)
@@ -4161,7 +4177,8 @@ macro_rules! mob_catalog_machine_dsl {
                 session_projection_visible,
                 runtime_residue_present,
                 archive_authority_known,
-                placed_release_confirmed
+                placed_release_confirmed,
+                keeps_durable_run
             }
             guard "exact_runtime" {
                 self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id)
@@ -4225,7 +4242,8 @@ macro_rules! mob_catalog_machine_dsl {
                 session_projection_visible,
                 runtime_residue_present,
                 archive_authority_known,
-                placed_release_confirmed
+                placed_release_confirmed,
+                keeps_durable_run
             }
             guard "exact_runtime" {
                 self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id)
@@ -4295,6 +4313,10 @@ macro_rules! mob_catalog_machine_dsl {
                     agent_identity)
                 || self.runtime_retire_pending_sessions.contains_key(agent_runtime_id) == true
                 || placed_release_confirmed == false
+            }
+            guard "not_kept_for_resume" {
+                keeps_durable_run == false
+                || self.member_state_markers.get_cloned(agent_runtime_id) == Some(MobMemberState::Retiring)
             }
             update {}
             to Running
@@ -22440,6 +22462,110 @@ macro_rules! mob_catalog_machine_dsl {
             to Running
         }
 
+        // Appended after every published transition, so no published
+        // TransitionId discriminant moves. Its guards exclude the
+        // Interrupt arm and the retry-anchor arms of the same input, so
+        // its place in the list changes no first-match chain.
+        transition ResolveAutonomousShutdownMemberActionKeepForResume {
+            per_phase [Running, Stopped, Completed]
+            on input ResolveAutonomousShutdownMemberAction {
+                agent_identity,
+                agent_runtime_id,
+                fence_token,
+                generation,
+                session_id,
+                session_has_live_actor,
+                session_projection_visible,
+                runtime_residue_present,
+                archive_authority_known,
+                placed_release_confirmed,
+                keeps_durable_run
+            }
+            guard "exact_runtime" {
+                self.identity_to_runtime.get_cloned(agent_identity) == Some(agent_runtime_id)
+            }
+            guard "exact_generation" {
+                self.identity_runtime_generations.get_copied(agent_identity) == Some(generation)
+            }
+            guard "exact_fence" {
+                self.identity_runtime_fence_tokens.get_copied(agent_identity) == Some(fence_token)
+            }
+            guard "autonomous_member" {
+                self.member_runtime_modes.get_cloned(agent_identity) == Some(SpawnPolicyRuntimeMode::AutonomousHost)
+            }
+            guard "not_local_terminal_retry_anchor" {
+                self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring)
+                || self.live_runtime_ids.contains(agent_runtime_id) == true
+                || self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == true
+                || self.member_kickoff_pending.contains(agent_identity)
+                || self.member_kickoff_starting.contains(agent_identity)
+                || self.member_kickoff_callback_pending.contains(agent_identity)
+                || !mob_machine_placed_kickoff_custody_absent_for_identity(
+                    self.pending_placed_kickoff_outcomes,
+                    self.resolved_placed_kickoff_outcomes,
+                    agent_identity)
+                || session_id == None
+                || self.runtime_retire_pending_sessions.get_cloned(agent_runtime_id) != session_id
+                || (self.member_session_bindings.contains_key(agent_identity) == true
+                    && self.member_session_bindings.get_cloned(agent_identity) != session_id)
+                || session_has_live_actor == true
+                || runtime_residue_present == true
+                || (archive_authority_known == true
+                    && session_projection_visible == true)
+            }
+            guard "not_peer_only_terminal_retry_anchor" {
+                self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring)
+                || self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == true
+                || self.member_kickoff_pending.contains(agent_identity)
+                || self.member_kickoff_starting.contains(agent_identity)
+                || self.member_kickoff_callback_pending.contains(agent_identity)
+                || !mob_machine_placed_kickoff_custody_absent_for_identity(
+                    self.pending_placed_kickoff_outcomes,
+                    self.resolved_placed_kickoff_outcomes,
+                    agent_identity)
+                || session_id != None
+                || self.member_session_bindings.contains_key(agent_identity) == true
+                || self.member_placement.contains_key(agent_identity) == true
+                || self.runtime_retire_pending_sessions.contains_key(agent_runtime_id) == true
+                || self.remote_runtime_retired_ids.contains(agent_runtime_id) == false
+                || self.remote_supervisor_revoked_ids.contains(agent_runtime_id) == false
+            }
+            guard "not_placed_terminal_retry_anchor" {
+                self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring)
+                || self.pending_session_ingress_detach_runtime_ids.contains(agent_runtime_id) == true
+                || self.member_kickoff_pending.contains(agent_identity)
+                || self.member_kickoff_starting.contains(agent_identity)
+                || self.member_kickoff_callback_pending.contains(agent_identity)
+                || !mob_machine_placed_kickoff_custody_absent_for_identity(
+                    self.pending_placed_kickoff_outcomes,
+                    self.resolved_placed_kickoff_outcomes,
+                    agent_identity)
+                || session_id == None
+                || self.member_session_bindings.get_cloned(agent_identity) != session_id
+                || self.member_placement.contains_key(agent_identity) == false
+                || self.current_placed_spawn_ids.contains_key(agent_identity) == false
+                || !mob_machine_placed_cleanup_absent_for_identity(
+                    self.pending_placed_carrier_cleanup,
+                    agent_identity)
+                || self.runtime_retire_pending_sessions.contains_key(agent_runtime_id) == true
+                || placed_release_confirmed == false
+            }
+            guard "kept_for_resume" { keeps_durable_run == true }
+            guard "member_not_retiring" {
+                self.member_state_markers.get_cloned(agent_runtime_id) != Some(MobMemberState::Retiring)
+            }
+            update {}
+            to Running
+            emit AutonomousShutdownMemberActionResolved {
+                action: AutonomousShutdownMemberActionKind::KeepForResume,
+                agent_identity: agent_identity,
+                agent_runtime_id: agent_runtime_id,
+                fence_token: fence_token,
+                generation: generation,
+                session_id: session_id,
+            }
+        }
+
     }
         }
 
@@ -24484,12 +24610,16 @@ pub enum MobMemberState {
 /// Machine-owned shutdown action for one exact autonomous member
 /// incarnation. The fail-closed default keeps interruption enabled; skipping
 /// is reserved for a machine-proven terminal retirement retry anchor after
-/// either Mob-owned archive or host-owned runtime release.
+/// either Mob-owned archive or host-owned runtime release. Keeping is
+/// reserved for a live, non-retiring member whose Shutdown unregisters its
+/// durable session with a requeue: its kickoff stays open and the runtime
+/// stop suspends its running turn for the next start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum AutonomousShutdownMemberActionKind {
     #[default]
     Interrupt,
     SkipTerminalRetirementAnchor,
+    KeepForResume,
 }
 
 /// Typed public wait-admission result for member waits. MobMachine emits this
@@ -24572,7 +24702,7 @@ pub enum EventSubscriptionRejectReasonKind {
 
 /// Typed work-origin classification for
 /// [`MobMachineInput::SubmitWork`] / [`MobMachineEffect::RequestRuntimeIngress`].
-/// Closed mirror of [`crate::ids::WorkOrigin`] — the DSL uses this enum as
+/// Closed mirror of `meerkat_mob::ids::WorkOrigin` - the DSL uses this enum as
 /// guard-visible truth instead of the former `origin == "External"` /
 /// `origin == "Internal"` string compares. The `Ingest` variant is only
 /// valid on the receiving side of the admission seam
@@ -24933,7 +25063,7 @@ pub enum MobFrameSeedDisposition {
 }
 
 /// Fallible reverse mapping: the `Ingest` variant has no counterpart in the
-/// shell-side [`crate::ids::WorkOrigin`] (which only classifies mob-submitted
+/// shell-side `meerkat_mob::ids::WorkOrigin` (which only classifies mob-submitted
 /// work lanes); callers on the mob-domain side assert it away and surface a
 /// domain error if the DSL ever produces it back across the seam.
 /// Typed member lifecycle notice kind. Replaces the former literal-string
@@ -25088,6 +25218,11 @@ pub enum IdentityLeaseCondition {
     HeldByCurrentIncarnation,
     HeldByOtherLiveIncarnation,
     HeldByExpiredIncarnation,
+    /// Unexpired, held by an earlier incarnation of the same holder whose
+    /// process the shell has proven ended (it holds the store's process
+    /// incarnation custody): nothing of that incarnation runs, so the lease
+    /// is taken over at once.
+    HeldByEndedIncarnation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

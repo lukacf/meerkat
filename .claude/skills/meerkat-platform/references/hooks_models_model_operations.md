@@ -314,9 +314,10 @@ multiplier = 2.0
   shell = { secs = 120, nanos = 0 }` (not humantime). A timed-out tool returns
     a `timeout` error result and the run goes on. Since 0.9.1 a call that hits
   its per-call or inactivity timeout first emits `tool_execution_timed_out`
-  (with the bound in `timeout_ms`), then its `tool_execution_completed`, and
-  ATIF exports record it as one observation marked `timed_out`; 0.9.0 never
-  emitted the event. The shell tool's `timeout_secs` comes from the model
+  (with the bound in `timeout_ms`), then its `tool_execution_completed` and
+  `tool_result_received`, and ATIF exports record it as one observation marked
+  `timed_out`; 0.9.0 never emitted the event. The shell tool's `timeout_secs`
+  comes from the model
   (minimum 1); without it `[shell] timeout_secs` applies (default 30, and 0
   keeps 30) since 0.9.1, where 0.9.0 always used 30.
 

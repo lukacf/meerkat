@@ -185,6 +185,7 @@ fn decode_profile(input: MobProfileInput) -> Result<Profile, String> {
         // its typed MeerkatSchema instead of erasing it back to JSON.
         output_schema: input.output_schema.map(|schema| schema.schema),
         provider_params: input.provider_params.map(Into::into),
+        durable: input.durable,
     })
 }
 
@@ -479,6 +480,7 @@ mod tests {
                         ..Default::default()
                     },
                 ),
+                durable: false,
             }),
         );
 
@@ -671,5 +673,20 @@ mod tests {
             let error = decode_public_mob_definition(input).expect_err("a malformed opt-in");
             assert!(error.contains(expected), "{error}");
         }
+    }
+
+    /// A public profile carries its durable worker flag into the domain
+    /// profile; an omitted flag is an ordinary profile.
+    #[test]
+    fn decode_public_profile_keeps_the_durable_worker_flag() {
+        let durable: MobProfileInput = serde_json::from_value(serde_json::json!({
+            "model": "claude-sonnet-4-6",
+            "tools": { "comms": true },
+            "durable": true
+        }))
+        .expect("durable profile input");
+        assert!(decode_public_profile(durable).expect("decodes").durable);
+        let ordinary = profile_input(serde_json::json!({ "comms": true }));
+        assert!(!decode_public_profile(ordinary).expect("decodes").durable);
     }
 }

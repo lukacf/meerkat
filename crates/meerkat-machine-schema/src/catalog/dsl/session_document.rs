@@ -401,6 +401,16 @@ pub enum RunIdCardinality {
     NoRunId,
     SingleRunId,
     MultipleRunIds,
+    /// The tail holds no assistant message and no tool result, so no row of
+    /// it could carry a run id: the first commit of a round whose assistant
+    /// message only the run cursor holds (round zero, or the round after a
+    /// rewrite), or a run's closing save before any assistant row, possibly
+    /// with no new message at all. The shell has already checked that the
+    /// store-issued provisional binding names the exact physical head. On a
+    /// strict continuation that binding attributes the tail to its run; on a
+    /// rewrite descendant only an agreeing run cursor does. Declared last so
+    /// the earlier variants keep their positions.
+    NoRunRows,
 }
 
 /// The terminal stop shape of the durable tail's last assistant message.
@@ -435,6 +445,31 @@ pub enum DurableTailRecoveryClass {
     /// Anything else. Held intact; never served, never discarded.
     #[default]
     Ambiguous,
+    /// The tail is a durable session's open run at a committed round: the
+    /// repairable shape, with a run cursor that agrees with the transcript
+    /// and names the tail's run, whose bound inputs are all still open. The
+    /// run continues from its last committed round instead of closing.
+    ///
+    /// Declared last so the earlier variants keep their positions.
+    ContinuableCandidate,
+}
+
+/// What the durable tail's run cursor says, compared with its transcript.
+///
+/// The shell extracts this MECHANICALLY; the machine assigns meaning. A
+/// cursor agrees when it names the tail's run and, while its round's tool
+/// calls are pending, the staged assistant message and its tool call ids are
+/// absent from the transcript. Fail closed: the default is the value that
+/// can only hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum DurableTailRunCursor {
+    /// The tail carries a cursor that does not agree with its transcript.
+    #[default]
+    Disagrees,
+    /// The tail carries no run cursor.
+    Absent,
+    /// The tail carries a run cursor that agrees with its transcript.
+    Agrees,
 }
 
 /// How a durable store row relates to the committed runtime authority
@@ -1037,6 +1072,8 @@ machine! {
                 dangling_tool_use_count: u64,
                 orphan_tool_result_count: u64,
                 messages_after_terminal: bool,
+                run_cursor: Enum<DurableTailRunCursor>,
+                cursor_inputs_open: bool,
             },
 
             // -----------------------------------------------------------
@@ -4426,7 +4463,7 @@ machine! {
         // bridge the authority to the row); both pass the same shape checks.
         //   Completed:  verified descendant, single run, EndTurn, no
         //               dangling calls, no orphan results, nothing after
-        //               the terminal.
+        //               the terminal, and no run cursor.
         //   Repairable: verified descendant, single run, coherent (no
         //               orphans, nothing after the terminal), NO dangling
         //               calls, stopped at ToolUse or with no recorded
@@ -4434,13 +4471,34 @@ machine! {
         //               execution: its external side effect may have fired
         //               before the crash, so no tail carrying one may be
         //               auto-closed and resumed.
+        //   Continuable: the Repairable shape with a run cursor that agrees
+        //               with the transcript and whose bound inputs are all
+        //               still open: a durable session's open run at a
+        //               committed round. It continues; it is never closed.
+        //               A Repairable shape whose agreeing cursor's inputs
+        //               are already settled stays Repairable, and a cursor
+        //               never upgrades any other shape.
+        //   No run rows: a tail with no assistant message and no tool
+        //               result (a round's first commit whose message only
+        //               the cursor holds, or a closing save before any
+        //               assistant row, possibly with no new row) carries no
+        //               run id. On a strict continuation the store-issued
+        //               provisional binding of the exact physical head
+        //               attributes it; on a rewrite descendant only an
+        //               agreeing cursor does. Attributed, it takes the
+        //               Repairable or Continuable arm like a single-run
+        //               tail.
         //   Ambiguous:  everything else (explicit negation of the above —
-        //               non-descendant relations, zero or multiple runs,
-        //               orphan results, content after the terminal, Other
-        //               stop shapes, or ANY dangling tool_use call).
+        //               non-descendant relations, an unattributed tail
+        //               (zero or multiple run ids, or no run rows on a
+        //               rewrite without an agreeing cursor), orphan
+        //               results, content after the terminal, Other stop
+        //               shapes, ANY dangling tool_use call, a cursor that
+        //               disagrees with the transcript, or a cursor on an
+        //               EndTurn shape: a run's final save clears it).
         //               Rewrite rows carry no run identity, so a rewrite
         //               descendant whose live tail holds no run-stamped
-        //               message has no run id and is held here too.
+        //               message and no agreeing cursor is held here too.
         // No class authorizes discarding; Ambiguous is held intact. For a
         // dangling call that means held for reconciliation: readable, never
         // executed against, until an idempotency/reconciliation witness or
@@ -4456,7 +4514,9 @@ machine! {
                 terminal_stop_reason,
                 dangling_tool_use_count,
                 orphan_tool_result_count,
-                messages_after_terminal
+                messages_after_terminal,
+                run_cursor,
+                cursor_inputs_open
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
@@ -4467,6 +4527,7 @@ machine! {
                 && dangling_tool_use_count == 0
                 && orphan_tool_result_count == 0
                 && messages_after_terminal == false
+                && run_cursor == DurableTailRunCursor::Absent
             }
             update {}
             to Ready
@@ -4485,24 +4546,71 @@ machine! {
                 terminal_stop_reason,
                 dangling_tool_use_count,
                 orphan_tool_result_count,
-                messages_after_terminal
+                messages_after_terminal,
+                run_cursor,
+                cursor_inputs_open
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
                 && (relation == DurableHeadRelation::VerifiedStrictDescendant
                     || relation == DurableHeadRelation::VerifiedRewriteDescendant)
-                && run_id_cardinality == RunIdCardinality::SingleRunId
+                && (run_id_cardinality == RunIdCardinality::SingleRunId
+                    || (run_id_cardinality == RunIdCardinality::NoRunRows
+                        && terminal_stop_reason == DurableTailStopReason::Absent
+                        && (relation == DurableHeadRelation::VerifiedStrictDescendant
+                            || run_cursor == DurableTailRunCursor::Agrees)))
                 && dangling_tool_use_count == 0
                 && orphan_tool_result_count == 0
                 && messages_after_terminal == false
                 && (terminal_stop_reason == DurableTailStopReason::ToolUse
                     || terminal_stop_reason == DurableTailStopReason::Absent)
+                && (run_cursor == DurableTailRunCursor::Absent
+                    || (run_cursor == DurableTailRunCursor::Agrees
+                        && cursor_inputs_open == false))
             }
             update {}
             to Ready
             emit DurableTailClassified {
                 candidate_id: candidate_id,
                 class: DurableTailRecoveryClass::InterruptedRepairableCandidate
+            }
+        }
+
+        transition ClassifyDurableTailContinuable {
+            on input ClassifyDurableTail {
+                session_id,
+                candidate_id,
+                relation,
+                run_id_cardinality,
+                terminal_stop_reason,
+                dangling_tool_use_count,
+                orphan_tool_result_count,
+                messages_after_terminal,
+                run_cursor,
+                cursor_inputs_open
+            }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && (relation == DurableHeadRelation::VerifiedStrictDescendant
+                    || relation == DurableHeadRelation::VerifiedRewriteDescendant)
+                && (run_id_cardinality == RunIdCardinality::SingleRunId
+                    || (run_id_cardinality == RunIdCardinality::NoRunRows
+                        && terminal_stop_reason == DurableTailStopReason::Absent
+                        && (relation == DurableHeadRelation::VerifiedStrictDescendant
+                            || run_cursor == DurableTailRunCursor::Agrees)))
+                && dangling_tool_use_count == 0
+                && orphan_tool_result_count == 0
+                && messages_after_terminal == false
+                && (terminal_stop_reason == DurableTailStopReason::ToolUse
+                    || terminal_stop_reason == DurableTailStopReason::Absent)
+                && run_cursor == DurableTailRunCursor::Agrees
+                && cursor_inputs_open == true
+            }
+            update {}
+            to Ready
+            emit DurableTailClassified {
+                candidate_id: candidate_id,
+                class: DurableTailRecoveryClass::ContinuableCandidate
             }
         }
 
@@ -4515,17 +4623,26 @@ machine! {
                 terminal_stop_reason,
                 dangling_tool_use_count,
                 orphan_tool_result_count,
-                messages_after_terminal
+                messages_after_terminal,
+                run_cursor,
+                cursor_inputs_open
             }
             guard {
                 self.lifecycle_phase == Phase::Ready
                 && ((relation != DurableHeadRelation::VerifiedStrictDescendant
                         && relation != DurableHeadRelation::VerifiedRewriteDescendant)
-                    || run_id_cardinality != RunIdCardinality::SingleRunId
+                    || !(run_id_cardinality == RunIdCardinality::SingleRunId
+                        || (run_id_cardinality == RunIdCardinality::NoRunRows
+                            && terminal_stop_reason == DurableTailStopReason::Absent
+                            && (relation == DurableHeadRelation::VerifiedStrictDescendant
+                                || run_cursor == DurableTailRunCursor::Agrees)))
                     || orphan_tool_result_count != 0
                     || messages_after_terminal == true
                     || terminal_stop_reason == DurableTailStopReason::Other
-                    || dangling_tool_use_count != 0)
+                    || dangling_tool_use_count != 0
+                    || run_cursor == DurableTailRunCursor::Disagrees
+                    || (terminal_stop_reason == DurableTailStopReason::EndTurn
+                        && run_cursor != DurableTailRunCursor::Absent))
             }
             update {}
             to Ready

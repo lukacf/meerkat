@@ -3930,6 +3930,7 @@ fn placed_shutdown_requires_exact_release_terminal_before_skipping_interrupt() {
                 runtime_residue_present: false,
                 archive_authority_known: false,
                 placed_release_confirmed,
+                keeps_durable_run: false,
             },
         )
         .expect("placed shutdown action must classify")
@@ -3951,6 +3952,81 @@ fn placed_shutdown_requires_exact_release_terminal_before_skipping_interrupt() {
             ..
         }
     )));
+}
+
+/// A Shutdown that keeps a live durable autonomous member's run for the next
+/// start resolves `KeepForResume` instead of `Interrupt`: its kickoff stays
+/// open and the runtime stop suspends its running turn. A Shutdown that keeps
+/// nothing still interrupts it, and so does any Shutdown once the member is
+/// retiring.
+#[test]
+fn shutdown_keeps_a_live_durable_autonomous_members_run_for_resume() {
+    let mut authority = MobMachineAuthority::new();
+    let session = seed_local_member(
+        &mut authority,
+        "kept",
+        0,
+        SpawnPolicyRuntimeMode::AutonomousHost,
+    );
+    let classify = |authority: &mut MobMachineAuthority, keeps_durable_run| {
+        let transition = MobMachineMutator::apply(
+            authority,
+            MobMachineInput::ResolveAutonomousShutdownMemberAction {
+                agent_identity: identity("kept"),
+                agent_runtime_id: runtime_id("kept", 0),
+                fence_token: FenceToken(1),
+                generation: Generation(0),
+                session_id: Some(session.clone()),
+                session_has_live_actor: true,
+                session_projection_visible: true,
+                runtime_residue_present: true,
+                archive_authority_known: true,
+                placed_release_confirmed: false,
+                keeps_durable_run,
+            },
+        )
+        .expect("the live member's shutdown action classifies");
+        transition
+            .effects()
+            .iter()
+            .filter_map(|effect| match effect {
+                MobMachineEffect::AutonomousShutdownMemberActionResolved { action, .. } => {
+                    Some(*action)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        (
+            classify(&mut authority, false),
+            classify(&mut authority, true)
+        ),
+        (
+            vec![AutonomousShutdownMemberActionKind::Interrupt],
+            vec![AutonomousShutdownMemberActionKind::KeepForResume],
+        ),
+        "only a Shutdown that keeps the member's durable run keeps it"
+    );
+
+    MobMachineMutator::apply(
+        &mut authority,
+        MobMachineInput::Retire {
+            mob_id: MobId("test-mob".to_string()),
+            agent_runtime_id: runtime_id("kept", 0),
+            agent_identity: identity("kept"),
+            generation: Generation(0),
+            releasing: Some(session.clone()),
+            session_id: Some(session.clone()),
+        },
+    )
+    .expect("local retire accepted");
+    assert_eq!(
+        classify(&mut authority, true),
+        vec![AutonomousShutdownMemberActionKind::Interrupt],
+        "a retiring member is interrupted even when the Shutdown keeps durable runs"
+    );
+    check_multi_host_invariants(authority.state());
 }
 
 #[test]

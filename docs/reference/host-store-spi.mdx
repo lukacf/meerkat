@@ -1,0 +1,366 @@
+---
+title: "Host Store SPI"
+description: "The storage interface a host implements to keep a Meerkat realm in its own database: operations, batches, limits, errors, the nine obligations, fence leases and the conformance chapter."
+icon: "plug"
+---
+
+# Host Store SPI
+
+Since 0.9.5, a host can keep a realm's durable state in its own database by
+implementing `meerkat_core::host_store::HostStore`. Core builds the realm's
+stores over it and stays the realm's only writer. This page is the contract
+for store implementers. What a realm on a host store does at run time, and
+what its users see, is in
+[Durable Runs and Host Stores](/guides/durable-runs#keeping-a-realm-in-your-own-database).
+
+## Model
+
+The store holds **scopes**. Each scope has:
+
+- a kind (`ScopeKind`): `Session`, `Identity`, `Mob` or `Record`;
+- a name (`ScopeName`), unique among the scopes of its kind in the realm;
+- a versioned head of opaque bytes;
+- ordered rows of opaque bytes.
+
+Core assigns every version and every commit id. It keeps the heads it has
+open in memory, and loads a scope only when it opens it: at start, on resume
+and on failover, never before a commit. The store never interprets a
+payload.
+
+Rows have stable indices. Appended rows take the next indices,
+`truncate_after` removes rows at the end, and `drop_before` removes rows at
+the start without renumbering the rest. Every committed batch moves each
+scope it touches from one version to the next, and one batch may write
+several scopes: rebinding an identity or spawning a member touches more than
+one.
+
+## Operations
+
+```rust
+#[async_trait]
+pub trait HostStore: Send + Sync {
+    async fn acquire_fence(&self, mode: AcquireMode) -> Result<FenceGrant, HostStoreError>;
+    async fn renew_fence(&self, token: FenceToken) -> Result<(), HostStoreError>;
+    fn fence_timing(&self) -> FenceTiming {
+        FenceTiming::default()
+    }
+    async fn load_head(&self, scope: &ScopeRef) -> Result<Option<VersionedHead>, HostStoreError>;
+    async fn list_heads(
+        &self,
+        kind: ScopeKind,
+        after: Option<&ScopeName>,
+        limit: usize,
+    ) -> Result<HeadPage, HostStoreError>;
+    async fn read_rows(
+        &self,
+        scope: &ScopeRef,
+        from: RowIndex,
+        limit: usize,
+    ) -> Result<Vec<Row>, HostStoreError>;
+    async fn commit(&self, batch: &CommitBatch) -> Result<(), HostStoreError>;
+}
+```
+
+| Operation | What it does |
+|-----------|--------------|
+| `acquire_fence(mode)` | Answers a token higher than any acquired before in the realm, durably, and records the new holder's lease. With `AcquireMode::Exclusive`, a live holder makes it answer `Held`. With `AcquireMode::Takeover`, it supersedes any holder and reports what remained of that holder's lease in `FenceGrant::superseded_lease` (zero when no holder was live) |
+| `renew_fence(token)` | Confirms that no token higher than `token` exists, and records a new lease for its holder from now, also when that holder's last lease has lapsed. Answers `FencedOut` when a higher token exists |
+| `fence_timing()` | The renew interval and the lease this store records (see [Fence Leases](#fence-leases)). Defaults to `FenceTiming::default()` |
+| `load_head(scope)` | The scope's visible head as a `VersionedHead { version, commit_id, head }`, or `None` when the scope was never created or was deleted |
+| `list_heads(kind, after, limit)` | Visible scopes of `kind` whose names sort after `after` (from the first when `None`), in name order by the bytes of their names, each with its visible head, at most `limit`. `HeadPage::next` names where to read on, and is `None` when the listing has ended. It serves listings and Core's bulk load at open |
+| `read_rows(scope, from, limit)` | The scope's visible rows from index `from`, in index order, at most `limit`, ending early at the scope's end. A `from` below the first visible row is `Invalid`. A scope that does not exist has no rows |
+| `commit(batch)` | Applies one batch atomically. `Ok` means durable. A commit id that already landed answers `Ok` without acting again. `Indeterminate` means the outcome is unknown |
+
+`VersionedHead::commit_id` is the commit id of the batch that wrote the
+visible version. After an indeterminate commit, Core compares it with its
+batch's commit id to tell whether the batch landed.
+
+## Batches
+
+A `CommitBatch` carries a commit id, the fence token of its writer and one
+update per scope it writes. Core builds it with `CommitBatch::try_new`, which
+refuses a batch:
+
+- with no update, or with two updates of one scope;
+- with an update that is not well formed (below);
+- with more than 8 MiB of heads and rows in all.
+
+Each `ScopeUpdate` says what the batch does to one scope:
+
+| Field | Meaning |
+|-------|---------|
+| `scope` | The scope, as a `ScopeRef { kind, name }` |
+| `previous` | The version the update applies to; `None` creates the scope |
+| `next` | The version after the batch: the one after `previous`, or `ScopeVersion::FIRST` (1) for a scope the batch creates |
+| `head` | The new head; `None` keeps the current one. A creating update must set it |
+| `append` | Rows appended at the end, in order; the first takes the end index left after any truncation |
+| `truncate_after` | Removes every row whose index is at least this one, so the next appended row takes this index. At or past the end, nothing is removed |
+| `drop_before` | Removes every row whose index is below this one, without renumbering the rest. Past the end, every row is removed and the end index stays where it was |
+| `delete` | Deletes the scope with its head and rows. Nothing else may be set |
+
+The parts of an update apply in this order: `truncate_after`, `drop_before`,
+`append`, `head`. A creating update removes no rows and cannot delete. Core
+never creates a deleted scope's name again, and a store may refuse such a
+create as `Invalid`.
+
+## Limits
+
+| Limit | Value | Constant |
+|-------|-------|----------|
+| Heads and rows in one batch | 8 MiB | `MAX_BATCH_BYTES` |
+| One row | 1 MiB | `MAX_ROW_BYTES` |
+| Scope name | 512 bytes, not empty, no control characters | `MAX_SCOPE_NAME_BYTES` |
+| Commit id | 128 bytes, not empty, no control characters | `MAX_COMMIT_ID_BYTES` |
+
+Core keeps every batch within these limits. It writes a large value first,
+as chunks in scopes of their own keyed by the value's digest, in as many
+batches as the value needs; then one commit batch, which alone fits the
+limits, makes the change visible by referring to the chunks and drops the
+chunks it supersedes. Your store therefore sees chunk batches before the
+commit batch that uses them. A chunk that no committed head refers to, for
+example one left by a commit that failed, is garbage, not corruption; Core
+deletes such chunks when it opens the realm and in a background sweep. A
+change that cannot be written this way, or that your store refuses for size
+with `Invalid`, fails as a whole with a typed size error: Core never
+truncates a value and never commits part of a change.
+
+## Errors
+
+| `HostStoreError` | Meaning | Applied |
+|------------------|---------|---------|
+| `Conflict { scope, current }` | The store refused the batch at commit: `scope` is at version `current` (`None`: it does not exist), not at the update's `previous`. Only a store that meets obligation 4 at commit answers it | Nothing |
+| `FencedOut { current }` | A token higher than the caller's exists. Answered by `renew_fence`, and by `commit` in a store that meets obligation 5 at commit | Nothing |
+| `Indeterminate(detail)` | The outcome is unknown: the batch may or may not have landed | Unknown |
+| `Invalid(detail)` | The request breaks a limit or is malformed | Nothing |
+| `Unavailable(detail)` | The store cannot be reached or cannot serve now | Nothing |
+| `Held { holder, remaining }` | An exclusive acquire found a live holder, whose recorded lease lasts `remaining` longer | Nothing acquired |
+
+Answer `Unavailable` only when nothing was applied. When you cannot tell
+whether a commit landed, answer `Indeterminate`: Core then settles it by
+retrying the same batch or by loading the head.
+
+## Obligations
+
+These nine obligations, with the self-fence margin rule under
+[Fence Leases](#fence-leases), are the whole contract. Each lists the ways a
+store may meet it, including the ways of an append-only store, one without
+updates or transactions.
+
+1. **All or nothing.** A load shows a batch completely, in every scope it
+   touches, or not at all. Valid ways:
+   - a transaction;
+   - rows tagged with the commit id plus a commit marker row, where loads
+     ignore rows that have no marker;
+   - a pending-stream batch commit.
+2. **Durable once acknowledged.** After `commit` answers `Ok`, the batch
+   survives a writer crash, and every later load shows it, from this writer
+   or any later one, unless obligation 5 hides it.
+3. **Idempotent retry.** A commit id sent twice acts once. A store may
+   refuse the duplicate or collapse it at load; answering `Ok` to a retry of
+   a batch that already landed is the usual way.
+4. **One version chain per scope.** Core never sends two batches for one
+   version of a scope, so no atomic precheck is required. If two exist anyway
+   (a fenced-out writer, a bug), every load must resolve them the same way.
+   Valid ways:
+   - refuse the second batch at commit with `Conflict`;
+   - fail the load with a typed conflict;
+   - pick one by a fixed rule, such as the lowest commit id, decided per
+     batch, so that a batch that loses in one scope is invisible in all of
+     them.
+
+   Whatever the rule, a batch carrying a lower fence token never beats one
+   carrying a higher token at the same version.
+5. **Fencing.** After a token is acquired, a batch carrying a lower token
+   whose commit point comes later never becomes visible. Every batch whose
+   commit point comes before the acquire stays visible, whether or not its
+   writer saw the acknowledgement: a load after the acquire shows it. Valid
+   ways:
+   - refuse the batch at commit with `FencedOut`;
+   - at load, ignore every batch whose token is below the highest token
+     acquired before its commit point.
+
+   The commit point is the store's own server-assigned commit order (for
+   example its marker's commit time), never a writer's clock. Commit points
+   that tie are ordered by a fixed rule, such as the commit id.
+6. **Logical removal.** Truncate, drop and delete take effect for loads
+   together with their batch. Physical cleanup may come later or never;
+   tombstones are fine.
+7. **Order.** Rows load in commit order.
+8. **Independence.** No realm-wide lock, pointer, sequence or transaction on
+   the commit path, and scopes commit concurrently. The fence is acquired and
+   renewed off the hot path; commits only carry the token.
+9. **Listing.** A scope is listed once its creating batch is visible, and
+   not after its deletion.
+
+A store meets obligations 4 and 5 either at commit, answering `Conflict` or
+`FencedOut`, or at load, by the fixed rules above. Core treats both the same
+way: the fenced or conflicting batch is not part of the realm.
+
+## Fence Leases
+
+The store records a lease for the holder of the highest token. It lasts
+`FenceTiming::lease` from the holder's last acquire or renew, as the store's
+own clock saw it, and the holder counts as live while it lasts.
+
+The host sizes the timing for its backend with `HostStore::fence_timing`,
+built with `FenceTiming::try_new(renew_interval, lease)` or, to declare the
+self-fence margin, `FenceTiming::try_with_margin(renew_interval, lease,
+self_fence_margin)`, and then, to declare the longest commit,
+`.try_with_max_commit_latency(max_commit_latency)`:
+
+| Setting | Default | Bounds |
+|---------|---------|--------|
+| Renew interval | 10 s (`FENCE_RENEW_INTERVAL_SECS`) | At least 1 s (`FenceTiming::MIN_RENEW_INTERVAL`) |
+| Lease | 30 s (`FENCE_LEASE_SECS`) | At least 3 renew intervals (`FENCE_MIN_LEASE_RENEWALS`), at most 1 hour (`FenceTiming::MAX_LEASE`) |
+| Self-fence margin | One renew interval (`try_new`) | At least 1 renew interval, and the lease minus the margin at least 2 renew intervals |
+| Longest commit | 2 s (`FENCE_MAX_COMMIT_LATENCY_SECS`) | Longer than zero, at most the lease |
+
+`FenceTiming::self_fence_window` is the lease minus the self-fence margin,
+and `try_with_margin` refuses a margin below one renew interval or a window
+below two renew intervals. The margin must be at least the renew interval
+plus twice your store's visibility lag. A renew written just before a
+takeover can stay invisible to the new holder for up to that lag, and the
+holder renews only once per interval, so the new holder's wait can end
+before the old holder's real lease; the margin makes the old holder stop
+first. A store whose writes become visible after a few seconds declares a
+margin larger by twice that. A shorter lease shortens the wait for the next
+process after a holder died, and at a takeover. A longer renew interval
+renews less often.
+
+The longest commit is how long one `commit` can take on your backend
+(`FenceTiming::max_commit_latency`). A fenced write of Core's that meets a
+commit still in flight on the fence it checks waits up to that long before
+it reports the write as backed off, so a store whose commits are slower
+declares a longer bound instead of failing those writes.
+
+### Core's Writer Rules
+
+The store relies on Core keeping these rules:
+
+- **Exclusive acquire.** Core acquires with `AcquireMode::Exclusive`, so two
+  processes never fence each other back and forth. Apart from Core taking
+  over its own recorded lease (below), only an explicit takeover uses
+  `AcquireMode::Takeover`. Core takes over its own recorded lease
+  when a stopped holder re-acquires and an exclusive acquire answers `Held`
+  with its own token.
+- **Renewing.** The holder renews once per renew interval. After a failed
+  renew, or once its self-fence window has closed, it stops every write and
+  dispatch, and goes on only through a fresh acquire, with a new token,
+  which it makes by itself before its next write; if another process took
+  the fence or committed meanwhile, the realm stops until it is opened
+  again. It never resumes on a later renew. The rule is Core's: a store
+  answers a renew of the current token even when the holder's lease lapsed,
+  and refuses only a token that was superseded or that it never issued.
+- **Self-fencing.** The holder fences itself on its own clock: it makes no
+  model call, dispatches nothing and commits nothing unless its last
+  successful acquire or renew started less than the self-fence window ago.
+  It checks the clock before each commit, before each model call, and right
+  before each tool call starts, after the round's pre-tool hooks; a call
+  refused there never starts, and the round commits none of its results. A
+  check takes no store request; the per-round path sends no fence request to
+  the store.
+- **Takeover wait.** After an acquire that supersedes a live holder, the new
+  holder waits out `FenceGrant::superseded_lease` before it makes a model
+  call or dispatches anything. By then the old holder has fenced itself: the
+  store started that lease no earlier than the holder started the acquire or
+  renew it came from, and the holder stops the self-fence margin before the
+  lease ends.
+- **Bulk load.** Core loads the heads with `list_heads` after the acquire
+  and before its first commit, so the load observes one cut.
+- **Commit ids.** Core never reuses a commit id for different content, and
+  never commits a scope's next version while an earlier commit touching that
+  scope has an unknown outcome. It settles the unknown first, by retrying the
+  same batch or by loading the head.
+
+## How Core Lays Out A Realm
+
+This section is informative: the layout is Core's own, and a store must not
+depend on it.
+
+- Each session's runtime is one `Session` scope.
+- Each mob storage is a few scopes: one `Mob` scope (its event log and
+  records), one `Identity` scope (its identity authority) and `Record`
+  scopes for flow runs and identity statuses.
+- Realm-wide maps are `Record` scopes, one per entry, such as one runtime per
+  continuation key.
+- Chunks of large values are scopes of their own.
+
+A realm therefore holds a few scopes per session and per mob, and listing
+and the bulk load at open read every head once.
+
+## Mapping Onto A Database
+
+Any database that meets the obligations works. Two common shapes:
+
+**A transactional database.** Commit each batch in one transaction. In it,
+check each update's `previous` against the stored version and the batch's
+token against the highest acquired token, and refuse with `Conflict` or
+`FencedOut`. Record the commit id with the scope's version, so that a retry
+of a landed batch answers `Ok`. Keep the fence token and its lease expiry,
+on the database's clock, in a row of their own.
+
+**An append-only store** (no updates, no transactions):
+
+- **Commit.** Append the batch with one pending-stream batch commit, or
+  append its rows tagged with the commit id and close them with a marker
+  row.
+- **Retries.** A streaming insert can fail in transport under a burst of
+  commits. Retry it a bounded number of times with jittered backoff.
+  Per-row insert ids, and a load that keeps one copy of a repeated commit id
+  and of a row written twice under one commit id (rows have stable indices),
+  make such a retry safe. In one store, about a third of the commits in a
+  burst met a transport error until it retried each insert up to six times.
+- **Request size.** A batch of up to 8 MiB grows to about 11 MB as JSON.
+  Split its rows into requests of at most 7 MiB each as sent, and write the
+  commit marker last.
+- **Load.** Take the scope's committed batches, drop fenced-out batches by
+  their marker's commit order, collapse duplicate commit ids, keep the lowest
+  commit id per version, and return the highest version's head and its rows
+  minus the removed ranges.
+- **Fence.** Acquiring appends a fence row with the next token and waits
+  until it is visible. Renewing checks that no higher token exists and
+  appends a lease row.
+- **Clock.** Commit timestamps are the store's own, and ties break by commit
+  id.
+- **Cleanup** is optional and stays off the commit path.
+
+## Conformance
+
+The `meerkat-store-conformance` crate checks a store through the six
+operations alone, in its host store chapter
+(`chapters::host_store::host_store`). Give it a `HostStoreFactory` over one
+realm, which starts empty:
+
+- every `open` stands for a new process: a new handle over the same realm
+  that holds nothing of the handles before it (for a remote backend, a new
+  client over the same dataset);
+- `lapse_fence_leases` lets every recorded lease run out, by advancing the
+  store's clock or by waiting.
+
+The chapter kills a process by dropping its handle, with any commit it has in
+flight. Where an obligation can be met at commit or at load, it accepts both.
+Its rows run in order:
+
+| Row | What it checks |
+|-----|----------------|
+| Acquire on an empty realm | An exclusive acquire supersedes no lease |
+| Reopen | A new process loads what an earlier one committed: heads, versions, commit ids and rows |
+| Kill | A writer dies before, during or after a batch over two scopes; the next writer sees it in both or neither, and settles an unknown batch the way Core does |
+| Stale fence | The current holder's first renew succeeds, even if its lease lapsed during the rows before; a superseded writer can neither keep the fence nor make a batch visible; an exclusive acquire waits out a live holder's lease and no longer |
+| Takeover with a commit in flight | The old writer's in-flight commit shows wholly or never, the same to every load |
+| Same version twice | Every load resolves two batches for one version the same way, and the loser is invisible in all its scopes |
+| Retry | A commit id sent again acts once, from the same handle or a new one |
+| Rows, removal and listing | Rows keep stable indices through truncation and drops, removal takes effect with its batch, listings page every visible scope once in name order, and a batch at the size limits lands byte-exact |
+| Independence | Over 200 scopes commit concurrently without a stall |
+| Stalled commit | A commit held in flight on one scope does not hold up a commit on another |
+
+The crate's long-run and durable-worker chapters run scripted runs over a
+store, kill them at chosen points of a round, and check that each restart
+continues from the last commit under the same run id, or, when nothing was
+committed yet, runs the input again as a new run.
+
+## See Also
+
+- [Durable Runs and Host Stores](/guides/durable-runs)
+- [Session contracts](/reference/session-contracts)
+- [Storage Operations](/guides/storage-operations)

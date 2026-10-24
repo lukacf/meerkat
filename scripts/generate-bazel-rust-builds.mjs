@@ -2410,6 +2410,11 @@ for (const pkg of localPackages.values()) {
         // resolves ownership anchors against a full workspace type index);
         // the 60s "small" budget times out on remote executors.
         attrs.splice(attrs.length - 1, 0, `    size = "medium",`);
+      } else if (key === "meerkat-mob" && target.name === "long_run_conformance") {
+        // The long run, compacted long run and durable worker conformance
+        // chapters run every row over a fresh store, a killed child process
+        // and a restart per row: minutes per test, and nine tests.
+        attrs.splice(attrs.length - 1, 0, `    size = "enormous",`);
       } else if (key === "meerkat-machine-codegen" && target.name === "render_contracts") {
         // Renders the full canonical machine and composition catalog (the
         // mob seam model alone is ~100k TLA lines) once per contract, 36

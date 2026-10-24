@@ -12,8 +12,8 @@ Meerkat (`rkat`) is a library-first agent runtime exposed through multiple surfa
 This guide is an overview. The reference documents below carry the detail; read the matching one before answering a detailed question. On a help surface (`rkat help`, JSON-RPC `help/ask`, REST `POST /help`, MCP `meerkat_help`), read a reference with the `skill_read_resource` tool, passing this skill's `source_uuid` and `skill_name` and the reference path as `path`; `skill_list_resources` lists them.
 
 - `references/api_reference.md` - per-surface methods, schemas, examples (CLI, REST, RPC, MCP, Python/TS/Rust SDKs).
-- `references/sessions_runtime_surfaces_sessions.md` - sessions on every surface: create, resume, list, read, history, archive, turn queueing and the attempt cap, interrupt versus `turn/stop_run`, forks, transcript edits, system prompts, events and replay, ATIF export, durable resume holds and tool-process recovery.
-- `references/sessions_runtime_surfaces_storage_config.md` - realm ids and where state lives, backends, multiprocess hosting, SQLite, `rkat storage`, runtime health and shutdown, WorkGraph limits, schedules, `rkat config` and config keys.
+- `references/sessions_runtime_surfaces_sessions.md` - sessions on every surface: create, resume, list, read, history, archive, turn queueing and the attempt cap, interrupt versus `turn/stop_run`, forks, transcript edits, system prompts, events and replay, ATIF export, durable runs (0.9.5 per-round commits, same-run resume, tool reruns), durable resume holds and tool-process recovery.
+- `references/sessions_runtime_surfaces_storage_config.md` - realm ids and where state lives, backends, host stores (0.9.5), multiprocess hosting, SQLite, `rkat storage`, runtime health and shutdown, WorkGraph limits, schedules, `rkat config` and config keys.
 - `references/sessions_runtime_surfaces_api_changes.md` - JSON-RPC methods and REST routes added or renamed since 0.8.40, the `ErrorCode` table with HTTP statuses and `rkat` exit codes, SDK changes, binaries and installs, Rust embedding, removals.
 - `references/providers_and_auth_models.md` - choosing a provider and model, default models and the catalog, capabilities, thinking and effort, `provider_params` and prompt caching, realtime, voice and image models, self-hosted servers, provider errors, refusals and content filters.
 - `references/providers_and_auth_credentials.md` - env-var API keys, realm backends, auth profiles and bindings, base URLs and cloud routes, credential storage and keychain refusals, every `rkat auth` subcommand, `--auth-binding`, auth RPC/REST/SDK methods and errors, connector OAuth clients.
@@ -500,7 +500,10 @@ surface, not the old live-adapter/docs-refresh snapshot:
   content is never discarded. While a session is held, resume fails with
   JSON-RPC -32003 (`SESSION_NOT_RUNNING`, HTTP 409) and data
   `{durable_resume_hold, session_error_code, session_id, content_retained: true}`:
-  `SESSION_DURABLE_TAIL_HELD_FOR_RECOVERY` (`tail_held_for_recovery`),
+  `SESSION_DURABLE_TAIL_HELD_FOR_RECOVERY` (`tail_held_for_recovery`; an
+  operator resolves an ambiguous held tail, or an interrupted one held
+  beside another run's stranded inputs, with
+  `rkat session resolve-held-tail <session-id>`, then `--apply`),
   `SESSION_DURABLE_TAIL_RECOVERY_REFUSED` (`recovery_refused`, 0.8.11: retry
   after the conflicting runtime quiesces),
   `SESSION_DURABLE_EVIDENCE_QUARANTINED` (`evidence_quarantined`), and
@@ -1236,13 +1239,13 @@ tools.
 
 ```toml
 # Default: three providers + Copilot backend; no persistent realm/comms/MCP/skills/memory/live activation
-meerkat = "=0.9.4"
+meerkat = "=0.9.5"
 
 # Single provider, minimal
-meerkat = { version = "=0.9.4", default-features = false, features = ["anthropic"] }
+meerkat = { version = "=0.9.5", default-features = false, features = ["anthropic"] }
 
 # Add persistence + memory + comms + live channels
-meerkat = { version = "=0.9.4", features = [
+meerkat = { version = "=0.9.5", features = [
     "jsonl-store", "session-store", "session-compaction",
     "memory-store-session", "comms", "mcp", "skills",
     "openai-realtime", "live", "live-webrtc"
@@ -1273,7 +1276,7 @@ surfaces. The default `rkat` feature set includes `memory-store` and
 builds:
 
 ```bash
-cargo install rkat --version "=0.9.4" --no-default-features --features "anthropic,openai,session-store,mcp"
+cargo install rkat --version "=0.9.5" --no-default-features --features "anthropic,openai,session-store,mcp"
 ```
 
 Disabled features return typed errors (e.g. `SessionError::PersistenceDisabled`) — no panics.
@@ -1454,6 +1457,10 @@ matching. For the lifecycle on every surface (create, resume with
 `rkat run --resume`, interrupt versus `turn/stop_run`, forks, transcript edits,
 archive, history, event replay, ATIF export, recovery holds and
 `rkat session repair-wholeblob`), load `references/sessions_runtime_surfaces_sessions.md`.
+Since 0.9.5 a run in a durable session commits every tool round and, after a
+crash, continues under the same run id from its last committed round; tool
+calls whose results were not committed run again at least once, keyed by a
+dedupe key (same file, durable runs).
 Storage locations, backends and config are in
 `references/sessions_runtime_surfaces_storage_config.md`.
 

@@ -648,7 +648,6 @@ fn applied_pending_state(input: &Input, run_id: &RunId, sequence: u64) -> Stored
 /// A durably accepted content row never bound to any run: the current
 /// never-started-input shape. Recovery must retain it for ordinary redelivery,
 /// not infer consumption from its presence beside a completed candidate.
-#[cfg(feature = "sqlite-store")]
 fn accepted_unbound_state(input: &Input) -> StoredInputState {
     let mut state = InputState::new_accepted(input.id().clone());
     state.persisted_input = Some(input.clone());
@@ -1429,6 +1428,240 @@ async fn whole_blob_provisional_recovery_promotes_store_owned_candidate() {
     );
 }
 
+/// Seed a session whose run answered and whose end-of-run save landed, but
+/// whose boundary did not: a committed prompt, the run's completed tail as
+/// the store's provisional tail, and the run's input applied and waiting for
+/// that missing boundary. Returns the session, its runtime and the input.
+async fn seed_completed_run_with_pending_input(
+    store: &InMemoryRuntimeStore,
+) -> (SessionId, LogicalRuntimeId, Input) {
+    use meerkat_core::lifecycle::core_executor::BoundSessionCommit;
+    use meerkat_core::types::{
+        AssistantBlock, BlockAssistantMessage, Message, StopReason, TranscriptMessageIdentity,
+        UserMessage,
+    };
+    use meerkat_runtime::store::{PreparedRuntimeSessionCommit, PreparedWholeBlobProvisionalTail};
+
+    let run_id = RunId::new();
+    let input = make_prompt("the run's prompt");
+    let mut committed = meerkat_core::Session::new();
+    committed.push(Message::User(UserMessage::text("the run's prompt")));
+    let session_id = committed.id().clone();
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    let committed_authority = store
+        .commit_prepared_session_boundary(
+            &runtime_id,
+            PreparedRuntimeSessionCommit::snapshot_only(
+                BoundSessionCommit::sealed(Arc::new(committed.clone())).unwrap(),
+            ),
+        )
+        .await
+        .unwrap()
+        .authority()
+        .and_then(|authority| authority.whole_blob())
+        .cloned()
+        .expect("initial boundary returns WholeBlob store authority");
+
+    // The run answered, and its end-of-run save landed; its boundary did not.
+    let mut answered = committed;
+    answered.push(Message::BlockAssistant(BlockAssistantMessage {
+        blocks: vec![AssistantBlock::Text {
+            text: "the answer".to_string(),
+            meta: None,
+        }],
+        stop_reason: Some(StopReason::EndTurn),
+        identity: TranscriptMessageIdentity::default().with_run_id(run_id.clone()),
+        created_at: meerkat_core::types::message_timestamp_now(),
+        assistant_message_id: None,
+    }));
+    store
+        .write_prepared_whole_blob_provisional_tail(
+            &runtime_id,
+            PreparedWholeBlobProvisionalTail::prepare(
+                committed_authority,
+                run_id.clone(),
+                1,
+                &BoundSessionCommit::sealed(Arc::new(answered)).unwrap(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    store
+        .persist_input_state(
+            &runtime_id,
+            &persistable(applied_pending_state(&input, &run_id, 1)),
+        )
+        .await
+        .unwrap();
+    (session_id, runtime_id, input)
+}
+
+/// The stored phase and terminal outcome of `input_id`'s row.
+async fn stored_terminal(
+    store: &InMemoryRuntimeStore,
+    runtime_id: &LogicalRuntimeId,
+    input_id: &InputId,
+) -> Option<(InputLifecycleState, Option<InputTerminalOutcome>)> {
+    store
+        .load_input_states_strict(runtime_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|row| &row.state.input_id == input_id)
+        .map(|row| (row.seed.phase, row.seed.terminal_outcome))
+}
+
+const CONSUMED_ROW: Option<(InputLifecycleState, Option<InputTerminalOutcome>)> = Some((
+    InputLifecycleState::Consumed,
+    Some(InputTerminalOutcome::Consumed),
+));
+
+/// The retire after an archive's settle leaves the input that settle's
+/// recovery consumed consumed.
+///
+/// The archive takes its runtime lease on a session no start registered
+/// again. The lease's registration recovers the run's input as pending: its
+/// run's boundary receipt is missing, so the input goes back to the queue,
+/// still naming the run. The archive's recovery then commits the run's
+/// completed tail and consumes that input at the store level, outside the
+/// lease's driver. The retire under the same lease adopts that terminal
+/// before it counts and sweeps the pending inputs, so it abandons nothing:
+/// the row stays consumed, and the sweep stages no runtime-terminated carrier
+/// for it (a directed input would otherwise tell its sender that work which
+/// ran was terminated). RED before: the retire's sweep abandoned the input as
+/// retired over the consumed row. Unrun: written while Cargo is not run.
+#[tokio::test]
+async fn the_retire_after_an_archive_settle_leaves_the_inputs_its_recovery_consumed() {
+    use meerkat_runtime::recovery::{
+        DurableTailRecoveryDisposition, DurableTailRecoveryOutcome,
+        recover_durable_tail_for_session_archive,
+    };
+
+    let store = Arc::new(InMemoryRuntimeStore::new());
+    let (session_id, runtime_id, input) = seed_completed_run_with_pending_input(&store).await;
+
+    let machine =
+        MeerkatMachine::persistent(store.clone() as Arc<dyn RuntimeStore>, memory_blob_store())
+            .expect("persistent machine");
+    let deadline = meerkat_core::time_compat::Instant::now() + std::time::Duration::from_secs(10);
+    let lease = machine
+        .prepare_session_archive_lease_before(&session_id, deadline)
+        .await
+        .expect("the archive's lease prepares")
+        .expect("a durable session leaves the archive a runtime to retire");
+
+    let (DurableTailRecoveryOutcome::Committed { disposition, .. }, _) =
+        recover_durable_tail_for_session_archive(store.as_ref(), &session_id)
+            .await
+            .expect("the archive's recovery answers")
+    else {
+        panic!("the archive's recovery must commit the run's completed tail");
+    };
+    assert_eq!(disposition, DurableTailRecoveryDisposition::CommitCompleted);
+    assert_eq!(
+        stored_terminal(&store, &runtime_id, input.id()).await,
+        CONSUMED_ROW,
+        "the recovery consumes the run's input"
+    );
+
+    let report = machine
+        .retire_session_with_archive_lease_before(lease, deadline)
+        .await
+        .expect("the archive's runtime retire commits");
+    assert_eq!(
+        report.inputs_abandoned, 0,
+        "the retire adopts the consumed input instead of abandoning it"
+    );
+    assert_eq!(
+        stored_terminal(&store, &runtime_id, input.id()).await,
+        CONSUMED_ROW,
+        "the retire leaves the consumed input consumed: its sweep abandons nothing, so no \
+         runtime-terminated carrier is staged for it"
+    );
+    assert_eq!(
+        load_runtime_state(store.as_ref(), &runtime_id)
+            .await
+            .unwrap(),
+        Some(RuntimeState::Retired)
+    );
+}
+
+/// A live retire after a store-owned recovery committed a hosted session's
+/// tail leaves the input that recovery consumed consumed.
+///
+/// The session's runtime is registered, and its driver holds the run's input
+/// as pending: the run's boundary receipt is missing, so the registration
+/// requeued it, still naming the run. An observation of the hosted session
+/// then settles the run's completed tail with the same store-owned recovery
+/// a restart runs; it consumes that input at the store level, outside the
+/// registered driver, and nothing reloads that driver. The live retire adopts
+/// the consumed terminal before it counts and sweeps the pending inputs, so
+/// it abandons nothing and the row stays consumed. RED before: the live
+/// retire's sweep abandoned the input as retired over the consumed row.
+/// Unrun: written while Cargo is not run.
+#[tokio::test]
+async fn a_live_retire_after_a_recovery_commit_leaves_the_inputs_it_consumed() {
+    use meerkat_runtime::recovery::{
+        DurableTailRecoveryDisposition, DurableTailRecoveryOutcome, recover_durable_tail,
+    };
+
+    let store = Arc::new(InMemoryRuntimeStore::new());
+    let (session_id, runtime_id, input) = seed_completed_run_with_pending_input(&store).await;
+
+    let machine =
+        MeerkatMachine::persistent(store.clone() as Arc<dyn RuntimeStore>, memory_blob_store())
+            .expect("persistent machine");
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("the session's runtime registers");
+    assert!(
+        machine
+            .list_active_inputs(&session_id)
+            .await
+            .unwrap()
+            .contains(input.id()),
+        "the registered driver holds the run's input as pending"
+    );
+
+    let DurableTailRecoveryOutcome::Committed { disposition, .. } =
+        recover_durable_tail(store.as_ref(), &session_id)
+            .await
+            .expect("the recovery answers")
+    else {
+        panic!("the recovery must commit the run's completed tail");
+    };
+    assert_eq!(disposition, DurableTailRecoveryDisposition::CommitCompleted);
+    assert_eq!(
+        stored_terminal(&store, &runtime_id, input.id()).await,
+        CONSUMED_ROW,
+        "the recovery consumes the run's input"
+    );
+
+    let deadline = meerkat_core::time_compat::Instant::now() + std::time::Duration::from_secs(10);
+    let report = machine
+        .retire_runtime_control_plane_before(&runtime_id, deadline)
+        .await
+        .expect("the live retire commits");
+    assert_eq!(
+        report.inputs_abandoned, 0,
+        "the live retire adopts the consumed input instead of abandoning it"
+    );
+    assert_eq!(
+        stored_terminal(&store, &runtime_id, input.id()).await,
+        CONSUMED_ROW,
+        "the live retire leaves the consumed input consumed: its sweep abandons nothing, so \
+         no runtime-terminated carrier is staged for it"
+    );
+    assert_eq!(
+        load_runtime_state(store.as_ref(), &runtime_id)
+            .await
+            .unwrap(),
+        Some(RuntimeState::Retired)
+    );
+}
+
 #[tokio::test]
 async fn whole_blob_interrupted_recovery_installs_one_sealed_repair_artifact() {
     use meerkat_core::lifecycle::core_executor::BoundSessionCommit;
@@ -1518,6 +1751,1347 @@ async fn whole_blob_interrupted_recovery_installs_one_sealed_repair_artifact() {
             .unwrap()
             .is_none(),
         "repaired recovery consumes the exact provisional candidate"
+    );
+}
+
+/// A WholeBlob run whose final boundary compacts saves its end as a
+/// cursor-less re-base: the committed base and the tail are one document. A
+/// crash before the boundary commit leaves that tail. Recovery reads it as a
+/// strict continuation with no run rows and no cursor, repairs it as an
+/// interrupted run and terminalizes the run's bound input: the document keeps
+/// every row the run wrote, exactly once, plus one interruption notice, and
+/// the input never runs again. Unrun until the candidate's validation.
+#[tokio::test]
+async fn whole_blob_closing_rebase_after_a_final_compaction_recovers_as_interrupted() {
+    use meerkat_core::lifecycle::core_executor::BoundSessionCommit;
+    use meerkat_core::types::{
+        AssistantBlock, BlockAssistantMessage, Message, StopReason, TranscriptMessageIdentity,
+        UserMessage,
+    };
+    use meerkat_runtime::recovery::{
+        DurableTailRecoveryDisposition, DurableTailRecoveryOutcome, recover_durable_tail,
+    };
+    use meerkat_runtime::store::{
+        PreparedRuntimeSessionCommit, PreparedWholeBlobRunRebase,
+        VerifiedCommittedWholeBlobPayload, WholeBlobRunRebaseOutcome,
+    };
+
+    let store = InMemoryRuntimeStore::new();
+    let mut committed = meerkat_core::Session::new();
+    committed.push(Message::User(UserMessage::text("earlier context")));
+    committed.push(Message::User(UserMessage::text("more earlier context")));
+    let session_id = committed.id().clone();
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    store
+        .commit_prepared_session_boundary(
+            &runtime_id,
+            PreparedRuntimeSessionCommit::snapshot_only(
+                BoundSessionCommit::sealed(Arc::new(committed.clone())).unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+
+    // The run: one prompt and its answer, then a compaction at its final
+    // boundary. No round commit came after the compaction.
+    let run_id = RunId::new();
+    let input = make_prompt("the question");
+    let mut live = committed;
+    live.push(Message::User(UserMessage::text("the question")));
+    live.push(Message::BlockAssistant(BlockAssistantMessage {
+        blocks: vec![AssistantBlock::Text {
+            text: "the answer".to_string(),
+            meta: None,
+        }],
+        stop_reason: Some(StopReason::EndTurn),
+        identity: TranscriptMessageIdentity::default().with_run_id(run_id.clone()),
+        created_at: meerkat_core::types::message_timestamp_now(),
+        assistant_message_id: None,
+    }));
+    let parent = live.transcript_revision().unwrap();
+    let commit = live
+        .commit_transcript_rewrite(
+            meerkat_core::TranscriptRewriteSelection::MessageRange { start: 0, end: 2 },
+            vec![Message::User(UserMessage::compaction_summary(
+                "earlier context, compacted",
+            ))],
+            meerkat_core::TranscriptRewriteReason::new("compaction"),
+            Some("closing-rebase".to_string()),
+            Some(parent),
+        )
+        .unwrap();
+    let compacted_messages = live.messages().to_vec();
+
+    // The run's input is bound to it, pending consumption by its boundary.
+    store
+        .persist_input_state(
+            &runtime_id,
+            &persistable(applied_pending_state(&input, &run_id, 1)),
+        )
+        .await
+        .unwrap();
+
+    // The end-of-run save: no cursor, written as a re-base with no earlier
+    // tail (a single-turn run takes no round commit).
+    let base = store
+        .load_committed_whole_blob_snapshot(&runtime_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let payload = VerifiedCommittedWholeBlobPayload::from_committed(&session_id, base).unwrap();
+    let rebase = PreparedWholeBlobRunRebase::prepare(
+        payload,
+        None,
+        run_id.clone(),
+        live,
+        std::slice::from_ref(&commit),
+    )
+    .unwrap();
+    let WholeBlobRunRebaseOutcome::Applied {
+        committed: rebased,
+        tail,
+    } = store
+        .commit_prepared_whole_blob_run_rebase(&runtime_id, rebase.store_parts())
+        .await
+        .unwrap()
+    else {
+        panic!("the closing save re-bases");
+    };
+    assert_eq!(tail.candidate_blob_sha256(), rebased.blob_sha256());
+
+    // The process crashes before the boundary commit; the restart recovers.
+    let DurableTailRecoveryOutcome::Committed {
+        disposition,
+        recovered,
+        ..
+    } = recover_durable_tail(&store, &session_id)
+        .await
+        .expect("the closing save recovers")
+    else {
+        panic!("the closing save must commit as an interrupted run");
+    };
+    assert_eq!(
+        disposition,
+        DurableTailRecoveryDisposition::RepairAndCommitInterrupted
+    );
+    // Nothing lost or duplicated: the compacted document, then one notice.
+    let messages = recovered.messages();
+    assert_eq!(messages.len(), compacted_messages.len() + 1);
+    assert_eq!(
+        &messages[..compacted_messages.len()],
+        compacted_messages.as_slice()
+    );
+    assert!(matches!(messages.last(), Some(Message::SystemNotice(_))));
+    let stored = store
+        .load_session_snapshot(&runtime_id)
+        .await
+        .unwrap()
+        .expect("the repaired body is committed");
+    let stored = meerkat_core::Session::from_persisted_bytes(stored.as_slice()).unwrap();
+    assert_eq!(stored.messages(), messages);
+    assert!(
+        store
+            .load_whole_blob_provisional_tail(&runtime_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "the recovery consumes the tail"
+    );
+    // The run's input is terminal: it never runs again.
+    let rows = store.load_input_states_strict(&runtime_id).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(&rows[0].state.input_id, input.id());
+    assert_eq!(rows[0].seed.phase, InputLifecycleState::Consumed);
+    assert_eq!(
+        rows[0].seed.terminal_outcome,
+        Some(InputTerminalOutcome::Consumed)
+    );
+}
+
+/// A run settled without resuming repairs its own tail through the
+/// run-guarded drive, as crash recovery would; a guard naming another run
+/// leaves the tail untouched.
+#[tokio::test]
+async fn run_guarded_recovery_repairs_only_the_named_runs_tail() {
+    use meerkat_core::lifecycle::core_executor::BoundSessionCommit;
+    use meerkat_core::types::{
+        AssistantBlock, BlockAssistantMessage, Message, StopReason, ToolResult,
+        TranscriptMessageIdentity, UserMessage,
+    };
+    use meerkat_runtime::recovery::{DurableTailRecoveryOutcome, recover_durable_tail_for_run};
+    use meerkat_runtime::store::{PreparedRuntimeSessionCommit, PreparedWholeBlobProvisionalTail};
+
+    let store = InMemoryRuntimeStore::new();
+    let run_id = RunId::new();
+    let mut committed = meerkat_core::Session::new();
+    committed.push(Message::User(UserMessage::text("invoke durable tool")));
+    let session_id = committed.id().clone();
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    let committed_authority = store
+        .commit_prepared_session_boundary(
+            &runtime_id,
+            PreparedRuntimeSessionCommit::snapshot_only(
+                BoundSessionCommit::sealed(Arc::new(committed.clone())).unwrap(),
+            ),
+        )
+        .await
+        .unwrap()
+        .authority()
+        .and_then(|authority| authority.whole_blob())
+        .cloned()
+        .expect("initial boundary returns WholeBlob store authority");
+
+    let mut interrupted = committed;
+    interrupted.push(Message::BlockAssistant(BlockAssistantMessage {
+        blocks: vec![AssistantBlock::ToolUse {
+            id: "durable-call".to_string(),
+            name: "durable_tool".to_string(),
+            args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
+            meta: None,
+        }],
+        stop_reason: Some(StopReason::ToolUse),
+        identity: TranscriptMessageIdentity::default().with_run_id(run_id.clone()),
+        created_at: meerkat_core::types::message_timestamp_now(),
+        assistant_message_id: None,
+    }));
+    interrupted.push(Message::tool_results(vec![ToolResult::new(
+        "durable-call".to_string(),
+        "durable result".to_string(),
+        false,
+    )]));
+    let interrupted_message_count = interrupted.messages().len();
+    let candidate = BoundSessionCommit::sealed(Arc::new(interrupted)).unwrap();
+    store
+        .write_prepared_whole_blob_provisional_tail(
+            &runtime_id,
+            PreparedWholeBlobProvisionalTail::prepare(
+                committed_authority,
+                run_id.clone(),
+                1,
+                &candidate,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        recover_durable_tail_for_run(&store, &session_id, &RunId::new())
+            .await
+            .expect("a guard naming another run is not an error")
+            .is_none(),
+        "another run's guard answers None"
+    );
+    assert!(
+        store
+            .load_whole_blob_provisional_tail(&runtime_id)
+            .await
+            .unwrap()
+            .is_some(),
+        "another run's guard leaves the tail untouched"
+    );
+
+    let Some(DurableTailRecoveryOutcome::Committed { recovered, .. }) =
+        recover_durable_tail_for_run(&store, &session_id, &run_id)
+            .await
+            .expect("the named run's tail recovers")
+    else {
+        panic!("the named run's interrupted tail must commit");
+    };
+    assert_eq!(recovered.messages().len(), interrupted_message_count + 1);
+    assert!(matches!(
+        recovered.messages().last(),
+        Some(Message::SystemNotice(_))
+    ));
+    assert!(
+        store
+            .load_whole_blob_provisional_tail(&runtime_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "the repair consumes the named run's tail"
+    );
+}
+
+/// The archive of a session that is ending never continues a run. Over a
+/// continuable tail (a round's first commit whose staged call lives only in
+/// the run cursor, the run's input still bound to it), ordinary recovery
+/// continues the run and writes nothing. The archive's recovery judges the
+/// quiescent runtime retired, so the machine repairs the tail and commits it
+/// as interrupted: the staged message is written with an outcome-unknown
+/// result for its call, then the interruption notice; the cursor is dropped,
+/// the tail consumed, the run's input consumed in the same commit, and the
+/// missing lifecycle row created `Idle`. RED before: the archive ran ordinary
+/// recovery, which answered `Continue` there. Unrun: written while Cargo is
+/// not run.
+#[tokio::test]
+async fn an_archive_over_a_continuable_tail_commits_it_as_interrupted() {
+    use meerkat_core::lifecycle::core_executor::BoundSessionCommit;
+    use meerkat_core::types::{
+        AssistantBlock, BlockAssistantMessage, Message, StopReason, TranscriptMessageIdentity,
+        UserMessage,
+    };
+    use meerkat_runtime::recovery::{
+        DurableTailRecoveryDisposition, DurableTailRecoveryOutcome, recover_durable_tail,
+        recover_durable_tail_for_session_archive,
+    };
+    use meerkat_runtime::store::{PreparedRuntimeSessionCommit, PreparedWholeBlobProvisionalTail};
+
+    let store = InMemoryRuntimeStore::new();
+    let run_id = RunId::new();
+    let input = make_prompt("the run's prompt");
+    let mut committed = meerkat_core::Session::new();
+    committed.push(Message::User(UserMessage::text("the run's prompt")));
+    let session_id = committed.id().clone();
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    let committed_authority = store
+        .commit_prepared_session_boundary(
+            &runtime_id,
+            PreparedRuntimeSessionCommit::snapshot_only(
+                BoundSessionCommit::sealed(Arc::new(committed.clone())).unwrap(),
+            ),
+        )
+        .await
+        .unwrap()
+        .authority()
+        .and_then(|authority| authority.whole_blob())
+        .cloned()
+        .expect("initial boundary returns WholeBlob store authority");
+
+    // Round zero's first commit: the staged call lives only in the run
+    // cursor, which binds the run's input.
+    let staged = BlockAssistantMessage {
+        blocks: vec![AssistantBlock::ToolUse {
+            id: "staged-call".to_string(),
+            name: "durable_tool".to_string(),
+            args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
+            meta: None,
+        }],
+        stop_reason: Some(StopReason::ToolUse),
+        identity: TranscriptMessageIdentity::default().with_run_id(run_id.clone()),
+        created_at: meerkat_core::types::message_timestamp_now(),
+        assistant_message_id: Some(
+            serde_json::from_value(serde_json::Value::String(
+                "0190b5f0-0000-7000-8000-000000000003".to_string(),
+            ))
+            .unwrap(),
+        ),
+    };
+    let mut round = committed.clone();
+    round
+        .set_run_cursor(&meerkat_core::SessionRunCursor::new(
+            run_id.clone(),
+            vec![input.id().clone()],
+            0,
+            meerkat_core::RunResumePoint::ToolsPending {
+                assistant_message: staged.clone(),
+            },
+        ))
+        .unwrap();
+    store
+        .write_prepared_whole_blob_provisional_tail(
+            &runtime_id,
+            PreparedWholeBlobProvisionalTail::prepare(
+                committed_authority,
+                run_id.clone(),
+                1,
+                &BoundSessionCommit::sealed(Arc::new(round)).unwrap(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    store
+        .persist_input_state(
+            &runtime_id,
+            &persistable(applied_pending_state(&input, &run_id, 1)),
+        )
+        .await
+        .unwrap();
+
+    // Ordinary recovery continues the open run and writes nothing.
+    let DurableTailRecoveryOutcome::Continue {
+        run_id: continued, ..
+    } = recover_durable_tail(&store, &session_id)
+        .await
+        .expect("ordinary recovery answers")
+    else {
+        panic!("ordinary recovery must continue the open run");
+    };
+    assert_eq!(continued, run_id);
+    assert!(
+        store
+            .load_whole_blob_provisional_tail(&runtime_id)
+            .await
+            .unwrap()
+            .is_some(),
+        "a continuation writes nothing"
+    );
+
+    // The archive's recovery commits the same tail as interrupted.
+    let (
+        DurableTailRecoveryOutcome::Committed {
+            disposition,
+            recovered,
+            ..
+        },
+        _,
+    ) = recover_durable_tail_for_session_archive(&store, &session_id)
+        .await
+        .expect("the archive's recovery answers")
+    else {
+        panic!("an archive must commit a continuable tail as interrupted");
+    };
+    assert_eq!(
+        disposition,
+        DurableTailRecoveryDisposition::RepairAndCommitInterrupted
+    );
+    let messages = recovered.messages();
+    assert_eq!(messages.len(), 4, "prompt, staged call, its result, notice");
+    assert_eq!(&messages[..1], committed.messages());
+    assert!(matches!(
+        &messages[1],
+        Message::BlockAssistant(message)
+            if message.assistant_message_id == staged.assistant_message_id
+    ));
+    assert!(matches!(
+        &messages[2],
+        Message::ToolResults { results, .. }
+            if results.len() == 1
+                && results[0].tool_use_id == "staged-call"
+                && results[0].is_error
+    ));
+    assert!(matches!(messages.last(), Some(Message::SystemNotice(_))));
+    assert!(
+        recovered.try_run_cursor().unwrap().is_none(),
+        "the commit drops the run cursor"
+    );
+    let stored = store
+        .load_session_snapshot(&runtime_id)
+        .await
+        .unwrap()
+        .expect("the repaired body is committed");
+    let stored = meerkat_core::Session::from_persisted_bytes(stored.as_slice()).unwrap();
+    assert_eq!(stored.messages(), messages);
+    assert!(
+        store
+            .load_whole_blob_provisional_tail(&runtime_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "the archive's recovery consumes the tail"
+    );
+    // The run's input is terminal in the same commit: it never runs again.
+    let rows = store.load_input_states_strict(&runtime_id).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(&rows[0].state.input_id, input.id());
+    assert_eq!(rows[0].seed.phase, InputLifecycleState::Consumed);
+    assert_eq!(
+        rows[0].seed.terminal_outcome,
+        Some(InputTerminalOutcome::Consumed)
+    );
+    assert_eq!(
+        load_runtime_state(&store, &runtime_id).await.unwrap(),
+        Some(RuntimeState::Idle)
+    );
+}
+
+/// What a graceful stop that kept a durable run leaves in `store`: the run's
+/// continuable tail (round zero's first commit, its staged call only in the
+/// run cursor, which binds the run's input), the run's input bound to it, and
+/// `queued_row`, the row of a content input queued behind it. Returns the
+/// session, the run and the run's input.
+async fn a_kept_run_beside_a_queued_input(
+    store: &InMemoryRuntimeStore,
+    queued_row: StoredInputState,
+) -> (SessionId, RunId, Input) {
+    use meerkat_core::lifecycle::core_executor::BoundSessionCommit;
+    use meerkat_core::types::{
+        AssistantBlock, BlockAssistantMessage, Message, StopReason, TranscriptMessageIdentity,
+        UserMessage,
+    };
+    use meerkat_runtime::store::{PreparedRuntimeSessionCommit, PreparedWholeBlobProvisionalTail};
+
+    let run_id = RunId::new();
+    let input = make_prompt("the run's prompt");
+    let mut committed = meerkat_core::Session::new();
+    committed.push(Message::User(UserMessage::text("the run's prompt")));
+    let session_id = committed.id().clone();
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    let committed_authority = store
+        .commit_prepared_session_boundary(
+            &runtime_id,
+            PreparedRuntimeSessionCommit::snapshot_only(
+                BoundSessionCommit::sealed(Arc::new(committed.clone())).unwrap(),
+            ),
+        )
+        .await
+        .unwrap()
+        .authority()
+        .and_then(|authority| authority.whole_blob())
+        .cloned()
+        .expect("initial boundary returns WholeBlob store authority");
+
+    // The kept run: round zero's first commit, the staged call in the run
+    // cursor, which binds the run's input.
+    let staged = BlockAssistantMessage {
+        blocks: vec![AssistantBlock::ToolUse {
+            id: "kept-call".to_string(),
+            name: "durable_tool".to_string(),
+            args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
+            meta: None,
+        }],
+        stop_reason: Some(StopReason::ToolUse),
+        identity: TranscriptMessageIdentity::default().with_run_id(run_id.clone()),
+        created_at: meerkat_core::types::message_timestamp_now(),
+        assistant_message_id: Some(
+            serde_json::from_value(serde_json::Value::String(
+                "0190b5f0-0000-7000-8000-000000000004".to_string(),
+            ))
+            .unwrap(),
+        ),
+    };
+    let mut round = committed.clone();
+    round
+        .set_run_cursor(&meerkat_core::SessionRunCursor::new(
+            run_id.clone(),
+            vec![input.id().clone()],
+            0,
+            meerkat_core::RunResumePoint::ToolsPending {
+                assistant_message: staged,
+            },
+        ))
+        .unwrap();
+    store
+        .write_prepared_whole_blob_provisional_tail(
+            &runtime_id,
+            PreparedWholeBlobProvisionalTail::prepare(
+                committed_authority,
+                run_id.clone(),
+                1,
+                &BoundSessionCommit::sealed(Arc::new(round)).unwrap(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    store
+        .persist_input_state(
+            &runtime_id,
+            &persistable(applied_pending_state(&input, &run_id, 1)),
+        )
+        .await
+        .unwrap();
+    store
+        .persist_input_state(&runtime_id, &persistable(queued_row))
+        .await
+        .unwrap();
+    (session_id, run_id, input)
+}
+
+/// The archive of a session no start registered again ends the work the
+/// session's runtime kept for a later start, then commits the kept run's tail
+/// as interrupted.
+///
+/// The store holds what a graceful stop that kept a durable run leaves (see
+/// [`a_kept_run_beside_a_queued_input`]), with a content input queued behind
+/// the run that names an earlier run. The tail's cursor does not list it,
+/// but nothing proves it is not in the tail, so the archive's recovery holds
+/// the tail beside it. The archive's lease registers the runtime from durable
+/// state, the run marked resumable again and the queued input queued. Ending
+/// the unresumed work abandons both inputs as cancelled through the lease's
+/// driver. The archive's recovery then commits the tail as interrupted with
+/// nothing left to terminalize, and the retire under the same lease leaves
+/// both inputs cancelled. RED before: nothing ended that work, so the archive
+/// ended with the held tail.
+#[tokio::test]
+async fn an_archive_ends_the_unresumed_work_then_commits_the_kept_runs_tail_as_interrupted() {
+    use meerkat_core::types::Message;
+    use meerkat_runtime::input_state::InputAbandonReason;
+    use meerkat_runtime::recovery::{
+        DurableTailRecoveryDisposition, DurableTailRecoveryOutcome,
+        recover_durable_tail_for_session_archive,
+    };
+
+    let store = Arc::new(InMemoryRuntimeStore::new());
+    let queued = make_prompt("an input queued behind the run");
+    let (session_id, run_id, input) = a_kept_run_beside_a_queued_input(
+        &store,
+        queued_state(
+            &queued,
+            Some(&RunId::new()),
+            meerkat_core::types::HandlingMode::Queue,
+        ),
+    )
+    .await;
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+
+    // The archive's recovery alone holds the tail beside the queued input.
+    let (held, _) = recover_durable_tail_for_session_archive(store.as_ref(), &session_id)
+        .await
+        .expect("the archive's recovery answers");
+    assert!(
+        matches!(held, DurableTailRecoveryOutcome::Held),
+        "a continuable tail beside a queued input naming another run holds"
+    );
+
+    // The archive takes its lease on a runtime no start registered again.
+    let machine =
+        MeerkatMachine::persistent(store.clone() as Arc<dyn RuntimeStore>, memory_blob_store())
+            .expect("persistent machine");
+    let deadline = meerkat_core::time_compat::Instant::now() + std::time::Duration::from_secs(10);
+    let lease = machine
+        .prepare_session_archive_lease_before(&session_id, deadline)
+        .await
+        .expect("the archive's lease prepares")
+        .expect("a durable session leaves the archive a runtime to retire");
+    assert_eq!(
+        machine.resumable_run_id(&session_id).await,
+        Some(run_id.clone()),
+        "the lease's registration keeps the run resumable"
+    );
+
+    let ended = machine
+        .end_unresumed_work_with_archive_lease_before(&lease, "session archived", deadline)
+        .await
+        .expect("the unresumed work ends");
+    assert_eq!(
+        sorted_id_strings(ended),
+        sorted_id_strings([input.id().clone(), queued.id().clone()]),
+        "the kept run's input and the queued input end"
+    );
+    assert_eq!(
+        machine.resumable_run_id(&session_id).await,
+        None,
+        "the run is no longer kept"
+    );
+    let cancelled = Some((
+        InputLifecycleState::Abandoned,
+        Some(InputTerminalOutcome::Abandoned {
+            reason: InputAbandonReason::Cancelled,
+        }),
+    ));
+    let terminal_of = |rows: &[StoredInputState], input_id: &InputId| {
+        rows.iter()
+            .find(|row| &row.state.input_id == input_id)
+            .map(|row| (row.seed.phase, row.seed.terminal_outcome.clone()))
+    };
+    let rows = store.load_input_states_strict(&runtime_id).await.unwrap();
+    assert_eq!(terminal_of(&rows, input.id()), cancelled);
+    assert_eq!(terminal_of(&rows, queued.id()), cancelled);
+
+    // The archive's recovery now commits the tail as interrupted.
+    let (
+        DurableTailRecoveryOutcome::Committed {
+            disposition,
+            recovered,
+            ..
+        },
+        _,
+    ) = recover_durable_tail_for_session_archive(store.as_ref(), &session_id)
+        .await
+        .expect("the archive's recovery answers")
+    else {
+        panic!("the archive must commit the kept run's tail as interrupted");
+    };
+    assert_eq!(
+        disposition,
+        DurableTailRecoveryDisposition::RepairAndCommitInterrupted
+    );
+    let messages = recovered.messages();
+    assert_eq!(messages.len(), 4, "prompt, staged call, its result, notice");
+    assert!(matches!(messages.last(), Some(Message::SystemNotice(_))));
+    assert!(
+        store
+            .load_whole_blob_provisional_tail(&runtime_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "the archive's recovery consumes the tail"
+    );
+
+    // The retire under the same lease writes nothing over the inputs.
+    machine
+        .retire_session_with_archive_lease_before(lease, deadline)
+        .await
+        .expect("the archive's runtime retire commits");
+    let rows = store.load_input_states_strict(&runtime_id).await.unwrap();
+    assert_eq!(terminal_of(&rows, input.id()), cancelled);
+    assert_eq!(terminal_of(&rows, queued.id()), cancelled);
+    assert_eq!(
+        load_runtime_state(store.as_ref(), &runtime_id)
+            .await
+            .unwrap(),
+        Some(RuntimeState::Retired)
+    );
+}
+
+/// The archive of a session no start registered again commits the kept
+/// run's tail at once beside an input queued behind the run that names no
+/// run.
+///
+/// The store is the one [`a_kept_run_beside_a_queued_input`] leaves, with a
+/// queued input that names no run. The tail's run cursor binds the run's own
+/// input and not the queued one, which names no run: it is not in the tail.
+/// So the archive's first recovery commits the tail as interrupted, consuming
+/// the run's input with it as for a kept run with nothing queued, and leaves
+/// the queued input queued. The archive's lease then finds no run to keep,
+/// and the retire under it ends the queued input as a retire ends its queue
+/// (abandoned, retired). RED before the cursor attribution: the first
+/// recovery held the tail beside the queued input.
+#[tokio::test]
+async fn an_archive_commits_the_kept_runs_tail_at_once_beside_a_queued_input_naming_no_run() {
+    use meerkat_core::types::Message;
+    use meerkat_runtime::input_state::InputAbandonReason;
+    use meerkat_runtime::recovery::{
+        DurableTailRecoveryDisposition, DurableTailRecoveryOutcome,
+        recover_durable_tail_for_session_archive,
+    };
+
+    let store = Arc::new(InMemoryRuntimeStore::new());
+    let queued = make_prompt("an input queued behind the run");
+    let (session_id, _run_id, input) = a_kept_run_beside_a_queued_input(
+        &store,
+        queued_state(&queued, None, meerkat_core::types::HandlingMode::Queue),
+    )
+    .await;
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+
+    let (
+        DurableTailRecoveryOutcome::Committed {
+            disposition,
+            recovered,
+            ..
+        },
+        _,
+    ) = recover_durable_tail_for_session_archive(store.as_ref(), &session_id)
+        .await
+        .expect("the archive's recovery answers")
+    else {
+        panic!("the archive's first recovery commits the kept run's tail");
+    };
+    assert_eq!(
+        disposition,
+        DurableTailRecoveryDisposition::RepairAndCommitInterrupted
+    );
+    let messages = recovered.messages();
+    assert_eq!(messages.len(), 4, "prompt, staged call, its result, notice");
+    assert!(matches!(messages.last(), Some(Message::SystemNotice(_))));
+    let terminal_of = |rows: &[StoredInputState], input_id: &InputId| {
+        rows.iter()
+            .find(|row| &row.state.input_id == input_id)
+            .map(|row| (row.seed.phase, row.seed.terminal_outcome.clone()))
+    };
+    let rows = store.load_input_states_strict(&runtime_id).await.unwrap();
+    assert_eq!(
+        terminal_of(&rows, input.id()),
+        Some((
+            InputLifecycleState::Consumed,
+            Some(InputTerminalOutcome::Consumed)
+        )),
+        "the run's input is consumed with its tail"
+    );
+    assert_eq!(
+        terminal_of(&rows, queued.id()),
+        Some((InputLifecycleState::Queued, None)),
+        "the queued input stays queued"
+    );
+
+    let machine =
+        MeerkatMachine::persistent(store.clone() as Arc<dyn RuntimeStore>, memory_blob_store())
+            .expect("persistent machine");
+    let deadline = meerkat_core::time_compat::Instant::now() + std::time::Duration::from_secs(10);
+    let lease = machine
+        .prepare_session_archive_lease_before(&session_id, deadline)
+        .await
+        .expect("the archive's lease prepares")
+        .expect("a durable session leaves the archive a runtime to retire");
+    assert_eq!(
+        machine.resumable_run_id(&session_id).await,
+        None,
+        "no run is kept"
+    );
+    machine
+        .retire_session_with_archive_lease_before(lease, deadline)
+        .await
+        .expect("the archive's runtime retire commits");
+    let rows = store.load_input_states_strict(&runtime_id).await.unwrap();
+    assert_eq!(
+        terminal_of(&rows, input.id()),
+        Some((
+            InputLifecycleState::Consumed,
+            Some(InputTerminalOutcome::Consumed)
+        ))
+    );
+    assert_eq!(
+        terminal_of(&rows, queued.id()),
+        Some((
+            InputLifecycleState::Abandoned,
+            Some(InputTerminalOutcome::Abandoned {
+                reason: InputAbandonReason::Retired,
+            })
+        )),
+        "the retire ends the queued input with its queue"
+    );
+    assert_eq!(
+        load_runtime_state(store.as_ref(), &runtime_id)
+            .await
+            .unwrap(),
+        Some(RuntimeState::Retired)
+    );
+}
+
+/// An operator resolves a tail recovery holds as ambiguous (a call the
+/// transcript shows without its result): the dry run writes nothing, and the
+/// repair keeps every row, answers the call as outcome unknown, appends a
+/// notice naming the verb and the candidate, and clears the tail.
+#[tokio::test]
+async fn operator_resolves_a_held_tail_through_the_store_traits() {
+    use meerkat_core::lifecycle::core_executor::BoundSessionCommit;
+    use meerkat_core::types::{
+        AssistantBlock, BlockAssistantMessage, Message, StopReason, TranscriptMessageIdentity,
+        UserMessage,
+    };
+    use meerkat_runtime::recovery::{
+        DurableTailRecoveryOutcome, HeldTailRepairVerdict, HeldTailResolution,
+        recover_durable_tail, resolve_held_durable_tail,
+    };
+    use meerkat_runtime::store::{PreparedRuntimeSessionCommit, PreparedWholeBlobProvisionalTail};
+
+    let store = InMemoryRuntimeStore::new();
+    let run_id = RunId::new();
+    let mut committed = meerkat_core::Session::new();
+    committed.push(Message::User(UserMessage::text("invoke a tool")));
+    let session_id = committed.id().clone();
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    let committed_authority = store
+        .commit_prepared_session_boundary(
+            &runtime_id,
+            PreparedRuntimeSessionCommit::snapshot_only(
+                BoundSessionCommit::sealed(Arc::new(committed.clone())).unwrap(),
+            ),
+        )
+        .await
+        .unwrap()
+        .authority()
+        .and_then(|authority| authority.whole_blob())
+        .cloned()
+        .expect("initial boundary returns WholeBlob store authority");
+
+    let mut held = committed;
+    held.push(Message::BlockAssistant(BlockAssistantMessage {
+        blocks: vec![AssistantBlock::ToolUse {
+            id: "held-call".to_string(),
+            name: "durable_tool".to_string(),
+            args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
+            meta: None,
+        }],
+        stop_reason: Some(StopReason::ToolUse),
+        identity: TranscriptMessageIdentity::default().with_run_id(run_id.clone()),
+        created_at: meerkat_core::types::message_timestamp_now(),
+        assistant_message_id: None,
+    }));
+    let held_message_count = held.messages().len();
+    let candidate = BoundSessionCommit::sealed(Arc::new(held)).unwrap();
+    store
+        .write_prepared_whole_blob_provisional_tail(
+            &runtime_id,
+            PreparedWholeBlobProvisionalTail::prepare(
+                committed_authority,
+                run_id.clone(),
+                1,
+                &candidate,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(
+            recover_durable_tail(&store, &session_id).await.unwrap(),
+            DurableTailRecoveryOutcome::Held
+        ),
+        "ordinary recovery holds a tail with a dangling call"
+    );
+
+    let HeldTailResolution::Ambiguous(plan) = resolve_held_durable_tail(&store, &session_id, false)
+        .await
+        .expect("the dry run reads the held tail")
+    else {
+        panic!("a dangling-call tail is held as ambiguous");
+    };
+    assert_eq!(plan.verdict, HeldTailRepairVerdict::WouldRepair);
+    assert_eq!(plan.run_id, run_id);
+    assert_eq!(plan.closed_calls, vec!["held-call".to_string()]);
+    assert_eq!(plan.facts.dangling_calls, vec!["held-call".to_string()]);
+    assert_eq!(plan.messages_before, held_message_count);
+    assert_eq!(plan.messages_after, held_message_count + 2);
+    assert!(plan.runtime_quiescent);
+    assert!(
+        store
+            .load_whole_blob_provisional_tail(&runtime_id)
+            .await
+            .unwrap()
+            .is_some(),
+        "the dry run writes nothing"
+    );
+
+    let HeldTailResolution::Ambiguous(applied) =
+        resolve_held_durable_tail(&store, &session_id, true)
+            .await
+            .expect("the repair applies")
+    else {
+        panic!("the held tail is still ambiguous when applied");
+    };
+    assert_eq!(applied.candidate_id, plan.candidate_id);
+    assert_eq!(
+        applied.verdict,
+        HeldTailRepairVerdict::Repaired {
+            boundary_sequence: 1
+        }
+    );
+    assert!(
+        store
+            .load_whole_blob_provisional_tail(&runtime_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "the repair consumes the held tail"
+    );
+    let stored = store
+        .load_session_snapshot(&runtime_id)
+        .await
+        .unwrap()
+        .expect("the repaired body is committed");
+    let stored = meerkat_core::Session::from_persisted_bytes(stored.as_slice()).unwrap();
+    let messages = stored.messages();
+    assert_eq!(messages.len(), held_message_count + 2);
+    let Message::ToolResults { results, .. } = &messages[held_message_count] else {
+        panic!("the dangling call's result follows its call");
+    };
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].tool_use_id, "held-call");
+    assert!(results[0].is_error);
+    assert!(results[0].text_content().contains("outcome_uncertain"));
+    let Message::SystemNotice(notice) = &messages[held_message_count + 1] else {
+        panic!("the operator's notice ends the repaired document");
+    };
+    let body = notice.body.as_deref().unwrap_or_default();
+    assert!(body.contains("resolve-held-tail"));
+    assert!(body.contains(&plan.candidate_id));
+
+    assert!(matches!(
+        recover_durable_tail(&store, &session_id).await.unwrap(),
+        DurableTailRecoveryOutcome::AlreadyAligned { .. }
+    ));
+    assert_eq!(
+        resolve_held_durable_tail(&store, &session_id, false)
+            .await
+            .unwrap(),
+        HeldTailResolution::NoTail
+    );
+}
+
+/// A host stopped the session's runtime and ended before it unregistered:
+/// the lifecycle row stays `Stopped` (no current run, no unregister in
+/// progress), and the session's tail is held as ambiguous. The operator verb
+/// runs over the store alone and never registers the runtime. The dry run
+/// reads that row as the `Idle` row a start's registration normalizes it to,
+/// reports the normalization and writes nothing: the row stays `Stopped`
+/// and the tail stays. The applied repair commits the tail as interrupted
+/// and writes the `Idle` row with it. RED before: the verb read the row as
+/// not quiescent and refused the repair. Unrun: written while Cargo is not
+/// run.
+#[tokio::test]
+async fn operator_resolves_a_held_tail_over_a_runtime_a_host_left_stopped() {
+    use meerkat_core::lifecycle::core_executor::BoundSessionCommit;
+    use meerkat_core::types::{
+        AssistantBlock, BlockAssistantMessage, Message, StopReason, TranscriptMessageIdentity,
+        UserMessage,
+    };
+    use meerkat_runtime::recovery::{
+        HeldTailRepairVerdict, HeldTailResolution, resolve_held_durable_tail,
+    };
+    use meerkat_runtime::store::{PreparedRuntimeSessionCommit, PreparedWholeBlobProvisionalTail};
+
+    let store = Arc::new(InMemoryRuntimeStore::new());
+    let run_id = RunId::new();
+    let mut committed = meerkat_core::Session::new();
+    committed.push(Message::User(UserMessage::text("invoke a tool")));
+    let session_id = committed.id().clone();
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+
+    // A host stops the session's runtime and ends before it unregisters.
+    {
+        let host =
+            MeerkatMachine::persistent(store.clone() as Arc<dyn RuntimeStore>, memory_blob_store())
+                .expect("persistent machine");
+        host.register_session(session_id.clone())
+            .await
+            .expect("register the session");
+        let registration = host
+            .current_session_registration_witness(&session_id)
+            .await
+            .expect("the registration is current");
+        assert!(
+            host.stop_runtime_executor_until_terminal_if_current(&registration, "host stop")
+                .await
+                .unwrap()
+        );
+    }
+    assert_eq!(
+        load_runtime_state(store.as_ref(), &runtime_id)
+            .await
+            .unwrap(),
+        Some(RuntimeState::Stopped),
+        "the ended host leaves the lifecycle row Stopped"
+    );
+
+    let committed_authority = store
+        .commit_prepared_session_boundary(
+            &runtime_id,
+            PreparedRuntimeSessionCommit::snapshot_only(
+                BoundSessionCommit::sealed(Arc::new(committed.clone())).unwrap(),
+            ),
+        )
+        .await
+        .unwrap()
+        .authority()
+        .and_then(|authority| authority.whole_blob())
+        .cloned()
+        .expect("initial boundary returns WholeBlob store authority");
+    let mut held = committed;
+    held.push(Message::BlockAssistant(BlockAssistantMessage {
+        blocks: vec![AssistantBlock::ToolUse {
+            id: "held-call".to_string(),
+            name: "durable_tool".to_string(),
+            args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
+            meta: None,
+        }],
+        stop_reason: Some(StopReason::ToolUse),
+        identity: TranscriptMessageIdentity::default().with_run_id(run_id.clone()),
+        created_at: meerkat_core::types::message_timestamp_now(),
+        assistant_message_id: None,
+    }));
+    store
+        .write_prepared_whole_blob_provisional_tail(
+            &runtime_id,
+            PreparedWholeBlobProvisionalTail::prepare(
+                committed_authority,
+                run_id.clone(),
+                1,
+                &BoundSessionCommit::sealed(Arc::new(held)).unwrap(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let HeldTailResolution::Ambiguous(plan) =
+        resolve_held_durable_tail(store.as_ref(), &session_id, false)
+            .await
+            .expect("the dry run reads the held tail")
+    else {
+        panic!("a dangling-call tail is held as ambiguous");
+    };
+    assert_eq!(plan.verdict, HeldTailRepairVerdict::WouldRepair);
+    assert!(plan.runtime_quiescent);
+    assert!(plan.normalizes_stopped_lifecycle);
+    assert!(
+        store
+            .load_whole_blob_provisional_tail(&runtime_id)
+            .await
+            .unwrap()
+            .is_some(),
+        "the dry run leaves the tail"
+    );
+    assert_eq!(
+        load_runtime_state(store.as_ref(), &runtime_id)
+            .await
+            .unwrap(),
+        Some(RuntimeState::Stopped),
+        "the dry run leaves the row Stopped"
+    );
+
+    let HeldTailResolution::Ambiguous(applied) =
+        resolve_held_durable_tail(store.as_ref(), &session_id, true)
+            .await
+            .expect("the repair applies")
+    else {
+        panic!("the held tail is still ambiguous when applied");
+    };
+    assert_eq!(applied.candidate_id, plan.candidate_id);
+    assert_eq!(
+        applied.verdict,
+        HeldTailRepairVerdict::Repaired {
+            boundary_sequence: 1
+        }
+    );
+    assert!(applied.normalizes_stopped_lifecycle);
+    assert!(
+        store
+            .load_whole_blob_provisional_tail(&runtime_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "the repair consumes the held tail"
+    );
+    assert_eq!(
+        load_runtime_state(store.as_ref(), &runtime_id)
+            .await
+            .unwrap(),
+        Some(RuntimeState::Idle),
+        "the repair writes the Idle row a start would normalize the Stopped row to"
+    );
+}
+
+/// A tail recovery does not hold (an interrupted run that ordinary recovery
+/// repairs) is not the operator's: nothing is written.
+#[tokio::test]
+async fn operator_leaves_a_tail_that_is_not_held() {
+    use meerkat_core::lifecycle::core_executor::BoundSessionCommit;
+    use meerkat_core::types::{
+        AssistantBlock, BlockAssistantMessage, Message, StopReason, ToolResult,
+        TranscriptMessageIdentity, UserMessage,
+    };
+    use meerkat_runtime::recovery::{
+        DurableTailRecoveryClass, HeldTailResolution, resolve_held_durable_tail,
+    };
+    use meerkat_runtime::store::{PreparedRuntimeSessionCommit, PreparedWholeBlobProvisionalTail};
+
+    let store = InMemoryRuntimeStore::new();
+    let run_id = RunId::new();
+    let mut committed = meerkat_core::Session::new();
+    committed.push(Message::User(UserMessage::text("invoke a tool")));
+    let session_id = committed.id().clone();
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    let committed_authority = store
+        .commit_prepared_session_boundary(
+            &runtime_id,
+            PreparedRuntimeSessionCommit::snapshot_only(
+                BoundSessionCommit::sealed(Arc::new(committed.clone())).unwrap(),
+            ),
+        )
+        .await
+        .unwrap()
+        .authority()
+        .and_then(|authority| authority.whole_blob())
+        .cloned()
+        .expect("initial boundary returns WholeBlob store authority");
+    let mut interrupted = committed;
+    interrupted.push(Message::BlockAssistant(BlockAssistantMessage {
+        blocks: vec![AssistantBlock::ToolUse {
+            id: "answered-call".to_string(),
+            name: "durable_tool".to_string(),
+            args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
+            meta: None,
+        }],
+        stop_reason: Some(StopReason::ToolUse),
+        identity: TranscriptMessageIdentity::default().with_run_id(run_id.clone()),
+        created_at: meerkat_core::types::message_timestamp_now(),
+        assistant_message_id: None,
+    }));
+    interrupted.push(Message::tool_results(vec![ToolResult::new(
+        "answered-call".to_string(),
+        "durable result".to_string(),
+        false,
+    )]));
+    let candidate = BoundSessionCommit::sealed(Arc::new(interrupted)).unwrap();
+    store
+        .write_prepared_whole_blob_provisional_tail(
+            &runtime_id,
+            PreparedWholeBlobProvisionalTail::prepare(committed_authority, run_id, 1, &candidate)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resolve_held_durable_tail(&store, &session_id, true)
+            .await
+            .unwrap(),
+        HeldTailResolution::NotHeld {
+            class: DurableTailRecoveryClass::InterruptedRepairableCandidate
+        }
+    );
+    assert!(
+        store
+            .load_whole_blob_provisional_tail(&runtime_id)
+            .await
+            .unwrap()
+            .is_some(),
+        "a tail that is not held is left to ordinary recovery"
+    );
+}
+
+/// An interrupted tail next to an unbound content input row is held by
+/// ordinary recovery for its input evidence. The operator verb reports that
+/// hold and writes nothing; it does not answer that ordinary recovery
+/// resolves it.
+#[tokio::test]
+async fn operator_reports_a_tail_ordinary_recovery_holds_for_its_inputs() {
+    use meerkat_core::lifecycle::core_executor::BoundSessionCommit;
+    use meerkat_core::types::{
+        AssistantBlock, BlockAssistantMessage, Message, StopReason, ToolResult,
+        TranscriptMessageIdentity, UserMessage,
+    };
+    use meerkat_runtime::recovery::{
+        DurableTailRecoveryOutcome, HeldTailResolution, recover_durable_tail,
+        resolve_held_durable_tail,
+    };
+    use meerkat_runtime::store::{PreparedRuntimeSessionCommit, PreparedWholeBlobProvisionalTail};
+
+    let store = InMemoryRuntimeStore::new();
+    let run_id = RunId::new();
+    let mut committed = meerkat_core::Session::new();
+    committed.push(Message::User(UserMessage::text("invoke a tool")));
+    let session_id = committed.id().clone();
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    let committed_authority = store
+        .commit_prepared_session_boundary(
+            &runtime_id,
+            PreparedRuntimeSessionCommit::snapshot_only(
+                BoundSessionCommit::sealed(Arc::new(committed.clone())).unwrap(),
+            ),
+        )
+        .await
+        .unwrap()
+        .authority()
+        .and_then(|authority| authority.whole_blob())
+        .cloned()
+        .expect("initial boundary returns WholeBlob store authority");
+    let mut interrupted = committed;
+    interrupted.push(Message::BlockAssistant(BlockAssistantMessage {
+        blocks: vec![AssistantBlock::ToolUse {
+            id: "answered-call".to_string(),
+            name: "durable_tool".to_string(),
+            args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
+            meta: None,
+        }],
+        stop_reason: Some(StopReason::ToolUse),
+        identity: TranscriptMessageIdentity::default().with_run_id(run_id.clone()),
+        created_at: meerkat_core::types::message_timestamp_now(),
+        assistant_message_id: None,
+    }));
+    interrupted.push(Message::tool_results(vec![ToolResult::new(
+        "answered-call".to_string(),
+        "durable result".to_string(),
+        false,
+    )]));
+    let candidate = BoundSessionCommit::sealed(Arc::new(interrupted)).unwrap();
+    store
+        .write_prepared_whole_blob_provisional_tail(
+            &runtime_id,
+            PreparedWholeBlobProvisionalTail::prepare(committed_authority, run_id, 1, &candidate)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let unbound = make_prompt("a queued prompt no run is bound to");
+    store
+        .persist_input_state(&runtime_id, &persistable(accepted_unbound_state(&unbound)))
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(
+            recover_durable_tail(&store, &session_id).await.unwrap(),
+            DurableTailRecoveryOutcome::Held
+        ),
+        "ordinary recovery holds an interrupted tail beside an unbound content row"
+    );
+    let HeldTailResolution::HeldOtherwise { reason } =
+        resolve_held_durable_tail(&store, &session_id, true)
+            .await
+            .expect("the operator reads the held tail")
+    else {
+        panic!("a tail ordinary recovery holds for its inputs is held otherwise");
+    };
+    assert!(reason.contains("input rows"));
+    assert!(
+        store
+            .load_whole_blob_provisional_tail(&runtime_id)
+            .await
+            .unwrap()
+            .is_some(),
+        "nothing is written"
+    );
+}
+
+/// Evidence that cannot be verified (a tail whose assistant row names
+/// another run than its store-issued provisional run) is an error to the
+/// operator verb, and nothing is written: quarantined evidence has no
+/// operator path.
+#[tokio::test]
+async fn operator_refuses_a_quarantined_tail() {
+    use meerkat_core::lifecycle::core_executor::BoundSessionCommit;
+    use meerkat_core::types::{
+        AssistantBlock, BlockAssistantMessage, Message, StopReason, TranscriptMessageIdentity,
+        UserMessage,
+    };
+    use meerkat_runtime::recovery::resolve_held_durable_tail;
+    use meerkat_runtime::store::{PreparedRuntimeSessionCommit, PreparedWholeBlobProvisionalTail};
+
+    let store = InMemoryRuntimeStore::new();
+    let mut committed = meerkat_core::Session::new();
+    committed.push(Message::User(UserMessage::text("invoke a tool")));
+    let session_id = committed.id().clone();
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    let committed_authority = store
+        .commit_prepared_session_boundary(
+            &runtime_id,
+            PreparedRuntimeSessionCommit::snapshot_only(
+                BoundSessionCommit::sealed(Arc::new(committed.clone())).unwrap(),
+            ),
+        )
+        .await
+        .unwrap()
+        .authority()
+        .and_then(|authority| authority.whole_blob())
+        .cloned()
+        .expect("initial boundary returns WholeBlob store authority");
+    let mut forked = committed;
+    forked.push(Message::BlockAssistant(BlockAssistantMessage {
+        blocks: vec![AssistantBlock::ToolUse {
+            id: "forked-call".to_string(),
+            name: "durable_tool".to_string(),
+            args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
+            meta: None,
+        }],
+        stop_reason: Some(StopReason::ToolUse),
+        identity: TranscriptMessageIdentity::default().with_run_id(RunId::new()),
+        created_at: meerkat_core::types::message_timestamp_now(),
+        assistant_message_id: None,
+    }));
+    let candidate = BoundSessionCommit::sealed(Arc::new(forked)).unwrap();
+    store
+        .write_prepared_whole_blob_provisional_tail(
+            &runtime_id,
+            PreparedWholeBlobProvisionalTail::prepare(
+                committed_authority,
+                RunId::new(),
+                1,
+                &candidate,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        resolve_held_durable_tail(&store, &session_id, true)
+            .await
+            .is_err(),
+        "unverifiable evidence is an error, never a repair"
+    );
+    assert!(
+        store
+            .load_whole_blob_provisional_tail(&runtime_id)
+            .await
+            .unwrap()
+            .is_some(),
+        "nothing is written"
     );
 }
 
@@ -3207,4 +4781,585 @@ async fn released_0_8_10_rkat_realm_upgrades_without_losing_durable_state() {
             "HeadCanonical runtime authority disappeared during upgrade"
         );
     }
+}
+
+/// A queued content row in `lane`, admitted first, naming `last_run` as its
+/// durable run association when it has one: a prompt queued behind the run
+/// and a steer that never joined it name none, a join the cancel requeued
+/// keeps the run, and a stale row names another run.
+fn queued_state(
+    input: &Input,
+    last_run: Option<&RunId>,
+    lane: meerkat_core::types::HandlingMode,
+) -> StoredInputState {
+    let mut state = InputState::new_accepted(input.id().clone());
+    state.persisted_input = Some(input.clone());
+    state.durability = Some(InputDurability::Durable);
+    stamp_runtime_metadata(&mut state, input);
+    StoredInputState {
+        state,
+        seed: InputStateSeed {
+            phase: InputLifecycleState::Queued,
+            last_run_id: last_run.cloned(),
+            attempt_count: u32::from(last_run.is_some()),
+            admission_sequence: Some(1),
+            recovery_lane: Some(lane),
+            ..InputStateSeed::new_accepted()
+        },
+    }
+}
+
+/// The round a cancelled run A committed last: its tool call and result
+/// after the committed base, its cursor awaiting the model and binding
+/// `cursor_inputs`.
+fn interrupted_round(
+    committed: &meerkat_core::Session,
+    run_id: &RunId,
+    cursor_inputs: Vec<InputId>,
+) -> meerkat_core::Session {
+    use meerkat_core::types::{
+        AssistantBlock, BlockAssistantMessage, Message, StopReason, ToolResult,
+        TranscriptMessageIdentity,
+    };
+    let mut round = committed.clone();
+    round.push(Message::BlockAssistant(BlockAssistantMessage {
+        blocks: vec![AssistantBlock::ToolUse {
+            id: "round-call".to_string(),
+            name: "durable_tool".to_string(),
+            args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
+            meta: None,
+        }],
+        stop_reason: Some(StopReason::ToolUse),
+        identity: TranscriptMessageIdentity::default().with_run_id(run_id.clone()),
+        created_at: meerkat_core::types::message_timestamp_now(),
+        assistant_message_id: Some(
+            serde_json::from_value(serde_json::Value::String(Uuid::now_v7().to_string())).unwrap(),
+        ),
+    }));
+    round.push(Message::tool_results(vec![ToolResult::new(
+        "round-call".to_string(),
+        "round result".to_string(),
+        false,
+    )]));
+    round
+        .set_run_cursor(&meerkat_core::SessionRunCursor::new(
+            run_id.clone(),
+            cursor_inputs,
+            0,
+            meerkat_core::RunResumePoint::AwaitingModel,
+        ))
+        .unwrap();
+    round
+}
+
+/// [`interrupted_round`] whose run cursor is stale: it still stages the
+/// round's assistant message at `ToolsPending`, though the round's second
+/// commit already wrote that message and its result into the transcript. The
+/// classifier finds the staged message in the tail, so the cursor disagrees
+/// and the tail is ambiguous.
+fn stale_tools_pending_round(
+    committed: &meerkat_core::Session,
+    run_id: &RunId,
+    cursor_inputs: Vec<InputId>,
+) -> meerkat_core::Session {
+    use meerkat_core::types::Message;
+    let mut round = interrupted_round(committed, run_id, cursor_inputs.clone());
+    let staged = round
+        .messages()
+        .iter()
+        .rev()
+        .find_map(|message| match message {
+            Message::BlockAssistant(assistant) => Some(assistant.clone()),
+            _ => None,
+        })
+        .expect("the round's assistant message");
+    round
+        .set_run_cursor(&meerkat_core::SessionRunCursor::new(
+            run_id.clone(),
+            cursor_inputs,
+            0,
+            meerkat_core::RunResumePoint::ToolsPending {
+                assistant_message: staged,
+            },
+        ))
+        .unwrap();
+    round
+}
+
+/// The store a restart reads, on either durable profile.
+enum TailStore {
+    WholeBlob(InMemoryRuntimeStore),
+    #[cfg(feature = "sqlite-store")]
+    HeadCanonical {
+        store: SqliteRuntimeStore,
+        sessions: SqliteSessionStore,
+        _dir: TempDir,
+    },
+}
+
+impl TailStore {
+    #[cfg(feature = "sqlite-store")]
+    fn head_canonical() -> Self {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("interrupted-cursor-tail.sqlite3");
+        Self::HeadCanonical {
+            store: SqliteRuntimeStore::new_head_canonical(&path).unwrap(),
+            sessions: SqliteSessionStore::open(&path).unwrap(),
+            _dir: dir,
+        }
+    }
+
+    fn store(&self) -> &dyn RuntimeStore {
+        match self {
+            Self::WholeBlob(store) => store,
+            #[cfg(feature = "sqlite-store")]
+            Self::HeadCanonical { store, .. } => store,
+        }
+    }
+
+    /// What a cancelled run `run_id` leaves for a restart: its last round
+    /// commit over the committed base (see [`interrupted_round`]) and `rows`
+    /// beside it. Returns the session.
+    async fn interrupted_cursor_tail(
+        &self,
+        run_id: &RunId,
+        cursor_inputs: Vec<InputId>,
+        rows: Vec<StoredInputState>,
+    ) -> SessionId {
+        self.cursor_tail(interrupted_round, run_id, cursor_inputs, rows)
+            .await
+    }
+
+    /// [`Self::interrupted_cursor_tail`] with the run's last round built by
+    /// `round` over the committed base.
+    async fn cursor_tail(
+        &self,
+        round: fn(&meerkat_core::Session, &RunId, Vec<InputId>) -> meerkat_core::Session,
+        run_id: &RunId,
+        cursor_inputs: Vec<InputId>,
+        rows: Vec<StoredInputState>,
+    ) -> SessionId {
+        use meerkat_core::lifecycle::core_executor::BoundSessionCommit;
+        use meerkat_core::types::{Message, UserMessage};
+
+        let mut committed = meerkat_core::Session::new();
+        committed.push(Message::User(UserMessage::text("committed before the run")));
+        let session_id = committed.id().clone();
+        let runtime_id = LogicalRuntimeId::for_session(&session_id);
+        match self {
+            Self::WholeBlob(store) => {
+                let committed_authority = store
+                    .commit_prepared_session_boundary(
+                        &runtime_id,
+                        meerkat_runtime::store::PreparedRuntimeSessionCommit::snapshot_only(
+                            BoundSessionCommit::sealed(Arc::new(committed.clone())).unwrap(),
+                        ),
+                    )
+                    .await
+                    .unwrap()
+                    .authority()
+                    .and_then(|authority| authority.whole_blob())
+                    .cloned()
+                    .expect("the committed base has a WholeBlob authority");
+                let round = round(&committed, run_id, cursor_inputs);
+                store
+                    .write_prepared_whole_blob_provisional_tail(
+                        &runtime_id,
+                        meerkat_runtime::store::PreparedWholeBlobProvisionalTail::prepare(
+                            committed_authority,
+                            run_id.clone(),
+                            1,
+                            &BoundSessionCommit::sealed(Arc::new(round)).unwrap(),
+                        )
+                        .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            #[cfg(feature = "sqlite-store")]
+            Self::HeadCanonical {
+                store, sessions, ..
+            } => {
+                use meerkat_core::session_store::PreparedHeadCanonicalMutation;
+                let mutation = PreparedHeadCanonicalMutation::prepare(&committed, None).unwrap();
+                let document = BoundSessionCommit::sealed(Arc::new(committed.clone()))
+                    .unwrap()
+                    .with_head_canonical_mutation(mutation)
+                    .unwrap();
+                let committed_authority = store
+                    .commit_prepared_session_boundary(
+                        &runtime_id,
+                        PreparedRuntimeSessionCommit::snapshot_only(document),
+                    )
+                    .await
+                    .unwrap()
+                    .authority()
+                    .and_then(|authority| authority.head_canonical())
+                    .cloned()
+                    .expect("the committed base has a HeadCanonical authority");
+                let committed = sessions
+                    .load(&session_id)
+                    .await
+                    .unwrap()
+                    .expect("the committed base materializes");
+                let round = round(&committed, run_id, cursor_inputs);
+                let observed_head = sessions
+                    .load_head(&session_id)
+                    .await
+                    .unwrap()
+                    .expect("the committed physical head");
+                let physical =
+                    PreparedHeadCanonicalMutation::prepare(&round, Some(observed_head)).unwrap();
+                store
+                    .write_prepared_head_canonical_provisional_tail(
+                        &runtime_id,
+                        PreparedHeadCanonicalProvisionalTail::prepare(
+                            committed_authority,
+                            run_id.clone(),
+                            physical.successor_head(),
+                            physical.successor_head_token(),
+                            &round,
+                        )
+                        .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                sessions
+                    .apply_prepared_head_canonical_mutation(&physical)
+                    .await
+                    .unwrap();
+            }
+        }
+        for row in rows {
+            self.store()
+                .persist_input_state(&runtime_id, &persistable(row))
+                .await
+                .unwrap();
+        }
+        session_id
+    }
+}
+
+/// An operator's repair of a tail whose run cursor disagrees with it
+/// consumes, with the tail, an input that names the tail's run though the
+/// cursor does not bind it.
+///
+/// Run A's last round wrote its assistant message and its result into the
+/// transcript, but the tail's cursor still stages that message: the cursor is
+/// stale, so the classifier judges it to disagree, and the tail is held as
+/// ambiguous. A stale cursor does not show which inputs the tail holds: an
+/// input beside it that names run A (a join appended after the cursor was
+/// written) may have its content in the tail. So the attribution keeps the
+/// run association there, and the operator's repair consumes that input with
+/// the tail, once, instead of leaving it to run again. RED before the cursor
+/// gate: the stale cursor's bound set attributed only the run's own input,
+/// and the repair left the other one queued for redelivery.
+async fn an_operator_repair_beside_a_disagreeing_cursor_consumes_the_runs_inputs(tails: TailStore) {
+    use meerkat_core::types::HandlingMode;
+    use meerkat_runtime::recovery::{
+        DurableTailRecoveryOutcome, HeldTailRepairVerdict, HeldTailResolution,
+        recover_durable_tail, resolve_held_durable_tail,
+    };
+
+    let run_id = RunId::new();
+    let own = make_prompt("run A's own input");
+    let joined = make_prompt("a join the stale cursor does not list");
+    let session_id = tails
+        .cursor_tail(
+            stale_tools_pending_round,
+            &run_id,
+            vec![own.id().clone()],
+            vec![
+                applied_pending_state(&own, &run_id, 1),
+                queued_state(&joined, Some(&run_id), HandlingMode::Steer),
+            ],
+        )
+        .await;
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+
+    assert!(
+        matches!(
+            recover_durable_tail(tails.store(), &session_id)
+                .await
+                .unwrap(),
+            DurableTailRecoveryOutcome::Held
+        ),
+        "a tail whose cursor disagrees with it is held"
+    );
+    let HeldTailResolution::Ambiguous(plan) =
+        resolve_held_durable_tail(tails.store(), &session_id, false)
+            .await
+            .expect("the dry run reads the held tail")
+    else {
+        panic!("a tail whose cursor disagrees with it is held as ambiguous");
+    };
+    assert_eq!(plan.verdict, HeldTailRepairVerdict::WouldRepair);
+    assert_eq!(
+        sorted_id_strings(plan.terminalized_inputs.clone()),
+        sorted_id_strings([own.id().clone(), joined.id().clone()]),
+        "the repair consumes both inputs that name the run"
+    );
+    let HeldTailResolution::Ambiguous(applied) =
+        resolve_held_durable_tail(tails.store(), &session_id, true)
+            .await
+            .expect("the repair applies")
+    else {
+        panic!("the held tail is still ambiguous when applied");
+    };
+    assert!(
+        matches!(applied.verdict, HeldTailRepairVerdict::Repaired { .. }),
+        "{:?}",
+        applied.verdict
+    );
+    for input in [&own, &joined] {
+        let stored = tails
+            .store()
+            .load_input_state(&runtime_id, input.id())
+            .await
+            .unwrap()
+            .expect("the row stays inspectable");
+        assert_eq!(
+            stored.seed.terminal_outcome,
+            Some(InputTerminalOutcome::Consumed),
+            "{}: consumed with the tail, never redelivered",
+            input.id()
+        );
+    }
+}
+
+#[tokio::test]
+async fn whole_blob_operator_repair_beside_a_disagreeing_cursor_consumes_the_runs_inputs() {
+    an_operator_repair_beside_a_disagreeing_cursor_consumes_the_runs_inputs(TailStore::WholeBlob(
+        InMemoryRuntimeStore::new(),
+    ))
+    .await;
+}
+
+#[cfg(feature = "sqlite-store")]
+#[tokio::test]
+async fn head_canonical_operator_repair_beside_a_disagreeing_cursor_consumes_the_runs_inputs() {
+    an_operator_repair_beside_a_disagreeing_cursor_consumes_the_runs_inputs(
+        TailStore::head_canonical(),
+    )
+    .await;
+}
+
+/// One content row beside a cancelled run's interrupted tail, and what a
+/// restart's recovery must do with it.
+#[derive(Debug, Clone, Copy)]
+enum BesideTheTail {
+    /// A prompt queued behind the run: Queue lane, naming no run.
+    QueuedPrompt,
+    /// A steer that never joined the run: Steer lane, naming no run.
+    UnjoinedSteer,
+    /// A steer that joined the run, but that no round commit listed before
+    /// the run ended: requeued with the run's association kept.
+    RequeuedJoin,
+    /// A queued row naming another run.
+    OtherRunsRow,
+    /// A row the run's cursor lists, still staged for the run.
+    CursorListed,
+}
+
+/// A restart's recovery of a cancelled run's interrupted tail, with one
+/// content row beside it. The tail's cursor lists exactly the inputs whose
+/// content the tail holds; A's own input ended with the cancel (no row), so
+/// the run is not continuable.
+/// - A queued prompt, an unjoined steer and a requeued join are not in the
+///   tail: the tail commits as interrupted and the row stays queued for
+///   ordinary redelivery. RED before the cursor attribution: the first two
+///   held the tail (the follow-up then never ran), and the requeued join was
+///   consumed with the tail although its content was not in it.
+/// - A row naming another run still holds the tail.
+/// - A row the cursor lists is the tail's own: it is consumed with it.
+async fn recovery_beside_an_interrupted_cursor_tail(tails: TailStore, case: BesideTheTail) {
+    use meerkat_core::types::HandlingMode;
+    use meerkat_runtime::recovery::{DurableTailRecoveryOutcome, recover_durable_tail};
+
+    let run_id = RunId::new();
+    let beside = match case {
+        BesideTheTail::UnjoinedSteer | BesideTheTail::RequeuedJoin => {
+            let Input::Prompt(mut prompt) = make_prompt("a steer beside the tail") else {
+                unreachable!("make_prompt builds a prompt");
+            };
+            prompt.turn_metadata = Some(
+                meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                    handling_mode: Some(HandlingMode::Steer),
+                    ..Default::default()
+                },
+            );
+            Input::Prompt(prompt)
+        }
+        _ => make_prompt("content beside the tail"),
+    };
+    let beside_id = beside.id().clone();
+    // The run's own input: it ended with the cancel and left no row.
+    let mut cursor_inputs = vec![InputId::new()];
+    let row = match case {
+        BesideTheTail::QueuedPrompt => queued_state(&beside, None, HandlingMode::Queue),
+        BesideTheTail::UnjoinedSteer => queued_state(&beside, None, HandlingMode::Steer),
+        BesideTheTail::RequeuedJoin => queued_state(&beside, Some(&run_id), HandlingMode::Steer),
+        BesideTheTail::OtherRunsRow => {
+            queued_state(&beside, Some(&RunId::new()), HandlingMode::Queue)
+        }
+        BesideTheTail::CursorListed => {
+            cursor_inputs.push(beside_id.clone());
+            applied_pending_state(&beside, &run_id, 1)
+        }
+    };
+    let session_id = tails
+        .interrupted_cursor_tail(&run_id, cursor_inputs, vec![row])
+        .await;
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+
+    let outcome = recover_durable_tail(tails.store(), &session_id)
+        .await
+        .unwrap_or_else(|error| panic!("{case:?}: recovery answers: {error}"));
+    let stored = tails
+        .store()
+        .load_input_state(&runtime_id, &beside_id)
+        .await
+        .unwrap()
+        .unwrap_or_else(|| panic!("{case:?}: the row stays inspectable"));
+    match case {
+        BesideTheTail::OtherRunsRow => {
+            assert!(
+                matches!(outcome, DurableTailRecoveryOutcome::Held),
+                "{case:?}: a row naming another run holds the tail: {outcome:?}"
+            );
+            assert_eq!(stored.seed.terminal_outcome, None, "{case:?}");
+        }
+        BesideTheTail::CursorListed => {
+            assert_commits_as_interrupted(case, &outcome);
+            assert_eq!(
+                stored.seed.terminal_outcome,
+                Some(InputTerminalOutcome::Consumed),
+                "{case:?}: the tail's own row is consumed with it"
+            );
+        }
+        BesideTheTail::QueuedPrompt
+        | BesideTheTail::UnjoinedSteer
+        | BesideTheTail::RequeuedJoin => {
+            assert_commits_as_interrupted(case, &outcome);
+            assert_eq!(
+                stored.seed.terminal_outcome, None,
+                "{case:?}: the row is not consumed with the tail"
+            );
+            assert!(
+                stored.state.persisted_input.is_some(),
+                "{case:?}: the row keeps its content for redelivery"
+            );
+        }
+    }
+}
+
+fn assert_commits_as_interrupted(
+    case: BesideTheTail,
+    outcome: &meerkat_runtime::recovery::DurableTailRecoveryOutcome,
+) {
+    let meerkat_runtime::recovery::DurableTailRecoveryOutcome::Committed { disposition, .. } =
+        outcome
+    else {
+        panic!("{case:?}: the tail commits: {outcome:?}");
+    };
+    assert_eq!(
+        format!("{disposition:?}"),
+        "RepairAndCommitInterrupted",
+        "{case:?}: the tail commits as interrupted"
+    );
+}
+
+#[tokio::test]
+async fn whole_blob_recovery_beside_an_interrupted_cursor_tail_with_a_queued_prompt() {
+    recovery_beside_an_interrupted_cursor_tail(
+        TailStore::WholeBlob(InMemoryRuntimeStore::new()),
+        BesideTheTail::QueuedPrompt,
+    )
+    .await;
+}
+
+#[cfg(feature = "sqlite-store")]
+#[tokio::test]
+async fn head_canonical_recovery_beside_an_interrupted_cursor_tail_with_a_queued_prompt() {
+    recovery_beside_an_interrupted_cursor_tail(
+        TailStore::head_canonical(),
+        BesideTheTail::QueuedPrompt,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn whole_blob_recovery_beside_an_interrupted_cursor_tail_with_an_unjoined_steer() {
+    recovery_beside_an_interrupted_cursor_tail(
+        TailStore::WholeBlob(InMemoryRuntimeStore::new()),
+        BesideTheTail::UnjoinedSteer,
+    )
+    .await;
+}
+
+#[cfg(feature = "sqlite-store")]
+#[tokio::test]
+async fn head_canonical_recovery_beside_an_interrupted_cursor_tail_with_an_unjoined_steer() {
+    recovery_beside_an_interrupted_cursor_tail(
+        TailStore::head_canonical(),
+        BesideTheTail::UnjoinedSteer,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn whole_blob_recovery_beside_an_interrupted_cursor_tail_with_a_requeued_join() {
+    recovery_beside_an_interrupted_cursor_tail(
+        TailStore::WholeBlob(InMemoryRuntimeStore::new()),
+        BesideTheTail::RequeuedJoin,
+    )
+    .await;
+}
+
+#[cfg(feature = "sqlite-store")]
+#[tokio::test]
+async fn head_canonical_recovery_beside_an_interrupted_cursor_tail_with_a_requeued_join() {
+    recovery_beside_an_interrupted_cursor_tail(
+        TailStore::head_canonical(),
+        BesideTheTail::RequeuedJoin,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn whole_blob_recovery_beside_an_interrupted_cursor_tail_with_another_runs_row() {
+    recovery_beside_an_interrupted_cursor_tail(
+        TailStore::WholeBlob(InMemoryRuntimeStore::new()),
+        BesideTheTail::OtherRunsRow,
+    )
+    .await;
+}
+
+#[cfg(feature = "sqlite-store")]
+#[tokio::test]
+async fn head_canonical_recovery_beside_an_interrupted_cursor_tail_with_another_runs_row() {
+    recovery_beside_an_interrupted_cursor_tail(
+        TailStore::head_canonical(),
+        BesideTheTail::OtherRunsRow,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn whole_blob_recovery_beside_an_interrupted_cursor_tail_with_a_cursor_listed_row() {
+    recovery_beside_an_interrupted_cursor_tail(
+        TailStore::WholeBlob(InMemoryRuntimeStore::new()),
+        BesideTheTail::CursorListed,
+    )
+    .await;
+}
+
+#[cfg(feature = "sqlite-store")]
+#[tokio::test]
+async fn head_canonical_recovery_beside_an_interrupted_cursor_tail_with_a_cursor_listed_row() {
+    recovery_beside_an_interrupted_cursor_tail(
+        TailStore::head_canonical(),
+        BesideTheTail::CursorListed,
+    )
+    .await;
 }

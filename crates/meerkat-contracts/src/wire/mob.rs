@@ -587,6 +587,10 @@ pub struct WireMobProfile {
     pub output_schema: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_params: Option<crate::wire::runtime::WireProviderParamsOverride>,
+    /// Spawn this profile's members as durable workers, which a mob without
+    /// persistent sessions refuses. Omitted means false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub durable: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -727,6 +731,10 @@ pub struct MobProfileInput {
     /// losing fidelity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_params: Option<crate::wire::runtime::WireProviderParamsOverride>,
+    /// Spawn this profile's members as durable workers, which a mob without
+    /// persistent sessions refuses. Omitted means false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub durable: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1670,6 +1678,18 @@ pub struct MobMemberSendParams {
     pub handling_mode: WireHandlingMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub render_metadata: Option<WireRenderMetadata>,
+    /// Optional caller idempotency key, deduplicated for the member identity
+    /// (it survives a respawn). A keyed send is committed as a member
+    /// continuation and answered with a receipt and a delivery status
+    /// (`continuation`), not a turn: the member's delivery owner admits it
+    /// with system origin, it is ordered only among keyed sends, it refuses
+    /// `render_metadata`, and a governed runtime refuses it. A replay keeps
+    /// `delivery_id` and `committed_at_ms`; its status may advance. Other
+    /// content under a used key is refused as `input_idempotency_conflict`.
+    /// Canonical text: non-empty, no surrounding whitespace, no control
+    /// characters, at most 256 bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
 }
 
 /// Response payload for host-side mob member delivery.
@@ -1693,6 +1713,50 @@ pub struct MobMemberSendResult {
     /// retired from app-facing responses per dogma #10.
     pub member_ref: WireMemberRef,
     pub handling_mode: WireHandlingMode,
+    /// The receipt and current delivery status of a keyed send; absent for an
+    /// unkeyed send.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<WireContinuationReceipt>,
+}
+
+/// The receipt of a keyed member send: the durable continuation it was
+/// committed as, and that continuation's delivery status when answered.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireContinuationReceipt {
+    /// The committed delivery; identical on every replay of the key.
+    pub delivery_id: String,
+    /// When the key was first committed, in Unix milliseconds; identical on
+    /// every replay of the key.
+    pub committed_at_ms: u64,
+    /// The delivery status read for this answer; it may advance between
+    /// replays.
+    pub status: WireContinuationStatus,
+}
+
+/// Delivery status of a keyed member send. `stranded` is final and means the
+/// content was never admitted: resend it under a new key. A `pending` that
+/// survives a gateway restart is not proof of loss; do not resend it under a
+/// new key.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum WireContinuationStatus {
+    // Committed and not admitted yet.
+    Pending,
+    // Admitted as an input of `session_id`: queued in that session's ledger,
+    // not proof that a turn ran. Follow it with `session/input_status`.
+    Admitted {
+        session_id: String,
+        input_id: String,
+    },
+    // Committed and never admitted: the member incarnation it was bound to
+    // was replaced.
+    Stranded,
+    // Settled as refused, never admitted.
+    Refused {
+        reason: String,
+    },
 }
 
 /// Request payload for `mob/ingress_interaction`.
@@ -2199,7 +2263,7 @@ pub struct MobLifecycleResult {
     pub action: WireMobLifecycleAction,
     pub ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub destroy_report: Option<Value>,
+    pub destroy_report: Option<WireMobDestroyReport>,
     /// For `stop`: what the stop did to each member's run and whether its
     /// run starts are held (#1500). A member reported `not_holdable` may
     /// still start a turn while the mob is stopped. A member reported
@@ -2727,6 +2791,11 @@ pub struct MobTurnStartParams {
     /// Host-regenerated request-only context for this member turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transient_turn_context: Option<meerkat_core::lifecycle::run_primitive::TurnRequestContext>,
+    /// `false`: this turn's events are not written as `session/event`
+    /// notifications, as on `turn/start`. Absent or `true` keeps them. Since
+    /// 0.9.5; an older server refuses the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_events: Option<bool>,
 }
 
 /// One currently wired peer that is known to be unreachable.
@@ -2840,6 +2909,182 @@ pub struct MobMemberStatusResult {
     /// repair. Absent-omitted for byte-compat with released SDKs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub registration_refusal: Option<WireMemberRegistrationHookCall>,
+    /// Present when a mob start deferred the member's custody restore instead
+    /// of failing the whole start: which restore, and the cause its last
+    /// attempt met. Every operation on the member re-attempts it first.
+    /// Absent-omitted for byte-compat with released SDKs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custody_deferred: Option<WireMemberCustodyDeferral>,
+}
+
+/// A member's custody restore a mob start deferred, as its status shows it.
+/// Advisory: its vocabularies may grow, and a reader surfaces a value it does
+/// not know instead of refusing it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireMemberCustodyDeferral {
+    /// The deferred restore.
+    pub restore: WireMemberCustodyRestore,
+    /// The cause its last attempt met.
+    pub cause: WireMemberCustodyDeferralCause,
+}
+
+/// Which startup restore of a member's custody a mob start deferred. The
+/// vocabulary may grow: a restore this version does not know reads as
+/// [`Self::Unknown`] with the value as it was sent, and is written back the
+/// same.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(from = "String", into = "String")]
+#[non_exhaustive]
+pub enum WireMemberCustodyRestore {
+    /// The operation binding of a member whose restore failed at the start.
+    StartupBinding,
+    /// A retiring member's local cleanup delivery custody.
+    CleanupDelivery,
+    /// A restore this version does not know, as it was sent.
+    Unknown(String),
+}
+
+impl WireMemberCustodyRestore {
+    /// The value on the wire.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::StartupBinding => "startup_binding",
+            Self::CleanupDelivery => "cleanup_delivery",
+            Self::Unknown(raw) => raw,
+        }
+    }
+}
+
+impl From<String> for WireMemberCustodyRestore {
+    fn from(raw: String) -> Self {
+        match raw.as_str() {
+            "startup_binding" => Self::StartupBinding,
+            "cleanup_delivery" => Self::CleanupDelivery,
+            _ => Self::Unknown(raw),
+        }
+    }
+}
+
+impl From<WireMemberCustodyRestore> for String {
+    fn from(restore: WireMemberCustodyRestore) -> Self {
+        match restore {
+            WireMemberCustodyRestore::Unknown(raw) => raw,
+            known => known.as_str().to_owned(),
+        }
+    }
+}
+
+/// The cause a deferred member custody restore last met. The vocabulary may
+/// grow: a cause this version does not know reads as [`Self::Unknown`] with
+/// the value as it was sent, and is written back the same.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(from = "String", into = "String")]
+#[non_exhaustive]
+pub enum WireMemberCustodyDeferralCause {
+    /// Another runtime owner on the realm hosts the member's session.
+    ServedElsewhere,
+    /// The member session's hosting claim cannot be taken on this realm.
+    HostingUnavailable,
+    /// The member's durable tail could not be proven, and its recovery kept
+    /// it.
+    DurableTailUnprovable,
+    /// A cause this version does not know, as it was sent.
+    Unknown(String),
+}
+
+impl WireMemberCustodyDeferralCause {
+    /// The value on the wire.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::ServedElsewhere => "served_elsewhere",
+            Self::HostingUnavailable => "hosting_unavailable",
+            Self::DurableTailUnprovable => "durable_tail_unprovable",
+            Self::Unknown(raw) => raw,
+        }
+    }
+}
+
+impl From<String> for WireMemberCustodyDeferralCause {
+    fn from(raw: String) -> Self {
+        match raw.as_str() {
+            "served_elsewhere" => Self::ServedElsewhere,
+            "hosting_unavailable" => Self::HostingUnavailable,
+            "durable_tail_unprovable" => Self::DurableTailUnprovable,
+            _ => Self::Unknown(raw),
+        }
+    }
+}
+
+impl From<WireMemberCustodyDeferralCause> for String {
+    fn from(cause: WireMemberCustodyDeferralCause) -> Self {
+        match cause {
+            WireMemberCustodyDeferralCause::Unknown(raw) => raw,
+            known => known.as_str().to_owned(),
+        }
+    }
+}
+
+/// The schema of the advisory custody vocabularies: the values this version
+/// knows. A reader accepts any other string as unknown.
+#[cfg(feature = "schema")]
+mod custody_deferral_schema {
+    /// Which startup restore of a member's custody a mob start deferred. The
+    /// vocabulary may grow: a reader surfaces a restore it does not know
+    /// instead of refusing it.
+    #[derive(schemars::JsonSchema)]
+    #[schemars(rename_all = "snake_case")]
+    #[allow(dead_code)]
+    pub(super) enum WireMemberCustodyRestore {
+        /// The operation binding of a member whose restore failed at the start.
+        StartupBinding,
+        /// A retiring member's local cleanup delivery custody.
+        CleanupDelivery,
+    }
+
+    /// The cause a deferred member custody restore last met. The vocabulary
+    /// may grow: a reader surfaces a cause it does not know instead of
+    /// refusing it.
+    #[derive(schemars::JsonSchema)]
+    #[schemars(rename_all = "snake_case")]
+    #[allow(dead_code)]
+    pub(super) enum WireMemberCustodyDeferralCause {
+        /// Another runtime owner on the realm hosts the member's session.
+        ServedElsewhere,
+        /// The member session's hosting claim cannot be taken on this realm.
+        HostingUnavailable,
+        /// The member's durable tail could not be proven, and its recovery kept
+        /// it.
+        DurableTailUnprovable,
+    }
+}
+
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for WireMemberCustodyRestore {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "WireMemberCustodyRestore".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        <custody_deferral_schema::WireMemberCustodyRestore as schemars::JsonSchema>::json_schema(
+            generator,
+        )
+    }
+}
+
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for WireMemberCustodyDeferralCause {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "WireMemberCustodyDeferralCause".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        <custody_deferral_schema::WireMemberCustodyDeferralCause as schemars::JsonSchema>::json_schema(
+            generator,
+        )
+    }
 }
 
 /// The member registration hook call that refused a restored member's
@@ -2969,6 +3214,7 @@ mod member_status_capability_tests {
             non_portable_disabled: None,
             preview_unavailable: None,
             registration_refusal: None,
+            custody_deferred: None,
         };
 
         let json = serde_json::to_string(&result)?;
@@ -2985,7 +3231,96 @@ mod member_status_capability_tests {
 pub struct MobDestroyResult {
     pub mob_id: String,
     pub ok: bool,
-    pub destroy_report: Value,
+    pub destroy_report: WireMobDestroyReport,
+}
+
+/// Wire form of a mob destroy's report (`meerkat_mob::MobDestroyReport`),
+/// field for field: a destroy result, a lifecycle destroy and the
+/// `mob_destroy_incomplete` error data carry it. Members are their identity
+/// strings. Empty lists are left out, and a missing flag reads as `false`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireMobDestroyReport {
+    /// Members whose retirement the destroy forced.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub force_destroyed_members: Vec<String>,
+    /// Remote members whose cleanup the destroy could not confirm.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub orphaned_remote_members: Vec<String>,
+    /// Whether remote cleanup ran out of its deadline.
+    #[serde(default)]
+    pub remote_cleanup_deadline_exceeded: bool,
+    /// Whether the mob's metadata was scrubbed.
+    #[serde(default)]
+    pub metadata_scrubbed: bool,
+    /// Whether the mob's events were cleared.
+    #[serde(default)]
+    pub events_cleared: bool,
+    /// Whether the mob's storage namespace was cleaned.
+    #[serde(default)]
+    pub namespace_cleaned: bool,
+    /// Cleanup failures, as text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
+    /// Members the destroy reloaded from their durable store and retired.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reloaded_members: Vec<String>,
+    /// Members whose durability reload the runtime refused, with the typed
+    /// refusal; retry the destroy later.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub member_reload_refusals: Vec<WireMobDestroyMemberRefusal>,
+}
+
+/// A member whose durability reload the runtime refused during a destroy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireMobDestroyMemberRefusal {
+    pub member: String,
+    pub refusal: WireMemberReloadRefusal,
+}
+
+/// Why the runtime refused a member's durability reload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WireMemberReloadRefusal {
+    /// The runtime's recovery is repair-blocked, for example while a
+    /// boundary commit past its deadline has not reported its durable
+    /// outcome.
+    RepairBlocked {
+        reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        evidence_digest: Option<String>,
+    },
+    /// Forward compatibility: a refusal kind this version does not know.
+    /// The server never sends it.
+    #[serde(other)]
+    Unknown,
+}
+
+/// The `data` of a `mob_destroy_incomplete` error: the destroy did not
+/// finish, its report says what is left, and it can be retried.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireMobDestroyIncompleteData {
+    /// Always `mob_destroy_incomplete`.
+    pub code: String,
+    pub destroy_report: WireMobDestroyReport,
+    pub retryable: bool,
+}
+
+impl WireMobDestroyIncompleteData {
+    /// The `code` of this error data.
+    pub const CODE: &'static str = "mob_destroy_incomplete";
+
+    /// The retryable incomplete-destroy data for `destroy_report`.
+    pub fn new(destroy_report: WireMobDestroyReport) -> Self {
+        Self {
+            code: Self::CODE.to_string(),
+            destroy_report,
+            retryable: true,
+        }
+    }
 }
 
 /// Request payload for `mob/claim_callback_route`.
@@ -4712,6 +5047,7 @@ mod tests {
             non_portable_disabled: None,
             preview_unavailable: None,
             registration_refusal: None,
+            custody_deferred: None,
         }
     }
 
@@ -4729,6 +5065,8 @@ mod tests {
             "lifecycle_capabilities",
             "non_portable_disabled",
             "preview_unavailable",
+            "registration_refusal",
+            "custody_deferred",
         ] {
             assert!(
                 value.get(absent).is_none(),
@@ -4748,6 +5086,82 @@ mod tests {
         assert!(decoded.placement.is_none());
         assert!(decoded.lifecycle_capabilities.is_none());
         assert!(decoded.preview_unavailable.is_none());
+        assert!(decoded.custody_deferred.is_none());
+    }
+
+    /// A deferred custody restore is a closed snake_case object at the top
+    /// level of the status result: the restore and the cause its last
+    /// attempt met.
+    #[test]
+    fn member_status_custody_deferred_round_trips() {
+        for (restore, restore_wire) in [
+            (WireMemberCustodyRestore::StartupBinding, "startup_binding"),
+            (
+                WireMemberCustodyRestore::CleanupDelivery,
+                "cleanup_delivery",
+            ),
+        ] {
+            for (cause, cause_wire) in [
+                (
+                    WireMemberCustodyDeferralCause::ServedElsewhere,
+                    "served_elsewhere",
+                ),
+                (
+                    WireMemberCustodyDeferralCause::HostingUnavailable,
+                    "hosting_unavailable",
+                ),
+                (
+                    WireMemberCustodyDeferralCause::DurableTailUnprovable,
+                    "durable_tail_unprovable",
+                ),
+            ] {
+                let deferral = WireMemberCustodyDeferral {
+                    restore: restore.clone(),
+                    cause,
+                };
+                let mut status = minimal_member_status();
+                status.custody_deferred = Some(deferral.clone());
+                let value = serde_json::to_value(&status).expect("serialize member status");
+                assert_eq!(
+                    value["custody_deferred"],
+                    serde_json::json!({ "restore": restore_wire, "cause": cause_wire })
+                );
+                let decoded: MobMemberStatusResult =
+                    serde_json::from_value(value).expect("the deferral decodes");
+                assert_eq!(decoded.custody_deferred, Some(deferral));
+            }
+        }
+    }
+
+    /// The advisory custody vocabularies may grow: a restore or a cause this
+    /// version does not know decodes as unknown with the value as sent, and
+    /// is written back unchanged. A value that is not a string still fails.
+    #[test]
+    fn member_status_custody_deferred_reads_an_unknown_value_as_unknown() {
+        let mut status = serde_json::to_value(minimal_member_status()).expect("serialize");
+        status["custody_deferred"] =
+            serde_json::json!({ "restore": "warm_handoff", "cause": "quota_paused" });
+        let decoded: MobMemberStatusResult =
+            serde_json::from_value(status.clone()).expect("unknown values decode");
+        assert_eq!(
+            decoded.custody_deferred,
+            Some(WireMemberCustodyDeferral {
+                restore: WireMemberCustodyRestore::Unknown("warm_handoff".to_string()),
+                cause: WireMemberCustodyDeferralCause::Unknown("quota_paused".to_string()),
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&decoded).expect("serialize again")["custody_deferred"],
+            status["custody_deferred"],
+            "an unknown value is written back as it was read"
+        );
+
+        status["custody_deferred"] =
+            serde_json::json!({ "restore": 7, "cause": "served_elsewhere" });
+        assert!(
+            serde_json::from_value::<MobMemberStatusResult>(status).is_err(),
+            "a restore that is not a string is malformed"
+        );
     }
 
     /// The preview-unavailable marker is a closed snake_case vocabulary at
@@ -5098,5 +5512,49 @@ mod tests {
             "agent_identity": "worker",
         }))
         .expect_err("close without channel_id must be rejected");
+    }
+}
+
+#[cfg(test)]
+mod destroy_report_tests {
+    use super::{WireMemberReloadRefusal, WireMobDestroyIncompleteData, WireMobDestroyReport};
+
+    #[test]
+    fn an_unknown_member_reload_refusal_kind_parses_as_unknown() -> Result<(), serde_json::Error> {
+        let report: WireMobDestroyReport = serde_json::from_value(serde_json::json!({
+            "member_reload_refusals": [
+                {"member": "m", "refusal": {"kind": "a_later_kind", "detail": 1}}
+            ]
+        }))?;
+        assert_eq!(
+            report
+                .member_reload_refusals
+                .iter()
+                .map(|refused| &refused.refusal)
+                .collect::<Vec<_>>(),
+            [&WireMemberReloadRefusal::Unknown]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn incomplete_destroy_data_carries_its_code_and_is_retryable() -> Result<(), serde_json::Error>
+    {
+        assert_eq!(
+            serde_json::to_value(WireMobDestroyIncompleteData::new(
+                WireMobDestroyReport::default()
+            ))?,
+            serde_json::json!({
+                "code": "mob_destroy_incomplete",
+                "destroy_report": {
+                    "remote_cleanup_deadline_exceeded": false,
+                    "metadata_scrubbed": false,
+                    "events_cleared": false,
+                    "namespace_cleaned": false,
+                },
+                "retryable": true,
+            })
+        );
+        Ok(())
     }
 }

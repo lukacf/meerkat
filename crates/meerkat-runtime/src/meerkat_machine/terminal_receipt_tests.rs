@@ -840,11 +840,18 @@ async fn unknown_input_reads_the_same_through_read_and_wait_with_or_without_regi
         wait(&ephemeral, &unregistered, &unknown).await,
         Err(RuntimeDriverError::NotReady { .. })
     ));
+    assert!(matches!(
+        ephemeral.session_input_states(&unregistered).await,
+        Err(RuntimeDriverError::NotReady { .. })
+    ));
     let session_id = SessionId::new();
     ephemeral
         .register_session(session_id.clone())
         .await
         .expect("register session");
+    let empty = ephemeral.session_input_states(&session_id).await.unwrap();
+    assert_eq!(empty.source, TerminalWitnessSource::LiveRuntime);
+    assert!(empty.report.is_empty());
     assert!(
         read(&ephemeral, &session_id, &unknown)
             .await
@@ -883,6 +890,10 @@ async fn unknown_input_reads_the_same_through_read_and_wait_with_or_without_regi
     <MeerkatMachine as SessionServiceRuntimeExt>::accept_input(&attached, &session_id, queued)
         .await
         .expect("queue a durable input");
+    let live_inputs = attached.session_input_states(&session_id).await.unwrap();
+    assert_eq!(live_inputs.source, TerminalWitnessSource::LiveRuntime);
+    assert_eq!(live_inputs.report.len(), 1);
+    assert_eq!(live_inputs.report[0].state.input_id, queued_id);
     assert!(
         read(&attached, &session_id, &unknown)
             .await
@@ -898,6 +909,16 @@ async fn unknown_input_reads_the_same_through_read_and_wait_with_or_without_regi
 
     let detached =
         MeerkatMachine::persistent_without_blobs(Arc::clone(&store)).expect("persistent machine");
+    // A durable observation does not claim that the still-attached owner has
+    // stopped admitting or that its pending row is settled.
+    let durable_inputs = detached.session_input_states(&session_id).await.unwrap();
+    assert_eq!(durable_inputs.source, TerminalWitnessSource::DurableStore);
+    assert_eq!(durable_inputs.report.len(), 1);
+    assert_eq!(durable_inputs.report[0].state.input_id, queued_id);
+    assert_eq!(
+        durable_inputs.report[0].seed.phase,
+        live_inputs.report[0].seed.phase
+    );
     assert!(
         read(&detached, &session_id, &unknown)
             .await
@@ -919,6 +940,10 @@ async fn unknown_input_reads_the_same_through_read_and_wait_with_or_without_regi
         wait(&detached, &never_admitted, &unknown).await,
         Err(RuntimeDriverError::NotFound { .. })
     ));
+    assert!(matches!(
+        detached.session_input_states(&never_admitted).await,
+        Err(RuntimeDriverError::NotFound { .. })
+    ));
     match wait(&detached, &session_id, &queued_id).await {
         Ok(Some(InputTerminalReceiptWait::Detached(Sourced {
             source: TerminalWitnessSource::DurableStore,
@@ -926,6 +951,14 @@ async fn unknown_input_reads_the_same_through_read_and_wait_with_or_without_regi
         }))) => assert_eq!(input_id, queued_id),
         other => panic!("a pending row with no live registration detaches, got {other:?}"),
     }
+    let before_close = attached.session_input_states(&session_id).await.unwrap();
+    assert_eq!(before_close.report.len(), 1);
+    assert_eq!(before_close.report[0].state.input_id, queued_id);
+    attached.unregister_session(&session_id).await.unwrap();
+    let closed_inputs = attached.session_input_states(&session_id).await.unwrap();
+    assert_eq!(closed_inputs.source, TerminalWitnessSource::DurableStore);
+    assert_eq!(closed_inputs.report.len(), 1);
+    assert_eq!(closed_inputs.report[0].state.input_id, queued_id);
 }
 
 /// A finalized receipt survives restart: a fresh machine over the same store
@@ -952,7 +985,20 @@ async fn finalized_receipt_is_read_from_the_store_after_restart() {
     let live = harness.wait_resolved(&x).await;
     let live_receipt = finalized(&live.report).clone();
     assert_eq!(completed_text(live_receipt.outcome()), "answer-1");
+    let live_inputs = harness
+        .machine
+        .session_input_states(&harness.session_id)
+        .await
+        .unwrap();
+    assert_eq!(live_inputs.source, TerminalWitnessSource::LiveRuntime);
+    assert_eq!(live_inputs.report.len(), 1);
+    assert_eq!(live_inputs.report[0].state.input_id, x);
     let session_id = harness.session_id.clone();
+    harness
+        .machine
+        .unregister_session(&session_id)
+        .await
+        .unwrap();
     drop(harness);
     drop(store);
 
@@ -963,6 +1009,14 @@ async fn finalized_receipt_is_read_from_the_store_after_restart() {
         Arc::new(meerkat_store::MemoryBlobStore::new()),
     )
     .expect("persistent machine");
+    let inputs = restarted.session_input_states(&session_id).await.unwrap();
+    assert_eq!(inputs.source, TerminalWitnessSource::DurableStore);
+    assert_eq!(inputs.report.len(), 1);
+    assert_eq!(inputs.report[0].state.input_id, x);
+    assert_eq!(
+        inputs.report[0].seed.phase,
+        live_inputs.report[0].seed.phase
+    );
     let read = restarted
         .input_terminal_receipt(
             &session_id,
@@ -1003,4 +1057,74 @@ async fn finalized_receipt_is_read_from_the_store_after_restart() {
             .expect("unknown key read")
             .is_none()
     );
+}
+
+/// Even when a damaged durable row has a valid live counterpart, a complete
+/// census must refuse rather than hide it or return only the other good row.
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite-store"))]
+#[tokio::test]
+async fn session_input_states_refuse_corrupt_rows_without_repair_or_registration() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("runtime.sqlite3");
+    let store = Arc::new(crate::store::SqliteRuntimeStore::new(path.clone()).unwrap())
+        as Arc<dyn crate::store::RuntimeStore>;
+    let attached = MeerkatMachine::persistent_without_blobs(store.clone()).unwrap();
+    let session_id = SessionId::new();
+    attached.register_session(session_id.clone()).await.unwrap();
+    let mut ids = Vec::new();
+    for key in ["census-good", "census-corrupt"] {
+        let input = keyed_external_event(key);
+        ids.push(input.id().clone());
+        let outcome = <MeerkatMachine as SessionServiceRuntimeExt>::accept_input(
+            &attached,
+            &session_id,
+            input,
+        )
+        .await
+        .unwrap();
+        assert!(outcome.is_accepted());
+    }
+    let before = attached.session_input_states(&session_id).await.unwrap();
+    assert_eq!(
+        sorted(
+            before
+                .report
+                .iter()
+                .map(|row| row.state.input_id.clone())
+                .collect()
+        ),
+        sorted(ids.clone())
+    );
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    let connection = rusqlite::Connection::open(path).unwrap();
+    let damaged = b"{invalid input row";
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE runtime_input_states SET state_json=?3 WHERE runtime_id=?1 AND input_id=?2",
+                rusqlite::params![
+                    runtime_id.to_string(),
+                    ids[1].to_string(),
+                    damaged.as_slice()
+                ],
+            )
+            .unwrap(),
+        1
+    );
+    let detached = MeerkatMachine::persistent_without_blobs(store).unwrap();
+    for machine in [&attached, &detached] {
+        assert!(matches!(
+            machine.session_input_states(&session_id).await,
+            Err(RuntimeDriverError::Internal(_))
+        ));
+    }
+    assert!(!detached.sessions.read().await.contains_key(&session_id));
+    let retained: Vec<u8> = connection
+        .query_row(
+            "SELECT state_json FROM runtime_input_states WHERE runtime_id=?1 AND input_id=?2",
+            rusqlite::params![runtime_id.to_string(), ids[1].to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(retained, damaged);
 }

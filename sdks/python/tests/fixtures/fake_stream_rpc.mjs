@@ -44,7 +44,7 @@ function streamEnd(streamId, outcome, error = undefined) {
       stream_id: streamId,
       ended: true,
       outcome,
-      ...(error ? { error } : {}),
+      ...(error !== undefined ? { error } : {}),
     },
   };
 }
@@ -94,6 +94,59 @@ rl.on("line", (line) => {
       },
     });
     return;
+  }
+
+  if (method === "session/stream_open" || method === "mob/stream_open") {
+    const scenario = String(params.session_id ?? params.mob_id ?? "");
+    const cases = {
+      "queued-terminal-error": ["terminal_error", { code: "stream_queue_overflow", message: "synthetic stream overflow" }],
+      "queued-gap-terminal-error": ["terminal_error", { code: "stream_queue_overflow", message: "synthetic stream overflow" }],
+      "queued-unknown-error": ["future_terminal_outcome", { code: "future_stream_code", message: "future detail: preserve exactly" }],
+      "queued-remote-end": ["remote_end", undefined],
+      "queued-explicit-close": ["explicit_close", null],
+      "live-terminal-error": ["terminal_error", { code: "stream_queue_overflow", message: "synthetic stream overflow" }],
+    };
+    if (Object.hasOwn(cases, scenario)) {
+      const streamId = `${method}:${scenario}:${params.agent_identity ?? "all"}`;
+      const [outcome, error] = cases[scenario];
+      const response = { jsonrpc: "2.0", id, result: { stream_id: streamId } };
+      const emit = () => {
+        for (const [index, delta] of ["first", "second"].entries()) {
+          const message = streamEvent(streamId,
+            `00000000-0000-4000-8000-00000000002${index}`, delta, 41 + index);
+          message.params.sequence = 7 + index;
+          if (scenario === "queued-gap-terminal-error" && index === 1) {
+            message.params.sequence = 9;
+            message.params.event.seq = 0;
+            message.params.event.payload = {
+              type: "stream_truncated", reason: { kind: "stream_lagged", dropped: 1 },
+            };
+          }
+          if (method === "mob/stream_open") {
+            message.method = "mob/stream_event";
+            if (!params.agent_identity) {
+              message.params.event = {
+                source: { identity: "synthetic-agent", generation: 0 },
+                role: "synthetic-player",
+                envelope: message.params.event,
+              };
+            }
+          }
+          write(message);
+        }
+        const terminal = streamEnd(streamId, outcome, error);
+        if (method === "mob/stream_open") terminal.method = "mob/stream_end";
+        write(terminal);
+      };
+      if (scenario === "live-terminal-error") {
+        write(response);
+        setTimeout(emit, 5);
+      } else {
+        emit();
+        write(response);
+      }
+      return;
+    }
   }
 
   if (method === "session/stream_open") {
@@ -193,7 +246,7 @@ rl.on("line", (line) => {
     }
   }
 
-  if (method === "session/stream_close") {
+  if (method === "session/stream_close" || method === "mob/stream_close") {
     write({
       jsonrpc: "2.0",
       id,

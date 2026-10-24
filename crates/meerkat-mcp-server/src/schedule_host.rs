@@ -161,9 +161,11 @@ impl McpScheduleContext {
         let session = Session::with_id(occurrence.materialized_session_id());
         let session_id = session.id().clone();
         let ingress = self.ingress_context();
+        // A redrive can meet its session running: the reuse reads the
+        // committed snapshot, which the run's provisional tail does not change.
         let authoritative_session = self
             .service
-            .load_authoritative_session(&session_id)
+            .load_committed_session_tolerating_tail(&session_id)
             .await
             .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
         let preexisting_authoritative = authoritative_session.is_some();
@@ -354,6 +356,7 @@ impl McpScheduleContext {
                     max_inline_peer_notifications: None,
                     app_context: create.app_context.clone(),
                     fork_source: None,
+                    prompt_context_fork_source: None,
                     additional_instructions: (!create.additional_instructions.is_empty())
                         .then(|| create.additional_instructions.clone()),
                     initial_metadata_entries: std::collections::BTreeMap::new(),
@@ -561,10 +564,12 @@ impl SurfaceScheduleSessionHost for McpScheduleTargetAdapter {
         let Some(session_id) = binding.resolved_session_id() else {
             return Ok(None);
         };
+        // The owner identity is committed metadata, which a running durable
+        // run's provisional tail does not change.
         let session = self
             .context
             .service
-            .load_authoritative_session(session_id)
+            .load_committed_session_tolerating_tail(session_id)
             .await
             .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?;
         Ok(recover_mob_member_identity_from_session_target(
@@ -830,9 +835,11 @@ async fn update_peer_ingress_context(
 ) -> Result<(), ScheduleDomainError> {
     #[cfg(feature = "comms")]
     {
+        // The keep-alive is committed metadata, read from the committed
+        // snapshot while the session's durable run holds a provisional tail.
         let session = _context
             .service
-            .load_authoritative_session(_session_id)
+            .load_committed_session_tolerating_tail(_session_id)
             .await
             .map_err(|error| ScheduleDomainError::Internal(error.to_string()))?
             .ok_or_else(|| {
@@ -1345,5 +1352,75 @@ mod tests {
                 .is_err(),
             "an unreadable chain must fail, not seed an empty set"
         );
+    }
+
+    /// A scheduled fire into a session whose durable run holds after a round
+    /// commit reads the session's committed document, not the run's
+    /// provisional tail: its owner identity at once, and its body for the
+    /// materialized-session reuse and its keep-alive, which wait for the
+    /// run's turn boundary (the live actor's lease). The WholeBlob twin is the
+    /// oracle.
+    async fn mcp_schedule_fire_into_a_running_session(head_canonical: bool) {
+        use crate::tests::committed_reads_tests::{McpHeldRun, mid_run};
+
+        let occurrence = sample_occurrence();
+        let held =
+            McpHeldRun::start_with_id(head_canonical, occurrence.materialized_session_id()).await;
+        let context = McpScheduleContext::from_state(&held.state);
+        let adapter = McpScheduleTargetAdapter::new(context.clone());
+        let binding = SessionTargetBinding::ResumableSession {
+            session_id: held.session_id.clone(),
+            action: meerkat::ScheduledSessionAction::Prompt {
+                prompt: ContentInput::Text("scheduled".to_string()),
+                system_prompt: None,
+                render_metadata: None,
+                skill_refs: Vec::new(),
+                additional_instructions: Vec::new(),
+            },
+        };
+        let probe = mid_run(adapter.probe_session_target(&binding)).await;
+        assert!(
+            matches!(probe, Ok(TargetProbeOutcome::Busy { .. })),
+            "the running session probes busy: {probe:?}"
+        );
+        let identity = mid_run(adapter.recover_session_target_identity(&binding)).await;
+        assert!(
+            matches!(identity, Ok(None)),
+            "an ordinary session's owner identity reads from its committed metadata: {identity:?}"
+        );
+        let session_id = held.session_id.clone();
+        let ((materialized, ingress), answered_mid_run) = held
+            .across(async move {
+                let materialized = context
+                    .materialize_scheduled_session(&occurrence, &materialization_spec("mock-model"))
+                    .await;
+                let ingress = update_peer_ingress_context(&context, &session_id).await;
+                (materialized, ingress)
+            })
+            .await;
+        assert!(
+            !answered_mid_run,
+            "the reuse waits for the running run's turn boundary: {materialized:?}"
+        );
+        assert_eq!(
+            materialized.as_ref().ok(),
+            Some(&held.session_id),
+            "the occurrence reuses its running session: {materialized:?}"
+        );
+        assert!(
+            ingress.is_ok(),
+            "the peer ingress reads the committed keep-alive: {ingress:?}"
+        );
+        held.completes().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mcp_schedule_fire_into_a_running_session_head_canonical() {
+        mcp_schedule_fire_into_a_running_session(true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mcp_schedule_fire_into_a_running_session_whole_blob() {
+        mcp_schedule_fire_into_a_running_session(false).await;
     }
 }

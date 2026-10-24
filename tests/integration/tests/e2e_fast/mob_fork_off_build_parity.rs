@@ -584,29 +584,37 @@ async fn e2e_fast_mob_fork_off_child_request_matches_the_forker_byte_for_byte() 
     );
 
     // The child's input is the forker's committed transcript at the fork
-    // boundary followed by its own task. `fork_off` runs inside the forker's
-    // turn and branches at the last committed boundary, which is everything
-    // the forker sent except the in-flight user message that asked for the
-    // fork: the system prompt and the earlier exchange.
+    // boundary, then the fork notice naming its source, then its own task.
+    // `fork_off` runs inside the forker's turn and branches at the last
+    // committed boundary, which is everything the forker sent except the
+    // in-flight user message that asked for the fork: the system prompt and
+    // the earlier exchange. Nothing of the forker's running turn reaches the
+    // child.
     let task_at = child_parts
         .input
         .iter()
         .position(|item| item.get().contains(CHILD_TASK))
         .expect("the child's request carries its task");
     let inherited = &child_parts.input[..task_at];
-    assert_eq!(
-        inherited.len() + 1,
-        forker_parts.input.len(),
-        "the child inherits the forker's request up to its in-flight fork prompt"
-    );
+    let committed = forker_parts.input.len() - 1;
     assert!(
-        inherited
-            .iter()
-            .any(|item| item.get().contains(SOURCE_TURN)),
+        forker_parts.input[committed].get().contains(FORK_PROMPT),
+        "the forker's last input is its in-flight fork prompt"
+    );
+    assert_eq!(
+        inherited.len(),
+        committed + 1,
+        "the child inherits the forker's request up to its in-flight fork prompt, then one fork notice"
+    );
+    let (shared, notice) = inherited.split_at(committed);
+    assert!(
+        shared.iter().any(|item| item.get().contains(SOURCE_TURN)),
         "the inherited prefix carries the forker's earlier exchange"
     );
-    for (index, (child_item, forker_item)) in
-        inherited.iter().zip(forker_parts.input.iter()).enumerate()
+    for (index, (child_item, forker_item)) in shared
+        .iter()
+        .zip(&forker_parts.input[..committed])
+        .enumerate()
     {
         assert_eq!(
             child_item.get(),
@@ -614,6 +622,28 @@ async fn e2e_fast_mob_fork_off_child_request_matches_the_forker_byte_for_byte() 
             "input item {index} differs before the fork boundary"
         );
     }
+    assert_eq!(
+        serde_json::from_str::<Value>(notice[0].get()).unwrap(),
+        json!({
+            "type": "message",
+            "role": "user",
+            "content": [{
+                "type": "input_text",
+                "text": format!(
+                    "Fork notice. You are a fork of member '{SOURCE}'. \
+                     The conversation above was copied from it."
+                ),
+            }],
+        }),
+        "the fork notice names the source and follows the copied conversation"
+    );
+    assert!(
+        !child_parts
+            .input
+            .iter()
+            .any(|item| item.get().contains(FORK_PROMPT)),
+        "the forker's in-flight fork prompt never reaches the child"
+    );
     // The shared prefix is cacheable where the forker's cache lives (#1235).
     // The forker's turn started from its previous run's end; every request of
     // that turn (the one that asked for the fork, and the tool round after
@@ -623,12 +653,12 @@ async fn e2e_fast_mob_fork_off_child_request_matches_the_forker_byte_for_byte() 
     // the forker's first request writes that entry even on a cold cache and
     // the child reads it.
     let forker_round = stack.only_body("forker tool round", is_fork_tool_round);
-    let anchor_at = inherited
+    let anchor_at = shared
         .iter()
         .rposition(|item| item.get().contains(SOURCE_TURN))
         .expect("the previous run's input");
     assert!(
-        anchor_at + 1 < inherited.len(),
+        anchor_at + 1 < shared.len(),
         "the previous run's answer follows its input inside the fork prefix"
     );
     for (name, body) in [

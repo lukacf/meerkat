@@ -2300,25 +2300,43 @@ pub(crate) mod tests {
             .expect("binding")
     }
 
-    #[tokio::test]
+    /// The verdict comes from the policy's own worker thread, on the real
+    /// clock. The row runs on a paused clock and holds a blocking task until
+    /// the dispatch returned: the paused clock does not advance while a
+    /// blocking task runs, so the 100 ms evaluation deadline cannot come due
+    /// before the worker answers, however late it is scheduled. A worker that
+    /// never answers ends the hold after a minute and fails the row on the
+    /// deadline instead of hanging it.
+    #[tokio::test(start_paused = true)]
     async fn application_denial_is_narrow_only_and_never_enters_inner_dispatcher() {
         let inner = Arc::new(SpyDispatcher::new(&["alpha"]));
         let gated = ExecutionPolicyGatedDispatcher::new(
             Arc::clone(&inner),
             ToolExecutionPolicy::unrestricted(),
         )
-        .with_consequence_policy(bound_consequence_policy(
-            ToolConsequenceVerdict::Deny(ToolConsequenceDenial::new(
-                "test_denied",
-                "denied by test policy",
-            )),
+        .with_consequence_policy(bound_fixed_consequence_policy(
+            FixedConsequenceSnapshot {
+                verdict: ToolConsequenceVerdict::Deny(ToolConsequenceDenial::new(
+                    "test_denied",
+                    "denied by test policy",
+                )),
+                // The policy's worker thread runs late, as on a loaded host.
+                on_evaluate: Some(Box::new(|| {
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                })),
+            },
             std::time::Duration::from_millis(100),
         ));
 
-        let error = dispatch_named_with_context(&gated, "alpha")
-            .await
-            .expect_err("application policy must deny");
-        assert!(matches!(error, ToolError::PolicyDenied { .. }));
+        let (dispatched, hold_until) = std::sync::mpsc::channel::<()>();
+        let clock_hold = tokio::task::spawn_blocking(move || {
+            let _ = hold_until.recv_timeout(std::time::Duration::from_secs(60));
+        });
+        let error = dispatch_named_with_context(&gated, "alpha").await;
+        drop(dispatched);
+        clock_hold.await.unwrap();
+        let error = error.expect_err("application policy must deny");
+        assert!(matches!(error, ToolError::PolicyDenied { .. }), "{error:?}");
         assert!(inner.dispatched().is_empty());
     }
 

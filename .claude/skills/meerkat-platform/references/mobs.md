@@ -60,6 +60,8 @@ Important semantics:
 - `wiring.auto_wire_orchestrator` and `wiring.role_wiring` shape default graph edges.
 - topology rules can enforce strict role-level communication policy.
 - `runtime_mode` omitted means `autonomous_host` (new default).
+- profile `durable = true` (0.9.5+) spawns durable workers: each member gets a durable identity a host re-attaches after a restart (`durable_identity_members()`). A mob whose member sessions do not outlive the process refuses the spawn with `NonDurableService` (`CAPABILITY_UNAVAILABLE`, data kind `mob_non_durable_service`): its session service answers `keeps_durable_member_sessions` false, which by default follows `supports_persistent_sessions`, and which `rkat run` answers false. `durable` is a profile field only (no spawn flag; an explicit Rust continuity intent wins), and a host older than 0.9.5 refuses a profile that sets it.
+- a rebuilt durable worker's open run continues from its last committed round under the same run id (per-round commits: `references/sessions_runtime_surfaces_sessions.md`). `MobBuilder::with_durable_resume_gate(gate)` lets a host decide first: `DurableResumeGate::check(&DurableResumeRequest { mob_id, agent_identity, profile, session_id, run_id, bound_input_ids, attention_projection, attention_projection_unreadable })` (`attention_projection_unreadable` carries the decode error when the run's projection does not decode, and `attention_projection` is then `None`: a gate that reads the projection answers `Unavailable` or `Superseded` then, never treats the run as one without attention) answers `DurableResumeVerdict::Continue`, `Superseded { reason }` (the run is settled like a stop: bound inputs abandoned as refused resumes, run failed and closed as interrupted with its committed rounds kept) or `Unavailable { reason }` (asked again, 3 attempts of 8 s each over about 30 s, then settled like `Superseded`). The gate must be cancel-safe and idempotent and map its own failures to `Unavailable`. Only durable workers are asked; no gate = continue. The mob binds the gate when it registers a worker it provisions itself (spawn, cold restore, explicit resume, warm revival); the gate is an in-process callback of the mob's own host, so a durable worker placed on and materialized by another host resumes there without asking this host's gate, and a session another surface opens before the mob rebuilds the worker resumes unasked too: build mobs before serving other surfaces.
 
 ## Rust SDK (detailed)
 
@@ -82,12 +84,12 @@ Primary crates:
 ### `MobBuilder` API
 
 - `MobBuilder::new(definition, storage)`
-- `MobBuilder::from_mobpack(definition, packed_skills, storage)` — create from mobpack with inline skills
+- `MobBuilder::from_mobpack(definition, packed_skills, storage)` - create from mobpack with inline skills
 - `MobBuilder::for_resume(storage)`
 - `.with_session_service(Arc<dyn MobSessionService>)`
 - `.allow_ephemeral_sessions(bool)`
 - `.notify_orchestrator_on_resume(bool)` (a notification that fails after the resume returned is recorded as an `OrchestratorResumeNotificationFailed` mob event once its input has failed terminally, after the runtime's bounded retries; one a retry delivers records nothing; the mob keeps running. The event is recorded in process: a crash before the input's terminal loses it)
-- `.with_default_llm_client(client)` — override LLM client (primarily for testing)
+- `.with_default_llm_client(client)` - override LLM client (primarily for testing)
 - `.register_tool_bundle(name, dispatcher)` / `.register_tool_bundle_with_account(name, account, dispatcher)` (states the `OperationAccount` the bundle's operations act with)
 - `.with_member_runtime_registration_hook(hook)` (`runtime-adapter`) - the host selects each member's destination and agent mandate. Since 0.9.4 `MemberRuntimeBuildIdentity::registration()` names the exact registration a call is for (a new member's prepared one, or a recovered member's current one): bind decisions to it, not to the session id or labels. The identity is no longer `UnwindSafe`; wrap it in `AssertUnwindSafe` to move it into `catch_unwind`
 - `.with_fork_instruction_policy(policy)` (0.9.4+) - the host's `ForkInstructionPolicy` for every fork of a member with activated host instructions: `RequireExplicitActivation` (default), `ReactivateInherited` or `Refuse`. Never a tool argument or part of a definition; `MobMcpState::with_fork_instruction_policy` sets it for MCP-managed mobs
@@ -97,7 +99,7 @@ Primary crates:
 ### `MobHandle` API
 
 - inspection: `status()`, `definition()`, `mob_id()`, `roster()`, `list_members()`, `list_all_members()`, `get_member()`, `events()`
-- membership: `spawn_spec(spec)`, `spawn_many(specs)`, `retire(identity)`, `respawn(identity)`, `retire_all()`, `set_spawn_policy()` — all identity-keyed via `AgentIdentity`
+- membership: `spawn_spec(spec)`, `spawn_many(specs)`, `retire(identity)`, `respawn(identity)`, `retire_all()`, `set_spawn_policy()` - all identity-keyed via `AgentIdentity`
 - graph: `wire()`, `unwire()`
 - turns: `member(id)` returns a `MemberHandle` with `send(content, handling_mode)` and `internal_turn(content)`
 - lifecycle: `stop()` (returns a `MobStopReport`), `resume()`, `complete()`, `reset()`, `destroy()`, `shutdown()`, `shutdown_with_report(options)`
@@ -132,7 +134,25 @@ actor's life, with Stop, Shutdown and Destroy available. `MobError` is
 `#[non_exhaustive]`.
 
 Shutdown report: `shutdown_with_report(ShutdownOptions)`
-(`ShutdownOptions::default().with_deadline(deadline)` bounds its waits)
+(`ShutdownOptions::default().with_deadline(deadline)` bounds its waits;
+since 0.9.5 the default `QueuedInputsOnShutdown::RequeueDurable`, which
+`shutdown()` takes too, resolves per member to
+`Requeue(RequeueMaxAge::DEFAULT)` (15 min) when the member's session commits
+every round (persistent session service and a runtime persistence store) and
+to `Stop` (0.9.4 behaviour) otherwise or when the member is already retiring;
+`.with_queued_inputs(QueuedInputsOnShutdown::Requeue(max_age))` or `Stop`
+applies to every member. Under Requeue the Shutdown holds run starts and
+cancels no running turn: a run that commits every round is suspended at its
+last committed round and continues at the next start (an autonomous member's
+too, its kickoff kept open and resumed under the same objective, unless the
+member is retiring or host-placed; a Stop with
+`StopOptions::default().leave_runs_running()` before the Shutdown leaves that
+kickoff open for the Shutdown to decide, while a plain Stop closes it; a run
+with no round commits is cancelled), and durable queued prompts that are
+neither directed nor bound to an objective (never a member's kickoff) are
+kept to run after it; their waiters get
+`BoundedTurnFailure::RequeuedAcrossStop`, or `RequeueExpired` when older than
+`max_age` at that start)
 returns a `MobShutdownReport` with per-member `members`
 (`MemberShutdownOutcome`), `runs` and `run_starts`; `is_clean()` is true when
 every member is `Unregistered`. Since 0.9.4 `UnregisterPending { stage,
@@ -316,6 +336,51 @@ is `Refused` (nothing to revoke, no cleanup debt); a 0.9.3 reader cannot decode
 such a council record. Upgrade member hosts before their controller: a 0.9.3
 member host answers `ReactivateInherited` with the refusal cause
 `member_host_unsupported` and forks participants without the policy otherwise.
+A durable fork child's model reads each copied activation row as a
+`[meerkat-inherited-instruction-v2]` header without its body. Copied
+`load_skill` results and per-turn skill context follow the host's declared
+policy (`DurableSessionForkTarget::declared_instructions`): named without
+the body under `RequireExplicitActivation`, refused under `Refuse`
+(`refusal.skills`), carried under `ReactivateInherited`; a fork without an
+activation window strips them under the default instead of refusing. A row
+that does not hold the bytes its identity names fails
+`Session::messages_for_model_boundary` with `ModelBoundaryProjectionError`,
+and the turn is refused.
+
+Prompt-context forks (`MemberLaunchMode::Fork`, `fork_helper`): the
+child gets a planned text of the source's history, decided by each row's
+type under the same policy. The source's system prompt and host system
+context are never carried. Under `RequireExplicitActivation` activation
+bodies, skill bodies the source loaded with `load_skill` (a line names
+each skill) and host-injected context rows (memory recall) are left out;
+under `Refuse` such a fork is refused with `ForkInstructionRefused`
+(`refusal.skills` names the skills); under `ReactivateInherited` they are
+carried. A copied comms notice keeps its title, its sender (or recipient),
+a status and payload preview and the sender's taint marker
+(`interaction::SENDER_TAINT_MARKER`); a peer message also keeps its text.
+It never keeps a request or delivery id or reply instructions: the content
+of a request, response or lifecycle notice is the runtime's rendering of
+those for the source, so it is left out.
+The rows fit a byte budget, newest first (half the child model's
+window at four bytes per token, at most 256 KiB); a newest row that alone
+does not fit is refused before anything is spawned with
+`MobError::ForkContextTooLarge` (`INVALID_PARAMS`, data kind
+`fork_context_too_large`). The child's create build carries
+`SessionBuildOptions::prompt_context_fork_source`. A child created on
+this host gets the context as one injected-context row and a typed fork
+notice (`SystemNoticeBlock::ForkBoundary`, wire `fork_boundary`) before
+its first input, whoever starts that turn, so a turn-driven helper sees
+it in its task turn; the session holds them until then as the metadata
+entry `session_fork_seed_v1`. A child placed on a member host gets them
+the same way when its host serves prompt-context fork children
+(supervisor bridge protocol 7; the controller asks the host with
+`HostFeatures` first); a host of 0.9.4 or earlier gives it the context
+as a prompt prefix ending in a `[fork_notice]:` line. A durable
+fork's child (`fork_member` and the forks built on it) gets a notice of
+kind `transcript` at its first turn. A notice names the source and, by
+name only, the instructions and tools the child lost or gained and what
+a prompt-context fork carried. A 0.9.4 reader decodes the block as an
+unknown notice with its summary.
 
 Refused restore (since 0.9.4): when a registration hook (`select_destination`,
 `select_agent_mandate`, `prepare_member_surface` or `verify_member_surface`)
@@ -611,7 +676,24 @@ mob under that id is refused until the cleanup is done. An admitted destroy
 closes the mob's admission first (`MobAdmissionCloseReason::Destroyed`).
 Since 0.9.4 a member whose boundary commit fails while the destroy waits on its
 ingress detach is reloaded and its retirement retried once;
-`MobDestroyReport::reloaded_members` names it (0.9.3 answered `Incomplete`). A
+`MobDestroyReport::reloaded_members` names it (0.9.3 answered `Incomplete`).
+Since 0.9.5, when the runtime refuses a member reload as repair-blocked (for
+example while a boundary commit past its deadline has not reported its
+outcome), the destroy answers `Incomplete` with the member in
+`MobDestroyReport::member_reload_refusals` (`kind: "repair_blocked"` and the
+runtime's `reason`): retry the destroy later. The SDKs read that report typed
+(`WireMobDestroyReport`): `mob_destroy_incomplete_report(error)` in Python,
+`mobDestroyIncompleteReport(error)` in TypeScript and `@rkat/web`. A refusal
+in the reload pass before the destroy starts leaves the mob unchanged; a later
+one comes after the destroy's cleanup has begun. A retire meets the same
+refusal at its quiesce stage and answers `MemberRetirementStuck` whose cause
+is `MobError::MemberReloadRepairBlocked` (data kind
+`mob_member_reload_repair_blocked`, `retryable: true`); redrive it with
+`MobHandle::redrive_retirement` once the outcome is reported. Since 0.9.5 a
+retire that started before the member degraded reloads it at its ingress
+detach and completes (retry an in-progress answer); a refusal there sticks
+with the same cause. The stuck error's data carries the cause's data as
+`cause_data` (since 0.9.5). A
 host that drains observers itself reads a `SqliteMobObserverDrainReport`;
 since 0.9.4 its `retained_registrations` counts change-watch notification
 registrations still running when the drain stopped them (a struct literal
@@ -717,7 +799,7 @@ The web build is a surface over the shared `MeerkatMachine`. Direct sessions and
 
 **How it works:**
 - `meerkat-core` + `meerkat-client` compile to wasm32 via `tokio_with_wasm` (drop-in tokio replacement)
-- `reqwest` uses browser `fetch` on wasm32 — no custom JS bridge
+- `reqwest` uses browser `fetch` on wasm32 - no custom JS bridge
 - `web-time` replaces `std::time` types (SystemTime, Instant) for browser compatibility
 - Anthropic CORS header added automatically on wasm32 targets
 
@@ -845,11 +927,11 @@ generated structure. These are two authoring forms, not separate engines.
 
 Key types:
 
-- `FrameSpec` — a set of `FlowNodeSpec` nodes forming a dependency graph within a frame
-- `FlowNodeSpec` — either `Step(FrameStepSpec)` or `RepeatUntil(RepeatUntilSpec)`
-- `FrameStepSpec` — references a named `step_id`, with `depends_on` and
+- `FrameSpec` - a set of `FlowNodeSpec` nodes forming a dependency graph within a frame
+- `FlowNodeSpec` - either `Step(FrameStepSpec)` or `RepeatUntil(RepeatUntilSpec)`
+- `FrameStepSpec` - references a named `step_id`, with `depends_on` and
   `depends_on_mode`; role/message stay in the flow's `steps` map
-- `RepeatUntilSpec` — loop with `loop_id`, `depends_on`, `depends_on_mode`,
+- `RepeatUntilSpec` - loop with `loop_id`, `depends_on`, `depends_on_mode`,
   `body: FrameSpec`, `until: ConditionExpr`, `max_iterations: u32`
 
 Execution model:
@@ -911,7 +993,7 @@ With generated authority, `AgentMobToolSurface`
 
 | Tool | Purpose |
 |------|---------|
-| `delegate` | Quick helper spawn — creates implicit mob on first use, spawns member, auto-wires comms |
+| `delegate` | Quick helper spawn - creates implicit mob on first use, spawns member, auto-wires comms |
 | `conclude_objective` | Supply only `outcome` to conclude the kickoff objective pre-addressed by the current turn |
 | `mob_create` | Create a mob from a definition |
 | `mob_destroy` | Destroy a mob and archive all members |
@@ -932,7 +1014,8 @@ spawn authority; supply `member_id` and `task`, optionally `message_count`,
 `max_text_bytes`, and `max_run_secs`. Unknown arguments are rejected. The
 child runs turn-driven whatever its role's default runtime mode. This
 durable transcript fork is distinct from `MemberLaunchMode::Fork` /
-`fork_helper`, which seed a fresh session's prompt with rendered history;
+`fork_helper`, which seed a fresh session with a planned text of the
+source's history (see "Prompt-context forks");
 low-level `Session::fork()` / `fork_at()` / `fork_replacing()` are separate
 structural primitives. Every fork starts with zero usage: the source's
 lifetime token counters are not copied into the child.

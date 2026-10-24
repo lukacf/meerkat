@@ -2,7 +2,7 @@
 //! bridge responder, acceptor-registry driver, and R8 persistence driver
 //! (multi-host mobs D6, §7.2 steps 1 & 3).
 //!
-//! The actor owns the generated [`MobHostBindingAuthority`] for the whole
+//! The actor owns the generated `MobHostBindingAuthority` for the whole
 //! daemon process (mob-keyed, A14) and serializes every mutation through one
 //! tokio task — the `MobActor` single-owner discipline. The shell observes
 //! typed envelope facts (sender match, address match, bootstrap-token
@@ -61,17 +61,19 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
 use meerkat_contracts::wire::supervisor_bridge::{
-    BridgeAck, BridgeBootstrapToken, BridgeCapabilities, BridgeCommand, BridgeCommandDecodeError,
-    BridgeCreateForkedParticipantPayload, BridgeForkedParticipantCreatedResponse,
-    BridgeForkedParticipantRevocationOutcome, BridgeForkedParticipantRevokedResponse,
-    BridgeHostBindPayload, BridgeHostBindResponse, BridgeHostBindingDescriptorIssuedResponse,
-    BridgeHostCapabilityRequirements, BridgeHostMemberRecord, BridgeHostRebindPayload,
-    BridgeHostReboundResponse, BridgeHostRevokePayload, BridgeHostRevokedResponse,
-    BridgeHostRuntimeIncarnation, BridgeHostStatusPayload, BridgeHostStatusResponse,
-    BridgeIssueHostBindingDescriptorPayload, BridgeMaterializePayload, BridgeMaterializedResponse,
-    BridgeMemberReleasedResponse, BridgePeerIdentity, BridgePeerSpec, BridgePeerTrustPayload,
-    BridgeProtocolVersion, BridgeRejectionCause, BridgeReleasePayload, BridgeReply,
-    BridgeRevokeForkedParticipantPayload, BridgeTurnOutcomeAck, BridgeTurnOutcomeRecord,
+    BridgeAck, BridgeAdoptedFirstTurn, BridgeBootstrapToken, BridgeCapabilities, BridgeCommand,
+    BridgeCommandDecodeError, BridgeCreateForkedParticipantPayload,
+    BridgeForkedParticipantCreatedResponse, BridgeForkedParticipantRevocationOutcome,
+    BridgeForkedParticipantRevokedResponse, BridgeHostBindPayload, BridgeHostBindResponse,
+    BridgeHostBindingDescriptorIssuedResponse, BridgeHostCapabilityRequirements,
+    BridgeHostFeaturesPayload, BridgeHostFeaturesResponse, BridgeHostMemberRecord,
+    BridgeHostRebindPayload, BridgeHostReboundResponse, BridgeHostRevokePayload,
+    BridgeHostRevokedResponse, BridgeHostRuntimeIncarnation, BridgeHostStatusPayload,
+    BridgeHostStatusResponse, BridgeIssueHostBindingDescriptorPayload, BridgeMaterializePayload,
+    BridgeMaterializedResponse, BridgeMemberReleasedResponse, BridgePeerIdentity, BridgePeerSpec,
+    BridgePeerTrustPayload, BridgePromptContextFork, BridgeProtocolVersion, BridgeRejectionCause,
+    BridgeReleasePayload, BridgeReply, BridgeRevokeForkedParticipantPayload, BridgeTurnOutcomeAck,
+    BridgeTurnOutcomeRecord, HOST_FEATURE_ADOPTED_FIRST_TURN, HOST_FEATURE_PROMPT_CONTEXT_FORK,
     MaterializeLaunchMode, MaterializeLaunchOutcome,
     MemberSessionDisposal as WireMemberSessionDisposal, RuntimeReleaseCause, WireFlowTurnOutcome,
     WireHostBindingDescriptor, WireHostBindingDescriptorKind, canonicalize_bridge_address,
@@ -107,8 +109,8 @@ use crate::machines::mob_host_binding_authority::{
 use crate::runtime::bridge_protocol::derive_host_bind_bootstrap_proof;
 use crate::runtime::host_materialize::{
     DecompiledMemberBuild, HostMemberMaterializer, LiveMemberRuntime, MaterializeDecompileError,
-    MaterializeServingContext, RevivedMemberOutcome, assemble_preflight_observations,
-    decompile_portable_spec, validate_portable_spec_structure,
+    MaterializePromptContextFork, MaterializeServingContext, RevivedMemberOutcome,
+    assemble_preflight_observations, decompile_portable_spec, validate_portable_spec_structure,
 };
 use crate::runtime::host_observation::{
     HostObservationProjection, HostPendingReservationReply, HostTrackedInputCancelReply,
@@ -821,6 +823,20 @@ pub struct MaterializedMemberRow {
     /// the exact attachment it admitted instead of guessing or forgetting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_participant_attachment: Option<ForkedParticipantAttachmentAssociation>,
+    /// Digest of the prompt-context fork this build carried (protocol V7,
+    /// `prompt_context_fork_digest`): per-launch material outside
+    /// `spec_digest`, so a replay at this tuple that carries a different
+    /// fork, or a fork against none, is refused rather than answered.
+    /// Additive: a row written before it reads as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_context_fork_digest: Option<String>,
+    /// The first turn of the session a `Resume` build adopted, recorded for
+    /// every `Resume` build so a replay at this tuple answers what the build
+    /// read. A replay reports it only when its request asks
+    /// (`report_adopted_first_turn`). Additive: a row written before it, and
+    /// every `Fresh` row, reads as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adopted_first_turn: Option<BridgeAdoptedFirstTurn>,
 }
 
 const fn default_generation_start_seq() -> u64 {
@@ -3027,6 +3043,16 @@ pub async fn release_forked_participant_association(
             detail: format!("capability attachment release failed: {error}"),
         }),
     }
+}
+
+/// `sha256:` digest of a V7 prompt-context fork as it crossed the bridge,
+/// recorded on the materialized row and compared on replay.
+pub(crate) fn prompt_context_fork_digest(
+    fork: &BridgePromptContextFork,
+) -> Result<String, serde_json::Error> {
+    use sha2::{Digest as _, Sha256};
+    let bytes = serde_json::to_vec(fork)?;
+    Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
 }
 
 /// Compare one incoming wire attachment against the durable association a
@@ -5945,7 +5971,7 @@ pub struct MobHostActorConfig {
     pub member_host: Option<HostMemberSubstrate>,
     /// Cadence of the actor's own capability maintenance pass.
     ///
-    /// `None` uses [`FORKED_PARTICIPANT_SWEEP_INTERVAL`]. This is a composition
+    /// `None` uses `FORKED_PARTICIPANT_SWEEP_INTERVAL`. This is a composition
     /// input rather than a hidden constant so a harness can drive the REAL
     /// periodic arm on a short cadence instead of waiting out production
     /// timing — no extra task, no test-only loop, the same single `select!`
@@ -7427,6 +7453,9 @@ impl MobHostActor {
             BridgeCommand::HostStatus(payload) => {
                 self.serve_host_status_candidate(candidate, payload).await;
             }
+            BridgeCommand::HostFeatures(payload) => {
+                self.serve_host_features_candidate(candidate, payload).await;
+            }
             BridgeCommand::IssueHostBindingDescriptor(payload) => {
                 self.serve_issue_host_binding_descriptor_candidate(candidate, payload)
                     .await;
@@ -8242,6 +8271,51 @@ impl MobHostActor {
             return;
         }
 
+        // V7: the prompt-context fork a Fresh launch carries (the decode
+        // refused it on any other launch). The seed is recorded on the
+        // child's session as the controller serialized it, so this host only
+        // checks that it is a JSON object; the child's first run reads it.
+        // Its digest rides the durable row, so a replay at this tuple is
+        // compared, never seeded again.
+        let (prompt_context_fork_seed, recorded_fork_digest) =
+            match payload.prompt_context_fork.as_ref() {
+                None => (None, None),
+                Some(fork) => {
+                    let seed = match fork.recorded_seed() {
+                        Ok(seed) => seed,
+                        Err(error) => {
+                            self.send_failure(
+                                candidate,
+                                BridgeRejectionCause::Unsupported,
+                                format!(
+                                    "materialize member rejected: the prompt-context fork \
+                                     seed is not a JSON object: {error}"
+                                ),
+                                Some(reply_address.as_str()),
+                            )
+                            .await;
+                            return;
+                        }
+                    };
+                    match prompt_context_fork_digest(fork) {
+                        Ok(digest) => (Some(seed), Some(digest)),
+                        Err(error) => {
+                            self.send_failure(
+                                candidate,
+                                BridgeRejectionCause::Internal,
+                                format!(
+                                    "materialize member failed: prompt-context fork digest: \
+                                     {error}"
+                                ),
+                                Some(reply_address.as_str()),
+                            )
+                            .await;
+                            return;
+                        }
+                    }
+                }
+            };
+
         if self.materializer.is_none() {
             self.send_failure(
                 candidate,
@@ -8682,6 +8756,14 @@ impl MobHostActor {
                         host_binding_generation: payload.binding_generation,
                         supervisor: &supervisor,
                         epoch: payload.epoch,
+                        prompt_context_fork: payload
+                            .prompt_context_fork
+                            .as_ref()
+                            .zip(prompt_context_fork_seed)
+                            .map(|(fork, seed)| MaterializePromptContextFork {
+                                seed,
+                                source: &fork.source,
+                            }),
                     },
                 )
                 .await
@@ -8797,6 +8879,8 @@ impl MobHostActor {
             supervisor_name: payload.supervisor.name.clone(),
             supervisor_address: payload.supervisor.address.clone(),
             forked_participant_attachment: None,
+            prompt_context_fork_digest: recorded_fork_digest,
+            adopted_first_turn: outcome.adopted_first_turn,
         };
         // Supersession compensation, immediately before the replacement row
         // commits: the old residency has already been quiesced, so its
@@ -9186,6 +9270,9 @@ impl MobHostActor {
             engine_version: meerkat_contracts::ContractVersion::CURRENT.to_string(),
             launch_outcome: outcome.launch_outcome,
             resolved_auth_binding: outcome.resolved_auth_binding,
+            adopted_first_turn: outcome
+                .adopted_first_turn
+                .filter(|_| payload.report_adopted_first_turn),
         });
         self.send_reply(
             candidate,
@@ -9299,6 +9386,47 @@ impl MobHostActor {
                     "materialize replay for '{identity}' presents a different capability \
                      attachment than the recorded residency; the idempotency key names one \
                      command only"
+                ),
+                Some(reply_address),
+            )
+            .await;
+            return;
+        }
+        // The same for the prompt-context fork the build carried: the seed
+        // is the source's history AT THE FORK, so a replay that carries a
+        // fork must carry the recorded one, and a Fresh replay without it
+        // is a different command under the same key too. A Resume never
+        // carries a fork (the decode refuses one there): it is the
+        // controller's revival of the recorded build, answered from the
+        // row below, which never seeds the child again.
+        let replayed_fork_digest = match payload
+            .prompt_context_fork
+            .as_ref()
+            .map(prompt_context_fork_digest)
+            .transpose()
+        {
+            Ok(digest) => digest,
+            Err(error) => {
+                self.send_failure(
+                    candidate,
+                    BridgeRejectionCause::Internal,
+                    format!("materialize replay failed: prompt-context fork digest: {error}"),
+                    Some(reply_address),
+                )
+                .await;
+                return;
+            }
+        };
+        let revival = replayed_fork_digest.is_none()
+            && matches!(payload.launch, MaterializeLaunchMode::Resume { .. });
+        if !revival && replayed_fork_digest != row.prompt_context_fork_digest {
+            self.send_failure(
+                candidate,
+                BridgeRejectionCause::SpecDigestMismatch,
+                format!(
+                    "materialize replay for '{identity}' carries a different prompt-context \
+                     fork than the recorded build; the idempotency key names one command \
+                     only"
                 ),
                 Some(reply_address),
             )
@@ -9452,6 +9580,8 @@ impl MobHostActor {
         }
 
         // The RECORDED ack, verbatim (including engine_version_at_build).
+        // The adopted first turn the build read is reported only to a
+        // request that asks for it.
         let reply = BridgeReply::MemberMaterialized(BridgeMaterializedResponse {
             member_pubkey: row.member_pubkey,
             member_peer_id: row.member_peer_id,
@@ -9461,6 +9591,9 @@ impl MobHostActor {
             engine_version: row.engine_version_at_build,
             launch_outcome: row.launch_outcome,
             resolved_auth_binding: row.resolved_auth_binding,
+            adopted_first_turn: row
+                .adopted_first_turn
+                .filter(|_| payload.report_adopted_first_turn),
         });
         self.send_reply(
             candidate,
@@ -10309,6 +10442,46 @@ impl MobHostActor {
         self.send_reply(
             candidate,
             HostBridgeReply::completed(reply),
+            Some(reply_address.as_str()),
+        )
+        .await;
+    }
+
+    /// V7 `HostFeatures`: the features this host serves beyond its
+    /// capability report, admitted like `HostStatus`. It has no effect.
+    async fn serve_host_features_candidate(
+        &mut self,
+        candidate: &PeerInputCandidate,
+        payload: BridgeHostFeaturesPayload,
+    ) {
+        let reply_address = payload.supervisor.address.clone();
+        if !self
+            .admit_host_command(
+                candidate,
+                &payload.mob_id,
+                payload.epoch,
+                payload.binding_generation,
+                &reply_address,
+            )
+            .await
+        {
+            return;
+        }
+        // A prompt-context fork child and a resumed member are member
+        // builds: only a host composed with a member substrate serves them.
+        let features = if self.materializer.is_some() {
+            vec![
+                HOST_FEATURE_PROMPT_CONTEXT_FORK.to_string(),
+                HOST_FEATURE_ADOPTED_FIRST_TURN.to_string(),
+            ]
+        } else {
+            Vec::new()
+        };
+        self.send_reply(
+            candidate,
+            HostBridgeReply::completed(BridgeReply::HostFeatures(BridgeHostFeaturesResponse {
+                features,
+            })),
             Some(reply_address.as_str()),
         )
         .await;
@@ -12901,6 +13074,8 @@ mod tests {
                         supervisor_name: "controller".to_string(),
                         supervisor_address: "tcp://127.0.0.1:1".to_string(),
                         forked_participant_attachment: None,
+                        prompt_context_fork_digest: None,
+                        adopted_first_turn: None,
                     },
                 )]),
                 released: BTreeMap::from([(
@@ -13025,6 +13200,8 @@ mod tests {
                         supervisor_name: "controller".to_string(),
                         supervisor_address: "tcp://127.0.0.1:7801".to_string(),
                         forked_participant_attachment: None,
+                        prompt_context_fork_digest: None,
+                        adopted_first_turn: None,
                     },
                 )]),
                 released: BTreeMap::new(),

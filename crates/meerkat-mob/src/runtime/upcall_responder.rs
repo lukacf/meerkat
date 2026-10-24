@@ -530,6 +530,7 @@ impl MobUpcallSeams {
     async fn execute_via_dispatcher(
         &self,
         context: MobToolAuthorityContext,
+        flow_provision_bound: Option<&super::MemberOperatorAuthorityCeiling>,
         request_id: &str,
         op: MemberOperatorOp,
     ) -> UpcallToolOutcome {
@@ -552,7 +553,10 @@ impl MobUpcallSeams {
             name: tool_name,
             args: &raw,
         };
-        let dispatcher = MobOperatorToolDispatcher::new(self.handle.clone(), true, context);
+        // A member-initiated flow run provisions members bounded like the
+        // member's own spawns.
+        let dispatcher = MobOperatorToolDispatcher::new(self.handle.clone(), true, context)
+            .with_flow_provision_bound(flow_provision_bound.cloned());
         let outcome = match dispatcher.dispatch(call).await {
             Ok(outcome) => UpcallToolOutcome::from_tool_result(&outcome.result),
             Err(error) => UpcallToolOutcome::from_tool_error(&error),
@@ -581,9 +585,10 @@ impl MobUpcallSeams {
         &self,
         context: &MobToolAuthorityContext,
         requester: &AgentIdentity,
+        bound: Option<&super::MemberOperatorAuthorityCeiling>,
         spec: MemberOperatorSpawnSpec,
     ) -> UpcallToolOutcome {
-        match self.spawn_one(context, requester, spec).await {
+        match self.spawn_one(context, requester, bound, spec).await {
             Ok(value) => UpcallToolOutcome::Ok {
                 content: value.to_string(),
                 is_error: false,
@@ -597,9 +602,10 @@ impl MobUpcallSeams {
         &self,
         context: &MobToolAuthorityContext,
         requester: &AgentIdentity,
+        bound: Option<&super::MemberOperatorAuthorityCeiling>,
         specs: Vec<MemberOperatorSpawnSpec>,
     ) -> UpcallToolOutcome {
-        match self.spawn_many(context, requester, specs).await {
+        match self.spawn_many(context, requester, bound, specs).await {
             Ok(value) => UpcallToolOutcome::Ok {
                 content: value.to_string(),
                 is_error: false,
@@ -679,6 +685,7 @@ impl MobUpcallSeams {
         &self,
         context: &MobToolAuthorityContext,
         requester: &AgentIdentity,
+        bound: Option<&super::MemberOperatorAuthorityCeiling>,
         spec: MemberOperatorSpawnSpec,
     ) -> Result<serde_json::Value, ToolError> {
         let tool_name = TOOL_SPAWN_MEMBER;
@@ -686,7 +693,7 @@ impl MobUpcallSeams {
         self.ensure_spawn_member_scope(context, tool_name, &spec)
             .await?;
         let domain_spec = self
-            .domain_spawn_spec(tool_name, requester, spec)?
+            .domain_spawn_spec(tool_name, requester, bound, spec)?
             .with_creation_source(self.capture_creation_source(requester).await);
         let result = self
             .handle
@@ -701,6 +708,7 @@ impl MobUpcallSeams {
         &self,
         context: &MobToolAuthorityContext,
         requester: &AgentIdentity,
+        bound: Option<&super::MemberOperatorAuthorityCeiling>,
         specs: Vec<MemberOperatorSpawnSpec>,
     ) -> Result<serde_json::Value, ToolError> {
         let tool_name = TOOL_SPAWN_MANY_MEMBERS;
@@ -713,7 +721,7 @@ impl MobUpcallSeams {
         let domain_specs = specs
             .into_iter()
             .map(|spec| {
-                self.domain_spawn_spec(tool_name, requester, spec)
+                self.domain_spawn_spec(tool_name, requester, bound, spec)
                     .map(|spec| spec.with_creation_source(creation_source.clone()))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -758,11 +766,13 @@ impl MobUpcallSeams {
 
     /// Wire spawn spec -> domain spec. Placement defaults to the REQUESTER's
     /// machine-recorded placement (§7.3: an upcall spawn without explicit
-    /// placement lands on the requesting member's host).
+    /// placement lands on the requesting member's host). The child carries
+    /// the requester's recorded ceiling as the upper bound of its own.
     fn domain_spawn_spec(
         &self,
         tool_name: &str,
         requester: &AgentIdentity,
+        bound: Option<&super::MemberOperatorAuthorityCeiling>,
         spec: MemberOperatorSpawnSpec,
     ) -> Result<SpawnMemberSpec, ToolError> {
         let placement = match spec.placement {
@@ -790,6 +800,7 @@ impl MobUpcallSeams {
             out.auto_wire_parent = auto_wire;
         }
         out.placement = Some(placement);
+        out.inherited_operator_authority_bound = bound.cloned();
         Ok(out)
     }
 
@@ -947,18 +958,26 @@ impl UpcallServeSeams for MobUpcallSeams {
         )
         .map_err(UpcallExecuteError::AuthorityRemint)?;
 
+        // A member's own spawns are bounded by the authority recorded for
+        // it: a narrowed member cannot hand a child more than it holds.
+        let spawn_bound = super::MemberOperatorAuthorityCeiling::recorded_in_upcall_facts(
+            &facts,
+            fenced.handle.mob_id().as_str(),
+        );
         Ok(match op {
             MemberOperatorOp::SpawnMember(spec) => {
                 fenced
-                    .execute_spawn_member(&context, &requester, *spec)
+                    .execute_spawn_member(&context, &requester, spawn_bound.as_ref(), *spec)
                     .await
             }
             MemberOperatorOp::SpawnManyMembers { specs } => {
-                fenced.execute_spawn_many(&context, &requester, specs).await
+                fenced
+                    .execute_spawn_many(&context, &requester, spawn_bound.as_ref(), specs)
+                    .await
             }
             other => {
                 fenced
-                    .execute_via_dispatcher(context, request_id, other)
+                    .execute_via_dispatcher(context, spawn_bound.as_ref(), request_id, other)
                     .await
             }
         })

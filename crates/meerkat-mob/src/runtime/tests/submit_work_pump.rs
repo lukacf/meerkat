@@ -266,6 +266,7 @@ async fn request_shutdown_then_read(
     let shutdown = handle
         .enqueue_actor_command_for_test(|reply_tx| crate::runtime::state::MobCommand::Shutdown {
             deadline: None,
+            queued_inputs: crate::runtime::QueuedInputsOnShutdown::Stop,
             reply_tx,
         })
         .await

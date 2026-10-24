@@ -160,8 +160,13 @@ pub fn context_budget_fact_for_session(
     reserved_output_tokens: u32,
     active_model_profile: &ModelProfileWitness,
 ) -> Result<ContextBudgetFact, ContextBudgetFactError> {
+    let messages = session.messages_for_model_boundary().map_err(|error| {
+        ContextBudgetFactError::InputEstimationFailed {
+            detail: error.to_string(),
+        }
+    })?;
     context_budget_fact_for_messages(
-        &session.messages_for_model_boundary(),
+        &messages,
         visible_tools,
         reserved_output_tokens,
         active_model_profile,

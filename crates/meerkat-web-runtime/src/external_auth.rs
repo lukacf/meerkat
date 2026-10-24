@@ -12,9 +12,9 @@
 //!   host callback returning a Promise of a typed auth envelope. The callback
 //!   survives across WASM calls (registered once, consulted
 //!   per-session).
-//! - [`register_external_auth_resolver`] — wasm_bindgen entry point
+//! - `register_external_auth_resolver` - wasm_bindgen entry point
 //!   that the host page calls to install the resolver.
-//! - [`build_session_request_with_auth_binding`] — the post-§6.14
+//! - `build_session_request_with_auth_binding` - the post-§6.14
 //!   session-request builder that routes through the provider-runtime
 //!   registry. When the resolved binding uses an `ExternalResolver`
 //!   credential source, the registry looks up this resolver id's callback,

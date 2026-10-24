@@ -4519,7 +4519,7 @@ async fn factory_built_agent_honors_config_tools_timeout() {
 
     let mut saw_timeout_completion = false;
     while let Ok(event) = event_rx.try_recv() {
-        if let meerkat::AgentEvent::ToolExecutionCompleted {
+        if let meerkat::AgentEvent::ToolResultReceived {
             name,
             is_error,
             content,

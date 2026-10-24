@@ -1130,6 +1130,7 @@ pub fn participant_profile(description: &str) -> meerkat_mob::Profile {
         max_inline_peer_notifications: None,
         output_schema: None,
         provider_params: None,
+        durable: false,
     }
 }
 

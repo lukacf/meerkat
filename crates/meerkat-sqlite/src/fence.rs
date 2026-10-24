@@ -100,6 +100,29 @@ fn sibling_lock_path(db_path: &Path, suffix: &str) -> PathBuf {
     db_path.with_file_name(name)
 }
 
+/// A lock file this process holds an OS lock on, through a descriptor it
+/// opened itself. Dropping it unlocks the file, then closes it. The lock
+/// belongs to the open file description, and a process spawned meanwhile
+/// holds a copy of the descriptor until it executes its program, which would
+/// keep a lock released by the close alone. Each value opened its own
+/// description, so the unlock releases no other holder's lock.
+#[derive(Debug)]
+struct HeldLock(File);
+
+impl std::ops::Deref for HeldLock {
+    type Target = File;
+
+    fn deref(&self) -> &File {
+        &self.0
+    }
+}
+
+impl Drop for HeldLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
 fn open_lock_file(lock_path: &Path) -> Option<File> {
     // Fail-open: if the lock file can neither be opened nor created, no
     // fence can exist on this medium either (see module docs).
@@ -117,7 +140,7 @@ fn open_lock_file(lock_path: &Path) -> Option<File> {
 /// Held for the duration of the operation; dropping it releases the lock.
 #[derive(Debug)]
 pub struct OperationGuard {
-    _lock: Option<File>,
+    _lock: Option<HeldLock>,
 }
 
 impl OperationGuard {
@@ -163,7 +186,9 @@ impl OperationGuard {
                 )));
             }
             match file.try_lock_shared() {
-                Ok(()) => Ok(Self { _lock: Some(file) }),
+                Ok(()) => Ok(Self {
+                    _lock: Some(HeldLock(file)),
+                }),
                 Err(error) if is_would_block(&error) => {
                     Err(SqliteStoreError::MaintenanceFenceHeld {
                         path: db_path.to_path_buf(),
@@ -194,7 +219,9 @@ impl OperationGuard {
             return Ok(Self { _lock: None });
         };
         match file.try_lock_shared() {
-            Ok(()) => Ok(Self { _lock: Some(file) }),
+            Ok(()) => Ok(Self {
+                _lock: Some(HeldLock(file)),
+            }),
             Err(err) if is_would_block(&err) => Err(SqliteStoreError::MaintenanceFenceHeld {
                 path: db_path.to_path_buf(),
             }),
@@ -226,9 +253,14 @@ impl OperationGuard {
             Err(err) if is_would_block(&err) => Err(SqliteStoreError::MaintenanceFenceHeld {
                 path: db_path.to_path_buf(),
             }),
-            // Admitted, or a filesystem without lock support (fail open, as
-            // `for_database`). Dropping the file releases the shared lock.
-            Ok(()) | Err(_) => Ok(()),
+            // Admitted: the shared lock is released at once.
+            Ok(()) => {
+                drop(HeldLock(file));
+                Ok(())
+            }
+            // A filesystem without lock support: fail open, as
+            // `for_database`.
+            Err(_) => Ok(()),
         }
     }
 }
@@ -246,7 +278,7 @@ impl OperationGuard {
 /// exclusively after the fence lock (the module documents the lock order).
 #[derive(Debug)]
 pub struct KeptConnectionPresence {
-    _lock: File,
+    _lock: HeldLock,
 }
 
 impl KeptConnectionPresence {
@@ -281,7 +313,9 @@ impl KeptConnectionPresence {
         };
         let file = open_lock_file(&presence_lock_path(db_path))?;
         file.try_lock_shared().ok()?;
-        Some(Self { _lock: file })
+        Some(Self {
+            _lock: HeldLock(file),
+        })
     }
 }
 
@@ -296,8 +330,8 @@ impl KeptConnectionPresence {
 /// roots.
 #[derive(Debug)]
 pub struct ExclusiveFence {
-    _lock: File,
-    _presence: File,
+    _lock: HeldLock,
+    _presence: HeldLock,
     lock_path: PathBuf,
 }
 
@@ -361,7 +395,7 @@ impl ExclusiveFence {
     /// Record both held locks in the holder registry (see
     /// `held_exclusive_locks`): only a fence that holds both admits its
     /// holder's own operations.
-    fn held(fence: File, presence: File, lock_path: PathBuf) -> Self {
+    fn held(fence: HeldLock, presence: HeldLock, lock_path: PathBuf) -> Self {
         if let Ok(mut held) = held_exclusive_locks().lock() {
             held.insert(registry_key(&lock_path));
         }
@@ -383,7 +417,7 @@ const FENCE_POLL: Duration = Duration::from_millis(25);
 
 /// Take `lock_path` exclusively without waiting; `None` while another holder
 /// has it.
-fn try_lock_exclusive(lock_path: &Path) -> Result<Option<File>, SqliteStoreError> {
+fn try_lock_exclusive(lock_path: &Path) -> Result<Option<HeldLock>, SqliteStoreError> {
     let file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -391,13 +425,16 @@ fn try_lock_exclusive(lock_path: &Path) -> Result<Option<File>, SqliteStoreError
         .truncate(false)
         .open(lock_path)?;
     match file.try_lock() {
-        Ok(()) => Ok(Some(file)),
+        Ok(()) => Ok(Some(HeldLock(file))),
         Err(err) if is_would_block(&err) => Ok(None),
         Err(err) => Err(SqliteStoreError::Io(std::io::Error::other(err))),
     }
 }
 
 impl Drop for ExclusiveFence {
+    /// The holder registry forgets the fence first, so this process admits
+    /// its own operations no more; its two locks are released after, as
+    /// their fields drop.
     fn drop(&mut self) {
         if let Ok(mut held) = held_exclusive_locks().lock() {
             held.remove(&registry_key(&self.lock_path));
@@ -441,6 +478,7 @@ mod tests {
         foreign.try_lock().expect("foreign exclusive lock");
         let err = OperationGuard::for_database(&db).expect_err("fence must block foreign ops");
         assert!(matches!(err, SqliteStoreError::MaintenanceFenceHeld { .. }));
+        foreign.unlock().expect("release the foreign fence");
         drop(foreign);
         OperationGuard::for_database(&db).expect("released after drop");
     }
@@ -470,6 +508,7 @@ mod tests {
         let err = OperationGuard::admit_missing_database(&db)
             .expect_err("a foreign fence covers the missing database");
         assert!(matches!(err, SqliteStoreError::MaintenanceFenceHeld { .. }));
+        foreign.unlock().expect("release the foreign fence");
         drop(foreign);
         OperationGuard::admit_missing_database(&db).expect("released after drop");
 
@@ -636,6 +675,7 @@ mod tests {
             .expect("open presence lock file");
         foreign.try_lock().expect("foreign exclusive presence lock");
         assert!(KeptConnectionPresence::acquire(&db).is_none());
+        foreign.unlock().expect("release the foreign presence lock");
         drop(foreign);
         KeptConnectionPresence::acquire(&db).expect("presence after release");
     }
@@ -663,5 +703,107 @@ mod tests {
             0,
             "nothing planted"
         );
+    }
+
+    /// A process this test spawns that holds a copy of one of the test's
+    /// descriptors, as its standard input, until it is dropped: what any process
+    /// spawned meanwhile holds until it executes its program, kept for as long as
+    /// the test needs.
+    #[cfg(unix)]
+    struct DescriptorCopy(std::process::Child);
+
+    #[cfg(unix)]
+    impl DescriptorCopy {
+        /// Spawn a process holding a copy of `file`'s descriptor.
+        fn spawn(file: &std::fs::File) -> Self {
+            let copy = file.try_clone().expect("a copy of the descriptor");
+            #[allow(clippy::disallowed_methods)] // the test's own process, which holds the copy
+            let child = std::process::Command::new("sleep")
+                .arg("600")
+                .stdin(copy)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("a process holding the copy");
+            Self(child)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for DescriptorCopy {
+        fn drop(&mut self) {
+            // On request (MEERKAT_TEST_DESCRIPTOR_COPY_LINGER_MS), the copy stays open
+            // that long first, so an fd sampler watching the run sees it.
+            if let Some(linger) = std::env::var("MEERKAT_TEST_DESCRIPTOR_COPY_LINGER_MS")
+                .ok()
+                .and_then(|millis| millis.parse::<u64>().ok())
+            {
+                std::thread::sleep(std::time::Duration::from_millis(linger));
+            }
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// A released fence is free at once while a process spawned meanwhile
+    /// still holds copies of its descriptors: operations pass, a connection
+    /// can be kept, and the fence can be taken again.
+    #[cfg(unix)]
+    #[test]
+    fn a_released_fence_is_free_while_a_spawned_process_holds_its_descriptors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = existing_database(dir.path());
+        let fence = ExclusiveFence::try_acquire(&db)
+            .expect("fence")
+            .expect("the fence is free");
+        let copies = [
+            DescriptorCopy::spawn(&fence._lock),
+            DescriptorCopy::spawn(&fence._presence),
+        ];
+        drop(fence);
+        OperationGuard::for_database(&db).expect("an operation passes a released fence");
+        assert!(
+            KeptConnectionPresence::acquire(&db).is_some(),
+            "a connection can be kept once the fence is released"
+        );
+        assert!(
+            ExclusiveFence::try_acquire(&db).expect("fence").is_some(),
+            "a released fence can be taken again"
+        );
+        drop(copies);
+    }
+
+    /// A released operation guard leaves the fence free at once while a
+    /// process spawned meanwhile still holds a copy of its descriptor.
+    #[cfg(unix)]
+    #[test]
+    fn a_released_operation_guard_is_free_while_a_spawned_process_holds_its_descriptor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = existing_database(dir.path());
+        let guard = OperationGuard::for_database(&db).expect("guard");
+        let copy = DescriptorCopy::spawn(guard._lock.as_ref().expect("a held guard"));
+        drop(guard);
+        assert!(
+            ExclusiveFence::try_acquire(&db).expect("fence").is_some(),
+            "the fence is free once the guard is released"
+        );
+        drop(copy);
+    }
+
+    /// A released presence leaves the fence free at once while a process
+    /// spawned meanwhile still holds a copy of its descriptor.
+    #[cfg(unix)]
+    #[test]
+    fn a_released_presence_is_free_while_a_spawned_process_holds_its_descriptor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = existing_database(dir.path());
+        let presence = KeptConnectionPresence::acquire(&db).expect("presence");
+        let copy = DescriptorCopy::spawn(&presence._lock);
+        drop(presence);
+        assert!(
+            ExclusiveFence::try_acquire(&db).expect("fence").is_some(),
+            "the fence is free once the presence is released"
+        );
+        drop(copy);
     }
 }

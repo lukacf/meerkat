@@ -676,6 +676,11 @@ impl MobActor {
             .warm_revival_overlay(&work.entry, &work.session_id)
             .await?;
         let external_tools = self.external_tools_for_profile(&profile, overlay)?;
+        // The continuity intent the member's incarnation was spawned with, read
+        // before the provision owner is taken: a durable worker is revived
+        // with its resume gate.
+        let continuity_intent =
+            Box::pin(self.recorded_member_continuity_intent(&work.entry, &work.session_id)).await?;
         let session_id = mob_dsl::SessionId::from_domain(&work.session_id);
         let transition = self.apply_dsl_signal_collect_transition(
             mob_dsl::MobMachineSignal::RecoverMemberSessionBinding {
@@ -752,6 +757,7 @@ impl MobActor {
             ops_registry: None,
             generated_self_owned_operation_owner: Some(work.session_id.clone()),
             direct_member_incarnation: None,
+            continuity_intent,
         }))
     }
 

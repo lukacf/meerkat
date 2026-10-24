@@ -158,6 +158,8 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "MobEventsResult": schema_for!(crate::wire::MobEventsResult),
         "MobMemberSendParams": schema_for!(crate::wire::MobMemberSendParams),
         "MobMemberSendResult": schema_for!(crate::wire::MobMemberSendResult),
+        "WireContinuationReceipt": schema_for!(crate::wire::WireContinuationReceipt),
+        "WireContinuationStatus": schema_for!(crate::wire::WireContinuationStatus),
         "MobIngressInteractionParams": schema_for!(crate::wire::MobIngressInteractionParams),
         "MobIngressInteractionResult": schema_for!(crate::wire::MobIngressInteractionResult),
         "MobAppendSystemContextResult": schema_for!(crate::wire::MobAppendSystemContextResult),
@@ -193,8 +195,15 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "WireMemberProgressSnapshot": schema_for!(crate::wire::WireMemberProgressSnapshot),
         "WireMemberPreviewUnavailable": schema_for!(crate::wire::WireMemberPreviewUnavailable),
         "WireMemberRegistrationHookCall": schema_for!(crate::wire::WireMemberRegistrationHookCall),
+        "WireMemberCustodyDeferral": schema_for!(crate::wire::WireMemberCustodyDeferral),
+        "WireMemberCustodyRestore": schema_for!(crate::wire::WireMemberCustodyRestore),
+        "WireMemberCustodyDeferralCause": schema_for!(crate::wire::WireMemberCustodyDeferralCause),
         "MobSnapshotResult": schema_for!(crate::wire::MobSnapshotResult),
         "MobDestroyResult": schema_for!(crate::wire::MobDestroyResult),
+        "WireMobDestroyReport": schema_for!(crate::wire::WireMobDestroyReport),
+        "WireMobDestroyMemberRefusal": schema_for!(crate::wire::WireMobDestroyMemberRefusal),
+        "WireMemberReloadRefusal": schema_for!(crate::wire::WireMemberReloadRefusal),
+        "WireMobDestroyIncompleteData": schema_for!(crate::wire::WireMobDestroyIncompleteData),
         "MobRotateSupervisorResult": schema_for!(crate::wire::MobRotateSupervisorResult),
         "MobClaimCallbackRouteParams": schema_for!(crate::wire::MobClaimCallbackRouteParams),
         "MobClaimCallbackRouteResult": schema_for!(crate::wire::MobClaimCallbackRouteResult),
@@ -291,6 +300,8 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "WireLiveProviderInputLatency": schema_for!(crate::wire::WireLiveProviderInputLatency),
         "WireLiveProviderInputLatencyReading": schema_for!(crate::wire::WireLiveProviderInputLatencyReading),
         "WireLiveContinuityMode": schema_for!(crate::wire::WireLiveContinuityMode),
+        // The advisories on `LiveOpenResult`: a named, growing vocabulary.
+        "WireLiveOpenAdvisory": schema_for!(crate::wire::WireLiveOpenAdvisory),
         // G8 (P2): emit `WireLiveTransportBootstrap` at the top level so
         // SDK codegen produces a typed discriminated union (TS) /
         // tagged-variant TypedDict (Python) for `LiveOpenResult.transport`
@@ -2308,6 +2319,7 @@ mod tests {
             "structured_output_retries",
             "provider_params",
             "auth_binding",
+            "session_events",
         ] {
             assert!(
                 properties.contains_key(field),

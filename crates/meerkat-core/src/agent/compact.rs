@@ -720,10 +720,9 @@ impl CompactionObservationSource {
     }
 }
 
-/// A summary call that came back but whose text is not the summary: the
-/// provider refused or filtered it, or stopped it because the model context
-/// window filled (whether the mechanical fallback then runs or the compaction
-/// fails). The provider did that work, so the caller charges it and records
+/// A summary call that came back but did not produce an accepted provider
+/// summary: the provider stopped it, its text was empty, or the rebuild was
+/// rejected. The provider did that work, so the caller charges it and records
 /// its request row although nothing of it is committed.
 #[derive(Debug)]
 pub(crate) struct UncommittedSummaryCall {
@@ -908,6 +907,26 @@ where
             break result;
         };
 
+        // Preserve accounting as soon as the provider returns. Rejecting the
+        // text or its rebuild cannot undo that call. Keep a validation error
+        // for the ordinary summary path without inventing a chargeable receipt.
+        let llm_result = llm_result.map(|result| {
+            let usage = validated_compaction_summary_usage(
+                result.usage().clone(),
+                client.provider(),
+                client.model(),
+            );
+            *uncommitted_call =
+                usage
+                    .as_ref()
+                    .ok()
+                    .map(|(usage, identity_dispute)| UncommittedSummaryCall {
+                        usage: usage.clone(),
+                        identity_dispute: identity_dispute.clone(),
+                    });
+            (result, usage)
+        });
+
         // A summary the provider stopped because the model context window
         // filled is truncated. It joins the capacity fallback below instead
         // of being committed. A refused or content-filtered summary fails this
@@ -916,7 +935,7 @@ where
         // provider work, so it is handed back as the uncommitted call, which
         // the caller charges whatever this attempt's result.
         let llm_result = match llm_result {
-            Ok(result)
+            Ok((result, _))
                 if matches!(
                     result.stop_reason(),
                     StopReason::ContextWindowExceeded
@@ -924,16 +943,6 @@ where
                         | StopReason::ContentFilter
                 ) =>
             {
-                *uncommitted_call = validated_compaction_summary_usage(
-                    result.usage().clone(),
-                    client.provider(),
-                    client.model(),
-                )
-                .ok()
-                .map(|(usage, identity_dispute)| UncommittedSummaryCall {
-                    usage,
-                    identity_dispute,
-                });
                 if result.stop_reason() == StopReason::ContextWindowExceeded {
                     Err(crate::error::AgentError::llm_context_window_stop(
                         client.provider().as_str(),
@@ -959,7 +968,7 @@ where
         };
 
         match llm_result {
-            Ok(result) => {
+            Ok((result, usage)) => {
                 // Extract summary text from response blocks
                 let mut summary = String::new();
                 for block in result.blocks() {
@@ -984,11 +993,7 @@ where
                     }
                     return Err(CompactionError::EmptySummary);
                 }
-                let (usage, dispute) = validated_compaction_summary_usage(
-                    result.usage().clone(),
-                    client.provider(),
-                    client.model(),
-                )?;
+                let (usage, dispute) = usage?;
                 summary_usage_identity_dispute = dispute;
                 (
                     summary,
@@ -1073,6 +1078,12 @@ where
         observation_source,
     )?;
     let messages_after = result.messages.len();
+
+    // The validated provider outcome now owns this receipt. A failed rewrite
+    // or a mechanical fallback leaves it uncommitted for the caller to charge.
+    if matches!(summary_source, CompactionSummarySource::ProviderCall { .. }) {
+        *uncommitted_call = None;
+    }
 
     Ok(CompactionOutcome {
         new_messages: result.messages,
@@ -1321,7 +1332,7 @@ mod tests {
         let session = session_with_unmeasured_voice();
         let encoded = serde_json::to_vec(&session).unwrap();
         let reloaded: Session = serde_json::from_slice(&encoded).unwrap();
-        let projected = reloaded.messages_for_model_boundary();
+        let projected = reloaded.messages_for_model_boundary().unwrap();
         assert_eq!(
             reloaded.messages().len(),
             3,
@@ -1334,10 +1345,13 @@ mod tests {
         ));
         assert_eq!(projected[0], reloaded.messages()[0]);
         assert_eq!(projected[2], reloaded.messages()[2]);
-        assert_eq!(projected, session.messages_for_model_boundary());
+        assert_eq!(projected, session.messages_for_model_boundary().unwrap());
         let mut ordinary = Session::new();
         ordinary.push(Message::User(UserMessage::text("Plain text.")));
-        assert_eq!(ordinary.messages_for_model_boundary(), ordinary.messages());
+        assert_eq!(
+            ordinary.messages_for_model_boundary().unwrap(),
+            ordinary.messages()
+        );
     }
 
     struct ObservationCompactor;
@@ -1497,11 +1511,19 @@ mod tests {
         session: &Session,
         client: &C,
     ) -> CompactionAttempt {
-        let model_messages = session.messages_for_model_boundary();
         let compactor: Arc<dyn Compactor> = Arc::new(ObservationCompactor);
+        attempt_source_with_compactor(session, client, &compactor).await
+    }
+
+    async fn attempt_source_with_compactor<C: crate::agent::AgentLlmClient>(
+        session: &Session,
+        client: &C,
+        compactor: &Arc<dyn Compactor>,
+    ) -> CompactionAttempt {
+        let model_messages = session.messages_for_model_boundary().unwrap();
         run_compaction(
             client,
-            &compactor,
+            compactor,
             None,
             CompactionInvocation {
                 authorization: None,
@@ -1522,6 +1544,220 @@ mod tests {
             &crate::event_tap::new_event_tap(),
         )
         .await
+    }
+
+    struct ReturnedSummaryClient {
+        text: &'static str,
+        stop_reason: StopReason,
+        usage: Usage,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ReturnedSummaryClient {
+        fn new(text: &'static str, stop_reason: StopReason) -> Self {
+            Self {
+                text,
+                stop_reason,
+                usage: Usage {
+                    input_tokens: 10,
+                    output_tokens: 3,
+                    provider_accounting: Some(crate::ProviderTokenAccounting::openai(
+                        "test-receipt-summary",
+                        10,
+                    )),
+                    ..Usage::default()
+                },
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::agent::AgentLlmClient for ReturnedSummaryClient {
+        async fn stream_response(
+            &self,
+            _: &[Message],
+            tools: &[Arc<crate::ToolDef>],
+            _: u32,
+            _: Option<f32>,
+            _: Option<&crate::ProviderParamsOverride>,
+        ) -> Result<crate::LlmStreamResult, crate::error::AgentError> {
+            assert!(tools.is_empty());
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let blocks = if self.text.is_empty() {
+                Vec::new()
+            } else {
+                vec![AssistantBlock::Text {
+                    text: self.text.into(),
+                    meta: None,
+                }]
+            };
+            Ok(crate::LlmStreamResult::new(
+                blocks,
+                self.stop_reason,
+                self.usage.clone(),
+            ))
+        }
+
+        fn provider(&self) -> crate::Provider {
+            crate::Provider::OpenAI
+        }
+
+        fn model(&self) -> &'static str {
+            "test-receipt-summary"
+        }
+    }
+
+    async fn assert_empty_summary_preserves_provider_usage(stop_reason: StopReason) {
+        let session = session_with_unmeasured_voice();
+        let before = serde_json::to_vec(&session).unwrap();
+        let mut client = ReturnedSummaryClient::new("", stop_reason);
+        if stop_reason == StopReason::MaxTokens {
+            client.usage.reasoning_tokens = Some(3);
+        }
+        let attempt = attempt_observed_source(&session, &client).await;
+        assert!(matches!(attempt.result, Err(CompactionError::EmptySummary)));
+        let call = attempt
+            .uncommitted_call
+            .expect("an empty summary still consumed one provider call");
+        assert_eq!(call.usage.into_inner(), client.usage, "{stop_reason:?}");
+        assert!(call.identity_dispute.is_none());
+        assert_eq!(client.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(serde_json::to_vec(&session).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn empty_end_turn_summary_preserves_provider_usage() {
+        assert_empty_summary_preserves_provider_usage(StopReason::EndTurn).await;
+    }
+
+    #[tokio::test]
+    async fn empty_max_tokens_summary_preserves_provider_usage() {
+        assert_empty_summary_preserves_provider_usage(StopReason::MaxTokens).await;
+    }
+
+    #[tokio::test]
+    async fn empty_summary_preserves_normalized_usage_and_identity_dispute() {
+        let session = session_with_unmeasured_voice();
+        let mut client = ReturnedSummaryClient::new("", StopReason::EndTurn);
+        client.usage = Usage {
+            input_tokens: 5,
+            output_tokens: 3,
+            cache_read_tokens: Some(7),
+            cache_creation_tokens: Some(2),
+            provider_accounting: Some(crate::ProviderTokenAccounting::anthropic(
+                "reported-summary-model",
+                5,
+                7,
+                2,
+            )),
+            ..Usage::default()
+        };
+        let attempt = attempt_observed_source(&session, &client).await;
+        assert!(matches!(attempt.result, Err(CompactionError::EmptySummary)));
+        let call = attempt
+            .uncommitted_call
+            .expect("reported work is preserved");
+        assert_eq!(call.usage.presented_tokens(), 14);
+        assert_eq!(call.usage.normalized_total_tokens(), 17);
+        assert_eq!(call.usage.into_inner(), client.usage);
+        let dispute = call.identity_dispute.expect("attribution remains disputed");
+        assert_eq!(dispute.active_provider, crate::Provider::OpenAI);
+        assert_eq!(dispute.active_model, "test-receipt-summary");
+        assert_eq!(dispute.reported_provider, crate::Provider::Anthropic);
+        assert_eq!(dispute.reported_model, "reported-summary-model");
+        assert_eq!(client.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    struct InvalidSummaryRebuild;
+
+    impl Compactor for InvalidSummaryRebuild {
+        fn should_compact(&self, context: &CompactionContext) -> bool {
+            ObservationCompactor.should_compact(context)
+        }
+
+        fn compaction_prompt(&self) -> &'static str {
+            ObservationCompactor.compaction_prompt()
+        }
+
+        fn max_summary_tokens(&self) -> u32 {
+            ObservationCompactor.max_summary_tokens()
+        }
+
+        fn prepare_for_summarization(
+            &self,
+            messages: &[Message],
+            budget: Option<crate::compact::SummarizationSourceBudget>,
+        ) -> crate::compact::SummarizationSource {
+            ObservationCompactor.prepare_for_summarization(messages, budget)
+        }
+
+        fn rebuild_history(
+            &self,
+            messages: &[Message],
+            summary: &str,
+        ) -> crate::compact::CompactionResult {
+            let mut result = ObservationCompactor.rebuild_history(messages, summary);
+            result.discarded.pop();
+            result
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_summary_rebuild_preserves_provider_usage() {
+        let session = session_with_unmeasured_voice();
+        let before = serde_json::to_vec(&session).unwrap();
+        let client = ReturnedSummaryClient::new("A valid summary.", StopReason::EndTurn);
+        let compactor: Arc<dyn Compactor> = Arc::new(InvalidSummaryRebuild);
+        let attempt = attempt_source_with_compactor(&session, &client, &compactor).await;
+        assert!(matches!(
+            attempt.result,
+            Err(CompactionError::InvalidRebuild(_))
+        ));
+        let call = attempt
+            .uncommitted_call
+            .expect("rejecting a rebuild does not undo provider work");
+        assert_eq!(call.usage.into_inner(), client.usage);
+        assert!(call.identity_dispute.is_none());
+        assert_eq!(client.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(serde_json::to_vec(&session).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn successful_summary_exposes_only_committed_provider_usage() {
+        let session = session_with_unmeasured_voice();
+        let client = ReturnedSummaryClient::new("A valid summary.", StopReason::EndTurn);
+        let attempt = attempt_observed_source(&session, &client).await;
+        let outcome = attempt.result.expect("valid summary and rebuild");
+        assert!(matches!(
+            outcome.summary_source,
+            CompactionSummarySource::ProviderCall { .. }
+        ));
+        assert_eq!(outcome.summary_usage.into_inner(), client.usage);
+        assert!(
+            attempt.uncommitted_call.is_none(),
+            "the call must not be charged twice"
+        );
+        assert_eq!(client.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn invalid_summary_accounting_does_not_fabricate_a_provider_receipt() {
+        for text in ["", "A valid summary."] {
+            let session = session_with_unmeasured_voice();
+            let before = serde_json::to_vec(&session).unwrap();
+            let mut client = ReturnedSummaryClient::new(text, StopReason::EndTurn);
+            client.usage.provider_accounting = None;
+            let attempt = attempt_observed_source(&session, &client).await;
+            if text.is_empty() {
+                assert!(matches!(attempt.result, Err(CompactionError::EmptySummary)));
+            } else {
+                assert!(matches!(attempt.result, Err(CompactionError::LlmFailed(_))));
+            }
+            assert!(attempt.uncommitted_call.is_none());
+            assert_eq!(client.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert_eq!(serde_json::to_vec(&session).unwrap(), before);
+        }
     }
 
     #[tokio::test]
@@ -1582,7 +1818,7 @@ mod tests {
         let reloaded: Session =
             serde_json::from_slice(&serde_json::to_vec(&session).unwrap()).unwrap();
         assert!(
-            matches!(&reloaded.messages_for_model_boundary()[0], Message::User(user)
+            matches!(&reloaded.messages_for_model_boundary().unwrap()[0], Message::User(user)
                 if user.text_content().contains("Blueprint review")
                     && user.text_content().contains("UNMEASURED"))
         );
@@ -1791,10 +2027,10 @@ mod tests {
     #[tokio::test]
     async fn compaction_integrates_voice_observations_before_rebase_and_reload() {
         let mut session = session_with_unmeasured_voice();
-        let model_messages = session.messages_for_model_boundary();
+        let model_messages = session.messages_for_model_boundary().unwrap();
         let compactor: Arc<dyn Compactor> = Arc::new(ObservationCompactor);
         let curator: Arc<dyn CompactionCurator> = Arc::new(ObservationCurator);
-        let outcome = run_compaction(
+        let attempt = run_compaction(
             &UnusedSummaryClient,
             &compactor,
             Some(&curator),
@@ -1816,9 +2052,14 @@ mod tests {
             &None,
             &crate::event_tap::new_event_tap(),
         )
-        .await
-        .result
-        .unwrap();
+        .await;
+        assert!(
+            attempt.uncommitted_call.is_none(),
+            "the curator made no provider call"
+        );
+        let outcome = attempt.result.unwrap();
+        assert_eq!(outcome.summary_source, CompactionSummarySource::HostCurator);
+        assert_eq!(outcome.summary_usage.normalized_total_tokens(), 0);
         assert!(
             outcome
                 .discarded
@@ -1844,13 +2085,13 @@ mod tests {
         );
         let reloaded: Session =
             serde_json::from_slice(&serde_json::to_vec(&session).unwrap()).unwrap();
-        let projected = reloaded.messages_for_model_boundary();
+        let projected = reloaded.messages_for_model_boundary().unwrap();
         assert_eq!(projected.len(), 1);
         assert!(matches!(&projected[0], Message::User(user)
             if user.transcript_role.is_compaction_summary()
                 && user.text_content().contains("blueprint review")
                 && user.text_content().contains("UNMEASURED")));
-        assert_eq!(projected, reloaded.messages_for_model_boundary());
+        assert_eq!(projected, reloaded.messages_for_model_boundary().unwrap());
     }
 
     /// These two cases used to fail the compaction closed. They are now

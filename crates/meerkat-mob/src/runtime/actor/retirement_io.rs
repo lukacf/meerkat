@@ -360,13 +360,7 @@ struct RetirementArchiveObservationSource {
 
 impl RetirementArchiveObservationSource {
     async fn already_complete(&self, session: &SessionId) -> Result<bool, MobError> {
-        if self.service.has_live_session(session).await?
-            || self
-                .service
-                .load_persisted_session(session)
-                .await?
-                .is_some()
-        {
+        if super::member_session_present(self.service.as_ref(), session).await? {
             return Ok(false);
         }
         #[cfg(feature = "runtime-adapter")]
@@ -458,6 +452,184 @@ fn retirement_stage_fences(
         )
         .collect();
     RetirementStageFences { commit, parked }
+}
+
+/// Before a retirement's ingress detach: reload the retiring member's session
+/// when its registration is durability-degraded, bounded by `deadline`.
+///
+/// A member whose session degraded after its quiesce stage (for example while
+/// the quiesce waited on a boundary commit that then passed its deadline)
+/// refuses the detach until a reload replaces its registration. The reload is
+/// the one the quiesce stage and a destroy perform
+/// (`MemberSessionDisposalArc::reload_durability_degraded_registration_settlement_until`),
+/// of the registration current for the retiring member's own session when
+/// this stage reads it, under the stage's fence. A `Discarded` reload answers
+/// the exact successor it published, which the detach then acts on.
+/// `None` when the session is not degraded, or the reload found it no longer
+/// degraded or that registration no longer current. A refusal is the stage's
+/// typed error ([`MobError::MemberReloadRepairBlocked`] for a repair-blocked
+/// one), and a reload past `deadline` the stage's in-progress error.
+#[cfg(feature = "runtime-adapter")]
+async fn reload_degraded_member_before_ingress_detach(
+    adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+    ops: &Arc<super::super::ops_adapter::MobOpsAdapter>,
+    session: &SessionId,
+    deadline: Instant,
+) -> Result<Option<meerkat_runtime::RuntimeSessionRegistrationWitness>, MobError> {
+    use super::super::provisioner::MemberSessionDisposalArc;
+    if adapter.durability_reload_required(session).await.is_none() {
+        return Ok(None);
+    }
+    let Some(registration) = adapter.current_session_registration_witness(session).await else {
+        return Ok(None);
+    };
+    #[cfg(test)]
+    retirement_stage_test_hooks::record_ingress_stage_reload(session);
+    #[cfg(test)]
+    if retirement_stage_test_hooks::take_ingress_stage_reload_refusal(session) {
+        return Err(MemberSessionDisposalArc::map_runtime_retirement_error(
+            session,
+            super::super::provisioner::DurabilityReloadFailure::Refused(
+                meerkat_runtime::RuntimeDriverError::RecoveryRepairBlocked {
+                    evidence_digest: None,
+                    reason: retirement_stage_test_hooks::INJECTED_RELOAD_REFUSAL.to_string(),
+                },
+            )
+            .into_retire_error(session),
+        ));
+    }
+    let settlement =
+        MemberSessionDisposalArc::reload_durability_degraded_registration_settlement_until(
+            adapter,
+            Some(ops),
+            &registration,
+            session,
+            deadline,
+        )
+        .await
+        .map_err(|failure| {
+            MemberSessionDisposalArc::map_runtime_retirement_error(
+                session,
+                failure.into_retire_error(session),
+            )
+        })?;
+    Ok(match settlement {
+        meerkat_runtime::ReloadRequiredRegistrationSettlement::Discarded { successor } => {
+            Some(successor)
+        }
+        meerkat_runtime::ReloadRequiredRegistrationSettlement::NotDegraded
+        | meerkat_runtime::ReloadRequiredRegistrationSettlement::NotCurrent => None,
+    })
+}
+
+/// The retire-ingress-detach stage's effect on the retiring member's local
+/// session: reload a degraded member first
+/// ([`reload_degraded_member_before_ingress_detach`]), then detach its peer
+/// ingress and require the ingress unattached. After a reload, the detach acts
+/// on the successor the reload published, which must still be current before
+/// the detach and after it.
+#[cfg(feature = "runtime-adapter")]
+async fn detach_retiring_member_ingress(
+    adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+    ops: &Arc<super::super::ops_adapter::MobOpsAdapter>,
+    session: &SessionId,
+    deadline: Instant,
+) -> Result<(), MobError> {
+    use meerkat_runtime::RuntimeDriverError;
+    let successor =
+        reload_degraded_member_before_ingress_detach(adapter, ops, session, deadline).await?;
+    #[cfg(test)]
+    if retirement_stage_test_hooks::take_degrade_before_ingress_detach(session) {
+        adapter
+            .force_session_durability_reload_required_for_test(session)
+            .await;
+    }
+    if let Some(successor) = successor.as_ref() {
+        ensure_reloaded_registration_still_current(adapter, session, successor).await?;
+    }
+    match adapter
+        .update_peer_ingress_context(session, false, None)
+        .await
+    {
+        Ok(_)
+        | Err(
+            RuntimeDriverError::NotFound { .. }
+            | RuntimeDriverError::Destroyed
+            | RuntimeDriverError::NotReady { .. },
+        ) => {}
+        Err(error) => {
+            let session_degraded =
+                matches!(error, RuntimeDriverError::RecoveryRepairBlocked { .. })
+                    && adapter.durability_reload_required(session).await.is_some();
+            return Err(retirement_ingress_detach_error(
+                session,
+                error,
+                session_degraded,
+            ));
+        }
+    }
+    let owner = adapter.peer_ingress_owner(session).await;
+    if !matches!(owner, meerkat_runtime::PeerIngressOwner::Unattached) {
+        return Err(MobError::Internal(format!(
+            "peer ingress owner remained attached after detach: {owner:?}"
+        )));
+    }
+    if let Some(successor) = successor.as_ref() {
+        ensure_reloaded_registration_still_current(adapter, session, successor).await?;
+    }
+    Ok(())
+}
+
+/// The ingress detach after a reload acts on the successor the reload
+/// published: a session whose current registration is no longer that
+/// successor has been taken over, and the retirement does not detach a later
+/// owner's ingress.
+#[cfg(feature = "runtime-adapter")]
+async fn ensure_reloaded_registration_still_current(
+    adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+    session: &SessionId,
+    successor: &meerkat_runtime::RuntimeSessionRegistrationWitness,
+) -> Result<(), MobError> {
+    if adapter
+        .current_session_registration_witness(session)
+        .await
+        .as_ref()
+        == Some(successor)
+    {
+        Ok(())
+    } else {
+        Err(MobError::Internal(format!(
+            "the registration the retirement reloaded for session {session} is no longer current at its ingress detach"
+        )))
+    }
+}
+
+/// The stage error of a retirement's refused ingress detach. A detach the
+/// runtime refuses as repair-blocked while the member session's durability
+/// gate reports a required reload (`session_degraded`: the session degraded
+/// after the stage's reload check) is [`MobError::MemberReloadRepairBlocked`]
+/// with the refusal's own reason and evidence digest; a redrive of the
+/// retirement reloads the member and continues. Any other refusal, a
+/// repair-blocked one without the gate included, keeps its internal text.
+#[cfg(feature = "runtime-adapter")]
+fn retirement_ingress_detach_error(
+    session: &SessionId,
+    error: meerkat_runtime::RuntimeDriverError,
+    session_degraded: bool,
+) -> MobError {
+    match error {
+        meerkat_runtime::RuntimeDriverError::RecoveryRepairBlocked {
+            evidence_digest,
+            reason,
+        } if session_degraded => MobError::MemberReloadRepairBlocked {
+            session_id: session.clone(),
+            reason,
+            evidence_digest,
+        },
+        error => MobError::Internal(format!(
+            "failed to detach peer ingress for session {session}: {error}"
+        )),
+    }
 }
 
 struct RetirementCommit {
@@ -3013,9 +3185,7 @@ impl MobActor {
                             exact_local_target_quiescent: false,
                         });
                     };
-                    if service.has_live_session(&session).await?
-                        || service.load_persisted_session(&session).await?.is_some()
-                    {
+                    if super::member_session_present(service.as_ref(), &session).await? {
                         // A host-refused member keeps its durable session for
                         // the archive below, but its runtime may hold nothing
                         // to route a retire to.
@@ -3502,8 +3672,13 @@ impl MobActor {
             .flatten();
         #[cfg(feature = "runtime-adapter")]
         let adapter = self.runtime_adapter.clone();
+        #[cfg(feature = "runtime-adapter")]
+        let ops = self.session_ops_adapter.clone();
+        #[cfg(feature = "runtime-adapter")]
+        let deadline = continuation.deadline;
         // Fence scope: self-only; detaches the retiring member's exact runtime
-        // attachment/ingress.
+        // attachment/ingress. A reload before the detach replaces only the
+        // retiring member's own registration.
         self.dispatch_retirement(
             continuation,
             "retire-ingress-detach",
@@ -3522,28 +3697,7 @@ impl MobActor {
                     }
                     #[cfg(feature = "runtime-adapter")]
                     if let (Some(adapter), Some(session)) = (adapter, session.as_ref()) {
-                        match adapter
-                            .update_peer_ingress_context(session, false, None)
-                            .await
-                        {
-                            Ok(_)
-                            | Err(
-                                meerkat_runtime::RuntimeDriverError::NotFound { .. }
-                                | meerkat_runtime::RuntimeDriverError::Destroyed
-                                | meerkat_runtime::RuntimeDriverError::NotReady { .. },
-                            ) => {}
-                            Err(error) => {
-                                return Err(MobError::Internal(format!(
-                                    "failed to detach peer ingress for session {session}: {error}"
-                                )));
-                            }
-                        }
-                        let owner = adapter.peer_ingress_owner(session).await;
-                        if !matches!(owner, meerkat_runtime::PeerIngressOwner::Unattached) {
-                            return Err(MobError::Internal(format!(
-                                "peer ingress owner remained attached after detach: {owner:?}"
-                            )));
-                        }
+                        detach_retiring_member_ingress(&adapter, &ops, session, deadline).await?;
                     }
                     #[cfg(not(feature = "runtime-adapter"))]
                     let _ = session;
@@ -3809,37 +3963,69 @@ impl MobActor {
             }
             return;
         }
-        let mut redriven_refused = false;
-        if let Some(stuck) = self.stuck_retirements.get(&identity) {
-            if redrive || matches!(reply, RetirementReply::Owned) {
-                tracing::info!(
-                    mob_id = %self.definition.id,
-                    agent_identity = %identity,
-                    stage = %stuck.stage,
-                    cause = %stuck.cause,
-                    "re-driving stuck member retirement"
-                );
-                redriven_refused = stuck.registration_refused;
-                self.stuck_retirements.remove(&identity);
-            } else {
-                let error = MobError::MemberRetirementStuck {
-                    member_id: identity.clone(),
-                    stage: stuck.stage.as_str().to_string(),
-                    cause: Arc::clone(&stuck.cause),
-                };
-                match reply {
-                    RetirementReply::Retire(reply) | RetirementReply::BatchRetire(reply) => {
-                        let _ = reply.send(Err(error));
-                    }
-                    RetirementReply::Respawn { reply, .. } => {
-                        let _ = reply.send(Err(super::super::handle::MobRespawnError::from(error)));
-                    }
-                    RetirementReply::IdentityReconcile(_)
-                    | RetirementReply::SpawnRollback
-                    | RetirementReply::Owned => {}
+        let redriven = redrive || matches!(reply, RetirementReply::Owned);
+        if let Some(stuck) = self.stuck_retirements.get(&identity)
+            && !redriven
+        {
+            let error = MobError::MemberRetirementStuck {
+                member_id: identity.clone(),
+                stage: stuck.stage.as_str().to_string(),
+                cause: Arc::clone(&stuck.cause),
+            };
+            match reply {
+                RetirementReply::Retire(reply) | RetirementReply::BatchRetire(reply) => {
+                    let _ = reply.send(Err(error));
                 }
-                return;
+                RetirementReply::Respawn { reply, .. } => {
+                    let _ = reply.send(Err(super::super::handle::MobRespawnError::from(error)));
+                }
+                RetirementReply::IdentityReconcile(_)
+                | RetirementReply::SpawnRollback
+                | RetirementReply::Owned => {}
             }
+            return;
+        }
+        // Nothing below acts on the member's session before this point. A
+        // member whose startup custody restore was deferred gets that restore
+        // re-attempted first; while it stays deferred, the retirement answers
+        // typed and starts nothing, and a stuck retirement stays stuck.
+        if let Err(error) = self.reattempt_deferred_member_custody(&identity).await {
+            match reply {
+                RetirementReply::Retire(reply) | RetirementReply::BatchRetire(reply) => {
+                    let _ = reply.send(Err(error));
+                }
+                RetirementReply::Respawn { reply, .. } => {
+                    let _ = reply.send(Err(super::super::handle::MobRespawnError::from(error)));
+                }
+                RetirementReply::IdentityReconcile(authority) => {
+                    self.record_identity_reconcile_disposition(
+                        &identity,
+                        &authority,
+                        identity_actuation_error_disposition(&error),
+                    )
+                    .await;
+                    self.enqueue_identity_reconcile(identity);
+                }
+                // A spawn rollback's member was never restored at a start, so
+                // it has no deferred restore; an owned re-drive keeps its
+                // stuck entry for the next re-drive.
+                RetirementReply::SpawnRollback | RetirementReply::Owned => {}
+            }
+            return;
+        }
+        let mut redriven_refused = false;
+        if let Some(stuck) = self.stuck_retirements.get(&identity)
+            && redriven
+        {
+            tracing::info!(
+                mob_id = %self.definition.id,
+                agent_identity = %identity,
+                stage = %stuck.stage,
+                cause = %stuck.cause,
+                "re-driving stuck member retirement"
+            );
+            redriven_refused = stuck.registration_refused;
+            self.stuck_retirements.remove(&identity);
         }
         let entry = self.roster.read().await.get(&identity).cloned();
         let Some(entry) = entry else {
@@ -4590,6 +4776,55 @@ impl MobActor {
         true
     }
 
+    /// Hand a retiring member's durably started retirement to the stuck
+    /// re-drive queue once its deferred cleanup delivery custody is restored
+    /// outside any retirement start (the backoff wake, an explicit resume).
+    /// A start re-drives no started retirement on its own, and while its
+    /// custody was deferred no retirement of the member could start, so it is
+    /// recorded as stuck at admission, with the cause it was deferred for,
+    /// and queued. A member no longer retiring, or whose retirement is in
+    /// flight or already stuck, needs no record.
+    pub(super) async fn redrive_custody_restored_retirement(
+        &mut self,
+        identity: &AgentIdentity,
+        cause: Arc<MobError>,
+    ) {
+        if self.retirements.contains_key(identity) {
+            return;
+        }
+        if !self.stuck_retirements.contains_key(identity) {
+            let Some(entry) = self.roster.read().await.get(identity).cloned() else {
+                return;
+            };
+            let retiring = self
+                .dsl_authority
+                .state()
+                .runtime_retire_pending_sessions
+                .contains_key(&mob_dsl::AgentRuntimeId::from_domain(
+                    &entry.agent_runtime_id,
+                ));
+            if !retiring {
+                return;
+            }
+            self.stuck_retirements.insert(
+                identity.clone(),
+                StuckRetirement {
+                    entry,
+                    stage: super::super::RetirementStage::ADMISSION,
+                    cause,
+                    registration_refused: false,
+                },
+            );
+        }
+        if self.enqueue_stuck_retirement_redrive(identity) {
+            tracing::info!(
+                mob_id = %self.definition.id,
+                agent_identity = %identity,
+                "member cleanup custody restored; its started retirement is queued for re-drive"
+            );
+        }
+    }
+
     /// Start the next queued stuck-retirement re-drive, if the mob is running
     /// and the member's retirement is not already in flight. Returns whether
     /// one was started.
@@ -4810,6 +5045,7 @@ impl MobActor {
                                 None,
                                 origin,
                                 restore_wiring,
+                                false,
                                 spawn_reply,
                             )
                         })
@@ -5968,6 +6204,70 @@ pub(crate) mod retirement_stage_test_hooks {
             None => false,
         }
     }
+
+    static DEGRADE_BEFORE_INGRESS_DETACH: Mutex<Vec<SessionId>> = Mutex::new(Vec::new());
+    static REFUSED_INGRESS_STAGE_RELOADS: Mutex<Vec<SessionId>> = Mutex::new(Vec::new());
+    static INGRESS_STAGE_RELOADS: Mutex<Vec<SessionId>> = Mutex::new(Vec::new());
+
+    /// The reason of the refusal [`refuse_next_ingress_stage_reload`] arms.
+    pub(crate) const INJECTED_RELOAD_REFUSAL: &str =
+        "injected repair-blocked refusal of the ingress stage's reload";
+
+    /// The next ingress detach of a retirement of `session` finds the
+    /// session degraded: after the stage's reload check, before the detach,
+    /// once.
+    pub(crate) fn degrade_before_next_ingress_detach(session: &SessionId) {
+        DEGRADE_BEFORE_INGRESS_DETACH
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(session.clone());
+    }
+
+    pub(super) fn take_degrade_before_ingress_detach(session: &SessionId) -> bool {
+        take_armed(&DEGRADE_BEFORE_INGRESS_DETACH, session)
+    }
+
+    /// The runtime refuses the next reload the ingress stage of a retirement
+    /// of `session` asks for, as repair-blocked, once.
+    pub(crate) fn refuse_next_ingress_stage_reload(session: &SessionId) {
+        REFUSED_INGRESS_STAGE_RELOADS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(session.clone());
+    }
+
+    pub(super) fn take_ingress_stage_reload_refusal(session: &SessionId) -> bool {
+        take_armed(&REFUSED_INGRESS_STAGE_RELOADS, session)
+    }
+
+    pub(super) fn record_ingress_stage_reload(session: &SessionId) {
+        INGRESS_STAGE_RELOADS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(session.clone());
+    }
+
+    /// How many reloads the ingress stage of retirements of `session` asked
+    /// for.
+    pub(crate) fn ingress_stage_reloads(session: &SessionId) -> usize {
+        INGRESS_STAGE_RELOADS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter(|reloaded| *reloaded == session)
+            .count()
+    }
+
+    fn take_armed(armed: &Mutex<Vec<SessionId>>, session: &SessionId) -> bool {
+        let mut armed = armed.lock().unwrap_or_else(PoisonError::into_inner);
+        match armed.iter().position(|candidate| candidate == session) {
+            Some(index) => {
+                armed.remove(index);
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -6074,6 +6374,7 @@ mod tests {
                         rollback_authority: None,
                         materialized_ack: None,
                         failed_restore_peer_ids: Vec::new(),
+                        adopted_first_turn: None,
                     }))
                     .is_ok()
             );
@@ -6222,5 +6523,41 @@ mod tests {
                 .expect("the predicate reads the runtime"),
             "after the canonical unregister a later runtime holds nothing for the session"
         );
+    }
+
+    /// A retirement's ingress detach refused repair-blocked while the member
+    /// session's durability gate reports a required reload (it degraded after
+    /// the stage's reload check) is the typed `MemberReloadRepairBlocked`
+    /// with the refusal's own reason and evidence digest. Another refusal, or
+    /// a repair-blocked one without the gate, keeps its internal text.
+    #[cfg(feature = "runtime-adapter")]
+    #[test]
+    fn an_ingress_detach_refused_on_a_degraded_session_is_the_typed_repair_blocked_refusal() {
+        use meerkat_runtime::RuntimeDriverError;
+        let session = SessionId::new();
+        let repair_blocked = || RuntimeDriverError::RecoveryRepairBlocked {
+            evidence_digest: Some("digest".to_string()),
+            reason: "durability reload required".to_string(),
+        };
+        match retirement_ingress_detach_error(&session, repair_blocked(), true) {
+            MobError::MemberReloadRepairBlocked {
+                session_id,
+                reason,
+                evidence_digest,
+            } => {
+                assert_eq!(session_id, session);
+                assert_eq!(reason, "durability reload required");
+                assert_eq!(evidence_digest.as_deref(), Some("digest"));
+            }
+            other => panic!("a refused detach on a degraded session is typed: {other:?}"),
+        }
+        let other_refusal = || RuntimeDriverError::Internal("detach failed".to_string());
+        for (error, session_degraded) in [(repair_blocked(), false), (other_refusal(), true)] {
+            let text = format!("failed to detach peer ingress for session {session}: {error}");
+            match retirement_ingress_detach_error(&session, error, session_degraded) {
+                MobError::Internal(message) => assert_eq!(message, text),
+                other => panic!("the refusal keeps its text: {other:?}"),
+            }
+        }
     }
 }

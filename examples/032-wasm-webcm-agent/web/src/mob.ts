@@ -406,7 +406,8 @@ export class MobOrchestrator {
         this.updateStatus(agent, `${ev.name}`, "tool-use");
         break;
 
-      case "tool_execution_completed":
+      // The result event carries the tool's output; the execution fact
+      // before it (tool_execution_completed) carries no body.
       case "tool_result_received":
         this.resolveCard(panel, ev.id, contentText(ev.content), ev.is_error === true);
         break;

@@ -359,6 +359,26 @@ impl CoreExecutorInterruptHandle for RestSessionRuntimeInterruptHandle {
             })
             .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
     }
+
+    async fn suspend_run_if_current(
+        &self,
+        expected_run_id: &meerkat_core::lifecycle::RunId,
+        _reason: String,
+    ) -> Result<bool, CoreExecutorError> {
+        self.context
+            .session_service
+            .suspend_run_with_machine_authority(
+                &self.session_id,
+                expected_run_id,
+                self.context.runtime_adapter.session_control_authority(),
+            )
+            .await
+            .or_else(|err| match err {
+                SessionError::NotRunning { .. } => Ok(false),
+                err => Err(err),
+            })
+            .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
+    }
 }
 
 #[doc(hidden)]
@@ -1110,14 +1130,38 @@ async fn prepare_rest_session_runtime_executor_locked(
             .prepare_cold_attach(session_id, claim)
             .await
             .map_err(runtime_driver_error_from_session_error)?;
-        let session = state
-            .session_service
-            .load_authoritative_session(session_id)
-            .await
-            .map_err(runtime_driver_error_from_session_error)?
-            .ok_or(meerkat_runtime::RuntimeDriverError::NotReady {
-                state: meerkat_runtime::RuntimeState::Destroyed,
-            })?;
+        // A crash-window tail is settled above. A durable run's open tail at
+        // a committed round is continued without a write, so it still stands
+        // ahead of the committed boundary and the committed read refuses it.
+        // Only that run, which this attach resumes, is read through the
+        // committed snapshot: the create below seeds its actor from the
+        // continued tail, never from the snapshot, and its own recovery
+        // refuses a tail that is not continued. Any other tail (held for
+        // reconciliation, or refused) keeps the strict read's refusal, so no
+        // run starts over it.
+        let continues_open_run = matches!(
+            meerkat_runtime::recovery::observe_resumable_run(
+                state.session_service.runtime_store().as_ref(),
+                session_id,
+            )
+            .await,
+            Ok(Some(_))
+        );
+        let session = if continues_open_run {
+            state
+                .session_service
+                .load_committed_session_tolerating_tail(session_id)
+                .await
+        } else {
+            state
+                .session_service
+                .load_authoritative_session(session_id)
+                .await
+        }
+        .map_err(runtime_driver_error_from_session_error)?
+        .ok_or(meerkat_runtime::RuntimeDriverError::NotReady {
+            state: meerkat_runtime::RuntimeState::Destroyed,
+        })?;
         if state
             .session_service
             .session_archived_by_authority(session_id, &session)
@@ -1630,14 +1674,11 @@ async fn cleanup_rest_runtime_after_completion_outcome(
 ) -> Result<bool, SessionError> {
     let runtime_registration_lock = rest_runtime_registration_lock(state, session_id);
     let _runtime_registration_guard = runtime_registration_lock.mutex().lock().await;
-    let archived_now = match state
-        .session_service
-        .load_authoritative_session(session_id)
-        .await?
-    {
-        Some(session) => session_archived_by_authority(state, session_id, &session).await?,
-        None => false,
-    };
+    // Body-free: a failed run that keeps its provisional tail leaves the
+    // physical head past the committed boundary, and a body read would mask
+    // the run's own error with the tail's revision conflict.
+    let archived_now =
+        committed_source_archived(&state.session_service, session_id).await? == Some(true);
     let live_session = if archived_now {
         meerkat_runtime::meerkat_machine::dsl::RuntimeCompletionLiveSessionObservation::NotObserved
     } else if state.session_service.has_live_session(session_id).await? {
@@ -1994,20 +2035,9 @@ async fn apply_runtime_turn_under_runtime_turn_boundary(
         ));
     }
 
-    let archived_now = match context
-        .session_service
-        .load_authoritative_session(session_id)
-        .await?
-    {
-        Some(session) => {
-            context
-                .session_service
-                .session_archived_by_authority(session_id, &session)
-                .await?
-        }
-        None => false,
-    };
-    if archived_now {
+    // Body-free: a run resumed over its open provisional tail is applied
+    // while the tail moves the physical head past the committed boundary.
+    if committed_source_archived(&context.session_service, session_id).await? == Some(true) {
         return Err(SessionError::NotFound {
             id: session_id.clone(),
         });
@@ -2051,12 +2081,14 @@ async fn apply_runtime_turn_under_runtime_turn_boundary(
         SessionError::Agent(meerkat_core::AgentError::InternalError(error.to_string()))
     })?;
 
+    // The session's identity is the committed snapshot's: a run resumed over
+    // its open provisional tail is applied while that tail stands, and a run's
+    // rounds never change the identity. A read failure is the apply's error,
+    // never a skipped validation.
     let session_identity = context
         .session_service
-        .load_authoritative_session(session_id)
-        .await
-        .ok()
-        .flatten()
+        .load_committed_session_tolerating_tail(session_id)
+        .await?
         .and_then(|session| {
             session
                 .session_metadata()
@@ -2231,25 +2263,11 @@ impl CoreExecutor for RestSessionRuntimeExecutor {
         {
             Ok(output) => Ok(output),
             Err(error @ SessionError::NotFound { .. }) => {
-                let archived = match self
-                    .context
-                    .session_service
-                    .load_authoritative_session(&self.session_id)
-                    .await
-                {
-                    Ok(Some(session)) => self
-                        .context
-                        .session_service
-                        .session_archived_by_authority(&self.session_id, &session)
+                let archived =
+                    committed_source_archived(&self.context.session_service, &self.session_id)
                         .await
-                        .map_err(CoreExecutorError::apply_failed_from_session_error)?,
-                    Ok(None) => false,
-                    Err(authority_error) => {
-                        return Err(CoreExecutorError::apply_failed_from_session_error(
-                            authority_error,
-                        ));
-                    }
-                };
+                        .map_err(CoreExecutorError::apply_failed_from_session_error)?
+                        == Some(true);
                 if archived {
                     Err(CoreExecutorError::archived_session_requires_teardown(
                         error.to_string(),
@@ -2271,6 +2289,17 @@ impl CoreExecutor for RestSessionRuntimeExecutor {
         self.context
             .session_service
             .reconcile_runtime_compaction_projections(&self.session_id, intents.to_vec())
+            .await
+            .map_err(|error| CoreExecutorError::Internal(error.to_string()))
+    }
+
+    async fn acknowledge_compaction_finalization(
+        &mut self,
+        authority: &meerkat_core::CommittedSessionBoundaryAuthority,
+    ) -> Result<(), CoreExecutorError> {
+        self.context
+            .session_service
+            .acknowledge_runtime_compaction_finalization(&self.session_id, authority)
             .await
             .map_err(|error| CoreExecutorError::Internal(error.to_string()))
     }
@@ -2817,26 +2846,43 @@ async fn session_archived_by_authority(
         .await
 }
 
+/// Body-free archive and presence answer for `session_id`'s committed
+/// source: `None` when no committed session exists, otherwise whether the
+/// RuntimeStore holds an absorbing archive terminal for it.
+///
+/// It reads [`PersistentSessionService::observe_live_durable_source`], which
+/// applies the archive rule of `session_archived_by_authority` (a rule that
+/// never reads the body) and never materializes the session body. A body read
+/// of the committed boundary refuses with `TranscriptRevisionConflict` from a
+/// durable run's first HeadCanonical round commit until its boundary commit,
+/// so a precheck that needs only presence and archive state reads no body. A
+/// classification this build does not know is a fault, never presence.
+pub(crate) async fn committed_source_archived(
+    service: &PersistentSessionService<FactoryAgentBuilder>,
+    session_id: &SessionId,
+) -> Result<Option<bool>, SessionError> {
+    match service.observe_live_durable_source(session_id).await? {
+        meerkat::LiveDurableSourceObservation::Absent => Ok(None),
+        meerkat::LiveDurableSourceObservation::Archived => Ok(Some(true)),
+        meerkat::LiveDurableSourceObservation::Committed { .. } => Ok(Some(false)),
+        other => Err(SessionError::Agent(
+            meerkat_core::AgentError::InternalError(format!(
+                "the durable source of session {session_id} answered a classification this build does not know: {other:?}"
+            )),
+        )),
+    }
+}
+
+/// Whether the RuntimeStore holds an absorbing archive terminal for the
+/// session, read body-free: an ingress into a running session is not refused
+/// by the run's provisional tail.
 async fn authoritative_session_archived_response(
     state: &AppState,
     session_id: &SessionId,
 ) -> Result<bool, Response> {
-    let session = state
-        .session_service
-        .load_authoritative_session(session_id)
+    committed_source_archived(&state.session_service, session_id)
         .await
-        .map_err(|err| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("failed to load session: {err}")})),
-            )
-                .into_response()
-        })?;
-    let Some(session) = session else {
-        return Ok(false);
-    };
-    session_archived_by_authority(state, session_id, &session)
-        .await
+        .map(|archived| archived == Some(true))
         .map_err(|err| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -3949,6 +3995,7 @@ fn make_runtime_external_event_input(
     event_type: &str,
     payload: Value,
     blocks: Option<Vec<meerkat_contracts::WireContentBlock>>,
+    idempotency_key: Option<meerkat_runtime::IdempotencyKey>,
 ) -> Result<meerkat_runtime::Input, ApiError> {
     if event_type.trim().is_empty() {
         return Err(ApiError::BadRequest(
@@ -3980,7 +4027,7 @@ fn make_runtime_external_event_input(
                 },
                 durability: meerkat_runtime::InputDurability::Durable,
                 visibility: meerkat_runtime::InputVisibility::default(),
-                idempotency_key: None,
+                idempotency_key,
                 supersession_key: None,
                 correlation_id: None,
             },
@@ -4005,6 +4052,16 @@ enum RestSessionExternalEventEnvelope {
     PeerResponseTerminal {},
 }
 
+/// The `/external-events` body: the event envelope plus the optional caller
+/// idempotency key, which parameterizes admission and is not event content.
+#[derive(Debug, Deserialize)]
+struct RestSessionExternalEventBody {
+    #[serde(default)]
+    idempotency_key: Option<String>,
+    #[serde(flatten)]
+    event: RestSessionExternalEventEnvelope,
+}
+
 use meerkat_contracts::wire::RestPeerResponseTerminalRequest as RestPeerResponseTerminalBody;
 
 /// Queue an external event into the runtime without waking an idle session.
@@ -4016,7 +4073,7 @@ async fn post_external_event(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: axum::http::HeaderMap,
-    Json(event): Json<RestSessionExternalEventEnvelope>,
+    Json(body): Json<RestSessionExternalEventBody>,
 ) -> Result<(StatusCode, Json<Value>), Response> {
     // Webhook auth resolved once at startup, stored in AppState.
     webhook::verify_webhook(&headers, &state.webhook_auth)
@@ -4025,12 +4082,20 @@ async fn post_external_event(
     let session_id =
         resolve_session_id_for_state(&id, &state).map_err(IntoResponse::into_response)?;
 
-    let input = match event {
+    // The one canonical rule checks a caller key and stores it in the caller
+    // namespace, shared with the RPC surface, apart from Core's own keys.
+    let idempotency_key = body
+        .idempotency_key
+        .as_deref()
+        .map(meerkat_runtime::IdempotencyKey::caller)
+        .transpose()
+        .map_err(|error| ApiError::BadRequest(error.to_string()).into_response())?;
+    let input = match body.event {
         RestSessionExternalEventEnvelope::GenericJson {
             event_type,
             payload,
             blocks,
-        } => make_runtime_external_event_input(&event_type, payload, blocks),
+        } => make_runtime_external_event_input(&event_type, payload, blocks, idempotency_key),
         RestSessionExternalEventEnvelope::PeerResponseTerminal {} => Err(ApiError::BadRequest(
             "peer_response_terminal is reserved on /external-events; use /peer-response-terminal"
                 .to_string(),
@@ -4358,6 +4423,21 @@ async fn admit_runtime_input_via_webhook(
             })),
         )
             .into_response()),
+        // The caller reused a key for other content: typed, naming the input
+        // the key is bound to.
+        Err(meerkat_runtime::RuntimeDriverError::InputIdempotencyConflict { existing_id }) => {
+            Err((
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": format!(
+                        "input idempotency conflicts with existing input {existing_id}"
+                    ),
+                    "code": "INPUT_IDEMPOTENCY_CONFLICT",
+                    "existing_id": existing_id.to_string(),
+                })),
+            )
+                .into_response())
+        }
         Err(err) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": err.to_string()})),
@@ -4839,6 +4919,7 @@ fn callback_pending_api_error(
     tool_use_id: String,
     tool_name: String,
     args: Value,
+    dedupe_key: Option<meerkat_core::ToolCallDedupeKey>,
     session_created: bool,
 ) -> ApiError {
     callback_batch_pending_api_error(
@@ -4849,6 +4930,7 @@ fn callback_pending_api_error(
             tool_name,
             args,
             settlement_failures: Vec::new(),
+            dedupe_key,
         }],
         session_created,
     )
@@ -4928,12 +5010,14 @@ fn completion_outcome_to_api_result(
             tool_use_id,
             tool_name,
             args,
+            dedupe_key,
         } => Err(callback_pending_api_error(
             session_id,
             realm,
             tool_use_id,
             tool_name,
             args,
+            dedupe_key,
             session_created,
         )),
         meerkat_runtime::completion::CompletionOutcome::CallbackBatchPending {
@@ -5005,6 +5089,7 @@ async fn completion_wait_error_to_api_error(
     state: &AppState,
     error: meerkat_runtime::completion::CompletionWaitError,
     session_id: &SessionId,
+    input_id: Option<&meerkat_core::lifecycle::InputId>,
     realm: &meerkat_core::RealmId,
     session_created: bool,
 ) -> ApiError {
@@ -5020,22 +5105,14 @@ async fn completion_wait_error_to_api_error(
         .resolve_runtime_completion_wait_failure(session_id, &error)
         .await
     {
-        Ok(authority) => match authority.public_error_class {
-            meerkat_runtime::meerkat_machine::dsl::RuntimeCompletionWaitFailurePublicErrorClass::InternalError => {
-                ApiError::InternalWithData {
-                    message: format!("runtime completion waiter failed: {error}"),
-                    code: runtime_completion_wait_failure_api_code(authority.public_reason)
-                        .to_string(),
-                    details: json!({
-                        "session_id": session_id.to_string(),
-                        "session_ref": format_session_ref(realm, session_id),
-                        "session_created": session_created,
-                        "public_error_class": format!("{:?}", authority.public_error_class),
-                        "resumable": authority.resumable,
-                    }),
-                }
-            }
-        },
+        Ok(authority) => runtime_completion_wait_failure_api_error(
+            &error,
+            authority,
+            session_id,
+            input_id,
+            realm,
+            session_created,
+        ),
         Err(authority_error) => ApiError::InternalWithData {
             message: format!(
                 "runtime completion waiter failed without generated failure authority: {error}"
@@ -5051,6 +5128,74 @@ async fn completion_wait_error_to_api_error(
     }
 }
 
+/// The REST answer of a waiter failure, from its generated resolution.
+///
+/// An internal failure answers `500` with the generated reason's code and
+/// whether the input is resumable. A session that is not running answers
+/// `409` `SESSION_NOT_RUNNING`: a graceful stop kept the input durably queued
+/// for the session's next start, and `details` names the input, the stop's
+/// time and `kind` and `reason` `requeued_across_stop`. It is no retryable
+/// unavailability: do not resubmit such an input; the same idempotency key
+/// after the restart re-attaches to it.
+fn runtime_completion_wait_failure_api_error(
+    error: &meerkat_runtime::completion::CompletionWaitError,
+    authority: meerkat_runtime::meerkat_machine::RuntimeCompletionWaitFailureAuthority,
+    session_id: &SessionId,
+    input_id: Option<&meerkat_core::lifecycle::InputId>,
+    realm: &meerkat_core::RealmId,
+    session_created: bool,
+) -> ApiError {
+    match authority.public_error_class {
+        meerkat_runtime::meerkat_machine::dsl::RuntimeCompletionWaitFailurePublicErrorClass::InternalError => {
+            ApiError::InternalWithData {
+                message: format!("runtime completion waiter failed: {error}"),
+                code: runtime_completion_wait_failure_api_code(authority.public_reason)
+                    .to_string(),
+                details: json!({
+                    "session_id": session_id.to_string(),
+                    "session_ref": format_session_ref(realm, session_id),
+                    "session_created": session_created,
+                    "public_error_class": format!("{:?}", authority.public_error_class),
+                    "resumable": authority.resumable,
+                }),
+            }
+        }
+        meerkat_runtime::meerkat_machine::dsl::RuntimeCompletionWaitFailurePublicErrorClass::SessionNotRunning => {
+            let kind = runtime_completion_wait_failure_api_kind(authority.public_reason);
+            ApiError::SessionNotRunningWithData {
+                message: format!("session {}: {error}", format_session_ref(realm, session_id)),
+                details: json!({
+                    "kind": kind,
+                    "reason": kind,
+                    "session_id": session_id.to_string(),
+                    "session_ref": format_session_ref(realm, session_id),
+                    "session_created": session_created,
+                    "input_id": input_id.map(ToString::to_string),
+                    "stopped_at": error.requeued_stopped_at(),
+                    "resumable": authority.resumable,
+                }),
+            }
+        }
+    }
+}
+
+/// The `details.kind` of a waiter failure's generated reason.
+fn runtime_completion_wait_failure_api_kind(
+    public_reason: meerkat_runtime::meerkat_machine::dsl::RuntimeCompletionWaitFailurePublicReason,
+) -> &'static str {
+    match public_reason {
+        meerkat_runtime::meerkat_machine::dsl::RuntimeCompletionWaitFailurePublicReason::CompletionChannelClosed => {
+            "completion_channel_closed"
+        }
+        meerkat_runtime::meerkat_machine::dsl::RuntimeCompletionWaitFailurePublicReason::CompletionAuthorityUnavailable => {
+            "completion_authority_unavailable"
+        }
+        meerkat_runtime::meerkat_machine::dsl::RuntimeCompletionWaitFailurePublicReason::RequeuedAcrossStop => {
+            "requeued_across_stop"
+        }
+    }
+}
+
 fn runtime_completion_wait_failure_api_code(
     public_reason: meerkat_runtime::meerkat_machine::dsl::RuntimeCompletionWaitFailurePublicReason,
 ) -> &'static str {
@@ -5060,6 +5205,9 @@ fn runtime_completion_wait_failure_api_code(
         }
         meerkat_runtime::meerkat_machine::dsl::RuntimeCompletionWaitFailurePublicReason::CompletionAuthorityUnavailable => {
             "RUNTIME_COMPLETION_AUTHORITY_UNAVAILABLE"
+        }
+        meerkat_runtime::meerkat_machine::dsl::RuntimeCompletionWaitFailurePublicReason::RequeuedAcrossStop => {
+            "RUNTIME_COMPLETION_REQUEUED_ACROSS_STOP"
         }
     }
 }
@@ -5105,6 +5253,11 @@ async fn completion_handle_to_api_result(
             session_created,
         ));
     };
+    let waited_input_id = match outcome {
+        meerkat_runtime::AcceptOutcome::Accepted { input_id, .. } => Some(input_id),
+        meerkat_runtime::AcceptOutcome::Deduplicated { existing_id, .. } => Some(existing_id),
+        _ => None,
+    };
     let completion = match handle.wait().await {
         Ok(completion) => completion,
         Err(error) => {
@@ -5112,6 +5265,7 @@ async fn completion_handle_to_api_result(
                 state,
                 error,
                 session_id,
+                waited_input_id,
                 realm,
                 session_created,
             )
@@ -5153,9 +5307,11 @@ async fn interrupt_noop_target(
     state: &AppState,
     session_id: &SessionId,
 ) -> Result<InterruptNoopTarget, ApiError> {
+    // The committed snapshot answers presence and the mob-member marker while
+    // the session's durable run holds a provisional tail.
     match state
         .session_service
-        .load_authoritative_session(session_id)
+        .load_committed_session_tolerating_tail(session_id)
         .await
     {
         Ok(Some(session)) => {
@@ -5812,6 +5968,7 @@ async fn create_session_inner(
         max_inline_peer_notifications: None,
         app_context: req.app_context,
         fork_source: None,
+        prompt_context_fork_source: None,
         additional_instructions: req.additional_instructions,
         // The help marker makes every rebuild of a help session from storage
         // refuse it.
@@ -6750,9 +6907,12 @@ async fn continue_session_inner(
         req.verbose,
     );
 
+    // A continue may queue behind the session's running durable run, whose
+    // provisional tail stands ahead of the committed snapshot: the archive and
+    // help-session checks read that snapshot.
     let loaded_session = match state
         .session_service
-        .load_authoritative_session(&session_id)
+        .load_committed_session_tolerating_tail(&session_id)
         .await
     {
         Ok(v) => v,
@@ -6821,9 +6981,11 @@ async fn continue_session_inner(
         let runtime_registration_lock = rest_runtime_registration_lock(state, &session_id);
         let runtime_registration_guard = runtime_registration_lock.mutex().lock().await;
         let runtime_was_registered = state.runtime_adapter.contains_session(&session_id).await;
+        // The session defaults come from the committed snapshot, which a
+        // running durable run's provisional tail does not change.
         let session = match state
             .session_service
-            .load_authoritative_session(&session_id)
+            .load_committed_session_tolerating_tail(&session_id)
             .await
         {
             Ok(Some(session)) => {
@@ -7072,6 +7234,7 @@ async fn continue_session_inner(
             max_inline_peer_notifications: None,
             app_context: None,
             fork_source: None,
+            prompt_context_fork_source: None,
             additional_instructions: None,
             initial_metadata_entries: std::collections::BTreeMap::new(),
             initial_tool_filter: None,
@@ -7383,9 +7546,11 @@ async fn continue_session_inner(
         let runtime_registration_lock = rest_runtime_registration_lock(state, &session_id);
         let runtime_registration_guard = runtime_registration_lock.mutex().lock().await;
         let runtime_was_registered = state.runtime_adapter.contains_session(&session_id).await;
+        // The session defaults come from the committed snapshot, which a
+        // running durable run's provisional tail does not change.
         let session = match state
             .session_service
-            .load_authoritative_session(&session_id)
+            .load_committed_session_tolerating_tail(&session_id)
             .await
         {
             Ok(Some(session)) => {
@@ -7935,28 +8100,18 @@ async fn continue_session_inner(
             RequestTerminal::Publish(Ok(Json(run_result_to_response(run_result, &state.realm))))
         }
         Err(err) => {
-            let archived_now = match state
-                .session_service
-                .load_authoritative_session(&session_id)
-                .await
-            {
-                Ok(Some(session)) => {
-                    match session_archived_by_authority(state, &session_id, &session).await {
-                        Ok(archived) => archived,
-                        Err(error) => {
-                            return RequestTerminal::Publish(Err(ApiError::Internal(format!(
-                                "Failed to load session archive state: {error}"
-                            ))));
-                        }
+            // Body-free: a failed run may keep its provisional tail, and a
+            // body read would replace the run's error with the tail's
+            // revision conflict.
+            let archived_now =
+                match committed_source_archived(&state.session_service, &session_id).await {
+                    Ok(archived) => archived == Some(true),
+                    Err(error) => {
+                        return RequestTerminal::Publish(Err(ApiError::Internal(format!(
+                            "Failed to load session archive state: {error}"
+                        ))));
                     }
-                }
-                Ok(None) => false,
-                Err(error) => {
-                    return RequestTerminal::Publish(Err(ApiError::Internal(format!(
-                        "Failed to load session: {error}"
-                    ))));
-                }
-            };
+                };
             if archived_now {
                 let cleanup_result =
                     discard_and_cleanup_archived_session_runtime(state, &session_id).await;
@@ -8011,9 +8166,12 @@ async fn session_events(
     // in-progress turn (not yet persisted) will return 404. Future improvement:
     // try read() first for message_count (works for live sessions), fall back
     // to load_persisted() for inactive sessions.
+    //
+    // A stream opened during a run reports the committed snapshot's message
+    // count: the run's provisional tail is not the session's history yet.
     let session = state
         .session_service
-        .load_authoritative_session(&session_id)
+        .load_committed_session_tolerating_tail(&session_id)
         .await
         .map_err(|e| ApiError::Internal(format!("{e}")))?
         .ok_or_else(|| ApiError::NotFound(format!("Session not found: {id}")))?;
@@ -8214,29 +8372,22 @@ async fn resolve_mcp_adapter(
     state: &AppState,
     session_id: &SessionId,
 ) -> Result<Arc<McpRouterAdapter>, ApiError> {
-    // Step 1: session must exist.
-    match state
-        .session_service
-        .load_authoritative_session(session_id)
-        .await
-    {
-        Ok(Some(session)) => {
-            if session_archived_by_authority(state, session_id, &session)
+    // Step 1: session must exist. Presence and archive state are read
+    // body-free, so a running session's provisional tail does not refuse it.
+    match committed_source_archived(&state.session_service, session_id).await {
+        Ok(Some(true)) => {
+            cleanup_archived_session_runtime(state, session_id)
                 .await
-                .map_err(|err| ApiError::Internal(err.to_string()))?
-            {
-                cleanup_archived_session_runtime(state, session_id)
-                    .await
-                    .map_err(|error| {
-                        ApiError::Internal(format!(
-                            "failed to clean up archived session runtime: {error}"
-                        ))
-                    })?;
-                return Err(ApiError::NotFound(format!(
-                    "Session not found: {session_id}"
-                )));
-            }
+                .map_err(|error| {
+                    ApiError::Internal(format!(
+                        "failed to clean up archived session runtime: {error}"
+                    ))
+                })?;
+            return Err(ApiError::NotFound(format!(
+                "Session not found: {session_id}"
+            )));
         }
+        Ok(Some(false)) => {}
         Ok(None) => {
             return Err(ApiError::NotFound(format!(
                 "Session not found: {session_id}"
@@ -8660,6 +8811,43 @@ pub async fn shutdown_all_mcp_sessions(state: &AppState) {
     }
 }
 
+/// Unregister every current runtime registration at the server's graceful
+/// shutdown (SIGTERM or Ctrl+C), each until its teardown is terminal, with the
+/// runtime's graceful shutdown disposition
+/// ([`meerkat_runtime::MeerkatMachine::graceful_shutdown_queued_inputs`]): a
+/// runtime with a persistence store requeues, so a session's eligible queued
+/// prompts stay queued for its next start and the runtime's stop keeps the
+/// run in flight of a session that commits each round; a runtime without one
+/// stops them. The server calls it when the shutdown signal arrives, before
+/// its HTTP drain, so an open request waiting on such a run is answered
+/// instead of holding the drain open, and once more after the drain for a
+/// session registered meanwhile. It cancels the requests still tracked only
+/// after that, as cancelling them first would cancel such a run. A teardown
+/// that fails is logged, and the rest still run.
+pub async fn unregister_runtime_sessions_for_shutdown(state: &AppState) {
+    let queued_inputs = state.runtime_adapter.graceful_shutdown_queued_inputs();
+    for registration in state
+        .runtime_adapter
+        .current_session_registration_witnesses()
+        .await
+    {
+        if let Err(error) = state
+            .runtime_adapter
+            .unregister_session_registration_until_terminal_with_queued_inputs_if_current(
+                &registration,
+                queued_inputs,
+            )
+            .await
+        {
+            tracing::warn!(
+                session_id = %registration.session_id(),
+                %error,
+                "runtime registration teardown failed during REST shutdown"
+            );
+        }
+    }
+}
+
 /// API error types
 #[derive(Debug)]
 pub enum ApiError {
@@ -8705,6 +8893,14 @@ pub enum ApiError {
     /// Retryable `SESSION_BUSY` (409) with typed details, e.g. a runtime
     /// teardown still completing past the caller's bounded wait.
     SessionBusyWithData {
+        message: String,
+        details: Value,
+    },
+    /// `SESSION_NOT_RUNNING` (409) with typed details, e.g. a wait a graceful
+    /// stop ended by keeping its input queued for the session's next start.
+    /// Not a retryable unavailability: resubmitting would run the input
+    /// twice.
+    SessionNotRunningWithData {
         message: String,
         details: Value,
     },
@@ -8763,6 +8959,7 @@ fn api_error_message(error: &ApiError) -> String {
         ApiError::BadRequestWithData { message, .. }
         | ApiError::InternalWithData { message, .. }
         | ApiError::SessionBusyWithData { message, .. }
+        | ApiError::SessionNotRunningWithData { message, .. }
         | ApiError::SessionRuntimeUnavailable { message, .. } => message.clone(),
         ApiError::DuplicateInput { existing_id } => {
             format!("duplicate input: {existing_id}")
@@ -8902,6 +9099,12 @@ impl IntoResponse for ApiError {
                 message,
                 Some(details),
             ),
+            ApiError::SessionNotRunningWithData { message, details } => (
+                StatusCode::CONFLICT,
+                "SESSION_NOT_RUNNING".to_string(),
+                message,
+                Some(details),
+            ),
         };
 
         let body = Json(ErrorResponse {
@@ -8920,6 +9123,8 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use chrono::{Duration, Utc};
+
+    pub(crate) mod committed_reads_tests;
     use futures::stream;
     use meerkat::{OccurrenceFailureClass, OccurrencePhase, ScheduleId};
     use meerkat_client::{LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
@@ -8933,6 +9138,96 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
     use tempfile::TempDir;
+
+    /// A wait a graceful stop ended by keeping the input queued for the next
+    /// start answers what the generated wait-failure authority resolves, the
+    /// same before and after its session is gone: the pre-admission is
+    /// released, and the answer is `409` `SESSION_NOT_RUNNING` (not a
+    /// retryable `503`) with `details.kind` `requeued_across_stop`, the input,
+    /// the stop time and `resumable`. A closed waiter keeps its internal class.
+    #[tokio::test]
+    async fn a_wait_requeued_across_a_stop_answers_its_generated_class() {
+        let adapter = meerkat_runtime::MeerkatMachine::ephemeral();
+        let session_id = SessionId::new();
+        let input_id = meerkat_core::lifecycle::InputId::new();
+        let realm = meerkat_core::RealmId::parse("requeue-realm").expect("realm");
+        let stopped_at = Utc::now();
+        let requeued =
+            meerkat_runtime::completion::CompletionWaitError::RequeuedAcrossStop { stopped_at };
+        for registered in [false, true] {
+            if registered {
+                adapter
+                    .prepare_bindings(session_id.clone())
+                    .await
+                    .expect("session should prepare runtime bindings");
+            }
+            let authority = adapter
+                .resolve_runtime_completion_wait_failure(&session_id, &requeued)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("registered={registered}: a kept input's wait must resolve: {error:?}")
+                });
+            assert!(
+                authority.releases_pre_admission(),
+                "registered={registered}"
+            );
+            let response = runtime_completion_wait_failure_api_error(
+                &requeued,
+                authority,
+                &session_id,
+                Some(&input_id),
+                &realm,
+                false,
+            )
+            .into_response();
+            assert_eq!(
+                response.status(),
+                StatusCode::CONFLICT,
+                "registered={registered}"
+            );
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                body["code"], "SESSION_NOT_RUNNING",
+                "registered={registered}"
+            );
+            assert_eq!(
+                body["details"],
+                json!({
+                    "kind": "requeued_across_stop",
+                    "reason": "requeued_across_stop",
+                    "session_id": session_id.to_string(),
+                    "session_ref": format_session_ref(&realm, &session_id),
+                    "session_created": false,
+                    "input_id": input_id.to_string(),
+                    "stopped_at": stopped_at,
+                    "resumable": true,
+                }),
+                "registered={registered}"
+            );
+        }
+
+        let closed = meerkat_runtime::completion::CompletionWaitError::ChannelClosed;
+        let authority = adapter
+            .resolve_runtime_completion_wait_failure(&session_id, &closed)
+            .await
+            .expect("a registered session resolves a closed waiter");
+        match runtime_completion_wait_failure_api_error(
+            &closed,
+            authority,
+            &session_id,
+            None,
+            &realm,
+            false,
+        ) {
+            ApiError::InternalWithData { code, .. } => {
+                assert_eq!(code, "RUNTIME_COMPLETION_CHANNEL_CLOSED");
+            }
+            other => panic!("a closed waiter keeps its internal class, got {other:?}"),
+        }
+    }
 
     struct FailDeleteOpsLifecycleOnceStore {
         inner: Arc<meerkat_runtime::InMemoryRuntimeStore>,
@@ -10480,6 +10775,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
+                durable: false,
             })),
         );
         let owner_session_id =
@@ -10526,6 +10822,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
+                durable: false,
             })),
         );
         let handle = meerkat_mob::MobBuilder::new(definition, meerkat_mob::MobStorage::in_memory())
@@ -10766,6 +11063,7 @@ mod tests {
         let generic_input = make_runtime_external_event_input(
             "archived_webhook_input",
             json!({"archived": true}),
+            None,
             None,
         )
         .expect("external event input");
@@ -11030,6 +11328,165 @@ mod tests {
             *calls.borrow(),
             2,
             "the waiting continue ran its own turn after the first one"
+        );
+    }
+
+    /// One tracked `POST /sessions/{id}/messages` (with `X-Meerkat-Request-Id`)
+    /// on a task: its status and JSON body.
+    fn spawn_tracked_rest_continue(
+        state: &AppState,
+        session_id: &SessionId,
+        request_id: &'static str,
+        prompt: &'static str,
+    ) -> tokio::task::JoinHandle<(StatusCode, Value)> {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let app = router(state.clone());
+        let session_id = session_id.to_string();
+        tokio::spawn(async move {
+            let response = app
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri(format!("/sessions/{session_id}/messages"))
+                        .header("content-type", "application/json")
+                        .header("x-meerkat-request-id", request_id)
+                        .body(Body::from(
+                            json!({ "session_id": session_id, "prompt": prompt }).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let body = serde_json::from_slice(&body).unwrap_or(Value::Null);
+            (status, body)
+        })
+    }
+
+    /// The REST server's graceful shutdown keeps a durable session's work for
+    /// its next start. At the signal, before its HTTP drain, it unregisters
+    /// every registration with the runtime's graceful disposition (Requeue on
+    /// this persistent realm), and it cancels the requests still tracked only
+    /// after the drain. The unregister alone answers both open tracked
+    /// continues, the one running and the one queued behind it, with `409`
+    /// `SESSION_NOT_RUNNING` and `requeued_across_stop`: neither is cancelled,
+    /// and neither holds the drain open. A server started again on the realm
+    /// runs each of them once when the session is opened again, ahead of the
+    /// new continue.
+    ///
+    /// Unrun. The queued continue's answer needs only the requeue; the running
+    /// continue's answer and its run at the next start also need the runtime
+    /// stop to suspend a run that commits each round, and the start to resume
+    /// it.
+    #[tokio::test]
+    async fn rest_graceful_shutdown_keeps_a_durable_sessions_turns_for_the_next_start() {
+        // Bounds a failure only; the passing path never waits for it.
+        const FAILURE_BOUND: std::time::Duration = std::time::Duration::from_secs(60);
+
+        let temp = TempDir::new().unwrap();
+        let session_id = {
+            let mut state = load_rest_state_with_capacity(&temp, 4).await;
+            let calls = Arc::new(tokio::sync::watch::channel(0).0);
+            let release = Arc::new(tokio::sync::Semaphore::new(0));
+            state.llm_client_override = Some(Arc::new(BlockingMockLlmClient {
+                calls: Arc::clone(&calls),
+                release: Arc::clone(&release),
+            }));
+            let session_id = create_deferred_rest_runtime_session(&state).await;
+            let running = spawn_tracked_rest_continue(
+                &state,
+                &session_id,
+                "shutdown-running",
+                "the running turn",
+            );
+            wait_for_rest_llm_calls(&calls, 1, "the running turn reaches the LLM").await;
+            let mut queued = spawn_tracked_rest_continue(
+                &state,
+                &session_id,
+                "shutdown-queued",
+                "the queued turn",
+            );
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(300), &mut queued)
+                    .await
+                    .is_err(),
+                "the second continue waits queued behind the running turn"
+            );
+
+            // The server's shutdown at the signal, before its HTTP drain:
+            // schedule delivery stops and the sessions unregister. That alone
+            // answers both open requests, so the drain that follows does not
+            // wait for their runs; nothing has been cancelled yet.
+            state.shutdown_schedule_host().await;
+            unregister_runtime_sessions_for_shutdown(&state).await;
+            let running = tokio::time::timeout(FAILURE_BOUND, running)
+                .await
+                .expect("the running continue is answered by the unregister")
+                .expect("running continue task");
+            let queued = tokio::time::timeout(FAILURE_BOUND, queued)
+                .await
+                .expect("the queued continue is answered by the unregister")
+                .expect("queued continue task");
+            // After the drain: the second unregister pass, then the requests
+            // still tracked are cancelled.
+            unregister_runtime_sessions_for_shutdown(&state).await;
+            state.request_executor.shutdown_and_abort_stragglers().await;
+            let kept = |(status, body): &(StatusCode, Value)| {
+                *status == StatusCode::CONFLICT
+                    && body["code"] == "SESSION_NOT_RUNNING"
+                    && body["details"]["kind"] == "requeued_across_stop"
+            };
+            assert!(
+                kept(&running) && kept(&queued),
+                "both tracked continues are kept across the stop, not cancelled: \
+                 running={running:?} queued={queued:?}"
+            );
+            assert_eq!(*calls.borrow(), 1, "nothing ran after the stop");
+            session_id
+        };
+
+        let mut reopened = load_rest_state_with_capacity(&temp, 4).await;
+        reopened.llm_client_override = Some(Arc::new(MockLlmClient));
+        let (status, body) = tokio::time::timeout(
+            FAILURE_BOUND,
+            spawn_tracked_rest_continue(
+                &reopened,
+                &session_id,
+                "after-restart",
+                "after the restart",
+            ),
+        )
+        .await
+        .expect("the continue after the restart finishes")
+        .expect("continue task");
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let session = reopened
+            .session_service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("load the session")
+            .expect("the session is committed");
+        let user_rows: Vec<String> = session
+            .messages()
+            .iter()
+            .filter_map(|message| match message {
+                meerkat_core::Message::User(user)
+                    if !user.transcript_role.is_injected_context() =>
+                {
+                    Some(user.text_content())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            user_rows,
+            ["the running turn", "the queued turn", "after the restart"],
+            "the kept run and the kept prompt each run once at the next start, ahead of \
+             the new continue"
         );
     }
 
@@ -13794,6 +14251,7 @@ requirement = { baseline = "command_runtime_v1", read = { kind = "paths", paths 
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
+                durable: false,
             })),
         );
         let mut definition = meerkat_mob::MobDefinition::explicit(mob_id.clone());
@@ -17081,6 +17539,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
                 tool_use_id: "call-1".to_string(),
                 tool_name: "external_mock".to_string(),
                 args: json!({ "value": "browser" }),
+                dedupe_key: None,
             },
             &session_id,
             &realm,
@@ -17114,6 +17573,47 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
         assert_eq!(details["resumable"], true);
         assert_eq!(details["tool_name"], "external_mock");
         assert_eq!(details["args"], json!({ "value": "browser" }));
+        assert!(
+            details["pending_tool_calls"][0].get("dedupe_key").is_none(),
+            "a call without a dedupe key omits the field"
+        );
+    }
+
+    /// A pending callback call's dedupe key reaches the `CALLBACK_PENDING`
+    /// details unchanged. (Unrun until the candidate's validation.)
+    #[test]
+    fn completion_outcome_to_api_result_carries_the_callback_dedupe_key() {
+        let session_id = SessionId::new();
+        let realm = meerkat_core::RealmId::parse("test-realm").expect("valid test realm id");
+        let arguments = serde_json::value::RawValue::from_string(r#"{"value":"browser"}"#.into())
+            .expect("valid arguments");
+        let key = meerkat_core::ToolCallDedupeKey::new(
+            meerkat_core::RunId::new(),
+            1,
+            "call-1",
+            "external_mock",
+            &arguments,
+        )
+        .expect("valid dedupe key");
+        let err = completion_outcome_to_api_result(
+            meerkat_runtime::completion::CompletionOutcome::CallbackPending {
+                tool_use_id: "call-1".to_string(),
+                tool_name: "external_mock".to_string(),
+                args: json!({ "value": "browser" }),
+                dedupe_key: Some(key.clone()),
+            },
+            &session_id,
+            &realm,
+            false,
+        )
+        .expect_err("callback pending should map to an API error");
+        let ApiError::InternalWithData { details, .. } = err else {
+            panic!("expected InternalWithData callback error");
+        };
+        assert_eq!(
+            details["pending_tool_calls"][0]["dedupe_key"],
+            serde_json::to_value(&key).expect("key serializes")
+        );
     }
 
     #[test]
@@ -17130,6 +17630,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
                 physical_outcome: meerkat_core::LiveBridgeEffectOutcome::Unknown,
                 failure_kind: meerkat_core::ToolDispatchTerminalErrorKind::Unavailable,
             }],
+            dedupe_key: None,
         }];
         let expected = serde_json::to_value(&pending).expect("typed pending calls");
         let error = completion_outcome_to_api_result(
@@ -17450,6 +17951,7 @@ matching the required schema. Output ONLY the JSON, no additional text or markdo
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
+                durable: false,
             })),
         );
         let mob_id = state

@@ -158,6 +158,7 @@ fn profile(peer_description: &str) -> Profile {
         max_inline_peer_notifications: None,
         output_schema: None,
         provider_params: None,
+        durable: false,
     }
 }
 

@@ -1089,6 +1089,8 @@ async fn committed_receipt_rejection_requires_reload_and_preserves_retry_evidenc
                 fence_token: state.active_fence_token,
                 generation: state.active_runtime_generation,
                 runtime_epoch_id: state.active_runtime_epoch_id.clone(),
+                queued_inputs: mm::UnregisterQueuedInputsDisposition::Stop,
+                requeue_max_age_ms: 0,
             },
             mm::MeerkatMachineInput::RuntimeLoopStoppedForUnregister {
                 session_id: session_id.clone(),

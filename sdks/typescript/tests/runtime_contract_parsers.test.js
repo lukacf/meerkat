@@ -129,6 +129,24 @@ describe("shared live result parsers", () => {
     }
   });
 
+  it("keeps an open advisory it does not know and fails closed on malformed advisories on both surfaces", async () => {
+    // Advisory, and its vocabulary may grow: an unknown value is kept as the
+    // server sent it and never fails the open.
+    const advisories = ["staged_prompt_refused", "a_later_advisory"];
+    for (const surface of ["session", "mob"]) {
+      const advised = await invokeOpen(surface, liveOpenResult({ advisories }));
+      assert.deepEqual(advised.advisories, advisories);
+      const without = await invokeOpen(surface, liveOpenResult());
+      assert.equal(without.advisories, undefined);
+      for (const malformed of ["staged_prompt_refused", [7], [""], null]) {
+        await assert.rejects(
+          () => invokeOpen(surface, liveOpenResult({ advisories: malformed })),
+          /Invalid .* response/,
+        );
+      }
+    }
+  });
+
   it("accepts every generated status and degradation discriminator", async () => {
     const reasons = [
       { kind: "rate_limited" },

@@ -68,6 +68,8 @@ fn begin_unregister_input() -> MeerkatMachineInput {
         fence_token: None,
         generation: None,
         runtime_epoch_id: None,
+        queued_inputs: mm_dsl::UnregisterQueuedInputsDisposition::Stop,
+        requeue_max_age_ms: 0,
     }
 }
 

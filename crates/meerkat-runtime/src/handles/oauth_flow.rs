@@ -14,8 +14,8 @@ use meerkat_auth_core::oauth_flow::{
     OAuthBrowserActionRef, OAuthBrowserFlowCompletion, OAuthBrowserFlowIdentity,
     OAuthDeviceFlowRecord, OAuthDevicePollLease, OAuthDevicePollLifecycle, OAuthFlowAuthority,
     OAuthFlowError, OAuthFlowQuarantine, OAuthFlowRecord, OAuthFlowRegistry,
-    OAuthFlowRegistrySnapshot, OAuthProviderIdentity, OAuthPrunedFlows, PersistedOAuthBrowserFlow,
-    PersistedOAuthDeviceFlow,
+    OAuthFlowRegistrySnapshot, OAuthFlowStartFailure, OAuthProviderIdentity, OAuthPrunedFlows,
+    OAuthStartAdmission, PersistedOAuthBrowserFlow, PersistedOAuthDeviceFlow,
 };
 use meerkat_core::AuthCredentialIdentity;
 use meerkat_core::handles::{DslTransitionError, LeaseKey};
@@ -82,6 +82,43 @@ pub struct RuntimeOAuthFlowHandle {
     /// Persisted flow records the last decode quarantined (kind and position
     /// only; contents never leave the snapshot).
     flow_quarantine: Arc<Mutex<Vec<OAuthFlowQuarantine>>>,
+    #[cfg(test)]
+    start_faults: Arc<BrowserStartFaults>,
+}
+
+/// One retirement of the attempt a failed start admitted, then exactly one
+/// retry when the probe still finds the attempt held.
+const START_RETIREMENT_ATTEMPTS: usize = 2;
+
+/// Faults a test injects into a browser start and into the retirement of the
+/// attempt it admitted.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct BrowserStartFaults {
+    /// The AuthMachine applies the admission, then a publication fault is
+    /// reported.
+    pub(crate) admit_after_mutation: std::sync::atomic::AtomicBool,
+    /// The payload insert fails.
+    pub(crate) insert: std::sync::atomic::AtomicBool,
+    /// How many of the next retirement expiries fail.
+    pub(crate) expiry_failures: std::sync::atomic::AtomicUsize,
+    /// How many of the next retirement payload removals fail.
+    pub(crate) payload_removal_failures: std::sync::atomic::AtomicUsize,
+    /// Retirement expiries attempted.
+    pub(crate) expiry_attempts: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+impl BrowserStartFaults {
+    fn take_one(counter: &std::sync::atomic::AtomicUsize) -> bool {
+        counter
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |left| left.checked_sub(1),
+            )
+            .is_ok()
+    }
 }
 
 #[derive(Debug)]
@@ -233,6 +270,12 @@ impl AuthLeaseReleaseObserver for OAuthPayloadReleaseObserver {
 }
 
 impl RuntimeOAuthFlowHandle {
+    /// Admit one browser attempt. A failed start says what it left of the
+    /// attempt it tried to admit: nothing admitted, the admitted attempt
+    /// retired, or its retirement unconfirmed. The outcome comes from probing
+    /// the attempt's own state under the payload lock, never from the error
+    /// kind. That state is fresh and this call's own, so no other call can
+    /// name it.
     fn start_browser_attempt(
         &self,
         target: AuthCredentialIdentity,
@@ -240,44 +283,65 @@ impl RuntimeOAuthFlowHandle {
         redirect_uri: String,
         pkce_verifier: String,
         nonce: Option<String>,
-    ) -> Result<String, OAuthFlowError> {
-        provider.validate_redirect(&redirect_uri)?;
+    ) -> Result<String, OAuthFlowStartFailure> {
+        let not_admitted = |error: OAuthFlowError| OAuthFlowStartFailure {
+            error,
+            admission: OAuthStartAdmission::NotAdmitted,
+        };
+        provider
+            .validate_redirect(&redirect_uri)
+            .map_err(|refusal| not_admitted(refusal.into()))?;
         let _payload_guard = self
             .payload_lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.sync_persisted_payloads("admit_oauth_browser_flow")?;
-        let state = OAuthFlowRegistry::new_state()?;
-        let expires_at = expires_at_millis(provider.lifetime(self.registry.ttl()))?;
-        self.admit_browser(&target, &state, &provider, &redirect_uri, expires_at)?;
+        self.sync_persisted_payloads("admit_oauth_browser_flow")
+            .map_err(not_admitted)?;
+        let state = OAuthFlowRegistry::new_state().map_err(not_admitted)?;
+        let expires_at =
+            expires_at_millis(provider.lifetime(self.registry.ttl())).map_err(not_admitted)?;
+        if let Err(error) =
+            self.admit_started_browser(&target, &state, &provider, &redirect_uri, expires_at)
+        {
+            // A refused input changes nothing. A fault after the AuthMachine
+            // applied the input leaves the flow admitted: retire it.
+            if !self.lifecycle.has_oauth_browser_flow(&target, &state) {
+                return Err(not_admitted(error));
+            }
+            return Err(self.retire_failed_admission(
+                error,
+                &target,
+                &state,
+                &provider,
+                &redirect_uri,
+            ));
+        }
         let (lifecycle_pruned, lifecycle_pruned_snapshot) =
             self.retain_registry_payloads_with_lifecycle();
-        let inserted = self.registry.insert_browser_flow_with_pruned(
+        let pruned = match self.insert_started_browser_payload(
             state.clone(),
             target.clone(),
             provider.clone(),
             redirect_uri.clone(),
             pkce_verifier,
             nonce,
-        );
-        let pruned = match inserted {
+        ) {
             Ok(pruned) => pruned,
-            Err(err) => {
-                if let Err(expire_err) = self.expire_browser(&target, &state) {
-                    tracing::debug!(
-                        target: "meerkat::auth::oauth",
-                        binding_target = ?target, action = ?OAuthBrowserActionRef::project(&state),
-                        "start: browser expiry compensation no-op after insert failure (legitimate interleaving): {expire_err}"
-                    );
-                }
-                return Err(err);
+            Err(error) => {
+                return Err(self.retire_failed_admission(
+                    error,
+                    &target,
+                    &state,
+                    &provider,
+                    &redirect_uri,
+                ));
             }
         };
         let (removed_browser, removed_device) =
             Self::removed_snapshot_keys_from_pruned(&lifecycle_pruned_snapshot, &lifecycle_pruned);
         self.expire_collected_flows(pruned);
         let admitted_browser = [browser_snapshot_key(&target, &state)];
-        if let Err(err) = self.persist_registry_payloads_claiming_admission(
+        if let Err(error) = self.persist_registry_payloads_claiming_admission(
             "admit_oauth_browser_flow",
             &target,
             &removed_browser,
@@ -285,22 +349,236 @@ impl RuntimeOAuthFlowHandle {
             &admitted_browser,
             &[],
         ) {
-            let _ = self.registry.remove_retired_browser_payload(
-                &state,
+            return Err(self.retire_failed_admission(
+                error,
                 &target,
-                provider,
+                &state,
+                &provider,
                 &redirect_uri,
-            );
-            if let Err(expire_err) = self.expire_browser(&target, &state) {
-                tracing::debug!(
-                    target: "meerkat::auth::oauth",
-                    binding_target = ?target, action = ?OAuthBrowserActionRef::project(&state),
-                    "start: browser expiry compensation no-op after persist failure (legitimate interleaving): {expire_err}"
-                );
-            }
-            return Err(err);
+            ));
         }
         Ok(state)
+    }
+
+    /// [`Self::admit_browser`] for a start. A test can make the publication
+    /// fail after the AuthMachine applied the admission.
+    fn admit_started_browser(
+        &self,
+        target: &AuthCredentialIdentity,
+        state: &str,
+        provider: &OAuthBrowserFlowIdentity,
+        redirect_uri: &str,
+        expires_at_millis: u64,
+    ) -> Result<(), OAuthFlowError> {
+        self.admit_browser(target, state, provider, redirect_uri, expires_at_millis)?;
+        #[cfg(test)]
+        if self
+            .start_faults
+            .admit_after_mutation
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(OAuthFlowError::LifecycleRejected {
+                operation: "admit_oauth_browser_flow",
+                detail: "injected publication fault after the admission applied".to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// The payload insert of a start. A test can make it fail.
+    fn insert_started_browser_payload(
+        &self,
+        state: String,
+        target: AuthCredentialIdentity,
+        provider: OAuthBrowserFlowIdentity,
+        redirect_uri: String,
+        pkce_verifier: String,
+        nonce: Option<String>,
+    ) -> Result<OAuthPrunedFlows, OAuthFlowError> {
+        #[cfg(test)]
+        if self
+            .start_faults
+            .insert
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(OAuthFlowError::LifecycleRejected {
+                operation: "insert_oauth_browser_payload",
+                detail: "injected payload insert fault".to_string(),
+            });
+        }
+        self.registry.insert_browser_flow_with_pruned(
+            state,
+            target,
+            provider,
+            redirect_uri,
+            pkce_verifier,
+            nonce,
+        )
+    }
+
+    /// Retire the attempt this start admitted under `state` after a later
+    /// step failed with `error`, and say what is left of it. The retirement
+    /// runs once, and exactly once more when the probe still finds the
+    /// attempt held. Past that the retirement is unconfirmed, and the outcome
+    /// names the attempt for a cancel by reference. The caller holds the
+    /// payload lock.
+    fn retire_failed_admission(
+        &self,
+        error: OAuthFlowError,
+        target: &AuthCredentialIdentity,
+        state: &str,
+        provider: &OAuthBrowserFlowIdentity,
+        redirect_uri: &str,
+    ) -> OAuthFlowStartFailure {
+        for _ in 0..START_RETIREMENT_ATTEMPTS {
+            self.retire_admitted_browser_attempt(target, state, provider, redirect_uri);
+            if self.admitted_browser_attempt_retired(target, state) {
+                return OAuthFlowStartFailure {
+                    error,
+                    admission: OAuthStartAdmission::Retired,
+                };
+            }
+        }
+        OAuthFlowStartFailure {
+            error,
+            admission: OAuthStartAdmission::RetirementUnconfirmed {
+                attempt_ref: OAuthBrowserActionRef::project(state),
+            },
+        }
+    }
+
+    /// One retirement of the attempt a start admitted: its payload, its
+    /// AuthMachine flow and any durable entry for it. A step that fails is
+    /// left to the probe that follows.
+    fn retire_admitted_browser_attempt(
+        &self,
+        target: &AuthCredentialIdentity,
+        state: &str,
+        provider: &OAuthBrowserFlowIdentity,
+        redirect_uri: &str,
+    ) {
+        if self.registry.holds_browser_payload(state, target)
+            && !self.injected_payload_removal_fault()
+        {
+            let _ = self.registry.remove_retired_browser_payload(
+                state,
+                target,
+                provider.clone(),
+                redirect_uri,
+            );
+        }
+        if self.lifecycle.has_oauth_browser_flow(target, state)
+            && let Err(expire_err) = self.expire_started_browser(target, state)
+        {
+            tracing::debug!(
+                target: "meerkat::auth::oauth",
+                binding_target = ?target, action = ?OAuthBrowserActionRef::project(state),
+                "start: the failed admission's browser flow is still held after its expiry: {expire_err}"
+            );
+        }
+        // A failed write can still have committed: only a read that finds no
+        // entry proves nothing durable is left.
+        if !matches!(self.durable_holds_browser_attempt(state), Ok(false))
+            && let Err(persist_err) = persist_registry_snapshot(
+                &OAuthFlowRegistrySnapshot::default(),
+                &self.store,
+                "retire_failed_oauth_browser_admission",
+                &[browser_snapshot_key(target, state)],
+                &[],
+                current_time_millis(),
+                SnapshotPersistPolicy::merge(),
+            )
+        {
+            tracing::debug!(
+                target: "meerkat::auth::oauth",
+                binding_target = ?target, action = ?OAuthBrowserActionRef::project(state),
+                "start: the failed admission's durable entry removal failed: {persist_err}"
+            );
+        }
+    }
+
+    /// The probe after a retirement: the AuthMachine holds no flow, the
+    /// registry no payload and the durable snapshot no entry for `state`.
+    fn admitted_browser_attempt_retired(
+        &self,
+        target: &AuthCredentialIdentity,
+        state: &str,
+    ) -> bool {
+        !self.lifecycle.has_oauth_browser_flow(target, state)
+            && !self.registry.holds_browser_payload(state, target)
+            && matches!(self.durable_holds_browser_attempt(state), Ok(false))
+    }
+
+    /// Whether the durable snapshot holds an entry for browser attempt
+    /// `state`, expired or not, under any target. Without a bound store
+    /// nothing is durable; a store that cannot be read proves nothing.
+    fn durable_holds_browser_attempt(&self, state: &str) -> Result<bool, OAuthFlowError> {
+        let operation = "probe_oauth_browser_admission";
+        let bound = self
+            .store
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(store) = bound else {
+            return Ok(false);
+        };
+        let store = store
+            .upgrade()
+            .ok_or_else(|| OAuthFlowError::PersistenceFailed {
+                operation,
+                detail: "runtime store is no longer available".to_string(),
+            })?;
+        let Some(bytes) = store.load_auth_oauth_flow_snapshot().map_err(|err| {
+            OAuthFlowError::PersistenceFailed {
+                operation,
+                detail: err.to_string(),
+            }
+        })?
+        else {
+            return Ok(false);
+        };
+        let decoded = OAuthFlowRegistrySnapshot::decode(&bytes).map_err(|err| {
+            OAuthFlowError::PersistenceFailed {
+                operation,
+                detail: err.to_string(),
+            }
+        })?;
+        Ok(decoded
+            .snapshot
+            .browser
+            .iter()
+            .any(|flow| flow.state == state))
+    }
+
+    /// The AuthMachine expiry of a start's retirement. A test can make it
+    /// fail and counts the attempts.
+    fn expire_started_browser(
+        &self,
+        target: &AuthCredentialIdentity,
+        state: &str,
+    ) -> Result<(), OAuthFlowError> {
+        #[cfg(test)]
+        {
+            self.start_faults
+                .expiry_attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if BrowserStartFaults::take_one(&self.start_faults.expiry_failures) {
+                return Err(OAuthFlowError::LifecycleRejected {
+                    operation: "expire_oauth_browser_flow",
+                    detail: "injected expiry fault".to_string(),
+                });
+            }
+        }
+        self.expire_browser(target, state)
+    }
+
+    /// Whether a test made this payload removal of a start's retirement fail.
+    fn injected_payload_removal_fault(&self) -> bool {
+        #[cfg(test)]
+        if BrowserStartFaults::take_one(&self.start_faults.payload_removal_failures) {
+            return true;
+        }
+        false
     }
 
     pub fn start(
@@ -399,6 +677,8 @@ impl RuntimeOAuthFlowHandle {
             payload_lock,
             _release_observer: Some(release_observer),
             flow_quarantine: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(test)]
+            start_faults: Arc::default(),
         };
         handle.rehydrate_persisted_payloads();
         handle
@@ -420,6 +700,8 @@ impl RuntimeOAuthFlowHandle {
             payload_lock: Arc::clone(&self.payload_lock),
             _release_observer: self._release_observer.clone(),
             flow_quarantine: Arc::clone(&self.flow_quarantine),
+            #[cfg(test)]
+            start_faults: Arc::clone(&self.start_faults),
         }
     }
 
@@ -1760,6 +2042,71 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
         pkce_verifier: String,
     ) -> Result<String, OAuthFlowError> {
         self.start_browser_attempt(target, provider, redirect_uri, pkce_verifier, None)
+            .map_err(|failure| failure.error)
+    }
+
+    /// Exact: the outcome is probed from the attempt's own state (see
+    /// `RuntimeOAuthFlowHandle::start_browser_attempt`).
+    fn start_with_admission(
+        &self,
+        target: AuthCredentialIdentity,
+        provider: OAuthBrowserFlowIdentity,
+        redirect_uri: String,
+        pkce_verifier: String,
+    ) -> Result<String, OAuthFlowStartFailure> {
+        self.start_browser_attempt(target, provider, redirect_uri, pkce_verifier, None)
+    }
+
+    /// The AuthMachine's browser flows for `target` that the registry holds
+    /// no payload for. The sync first restores a durable entry the
+    /// AuthMachine does not hold as a whole attempt, which a pending read
+    /// reports and the ordinary retirement reaches. A retired flow loses its
+    /// durable entry before its AuthMachine flow: an entry left behind would
+    /// come back as a whole attempt on the next read.
+    fn retire_unpayloaded_browser_attempts(
+        &self,
+        target: &AuthCredentialIdentity,
+        attempt_ref: Option<&str>,
+    ) -> Result<Vec<OAuthBrowserActionRef>, OAuthFlowError> {
+        let operation = "retire_unpayloaded_oauth_browser_flows";
+        let _payload_guard = self
+            .payload_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.sync_persisted_payloads(operation)?;
+        let unpayloaded = self
+            .lifecycle
+            .oauth_browser_flow_ids(target)
+            .into_iter()
+            .filter(|state| !self.registry.holds_browser_payload(state, target))
+            .filter(|state| {
+                attempt_ref
+                    .is_none_or(|wanted| OAuthBrowserActionRef::project(state).as_str() == wanted)
+            })
+            .collect::<Vec<_>>();
+        if unpayloaded.is_empty() {
+            return Ok(Vec::new());
+        }
+        let removed = unpayloaded
+            .iter()
+            .map(|state| browser_snapshot_key(target, state))
+            .collect::<Vec<_>>();
+        persist_registry_snapshot(
+            &OAuthFlowRegistrySnapshot::default(),
+            &self.store,
+            operation,
+            &removed,
+            &[],
+            current_time_millis(),
+            SnapshotPersistPolicy::merge(),
+        )?;
+        for state in &unpayloaded {
+            self.expire_browser(target, state)?;
+        }
+        Ok(unpayloaded
+            .iter()
+            .map(|state| OAuthBrowserActionRef::project(state))
+            .collect())
     }
 
     fn start_with_nonce(
@@ -1771,6 +2118,7 @@ impl OAuthFlowAuthority for RuntimeOAuthFlowHandle {
         nonce: String,
     ) -> Result<String, OAuthFlowError> {
         self.start_browser_attempt(target, provider, redirect_uri, pkce_verifier, Some(nonce))
+            .map_err(|failure| failure.error)
     }
 
     fn verify(
@@ -2234,16 +2582,47 @@ pub(crate) mod tests {
         released: bool,
     }
 
+    /// How one scripted OAuth snapshot update ends.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum ScriptedOAuthUpdate {
+        /// Fails before anything is written.
+        Fail,
+        /// Writes the update, then reports a failure, as a store whose
+        /// commit-time error reads like any other.
+        CommitThenFail,
+    }
+
     #[derive(Debug, Default)]
     pub(crate) struct FailingOAuthSnapshotStore {
         session_authority: crate::store::memory::InMemoryRuntimeStore,
         snapshot: StdMutex<Option<Vec<u8>>>,
         fail_oauth_persist: AtomicBool,
+        scripted_updates: StdMutex<std::collections::VecDeque<ScriptedOAuthUpdate>>,
         blocking_oauth_persist: StdMutex<BlockingOAuthPersistState>,
         blocking_oauth_persist_cv: Condvar,
     }
 
     impl FailingOAuthSnapshotStore {
+        /// The next snapshot updates end as `outcomes` says, in order; the
+        /// ones after them as the store otherwise would.
+        pub(crate) fn script_oauth_updates(
+            &self,
+            outcomes: impl IntoIterator<Item = ScriptedOAuthUpdate>,
+        ) {
+            self.scripted_updates
+                .lock()
+                .expect("scripted updates lock")
+                .extend(outcomes);
+        }
+
+        /// Scripted updates not yet consumed.
+        pub(crate) fn scripted_oauth_updates_left(&self) -> usize {
+            self.scripted_updates
+                .lock()
+                .expect("scripted updates lock")
+                .len()
+        }
+
         pub(crate) fn block_next_oauth_persist(&self) {
             let mut state = self
                 .blocking_oauth_persist
@@ -2349,7 +2728,14 @@ pub(crate) mod tests {
             update: &mut crate::store::AuthOAuthFlowSnapshotUpdate<'_>,
         ) -> Result<(), RuntimeStoreError> {
             self.wait_if_oauth_persist_blocked();
-            if self.fail_oauth_persist.load(Ordering::SeqCst) {
+            let scripted = self
+                .scripted_updates
+                .lock()
+                .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?
+                .pop_front();
+            if scripted == Some(ScriptedOAuthUpdate::Fail)
+                || (scripted.is_none() && self.fail_oauth_persist.load(Ordering::SeqCst))
+            {
                 return Err(RuntimeStoreError::WriteFailed(
                     "injected oauth snapshot failure".to_string(),
                 ));
@@ -2360,6 +2746,11 @@ pub(crate) mod tests {
                 .map_err(|err| RuntimeStoreError::WriteFailed(err.to_string()))?;
             let next = update(snapshot.as_deref())?;
             *snapshot = Some(next);
+            if scripted == Some(ScriptedOAuthUpdate::CommitThenFail) {
+                return Err(RuntimeStoreError::WriteFailed(
+                    "injected oauth snapshot failure after the commit".to_string(),
+                ));
+            }
             Ok(())
         }
 
@@ -5087,5 +5478,852 @@ mod connector_owner_tests {
                 .is_err()
         );
         assert!(!lifecycle.has_oauth_browser_flow_for_test(&target, &state));
+    }
+}
+
+/// What a failed browser start leaves of the attempt it tried to admit, and
+/// the retirement of an attempt held without its payload.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod start_admission_tests {
+    use std::sync::atomic::Ordering;
+
+    use meerkat_auth_core::auth_store::{
+        EphemeralTokenStore, InMemoryCoordinator, ProviderAuthPersistence,
+    };
+    use meerkat_auth_core::connector_oauth::{
+        ConnectorAccountObservation, ConnectorOAuthDescriptor, ConnectorOAuthParameters,
+        ConnectorOAuthRefusal,
+    };
+    use meerkat_auth_core::mcp_oauth::{
+        McpOAuthAccountStrategy, McpOAuthAuthority, McpOAuthCeremonyContext, McpOAuthError,
+        McpServerIdentity,
+    };
+
+    use super::tests::{FailingOAuthSnapshotStore, ScriptedOAuthUpdate};
+    use super::*;
+
+    const REDIRECT: &str = "http://127.0.0.1:12345/callback";
+    const RESOURCE: &str = "https://mcp.example/mcp";
+    const ACCOUNT: &str = "account-a";
+    const TTL: Duration = Duration::from_secs(600);
+
+    /// An MCP target of its own: the login lifecycle lock is process-wide
+    /// per lease key, so no two tests share one.
+    fn mcp_target(name: &str) -> McpServerIdentity {
+        McpServerIdentity::from_server_config(name, RESOURCE)
+            .with_expected_account(ACCOUNT)
+            .unwrap()
+    }
+
+    fn identity(target: &McpServerIdentity) -> AuthCredentialIdentity {
+        target.auth_binding_ref().unwrap().into()
+    }
+
+    fn descriptor() -> OAuthBrowserFlowIdentity {
+        ConnectorOAuthDescriptor::try_from(ConnectorOAuthParameters {
+            issuer: "https://issuer.example".into(),
+            client: "client-id".into(),
+            resource: RESOURCE.into(),
+            scopes: ["mcp.read".into()].into(),
+            redirect_uri: REDIRECT.into(),
+            expected_account: ACCOUNT.into(),
+            strategy_id: "authenticated-test-profile".into(),
+            client_auth_profile: None,
+            protocol: None,
+        })
+        .unwrap()
+        .into()
+    }
+
+    /// The browser attempts a flow owner holds for one target, by state:
+    /// AuthMachine flows, registry payloads and durable entries.
+    #[derive(Debug, Default, PartialEq, Eq)]
+    struct Held {
+        machine: Vec<String>,
+        payloads: Vec<String>,
+        durable: Vec<String>,
+    }
+
+    impl Held {
+        fn of(
+            lifecycle: &RuntimeAuthLeaseHandle,
+            flows: &RuntimeOAuthFlowHandle,
+            store: &Arc<dyn RuntimeStore>,
+            target: &AuthCredentialIdentity,
+        ) -> Self {
+            let mut machine = lifecycle.oauth_browser_flow_ids(target);
+            machine.sort();
+            let mut payloads = flows
+                .registry
+                .snapshot_for_persistence(current_time_millis())
+                .browser
+                .into_iter()
+                .filter(|flow| &flow.target == target)
+                .map(|flow| flow.state)
+                .collect::<Vec<_>>();
+            payloads.sort();
+            let mut durable = store
+                .load_auth_oauth_flow_snapshot()
+                .unwrap()
+                .map(|bytes| {
+                    OAuthFlowRegistrySnapshot::decode(&bytes)
+                        .unwrap()
+                        .snapshot
+                        .browser
+                })
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|flow| &flow.target == target)
+                .map(|flow| flow.state)
+                .collect::<Vec<_>>();
+            durable.sort();
+            Self {
+                machine,
+                payloads,
+                durable,
+            }
+        }
+
+        fn nothing() -> Self {
+            Self::default()
+        }
+
+        /// An attempt held by the AuthMachine and the durable snapshot,
+        /// without its payload.
+        fn without_payload(state: &str) -> Self {
+            Self {
+                machine: vec![state.to_owned()],
+                payloads: Vec::new(),
+                durable: vec![state.to_owned()],
+            }
+        }
+    }
+
+    /// A persistent flow owner whose OAuth snapshot writes a test scripts.
+    struct Owner {
+        lifecycle: Arc<RuntimeAuthLeaseHandle>,
+        store: Arc<FailingOAuthSnapshotStore>,
+        store_dyn: Arc<dyn RuntimeStore>,
+        flows: Arc<RuntimeOAuthFlowHandle>,
+    }
+
+    impl Owner {
+        fn new() -> Self {
+            let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
+            let store = Arc::new(FailingOAuthSnapshotStore::default());
+            let store_dyn: Arc<dyn RuntimeStore> = store.clone();
+            let flows = Arc::new(
+                RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+                    TTL,
+                    lifecycle.clone(),
+                    &store_dyn,
+                ),
+            );
+            Self {
+                lifecycle,
+                store,
+                store_dyn,
+                flows,
+            }
+        }
+
+        fn start(&self, target: &AuthCredentialIdentity) -> Result<String, OAuthFlowStartFailure> {
+            self.flows.start_with_admission(
+                target.clone(),
+                descriptor(),
+                REDIRECT.to_owned(),
+                "start-admission-verifier".to_owned(),
+            )
+        }
+
+        fn held(&self, target: &AuthCredentialIdentity) -> Held {
+            Held::of(&self.lifecycle, &self.flows, &self.store_dyn, target)
+        }
+
+        /// What a fresh process over the same store holds: a new AuthMachine
+        /// and registry, restored from the store.
+        fn held_after_restart(&self, target: &AuthCredentialIdentity) -> Held {
+            let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
+            let flows = RuntimeOAuthFlowHandle::new_with_persistent_store_and_auth_lease(
+                TTL,
+                lifecycle.clone(),
+                &self.store_dyn,
+            );
+            Held::of(&lifecycle, &flows, &self.store_dyn, target)
+        }
+
+        fn faults(&self) -> &BrowserStartFaults {
+            &self.flows.start_faults
+        }
+
+        fn durable_bytes(&self) -> Option<Vec<u8>> {
+            self.store_dyn.load_auth_oauth_flow_snapshot().unwrap()
+        }
+
+        /// A failed start that leaves its attempt with the AuthMachine and the
+        /// durable snapshot but not its payload: its admission write commits,
+        /// then reports a failure; both retirements' writes and expiries
+        /// fail. Returns the attempt's state.
+        fn attempt_held_without_payload(&self, target: &AuthCredentialIdentity) -> String {
+            self.store.script_oauth_updates([
+                ScriptedOAuthUpdate::CommitThenFail,
+                ScriptedOAuthUpdate::Fail,
+                ScriptedOAuthUpdate::Fail,
+            ]);
+            self.faults().expiry_failures.store(2, Ordering::SeqCst);
+            let failure = self.start(target).expect_err("the admission write fails");
+            let OAuthStartAdmission::RetirementUnconfirmed { attempt_ref } = failure.admission
+            else {
+                panic!("the start could not retire its attempt: {failure:?}");
+            };
+            let held = self.held(target);
+            let [state] = held.machine.as_slice() else {
+                panic!("one attempt is held: {held:?}");
+            };
+            assert_eq!(held, Held::without_payload(state));
+            assert_eq!(OAuthBrowserActionRef::project(state), attempt_ref);
+            assert_eq!(self.store.scripted_oauth_updates_left(), 0);
+            state.clone()
+        }
+    }
+
+    fn admission_of(result: Result<String, OAuthFlowStartFailure>) -> OAuthStartAdmission {
+        result.expect_err("the start fails").admission
+    }
+
+    /// A start refused before the AuthMachine applied anything
+    /// admitted nothing, and says so: a redirect the descriptor does not
+    /// name, and an admission the AuthMachine refuses at its capacity. The
+    /// refusal speaks of this call only: the attempt already admitted stays.
+    #[test]
+    fn a_refused_start_admitted_nothing() {
+        let owner = Owner::new();
+        let target = identity(&mcp_target("refused-start"));
+        let refused = owner.flows.start_with_admission(
+            target.clone(),
+            descriptor(),
+            "http://127.0.0.1:9/other".to_owned(),
+            "verifier".to_owned(),
+        );
+        assert_eq!(
+            refused,
+            Err(OAuthFlowStartFailure {
+                error: OAuthFlowError::Connector(ConnectorOAuthRefusal::DescriptorMismatch),
+                admission: OAuthStartAdmission::NotAdmitted,
+            })
+        );
+        assert_eq!(owner.held(&target), Held::nothing());
+
+        let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
+        let flows =
+            RuntimeOAuthFlowHandle::new_with_capacity_and_auth_lease(TTL, 1, lifecycle.clone());
+        let first = identity(&mcp_target("capacity-first"));
+        let second = identity(&mcp_target("capacity-second"));
+        let admitted = flows
+            .start_with_admission(
+                first.clone(),
+                descriptor(),
+                REDIRECT.to_owned(),
+                "v1".to_owned(),
+            )
+            .unwrap();
+        let refused = flows
+            .start_with_admission(
+                second.clone(),
+                descriptor(),
+                REDIRECT.to_owned(),
+                "v2".to_owned(),
+            )
+            .expect_err("the AuthMachine refuses past its capacity");
+        assert!(
+            matches!(
+                refused.error,
+                OAuthFlowError::LifecycleRejected {
+                    operation: "admit_oauth_browser_flow",
+                    ..
+                }
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(refused.admission, OAuthStartAdmission::NotAdmitted);
+        assert!(lifecycle.oauth_browser_flow_ids(&second).is_empty());
+        assert_eq!(lifecycle.oauth_browser_flow_ids(&first), vec![admitted]);
+    }
+
+    /// The payload insert fails after the admission. The start
+    /// retires the attempt and says so; nothing is held, and a fresh
+    /// process restores nothing.
+    #[test]
+    fn a_start_whose_payload_insert_fails_retires_its_attempt() {
+        let owner = Owner::new();
+        let target = identity(&mcp_target("insert-fails"));
+        owner.faults().insert.store(true, Ordering::SeqCst);
+        let failure = owner.start(&target).expect_err("the insert fails");
+        assert!(
+            matches!(
+                failure.error,
+                OAuthFlowError::LifecycleRejected {
+                    operation: "insert_oauth_browser_payload",
+                    ..
+                }
+            ),
+            "{failure:?}"
+        );
+        assert_eq!(failure.admission, OAuthStartAdmission::Retired);
+        assert_eq!(owner.held(&target), Held::nothing());
+        assert_eq!(owner.held_after_restart(&target), Held::nothing());
+    }
+
+    /// The admission write fails before it commits. The start retires
+    /// the attempt; the durable snapshot is the one before the start, and a
+    /// fresh process restores nothing.
+    #[test]
+    fn a_start_whose_admission_write_fails_retires_its_attempt() {
+        let owner = Owner::new();
+        let other = identity(&mcp_target("write-fails-other"));
+        let kept = owner.start(&other).unwrap();
+        let before = owner.durable_bytes();
+        assert!(before.is_some());
+
+        let target = identity(&mcp_target("write-fails"));
+        owner.store.fail_oauth_persist();
+        let failure = owner.start(&target).expect_err("the admission write fails");
+        assert!(
+            matches!(failure.error, OAuthFlowError::PersistenceFailed { .. }),
+            "{failure:?}"
+        );
+        assert_eq!(failure.admission, OAuthStartAdmission::Retired);
+        assert_eq!(owner.held(&target), Held::nothing());
+        assert_eq!(
+            owner.durable_bytes(),
+            before,
+            "the durable snapshot is unchanged"
+        );
+        owner.store.allow_oauth_persist();
+        assert_eq!(owner.held_after_restart(&target), Held::nothing());
+        assert_eq!(owner.held_after_restart(&other).durable, vec![kept]);
+    }
+
+    /// The admission write commits, then reports a failure. A failed
+    /// write proves nothing: the start reads the snapshot back, removes the
+    /// entry, and says `Retired` only once the read finds none. A fresh
+    /// process then restores nothing.
+    #[test]
+    fn a_start_whose_admission_write_commits_then_fails_removes_its_durable_entry() {
+        let owner = Owner::new();
+        let target = identity(&mcp_target("commit-then-fails"));
+        owner
+            .store
+            .script_oauth_updates([ScriptedOAuthUpdate::CommitThenFail]);
+        let failure = owner
+            .start(&target)
+            .expect_err("the admission write reports a failure");
+        assert!(
+            matches!(failure.error, OAuthFlowError::PersistenceFailed { .. }),
+            "{failure:?}"
+        );
+        assert_eq!(failure.admission, OAuthStartAdmission::Retired);
+        assert_eq!(owner.store.scripted_oauth_updates_left(), 0);
+        assert_eq!(owner.held(&target), Held::nothing());
+        assert_eq!(owner.held_after_restart(&target), Held::nothing());
+    }
+
+    /// The admission write commits, then reports a failure, and both
+    /// removals of the entry fail. Without a read that finds no entry the
+    /// start does not say `Retired`: it names the attempt. Once the store
+    /// writes again, the next read restores the entry as a whole attempt,
+    /// which its ordinary retirement ends.
+    #[test]
+    fn a_durable_entry_the_start_cannot_remove_leaves_its_retirement_unconfirmed() {
+        let owner = Owner::new();
+        let target = identity(&mcp_target("entry-stays"));
+        owner.store.script_oauth_updates([
+            ScriptedOAuthUpdate::CommitThenFail,
+            ScriptedOAuthUpdate::Fail,
+            ScriptedOAuthUpdate::Fail,
+        ]);
+        let failure = owner
+            .start(&target)
+            .expect_err("the admission write reports a failure");
+        let held = owner.held(&target);
+        let [state] = held.durable.as_slice() else {
+            panic!("the durable entry stays: {held:?}");
+        };
+        assert_eq!(
+            failure.admission,
+            OAuthStartAdmission::RetirementUnconfirmed {
+                attempt_ref: OAuthBrowserActionRef::project(state),
+            }
+        );
+        assert!(
+            held.machine.is_empty() && held.payloads.is_empty(),
+            "{held:?}"
+        );
+        assert_eq!(
+            owner.store.scripted_oauth_updates_left(),
+            0,
+            "one retirement and exactly one retry each tried the removal"
+        );
+
+        let (pending, record) = owner
+            .flows
+            .pending_connector_browser_attempt(&target)
+            .unwrap()
+            .expect("the next read restores the entry as a whole attempt");
+        assert_eq!(&pending, state);
+        OAuthFlowAuthority::expire(
+            owner.flows.as_ref(),
+            &pending,
+            &target,
+            record.provider,
+            &record.redirect_uri,
+        )
+        .unwrap();
+        assert_eq!(owner.held(&target), Held::nothing());
+        assert_eq!(owner.held_after_restart(&target), Held::nothing());
+    }
+
+    /// The admission write fails and both expiries fail. The attempt
+    /// stays with the AuthMachine, without its payload; the start names it,
+    /// and its reference retires it.
+    #[test]
+    fn a_start_that_cannot_expire_its_attempt_names_it_for_retirement() {
+        let owner = Owner::new();
+        let target = identity(&mcp_target("expiry-fails"));
+        owner.store.fail_oauth_persist();
+        owner.faults().expiry_failures.store(2, Ordering::SeqCst);
+        let failure = owner.start(&target).expect_err("the admission write fails");
+        let held = owner.held(&target);
+        let [state] = held.machine.as_slice() else {
+            panic!("the AuthMachine keeps the attempt: {held:?}");
+        };
+        let attempt_ref = OAuthBrowserActionRef::project(state);
+        assert_eq!(
+            failure.admission,
+            OAuthStartAdmission::RetirementUnconfirmed {
+                attempt_ref: attempt_ref.clone(),
+            }
+        );
+        assert!(
+            held.payloads.is_empty() && held.durable.is_empty(),
+            "{held:?}"
+        );
+
+        owner.store.allow_oauth_persist();
+        assert_eq!(
+            owner
+                .flows
+                .retire_unpayloaded_browser_attempts(&target, Some(attempt_ref.as_str()))
+                .unwrap(),
+            vec![attempt_ref]
+        );
+        assert_eq!(owner.held(&target), Held::nothing());
+        assert_eq!(
+            owner
+                .flows
+                .retire_unpayloaded_browser_attempts(&target, None)
+                .unwrap(),
+            Vec::new()
+        );
+    }
+
+    /// Both removals of the payload fail. The payload stays, so the
+    /// start names the attempt; the next read retires the payload the
+    /// durable snapshot never held.
+    #[test]
+    fn a_start_that_cannot_remove_its_payload_names_the_attempt() {
+        let owner = Owner::new();
+        let target = identity(&mcp_target("removal-fails"));
+        owner.store.fail_oauth_persist();
+        owner
+            .faults()
+            .payload_removal_failures
+            .store(2, Ordering::SeqCst);
+        let failure = owner.start(&target).expect_err("the admission write fails");
+        let held = owner.held(&target);
+        let [state] = held.payloads.as_slice() else {
+            panic!("the payload stays: {held:?}");
+        };
+        assert_eq!(
+            failure.admission,
+            OAuthStartAdmission::RetirementUnconfirmed {
+                attempt_ref: OAuthBrowserActionRef::project(state),
+            }
+        );
+        owner.store.allow_oauth_persist();
+        assert_eq!(
+            owner
+                .flows
+                .pending_connector_browser_attempt(&target)
+                .unwrap(),
+            None
+        );
+        assert_eq!(owner.held(&target), Held::nothing());
+    }
+
+    /// The retirement runs once, and exactly once more when the probe still
+    /// finds the attempt held: one failed expiry is retried and retires the
+    /// attempt; three failed expiries see two tries, never a third.
+    #[test]
+    fn a_failed_start_retries_its_retirement_exactly_once() {
+        let owner = Owner::new();
+        let target = identity(&mcp_target("retried-once"));
+        owner.store.fail_oauth_persist();
+        owner.faults().expiry_failures.store(1, Ordering::SeqCst);
+        assert_eq!(
+            admission_of(owner.start(&target)),
+            OAuthStartAdmission::Retired
+        );
+        assert_eq!(owner.faults().expiry_attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(owner.held(&target), Held::nothing());
+
+        let owner = Owner::new();
+        let target = identity(&mcp_target("retried-at-most-once"));
+        owner.store.fail_oauth_persist();
+        owner.faults().expiry_failures.store(3, Ordering::SeqCst);
+        assert!(matches!(
+            admission_of(owner.start(&target)),
+            OAuthStartAdmission::RetirementUnconfirmed { .. }
+        ));
+        assert_eq!(owner.faults().expiry_attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(owner.faults().expiry_failures.load(Ordering::SeqCst), 1);
+    }
+
+    /// A publication fault after the AuthMachine applied the
+    /// admission is never `NotAdmitted`: the attempt is retired, or named
+    /// when its expiry fails too.
+    #[test]
+    fn a_fault_after_the_admission_applied_is_never_not_admitted() {
+        let owner = Owner::new();
+        let target = identity(&mcp_target("publication-fault"));
+        owner
+            .faults()
+            .admit_after_mutation
+            .store(true, Ordering::SeqCst);
+        let failure = owner.start(&target).expect_err("the publication fails");
+        assert!(
+            matches!(
+                failure.error,
+                OAuthFlowError::LifecycleRejected {
+                    operation: "admit_oauth_browser_flow",
+                    ..
+                }
+            ),
+            "{failure:?}"
+        );
+        assert_eq!(failure.admission, OAuthStartAdmission::Retired);
+        assert_eq!(owner.held(&target), Held::nothing());
+
+        owner.faults().expiry_failures.store(2, Ordering::SeqCst);
+        let failure = owner.start(&target).expect_err("the publication fails");
+        let held = owner.held(&target);
+        let [state] = held.machine.as_slice() else {
+            panic!("the AuthMachine keeps the attempt: {held:?}");
+        };
+        assert_eq!(
+            failure.admission,
+            OAuthStartAdmission::RetirementUnconfirmed {
+                attempt_ref: OAuthBrowserActionRef::project(state),
+            }
+        );
+    }
+
+    /// Starts racing on one target, the first admission write
+    /// failing. The failed start says `Retired` and holds nothing; every
+    /// other start holds exactly its own attempt.
+    #[test]
+    fn racing_starts_keep_each_claim_true() {
+        let owner = Owner::new();
+        let target = identity(&mcp_target("racing-starts"));
+        owner
+            .store
+            .script_oauth_updates([ScriptedOAuthUpdate::Fail]);
+        let results = std::thread::scope(|scope| {
+            let handles = (0..4)
+                .map(|_| scope.spawn(|| owner.start(&target)))
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        let mut admitted = results
+            .iter()
+            .filter_map(|result| result.as_ref().ok().cloned())
+            .collect::<Vec<_>>();
+        admitted.sort();
+        let failed = results
+            .iter()
+            .filter_map(|result| result.as_ref().err())
+            .collect::<Vec<_>>();
+        assert_eq!(admitted.len(), 3, "{results:?}");
+        assert!(
+            matches!(
+                failed.as_slice(),
+                [OAuthFlowStartFailure {
+                    admission: OAuthStartAdmission::Retired,
+                    ..
+                }]
+            ),
+            "{failed:?}"
+        );
+        assert_eq!(
+            owner.held(&target),
+            Held {
+                machine: admitted.clone(),
+                payloads: admitted.clone(),
+                durable: admitted,
+            }
+        );
+    }
+
+    /// The existing start returns the error the admission-reporting
+    /// start reports, fault by fault.
+    #[test]
+    fn the_existing_start_returns_the_same_errors() {
+        type Fault = fn(&Owner);
+        let faults: [(&str, Fault); 3] = [
+            ("insert", |owner| {
+                owner.faults().insert.store(true, Ordering::SeqCst);
+            }),
+            ("persist", |owner| owner.store.fail_oauth_persist()),
+            ("publication", |owner| {
+                owner
+                    .faults()
+                    .admit_after_mutation
+                    .store(true, Ordering::SeqCst);
+            }),
+        ];
+        for (name, inject) in faults {
+            let owner = Owner::new();
+            let target = identity(&mcp_target(&format!("same-error-{name}")));
+            inject(&owner);
+            let reported = owner.start(&target).expect_err(name).error;
+            let existing = owner
+                .flows
+                .start(
+                    target.clone(),
+                    descriptor(),
+                    REDIRECT.to_owned(),
+                    "existing".to_owned(),
+                )
+                .expect_err(name);
+            let same = match (&reported, &existing) {
+                (
+                    OAuthFlowError::LifecycleRejected { operation: a, .. },
+                    OAuthFlowError::LifecycleRejected { operation: b, .. },
+                )
+                | (
+                    OAuthFlowError::PersistenceFailed { operation: a, .. },
+                    OAuthFlowError::PersistenceFailed { operation: b, .. },
+                ) => a == b,
+                _ => false,
+            };
+            assert!(same, "{name}: {reported:?} / {existing:?}");
+            assert_eq!(owner.held(&target), Held::nothing(), "{name}");
+        }
+    }
+
+    /// The AuthMachine keeps an attempt without its payload, beside its
+    /// durable entry. The retirement removes both, and a fresh process
+    /// restores nothing. Control: a whole pending attempt is not retired.
+    #[test]
+    fn an_attempt_held_without_its_payload_is_retired_with_its_durable_entry() {
+        let owner = Owner::new();
+        let target = identity(&mcp_target("unpayloaded"));
+        let state = owner.attempt_held_without_payload(&target);
+        let attempt_ref = OAuthBrowserActionRef::project(&state);
+        assert_eq!(
+            owner
+                .flows
+                .retire_unpayloaded_browser_attempts(&target, Some("another-reference"))
+                .unwrap(),
+            Vec::new()
+        );
+        assert_eq!(owner.held(&target), Held::without_payload(&state));
+        assert_eq!(
+            owner
+                .flows
+                .retire_unpayloaded_browser_attempts(&target, None)
+                .unwrap(),
+            vec![attempt_ref]
+        );
+        assert_eq!(owner.held(&target), Held::nothing());
+        assert_eq!(owner.held_after_restart(&target), Held::nothing());
+
+        let pending = owner.start(&target).unwrap();
+        assert_eq!(
+            owner
+                .flows
+                .retire_unpayloaded_browser_attempts(&target, None)
+                .unwrap(),
+            Vec::new()
+        );
+        owner
+            .flows
+            .verify(&pending, &target, descriptor(), REDIRECT)
+            .expect("the whole pending attempt stays");
+        assert_eq!(owner.held(&target).durable, vec![pending]);
+    }
+
+    /// The rows below never reach the strategy: they cancel and log out.
+    struct UnusedStrategy;
+
+    #[async_trait::async_trait]
+    impl McpOAuthAccountStrategy for UnusedStrategy {
+        fn descriptor(
+            &self,
+            _target: &McpServerIdentity,
+            _context: &McpOAuthCeremonyContext<'_>,
+        ) -> Result<ConnectorOAuthDescriptor, ConnectorOAuthRefusal> {
+            Err(ConnectorOAuthRefusal::VerificationUnavailable)
+        }
+
+        async fn observe_account(
+            &self,
+            _descriptor: &ConnectorOAuthDescriptor,
+            _tokens: &meerkat_auth_core::auth_oauth::OAuthTokenResult,
+        ) -> Result<ConnectorAccountObservation, ConnectorOAuthRefusal> {
+            Err(ConnectorOAuthRefusal::VerificationUnavailable)
+        }
+    }
+
+    fn mcp_authority(owner: &Owner) -> McpOAuthAuthority {
+        let generated =
+            crate::protocol_auth_lease_lifecycle_publication::generated_auth_lease_handle(
+                owner.lifecycle.clone(),
+            )
+            .unwrap();
+        McpOAuthAuthority::new(
+            ProviderAuthPersistence::new(
+                Arc::new(EphemeralTokenStore::new()),
+                Arc::new(InMemoryCoordinator::new()),
+            ),
+            generated,
+        )
+        .with_interactive_strategy(owner.flows.clone(), Arc::new(UnusedStrategy))
+        .unwrap()
+    }
+
+    /// A cancel by the reference a failed start named retires the
+    /// attempt held without its payload, and its durable entry; no pending
+    /// read reports that attempt. A second cancel finds nothing.
+    #[test]
+    fn a_cancel_by_reference_retires_an_attempt_held_without_its_payload() {
+        let owner = Owner::new();
+        let authority = mcp_authority(&owner);
+        let target = mcp_target("cancel-unpayloaded");
+        let state = owner.attempt_held_without_payload(&identity(&target));
+        assert_eq!(authority.pending_attempt(&target).unwrap(), None);
+        let attempt_ref = OAuthBrowserActionRef::project(&state);
+        authority
+            .cancel_attempt_by_ref(&target, attempt_ref.as_str())
+            .expect("the named attempt is retired");
+        assert_eq!(owner.held(&identity(&target)), Held::nothing());
+        assert_eq!(
+            owner.held_after_restart(&identity(&target)),
+            Held::nothing()
+        );
+        assert!(matches!(
+            authority.cancel_attempt_by_ref(&target, attempt_ref.as_str()),
+            Err(McpOAuthError::Flow(OAuthFlowError::Missing))
+        ));
+    }
+
+    /// Control: a logout leaves nothing of an attempt held without its
+    /// payload, with or without a durable entry. Its pending loop does not
+    /// see such an attempt, but the lease release that follows cancels every
+    /// browser flow the AuthMachine holds for the slot, and the release
+    /// observer removes their payloads and durable entries.
+    #[tokio::test]
+    async fn logout_leaves_nothing_of_an_attempt_held_without_its_payload() {
+        let owner = Owner::new();
+        let authority = mcp_authority(&owner);
+        let with_entry = mcp_target("logout-unpayloaded-durable");
+        owner.attempt_held_without_payload(&identity(&with_entry));
+        let without_entry = mcp_target("logout-unpayloaded");
+        owner.store.fail_oauth_persist();
+        owner.faults().expiry_failures.store(2, Ordering::SeqCst);
+        let failure = owner
+            .start(&identity(&without_entry))
+            .expect_err("the admission write fails");
+        assert!(matches!(
+            failure.admission,
+            OAuthStartAdmission::RetirementUnconfirmed { .. }
+        ));
+        owner.store.allow_oauth_persist();
+        let held = owner.held(&identity(&without_entry));
+        assert!(
+            held.machine.len() == 1 && held.payloads.is_empty() && held.durable.is_empty(),
+            "{held:?}"
+        );
+        for target in [&with_entry, &without_entry] {
+            authority.logout(target).await.expect("the logout succeeds");
+            assert_eq!(owner.held(&identity(target)), Held::nothing());
+            assert_eq!(owner.held_after_restart(&identity(target)), Held::nothing());
+        }
+    }
+
+    /// Through the MCP authority: a start whose durable entry outlived
+    /// its failure names the attempt, and a cancel by that reference retires
+    /// it once the store writes again.
+    #[test]
+    fn a_cancel_by_reference_settles_a_durable_entry_a_start_left() {
+        let owner = Owner::new();
+        let authority = mcp_authority(&owner);
+        let target = mcp_target("cancel-durable-entry");
+        owner.store.script_oauth_updates([
+            ScriptedOAuthUpdate::CommitThenFail,
+            ScriptedOAuthUpdate::Fail,
+            ScriptedOAuthUpdate::Fail,
+        ]);
+        let OAuthStartAdmission::RetirementUnconfirmed { attempt_ref } =
+            admission_of(owner.start(&identity(&target)))
+        else {
+            panic!("the durable entry stays");
+        };
+        authority
+            .cancel_attempt_by_ref(&target, attempt_ref.as_str())
+            .expect("the named attempt is retired");
+        assert_eq!(owner.held(&identity(&target)), Held::nothing());
+        assert_eq!(
+            owner.held_after_restart(&identity(&target)),
+            Held::nothing()
+        );
+    }
+
+    /// Control: a cancel by reference of a whole pending attempt retires it
+    /// as before, and an unknown reference is refused and retires nothing.
+    #[test]
+    fn a_cancel_by_reference_of_a_whole_pending_attempt_is_unchanged() {
+        let owner = Owner::new();
+        let authority = mcp_authority(&owner);
+        let target = mcp_target("cancel-whole-attempt");
+        let state = owner.start(&identity(&target)).unwrap();
+        let attempt_ref = OAuthBrowserActionRef::project(&state);
+        assert_eq!(
+            authority
+                .pending_attempt(&target)
+                .unwrap()
+                .map(|pending| pending.attempt_ref),
+            Some(attempt_ref.clone())
+        );
+        assert!(matches!(
+            authority.cancel_attempt_by_ref(&target, "another-reference"),
+            Err(McpOAuthError::Flow(OAuthFlowError::Missing))
+        ));
+        assert_eq!(
+            owner.held(&identity(&target)),
+            Held {
+                machine: vec![state.clone()],
+                payloads: vec![state.clone()],
+                durable: vec![state],
+            }
+        );
+        authority
+            .cancel_attempt_by_ref(&target, attempt_ref.as_str())
+            .unwrap();
+        assert_eq!(owner.held(&identity(&target)), Held::nothing());
     }
 }

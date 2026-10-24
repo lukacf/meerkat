@@ -2669,6 +2669,11 @@ pub enum IdentityLeaseCondition {
     HeldByCurrentIncarnation,
     HeldByOtherLiveIncarnation,
     HeldByExpiredIncarnation,
+    /// Unexpired, held by an earlier incarnation of this mob whose process
+    /// has ended, proven by this process holding the store's incarnation
+    /// custody. The machine takes such a lease over at once
+    /// ([`IdentityReconcileDecision::AcquireLease`]).
+    HeldByEndedIncarnation,
 }
 
 /// Resource observation condition. `Divergent` means decodable, attributable
@@ -3783,6 +3788,7 @@ pub(crate) fn identity_adoption_fixture(
         max_inline_peer_notifications: None,
         output_schema: None,
         provider_params: None,
+        durable: false,
     };
     let execution = DesiredExecution::ControllingSession;
     let member = IdentityProfileMemberDeclaration {
@@ -4144,6 +4150,7 @@ mod tests {
             IdentityLeaseCondition::HeldByCurrentIncarnation,
             IdentityLeaseCondition::HeldByOtherLiveIncarnation,
             IdentityLeaseCondition::HeldByExpiredIncarnation,
+            IdentityLeaseCondition::HeldByEndedIncarnation,
         ];
         let resources = [
             IdentityResourceCondition::Unavailable,
@@ -4188,7 +4195,12 @@ mod tests {
                 }
             }
         }
-        assert_eq!(classified, 31_500);
+        // 6 intents x 7 leases x 7 sessions x 5^3 resource triples. The lease
+        // axis has 7 since IdentityLeaseCondition::HeldByEndedIncarnation (the
+        // lease reclaim of an incarnation whose process ended). The total stays
+        // hard-coded on purpose: a new condition variant must fail here so that
+        // someone reviews the classifier for it.
+        assert_eq!(classified, 36_750);
         assert_eq!(authority.state(), &initial_state);
     }
 
@@ -4598,6 +4610,24 @@ mod tests {
         assert_eq!(
             classify_identity_reconciliation(facts),
             IdentityReconcileDecision::AcquireLease
+        );
+    }
+
+    /// A lease an ended incarnation holds is taken over at once, while one
+    /// held by an incarnation that may still run is waited out: the machine,
+    /// not the shell, decides the takeover.
+    #[test]
+    fn an_ended_incarnations_lease_is_acquired_and_a_live_one_awaited() {
+        let mut facts = matching_facts();
+        facts.lease = IdentityLeaseCondition::HeldByEndedIncarnation;
+        assert_eq!(
+            classify_identity_reconciliation(facts),
+            IdentityReconcileDecision::AcquireLease
+        );
+        facts.lease = IdentityLeaseCondition::HeldByOtherLiveIncarnation;
+        assert_eq!(
+            classify_identity_reconciliation(facts),
+            IdentityReconcileDecision::AwaitLease
         );
     }
 

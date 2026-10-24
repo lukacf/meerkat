@@ -187,9 +187,15 @@ export RUST_LANE_ID="${validation_lane}"
 # does not track use. A failed gate never prunes: a peer that just failed on a
 # shared-machine condition (disk full, load) is about to retry on its lane.
 resolve_lane_targets_root() {
-  local lane_target_dir print_env
+  local lane_target_dir="" print_env
   print_env="$("${SOURCE_ROOT}/scripts/repo-cargo" --print-env 2>/dev/null)" || return 0
-  lane_target_dir="$(sed -n 's/^CARGO_TARGET_DIR=//p' <<<"$print_env" | head -n 1)"
+  # Match the first complete key without an early-exit pipeline or here-string.
+  # The latter can also block on medium-sized pipe-backed input in Bash 5.3.
+  print_env=$'\n'"$print_env"
+  if [[ "$print_env" == *$'\nCARGO_TARGET_DIR='* ]]; then
+    lane_target_dir="${print_env#*$'\nCARGO_TARGET_DIR='}"
+    lane_target_dir="${lane_target_dir%%$'\n'*}"
+  fi
   [[ -n "$lane_target_dir" && -d "$lane_target_dir" ]] || return 0
   [[ "$(basename "$lane_target_dir")" == "$validation_lane" ]] || return 0
   case "$lane_target_dir" in

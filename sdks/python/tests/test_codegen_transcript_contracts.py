@@ -35,6 +35,7 @@ from meerkat.generated.types import (
     WireProviderMetaAnthropicCompaction,
     WireProviderMetaAnthropicRedacted,
     WireProviderMetaGemini,
+    WireProviderMetaGeminiFunctionCall,
     WireProviderMetaOpenAi,
     WireProviderMetaOpenAiAssistantMessage,
     WireProviderMetaOpenAiResponse,
@@ -111,6 +112,7 @@ def test_generated_provider_metadata_is_closed_and_schema_nullable() -> None:
         WireProviderMetaAnthropicRedacted,
         WireProviderMetaAnthropicCompaction,
         WireProviderMetaGemini,
+        WireProviderMetaGeminiFunctionCall,
         WireProviderMetaOpenAi,
         WireProviderMetaOpenAiAssistantMessage,
         WireProviderMetaOpenAiResponse,
@@ -122,6 +124,7 @@ def test_generated_provider_metadata_is_closed_and_schema_nullable() -> None:
         WireProviderMetaAnthropicRedacted: "data",
         WireProviderMetaAnthropicCompaction: "content",
         WireProviderMetaGemini: "thoughtSignature",
+        WireProviderMetaGeminiFunctionCall: "provider_id",
         WireProviderMetaOpenAi: "id",
         WireProviderMetaOpenAiAssistantMessage: "id",
         WireProviderMetaOpenAiResponse: "response_id",
@@ -130,6 +133,12 @@ def test_generated_provider_metadata_is_closed_and_schema_nullable() -> None:
         hints = get_type_hints(variant, include_extras=True)
         assert get_origin(hints["provider"]) is Required
         assert get_origin(hints[payload]) is Required
+
+    gemini_call_hints = get_type_hints(WireProviderMetaGeminiFunctionCall, include_extras=True)
+    assert "id" not in gemini_call_hints
+    assert get_args(gemini_call_hints["provider_id"]) == (str,)
+    assert get_origin(gemini_call_hints["thoughtSignature"]) is NotRequired
+    assert set(get_args(get_args(gemini_call_hints["thoughtSignature"])[0])) == {str, type(None)}
 
     open_ai_hints = get_type_hints(WireProviderMetaOpenAi, include_extras=True)
     for field in ("encrypted_content", "phase", "response_id"):

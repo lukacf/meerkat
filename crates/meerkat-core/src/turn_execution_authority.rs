@@ -213,7 +213,7 @@ impl TurnFailureSourceKind {
             AgentError::MaxTokensReached { .. } => Self::MaxTokensReached,
             AgentError::ContentFiltered { .. } => Self::ContentFiltered,
             AgentError::MaxTurnsReached { .. } => Self::MaxTurnsReached,
-            AgentError::Cancelled => Self::Cancelled,
+            AgentError::Cancelled | AgentError::RunSuspended { .. } => Self::Cancelled,
             AgentError::InvalidStateTransition { .. } => Self::InvalidStateTransition,
             AgentError::OperationNotFound(_) => Self::OperationNotFound,
             AgentError::DepthLimitExceeded { .. } => Self::DepthLimitExceeded,

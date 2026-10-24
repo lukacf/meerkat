@@ -533,6 +533,11 @@ function handleEvent(event: AgentEvent): string {
       // batch requested and what this attempt sent (absent when the batch
       // applies no level).
       return `${event.type}:${event.requested.disposition}:${event.outcome?.kind ?? 'none'}`;
+    case 'run_resumed':
+      // A durable run resumed from its run cursor after a restart, in place
+      // of `run_started`: the same `run_id` continues from `round`, at
+      // `tools_pending` (the staged calls run again) or `awaiting_model`.
+      return `${event.type}:${event.session_id}:${event.run_id}:${event.round}:${event.resume_point}`;
     default: {
       const _exhaustive: never = event;
       return _exhaustive;
@@ -556,6 +561,34 @@ const backgroundJobStringOnly: AgentEvent = {
   status: 'completed',
   terminal_status: 'failed',
   detail: 'exit_code: 0',
+};
+
+// A tool call's result body is on tool_result_received only; the execution
+// fact carries no copy of it.
+const toolCompletionWithoutBody: AgentEvent = {
+  type: 'tool_execution_completed',
+  id: 'call_1',
+  name: 'view_image',
+  is_error: false,
+  duration_ms: 12,
+};
+
+const toolCompletionWithBody: AgentEvent = {
+  type: 'tool_execution_completed',
+  id: 'call_1',
+  name: 'view_image',
+  // @ts-expect-error the result body is on tool_result_received, not on the execution fact.
+  content: [{ type: 'text', text: 'one copy' }],
+  is_error: false,
+  duration_ms: 12,
+};
+
+const toolResultWithBody: AgentEvent = {
+  type: 'tool_result_received',
+  id: 'call_1',
+  name: 'view_image',
+  content: [{ type: 'text', text: 'one copy' }],
+  is_error: false,
 };
 
 handleEvent(backgroundJobWithoutLegacyStatus);

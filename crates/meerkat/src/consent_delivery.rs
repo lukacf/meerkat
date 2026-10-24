@@ -118,9 +118,18 @@ impl RetainedJobSource for ConsentNoticeJobSource {
     }
 }
 
+/// Why a consent-aware host answers no other owner yet.
+#[cfg(feature = "session-store")]
+const UNBOUND_SERVICES: &str = "the host has not bound its continuation services yet";
+
 /// Answers the consent namespace from the approval owner and every other
-/// job from the host's bound job source. Built only by the session-store
-/// runtime delivery host, so it is compiled with it.
+/// job from the host's bound job source. Until the host binds its
+/// continuation services, every other job and every host original outside
+/// the reserved namespaces is unavailable (retry later), never absent: a
+/// delivery drained in that window (for example by the arming reconcile after
+/// a restart) stays pending and is decided by the bound owner once bound, as
+/// the setup signal (`Unbound`) says. Built only by the session-store runtime
+/// delivery host, so it is compiled with it.
 #[cfg(feature = "session-store")]
 pub(crate) struct ConsentAwareJobSource {
     pub(crate) consent: ConsentNoticeJobSource,
@@ -140,8 +149,27 @@ impl RetainedJobSource for ConsentAwareJobSource {
         }
         match &self.others {
             Some(others) => others.retained_job(producer, job_id).await,
-            None => RetainedJobLookup::Absent,
+            None => RetainedJobLookup::Unavailable(UNBOUND_SERVICES.to_string()),
         }
+    }
+
+    /// Host originals come from the host's bound source only, never in a
+    /// reserved (Core-owned) namespace such as the consent namespace.
+    async fn host_original(&self, namespace: &str, producer_id: &str) -> crate::HostOriginalLookup {
+        if crate::is_reserved_host_namespace(namespace) {
+            return crate::HostOriginalLookup::Absent;
+        }
+        match &self.others {
+            Some(others) => others.host_original(namespace, producer_id).await,
+            None => crate::HostOriginalLookup::Unavailable(UNBOUND_SERVICES.to_string()),
+        }
+    }
+
+    fn host_original_binder(&self, namespace: &str) -> Option<Arc<dyn crate::HostOriginalBinder>> {
+        if crate::is_reserved_host_namespace(namespace) {
+            return None;
+        }
+        self.others.as_ref()?.host_original_binder(namespace)
     }
 }
 
@@ -501,6 +529,8 @@ mod tests {
             InputAbandonReason::MaxAttemptsExhausted { attempts: 3 },
             InputAbandonReason::NeverExecuted,
             InputAbandonReason::ToolProcessInterrupted,
+            InputAbandonReason::RequeueExpired,
+            InputAbandonReason::ResumeRefused,
         ] {
             assert!(
                 ends_notice_input(&InputTerminalOutcome::Abandoned {
@@ -516,5 +546,203 @@ mod tests {
             aggregate_id: InputId::new(),
         }));
         assert!(!ends_notice_input(&InputTerminalOutcome::Consumed));
+    }
+}
+
+#[cfg(all(test, feature = "session-store"))]
+#[allow(clippy::expect_used)]
+mod host_original_tests {
+    use std::sync::Arc;
+
+    use meerkat_core::SessionId;
+    use meerkat_core::session_hosting::HostingPaths;
+
+    use super::{ConsentAwareJobSource, ConsentNoticeJobSource};
+    use crate::{
+        BoundHostOriginal, ContinuationDelivery, ContinuationHandling, ContinuationKey,
+        ContinuationOwner, ContinuationProducer, ContinuationResultRef, HostOriginalBinder,
+        HostOriginalBinderReadiness, HostOriginalFacts, HostOriginalLookup, HostOriginalRef,
+        HostOriginalRefusal, HostOriginalSettlement, RetainedJobLookup, RetainedJobSource,
+    };
+
+    /// A host source that claims every host original and offers a binder for
+    /// every namespace.
+    struct ClaimsEverything(HostOriginalFacts);
+
+    #[async_trait::async_trait]
+    impl RetainedJobSource for ClaimsEverything {
+        async fn retained_job(
+            &self,
+            _producer: &ContinuationProducer,
+            _job_id: &str,
+        ) -> RetainedJobLookup {
+            RetainedJobLookup::Absent
+        }
+
+        async fn host_original(&self, _namespace: &str, _producer_id: &str) -> HostOriginalLookup {
+            HostOriginalLookup::Found(self.0.clone())
+        }
+
+        fn host_original_binder(&self, _namespace: &str) -> Option<Arc<dyn HostOriginalBinder>> {
+            Some(Arc::new(InertBinder))
+        }
+    }
+
+    struct InertBinder;
+
+    #[async_trait::async_trait]
+    impl HostOriginalBinder for InertBinder {
+        async fn bind(
+            &self,
+            _original: &HostOriginalRef,
+            _session: &SessionId,
+            _input: meerkat_runtime::Input,
+        ) -> Result<BoundHostOriginal, HostOriginalRefusal> {
+            Err(HostOriginalRefusal::NotOwned)
+        }
+
+        async fn readiness(
+            &self,
+            _namespace: &str,
+            _owner: &ContinuationOwner,
+        ) -> HostOriginalBinderReadiness {
+            HostOriginalBinderReadiness::Ready
+        }
+
+        fn retain_unresolved(&self, _settlement: Box<dyn HostOriginalSettlement>, _detail: &str) {}
+    }
+
+    fn facts() -> HostOriginalFacts {
+        HostOriginalFacts::new(
+            ContinuationOwner::Session {
+                session_id: SessionId::new(),
+            },
+            ContinuationDelivery {
+                key: ContinuationKey::new("ingest:1").expect("key"),
+                result: ContinuationResultRef {
+                    producer: ContinuationProducer::Host {
+                        namespace: "app.ingest".into(),
+                    },
+                    producer_id: "observation-1".into(),
+                    result_digest: "sha256:observation-1".into(),
+                    summary: None,
+                },
+                body: "a new item arrived".into(),
+                handling: ContinuationHandling::Queue,
+            },
+            meerkat_runtime::OriginalWorkRef {
+                authority: meerkat_core::PrincipalRef::in_domain(
+                    meerkat_core::PrincipalKind::ServiceAccount,
+                    "collector",
+                    meerkat_core::TrustDomainId::new("host-test").expect("domain"),
+                )
+                .expect("qualified"),
+                work: meerkat_authorization_contracts::evidence::EvidenceId::new("observation-1")
+                    .expect("work id"),
+            },
+        )
+    }
+
+    /// The consent-aware composition forwards host originals and their binder
+    /// to the host's source, but never in a reserved (Core-owned) namespace,
+    /// the consent namespace included, whatever the host's source claims.
+    #[tokio::test]
+    async fn the_consent_aware_source_never_forwards_a_reserved_namespace() {
+        let lock_dir = "/tmp/consent-aware-host-original-test";
+        let domain = HostingPaths {
+            hosting_lock_dir: lock_dir.into(),
+            cold_delivery_lock: format!("{lock_dir}/cold-delivery.lock").into(),
+            database: None,
+        }
+        .domain_ref();
+        let facts = facts();
+        let source = ConsentAwareJobSource {
+            consent: ConsentNoticeJobSource::new(
+                Arc::new(meerkat_core::ApprovalService::new()),
+                domain,
+            ),
+            others: Some(Arc::new(ClaimsEverything(facts.clone()))),
+        };
+        assert_eq!(
+            source.host_original("app.ingest", "observation-1").await,
+            HostOriginalLookup::Found(facts)
+        );
+        assert!(source.host_original_binder("app.ingest").is_some());
+        for reserved in [
+            meerkat_core::approval::consent::CONSENT_DELIVERY_NAMESPACE,
+            "meerkat.other",
+        ] {
+            assert_eq!(
+                source.host_original(reserved, "observation-1").await,
+                HostOriginalLookup::Absent,
+                "{reserved}"
+            );
+            assert!(
+                source.host_original_binder(reserved).is_none(),
+                "{reserved}"
+            );
+        }
+    }
+
+    fn unbound_source() -> ConsentAwareJobSource {
+        let lock_dir = "/tmp/consent-aware-unbound-test";
+        ConsentAwareJobSource {
+            consent: ConsentNoticeJobSource::new(
+                Arc::new(meerkat_core::ApprovalService::new()),
+                HostingPaths {
+                    hosting_lock_dir: lock_dir.into(),
+                    cold_delivery_lock: format!("{lock_dir}/cold-delivery.lock").into(),
+                    database: None,
+                }
+                .domain_ref(),
+            ),
+            others: None,
+        }
+    }
+
+    /// Before the host binds its continuation services, a host original
+    /// outside the reserved namespaces is unavailable (retry later), never
+    /// absent: a delivery drained in that window stays pending, as the
+    /// readiness signal (`Unbound`) promises. A reserved namespace stays
+    /// absent.
+    #[tokio::test]
+    async fn an_unbound_consent_aware_source_answers_a_host_original_unavailable() {
+        let source = unbound_source();
+        assert!(
+            matches!(
+                source.host_original("app.ingest", "observation-1").await,
+                HostOriginalLookup::Unavailable(_)
+            ),
+            "unavailable until the host binds its services, never absent"
+        );
+        assert!(source.host_original_binder("app.ingest").is_none());
+        assert_eq!(
+            source
+                .host_original(
+                    meerkat_core::approval::consent::CONSENT_DELIVERY_NAMESPACE,
+                    "observation-1"
+                )
+                .await,
+            HostOriginalLookup::Absent,
+            "a reserved namespace is never anyone's"
+        );
+    }
+
+    /// The retained-completion twin: before the host binds its continuation
+    /// services, another producer's job is unavailable (retry later), never
+    /// absent, so its retained completion stays pending instead of being
+    /// refused.
+    #[tokio::test]
+    async fn an_unbound_consent_aware_source_answers_another_producers_job_unavailable() {
+        let source = unbound_source();
+        assert!(
+            matches!(
+                source
+                    .retained_job(&ContinuationProducer::ForkOff, "job-1")
+                    .await,
+                RetainedJobLookup::Unavailable(_)
+            ),
+            "unavailable until the host binds its services, never absent"
+        );
     }
 }

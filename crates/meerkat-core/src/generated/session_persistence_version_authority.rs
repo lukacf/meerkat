@@ -4,8 +4,9 @@
 use std::fmt;
 
 pub const SESSION_VERSION: u32 = 4;
-pub const STORED_INPUT_STATE_VERSION: u32 = 7;
+pub const STORED_INPUT_STATE_VERSION: u32 = 8;
 pub const SESSION_METADATA_SCHEMA_VERSION: u32 = 2;
+pub const STORED_INPUT_STATE_BASELINE_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionPersistenceVersionField {
@@ -65,6 +66,17 @@ pub fn session_metadata_schema_version() -> u32 {
     SESSION_METADATA_SCHEMA_VERSION
 }
 
+/// The version one row is written with: the current version when it
+/// carries a fact only the current version can read, the baseline otherwise.
+#[must_use]
+pub fn stored_input_state_version_for_row(carries_current_only_facts: bool) -> u32 {
+    if carries_current_only_facts {
+        STORED_INPUT_STATE_VERSION
+    } else {
+        STORED_INPUT_STATE_BASELINE_VERSION
+    }
+}
+
 pub fn restore_session_envelope_version(
     observed: u32,
 ) -> Result<u32, SessionPersistenceVersionAuthorityError> {
@@ -83,7 +95,7 @@ pub fn restore_stored_input_state_version(
         SessionPersistenceVersionField::StoredInputState,
         observed,
         STORED_INPUT_STATE_VERSION,
-        &[3, 4, 5, 6, 7],
+        &[3, 4, 5, 6, 7, 8],
     )
 }
 

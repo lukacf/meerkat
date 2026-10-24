@@ -13,6 +13,8 @@ pub use ephemeral_runtime::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 mod fatal_error;
+mod input_state_projection;
+pub use input_state_projection::wire_input_state;
 #[cfg(all(
     feature = "session-store",
     feature = "live",
@@ -151,13 +153,14 @@ pub use runtime_schedule_host::{
 };
 pub use schedule_host::{
     AcceptedScheduledInput, MobMemberCurrentSessionScheduleResolver, NoopScheduleMobHost,
-    ScheduleAdmissionOutcome, ScheduleHostHandle, ScheduledEventDispatch, ScheduledPromptDispatch,
-    ScheduledSessionAgentBinding, SharedScheduleTargetAdapter, SurfaceScheduleMobHost,
-    SurfaceScheduleSessionHost, accept_schedule_runtime_input_with_reconciliation,
-    async_completion_dispatch, async_completion_dispatch_with_admission_outcome,
-    build_dispatch_from_accepted, immediate_completed_dispatch,
-    immediate_completed_dispatch_with_admission_outcome, immediate_delivery_failure,
-    mob_member_schedule_identity, parse_mob_member_schedule_identity,
+    ScheduleAdmissionFence, ScheduleAdmissionOutcome, ScheduleHostHandle, ScheduledEventDispatch,
+    ScheduledPromptDispatch, ScheduledSessionAgentBinding, SharedScheduleTargetAdapter,
+    SurfaceScheduleMobHost, SurfaceScheduleSessionHost,
+    accept_fenced_schedule_runtime_input_with_reconciliation,
+    accept_schedule_runtime_input_with_reconciliation, async_completion_dispatch,
+    async_completion_dispatch_with_admission_outcome, build_dispatch_from_accepted,
+    immediate_completed_dispatch, immediate_completed_dispatch_with_admission_outcome,
+    immediate_delivery_failure, mob_member_schedule_identity, parse_mob_member_schedule_identity,
     recover_mob_member_identity_from_session_target, runtime_delivery_dispatch_from_admission,
     schedule_delivery_idempotency_key, schedule_host_supported, schedule_runtime_correlation_id,
     schedule_runtime_delivery_idempotency_key, spawn_schedule_host,

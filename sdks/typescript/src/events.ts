@@ -369,6 +369,11 @@ export interface ToolCallRequestedEvent {
   readonly args: ToolCallArguments;
 }
 
+/**
+ * A tool result was fed back to the model. The only event that carries the
+ * result body (`content`); `tool_execution_completed` for the same `id`
+ * carries the execution facts.
+ */
 export interface ToolResultReceivedEvent {
   readonly type: "tool_result_received";
   readonly id: string;
@@ -419,11 +424,16 @@ export interface ToolExecutionStartedEvent {
   readonly name: string;
 }
 
+/**
+ * A tool finished executing: whether it failed, and how long it took. It
+ * carries no result body: the body is on the `tool_result_received` event for
+ * the same `id`. An event from an older server that still carries `content`
+ * parses, and the field is ignored.
+ */
 export interface ToolExecutionCompletedEvent {
   readonly type: "tool_execution_completed";
   readonly id: string;
   readonly name: string;
-  readonly content: readonly ContentBlock[];
   readonly isError?: boolean;
   readonly durationMs?: number;
 }
@@ -1930,7 +1940,6 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
         type,
         id: requireStringField(raw, "id"),
         name: requireStringField(raw, "name"),
-        content: parseContentBlocks(raw.content, undefined),
         ...(parseWireBoolean(raw.is_error) != null ? { isError: parseWireBoolean(raw.is_error) } : {}),
         ...(typeof raw.duration_ms === "number" && Number.isFinite(raw.duration_ms)
           ? { durationMs: raw.duration_ms }
@@ -1961,8 +1970,11 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
               ),
             }),
       };
-    case "compaction_failed":
-      return { type, reason: requireRecordField(raw, "reason") };
+    case "compaction_failed": {
+      const reason = requireRecordField(raw, "reason");
+      requireStringField(reason, "kind");
+      return { type, reason };
+    }
 
     // Budget
     case "budget_warning":

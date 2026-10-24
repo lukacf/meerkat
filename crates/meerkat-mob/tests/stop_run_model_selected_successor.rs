@@ -10,7 +10,11 @@
 //! resync could run.
 //!
 //! The successor must complete in the SAME session, on the selected model,
-//! with the stopped input and the joined steer not replayed.
+//! with the stopped input and the joined steer not replayed. A stopped run is
+//! closed as interrupted, and the rounds it committed stay in the transcript
+//! (per-round commits): the successor's history carries the stopped run's
+//! committed round once, under the stopped run, then the interrupted-run
+//! notice, then the successor's prompt.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -92,6 +96,100 @@ fn user_texts(messages: &[Message]) -> Vec<String> {
 
 fn mentions(texts: &[String], needle: &str) -> bool {
     texts.iter().any(|text| text.contains(needle))
+}
+
+/// The run a rendered message belongs to: a turn's own messages carry it in
+/// their identity, a peer delivery in its runtime origin. Tool results and
+/// system notices carry none.
+fn message_run_id(message: &serde_json::Value) -> Option<&str> {
+    message
+        .pointer("/identity/run_id")
+        .or_else(|| message.pointer("/runtime_origin/run_id"))
+        .and_then(serde_json::Value::as_str)
+}
+
+/// The successor's history after a stopped run. A stopped run is closed as
+/// interrupted, and the rounds it committed stay in the transcript:
+/// - the stopped input appears exactly once, inside the stopped run's
+///   committed round, under the stopped run's id, and that round holds
+///   nothing of another run;
+/// - nothing of it appears under the successor's run;
+/// - the interrupted-run notice sits between that round and the successor's
+///   prompt;
+/// - the steer, which joined a round that never committed, never appears;
+/// - the successor's prompt appears once, under its own run.
+fn assert_stopped_run_history(request: &RecordedRequest, stopped_run: &meerkat_core::RunId) {
+    let stopped_run = stopped_run.to_string();
+    let messages: Vec<serde_json::Value> = request
+        .user_texts
+        .iter()
+        .map(|text| serde_json::from_str(text).expect("a rendered message parses"))
+        .collect();
+    let positions = |needle: &str| {
+        messages
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| message.to_string().contains(needle))
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>()
+    };
+    let stopped_input = positions(FIRST_PROMPT);
+    assert_eq!(
+        stopped_input.len(),
+        1,
+        "the stopped input appears exactly once: {request:?}"
+    );
+    let stopped_input = stopped_input[0];
+    assert_eq!(
+        message_run_id(&messages[stopped_input]),
+        Some(stopped_run.as_str()),
+        "the stopped input is the stopped run's own committed input: {request:?}"
+    );
+    let successor_prompt = positions(NEXT_PROMPT);
+    assert_eq!(
+        successor_prompt.len(),
+        1,
+        "the successor's prompt appears once: {request:?}"
+    );
+    let successor_prompt = successor_prompt[0];
+    let successor_run = message_run_id(&messages[successor_prompt])
+        .expect("the successor's prompt carries its run")
+        .to_string();
+    assert_ne!(
+        successor_run, stopped_run,
+        "the successor runs as a new run: {request:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .filter(|message| message_run_id(message) == Some(successor_run.as_str()))
+            .all(|message| !message.to_string().contains(FIRST_PROMPT)),
+        "nothing of the stopped input is under the successor's run: {request:?}"
+    );
+    let notice = messages
+        .iter()
+        .position(|message| {
+            message["role"] == "system_notice"
+                && message["body"]
+                    .as_str()
+                    .is_some_and(|body| body.contains("InterruptedByRecovery"))
+        })
+        .unwrap_or_else(|| panic!("the interrupted-run notice is present: {request:?}"));
+    assert!(
+        stopped_input < notice && notice < successor_prompt,
+        "the interrupted-run notice sits between the stopped round and the successor's \
+         prompt: {request:?}"
+    );
+    assert!(
+        messages[stopped_input..notice].iter().all(|message| {
+            message_run_id(message).is_none_or(|run| run == stopped_run.as_str())
+        }),
+        "the stopped round holds nothing of another run: {request:?}"
+    );
+    assert!(
+        positions(STEER_PROMPT).is_empty(),
+        "the steer never appears: {request:?}"
+    );
 }
 
 fn done_events(
@@ -290,6 +388,7 @@ fn mob_definition() -> MobDefinition {
             max_inline_peer_notifications: None,
             output_schema: None,
             provider_params: None,
+            durable: false,
         })),
     );
     let mut definition = MobDefinition::explicit(MobId::from(format!(
@@ -417,13 +516,7 @@ async fn a_stopped_run_does_not_break_the_next_model_selected_turn() {
         1,
         "the successor prompt reaches the provider once: {successor_request:?}"
     );
-    assert!(
-        !successor_request
-            .user_texts
-            .iter()
-            .any(|text| text.contains(FIRST_PROMPT) || text.contains(STEER_PROMPT)),
-        "the stopped input and the joined steer are not replayed: {successor_request:?}"
-    );
+    assert_stopped_run_history(successor_request, &run_id);
     assert_eq!(
         handle.resolve_bridge_session_id(&worker).await,
         Some(session_id),
@@ -542,13 +635,7 @@ async fn a_stopped_peer_driven_run_does_not_break_the_next_model_selected_turn()
     assert_eq!(successors.len(), 1, "one successor request: {requests:?}");
     let successor_request = successors[0];
     assert_eq!(successor_request.model, SELECTED_MODEL);
-    assert!(
-        !successor_request
-            .user_texts
-            .iter()
-            .any(|text| text.contains(FIRST_PROMPT) || text.contains(STEER_PROMPT)),
-        "the stopped peer input and the joined steer are not replayed: {requests:?}"
-    );
+    assert_stopped_run_history(successor_request, &run_id);
 }
 
 /// Control: the same stop at the same model boundary, with NO steer joined.

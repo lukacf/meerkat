@@ -19,6 +19,43 @@ fn deadline() -> std::time::Instant {
     std::time::Instant::now() + WAIT
 }
 
+/// How long a row waits for its mob's destroy to complete, retries included:
+/// a hang guard, not a latency bound. A starved run can archive a member many
+/// times slower than the retirement budget, so two minutes; a destroy that
+/// never completes still fails the row.
+const DESTROY_GUARD: Duration = Duration::from_secs(120);
+
+/// Destroy `handle`'s mob to its terminal report. A member's archive slower
+/// than the retirement budget its disposal waits for (2 s in tests, which a
+/// loaded run exceeds) leaves the destroy Incomplete while the archive keeps
+/// running in its process-owned task. The destroy's contract is to be retried
+/// ([`MobHandle::destroy`]), and a retry finds the archive done. Only that
+/// Incomplete is retried, within [`DESTROY_GUARD`]; any other answer fails
+/// the row.
+async fn destroy_to_terminal(handle: &MobHandle) {
+    let started = tokio::time::Instant::now();
+    let mut attempts = 0_u32;
+    loop {
+        attempts += 1;
+        let Ok(answer) = tokio::time::timeout_at(started + DESTROY_GUARD, handle.destroy()).await
+        else {
+            panic!("the mob destroy did not finish in {DESTROY_GUARD:?} ({attempts} attempts)");
+        };
+        match answer {
+            Ok(_) => return,
+            Err(crate::runtime::handle::MobDestroyError::Incomplete { report })
+                if report
+                    .errors
+                    .iter()
+                    .any(|error| error.contains("retirement remains in progress")) =>
+            {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(error) => panic!("destroy the mob (attempt {attempts}): {error:?}"),
+        }
+    }
+}
+
 fn delivery(label: &str) -> MobDeliveryIdentity {
     MobDeliveryIdentity::new(label, Uuid::new_v4().to_string()).expect("stable delivery identity")
 }
@@ -1269,10 +1306,7 @@ async fn a_scope_from_a_destroyed_incarnation_never_reaches_the_mob_created_agai
         session_id: old_session,
         client,
     } = fixture;
-    tokio::time::timeout(WAIT, owner.handle.destroy())
-        .await
-        .expect("mob destroy finishes")
-        .expect("destroy the mob");
+    destroy_to_terminal(&owner.handle).await;
     let Owner {
         handle,
         store,

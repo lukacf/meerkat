@@ -229,7 +229,7 @@ export class Session {
   async sendExternalEvent(
     eventType: string,
     payload: unknown,
-    options?: { blocks?: ContentBlock[] },
+    options?: { blocks?: ContentBlock[]; idempotencyKey?: string },
   ): Promise<Record<string, unknown>> {
     return this._client.sendExternalEvent(this._id, eventType, payload, options);
   }
@@ -451,7 +451,7 @@ export class DeferredSession {
   async sendExternalEvent(
     eventType: string,
     payload: unknown,
-    options?: { blocks?: ContentBlock[] },
+    options?: { blocks?: ContentBlock[]; idempotencyKey?: string },
   ): Promise<Record<string, unknown>> {
     return this._client.sendExternalEvent(this._id, eventType, payload, options);
   }

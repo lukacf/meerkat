@@ -1773,6 +1773,8 @@ pub enum DurableTailRecoveryClass {
     InterruptedRepairableCandidate,
     #[serde(rename = "Ambiguous")]
     Ambiguous,
+    #[serde(rename = "ContinuableCandidate")]
+    ContinuableCandidate,
 }
 impl DurableTailRecoveryClass {
     pub fn as_str(&self) -> &'static str {
@@ -1780,6 +1782,7 @@ impl DurableTailRecoveryClass {
             Self::CompletedCandidate => "CompletedCandidate",
             Self::InterruptedRepairableCandidate => "InterruptedRepairableCandidate",
             Self::Ambiguous => "Ambiguous",
+            Self::ContinuableCandidate => "ContinuableCandidate",
         }
     }
 }
@@ -1790,6 +1793,7 @@ impl std::convert::TryFrom<&str> for DurableTailRecoveryClass {
             "CompletedCandidate" => Ok(Self::CompletedCandidate),
             "InterruptedRepairableCandidate" => Ok(Self::InterruptedRepairableCandidate),
             "Ambiguous" => Ok(Self::Ambiguous),
+            "ContinuableCandidate" => Ok(Self::ContinuableCandidate),
             other => Err(format!("invalid DurableTailRecoveryClass value `{other}`")),
         }
     }
@@ -1831,6 +1835,10 @@ pub enum DurableTailRecoveryDisposition {
     CommitCompletedRetainInputs,
     #[serde(rename = "HoldIntact")]
     HoldIntact,
+    #[serde(rename = "ContinueRun")]
+    ContinueRun,
+    #[serde(rename = "OperatorRepairAndCommitInterrupted")]
+    OperatorRepairAndCommitInterrupted,
 }
 impl DurableTailRecoveryDisposition {
     pub fn as_str(&self) -> &'static str {
@@ -1840,6 +1848,8 @@ impl DurableTailRecoveryDisposition {
             Self::RepairAndCommitInterrupted => "RepairAndCommitInterrupted",
             Self::CommitCompletedRetainInputs => "CommitCompletedRetainInputs",
             Self::HoldIntact => "HoldIntact",
+            Self::ContinueRun => "ContinueRun",
+            Self::OperatorRepairAndCommitInterrupted => "OperatorRepairAndCommitInterrupted",
         }
     }
 }
@@ -1852,6 +1862,8 @@ impl std::convert::TryFrom<&str> for DurableTailRecoveryDisposition {
             "RepairAndCommitInterrupted" => Ok(Self::RepairAndCommitInterrupted),
             "CommitCompletedRetainInputs" => Ok(Self::CommitCompletedRetainInputs),
             "HoldIntact" => Ok(Self::HoldIntact),
+            "ContinueRun" => Ok(Self::ContinueRun),
+            "OperatorRepairAndCommitInterrupted" => Ok(Self::OperatorRepairAndCommitInterrupted),
             other => Err(format!(
                 "invalid DurableTailRecoveryDisposition value `{other}`"
             )),
@@ -2243,6 +2255,10 @@ pub enum InputAbandonReason {
     NeverExecuted,
     #[serde(rename = "ToolProcessInterrupted")]
     ToolProcessInterrupted,
+    #[serde(rename = "RequeueExpired")]
+    RequeueExpired,
+    #[serde(rename = "ResumeRefused")]
+    ResumeRefused,
 }
 impl InputAbandonReason {
     pub fn as_str(&self) -> &'static str {
@@ -2255,6 +2271,8 @@ impl InputAbandonReason {
             Self::MaxAttemptsExhausted => "MaxAttemptsExhausted",
             Self::NeverExecuted => "NeverExecuted",
             Self::ToolProcessInterrupted => "ToolProcessInterrupted",
+            Self::RequeueExpired => "RequeueExpired",
+            Self::ResumeRefused => "ResumeRefused",
         }
     }
 }
@@ -2270,6 +2288,8 @@ impl std::convert::TryFrom<&str> for InputAbandonReason {
             "MaxAttemptsExhausted" => Ok(Self::MaxAttemptsExhausted),
             "NeverExecuted" => Ok(Self::NeverExecuted),
             "ToolProcessInterrupted" => Ok(Self::ToolProcessInterrupted),
+            "RequeueExpired" => Ok(Self::RequeueExpired),
+            "ResumeRefused" => Ok(Self::ResumeRefused),
             other => Err(format!("invalid InputAbandonReason value `{other}`")),
         }
     }
@@ -8284,6 +8304,8 @@ pub enum RecoveredInputNormalizationReasonKind {
     BoundaryReceiptCommitted,
     #[serde(rename = "MissingBoundaryReceipt")]
     MissingBoundaryReceipt,
+    #[serde(rename = "ResumableRun")]
+    ResumableRun,
 }
 impl RecoveredInputNormalizationReasonKind {
     pub fn as_str(&self) -> &'static str {
@@ -8292,6 +8314,7 @@ impl RecoveredInputNormalizationReasonKind {
             Self::RollbackStaged => "RollbackStaged",
             Self::BoundaryReceiptCommitted => "BoundaryReceiptCommitted",
             Self::MissingBoundaryReceipt => "MissingBoundaryReceipt",
+            Self::ResumableRun => "ResumableRun",
         }
     }
 }
@@ -8303,6 +8326,7 @@ impl std::convert::TryFrom<&str> for RecoveredInputNormalizationReasonKind {
             "RollbackStaged" => Ok(Self::RollbackStaged),
             "BoundaryReceiptCommitted" => Ok(Self::BoundaryReceiptCommitted),
             "MissingBoundaryReceipt" => Ok(Self::MissingBoundaryReceipt),
+            "ResumableRun" => Ok(Self::ResumableRun),
             other => Err(format!(
                 "invalid RecoveredInputNormalizationReasonKind value `{other}`"
             )),
@@ -10678,12 +10702,15 @@ pub enum RuntimeCompletionWaitFailureObservation {
     ChannelClosed,
     #[serde(rename = "AuthorityUnavailable")]
     AuthorityUnavailable,
+    #[serde(rename = "RequeuedAcrossStop")]
+    RequeuedAcrossStop,
 }
 impl RuntimeCompletionWaitFailureObservation {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::ChannelClosed => "ChannelClosed",
             Self::AuthorityUnavailable => "AuthorityUnavailable",
+            Self::RequeuedAcrossStop => "RequeuedAcrossStop",
         }
     }
 }
@@ -10693,6 +10720,7 @@ impl std::convert::TryFrom<&str> for RuntimeCompletionWaitFailureObservation {
         match value {
             "ChannelClosed" => Ok(Self::ChannelClosed),
             "AuthorityUnavailable" => Ok(Self::AuthorityUnavailable),
+            "RequeuedAcrossStop" => Ok(Self::RequeuedAcrossStop),
             other => Err(format!(
                 "invalid RuntimeCompletionWaitFailureObservation value `{other}`"
             )),
@@ -10728,11 +10756,14 @@ pub enum RuntimeCompletionWaitFailurePublicErrorClass {
     #[default]
     #[serde(rename = "InternalError")]
     InternalError,
+    #[serde(rename = "SessionNotRunning")]
+    SessionNotRunning,
 }
 impl RuntimeCompletionWaitFailurePublicErrorClass {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::InternalError => "InternalError",
+            Self::SessionNotRunning => "SessionNotRunning",
         }
     }
 }
@@ -10741,6 +10772,7 @@ impl std::convert::TryFrom<&str> for RuntimeCompletionWaitFailurePublicErrorClas
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
             "InternalError" => Ok(Self::InternalError),
+            "SessionNotRunning" => Ok(Self::SessionNotRunning),
             other => Err(format!(
                 "invalid RuntimeCompletionWaitFailurePublicErrorClass value `{other}`"
             )),
@@ -10778,12 +10810,15 @@ pub enum RuntimeCompletionWaitFailurePublicReason {
     CompletionChannelClosed,
     #[serde(rename = "CompletionAuthorityUnavailable")]
     CompletionAuthorityUnavailable,
+    #[serde(rename = "RequeuedAcrossStop")]
+    RequeuedAcrossStop,
 }
 impl RuntimeCompletionWaitFailurePublicReason {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::CompletionChannelClosed => "CompletionChannelClosed",
             Self::CompletionAuthorityUnavailable => "CompletionAuthorityUnavailable",
+            Self::RequeuedAcrossStop => "RequeuedAcrossStop",
         }
     }
 }
@@ -10793,6 +10828,7 @@ impl std::convert::TryFrom<&str> for RuntimeCompletionWaitFailurePublicReason {
         match value {
             "CompletionChannelClosed" => Ok(Self::CompletionChannelClosed),
             "CompletionAuthorityUnavailable" => Ok(Self::CompletionAuthorityUnavailable),
+            "RequeuedAcrossStop" => Ok(Self::RequeuedAcrossStop),
             other => Err(format!(
                 "invalid RuntimeCompletionWaitFailurePublicReason value `{other}`"
             )),
@@ -11748,6 +11784,56 @@ impl std::convert::TryFrom<String> for StagedSessionPhase {
     }
 }
 impl std::fmt::Display for StagedSessionPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum StopInputDisposition {
+    #[default]
+    #[serde(rename = "Abandon")]
+    Abandon,
+    #[serde(rename = "Retain")]
+    Retain,
+}
+impl StopInputDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Abandon => "Abandon",
+            Self::Retain => "Retain",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for StopInputDisposition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Abandon" => Ok(Self::Abandon),
+            "Retain" => Ok(Self::Retain),
+            other => Err(format!("invalid StopInputDisposition value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for StopInputDisposition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for StopInputDisposition {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -13396,6 +13482,58 @@ impl std::fmt::Display for TurnTerminalOutcome {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum UnregisterQueuedInputsDisposition {
+    #[default]
+    #[serde(rename = "Stop")]
+    Stop,
+    #[serde(rename = "Requeue")]
+    Requeue,
+}
+impl UnregisterQueuedInputsDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Stop => "Stop",
+            Self::Requeue => "Requeue",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for UnregisterQueuedInputsDisposition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Stop" => Ok(Self::Stop),
+            "Requeue" => Ok(Self::Requeue),
+            other => Err(format!(
+                "invalid UnregisterQueuedInputsDisposition value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for UnregisterQueuedInputsDisposition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for UnregisterQueuedInputsDisposition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum UserInterruptObservationKind {
     #[default]
     #[serde(rename = "Accepted")]
@@ -13774,6 +13912,7 @@ pub struct State {
     pub boundary_cancel_dispatch_generation: u64,
     pub turn_terminal_run_id: Option<RunId>,
     pub recovered_boundary_sequence: u64,
+    pub resumable_run_id: Option<RunId>,
     pub terminal_outcome: Option<TurnTerminalOutcome>,
     pub terminal_cause_kind: Option<TurnTerminalCauseKind>,
     pub last_runtime_apply_failure_cause: Option<RuntimeApplyFailureCause>,
@@ -13837,6 +13976,8 @@ pub struct State {
     pub unregister_teardown_retains_snapshot: bool,
     pub unregister_runtime_loop_forced_abort: bool,
     pub unregister_comms_drain_forced_abort: bool,
+    pub unregister_queued_inputs: UnregisterQueuedInputsDisposition,
+    pub unregister_requeue_max_age_ms: u64,
     pub staged_session_phase: StagedSessionPhase,
     pub staged_session_id: Option<SessionId>,
     pub staged_session_keep_alive: Option<bool>,
@@ -14328,6 +14469,7 @@ impl std::fmt::Debug for State {
                 "recovered_boundary_sequence",
                 &self.recovered_boundary_sequence,
             )
+            .field("resumable_run_id", &self.resumable_run_id)
             .field("terminal_outcome", &self.terminal_outcome)
             .field("terminal_cause_kind", &self.terminal_cause_kind)
             .field(
@@ -14513,6 +14655,11 @@ impl std::fmt::Debug for State {
             .field(
                 "unregister_comms_drain_forced_abort",
                 &self.unregister_comms_drain_forced_abort,
+            )
+            .field("unregister_queued_inputs", &self.unregister_queued_inputs)
+            .field(
+                "unregister_requeue_max_age_ms",
+                &self.unregister_requeue_max_age_ms,
             )
             .field("staged_session_phase", &self.staged_session_phase)
             .field("staged_session_id", &self.staged_session_id)
@@ -15887,6 +16034,8 @@ pub mod inputs {
         pub fence_token: Option<FenceToken>,
         pub generation: Option<Generation>,
         pub runtime_epoch_id: Option<RuntimeEpochId>,
+        pub queued_inputs: UnregisterQueuedInputsDisposition,
+        pub requeue_max_age_ms: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct BeginUnregisterUnservedAttachment {
@@ -16636,6 +16785,7 @@ pub mod inputs {
         pub input_id: String,
         pub phase: RecoveredInputObservedPhase,
         pub applied_boundary_committed: Option<bool>,
+        pub bound_run_resumable: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ClassifyRecoveredInputDurability {
@@ -18618,6 +18768,53 @@ pub mod inputs {
         pub has_interaction_terminal_outbox: bool,
         pub finalization: RuntimeCompletionFinalizationObservation,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ClassifyStopInputDisposition {
+        pub input_id: String,
+        pub durability: InputDurabilityKind,
+        pub directed: bool,
+        pub objective_bound: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct MarkRunResumable {
+        pub run_id: RunId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResumeRun {
+        pub run_id: RunId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ReleaseResumableRun {
+        pub run_id: RunId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SettleResumableRun {
+        pub run_id: RunId,
+        pub reason: InputAbandonReason,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct SuspendRunForStop {
+        pub run_id: RunId,
+        pub durable_session: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ReplayAppliedRunContributor {
+        pub input_id: String,
+        pub run_id: RunId,
+        pub lane: InputLane,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AuthorizeOperatorDurableTailRepair {
+        pub session_id: SessionId,
+        pub candidate_id: String,
+        pub candidate_run_id: RunId,
+        pub class: DurableTailRecoveryClass,
+        pub observed_lifecycle: DurableRecoveryObservedLifecycle,
+        pub observed_current_run: DurableRecoveryObservedRun,
+        pub last_committed_sequence: u64,
+        pub prior_commit: DurableRecoveryPriorCommit,
+        pub input_evidence: DurableRecoveryInputEvidence,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -19037,6 +19234,14 @@ pub enum Input {
     RecoverInputCompletionBoundary(inputs::RecoverInputCompletionBoundary),
     ResolveCheckpointCompletionResult(inputs::ResolveCheckpointCompletionResult),
     ResolveAbandonedCompletionResult(inputs::ResolveAbandonedCompletionResult),
+    ClassifyStopInputDisposition(inputs::ClassifyStopInputDisposition),
+    MarkRunResumable(inputs::MarkRunResumable),
+    ResumeRun(inputs::ResumeRun),
+    ReleaseResumableRun(inputs::ReleaseResumableRun),
+    SettleResumableRun(inputs::SettleResumableRun),
+    SuspendRunForStop(inputs::SuspendRunForStop),
+    ReplayAppliedRunContributor(inputs::ReplayAppliedRunContributor),
+    AuthorizeOperatorDurableTailRepair(inputs::AuthorizeOperatorDurableTailRepair),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -19618,6 +19823,16 @@ impl Input {
             Self::ResolveAbandonedCompletionResult(_) => {
                 InputKind::ResolveAbandonedCompletionResult
             }
+            Self::ClassifyStopInputDisposition(_) => InputKind::ClassifyStopInputDisposition,
+            Self::MarkRunResumable(_) => InputKind::MarkRunResumable,
+            Self::ResumeRun(_) => InputKind::ResumeRun,
+            Self::ReleaseResumableRun(_) => InputKind::ReleaseResumableRun,
+            Self::SettleResumableRun(_) => InputKind::SettleResumableRun,
+            Self::SuspendRunForStop(_) => InputKind::SuspendRunForStop,
+            Self::ReplayAppliedRunContributor(_) => InputKind::ReplayAppliedRunContributor,
+            Self::AuthorizeOperatorDurableTailRepair(_) => {
+                InputKind::AuthorizeOperatorDurableTailRepair
+            }
         }
     }
 }
@@ -20026,6 +20241,14 @@ pub enum InputKind {
     RecoverInputCompletionBoundary,
     ResolveCheckpointCompletionResult,
     ResolveAbandonedCompletionResult,
+    ClassifyStopInputDisposition,
+    MarkRunResumable,
+    ResumeRun,
+    ReleaseResumableRun,
+    SettleResumableRun,
+    SuspendRunForStop,
+    ReplayAppliedRunContributor,
+    AuthorizeOperatorDurableTailRepair,
 }
 
 pub mod signals {
@@ -21767,6 +21990,33 @@ pub mod effects {
         pub result_class: RuntimeCompletionResultClass,
         pub cleanup_outcome: RuntimeCompletionObservedOutcome,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct StopInputDispositionClassified {
+        pub input_id: String,
+        pub disposition: StopInputDisposition,
+        pub requeue_max_age_ms: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResumableRunMarked {
+        pub run_id: RunId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResumedRunAuthorized {
+        pub run_id: RunId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResumableRunReleased {
+        pub run_id: RunId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResumableRunSettled {
+        pub run_id: RunId,
+        pub reason: InputAbandonReason,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RunSuspendedForStop {
+        pub run_id: RunId,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -22036,6 +22286,12 @@ pub enum Effect {
     TerminalCompletionCorrelationClassified(effects::TerminalCompletionCorrelationClassified),
     CheckpointCompletionResultResolved(effects::CheckpointCompletionResultResolved),
     AbandonedCompletionResultResolved(effects::AbandonedCompletionResultResolved),
+    StopInputDispositionClassified(effects::StopInputDispositionClassified),
+    ResumableRunMarked(effects::ResumableRunMarked),
+    ResumedRunAuthorized(effects::ResumedRunAuthorized),
+    ResumableRunReleased(effects::ResumableRunReleased),
+    ResumableRunSettled(effects::ResumableRunSettled),
+    RunSuspendedForStop(effects::RunSuspendedForStop),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -22292,6 +22548,12 @@ pub enum EffectKind {
     TerminalCompletionCorrelationClassified,
     CheckpointCompletionResultResolved,
     AbandonedCompletionResultResolved,
+    StopInputDispositionClassified,
+    ResumableRunMarked,
+    ResumedRunAuthorized,
+    ResumableRunReleased,
+    ResumableRunSettled,
+    RunSuspendedForStop,
 }
 
 pub mod command_capabilities {
@@ -22305,6 +22567,7 @@ pub mod command_capabilities {
         AuthorizedAcceptedInputMaterialization,
         AuthorizeRuntimeLoopBatch,
         AuthorizedStageForRun,
+        AuthorizedResumedRun,
         AuthorizedRuntimeLoopRunCommit,
         AuthorizedInteractionTerminalOutboxAdoption,
         AuthorizedRuntimeCompletionResultClosure,
@@ -22319,6 +22582,7 @@ pub mod command_capabilities {
                 }
                 Self::AuthorizeRuntimeLoopBatch => "AuthorizeRuntimeLoopBatch",
                 Self::AuthorizedStageForRun => "AuthorizedStageForRun",
+                Self::AuthorizedResumedRun => "AuthorizedResumedRun",
                 Self::AuthorizedRuntimeLoopRunCommit => "AuthorizedRuntimeLoopRunCommit",
                 Self::AuthorizedInteractionTerminalOutboxAdoption => {
                     "AuthorizedInteractionTerminalOutboxAdoption"
@@ -22450,6 +22714,27 @@ pub mod command_capabilities {
         #[must_use]
         pub const fn plan(&self) -> CommandPlanKind {
             CommandPlanKind::AuthorizedStageForRun
+        }
+    }
+
+    #[must_use = "generated command capability `AuthorizedResumedRun` must be consumed by the shell action it authorizes"]
+    #[derive(Debug, PartialEq, Eq)]
+    pub struct AuthorizedResumedRun {
+        _sealed: private::Sealed,
+    }
+
+    impl AuthorizedResumedRun {
+        #[doc(hidden)]
+        #[allow(dead_code)]
+        pub(crate) fn mint_from_generated_command_plan() -> Self {
+            Self {
+                _sealed: private::Sealed,
+            }
+        }
+
+        #[must_use]
+        pub const fn plan(&self) -> CommandPlanKind {
+            CommandPlanKind::AuthorizedResumedRun
         }
     }
 
@@ -25329,6 +25614,77 @@ pub enum TransitionId {
     ResolveCheckpointCompletionResultFailedRunning,
     ResolveCheckpointCompletionResultFailedRetired,
     ResolveCheckpointCompletionResultFailedStopped,
+    ClassifyStopInputDispositionRetainInitializing,
+    ClassifyStopInputDispositionRetainIdle,
+    ClassifyStopInputDispositionRetainAttached,
+    ClassifyStopInputDispositionRetainRunning,
+    ClassifyStopInputDispositionRetainRetired,
+    ClassifyStopInputDispositionRetainStopped,
+    ClassifyStopInputDispositionAbandonInitializing,
+    ClassifyStopInputDispositionAbandonIdle,
+    ClassifyStopInputDispositionAbandonAttached,
+    ClassifyStopInputDispositionAbandonRunning,
+    ClassifyStopInputDispositionAbandonRetired,
+    ClassifyStopInputDispositionAbandonStopped,
+    ResolveRuntimeCompletionWaitFailureRequeuedAcrossStopInitializing,
+    ResolveRuntimeCompletionWaitFailureRequeuedAcrossStopIdle,
+    ResolveRuntimeCompletionWaitFailureRequeuedAcrossStopAttached,
+    ResolveRuntimeCompletionWaitFailureRequeuedAcrossStopRunning,
+    ResolveRuntimeCompletionWaitFailureRequeuedAcrossStopRetired,
+    ResolveRuntimeCompletionWaitFailureRequeuedAcrossStopStopped,
+    AuthorizeDurableTailRecoveryContinueIdle,
+    AuthorizeDurableTailRecoveryRepairContinuableRetiredIdle,
+    AuthorizeDurableTailRecoveryRepairContinuableRetiredRetired,
+    AuthorizeDurableTailRecoveryHoldContinuableRetiredIdle,
+    AuthorizeDurableTailRecoveryHoldContinuableRetiredRetired,
+    MarkRunResumableInitializing,
+    MarkRunResumableIdle,
+    MarkRunResumableAttached,
+    ResumeRunRunning,
+    ReleaseResumableRunInitializing,
+    ReleaseResumableRunIdle,
+    ReleaseResumableRunAttached,
+    ReleaseResumableRunRetired,
+    ReleaseResumableRunStopped,
+    SettleResumableRunInitializing,
+    SettleResumableRunIdle,
+    SettleResumableRunAttached,
+    SettleResumableRunRetired,
+    SettleResumableRunStopped,
+    NormalizeRecoveredInputStagedResumableInitializing,
+    NormalizeRecoveredInputStagedResumableIdle,
+    NormalizeRecoveredInputStagedResumableAttached,
+    NormalizeRecoveredInputStagedResumableRunning,
+    NormalizeRecoveredInputStagedResumableRetired,
+    NormalizeRecoveredInputStagedResumableStopped,
+    NormalizeRecoveredInputAppliedResumableInitializing,
+    NormalizeRecoveredInputAppliedResumableIdle,
+    NormalizeRecoveredInputAppliedResumableAttached,
+    NormalizeRecoveredInputAppliedResumableRunning,
+    NormalizeRecoveredInputAppliedResumableRetired,
+    NormalizeRecoveredInputAppliedResumableStopped,
+    SuspendRunForStopRunningToIdle,
+    SuspendRunForStopRunningToAttached,
+    ReplayAppliedRunContributorIdle,
+    ReplayAppliedRunContributorAttached,
+    ReplayAppliedRunContributorRunning,
+    ReplayAppliedRunContributorRetired,
+    ReplayAppliedRunContributorStopped,
+    ClassifyStopInputDispositionRetainResumableInitializing,
+    ClassifyStopInputDispositionRetainResumableIdle,
+    ClassifyStopInputDispositionRetainResumableAttached,
+    ClassifyStopInputDispositionRetainResumableRunning,
+    ClassifyStopInputDispositionRetainResumableRetired,
+    ClassifyStopInputDispositionRetainResumableStopped,
+    AuthorizeOperatorDurableTailRepairIdle,
+    AuthorizeOperatorDurableTailRepairRetired,
+    AuthorizeOperatorDurableTailRepairRefuseIdle,
+    AuthorizeOperatorDurableTailRepairRefuseRetired,
+    AuthorizeOperatorDurableTailRepairRefuseNonQuiescentInitializing,
+    AuthorizeOperatorDurableTailRepairRefuseNonQuiescentAttached,
+    AuthorizeOperatorDurableTailRepairRefuseNonQuiescentRunning,
+    AuthorizeOperatorDurableTailRepairRefuseNonQuiescentStopped,
+    AuthorizeOperatorDurableTailRepairRefuseNonQuiescentDestroyed,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -25426,6 +25782,7 @@ pub fn initial_state() -> State {
         boundary_cancel_dispatch_generation: 0,
         turn_terminal_run_id: None,
         recovered_boundary_sequence: 0,
+        resumable_run_id: None,
         terminal_outcome: None,
         terminal_cause_kind: None,
         last_runtime_apply_failure_cause: None,
@@ -25480,6 +25837,8 @@ pub fn initial_state() -> State {
         unregister_teardown_retains_snapshot: false,
         unregister_runtime_loop_forced_abort: false,
         unregister_comms_drain_forced_abort: false,
+        unregister_queued_inputs: UnregisterQueuedInputsDisposition::Stop,
+        unregister_requeue_max_age_ms: 0,
         staged_session_phase: StagedSessionPhase::NotStaged,
         staged_session_id: None,
         staged_session_keep_alive: None,

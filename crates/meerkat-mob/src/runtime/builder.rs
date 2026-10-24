@@ -656,6 +656,8 @@ pub struct MobBuilder {
     runtime_adapter: RuntimeAdapterOption,
     #[cfg(feature = "runtime-adapter")]
     member_runtime_registration_hook: Option<Arc<dyn super::MemberRuntimeRegistrationHook>>,
+    #[cfg(feature = "runtime-adapter")]
+    durable_resume_gate: Option<Arc<dyn super::DurableResumeGate>>,
     workgraph_service: Option<meerkat::WorkGraphService>,
     allow_ephemeral_sessions: bool,
     notify_orchestrator_on_resume: bool,
@@ -1425,6 +1427,71 @@ async fn record_seeded_member_endpoint_broken(
         },
     );
     Ok(())
+}
+
+/// Each identity's latest incarnation in a journal: its generation and the
+/// continuity intent it was spawned with.
+pub(super) type RecordedContinuity =
+    HashMap<AgentIdentity, (crate::ids::Generation, super::handle::SpawnContinuityIntent)>;
+
+/// The continuity intent each identity's latest incarnation in `events` was
+/// spawned with, with that incarnation's generation: its own spawn, carried
+/// across a `MemberReset`, which keeps the incarnation under a new
+/// generation. The roster is projected from the same journal, so every entry
+/// of the current epoch finds its own incarnation's spawn here.
+pub(super) fn recorded_continuity_intents(events: &[crate::event::MobEvent]) -> RecordedContinuity {
+    let mut recorded: RecordedContinuity = HashMap::new();
+    for event in events {
+        match &event.kind {
+            MobEventKind::MemberSpawned(spawned) => {
+                recorded.insert(
+                    spawned.agent_identity.clone(),
+                    (spawned.generation, spawned.continuity_intent.clone()),
+                );
+            }
+            MobEventKind::MemberReset {
+                agent_identity,
+                previous_generation,
+                new_generation,
+                ..
+            } => {
+                if let Some((generation, _)) = recorded.get_mut(agent_identity)
+                    && *generation == *previous_generation
+                {
+                    *generation = *new_generation;
+                }
+            }
+            _ => {}
+        }
+    }
+    recorded
+}
+
+/// The continuity intent `entry`'s incarnation was spawned with (its own
+/// spawn, carried across `MemberReset`): what its restore, explicit resume or
+/// warm revival provisions it as. A rebuild refuses an entry whose own spawn
+/// is missing from `recorded` (the roster's projection from the same journal
+/// rules that out) instead of rebuilding a possibly durable worker without
+/// its resume gate; the refusal is traced as the broken invariant it is.
+pub(super) fn entry_continuity_intent(
+    recorded: &RecordedContinuity,
+    entry: &RosterEntry,
+) -> Result<super::handle::SpawnContinuityIntent, String> {
+    recorded
+        .get(&entry.agent_identity)
+        .filter(|(generation, _)| *generation == entry.generation)
+        .map(|(_, intent)| intent.clone())
+        .ok_or_else(|| {
+            tracing::error!(
+                agent_identity = %entry.agent_identity,
+                generation = %entry.generation,
+                "a restored member's own spawn is missing from its journal epoch"
+            );
+            format!(
+                "the journal holds no spawn of member '{}' at generation {}, so its continuity intent is unknown",
+                entry.agent_identity, entry.generation
+            )
+        })
 }
 
 fn recovered_session_bindings_without_endpoint(
@@ -6536,6 +6603,19 @@ async fn recover_placed_kickoff_outcome_custody(
                 expected.agent_identity
             )));
         }
+        // A plain resume whose member host reported the adopted session's
+        // first turn as started waived its kickoff: there is nothing to
+        // repair. A waived kickoff never records custody, so a chain for it
+        // fails closed.
+        if entry.record.waives_first_turn() {
+            if chains.contains_key(&key) {
+                return Err(MobError::Internal(format!(
+                    "waived placed kickoff '{}' has custody history",
+                    expected.input_id
+                )));
+            }
+            continue;
+        }
         if let Some(chain) = chains.get(&key) {
             if chain
                 .recorded_cursor
@@ -7095,6 +7175,9 @@ struct RuntimeWiring {
     reachability_observations: Arc<super::handle::ReachabilityObservations>,
     restore_diagnostics:
         Arc<RwLock<HashMap<AgentIdentity, super::handle::RestoreFailureDiagnostic>>>,
+    /// The custody restores the actor defers, as member status reads see
+    /// them: shared by the handles and the actor's deferral registry.
+    custody_deferrals: super::handle::MemberCustodyDeferrals,
     runtime_metadata: Arc<dyn crate::store::MobRuntimeMetadataStore>,
     identity: Arc<dyn crate::store::MobIdentityStore>,
     identity_member: Option<Arc<dyn crate::store::MobIdentityMemberStore>>,
@@ -7193,6 +7276,8 @@ impl MobBuilder {
             runtime_adapter: None,
             #[cfg(feature = "runtime-adapter")]
             member_runtime_registration_hook: None,
+            #[cfg(feature = "runtime-adapter")]
+            durable_resume_gate: None,
             workgraph_service: None,
             allow_ephemeral_sessions: false,
             notify_orchestrator_on_resume: true,
@@ -7278,6 +7363,8 @@ impl MobBuilder {
             runtime_adapter: None,
             #[cfg(feature = "runtime-adapter")]
             member_runtime_registration_hook: None,
+            #[cfg(feature = "runtime-adapter")]
+            durable_resume_gate: None,
             workgraph_service: None,
             allow_ephemeral_sessions: false,
             notify_orchestrator_on_resume: true,
@@ -7381,6 +7468,21 @@ impl MobBuilder {
         hook: Arc<dyn super::MemberRuntimeRegistrationHook>,
     ) -> Self {
         self.member_runtime_registration_hook = Some(hook);
+        self
+    }
+
+    /// Install the host's check before a durable worker's interrupted run
+    /// resumes (see [`super::DurableResumeGate`]). The mob binds it on the
+    /// exact runtime registration of each durable worker it provisions itself
+    /// (at spawn, cold restore, explicit resume and warm revival), before the
+    /// worker's actor exists; the runtime asks it before it resumes a run the
+    /// worker left open. A durable worker placed on and materialized by
+    /// another host resumes its runs there without asking the gate. Members
+    /// that are not durable workers are never checked, and without a gate
+    /// every run resumes.
+    #[cfg(feature = "runtime-adapter")]
+    pub fn with_durable_resume_gate(mut self, gate: Arc<dyn super::DurableResumeGate>) -> Self {
+        self.durable_resume_gate = Some(gate);
         self
     }
 
@@ -7623,6 +7725,8 @@ impl MobBuilder {
                 runtime_adapter,
                 #[cfg(feature = "runtime-adapter")]
                 member_runtime_registration_hook,
+                #[cfg(feature = "runtime-adapter")]
+                durable_resume_gate,
                 workgraph_service,
                 allow_ephemeral_sessions,
                 notify_orchestrator_on_resume,
@@ -7854,6 +7958,7 @@ impl MobBuilder {
                     session_service,
                     runtime_adapter,
                     member_runtime_registration_hook,
+                    durable_resume_gate,
                     workgraph_service,
                     tool_bundles,
                     default_llm_client,
@@ -7964,6 +8069,8 @@ impl MobBuilder {
             runtime_adapter,
             #[cfg(feature = "runtime-adapter")]
             member_runtime_registration_hook,
+            #[cfg(feature = "runtime-adapter")]
+            durable_resume_gate,
             workgraph_service,
             allow_ephemeral_sessions,
             notify_orchestrator_on_resume,
@@ -8290,8 +8397,12 @@ impl MobBuilder {
             )
             .with_binding_persistence(definition.id.clone(), storage.runtime_metadata.clone())
             .with_composition_signal_dispatcher(composition_signal_dispatcher);
-            let runtime_provisioner = Arc::new(match member_runtime_registration_hook.clone() {
+            let runtime_provisioner = match member_runtime_registration_hook.clone() {
                 Some(hook) => runtime_provisioner.with_member_runtime_registration_hook(hook),
+                None => runtime_provisioner,
+            };
+            let runtime_provisioner = Arc::new(match durable_resume_gate.clone() {
+                Some(gate) => runtime_provisioner.with_durable_resume_gate(gate),
                 None => runtime_provisioner,
             });
             drive_recovered_placed_carrier_cleanup(
@@ -8408,6 +8519,7 @@ impl MobBuilder {
             // projection below after applying any recovered binding events.
             let roster_state = Arc::new(RwLock::new(RosterAuthority::from_roster(roster.clone())));
             let restore_diagnostics = Arc::new(RwLock::new(seeded_restore_diagnostics));
+            let custody_deferrals = super::handle::MemberCustodyDeferrals::default();
             let (machine_state_watch_tx, machine_state_watch_rx) =
                 tokio::sync::watch::channel(initial_dsl_authority.state().clone());
             let reachability_observations =
@@ -8434,6 +8546,7 @@ impl MobBuilder {
                 phase_watch_tx,
                 reachability_observations: Arc::clone(&reachability_observations),
                 restore_diagnostics: restore_diagnostics.clone(),
+                custody_deferrals: custody_deferrals.clone(),
                 runtime_metadata: storage.runtime_metadata.clone(),
                 identity: storage.identity.clone(),
                 identity_member: storage.identity_member.clone(),
@@ -8465,6 +8578,7 @@ impl MobBuilder {
                 session_service: session_service.clone(),
                 runtime_adapter: runtime_adapter.clone(),
                 restore_diagnostics,
+                custody_deferrals,
                 supervisor_bridge: supervisor_bridge.clone(),
                 machine_state_watch_rx,
                 reachability_observations,
@@ -9298,6 +9412,7 @@ impl MobBuilder {
             });
         let legacy_recovered_session_bindings =
             recovered_session_bindings_without_endpoint(epoch_events);
+        let recorded_continuity = recorded_continuity_intents(epoch_events);
         let mut new_recovered_session_bindings_without_endpoint = HashSet::new();
         let listed_sessions = session_service
             .list(meerkat_core::service::SessionQuery::default())
@@ -9956,6 +10071,14 @@ impl MobBuilder {
                     .await;
                     continue;
                 }
+                // A durable worker is restored with its resume gate.
+                let continuity_intent = match entry_continuity_intent(&recorded_continuity, entry) {
+                    Ok(intent) => intent,
+                    Err(reason) => {
+                        record_restore_failure(bridge_session_id.clone(), reason).await;
+                        continue;
+                    }
+                };
                 match provisioner
                     .provision_member(super::provisioner::ProvisionMemberRequest {
                         create_session: req,
@@ -9972,6 +10095,7 @@ impl MobBuilder {
                         runtime_revival_intent:
                             super::provisioner::RuntimeRevivalIntent::ColdRestore,
                         held_bound: None,
+                        continuity_intent,
                     })
                     .await
                 {
@@ -10133,6 +10257,13 @@ impl MobBuilder {
                 entry.role.as_str(),
                 entry.agent_identity.as_str(),
             )?;
+            let continuity_intent = match entry_continuity_intent(&recorded_continuity, entry) {
+                Ok(intent) => intent,
+                Err(reason) => {
+                    record_restore_failure(bridge_session_id.clone(), reason).await;
+                    continue;
+                }
+            };
             let mut provision_request = super::provisioner::ProvisionMemberRequest {
                 create_session: req,
                 authorized_resume: None,
@@ -10147,6 +10278,7 @@ impl MobBuilder {
                 // back typed, as on the durable arm above.
                 runtime_revival_intent: super::provisioner::RuntimeRevivalIntent::ColdRestore,
                 held_bound: None,
+                continuity_intent,
             };
             let admitted_bridge_session_id =
                 super::actor::admit_bridge_session_for_spawn(&mut provision_request.create_session);
@@ -10532,6 +10664,7 @@ impl MobBuilder {
         session_service: Arc<dyn MobSessionService>,
         runtime_adapter: RuntimeAdapterOption,
         member_runtime_registration_hook: Option<Arc<dyn super::MemberRuntimeRegistrationHook>>,
+        durable_resume_gate: Option<Arc<dyn super::DurableResumeGate>>,
         workgraph_service: Option<meerkat::WorkGraphService>,
         tool_bundles: BTreeMap<String, Arc<dyn AgentToolDispatcher>>,
         default_llm_client: Option<Arc<dyn LlmClient>>,
@@ -10583,8 +10716,12 @@ impl MobBuilder {
             )
             .with_binding_persistence(definition.id.clone(), runtime_metadata.clone())
             .with_composition_signal_dispatcher(composition_signal_dispatcher);
-            let provisioner = Arc::new(match member_runtime_registration_hook {
+            let provisioner = match member_runtime_registration_hook {
                 Some(hook) => provisioner.with_member_runtime_registration_hook(hook),
+                None => provisioner,
+            };
+            let provisioner = Arc::new(match durable_resume_gate {
+                Some(gate) => provisioner.with_durable_resume_gate(gate),
                 None => provisioner,
             });
             let session_ops_adapter = provisioner.session_ops_adapter();
@@ -10600,6 +10737,7 @@ impl MobBuilder {
                     super::handle::ReachabilityObservations::default(),
                 ),
                 restore_diagnostics,
+                custody_deferrals: super::handle::MemberCustodyDeferrals::default(),
                 runtime_metadata,
                 identity,
                 identity_member,
@@ -10738,6 +10876,7 @@ impl MobBuilder {
                 phase_watch_tx: phase_watch_tx_actor,
                 reachability_observations,
                 restore_diagnostics,
+                custody_deferrals,
                 runtime_metadata,
                 identity,
                 identity_member,
@@ -10781,6 +10920,7 @@ impl MobBuilder {
                 session_service: handle_session_service.clone(),
                 runtime_adapter: runtime_adapter.clone(),
                 restore_diagnostics: restore_diagnostics.clone(),
+                custody_deferrals: custody_deferrals.clone(),
                 supervisor_bridge: supervisor_bridge.clone(),
                 machine_state_watch_rx: machine_state_watch_tx.subscribe(),
                 reachability_observations: Arc::clone(&reachability_observations),
@@ -10909,7 +11049,9 @@ impl MobBuilder {
             ));
             let identity_reconcile_holder_id = format!("mob:{}", definition.id);
             let identity_reconcile_incarnation_id =
-                meerkat_core::ops::OperationId::new().to_string();
+                super::identity_incarnation_custody::mint_incarnation_id(
+                    identity.incarnation_custody_store(),
+                );
             let recovered_member_status_observed_at_ms = dsl_authority
                 .state()
                 .member_last_observed_at_ms
@@ -11013,6 +11155,8 @@ impl MobBuilder {
                 stuck_retirements: BTreeMap::new(),
                 shutdown_report: super::MobShutdownReport::default(),
                 shutdown_deadline: None,
+                #[cfg(feature = "runtime-adapter")]
+                shutdown_queued_inputs: super::QueuedInputsOnShutdown::Stop,
                 pending_shutdown_teardown: None,
                 pending_stuck_redrives: std::collections::VecDeque::new(),
                 next_retirement_ticket: 0,
@@ -11074,6 +11218,9 @@ impl MobBuilder {
                 identity_reconcile_safety_cursor: None,
                 identity_reconcile_failures: Arc::new(RwLock::new(BTreeMap::new())),
                 identity_reconcile_backoff: BTreeMap::new(),
+                deferred_member_custody: super::actor::DeferredMemberCustodyRegistry::publishing(
+                    custody_deferrals,
+                ),
                 identity_reconcile_parked: BTreeMap::new(),
                 spawn_panic_log_ledger: Arc::new(
                     super::panic_capture::SpawnPanicLogLedger::default(),
@@ -11492,6 +11639,111 @@ mod tests {
     };
     use chrono::Utc;
     use meerkat_core::time_compat::UNIX_EPOCH;
+
+    /// A restore provisions every roster entry with the continuity intent of
+    /// its own spawn, matched by generation: after a retire and a respawn,
+    /// the respawn's intent decides, and a reset carries the spawn's intent
+    /// to its new generation. An entry whose own spawn the journal does not
+    /// hold is refused, never restored as ephemeral.
+    #[cfg(feature = "runtime-adapter")]
+    #[test]
+    fn a_restored_member_takes_its_own_spawns_continuity_intent() {
+        let identity = AgentIdentity::from("worker-1");
+        let durable = crate::runtime::SpawnContinuityIntent::DurableIdentity {
+            continuity_key: "worker-1".to_string(),
+        };
+        let event = |cursor: u64, kind: MobEventKind| MobEvent {
+            cursor,
+            timestamp: Utc::now(),
+            mob_id: MobId::from("restore-mob"),
+            kind,
+        };
+        let spawned = |generation: Generation, intent: crate::runtime::SpawnContinuityIntent| {
+            let mut spawned = MemberSpawnedEvent::new(
+                identity.clone(),
+                generation,
+                crate::ids::FenceToken::new(1),
+                crate::ids::AgentRuntimeId::new(identity.clone(), generation),
+                ProfileName::from("worker"),
+            )
+            .with_bridge_member_ref(Some(
+                crate::event::MemberRef::from_bridge_session_id(
+                    meerkat_core::types::SessionId::new(),
+                ),
+            ));
+            spawned.continuity_intent = intent;
+            MobEventKind::MemberSpawned(spawned)
+        };
+        let events = vec![
+            event(
+                1,
+                spawned(
+                    Generation::new(0),
+                    crate::runtime::SpawnContinuityIntent::Ephemeral,
+                ),
+            ),
+            event(
+                2,
+                MobEventKind::MemberRetired {
+                    agent_identity: identity.clone(),
+                    generation: Generation::new(0),
+                    role: ProfileName::from("worker"),
+                },
+            ),
+            event(3, spawned(Generation::new(1), durable.clone())),
+        ];
+        let roster = Roster::project(&events);
+        let recorded = recorded_continuity_intents(&events);
+        let entries = roster.list().cloned().collect::<Vec<_>>();
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        for entry in &entries {
+            assert_eq!(entry.generation, Generation::new(1));
+            assert_eq!(
+                entry_continuity_intent(&recorded, entry),
+                Ok(durable.clone())
+            );
+        }
+
+        let mut unrecorded = entries[0].clone();
+        unrecorded.generation = Generation::new(2);
+        let refused = entry_continuity_intent(&recorded, &unrecorded)
+            .expect_err("an entry without its own spawn is refused");
+        assert!(
+            refused.contains("worker-1") && refused.contains("generation 2"),
+            "{refused}"
+        );
+
+        // A reset keeps the incarnation under a new generation, with no new
+        // spawn: the entry takes its spawn's intent across it.
+        let reset_events = vec![
+            event(1, spawned(Generation::new(0), durable.clone())),
+            event(
+                2,
+                MobEventKind::MemberReset {
+                    agent_identity: identity.clone(),
+                    previous_generation: Generation::new(0),
+                    new_generation: Generation::new(1),
+                    fence_token: crate::ids::FenceToken::new(2),
+                    agent_runtime_id: crate::ids::AgentRuntimeId::new(
+                        identity.clone(),
+                        Generation::new(1),
+                    ),
+                },
+            ),
+        ];
+        let roster = Roster::project(&reset_events);
+        let recorded = recorded_continuity_intents(&reset_events);
+        let entries = roster.list().cloned().collect::<Vec<_>>();
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_eq!(entries[0].generation, Generation::new(1));
+        assert_eq!(
+            entry_continuity_intent(&recorded, &entries[0]),
+            Ok(durable.clone())
+        );
+        let mut unrecorded = entries[0].clone();
+        unrecorded.generation = Generation::new(2);
+        assert!(entry_continuity_intent(&recorded, &unrecorded).is_err());
+    }
 
     #[cfg(feature = "runtime-adapter")]
     mod cold_runtime_restoration {
@@ -12365,6 +12617,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
+                durable: false,
             },
             definition_extract: PortableDefinitionExtract {
                 profile_names: vec!["worker".to_string()],
@@ -12433,6 +12686,7 @@ mod tests {
                         signing_key: mob_dsl::PeerSigningKey(signing_key),
                     },
                     ack_engine_version: "placed-recovery-test-engine".to_string(),
+                    adopted_first_turn_started: false,
                 },
             );
         }
@@ -12471,6 +12725,59 @@ mod tests {
             .validate_for_mob(mob_id)
             .expect("valid autonomous placed carrier");
         record
+    }
+
+    /// The kickoff waiver is written only when it waives, so every other
+    /// commit record keeps its bytes; a waiver round-trips; and only an
+    /// autonomous carrier may carry one.
+    #[test]
+    fn a_placed_commit_record_waives_only_an_autonomous_kickoff() {
+        let mob_id = MobId::from("placed-waiver-shape");
+        let identity = AgentIdentity::from("placed-worker");
+        let record = test_autonomous_placed_carrier(&mob_id, &identity);
+        let crate::store::PlacedSpawnCarrierPhase::Committed(commit) = &record.phase else {
+            panic!("the autonomous test carrier is committed");
+        };
+        let unwaived = serde_json::to_value(commit).expect("encode commit record");
+        assert!(
+            unwaived.get("adopted_first_turn_started").is_none(),
+            "a record without a waiver keeps its bytes"
+        );
+
+        let mut waived = record.clone();
+        let crate::store::PlacedSpawnCarrierPhase::Committed(commit) = &mut waived.phase else {
+            panic!("the autonomous test carrier is committed");
+        };
+        commit.adopted_first_turn_started = true;
+        waived
+            .validate_for_mob(&mob_id)
+            .expect("an autonomous carrier may waive its kickoff");
+        let encoded = serde_json::to_value(&waived).expect("encode waived carrier");
+        assert_eq!(
+            encoded["phase"]["commit"]["adopted_first_turn_started"],
+            serde_json::json!(true)
+        );
+        let decoded: crate::store::MobPlacedSpawnCarrierRecord =
+            serde_json::from_value(encoded).expect("decode waived carrier");
+        assert_eq!(decoded, waived);
+
+        let mut turn_driven = test_placed_carrier(
+            &mob_id,
+            &identity,
+            Generation::INITIAL,
+            FenceToken::new(73),
+            crate::ids::PlacedSpawnId::new(),
+            true,
+        );
+        let crate::store::PlacedSpawnCarrierPhase::Committed(commit) = &mut turn_driven.phase
+        else {
+            panic!("the test carrier is committed");
+        };
+        commit.adopted_first_turn_started = true;
+        let error = turn_driven
+            .validate_for_mob(&mob_id)
+            .expect_err("a carrier that is not autonomous may not waive a kickoff");
+        assert!(error.to_string().contains("not autonomous"), "got {error}");
     }
 
     fn test_current_carrier_plan(
@@ -13035,6 +13342,140 @@ mod tests {
             error
                 .to_string()
                 .contains("no-effect rejection does not match its lifecycle projection")
+        );
+    }
+
+    /// An autonomous placed carrier whose committed record waives its
+    /// kickoff: its member host reported the adopted session's first turn as
+    /// started.
+    fn test_waived_autonomous_placed_carrier(
+        mob_id: &MobId,
+        identity: &AgentIdentity,
+    ) -> crate::store::MobPlacedSpawnCarrierRecord {
+        let mut record = test_autonomous_placed_carrier(mob_id, identity);
+        let crate::store::PlacedSpawnCarrierPhase::Committed(commit) = &mut record.phase else {
+            panic!("the autonomous test carrier is committed");
+        };
+        commit.adopted_first_turn_started = true;
+        record
+            .validate_for_mob(mob_id)
+            .expect("valid waived autonomous placed carrier");
+        record
+    }
+
+    /// A waived carrier committed before a crash, with no kickoff custody
+    /// yet: cold recovery repairs no kickoff for it.
+    #[tokio::test]
+    async fn a_waived_placed_carrier_recovers_no_kickoff_custody() {
+        let mob_id = MobId::from("kickoff-recovery-waived");
+        let identity = AgentIdentity::from("placed-worker");
+        let record = test_waived_autonomous_placed_carrier(&mob_id, &identity);
+        let plan = test_current_carrier_plan(&record);
+        let store: Arc<dyn MobEventStore> = Arc::new(InMemoryMobEventStore::new());
+        store
+            .append(repaired_placed_spawn_event(&mob_id, &record).expect("spawn projection"))
+            .await
+            .expect("append exact MemberSpawned projection");
+        let mut events = store.replay_all().await.expect("replay");
+        let mut authority = test_authority_for_current_carrier(&record, &plan);
+
+        recover_placed_kickoff_outcome_custody(&mut authority, &store, &mob_id, &mut events, &plan)
+            .await
+            .expect("a waived carrier recovers");
+
+        assert!(
+            !events.iter().any(|event| matches!(
+                event.kind,
+                MobEventKind::PlacedKickoffObligationRecorded { .. }
+                    | MobEventKind::MemberKickoffUpdated { .. }
+            )),
+            "no kickoff custody or lifecycle is repaired for a waived carrier"
+        );
+        let state = authority.state();
+        assert!(state.pending_placed_kickoff_outcomes.is_empty());
+        assert!(state.member_kickoff_starting.is_empty());
+    }
+
+    /// A waived kickoff never records custody, so custody history for one
+    /// fails closed.
+    #[tokio::test]
+    async fn a_waived_placed_carrier_with_custody_history_fails_closed() {
+        let mob_id = MobId::from("kickoff-recovery-waived-history");
+        let identity = AgentIdentity::from("placed-worker");
+        let record = test_waived_autonomous_placed_carrier(&mob_id, &identity);
+        let plan = test_current_carrier_plan(&record);
+        let store: Arc<dyn MobEventStore> = Arc::new(InMemoryMobEventStore::new());
+        store
+            .append(repaired_placed_spawn_event(&mob_id, &record).expect("spawn projection"))
+            .await
+            .expect("append exact MemberSpawned projection");
+        let obligation = super::placed_kickoff_reconciler::obligation_event_from_carrier(&record)
+            .expect("derive exact kickoff obligation");
+        append_kickoff_pair(
+            &store,
+            &mob_id,
+            MobEventKind::PlacedKickoffObligationRecorded {
+                obligation: obligation.clone(),
+            },
+            &identity,
+            &MobMemberKickoffSnapshot {
+                objective_id: Some(obligation.objective_id),
+                phase: MobMemberKickoffPhase::Starting,
+                error: None,
+                updated_at: UNIX_EPOCH,
+            },
+        )
+        .await;
+        let mut events = store.replay_all().await.expect("replay");
+        let mut authority = test_authority_for_current_carrier(&record, &plan);
+
+        let error = recover_placed_kickoff_outcome_custody(
+            &mut authority,
+            &store,
+            &mob_id,
+            &mut events,
+            &plan,
+        )
+        .await
+        .expect_err("custody history for a waived kickoff fails closed");
+        assert!(
+            error.to_string().contains("has custody history"),
+            "got {error}"
+        );
+    }
+
+    /// The duplicate-current check runs before the waiver is read: two
+    /// current carriers for one kickoff fail even when both waive it.
+    #[tokio::test]
+    async fn duplicate_waived_placed_carriers_still_fail_as_duplicates() {
+        let mob_id = MobId::from("kickoff-recovery-waived-duplicate");
+        let identity = AgentIdentity::from("placed-worker");
+        let record = test_waived_autonomous_placed_carrier(&mob_id, &identity);
+        let single = test_current_carrier_plan(&record);
+        let mut plan = test_current_carrier_plan(&record);
+        plan.entries.push(plan.entries[0].clone());
+        let store: Arc<dyn MobEventStore> = Arc::new(InMemoryMobEventStore::new());
+        store
+            .append(repaired_placed_spawn_event(&mob_id, &record).expect("spawn projection"))
+            .await
+            .expect("append exact MemberSpawned projection");
+        let mut events = store.replay_all().await.expect("replay");
+        let mut authority = test_authority_for_current_carrier(&record, &single);
+
+        let error = recover_placed_kickoff_outcome_custody(
+            &mut authority,
+            &store,
+            &mob_id,
+            &mut events,
+            &plan,
+        )
+        .await
+        .expect_err("duplicate current carriers fail");
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate current placed kickoff carrier"),
+            "got {error}"
         );
     }
 

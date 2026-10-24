@@ -184,6 +184,8 @@ struct Provider {
     prepared: AtomicUsize,
     dropped: Arc<AtomicUsize>,
     reserved: bool,
+    /// The Core-owned name a `reserved` preparation uses.
+    reserved_key: &'static str,
     unselected_class: ToolMutationClass,
     restrictions: std::sync::Mutex<Vec<bool>>,
     /// The final check this provider attaches: `Some(passes)`.
@@ -200,6 +202,7 @@ impl Provider {
             prepared: AtomicUsize::new(0),
             dropped: Default::default(),
             reserved: false,
+            reserved_key: meerkat_core::CALL_ORIGIN_META_KEY,
             unselected_class: ToolMutationClass::Unknown,
             restrictions: Default::default(),
             final_check: None,
@@ -235,7 +238,7 @@ impl McpCallContextProvider for Provider {
             .push((session.clone(), target.connection_id, origin));
         let sequence = self.prepared.fetch_add(1, Ordering::SeqCst);
         let key = if self.reserved {
-            meerkat_core::CALL_ORIGIN_META_KEY
+            self.reserved_key
         } else {
             PRIVATE_KEY
         };
@@ -401,6 +404,139 @@ async fn missing_context_and_reserved_override_refuse_before_server_effects() {
                 .iter()
                 .all(|entry| entry.inflight_call_count == 0)
         );
+    })
+    .catch_unwind()
+    .await;
+    router.shutdown().await;
+    fixture.finish(result).await;
+}
+
+/// The dedupe key of a call to the fixture's `read` operation.
+fn read_dedupe_key(args: &serde_json::value::RawValue) -> meerkat_core::ToolCallDedupeKey {
+    meerkat_core::ToolCallDedupeKey::new(meerkat_core::RunId::new(), 4, "keyed-call", "read", args)
+        .unwrap()
+}
+
+/// A call that has a dedupe key sends it, unchanged, as Core's own `_meta`
+/// entry, beside the host's prepared metadata, which reaches the server
+/// unchanged too. (Unrun until the candidate's validation.)
+#[tokio::test]
+async fn a_keyed_call_sends_its_dedupe_key_beside_the_host_metadata() {
+    let fixture = Fixture::start().await;
+    let result = AssertUnwindSafe(async {
+        let connection = crate::McpConnection::connect_within(&fixture.config, LIMIT)
+            .await
+            .unwrap();
+        let args = json!({"action": "ok"});
+        let key = read_dedupe_key(&serde_json::value::to_raw_value(&args).unwrap());
+        let host = serde_json::Map::from_iter([(
+            PRIVATE_KEY.to_string(),
+            json!({"correlation": "host-prepared"}),
+        )]);
+        connection
+            .call_tool_result_admitted(
+                crate::connection::CallAdmission::Ceiling(None),
+                "read",
+                &args,
+                Some(host),
+                Some(&key),
+                || Ok(None),
+            )
+            .await
+            .unwrap();
+        {
+            let requests = fixture.server.requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            let meta = &requests[0]["meta"];
+            assert_eq!(
+                meta[meerkat_core::TOOL_CALL_DEDUPE_KEY_META_KEY],
+                serde_json::to_value(&key).unwrap()
+            );
+            assert_eq!(
+                meta[meerkat_core::TOOL_CALL_DEDUPE_KEY_META_KEY]["call_id"],
+                "keyed-call"
+            );
+            assert_eq!(
+                meta[meerkat_core::TOOL_CALL_DEDUPE_KEY_META_KEY]["round"],
+                4
+            );
+            assert_eq!(meta[PRIVATE_KEY], json!({"correlation": "host-prepared"}));
+        }
+        connection.close().await.unwrap();
+    })
+    .catch_unwind()
+    .await;
+    fixture.finish(result).await;
+}
+
+/// A call outside an agent-loop round (its context binds no run and no
+/// round) has no dedupe key, and its `_meta` names none; the host's
+/// prepared metadata still reaches the server. (Unrun until the
+/// candidate's validation.)
+#[tokio::test]
+async fn a_call_outside_a_round_sends_no_dedupe_key() {
+    let fixture = Fixture::start().await;
+    let provider = Arc::new(Provider::new(fixture.config.clone()));
+    let router = fixture
+        .router(Some(provider.clone()), fixture.config.clone())
+        .await;
+    let result = AssertUnwindSafe(async {
+        let args = serde_json::value::to_raw_value(&json!({"action":"ok"})).unwrap();
+        let call = ToolCallView {
+            id: "unkeyed",
+            name: "read",
+            args: &args,
+        };
+        let current = context();
+        assert!(current.tool_call_dedupe_key(call).is_none());
+        router.dispatch_with_context(call, &current).await.unwrap();
+        let requests = fixture.server.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0]["meta"]
+                .get(meerkat_core::TOOL_CALL_DEDUPE_KEY_META_KEY)
+                .is_none()
+        );
+        assert_eq!(requests[0]["meta"][PRIVATE_KEY]["correlation"], "private-0");
+    })
+    .catch_unwind()
+    .await;
+    router.shutdown().await;
+    fixture.finish(result).await;
+}
+
+/// Core owns the dedupe key's `_meta` name: a host preparation that uses it
+/// is refused before the server sees anything, as one that uses the origin
+/// key is, and its lease is dropped. (Unrun until the candidate's
+/// validation.)
+#[tokio::test]
+async fn a_host_preparation_that_names_the_dedupe_key_is_refused() {
+    let fixture = Fixture::start().await;
+    let mut source = Provider::new(fixture.config.clone());
+    source.reserved = true;
+    source.reserved_key = meerkat_core::TOOL_CALL_DEDUPE_KEY_META_KEY;
+    let provider = Arc::new(source);
+    let router = fixture
+        .router(Some(provider.clone()), fixture.config.clone())
+        .await;
+    let result = AssertUnwindSafe(async {
+        let args = serde_json::value::to_raw_value(&json!({"action":"ok"})).unwrap();
+        let call = ToolCallView {
+            id: "forged",
+            name: "read",
+            args: &args,
+        };
+        let error = router
+            .dispatch_with_context(call, &context())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error.primary_error(), ToolError::AccessDenied { .. }),
+            "{error:?}"
+        );
+        assert_eq!(provider.prepared.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.dropped.load(Ordering::SeqCst), 1);
+        assert!(fixture.server.requests.lock().unwrap().is_empty());
     })
     .catch_unwind()
     .await;

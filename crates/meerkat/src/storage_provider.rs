@@ -23,9 +23,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use meerkat_core::host_store::HostStore;
 use meerkat_core::{ArtifactStore, BlobStore, DurabilityDeclaration, RealmLocator, StorageLayout};
 use meerkat_jobs::DetachedJobStore;
 use meerkat_runtime::RuntimeStore;
+use meerkat_runtime::store::spi::{SpiRealm, SpiRealmConfig, SpiRuntimeStore, SpiSessionStore};
 use meerkat_schedule::ScheduleStore;
 use meerkat_workgraph::WorkGraphStore;
 
@@ -182,5 +184,118 @@ impl RealmStorageProvider for DiskStorageProvider {
         static DISK_MIGRATOR: meerkat_store::doctor::DiskStorageMigrator =
             meerkat_store::doctor::DiskStorageMigrator;
         Some(&DISK_MIGRATOR)
+    }
+}
+
+/// The stores a host supplies next to a host store realm: everything the
+/// host store SPI does not carry yet (schedules, the work graph, detached
+/// jobs, blobs and artifacts), with one durability declaration per slot.
+pub struct HostSuppliedStores {
+    pub schedule_store: Arc<dyn ScheduleStore>,
+    pub workgraph_store: Arc<dyn WorkGraphStore>,
+    pub job_store: Arc<dyn DetachedJobStore>,
+    pub blob_store: Arc<dyn BlobStore>,
+    pub artifact_store: Arc<dyn ArtifactStore>,
+    /// The factory `store_path` for the realm.
+    pub store_path: PathBuf,
+    /// Where session projections materialize; `None` disables them.
+    pub projection_root: Option<PathBuf>,
+    /// Declarations for `schedule`, `workgraph`, `jobs`, `blobs` and
+    /// `artifacts`. The provider declares `sessions` and `runtime` itself.
+    pub durability: Vec<DurabilityDeclaration>,
+}
+
+/// A realm whose runtime and session state live in the host's own database
+/// through the host store SPI ([`meerkat_core::host_store`]).
+///
+/// [`HostStoreProvider::open`] acquires the realm's fence once
+/// ([`SpiRealm`]); every store set it opens shares that realm, and the
+/// host builds the realm's mob storage over [`HostStoreProvider::realm`]
+/// (meerkat-mob's host store adapter), so the runtime and the mob adapters
+/// commit under one fence. The session slot is a read adapter over the
+/// runtime store ([`SpiSessionStore`]): a host store realm is WholeBlob and
+/// the session service writes sessions only through the runtime store.
+///
+/// OAuth login flows in progress stay process-local on such a realm: a
+/// restart cancels a login in progress and the user starts it again.
+/// Completed credentials are not affected. Temporary councils are
+/// process-local too: the default council store declares itself
+/// process-bound, so a council that requires durable custody is refused and
+/// a process-bound one does not survive a restart.
+pub struct HostStoreProvider {
+    name: String,
+    realm: Arc<SpiRealm>,
+    runtime_store: Arc<SpiRuntimeStore>,
+    supplied: HostSuppliedStores,
+}
+
+impl HostStoreProvider {
+    /// Open the realm over `host`: acquire its fence (exclusive unless
+    /// `config` says take over), list its heads, and open the runtime store.
+    ///
+    /// # Errors
+    /// A held fence, a host failure or host data that does not decode, as
+    /// [`PersistenceError::Runtime`].
+    pub async fn open(
+        name: impl Into<String>,
+        host: Arc<dyn HostStore>,
+        config: SpiRealmConfig,
+        supplied: HostSuppliedStores,
+    ) -> Result<Self, PersistenceError> {
+        let realm = SpiRealm::open(host, config)
+            .await
+            .map_err(|error| PersistenceError::Runtime(error.into_read()))?;
+        let runtime_store = Arc::new(
+            SpiRuntimeStore::open(Arc::clone(&realm))
+                .await
+                .map_err(|error| PersistenceError::Runtime(error.into_read()))?,
+        );
+        Ok(Self {
+            name: name.into(),
+            realm,
+            runtime_store,
+            supplied,
+        })
+    }
+
+    /// The realm every adapter of this process commits through: build the
+    /// mob storage over it.
+    #[must_use]
+    pub fn realm(&self) -> &Arc<SpiRealm> {
+        &self.realm
+    }
+
+    /// The realm's runtime store.
+    #[must_use]
+    pub fn runtime_store(&self) -> &Arc<SpiRuntimeStore> {
+        &self.runtime_store
+    }
+}
+
+#[async_trait]
+impl RealmStorageProvider for HostStoreProvider {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn open(&self, _ctx: &RealmOpenContext) -> Result<RealmStoreSet, PersistenceError> {
+        use meerkat_core::DurabilityResolution;
+        let mut durability = vec![
+            DurabilityDeclaration::durable("sessions", DurabilityResolution::Persistent),
+            DurabilityDeclaration::durable("runtime", DurabilityResolution::Persistent),
+        ];
+        durability.extend(self.supplied.durability.iter().cloned());
+        Ok(RealmStoreSet {
+            session_store: Arc::new(SpiSessionStore::new(Arc::clone(&self.runtime_store))),
+            runtime_store: Arc::clone(&self.runtime_store) as Arc<dyn RuntimeStore>,
+            schedule_store: Arc::clone(&self.supplied.schedule_store),
+            workgraph_store: Arc::clone(&self.supplied.workgraph_store),
+            job_store: Arc::clone(&self.supplied.job_store),
+            blob_store: Arc::clone(&self.supplied.blob_store),
+            artifact_store: Arc::clone(&self.supplied.artifact_store),
+            store_path: self.supplied.store_path.clone(),
+            projection_root: self.supplied.projection_root.clone(),
+            durability,
+        })
     }
 }

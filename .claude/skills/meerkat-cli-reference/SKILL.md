@@ -104,7 +104,7 @@ Top-level commands:
 rkat init
 rkat run <PROMPT> [OPTIONS]
 rkat help <QUESTION> [OPTIONS]
-rkat session list|show|repair-wholeblob|export-atif|delete|interrupt ...
+rkat session list|show|repair-wholeblob|resolve-held-tail|export-atif|delete|interrupt ...
 rkat blob get <BLOB-ID> [--output <FILE>] [--json]
 rkat realm current|list|show|create|govern|grant|revoke-grant|delete|prune ...
 rkat mcp add|login|remove|list|get ...
@@ -268,6 +268,7 @@ Do not use `rkat sessions show --json`, `rkat rpc blob/get`, or `rkat blob get
 rkat session list [--limit N] [--offset N] [--label KEY=VALUE]   # --limit defaults to 20
 rkat session show <ID>
 rkat session repair-wholeblob <ID> [--apply [--accept-shorter]] [--runtime-store <FILE>] [--json]
+rkat session resolve-held-tail <ID> [--apply] [--runtime-store <FILE>] [--json]
 rkat session export-atif <ID> [--output <FILE>]
 rkat session delete <ID>
 rkat session interrupt <ID>
@@ -282,6 +283,23 @@ allows `--apply` when the live transcript is shorter than the audited
 endpoint. `--runtime-store <FILE>` opens that runtime database directly
 instead of `<state-root>/<realm>/runtime.sqlite3`; the id must then be a full
 session UUID.
+
+`resolve-held-tail` reports why durable-tail recovery holds a session's tail
+as ambiguous, or holds an interrupted tail beside inputs another run left
+staged or queued (a shape only pre-release builds of 0.9.5, or a store fault,
+leave), and what the repair keeps, answers, ends and requeues; with `--apply`
+it commits a repair the runtime machine authorizes as an interrupted run
+(every row kept, the open calls answered as outcome unknown, the stranded
+inputs requeued). Stop every host of the session first: the repair is refused
+while the persisted lifecycle row is not quiescent, and an idle live host is
+not detected. A row a host left `Stopped`
+when it ended before unregistering (no current run, no unregister in progress)
+counts as the `Idle` row a start would normalize it to: the report says so, and
+`--apply` writes it with the repair. It exits non-zero when the
+repair is refused or the tail is held for another reason, and never retries.
+Without `--runtime-store` it opens the realm's runtime database (a SQLite
+realm's session database, a JSONL realm's `runtime.sqlite3`); with it, the id
+must be a full session UUID.
 
 ## Blob
 

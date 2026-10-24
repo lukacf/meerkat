@@ -3,6 +3,10 @@
 //! An operator diagnose must leave the realm directory as it found it: no
 //! realm manifest, no session/jobs/workgraph stores, and a typed refusal when
 //! the database is missing or the realm id is not a directory name.
+//!
+//! `rkat session resolve-held-tail` follows the same operator rules: with
+//! `--runtime-store` the id must be a full session UUID, and a missing
+//! database or realm manifest refuses typed without creating anything.
 #![allow(
     clippy::expect_used,
     clippy::unwrap_used,
@@ -175,5 +179,96 @@ fn mob_scope_realm_id_is_refused_with_the_directory_name_rule() {
     assert!(
         directory_entries(&realms_root).is_empty(),
         "a refused realm id must not create a realm directory"
+    );
+}
+
+#[test]
+fn resolve_held_tail_with_a_runtime_store_takes_a_full_session_uuid() {
+    let temp = TempDir::new().unwrap();
+    let host = temp.path().join("host");
+    std::fs::create_dir_all(&host).unwrap();
+    let database = host.join("runtime.sqlite");
+    let output = run_rkat(
+        &temp,
+        &[
+            "session",
+            "resolve-held-tail",
+            "gateway:not-a-session-uuid",
+            "--apply",
+            "--runtime-store",
+            database.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--runtime-store takes a full session UUID"),
+        "{stderr}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "a refused id prints no report: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        directory_entries(&host).is_empty(),
+        "a refused id must not open or create the runtime database"
+    );
+}
+
+#[test]
+fn resolve_held_tail_over_a_missing_runtime_store_is_a_typed_refusal_without_side_effects() {
+    let temp = TempDir::new().unwrap();
+    let host = temp.path().join("host");
+    std::fs::create_dir_all(&host).unwrap();
+    let database = host.join("runtime.sqlite");
+    let output = run_rkat(
+        &temp,
+        &[
+            "session",
+            "resolve-held-tail",
+            "01a000bb-b69e-7570-933d-ffd5d61d51ee",
+            "--runtime-store",
+            database.to_str().unwrap(),
+        ],
+    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("cannot open the runtime store"), "{stderr}");
+    assert!(stderr.contains("no runtime database at"), "{stderr}");
+    assert!(
+        directory_entries(&host).is_empty(),
+        "a refused open must not create the runtime database"
+    );
+}
+
+#[test]
+fn resolve_held_tail_in_a_realm_without_a_manifest_refuses_without_side_effects() {
+    let temp = TempDir::new().unwrap();
+    let realms_root = temp.path().join("realms");
+    std::fs::create_dir_all(realms_root.join("empty")).unwrap();
+    let output = run_rkat(
+        &temp,
+        &[
+            "--state-root",
+            realms_root.to_str().unwrap(),
+            "--realm",
+            "empty",
+            "session",
+            "resolve-held-tail",
+            "01a000bb-b69e-7570-933d-ffd5d61d51ee",
+        ],
+    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cannot read the manifest of realm 'empty'"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("--runtime-store"), "{stderr}");
+    assert!(
+        directory_entries(&realms_root.join("empty")).is_empty(),
+        "a refused resolve must not create anything in the realm"
     );
 }

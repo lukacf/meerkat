@@ -59,11 +59,12 @@ rust_library(
     compile_data = [
         "Cargo.toml",
         "src/runtime/mod.rs",
+        "tests/fixtures/pre_native_id_messages.json",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-gemini",
     },
     proc_macro_deps = all_crate_deps(
@@ -97,13 +98,14 @@ rust_library(
     compile_data = [
         "Cargo.toml",
         "src/runtime/mod.rs",
+        "tests/fixtures/pre_native_id_messages.json",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = [
         "//crates/meerkat:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-gemini",
     },
     proc_macro_deps = all_crate_deps(
@@ -143,11 +145,12 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/runtime/mod.rs",
+        "tests/fixtures/pre_native_id_messages.json",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-gemini",
     },
     tags = [
@@ -156,6 +159,10 @@ rust_test(
     ],
     size = "medium",
     data = [
+        "//:test_fixtures",
+        "//tests/fixtures/machine-dsl-tests:package_runfiles",
+        "//tests/fixtures/mcp-test-server:package_runfiles",
+        "//tests/fixtures/surface-build-fixtures:package_runfiles",
         ":package_runfiles",
     ],
     env = {
@@ -202,13 +209,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/runtime/mod.rs",
+        "tests/fixtures/pre_native_id_messages.json",
     ],
     srcs = [
         "tests/live_video_uri_smoke.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "live_video_uri_smoke",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-gemini",
     },
@@ -263,13 +271,14 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/runtime/mod.rs",
+        "tests/fixtures/pre_native_id_messages.json",
     ],
     srcs = [
         "tests/oauth_resolve.rs",
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "oauth_resolve",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-gemini",
     },

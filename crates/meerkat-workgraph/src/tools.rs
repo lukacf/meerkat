@@ -15,7 +15,7 @@ use crate::{CreateWorkItemRequest, WorkGraphError, WorkGraphService};
 ///
 /// This is the closed set of semantic error outcomes a WorkGraph tool call can
 /// surface. It is derived directly from [`WorkGraphError`] (the canonical domain
-/// error) in [`map_error`], never re-parsed from text, and serializes to the
+/// error) in `map_error`, never re-parsed from text, and serializes to the
 /// stable `snake_case` wire codes consumed by SDKs. Surfaces map this typed code
 /// onto their own transport numbering (e.g. JSON-RPC) with an exhaustive match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

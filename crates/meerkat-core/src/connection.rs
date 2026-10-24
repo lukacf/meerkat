@@ -565,7 +565,7 @@ impl PeerRole {
 /// `comms_name` string and re-deriving the realm by format convention.
 ///
 /// `comms_name`/`realm_id`/`peer_meta` remain on the metadata as the transport
-/// routing name and discovery metadata — identity and transport are separate
+/// routing name and discovery metadata - identity and transport are separate
 /// facts. Old persisted rows written before this field existed deserialize as
 /// `None` (the field is `#[serde(default, skip_serializing_if)]` on the
 /// metadata), so back-read is safe.

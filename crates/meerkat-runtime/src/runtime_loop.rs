@@ -594,7 +594,9 @@ pub(crate) enum EmptyOutboxCheckpoint {
     /// snapshot. A crash between the runtime commit and its SessionStore
     /// projection leaves a stale compatibility row that only this refresh
     /// heals, and these callers discard the returned checkpoint, so no
-    /// fallback would project it.
+    /// fallback would project it. While a run's provisional tail stands, the
+    /// refresh waits for the run's boundary instead (see
+    /// `reconcile_loaded_compaction_projection_outbox`).
     RefreshFromStore,
 }
 
@@ -638,6 +640,48 @@ pub(crate) async fn reconcile_loaded_compaction_projection_outbox(
         // obligations this path keeps.
         return Ok(None);
     }
+    // A run's provisional tail stands over the committed base: a run resumed
+    // from it, a run kept across a requeue stop, or a run whose round
+    // commits a crash or an abnormal exit left. The outboxed intents' stages
+    // are kept by the reconciliation above, and nothing else happens here
+    // while the tail stands:
+    // - a WholeBlob refresh is refused by the store under the tail, and its
+    //   checkpoint would replace the resumed actor's image with the committed
+    //   base, which lacks the run's rounds;
+    // - a finalization re-issues the committed authority under the tail, so
+    //   the tail's base no longer matches and the run's next round commit and
+    //   its promotion are refused.
+    // The run's boundary promotes the tail, and the per-run reconciliation
+    // after it finalizes the intents once.
+    let tail = {
+        let driver = driver.lock().await;
+        let tail_run = driver.provisional_tail_run().await?;
+        tail_run.map(|run_id| {
+            let owned = driver.resumable_run_id().as_ref() == Some(&run_id)
+                || driver.current_run_id().as_ref() == Some(&run_id);
+            (run_id, owned)
+        })
+    };
+    if let Some((run_id, owned)) = tail {
+        if owned {
+            tracing::debug!(
+                %run_id,
+                intents = intents.len(),
+                "compaction projection refresh deferred while the run's provisional tail stands"
+            );
+        } else {
+            // Neither the marked run nor the current one owns this tail: a run
+            // that ended without resuming left it, and its settlement did not
+            // repair it. The next registration's recovery repairs it; until
+            // then nothing refreshes or finalizes.
+            tracing::warn!(
+                %run_id,
+                intents = intents.len(),
+                "compaction projection refresh deferred under a provisional tail no live run owns"
+            );
+        }
+        return Ok(None);
+    }
     let persistence_profile = {
         let driver = driver.lock().await;
         driver.session_persistence_profile()
@@ -655,6 +699,39 @@ pub(crate) async fn reconcile_loaded_compaction_projection_outbox(
             driver
                 .mark_compaction_projection_finalized(&intent.projection)
                 .await?;
+        }
+        // That metadata-only commit is the store's, so the live actor never
+        // prepared it: its HeadCanonical metadata baseline still names the
+        // head that carried the intents, while its own session already
+        // dropped them in the executor reconciliation above. Adopt the
+        // committed head once every intent is finalized, or the actor's next
+        // boundary preparation names a predecessor the store no longer holds.
+        //
+        // The adoption is best-effort. The finalization is durable either
+        // way, and an actor that did not adopt it cannot commit over it: the
+        // store refuses its next preparation and the turn resyncs from
+        // durable state. So a refused adoption (an executor or session
+        // service that does not implement it, an actor that just exited)
+        // fails neither the committed run nor the runtime.
+        if !intents.is_empty() {
+            let authority = {
+                let driver = driver.lock().await;
+                driver.committed_head_canonical_authority().await
+            };
+            let adopted = match authority {
+                Ok(authority) => executor
+                    .acknowledge_compaction_finalization(&authority)
+                    .await
+                    .map_err(|error| error.to_string()),
+                Err(error) => Err(error.to_string()),
+            };
+            if let Err(error) = adopted {
+                tracing::warn!(
+                    session_id = ?intents.first().map(|intent| intent.projection.session_id()),
+                    %error,
+                    "the live actor did not adopt the HeadCanonical compaction finalization; its next boundary preparation is refused and resyncs"
+                );
+            }
         }
         return Ok(None);
     }
@@ -931,6 +1008,7 @@ impl InteractionTerminalPublicationError {
             // A receipt-less terminal is a legitimate read verdict, but
             // terminal publication expects the receipt its run staged.
             crate::RuntimeDriverError::ValidationFailed { .. }
+            | crate::RuntimeDriverError::QueuedInputsRefused(_)
             | crate::RuntimeDriverError::ScopedContextGenerationNotAdvanced { .. }
             | crate::RuntimeDriverError::InputRefused { .. }
             | crate::RuntimeDriverError::RetainedResumeRefused { .. }
@@ -5202,6 +5280,25 @@ impl Drop for RunSettlementPublication {
 }
 
 impl RuntimeLoopAuthorityBinding {
+    /// Require a cold reload of this loop's session runtime: nothing the live
+    /// runtime realizes is committed until registration reloads it from
+    /// durable state.
+    async fn require_session_durability_reload(&self, operation: &'static str, reason: String) {
+        let Some(machine) = self.machine.upgrade() else {
+            return;
+        };
+        if !machine
+            .require_session_durability_reload(&self.session_id, operation, reason)
+            .await
+        {
+            tracing::warn!(
+                session_id = %self.session_id,
+                operation,
+                "no persistent runtime registration to degrade"
+            );
+        }
+    }
+
     /// A guard that signals run-settlement waiters when the scope it spans
     /// ends, however it ends.
     fn run_settlement_publication(&self) -> RunSettlementPublication {
@@ -6995,6 +7092,320 @@ async fn cancel_stopped_live_boundary_joins(
     Ok(())
 }
 
+/// What the resumed-run admission of one loop lap decided.
+enum ResumedRunAdmissionLap {
+    /// Begin the run: its admission let it continue.
+    Resume(RunId),
+    /// The run was settled without running: go round again.
+    Again,
+    /// Leave the loop with this wake decision.
+    Exit(bool),
+}
+
+/// Ask the resumed-run admission bound to the session's registration about
+/// the run its durable tail left open, before the run is begun again.
+///
+/// The loop holds neither queue authority nor the driver lock while it asks:
+/// an admission may take its bounded attempts. A refused run is settled at
+/// once, as a stop settles a run, without running.
+async fn admit_resumed_run(
+    driver: &crate::meerkat_machine::SharedDriver,
+    completions: Option<&crate::meerkat_machine::SharedCompletionRegistry>,
+    executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
+    authority_binding: &RuntimeLoopAuthorityBinding,
+    run_id: RunId,
+) -> ResumedRunAdmissionLap {
+    let Some(machine) = authority_binding.machine.upgrade() else {
+        return ResumedRunAdmissionLap::Exit(true);
+    };
+    let session_id = authority_binding.session_id.clone();
+    let admission = machine.resumed_run_admission(&session_id).await;
+    drop(machine);
+    let Some(admission) = admission else {
+        return ResumedRunAdmissionLap::Resume(run_id);
+    };
+    let request = {
+        let d = driver.lock().await;
+        let bound_input_ids = d.resumed_run_bound_input_ids(&run_id);
+        let turn_tool_overlay = resumed_run_primitive(&d, &run_id, &bound_input_ids)
+            .ok()
+            .and_then(|primitive| {
+                primitive
+                    .turn_metadata()
+                    .and_then(|metadata| metadata.turn_tool_overlay.clone())
+            });
+        crate::resumed_run_admission::ResumedRunAdmissionRequest::new(
+            crate::identifiers::LogicalRuntimeId::for_session(&session_id),
+            session_id.clone(),
+            run_id.clone(),
+            bound_input_ids,
+        )
+        .with_turn_tool_overlay(turn_tool_overlay)
+    };
+    match crate::resumed_run_admission::ask_resumed_run_admission(Some(&admission), &request).await
+    {
+        crate::resumed_run_admission::ResumedRunAdmissionVerdict::Continue => {
+            ResumedRunAdmissionLap::Resume(run_id)
+        }
+        crate::resumed_run_admission::ResumedRunAdmissionVerdict::Refused { detail } => {
+            settle_refused_resumed_run(
+                driver,
+                completions,
+                executor,
+                authority_binding,
+                &run_id,
+                detail,
+            )
+            .await
+        }
+    }
+}
+
+/// Settle a resumed run its admission refused. The machine clears the run's
+/// mark, records its terminal and abandons its bound inputs as refused
+/// resumes; the loop fails their waiters, owes the runless terminal and
+/// drains any directed terminal outbox the settlement staged. The run never
+/// begins again.
+async fn settle_refused_resumed_run(
+    driver: &crate::meerkat_machine::SharedDriver,
+    completions: Option<&crate::meerkat_machine::SharedCompletionRegistry>,
+    executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
+    authority_binding: &RuntimeLoopAuthorityBinding,
+    run_id: &RunId,
+    detail: String,
+) -> ResumedRunAdmissionLap {
+    tracing::warn!(
+        session_id = %authority_binding.session_id,
+        %run_id,
+        %detail,
+        "the resumed run was refused; it is settled without running"
+    );
+    let mut runless_terminal = authority_binding.runless_terminal_announcement();
+    let queue_authority_guard = match authority_binding
+        .lock_current_queue_driver_authority(driver, "refused resumed run settlement")
+        .await
+    {
+        Ok(guard) => guard,
+        Err(_) => return ResumedRunAdmissionLap::Exit(true),
+    };
+    let settled = driver
+        .lock()
+        .await
+        .settle_resumable_run(
+            run_id,
+            crate::input_state::InputAbandonReason::ResumeRefused,
+        )
+        .await;
+    let abandoned = match settled {
+        Ok(abandoned) => abandoned,
+        Err(error) => {
+            tracing::error!(%run_id, %error, "failed to settle a refused resumed run");
+            drop(queue_authority_guard);
+            return ResumedRunAdmissionLap::Exit(true);
+        }
+    };
+    if !abandoned.is_empty() {
+        runless_terminal.owe();
+    }
+    if let Some(completions) = completions {
+        let mut completions = completions.lock().await;
+        fail_completion_waiters(
+            &mut completions,
+            &abandoned,
+            format!("the resumed run was refused: {detail}"),
+        );
+    }
+    authority_binding.release_ended_run_tool_markers(run_id);
+    // The settled run never resumes, so its provisional tail is repaired as
+    // an interrupted run, after the abandonment committed: its rows stay in
+    // the transcript, and the session layer resynchronizes the seeded actor
+    // from the repaired boundary at its next step. A tail the repair leaves
+    // standing would refuse the next run's first round commit, so then the
+    // session reloads at once, before any run, and the lap exits.
+    let reload = driver
+        .lock()
+        .await
+        .repair_settled_run_tail(&authority_binding.session_id, run_id)
+        .await;
+    if reload {
+        drop(queue_authority_guard);
+        authority_binding
+            .require_session_durability_reload(
+                "settled_resumable_run_tail_repair",
+                format!("settled run {run_id}'s provisional tail still stands"),
+            )
+            .await;
+        return ResumedRunAdmissionLap::Exit(true);
+    }
+    drop(queue_authority_guard);
+    if !abandoned.is_empty()
+        && drain_recovered_interaction_terminal_outboxes_until_clear(
+            driver,
+            completions,
+            executor,
+            authority_binding,
+            true,
+            RuntimeProjectionRecoveryAuthority::RuntimeLoop,
+        )
+        .await
+    {
+        return ResumedRunAdmissionLap::Exit(true);
+    }
+    ResumedRunAdmissionLap::Again
+}
+
+/// How the loop realized an `apply` that answered with a suspended run.
+enum SuspendedRunRealization {
+    /// The machine marked the run resumable; nothing else is realized.
+    Suspended,
+    /// The machine refused the suspension: the run is cancelled as before.
+    Refused,
+    /// The loop lost its driver authority.
+    Exit,
+}
+
+/// Realize an `apply` the executor answered with a suspended run: a graceful
+/// requeue stop dropped the turn with no terminal and no closing write. The
+/// machine marks the run resumable (`SuspendRunForStop`) under driver
+/// authority, before the stop's first input classification, so the stop keeps
+/// the run's inputs bound to it with its requeue mark and the next start
+/// resumes the run from its last committed round. Nothing else is realized:
+/// no terminal, no input change, and the provisional tail stays.
+///
+/// The machine refuses outside a requeue stop, for a session without durable
+/// rounds, while a live-boundary join is still published, for a run whose
+/// turn already ended, or for a run that is not current; a suspension of
+/// another run than this loop's is refused here. A refused suspension is
+/// cancelled by the caller, as a hard cancel is: the run's inputs end
+/// cancelled and its waiters and directed terminals resolve through that
+/// realization. The agent already ended the turn without a terminal event,
+/// so the session's event stream carries no run terminal for it; a refusal
+/// is rare, since the saga asks only under a requeue stop on a persistent
+/// session and the agent answers suspended only for a run with round
+/// commits.
+async fn realize_suspended_run(
+    driver: &crate::meerkat_machine::SharedDriver,
+    authority_binding: &RuntimeLoopAuthorityBinding,
+    run_id: &RunId,
+    suspended_run_id: &RunId,
+) -> SuspendedRunRealization {
+    if suspended_run_id != run_id {
+        tracing::error!(
+            %run_id,
+            %suspended_run_id,
+            "the executor answered a suspension of another run; this run is cancelled"
+        );
+        return SuspendedRunRealization::Refused;
+    }
+    let _authority_guard = match authority_binding
+        .lock_current_driver_authority(driver, "runtime loop run suspension")
+        .await
+    {
+        Ok(guard) => guard,
+        Err(_) => return SuspendedRunRealization::Exit,
+    };
+    let mut d = driver.lock().await;
+    // The run commits every round: only an agent whose run takes round
+    // commits answers a suspension (a run without them ends cancelled at the
+    // session task and never reaches here), and the runtime keeps them
+    // durably only with a persistent driver.
+    let durable_session = matches!(
+        &*d,
+        crate::meerkat_machine::driver::DriverEntry::Persistent(_)
+    );
+    match crate::meerkat_machine::driver::machine_suspend_run_for_stop(
+        &mut d,
+        run_id,
+        durable_session,
+    ) {
+        Ok(true) => {
+            tracing::info!(
+                %run_id,
+                "the requeue stop suspended the run; the next start resumes it"
+            );
+            SuspendedRunRealization::Suspended
+        }
+        Ok(false) => {
+            tracing::warn!(
+                %run_id,
+                durable_session,
+                "the machine refused to suspend the run for the stop; it is cancelled"
+            );
+            SuspendedRunRealization::Refused
+        }
+        Err(error) => {
+            tracing::error!(
+                %run_id,
+                %error,
+                "failed to suspend the run for the stop; it is cancelled"
+            );
+            SuspendedRunRealization::Refused
+        }
+    }
+}
+
+/// The run primitive of a resumed run: its bound inputs, hydrated from the
+/// ledger and merged exactly as an ordinary run merges its batch, dispatched
+/// with the `ResumeRun` kind under the run's original id.
+///
+/// The kind is stamped only on this dispatched primitive, never on an input:
+/// the session layer then re-enters the run from its cursor and appends none
+/// of the inputs again.
+fn resumed_run_primitive(
+    d: &crate::meerkat_machine::driver::DriverEntry,
+    run_id: &RunId,
+    input_ids: &[InputId],
+) -> Result<RunPrimitive, String> {
+    let staged_inputs = d
+        .hydrate_resumed_run_inputs(run_id, input_ids)
+        .map_err(|error| format!("resumed run batch hydration failed: {error}"))?;
+    let staged_ids: Vec<InputId> = staged_inputs.iter().map(|(id, _)| id.clone()).collect();
+    // The inputs' own semantics, as an ordinary batch has them. One request
+    // shape may differ from the run's original rounds: when the original run
+    // was a fresh steer batch, its start appended the steer content as
+    // conversation rows (the ordinary dequeue normalizes such a batch to
+    // queue handling), and the resumed rounds also carry that content as
+    // transient request context. Normalizing here instead would drop the
+    // context of a run a steer pre-bound, whose rounds only ever saw it as
+    // context, and nothing durable tells the two starts apart.
+    let semantics = crate::meerkat_machine::machine_batch_runtime_semantics(d, &staged_ids)
+        .ok_or_else(|| {
+            "runtime-stamped execution kind missing for one or more resumed inputs".to_string()
+        })?;
+    let projections = crate::meerkat_machine::machine_batch_primitive_projections(
+        d,
+        &staged_inputs,
+    )
+    .ok_or_else(|| {
+        "runtime-stamped primitive projection missing for one or more resumed inputs".to_string()
+    })?;
+    let boundary = semantics
+        .first()
+        .map(|semantics| semantics.boundary)
+        .ok_or_else(|| "runtime-stamped boundary missing for the resumed inputs".to_string())?;
+    let mut primitive = try_projected_inputs_to_primitive_with_boundary(
+        &staged_inputs,
+        &projections,
+        boundary,
+        &semantics,
+    )
+    .map_err(|conflict| format!("resumed run turn-metadata merge conflict: {conflict}"))?;
+    let work_authorization = d
+        .batch_work_authorization(run_id, &staged_ids)
+        .map_err(|_| {
+            "retained native work attribution is unavailable for the resumed run".to_string()
+        })?;
+    let RunPrimitive::StagedInput(staged) = &mut primitive else {
+        return Err(
+            "a resumed run's primitive carries no turn metadata to mark it resumed".to_string(),
+        );
+    };
+    let metadata = staged.turn_metadata.get_or_insert_with(Default::default);
+    metadata.work_authorization = work_authorization;
+    metadata.execution_kind = Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumeRun);
+    Ok(primitive)
+}
+
 async fn process_queue(
     driver: &crate::meerkat_machine::SharedDriver,
     executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
@@ -7005,7 +7416,7 @@ async fn process_queue(
     handoff: &mut RuntimeLoopTerminalHandoff,
 ) -> bool {
     let post_commit_hooks = authority_binding.post_commit_hooks().await;
-    loop {
+    'lap: loop {
         // Each run iteration ends with its run recorded (or never started).
         let _run_settlement = authority_binding.run_settlement_publication();
         let turn_finalization_guard = match executor.turn_finalization_boundary_handle() {
@@ -7085,16 +7496,45 @@ async fn process_queue(
             Err(_) => return true,
         }
 
+        // A run the durable session left open resumes ahead of everything
+        // else this lap would do. While it is marked no other run can start,
+        // and nothing may be appended to the transcript its actor was seeded
+        // from before the run re-enters: the notices below wait for it.
+        let (resumable_run_id, draining) = {
+            let d = driver.lock().await;
+            (d.resumable_run_id(), d.registration_draining())
+        };
+        // A run marked while the registration drains (a requeue stop that
+        // suspended it, or kept it) is the next start's to resume, never this
+        // stopping loop's: yield to the stop.
+        if resumable_run_id.is_some() && draining {
+            return false;
+        }
+        let resumed_run_id = match resumable_run_id {
+            Some(run_id) => {
+                match admit_resumed_run(driver, completions, executor, authority_binding, run_id)
+                    .await
+                {
+                    ResumedRunAdmissionLap::Resume(run_id) => Some(run_id),
+                    ResumedRunAdmissionLap::Again => continue,
+                    ResumedRunAdmissionLap::Exit(wake) => return wake,
+                }
+            }
+            None => None,
+        };
+
         // Record interrupted-run notices owed to the model while the
         // turn-finalization boundary is held and the actor is idle, whether or
         // not input is queued: they join the transcript the next real turn
         // sees (an idle session gets them at attach), with no turn of their
         // own.
-        authority_binding
-            .record_interrupted_tool_notices(&*executor)
-            .await;
+        if resumed_run_id.is_none() {
+            authority_binding
+                .record_interrupted_tool_notices(&*executor)
+                .await;
+        }
 
-        if post_commit_hooks.has_ready_background_completions() {
+        if resumed_run_id.is_none() && post_commit_hooks.has_ready_background_completions() {
             // B is held and the actor is idle. Retain exact driver authority
             // through the writer await; no original work or new-run authority
             // is borrowed to append these closed runtime-owned facts.
@@ -7126,11 +7566,13 @@ async fn process_queue(
         // no queue entry exists also closes the observation race: an input
         // admitted after this read carries its own wake and re-enters this path
         // before any dequeue can occur.
-        if !driver.lock().await.has_queued_input_in_any_lane() {
+        if resumed_run_id.is_none() && !driver.lock().await.has_queued_input_in_any_lane() {
             return false;
         }
 
-        // Realize any committed cross-run handoff now.
+        // Realize any committed cross-run handoff now. A resumed run is not
+        // served under a new identity: it continues the run that committed
+        // its own handoffs, which its run cursor carries.
         //
         // Position is the contract: the turn-finalization boundary is already
         // held and queue authority has NOT been claimed, so the session actor
@@ -7138,7 +7580,8 @@ async fn process_queue(
         // dequeue would serve the pending input with the identity the handoff
         // was committed to replace, which is the exact off-by-one-turn bug this
         // seam exists to prevent.
-        if let Some(pre_dequeue) = executor.pre_dequeue_handle()
+        if resumed_run_id.is_none()
+            && let Some(pre_dequeue) = executor.pre_dequeue_handle()
             && let Err(error) = pre_dequeue
                 .realize_committed_handoffs_under_turn_finalization_boundary()
                 .await
@@ -7202,7 +7645,9 @@ async fn process_queue(
                         meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict,
                     >,
                 >,
-                batch: crate::meerkat_machine::driver::AuthorizedRuntimeLoopBatch,
+                /// `None` for a resumed run, which the machine began without
+                /// staging: its inputs are already bound to it.
+                batch: Option<crate::meerkat_machine::driver::AuthorizedRuntimeLoopBatch>,
             },
             AuthorityMismatch {
                 input_ids: Vec<InputId>,
@@ -7213,6 +7658,77 @@ async fn process_queue(
         // Dequeue and prepare under the driver lock.
         let dequeued = 'dequeue: {
             let mut d = driver.lock().await;
+
+            // The admitted resumed run begins here, under queue authority and
+            // ahead of any queued batch. A stop or settlement that cleared its
+            // mark while the admission was asked leaves nothing to resume.
+            if let Some(run_id) = resumed_run_id.clone() {
+                match crate::meerkat_machine::driver::machine_begin_resumed_run(&mut d, &run_id) {
+                    Ok(crate::meerkat_machine::driver::ResumedRunStart::Started { input_ids }) => {
+                        // The run runs now: the marks a requeue stop left on
+                        // its inputs go, durably, before it is dispatched, so
+                        // a later crash of the run is never read as an
+                        // expired stop.
+                        if let Err(error) = d.clear_resumed_run_stop_marks(&input_ids).await {
+                            tracing::error!(
+                                %run_id,
+                                %error,
+                                "failed closed clearing a resumed run's stop marks"
+                            );
+                            break 'dequeue RuntimeLoopDequeueOutcome::AuthorityMismatch {
+                                input_ids,
+                                reason: format!(
+                                    "the resumed run's stop marks could not be cleared: {error}"
+                                ),
+                            };
+                        }
+                        // A resumed run that cannot be described is stopped
+                        // through the mismatch path, never replayed while its
+                        // provisional tail stands.
+                        break 'dequeue match resumed_run_primitive(&d, &run_id, &input_ids) {
+                            Ok(primitive) => RuntimeLoopDequeueOutcome::Ready {
+                                input_ids,
+                                run_id,
+                                primitive: Box::new(Ok(primitive)),
+                                batch: None,
+                            },
+                            Err(reason) => {
+                                tracing::error!(%run_id, %reason, "resumed run batch refused");
+                                RuntimeLoopDequeueOutcome::AuthorityMismatch { input_ids, reason }
+                            }
+                        };
+                    }
+                    Ok(crate::meerkat_machine::driver::ResumedRunStart::RunStartsHeld) => {
+                        tracing::debug!(%run_id, "run starts are held; the resumed run waits");
+                        #[cfg(any(test, feature = "test-support"))]
+                        authority_binding.note_run_start_held();
+                        drop(d);
+                        drop(queue_authority_guard);
+                        return false;
+                    }
+                    Ok(crate::meerkat_machine::driver::ResumedRunStart::NotResumable) => {
+                        tracing::debug!(
+                            %run_id,
+                            "the resumed run's mark ended before it began; nothing resumes"
+                        );
+                        drop(d);
+                        drop(queue_authority_guard);
+                        continue 'lap;
+                    }
+                    Err(error) => {
+                        // Parking here would leave the run marked, and every
+                        // later wake would ask the admission again and fail
+                        // the same way: the loop stops instead, as for a lost
+                        // queue authority.
+                        tracing::error!(
+                            %run_id,
+                            %error,
+                            "failed closed while beginning a resumed run"
+                        );
+                        return true;
+                    }
+                }
+            }
 
             // Immediate attached steer can pre-bind the DSL run before waking
             // the loop. The generated classifier owns whether that binding
@@ -7354,7 +7870,7 @@ async fn process_queue(
                 input_ids: contributing_input_ids,
                 run_id,
                 primitive: Box::new(primitive),
-                batch,
+                batch: Some(batch),
             }
         };
 
@@ -7365,68 +7881,76 @@ async fn process_queue(
                 primitive,
                 batch,
             } => {
-                match crate::meerkat_machine::prepare_runtime_loop_batch_start(
-                    driver,
-                    run_id.clone(),
-                    batch,
-                    authority_binding.runless_terminal_announcement(),
-                )
-                .await
-                {
-                    Ok(crate::meerkat_machine::driver::RuntimeLoopBatchStart::Started) => {}
-                    Ok(crate::meerkat_machine::driver::RuntimeLoopBatchStart::RunStartsHeld) => {
-                        // The member's mob is stopped (#1500). Nothing was
-                        // staged; the input waits in its lane. Releasing the
-                        // hold wakes this loop.
-                        tracing::debug!(%run_id, "run starts are held; runtime loop parks");
-                        #[cfg(any(test, feature = "test-support"))]
-                        authority_binding.note_run_start_held();
-                        drop(queue_authority_guard);
-                        return false;
-                    }
-                    Ok(crate::meerkat_machine::driver::RuntimeLoopBatchStart::StageRefused {
-                        reason,
-                        abandoned_input_ids,
-                    }) => {
-                        // The machine refused to stage an accepted batch. Its
-                        // members are already resolved (another attempt at the
-                        // back of the backlog, or terminalized at the retry
-                        // cap), so this wake keeps draining: returning here
-                        // dropped the wake and, under fifo, starved every input
-                        // behind the refused head indefinitely (field 0.8.22).
-                        tracing::warn!(
-                            %run_id,
-                            reason = %reason,
-                            abandoned = abandoned_input_ids.len(),
-                            "generated staging authority refused an accepted input batch; resolved through machine authority"
-                        );
-                        drop(queue_authority_guard);
-                        if !abandoned_input_ids.is_empty()
-                            && drain_recovered_interaction_terminal_outboxes_until_clear(
-                                driver,
-                                completions,
-                                executor,
-                                authority_binding,
-                                true,
-                                RuntimeProjectionRecoveryAuthority::RuntimeLoop,
-                            )
-                            .await
-                        {
-                            return true;
+                // A resumed run was begun at dequeue, without staging; an
+                // ordinary batch starts and stages here.
+                if let Some(batch) = batch {
+                    match crate::meerkat_machine::prepare_runtime_loop_batch_start(
+                        driver,
+                        run_id.clone(),
+                        batch,
+                        authority_binding.runless_terminal_announcement(),
+                    )
+                    .await
+                    {
+                        Ok(crate::meerkat_machine::driver::RuntimeLoopBatchStart::Started) => {}
+                        Ok(
+                            crate::meerkat_machine::driver::RuntimeLoopBatchStart::RunStartsHeld,
+                        ) => {
+                            // The member's mob is stopped (#1500). Nothing was
+                            // staged; the input waits in its lane. Releasing the
+                            // hold wakes this loop.
+                            tracing::debug!(%run_id, "run starts are held; runtime loop parks");
+                            #[cfg(any(test, feature = "test-support"))]
+                            authority_binding.note_run_start_held();
+                            drop(queue_authority_guard);
+                            return false;
                         }
-                        continue;
-                    }
-                    Err(err) => {
-                        tracing::error!(%run_id, error = %err, "failed to prepare runtime loop batch");
-                        if let Some(completions) = completions.as_ref() {
-                            let mut completions = completions.lock().await;
-                            fail_completion_waiters(
-                                &mut completions,
-                                &input_ids,
-                                format!("runtime batch preparation failed: {err}"),
+                        Ok(
+                            crate::meerkat_machine::driver::RuntimeLoopBatchStart::StageRefused {
+                                reason,
+                                abandoned_input_ids,
+                            },
+                        ) => {
+                            // The machine refused to stage an accepted batch. Its
+                            // members are already resolved (another attempt at the
+                            // back of the backlog, or terminalized at the retry
+                            // cap), so this wake keeps draining: returning here
+                            // dropped the wake and, under fifo, starved every input
+                            // behind the refused head indefinitely (field 0.8.22).
+                            tracing::warn!(
+                                %run_id,
+                                reason = %reason,
+                                abandoned = abandoned_input_ids.len(),
+                                "generated staging authority refused an accepted input batch; resolved through machine authority"
                             );
+                            drop(queue_authority_guard);
+                            if !abandoned_input_ids.is_empty()
+                                && drain_recovered_interaction_terminal_outboxes_until_clear(
+                                    driver,
+                                    completions,
+                                    executor,
+                                    authority_binding,
+                                    true,
+                                    RuntimeProjectionRecoveryAuthority::RuntimeLoop,
+                                )
+                                .await
+                            {
+                                return true;
+                            }
+                            continue;
                         }
-                        return false;
+                        Err(err) => {
+                            tracing::error!(%run_id, error = %err, "failed to prepare runtime loop batch");
+                            if let Some(completions) = completions.as_ref() {
+                                let mut completions = completions.lock().await;
+                                fail_completion_waiters(
+                                    &mut completions,
+                                    &input_ids,
+                                    format!("runtime batch preparation failed: {err}"),
+                                );
+                            }
+                            return false;
+                        }
                     }
                 }
                 // The input is durably `Staged` from here: it has left its work
@@ -8405,6 +8929,36 @@ async fn process_queue(
                         }
                     }
                     Err(e) => {
+                        // A run a graceful requeue stop suspended is realized
+                        // as nothing: the machine marks it resumable before
+                        // the stop classifies any input, and the stop keeps
+                        // its inputs bound to it. It never reaches the
+                        // failed-run disposition below, whose replay would
+                        // requeue the inputs over the run's provisional tail.
+                        // A suspension the machine refuses is cancelled.
+                        let (e, d) = match &e {
+                            CoreExecutorError::Suspended {
+                                run_id: suspended_run_id,
+                            } => {
+                                let suspended_run_id = suspended_run_id.clone();
+                                drop(d);
+                                match realize_suspended_run(
+                                    driver,
+                                    authority_binding,
+                                    &run_id,
+                                    &suspended_run_id,
+                                )
+                                .await
+                                {
+                                    SuspendedRunRealization::Suspended => continue 'lap,
+                                    SuspendedRunRealization::Exit => return true,
+                                    SuspendedRunRealization::Refused => {
+                                        (CoreExecutorError::cancelled(), driver.lock().await)
+                                    }
+                                }
+                            }
+                            _ => (e, d),
+                        };
                         let cancelled = e.is_cancelled();
                         // Post-mutation failures must not re-enter the retry
                         // lane. `failed_run_contributor_disposition` classifies
@@ -8658,6 +9212,39 @@ async fn process_queue(
                         match terminalization_outcome {
                             OwnedRuntimeLoopTerminalizationOutcome::Persisted => {
                                 authority_binding.release_ended_run_tool_markers(&run_id);
+                                // The cancel dropped the run future, so the
+                                // run's last round commit is still the store's
+                                // provisional tail. The cancellation is
+                                // committed now (no current run, the run's
+                                // inputs abandoned): close that tail as an
+                                // interrupted run before anything else runs,
+                                // so the session's next save and next run do
+                                // not meet it. A suspension never reaches this
+                                // arm.
+                                if cancelled {
+                                    let mut driver = driver.lock().await;
+                                    driver
+                                        .settle_cancelled_run_tail(
+                                            &authority_binding.session_id,
+                                            &run_id,
+                                        )
+                                        .await;
+                                    // A committed settle consumed the inputs
+                                    // the tail's cursor lists. The cancel may
+                                    // have requeued one of them (a join whose
+                                    // live image it dropped); adopt it, so the
+                                    // loop never runs that content again.
+                                    if let Err(error) = driver
+                                        .adopt_settled_cancelled_run_inputs(&run_id, completions)
+                                        .await
+                                    {
+                                        tracing::warn!(
+                                            %run_id,
+                                            %error,
+                                            "the cancelled run's settled inputs were not adopted"
+                                        );
+                                    }
+                                }
                             }
                             OwnedRuntimeLoopTerminalizationOutcome::Rejected(error) => {
                                 tracing::error!(
@@ -12674,6 +13261,116 @@ mod tests {
         }
     }
 
+    /// A resumed run is dispatched with its own bound inputs under the
+    /// `ResumeRun` kind: the batch is read from the run's bindings, never from
+    /// a lane, and the kind is stamped on the dispatched primitive only.
+    #[tokio::test]
+    async fn a_resumed_runs_primitive_carries_its_bound_inputs_under_the_resume_kind() {
+        let driver = make_shared_ephemeral_driver("resumed-primitive");
+        let (run_id, input_id) = stage_one_run_for_disposition_test(&driver).await;
+
+        let guard = driver.lock().await;
+        assert_eq!(
+            guard.resumed_run_bound_input_ids(&run_id),
+            vec![input_id.clone()],
+            "the staged input is the run's bound batch"
+        );
+        let primitive = resumed_run_primitive(&guard, &run_id, std::slice::from_ref(&input_id))
+            .expect("a run's own staged input describes its resumed batch");
+        assert_eq!(
+            primitive.contributing_input_ids(),
+            std::slice::from_ref(&input_id)
+        );
+        assert_eq!(
+            primitive
+                .turn_metadata()
+                .and_then(|metadata| metadata.execution_kind),
+            Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumeRun),
+            "the dispatched primitive carries the resume kind"
+        );
+        match &*guard {
+            crate::meerkat_machine::DriverEntry::Ephemeral(d) => assert_eq!(
+                d.input_phase(&input_id),
+                Some(crate::input_state::InputLifecycleState::Staged),
+                "describing the resumed batch changes no input"
+            ),
+            _ => panic!("expected ephemeral driver"),
+        }
+    }
+
+    /// A resumed batch names only inputs still bound to the run: another
+    /// run's id finds nothing to resume and refuses to hydrate.
+    #[tokio::test]
+    async fn a_resumed_batch_refuses_inputs_not_bound_to_the_run() {
+        let driver = make_shared_ephemeral_driver("resumed-primitive-foreign");
+        let (_run_id, input_id) = stage_one_run_for_disposition_test(&driver).await;
+        let other_run = RunId::new();
+
+        let guard = driver.lock().await;
+        assert!(guard.resumed_run_bound_input_ids(&other_run).is_empty());
+        assert!(
+            resumed_run_primitive(&guard, &other_run, std::slice::from_ref(&input_id)).is_err(),
+            "an input bound to another run is not this run's resumed batch"
+        );
+    }
+
+    /// RED before the replay of applied contributors: a failed run whose
+    /// contributor a committed round already applied (a resumed run's) returns
+    /// it to the work lane with the staged ones. Left applied, it stayed bound
+    /// to a run that ended, and a later registration found that run open and
+    /// resumable again.
+    #[tokio::test]
+    async fn a_failed_run_replays_a_contributor_a_committed_round_applied() {
+        let driver = make_shared_ephemeral_driver("replayed-applied-contributor");
+        let (run_id, input_id) = stage_one_run_for_disposition_test(&driver).await;
+        {
+            let mut guard = driver.lock().await;
+            let receipt = meerkat_core::lifecycle::RunBoundaryReceiptDraft {
+                run_id: run_id.clone(),
+                boundary: RunApplyBoundary::Immediate,
+                contributing_input_ids: vec![input_id.clone()],
+                conversation_digest: None,
+                message_count: 0,
+            }
+            .into_sequenced(1);
+            guard
+                .machine_realize_boundary_applied_in_memory(&run_id, &receipt)
+                .expect("the round's boundary applies its contributor");
+            match &*guard {
+                crate::meerkat_machine::DriverEntry::Ephemeral(d) => assert_eq!(
+                    d.input_phase(&input_id),
+                    Some(crate::input_state::InputLifecycleState::AppliedPendingConsumption),
+                ),
+                _ => panic!("expected ephemeral driver"),
+            }
+        }
+
+        crate::meerkat_machine::fail_runtime_loop_run(
+            &driver,
+            run_id,
+            CoreApplyFailureCause::executor_internal("the resumed run failed"),
+            crate::meerkat_machine::FailedRunContributorDisposition::Replayed,
+        )
+        .await
+        .expect("a failed run terminalizes");
+
+        let guard = driver.lock().await;
+        match &*guard {
+            crate::meerkat_machine::DriverEntry::Ephemeral(d) => {
+                assert_eq!(
+                    d.input_phase(&input_id),
+                    Some(crate::input_state::InputLifecycleState::Queued),
+                    "an applied contributor of a failed run replays like a staged one"
+                );
+                assert!(
+                    d.has_queued_input(&input_id),
+                    "the replayed contributor is lane-bound again"
+                );
+            }
+            _ => panic!("expected ephemeral driver"),
+        }
+    }
+
     /// The double-execution refusal, at the machine realization rather than as
     /// a compensating step after it: a never-started run's contributors are
     /// terminalized by the same realization that terminalizes the run, so they
@@ -13693,6 +14390,7 @@ mod tests {
             tool_use_id: "call-1".to_string(),
             tool_name: "external_mock".to_string(),
             args: serde_json::json!({ "value": "browser" }),
+            dedupe_key: None,
         });
 
         registry.resolve_process_local_runtime_completion_authorized(
@@ -13710,6 +14408,7 @@ mod tests {
                 tool_use_id,
                 tool_name,
                 args,
+                ..
             } => {
                 assert_eq!(tool_use_id, "call-1");
                 assert_eq!(tool_name, "external_mock");

@@ -82,7 +82,8 @@
 //!   preimage, so a stripped or tampered head no longer re-derives its stored
 //!   token and reads fail closed as `Corrupted`. That binding is therefore
 //!   load-bearing, not decorative.
-//! * **History decode** — deserialization routes through [`Self::from_records`],
+//! * **History decode** - deserialization routes through
+//!   [`SessionModelRoutingControlHistory::from_records`],
 //!   so duplicate, orphaned, resurrected, or scoped records fail closed in
 //!   every embedding carrier, including `SessionHead`.
 //! * **Durable save transition** — the committed log is append-only across
@@ -247,7 +248,7 @@ impl SessionModelRoutingControlRecord {
 /// user/system-policy origin has a live control surface of its own.
 ///
 /// This answers SHAPE only. A record additionally needs a target that actually
-/// names something — see [`durable_handoff_intent_refusal`], which is what the
+/// names something - see `durable_handoff_intent_refusal`, which is what the
 /// commit paths call.
 #[must_use]
 pub fn intent_is_durable_handoff(intent: &SwitchTurnIntent) -> bool {

@@ -540,7 +540,6 @@ fn agent_event_all_variants_roundtrip() {
         AgentEvent::ToolExecutionCompleted {
             id: "tc2".to_string(),
             name: "shell".to_string(),
-            content: ContentBlock::text_vec("ok".to_string()),
             is_error: false,
             duration_ms: 100,
         },
@@ -825,7 +824,6 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
         AgentEvent::ToolExecutionCompleted {
             id: "tool-1".to_string(),
             name: "search".to_string(),
-            content: ContentBlock::text_vec("ok".to_string()),
             is_error: false,
             duration_ms: 1,
         },
@@ -960,6 +958,12 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             run_id: meerkat_core::lifecycle::RunId::new(),
             input_ids: vec![meerkat_core::lifecycle::InputId::new()],
         }),
+        AgentEvent::RunResumed {
+            session_id: SessionId::new(),
+            run_id: meerkat_core::lifecycle::RunId::new(),
+            round: 2,
+            resume_point: meerkat_core::RunResumePointKind::ToolsPending,
+        },
     ];
 
     for event in events {
@@ -1230,4 +1234,87 @@ fn realtime_image_chunk_is_a_named_public_contract() {
 fn bridge_interrupt_payload_is_exported_from_the_crate_root() {
     fn assert_root_export<T>() {}
     assert_root_export::<BridgeInterruptPayload>();
+}
+
+/// `session/external_event` and `mob/member_send` carry an optional
+/// top-level `idempotency_key`: present, it round-trips; absent, it stays
+/// absent. Driven through JSON so the row compiles without the field.
+#[test]
+fn external_event_and_member_send_params_carry_an_optional_top_level_key() {
+    let keyed: meerkat_contracts::SessionExternalEventParams =
+        serde_json::from_value(serde_json::json!({
+            "session_id": "session-1",
+            "kind": "generic_json",
+            "event_type": "inbox.item",
+            "payload": { "body": "x" },
+            "idempotency_key": "inbox:1",
+        }))
+        .expect("keyed external event params parse");
+    let back = serde_json::to_value(&keyed).expect("serialize");
+    assert_eq!(
+        back["idempotency_key"], "inbox:1",
+        "the key round-trips: {back}"
+    );
+    assert_eq!(
+        back["kind"], "generic_json",
+        "the envelope stays flattened: {back}"
+    );
+
+    let unkeyed: meerkat_contracts::SessionExternalEventParams =
+        serde_json::from_value(serde_json::json!({
+            "session_id": "session-1",
+            "kind": "generic_json",
+            "event_type": "inbox.item",
+            "payload": { "body": "x" },
+        }))
+        .expect("unkeyed external event params parse");
+    let back = serde_json::to_value(&unkeyed).expect("serialize");
+    assert!(
+        back.get("idempotency_key").is_none(),
+        "absent stays absent: {back}"
+    );
+
+    let send: meerkat_contracts::MobMemberSendParams = serde_json::from_value(serde_json::json!({
+        "mob_id": "mob-1",
+        "agent_identity": "worker-1",
+        "content": "hello",
+        "idempotency_key": "item-1",
+    }))
+    .expect("member_send params accept the key");
+    let back = serde_json::to_value(&send).expect("serialize");
+    assert_eq!(
+        back["idempotency_key"], "item-1",
+        "the key round-trips: {back}"
+    );
+}
+
+/// both emitted schemas name the optional key, and a
+/// keyed member_send result names its continuation receipt and status.
+#[cfg(feature = "schema")]
+#[test]
+fn external_event_and_member_send_schemas_name_the_optional_key() {
+    let event = serde_json::to_value(schemars::schema_for!(
+        meerkat_contracts::SessionExternalEventParams
+    ))
+    .expect("schema json");
+    assert!(
+        event["properties"].get("idempotency_key").is_some(),
+        "session/external_event schema names idempotency_key: {event}"
+    );
+    let send = serde_json::to_value(schemars::schema_for!(
+        meerkat_contracts::MobMemberSendParams
+    ))
+    .expect("schema json");
+    assert!(
+        send["properties"].get("idempotency_key").is_some(),
+        "mob/member_send schema names idempotency_key: {send}"
+    );
+    let result = serde_json::to_value(schemars::schema_for!(
+        meerkat_contracts::MobMemberSendResult
+    ))
+    .expect("schema json");
+    assert!(
+        result["properties"].get("continuation").is_some(),
+        "mob/member_send result names its continuation receipt: {result}"
+    );
 }

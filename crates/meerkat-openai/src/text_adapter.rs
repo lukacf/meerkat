@@ -111,6 +111,7 @@ fn project_realtime_replay_messages(messages: &[Message]) -> Result<Vec<Message>
         crate::client::OpenAiReplayProjectionMode::ChatCompletions,
         false,
         false,
+        false,
     )
 }
 

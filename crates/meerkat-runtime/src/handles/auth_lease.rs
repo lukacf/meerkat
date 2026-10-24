@@ -1105,6 +1105,26 @@ impl RuntimeAuthLeaseHandle {
             .is_some_and(|authority| authority.state().oauth_browser_flow_ids.contains(flow_id))
     }
 
+    /// Every browser flow the AuthMachine holds for `target`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn oauth_browser_flow_ids(&self, target: &AuthCredentialIdentity) -> Vec<String> {
+        let lease_key = LeaseKey::from_credential_identity(target);
+        self.machines
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .authorities
+            .get(&lease_key)
+            .map(|authority| {
+                authority
+                    .state()
+                    .oauth_browser_flow_ids
+                    .iter()
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Whether the AuthMachine holds browser flow `flow_id` for `target`
     /// admitted under `provider` (its binding key) with a redirect other
     /// than `redirect_uri`: a completion its redirect guard refuses once

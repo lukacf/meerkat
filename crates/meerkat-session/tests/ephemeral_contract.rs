@@ -90,6 +90,7 @@ impl SessionAgent for MockAgent {
                 tool_use_id: "call-1".to_string(),
                 tool_name: "external_mock".into(),
                 args: json!({ "value": "browser" }),
+                dedupe_key: None,
             });
         }
 
@@ -418,6 +419,7 @@ fn filtered_tool_names(overlay: &Option<TurnToolOverlay>) -> Vec<String> {
 fn rendered_system_prompts(session: &Session) -> Vec<String> {
     session
         .messages_for_model_boundary()
+        .unwrap()
         .iter()
         .filter_map(|message| match message {
             meerkat_core::types::Message::System(system) => Some(system.content.clone()),
@@ -1914,6 +1916,7 @@ async fn test_apply_runtime_turn_returns_callback_pending_terminal() -> Result<(
         tool_use_id,
         tool_name,
         args,
+        ..
     }) = output.terminal
     else {
         return Err("expected callback pending terminal".to_string());

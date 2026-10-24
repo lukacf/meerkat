@@ -305,6 +305,61 @@ impl IdempotencyKey {
     pub fn new(key: impl Into<String>) -> Self {
         Self(key.into())
     }
+
+    /// A caller-supplied key for a session input: checked by the canonical
+    /// key rule ([`validate_canonical_key_text`], at most
+    /// [`CALLER_IDEMPOTENCY_KEY_MAX_BYTES`]) and stored under
+    /// [`CALLER_IDEMPOTENCY_KEY_NAMESPACE`], so it never meets a key Core
+    /// derives for its own deliveries in the same session's input index.
+    ///
+    /// # Errors
+    /// [`CanonicalKeyTextError`] when `raw` is not canonical key text.
+    pub fn caller(raw: &str) -> Result<Self, CanonicalKeyTextError> {
+        validate_canonical_key_text("idempotency_key", raw, CALLER_IDEMPOTENCY_KEY_MAX_BYTES)?;
+        Ok(Self(format!("{CALLER_IDEMPOTENCY_KEY_NAMESPACE}{raw}")))
+    }
+}
+
+/// Longest caller-supplied idempotency key, in bytes, before its namespace.
+pub const CALLER_IDEMPOTENCY_KEY_MAX_BYTES: usize = 256;
+
+/// The namespace a caller-supplied key is stored under in a session's input
+/// index. Core's own keys (job deliveries, continuation admissions, peer
+/// inputs) never start with it.
+pub const CALLER_IDEMPOTENCY_KEY_NAMESPACE: &str = "caller:";
+
+/// A key that is not canonical key text.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{field} must be canonical nonempty text no longer than {max_bytes} bytes")]
+pub struct CanonicalKeyTextError {
+    /// The field the key was supplied as, as the refusal names it.
+    pub field: String,
+    /// The cap the key exceeded or would have to meet.
+    pub max_bytes: usize,
+}
+
+/// The one canonical key-text rule, shared by every caller-supplied key:
+/// non-empty, no leading or trailing whitespace, at most `max_bytes` bytes,
+/// and no control characters.
+///
+/// # Errors
+/// [`CanonicalKeyTextError`] naming `field` when `value` breaks the rule.
+pub fn validate_canonical_key_text(
+    field: &str,
+    value: &str,
+    max_bytes: usize,
+) -> Result<(), CanonicalKeyTextError> {
+    if value.is_empty()
+        || value.trim() != value
+        || value.len() > max_bytes
+        || value.chars().any(char::is_control)
+    {
+        return Err(CanonicalKeyTextError {
+            field: field.to_string(),
+            max_bytes,
+        });
+    }
+    Ok(())
 }
 
 impl std::fmt::Display for IdempotencyKey {

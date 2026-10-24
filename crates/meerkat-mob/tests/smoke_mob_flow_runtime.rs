@@ -301,6 +301,7 @@ fn flow_profile(model: &str, peer_description: &str) -> Profile {
         max_inline_peer_notifications: None,
         output_schema: None,
         provider_params: None,
+        durable: false,
     }
 }
 
@@ -2871,6 +2872,7 @@ fn external_tcp_smoke_definition(
             max_inline_peer_notifications: None,
             output_schema: None,
             provider_params: None,
+            durable: false,
         })),
     );
 

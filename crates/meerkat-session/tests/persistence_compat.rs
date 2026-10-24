@@ -10,7 +10,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use meerkat_core::generated::session_persistence_version_authority::{
-    STORED_INPUT_STATE_VERSION, restore_stored_input_state_version,
+    STORED_INPUT_STATE_BASELINE_VERSION, STORED_INPUT_STATE_VERSION,
+    restore_stored_input_state_version, stored_input_state_version_for_row,
 };
 use meerkat_core::{SESSION_METADATA_SCHEMA_VERSION, SESSION_VERSION, Session, SessionMetadata};
 use serde_json::{Value, json};
@@ -159,17 +160,23 @@ fn stored_input_state_version_is_pinned_to_current() {
     // constant so the rejection tests there and the authority here agree.
     // v5 adds the exact durable completion outcome; v6 adds the protected
     // mandatory-hook withholding audit record; v7 is the 0.9.4 encoding,
-    // whose additions the runtime decoder refuses in an older row. A
-    // supported 0.8.10 deployment may still contain retained v3 rows, so the
-    // generated authority admits v3, v4, v5 and the v6 rows 0.9.0 to 0.9.3
-    // wrote into current v7.
-    assert_eq!(STORED_INPUT_STATE_VERSION, 7);
-    assert_eq!(restore_stored_input_state_version(3), Ok(7));
-    assert_eq!(restore_stored_input_state_version(4), Ok(7));
-    assert_eq!(restore_stored_input_state_version(5), Ok(7));
-    assert_eq!(restore_stored_input_state_version(6), Ok(7));
-    assert_eq!(restore_stored_input_state_version(7), Ok(7));
-    assert!(restore_stored_input_state_version(8).is_err());
+    // whose additions the runtime decoder refuses in an older row; v8 adds
+    // the requeue-across-stop facts. A row is written at v8 only when it
+    // carries one of them, so every other row stays at the v7 baseline and
+    // 0.9.4 still reads it. A supported 0.8.10 deployment may still contain
+    // retained v3 rows, so the generated authority admits v3, v4, v5 and the
+    // v6 rows 0.9.0 to 0.9.3 wrote into current v8.
+    assert_eq!(STORED_INPUT_STATE_VERSION, 8);
+    assert_eq!(STORED_INPUT_STATE_BASELINE_VERSION, 7);
+    assert_eq!(stored_input_state_version_for_row(false), 7);
+    assert_eq!(stored_input_state_version_for_row(true), 8);
+    assert_eq!(restore_stored_input_state_version(3), Ok(8));
+    assert_eq!(restore_stored_input_state_version(4), Ok(8));
+    assert_eq!(restore_stored_input_state_version(5), Ok(8));
+    assert_eq!(restore_stored_input_state_version(6), Ok(8));
+    assert_eq!(restore_stored_input_state_version(7), Ok(8));
+    assert_eq!(restore_stored_input_state_version(8), Ok(8));
+    assert!(restore_stored_input_state_version(9).is_err());
     assert_eq!(SESSION_VERSION, 4);
     assert_eq!(SESSION_METADATA_SCHEMA_VERSION, 2);
 }

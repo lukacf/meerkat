@@ -1928,6 +1928,22 @@ impl MemberObservationHost for HostMemberObservation {
         Ok(self.session_facts(session)?.generation)
     }
 
+    async fn visible_tool_names(
+        &self,
+        session: &SessionId,
+    ) -> Result<Option<Vec<String>>, MemberObservationError> {
+        // Only a resident member's session answers.
+        self.session_facts(session)?;
+        Ok(
+            match self.session_service.fork_source_tools(session).await {
+                meerkat_core::fork_notice::ForkSeedSourceTools::Read { names } => {
+                    Some(names.iter().map(ToString::to_string).collect())
+                }
+                meerkat_core::fork_notice::ForkSeedSourceTools::NotRead { .. } => None,
+            },
+        )
+    }
+
     async fn read_history(
         &self,
         session: &SessionId,
@@ -3378,14 +3394,36 @@ async fn run_directed_turn_watcher(
         Some(handle) => Some(handle.try_wait().await),
         None => None,
     };
+    // A wait failure the generated authority resolves as resumable (a
+    // graceful stop kept the input durably queued for the next start) is
+    // neither failed nor terminal here. Record nothing; the tracked turn
+    // stays Pending and the next start's recovery reattaches to it.
+    if let Some(Err(error)) = &completion_result
+        && adapter
+            .resolve_runtime_completion_wait_failure(&session, error)
+            .await
+            .is_ok_and(|authority| authority.resumable)
+    {
+        tracing::info!(
+            session_id = %session,
+            input_id = %input_id,
+            error = %error,
+            "input kept queued across a graceful stop; retaining tracked turn Pending for the next start"
+        );
+        return;
+    }
+    // A kept input whose resolution failed is no terminal either.
     if completion_result.as_ref().is_some_and(|result| {
-        result
-            .as_ref()
-            .err()
-            .and_then(CompletionWaitError::wait_failure_observation)
-            == Some(
-                meerkat_runtime::meerkat_machine::dsl::RuntimeCompletionWaitFailureObservation::AuthorityUnavailable,
+        matches!(
+            result
+                .as_ref()
+                .err()
+                .and_then(CompletionWaitError::wait_failure_observation),
+            Some(
+                meerkat_runtime::meerkat_machine::dsl::RuntimeCompletionWaitFailureObservation::AuthorityUnavailable
+                    | meerkat_runtime::meerkat_machine::dsl::RuntimeCompletionWaitFailureObservation::RequeuedAcrossStop,
             )
+        )
     }) {
         if let Some(Err(error)) = &completion_result {
             tracing::error!(

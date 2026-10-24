@@ -319,7 +319,7 @@ try {
       plan: { mode: "none" },
       component_results: {
         ...goodAttestation.component_results,
-        ...Object.fromEntries(["clippy", "unit", "integration", "governed_jsonl", "mcp_confinement_positive", "main_unit", "closure_check", "wasm_check", "sdk_host"].map((lane) => [lane, "skipped"])),
+        ...Object.fromEntries(["clippy", "unit", "integration", "governed_jsonl", "mcp_confinement_positive", "main_unit", "closure_check", "rustdoc", "wasm_check", "sdk_host"].map((lane) => [lane, "skipped"])),
       },
     }],
     ["a packages-mode run", { plan: { mode: "packages" } }],
@@ -549,10 +549,10 @@ if (args[0] === "api") {
     CLOSURE_TEST_COUNT: "0", TEST_SCOPE_COUNT: "0", HOOK_BINARY_COUNT: "0", HOOK_RETAINED_COUNT: "0",
     MAIN_UNIT_PACKED_RESULT: "skipped", MAIN_UNIT_ARCHIVE_BUILD_RESULT: "skipped", MAIN_UNIT_ARCHIVE_RUN_RESULT: "skipped",
     MAIN_ARCHIVE_BUILD_COUNT: "0", MAIN_ARCHIVE_RUN_COUNT: "0",
-    CLOSURE_CHECK_RESULT: "skipped", FEATURE_CHECK_RESULT: "skipped", FEATURE_CHECK_COUNT: "0",
+    CLOSURE_CHECK_RESULT: "skipped", RUSTDOC_RESULT: "skipped", FEATURE_CHECK_RESULT: "skipped", FEATURE_CHECK_COUNT: "0",
     WASM: "false", WASM_CHECK_RESULT: "skipped", SDK_HOST_RESULT: "skipped", EXAMPLE_WEB_RESULT: "skipped",
     WASM_TIMERS_RESULT: "skipped", BAZEL_GRAPH_RESULT: "success", RUST_CHANGED: "false", IS_MAIN_PUSH: "true",
-    IS_PULL_REQUEST: "false", PLAN_EVENT: "push", CLOSURE_CHECK: "false", GOVERNED_JSONL: "false",
+    IS_PULL_REQUEST: "false", PLAN_EVENT: "push", CLOSURE_CHECK: "false", RUSTDOC: "false", GOVERNED_JSONL: "false",
     MCP_CONFINEMENT_POSITIVE: "false", DEFERRED_TO_PUSH: "", READER_NOT_RUN: "",
     SDK_HOST: "false", BAZEL_GRAPH: "true", EXAMPLES_BROWSER: "false", EXAMPLE_WEB: "false", EXAMPLE_WEB_WASM: "false",
     MODE: "release-projection", REASON: "release projection", SHARD_COUNT: "0", UNIT_SHARD_COUNT: "6",
@@ -626,11 +626,12 @@ if (args[0] === "api") {
   };
   const pullRequestGate = {
     ...rustGate, IS_MAIN_PUSH: "false", IS_PULL_REQUEST: "true", PLAN_EVENT: "pull_request",
-    DEFERRED_TO_PUSH: "17 closure-tests rows; the closure check; governed JSONL; MCP confinement positive",
+    DEFERRED_TO_PUSH: "17 closure-tests rows; the closure check; governed JSONL; MCP confinement positive; the workspace rustdoc",
   };
   const pushGate = {
-    ...rustGate, CLOSURE_CHECK: "true", GOVERNED_JSONL: "true", MCP_CONFINEMENT_POSITIVE: "true",
-    CLOSURE_CHECK_RESULT: "success", GOVERNED_JSONL_RESULT: "success", MCP_CONFINEMENT_POSITIVE_RESULT: "success",
+    ...rustGate, CLOSURE_CHECK: "true", RUSTDOC: "true", GOVERNED_JSONL: "true", MCP_CONFINEMENT_POSITIVE: "true",
+    CLOSURE_CHECK_RESULT: "success", RUSTDOC_RESULT: "success", GOVERNED_JSONL_RESULT: "success",
+    MCP_CONFINEMENT_POSITIVE_RESULT: "success",
     CLOSURE_TEST_COUNT: "17", CLOSURE_TESTS_RESULT: "success", MAIN_UNIT_PACKED_RESULT: "success",
     WASM_CHECK_RESULT: "success", SDK_HOST_RESULT: "success", EXAMPLE_WEB_RESULT: "success",
     WASM_TIMERS_RESULT: "success", BAZEL_GRAPH_RESULT: "success",
@@ -671,12 +672,16 @@ if (args[0] === "api") {
   assert.match(unitOnMainRun.stdout, /the push runs its unit rows in the main unit lane: core/);
   for (const [label, env] of [
     ["a push plan without the closure check", { ...pushGate, CLOSURE_CHECK: "false", CLOSURE_CHECK_RESULT: "skipped" }],
+    ["a push plan without the workspace rustdoc", { ...pushGate, RUSTDOC: "false", RUSTDOC_RESULT: "skipped" }],
     ["a push plan without governed JSONL", { ...pushGate, GOVERNED_JSONL: "false", GOVERNED_JSONL_RESULT: "skipped" }],
     ["a push plan without the confinement lane", { ...pushGate, MCP_CONFINEMENT_POSITIVE: "false", MCP_CONFINEMENT_POSITIVE_RESULT: "skipped" }],
     ["a push plan that left lanes to a later push", { ...pushGate, DEFERRED_TO_PUSH: "the closure check" }],
     ["a pull-request plan on a push", { ...pushGate, PLAN_EVENT: "pull_request" }],
     ["a push whose closure check did not run", { ...pushGate, CLOSURE_CHECK_RESULT: "skipped" }],
+    ["a push whose workspace rustdoc did not run", { ...pushGate, RUSTDOC_RESULT: "skipped" }],
+    ["a push whose workspace rustdoc failed", { ...pushGate, RUSTDOC_RESULT: "failure" }],
     ["a pull request whose skipped closure check failed", { ...pullRequestGate, CLOSURE_CHECK_RESULT: "failure" }],
+    ["a pull request whose skipped workspace rustdoc failed", { ...pullRequestGate, RUSTDOC_RESULT: "failure" }],
     ["a pull request whose governed JSONL lane failed", { ...pullRequestGate, GOVERNED_JSONL_RESULT: "failure" }],
     ["unit rows on main whose packed main unit lane did not run", { ...unitOnMainGate, MAIN_UNIT_PACKED_RESULT: "skipped" }],
     ["unit rows on main whose packed main unit lane failed", { ...unitOnMainGate, MAIN_UNIT_PACKED_RESULT: "failure" }],
@@ -762,11 +767,15 @@ process.stdout.write(JSON.stringify(fixture[path]));
   const job = (name, created, started, completed) => ({
     name, created_at: at(created), started_at: at(started), completed_at: at(completed), conclusion: "success",
   });
-  const runBudget = (attemptStarts, jobs, extraEnv = {}) => {
+  const runBudget = (attemptStarts, jobs, extraEnv = {}) =>
+    runBudgetAt(attemptStarts.map(at), jobs, extraEnv);
+  // The plan's GUARD_LANE_REASONS is "{}" unless a row sets it: no
+  // exact-profile lane ran.
+  const runBudgetAt = (attemptStarts, jobs, extraEnv = {}) => {
     const run = `/repos/${REPOSITORY}/actions/runs/${RUN_ID}`;
     const pages = { [`${run}/attempts/${attemptStarts.length}/jobs?per_page=100`]: [{ jobs }] };
     attemptStarts.forEach((start, index) => {
-      pages[`${run}/attempts/${index + 1}`] = [{ run_started_at: at(start) }];
+      pages[`${run}/attempts/${index + 1}`] = [{ run_started_at: start }];
     });
     writeFileSync(budgetFixture, JSON.stringify(pages));
     const outputFile = join(scratch, "budget-output");
@@ -777,7 +786,7 @@ process.stdout.write(JSON.stringify(fixture[path]));
         GITHUB_REPOSITORY: REPOSITORY, GITHUB_RUN_ID: String(RUN_ID), GITHUB_RUN_ATTEMPT: String(attemptStarts.length),
         MAX_EXEC_SECONDS: workflowSeconds("CI_MAX_EXEC_SECONDS"), MAX_TERMINAL_SECONDS: workflowSeconds("CI_MAX_TERMINAL_SECONDS"),
         QUEUE_WARN_SECONDS: workflowSeconds("CI_QUEUE_WARN_SECONDS"), ENFORCE_BUDGET: "true",
-        GITHUB_OUTPUT: outputFile, GITHUB_STEP_SUMMARY: "", ...extraEnv,
+        GITHUB_OUTPUT: outputFile, GITHUB_STEP_SUMMARY: "", GUARD_LANE_REASONS: "{}", ...extraEnv,
       },
       encoding: "utf8",
     });
@@ -804,7 +813,7 @@ process.stdout.write(JSON.stringify(fixture[path]));
     budget.outputs,
     {
       exec_path_seconds: "930", terminal_seconds: "1215", terminal_excluding_queue_seconds: "931",
-      queue_seconds: "709", budget_verdict: "queue_delayed",
+      queue_seconds: "709", budget_verdict: "queue_delayed", guard_lanes_outside_budget: "[]",
     },
     `the rest-wave row's path holds the stagger job's queue: ${budget.stdout}`,
   );
@@ -822,6 +831,122 @@ process.stdout.write(JSON.stringify(fixture[path]));
   assert.equal(budget.status, 1, `a rest-wave row over the execution budget fails: ${budget.stdout}`);
   assert.equal(budget.outputs.exec_path_seconds, "1081", "1046 s of the row, 30 s of classification, 5 s of stagger");
   assert.equal(budget.outputs.budget_verdict, "exec_over_budget");
+
+  // An exact-profile lane the plan ran only because the change touched its
+  // inputs or changed its definition is outside a pull request's budget:
+  // its cold build alone exceeds it. The plan says why it ran
+  // (guard_lane_reasons); the gate reads that, matches the lane's job by its
+  // exact name, still requires it (the lane check) and names it in a typed
+  // warning. Every other lane, and a guard lane run for any other reason or
+  // not successful, stays in the budget, and anything it cannot read fails.
+  const changesJob = workflow.slice(workflow.indexOf("\n  changes:\n"), workflow.indexOf("\n  fmt-governance:\n"));
+  assert.match(changesJob, /\n {6}guard_lane_reasons: \$\{\{ steps\.plan\.outputs\.guard_lane_reasons \}\}\n/, "the classification exports the plan's guard lane reasons");
+  assert.equal(
+    extractStepEnv(workflow, "Enforce lane execution budget").GUARD_LANE_REASONS,
+    "${{ needs.changes.outputs.guard_lane_reasons }}",
+    "the budget reads them from the plan",
+  );
+  const guardJobs = Object.fromEntries(budgetEnv.GUARD_LANE_JOBS.split(",").map((entry) => entry.split("=")));
+  assert.deepEqual(
+    guardJobs,
+    { governed_jsonl: jobName("governed-jsonl"), mcp_confinement_positive: jobName("mcp-confinement-positive") },
+    "the budget names each exact-profile lane's job exactly as ci.yml does",
+  );
+  const realRun = JSON.parse(readFileSync(resolve(root, "scripts/tests/fixtures/ci-budget/run-39919235188.json"), "utf8"));
+  const realStarts = realRun.attempts.map((entry) => entry.run_started_at);
+  const confinement = guardJobs.mcp_confinement_positive;
+  const ranFor = (reasons) => ({ GUARD_LANE_REASONS: JSON.stringify({ mcp_confinement_positive: reasons }) });
+  const both = ["definition_changed", "inputs_changed"];
+  // Run 39919235188: the confinement lane ran 1760 s, so the pull request
+  // failed both budgets with every lane green.
+  budget = runBudgetAt(realStarts, realRun.jobs);
+  assert.equal(budget.status, 1, `without the plan's reason the run fails: ${budget.stdout}`);
+  assert.equal(budget.outputs.exec_path_seconds, "1801");
+  assert.equal(budget.outputs.terminal_excluding_queue_seconds, "1804");
+  assert.equal(budget.outputs.budget_verdict, "runaway");
+  // With the plan's reasons for it, the lane is outside the budget, and the
+  // run's next lanes fit: wasm32 check's path, store-restart's terminal.
+  budget = runBudgetAt(realStarts, realRun.jobs, ranFor(both));
+  assert.equal(budget.status, 0, `the plan's reasons leave the lane outside the budget: ${budget.stdout}${budget.stderr}`);
+  assert.deepEqual(
+    { ...budget.outputs, guard_lanes_outside_budget: JSON.parse(budget.outputs.guard_lanes_outside_budget) },
+    {
+      exec_path_seconds: "1031", terminal_seconds: "1116", terminal_excluding_queue_seconds: "1116",
+      queue_seconds: "0", budget_verdict: "within_budget",
+      guard_lanes_outside_budget: [{
+        job: confinement, reasons: both, ran_seconds: 1760, exec_path_seconds: 1801, terminal_excluding_queue_seconds: 1804,
+      }],
+    },
+    `the budget holds the other lanes: ${budget.stdout}`,
+  );
+  assert.match(budget.stdout, /^Lane execution: 1031\/1080 s \(execution critical path: wasm32 check\);.*; outside the budget: MCP confinement positive \(Linux\), ran 1760 s$/m);
+  assert.match(budget.stdout, /^\| MCP confinement positive \(Linux\) \| 1 \| 0 \| 1760 \| 1801 \| 1804 \| 1804 \| success \(outside the budget\) \|$/m);
+  assert.match(
+    budget.stdout,
+    /^::warning title=Guard lane outside the budget::MCP confinement positive \(Linux\) ran 1760 s \(execution path 1801 s, push-to-terminal excluding runner queue 1804 s\) outside the lane budgets: the plan ran it because the change changed its definition and touched its inputs \(definition_changed, inputs_changed\); it is still required to succeed, and its own timeout-minutes bounds it\.$/m,
+  );
+  assert.doesNotMatch(budget.stdout, /::error::/);
+  budget = runBudgetAt(realStarts, realRun.jobs, ranFor(["inputs_changed"]));
+  assert.equal(budget.status, 0, `inputs alone: ${budget.stdout}`);
+  assert.match(budget.stdout, /the plan ran it because the change touched its inputs \(inputs_changed\);/);
+  // A guard lane run for any other reason stays in the budget, also beside
+  // an exempt reason.
+  for (const reasons of [["diff_unknown"], ["every_rust_change"], ["definition_changed", "diff_unknown"], []]) {
+    budget = runBudgetAt(realStarts, realRun.jobs, ranFor(reasons));
+    assert.equal(budget.status, 1, `a lane run for ${JSON.stringify(reasons)} stays in the budget: ${budget.stdout}`);
+    assert.equal(budget.outputs.exec_path_seconds, "1801", `${JSON.stringify(reasons)}`);
+    assert.equal(budget.outputs.guard_lanes_outside_budget, "[]", `${JSON.stringify(reasons)}`);
+    assert.doesNotMatch(budget.stdout, /Guard lane outside the budget/, `${JSON.stringify(reasons)}`);
+  }
+  // Failed or cancelled, the lane is measured like any other (the lane check
+  // fails the gate too).
+  for (const conclusion of ["failure", "cancelled"]) {
+    const jobs = realRun.jobs.map((entry) => (entry.name === confinement ? { ...entry, conclusion } : entry));
+    budget = runBudgetAt(realStarts, jobs, ranFor(both));
+    assert.equal(budget.status, 1, `a ${conclusion} guard lane stays in the budget: ${budget.stdout}`);
+    assert.match(budget.stdout, new RegExp(`^\\| MCP confinement positive \\(Linux\\) \\| 1 \\| 0 \\| 1760 \\| 1801 \\| 1804 \\| 1804 \\| ${conclusion} \\|$`, "m"));
+    assert.equal(budget.outputs.guard_lanes_outside_budget, "[]");
+  }
+  // An ordinary lane over budget beside the exempt one still fails, and the
+  // exempt lane is still named.
+  const slowWasm = realRun.jobs.map((entry) =>
+    entry.name === "wasm32 check" ? { ...entry, completed_at: "2026-10-23T07:57:37Z" } : entry,
+  );
+  budget = runBudgetAt(realStarts, slowWasm, ranFor(both));
+  assert.equal(budget.status, 1, `an ordinary lane over budget fails beside an exempt lane: ${budget.stdout}`);
+  assert.equal(budget.outputs.exec_path_seconds, "1081", "wasm32 check: 1040 s, 38 s of classification, 3 s of stagger");
+  assert.equal(budget.outputs.budget_verdict, "exec_over_budget");
+  assert.match(budget.stdout, /^::error::CI exceeded the 1080-second lane execution budget \(1081 s; execution critical path wasm32 check, slowest lane wasm32 check at 1040 s\)\.$/m);
+  assert.match(budget.stdout, /^::warning title=Guard lane outside the budget::MCP confinement positive \(Linux\) ran 1760 s/m);
+  // So does an ordinary lane past the runaway ceiling.
+  const lateRestart = realRun.jobs.map((entry) =>
+    entry.name === "Integration tests (meerkat-store-restart)" ? { ...entry, completed_at: "2026-10-23T07:59:34Z" } : entry,
+  );
+  budget = runBudgetAt(realStarts, lateRestart, ranFor(both));
+  assert.equal(budget.status, 1, `an ordinary lane past the runaway ceiling fails beside an exempt lane: ${budget.stdout}`);
+  assert.equal(budget.outputs.terminal_excluding_queue_seconds, "1201");
+  assert.equal(budget.outputs.budget_verdict, "runaway");
+  // A push or a dispatch enforces nothing: the reasons change nothing there.
+  budget = runBudgetAt(realStarts, realRun.jobs, { ...ranFor(both), ENFORCE_BUDGET: "false" });
+  assert.equal(budget.status, 0, `an unenforced run only reports: ${budget.stdout}`);
+  assert.equal(budget.outputs.exec_path_seconds, "1801", "the report keeps the lane on an unenforced run");
+  assert.equal(budget.outputs.guard_lanes_outside_budget, "[]");
+  assert.doesNotMatch(budget.stdout, /Guard lane outside the budget|::error::/);
+  // Fail closed on a pull request: a reasons output that is missing or
+  // unreadable, a lane GUARD_LANE_JOBS does not name, or a lane the plan ran
+  // with no completed job (Governed JSONL was skipped in this run).
+  for (const [label, reasons, message] of [
+    ["a missing reasons output", "", /^::error::the plan's guard_lane_reasons is unreadable \(''\): /m],
+    ["reasons that are not JSON", "definition_changed", /^::error::the plan's guard_lane_reasons is unreadable/m],
+    ["reasons that are a list", "[]", /^::error::the plan's guard_lane_reasons is unreadable \('\[\]'\): expected an object of reason lists$/m],
+    ["a reason that is not a list", '{"mcp_confinement_positive":"definition_changed"}', /expected an object of reason lists/],
+    ["a lane the gate cannot name", '{"retired_lane":["inputs_changed"]}', /^::error::the plan ran guard lane retired_lane \(inputs_changed\), which GUARD_LANE_JOBS does not name\.$/m],
+    ["a lane with no completed job", '{"governed_jsonl":["inputs_changed"]}', /^::error::the plan ran Governed JSONL \(inputs_changed\), but this attempt has no completed job of that name\.$/m],
+  ]) {
+    budget = runBudgetAt(realStarts, realRun.jobs, { GUARD_LANE_REASONS: reasons });
+    assert.equal(budget.status, 1, `${label} fails a pull request: ${budget.stdout}`);
+    assert.match(budget.stdout, message, `${label}: ${budget.stdout}`);
+  }
 
   // The readers of the pin below, on known inputs: a comment or blank line
   // ends neither the on: map nor a step's env:.

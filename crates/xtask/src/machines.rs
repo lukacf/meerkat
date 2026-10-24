@@ -3161,8 +3161,8 @@ fn retired_generated_source_paths() -> &'static [&'static str] {
 ///
 /// 1. **Symbol resolution** — the anchor's `symbol` path must exist on disk.
 /// 2. **Schema-target resolution** — the anchor's typed `target` must name a
-///    real schema element. A [`CoverageSchemaTarget::Machine`] must name a
-///    machine in the canonical machine-id set; a [`CoverageSchemaTarget::Route`]
+///    real schema element. A `CoverageSchemaTarget::Machine` must name a
+///    machine in the canonical machine-id set; a `CoverageSchemaTarget::Route`
 ///    must name a route declared by the owning composition. An anchor that
 ///    names a machine/route absent from the schema is a generated-artifact
 ///    drift and pushes a mismatch (it never silently passes).

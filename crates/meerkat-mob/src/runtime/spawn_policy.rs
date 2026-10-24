@@ -18,9 +18,9 @@ pub struct SpawnSpec {
 /// Policy that determines whether an unknown agent identity should trigger an
 /// automatic spawn.
 ///
-/// Attached to the [`MobActor`] at build-time or set dynamically at runtime.
+/// Attached to the `MobActor` at build-time or set dynamically at runtime.
 /// When a `send_message` (external turn) targets an unknown meerkat and a
-/// spawn policy is present, the actor observes [`resolve`] and submits the
+/// spawn policy is present, the actor observes [`resolve`](Self::resolve) and submits the
 /// typed observation back to MobMachine before auto-provisioning a member.
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]

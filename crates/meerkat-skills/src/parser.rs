@@ -1,7 +1,7 @@
 //! SKILL.md frontmatter parser.
 //!
 //! Uses `serde-saphyr` (pure Rust, no `unsafe`) for YAML parsing of the
-//! frontmatter block, under the rules in [`yaml_options`].
+//! frontmatter block, under the rules in `yaml_options`.
 
 use std::fmt;
 

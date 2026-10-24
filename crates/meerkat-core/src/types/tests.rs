@@ -1584,6 +1584,42 @@ mod ordered_transcript_types {
     }
 
     #[test]
+    fn gemini_function_call_metadata_preserves_native_id_with_optional_signature() {
+        for thought_signature in [None, Some("opaque-signature".to_string())] {
+            let meta = ProviderMeta::GeminiFunctionCall {
+                provider_id: "provider-call-1".into(),
+                thought_signature: thought_signature.clone(),
+            };
+            let value = serde_json::to_value(&meta).unwrap();
+            assert_eq!(value["provider"], "gemini_function_call");
+            assert_eq!(value["provider_id"], "provider-call-1");
+            assert!(value.get("id").is_none());
+            assert_eq!(
+                value.get("thoughtSignature").and_then(Value::as_str),
+                thought_signature.as_deref()
+            );
+            assert_eq!(serde_json::from_value::<ProviderMeta>(value).unwrap(), meta);
+        }
+        // Old durable signature-only metadata still has exactly its old shape.
+        let legacy = serde_json::json!({"provider": "gemini", "thoughtSignature": "old"});
+        let parsed: ProviderMeta = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), legacy);
+    }
+
+    #[test]
+    fn gemini_function_call_metadata_requires_provider_id() {
+        for value in [
+            serde_json::json!({"provider": "gemini_function_call"}),
+            serde_json::json!({"provider": "gemini_function_call", "id": "native-call"}),
+            serde_json::json!({"provider": "gemini_function_call", "id": "native-call", "thoughtSignature": "signature"}),
+            serde_json::json!({"provider": "gemini_function_call", "provider_id": null}),
+            serde_json::json!({"provider": "gemini_function_call", "provider_id": 7}),
+        ] {
+            assert!(serde_json::from_value::<ProviderMeta>(value).is_err());
+        }
+    }
+
+    #[test]
     fn test_provider_meta_openai_roundtrip() {
         let meta = ProviderMeta::OpenAi {
             id: "reasoning_item_123".to_string(),

@@ -117,7 +117,8 @@ AuditRunLifecycle == PrepareAttached(AuditSession, AuditRun)
 \* which violates the generated deferred_stop_requires_active_runtime_phase.)
 AuditSessionLifecycle ==
     \/ runtime_stop_deferred = FALSE
-        /\ BeginUnregisterSessionAttached(AuditSession, active_runtime_id, active_fence_token, active_runtime_generation, active_runtime_epoch_id)
+        \* The unregister's queued-input disposition is irrelevant here: Stop.
+        /\ BeginUnregisterSessionAttached(AuditSession, active_runtime_id, active_fence_token, active_runtime_generation, active_runtime_epoch_id, "Stop", 0)
     \/ RuntimeLoopStoppedForUnregisterAttached(AuditSession, FALSE)
     \/ CommsDrainExitedForUnregisterAttached(AuditSession, FALSE)
     \/ CompletionWaitersResolvedForUnregisterAttached(AuditSession)

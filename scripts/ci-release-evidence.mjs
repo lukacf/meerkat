@@ -83,6 +83,7 @@ export const WORKSPACE_LANES = [
   "mcp_confinement_positive",
   "main_unit",
   "closure_check",
+  "rustdoc",
   "wasm_check",
   "sdk_host",
   "example_web",

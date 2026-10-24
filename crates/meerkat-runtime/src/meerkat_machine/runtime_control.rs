@@ -7270,10 +7270,25 @@ impl MeerkatMachine {
                 session_id: crate::meerkat_machine::dsl::SessionId::from_domain(session_id),
                 failure,
             };
-        let effects = self
-            .preview_session_dsl_input(session_id, input, "ResolveRuntimeCompletionWaitFailure")
-            .await
-            .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
+        let effects = match self.session_dsl_authority(session_id).await {
+            Ok(authority) => Self::preview_dsl_input_on_shared_authority(
+                &authority,
+                input,
+                "ResolveRuntimeCompletionWaitFailure",
+            ),
+            // A graceful stop answers a kept input's waiter while the session
+            // unregisters, so the session may be gone by the time its surface
+            // asks. The generated arm for that failure reads no session state
+            // and answers on a fresh authority; every session-scoped arm
+            // refuses there, and the refusal stays the missing session's.
+            Err(missing) => Self::preview_dsl_input_on_authority(
+                crate::meerkat_machine::dsl::MeerkatMachineAuthority::new(),
+                input,
+                "ResolveRuntimeCompletionWaitFailure",
+            )
+            .map_err(|_| missing),
+        }
+        .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?;
         runtime_completion_wait_failure_authority_from_effects(session_id, failure, &effects)
     }
 
@@ -17265,6 +17280,59 @@ impl MeerkatMachine {
             .await
     }
 
+    /// [`Self::accept_input_with_completion`] for a keyed prompt whose
+    /// process-local resource owner (for example a trusted host's custody of
+    /// the original the prompt binds) is settled by native admission, as
+    /// [`Self::accept_input_with_completion_for_attachment_and_replay_policy_with_custody`]
+    /// settles it, without an attachment fence. The replay contract is
+    /// `ExactPrompt`: a duplicate is the same prompt and context, verified
+    /// from the existing admission's retained witness. Before the credential
+    /// boundary, dropping the returned future settles `NotAdmitted`; after
+    /// it, dropping the acknowledgement cannot cancel the native-owned
+    /// settlement. This does not change the native admission result.
+    pub fn accept_input_with_completion_and_custody<'a>(
+        &'a self,
+        session_id: &'a SessionId,
+        input: Input,
+        custody: Box<dyn crate::input_admission_custody::NativeInputAdmissionCustody>,
+    ) -> AcceptInputWithCompletionFuture<'a> {
+        // Construct before boxing: even a never-polled future owns its cleanup.
+        let custody = crate::input_admission_custody::NativeInputAdmissionGuard::new(custody);
+        let session_id = session_id.clone();
+        Box::pin(async move {
+            if !matches!(input, Input::Prompt(_)) || input.header().idempotency_key.is_none() {
+                return Err(RuntimeDriverError::ValidationFailed {
+                    reason: "exact prompt replay requires a prompt with a stable idempotency key"
+                        .to_string(),
+                });
+            }
+            match self
+                .execute_meerkat_machine_ingress_command_with_custody(
+                    MeerkatMachineCommand::AcceptWithCompletion {
+                        session_id,
+                        input,
+                        register_completion: true,
+                        replay_policy: crate::accept::InputReplayPolicy::ExactPrompt,
+                        admission_requirement: crate::accept::AdmissionRequirement::Any,
+                        member_residency: MemberResidencyExpectation::Unfenced,
+                        expected_attachment: None,
+                    },
+                    Some(custody),
+                )
+                .await?
+            {
+                MeerkatMachineCommandResult::AcceptWithCompletion {
+                    outcome,
+                    handle,
+                    admission_signal: _,
+                } => Ok((outcome, handle)),
+                other => Err(RuntimeDriverError::Internal(format!(
+                    "unexpected custody accept result: {other:?}"
+                ))),
+            }
+        })
+    }
+
     pub(crate) async fn accept_peer_ingress_with_completion(
         &self,
         facts: meerkat_core::interaction::PeerIngressClaimCommitFacts,
@@ -18332,9 +18400,8 @@ impl MeerkatMachine {
                 tracing::error!("prepare_bindings: unexpected command result variant");
                 Err(RuntimeBindingsError::SessionNotFound(session_id))
             }
-            Err(err) => Err(RuntimeBindingsError::PrepareFailed(
-                session_id,
-                err.to_string(),
+            Err(err) => Err(RuntimeBindingsError::from_preparation_error(
+                session_id, &err,
             )),
         }
     }
@@ -18415,10 +18482,10 @@ impl MeerkatMachine {
             // found": a typed machine rejection (e.g. a PrepareBindings
             // guard) must reach the caller verbatim — the field spent a
             // debugging cycle on "not found in runtime adapter after
-            // registration" that was actually a binding guard rejection.
-            Err(err) => Err(RuntimeBindingsError::PrepareFailed(
-                session_id,
-                err.to_string(),
+            // registration" that was actually a binding guard rejection. A
+            // hosting refusal keeps its typed session error.
+            Err(err) => Err(RuntimeBindingsError::from_preparation_error(
+                session_id, &err,
             )),
         }
     }

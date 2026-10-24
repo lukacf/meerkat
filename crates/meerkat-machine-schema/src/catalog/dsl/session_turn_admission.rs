@@ -46,6 +46,9 @@ pub enum StartTurnExecutionKind {
     #[default]
     ContentTurn,
     ResumePending,
+    /// The continuation of a run a durable session left open. Its boundary
+    /// is the session's run cursor, not the transcript tail.
+    ResumeRun,
 }
 
 /// Resolved start-turn disposition emitted by the machine.
@@ -55,6 +58,9 @@ pub enum StartTurnDisposition {
     RunContentTurn,
     RunPending,
     NoPendingBoundary,
+    /// Resume the run the session's run cursor names. The agent refuses a
+    /// cursor that names another run.
+    ResumeRun,
 }
 
 /// Public terminal witness emitted alongside a `NoPendingBoundary` disposition.
@@ -667,6 +673,30 @@ machine! {
             to Admitted
             emit StartTurnDispositionResolved { disposition: StartTurnDisposition::NoPendingBoundary }
             emit StartTurnPublicTerminalResolved { terminal: StartTurnPublicTerminal::NoPendingBoundary }
+        }
+
+        // A resumed run re-enters its loop from the session's run cursor.
+        // The cursor, which the agent checks against the dispatched run, is
+        // its boundary: the transcript tail and the pending-continuation
+        // disposition do not decide it, and it appends no prompt.
+        transition ResolveDispositionResumeRun {
+            on input ResolveStartTurnDisposition {
+                execution_kind_present,
+                execution_kind,
+                prompt_trimmed_text_byte_count,
+                prompt_non_text_block_count,
+                pending_continuation
+            }
+            guard {
+                self.lifecycle_phase == Phase::Admitted
+                && execution_kind_present
+                && execution_kind == StartTurnExecutionKind::ResumeRun
+            }
+            update {
+                self.last_public_terminal = None;
+            }
+            to Admitted
+            emit StartTurnDispositionResolved { disposition: StartTurnDisposition::ResumeRun }
         }
 
         transition ResolveDispositionDirectPrompt {

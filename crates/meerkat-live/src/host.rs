@@ -504,8 +504,9 @@ pub enum ToolDispatchSkipReason {
 /// (`format!("tool dispatch timeout after {timeout:?}")`) and submitted it as
 /// the [`LiveAdapterCommand::SubmitToolError`] payload, asking the adapter /
 /// downstream to recover the fact by parsing prose. Instead the host now mints
-/// this typed fact; the only point a string is produced is its [`Display`]
-/// projection at the meerkat-core `SubmitToolError { error: String }` seam
+/// this typed fact; the only point a string is produced is its
+/// [`Display`](std::fmt::Display) projection at the meerkat-core
+/// `SubmitToolError { error: String }` seam
 /// edge (that wire field is owned by `meerkat-core::live_adapter`, so the
 /// adapter command itself cannot be made fully typed from this crate). The
 /// `Display` rendering is a deterministic projection of the typed fields, not
@@ -539,7 +540,7 @@ impl std::fmt::Display for LiveToolDispatchTimeout {
 /// This is the seam through which adapter observations become canonical
 /// Meerkat semantic facts. Surfaces (RPC/REST/WASM) provide an implementation
 /// that bridges into [`meerkat_core::SessionService`] / `EventInjector` /
-/// observer streams. Tests use [`RecordingProjectionSink`] (in this module's
+/// observer streams. Tests use `RecordingProjectionSink` (in this module's
 /// `#[cfg(test)]` block) to assert routing decisions deterministically.
 /// Provider-side identity carried alongside a transcript fragment.
 ///
@@ -2604,8 +2605,8 @@ impl LiveAdapterHost {
     /// The caller passes the typed [`LiveToolDispatchTimeout`] fact; the only
     /// stringification happens here, at the meerkat-core
     /// [`LiveAdapterCommand::SubmitToolError`] seam edge, via the fact's
-    /// [`Display`] projection. No call site fabricates a parseable prose
-    /// string; the typed value is the truth.
+    /// [`Display`](std::fmt::Display) projection. No call site fabricates a
+    /// parseable prose string; the typed value is the truth.
     pub async fn submit_tool_dispatch_timeout(
         &self,
         channel_id: &LiveChannelId,

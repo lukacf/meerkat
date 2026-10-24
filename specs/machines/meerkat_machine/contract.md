@@ -31,6 +31,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `boundary_cancel_dispatch_generation`: `u64`
 - `turn_terminal_run_id`: `Option<RunId>`
 - `recovered_boundary_sequence`: `u64`
+- `resumable_run_id`: `Option<RunId>`
 - `terminal_outcome`: `Option<TurnTerminalOutcome>`
 - `terminal_cause_kind`: `Option<TurnTerminalCauseKind>`
 - `last_runtime_apply_failure_cause`: `Option<RuntimeApplyFailureCause>`
@@ -85,6 +86,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `unregister_teardown_retains_snapshot`: `Bool`
 - `unregister_runtime_loop_forced_abort`: `Bool`
 - `unregister_comms_drain_forced_abort`: `Bool`
+- `unregister_queued_inputs`: `UnregisterQueuedInputsDisposition`
+- `unregister_requeue_max_age_ms`: `u64`
 - `staged_session_phase`: `StagedSessionPhase`
 - `staged_session_id`: `Option<SessionId>`
 - `staged_session_keep_alive`: `Option<Bool>`
@@ -536,7 +539,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Runtime-Internal Inputs
 - `AuthorizeDurableTailRecovery`(session_id: SessionId, candidate_id: String, candidate_run_id: RunId, class: DurableTailRecoveryClass, observed_lifecycle: DurableRecoveryObservedLifecycle, observed_current_run: DurableRecoveryObservedRun, last_committed_sequence: u64, prior_commit: DurableRecoveryPriorCommit, input_evidence: DurableRecoveryInputEvidence)
 - `PrepareTerminalSupervisorCleanupBindings`(session_id: SessionId)
-- `BeginUnregisterSession`(session_id: SessionId, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>)
+- `BeginUnregisterSession`(session_id: SessionId, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, queued_inputs: UnregisterQueuedInputsDisposition, requeue_max_age_ms: u64)
 - `BeginUnregisterUnservedAttachment`(session_id: SessionId, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>)
 - `RuntimeLoopStoppedForUnregister`(session_id: SessionId, forced_abort: Bool)
 - `CommsDrainExitedForUnregister`(session_id: SessionId, forced_abort: Bool)
@@ -604,7 +607,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ResolveAdmissionValidation`(input_id: String, input_kind: AdmissionInputKind, input_origin: AdmissionInputOriginKind, durability: InputDurabilityKind, peer_handling_mode_valid: Bool, peer_response_terminal_structurally_valid: Bool, peer_response_terminal_observed_status: PeerResponseTerminalObservedStatus)
 - `ResolveAdmissionIdempotency`(input_id: String, idempotency_key: Option<String>)
 - `RegisterAcceptedIdempotency`(input_id: String, idempotency_key: String)
-- `NormalizeRecoveredInputLifecycle`(input_id: String, phase: RecoveredInputObservedPhase, applied_boundary_committed: Option<Bool>)
+- `NormalizeRecoveredInputLifecycle`(input_id: String, phase: RecoveredInputObservedPhase, applied_boundary_committed: Option<Bool>, bound_run_resumable: Bool)
 - `ClassifyRecoveredInputDurability`(input_id: String, durability: InputDurabilityKind)
 - `ResolveInputPublicLifecycle`(input_id: String, phase: RecoveredInputObservedPhase)
 - `ResolveInputPublicTerminalOutcome`(input_id: String, phase: RecoveredInputObservedPhase, terminal_kind: Option<InputTerminalKind>, abandon_reason: Option<InputAbandonReason>)
@@ -893,6 +896,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecoverInputCompletionBoundary`(input_id: String, run_id: RunId, sequence: u64, boundary: Option<RecoveredRunApplyBoundary>, execution_kind: RecoveredRuntimeExecutionKind)
 - `ResolveCheckpointCompletionResult`(owner_input_id: String, run_id: RunId, candidate_digest: String, completion_input_ids_digest: String, requires_session_checkpoint: Bool, recipient_input_ids: Set<String>, finalization: RuntimeCompletionFinalizationObservation)
 - `ResolveAbandonedCompletionResult`(owner_input_id: String, run_id: RunId, candidate_digest: String, completion_input_ids_digest: String, recipient_input_ids: Set<String>, terminal_outcome: TurnTerminalOutcome, terminal_cause_kind: TurnTerminalCauseKind, requires_session_checkpoint: Bool, has_interaction_terminal_outbox: Bool, finalization: RuntimeCompletionFinalizationObservation)
+- `ClassifyStopInputDisposition`(input_id: String, durability: InputDurabilityKind, directed: Bool, objective_bound: Bool)
+- `MarkRunResumable`(run_id: RunId)
+- `ResumeRun`(run_id: RunId)
+- `ReleaseResumableRun`(run_id: RunId)
+- `SettleResumableRun`(run_id: RunId, reason: InputAbandonReason)
+- `SuspendRunForStop`(run_id: RunId, durable_session: Bool)
+- `ReplayAppliedRunContributor`(input_id: String, run_id: RunId, lane: InputLane)
+- `AuthorizeOperatorDurableTailRepair`(session_id: SessionId, candidate_id: String, candidate_run_id: RunId, class: DurableTailRecoveryClass, observed_lifecycle: DurableRecoveryObservedLifecycle, observed_current_run: DurableRecoveryObservedRun, last_committed_sequence: u64, prior_commit: DurableRecoveryPriorCommit, input_evidence: DurableRecoveryInputEvidence)
 
 ## Signals
 - `Initialize`
@@ -1159,6 +1170,12 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `TerminalCompletionCorrelationClassified`(owner_input_id: String, run_id: Option<RunId>, correlation: TerminalCompletionCorrelation)
 - `CheckpointCompletionResultResolved`(session_id: SessionId, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, runtime_generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, run_id: RunId, owner_input_id: String, candidate_digest: String, completion_input_ids_digest: String, recipient_input_ids: Set<String>, requires_session_checkpoint: Bool, result_class: RuntimeCompletionResultClass, cleanup_outcome: RuntimeCompletionObservedOutcome)
 - `AbandonedCompletionResultResolved`(session_id: SessionId, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, runtime_generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, run_id: RunId, owner_input_id: String, candidate_digest: String, completion_input_ids_digest: String, recipient_input_ids: Set<String>, requires_session_checkpoint: Bool, result_class: RuntimeCompletionResultClass, cleanup_outcome: RuntimeCompletionObservedOutcome)
+- `StopInputDispositionClassified`(input_id: String, disposition: StopInputDisposition, requeue_max_age_ms: u64)
+- `ResumableRunMarked`(run_id: RunId)
+- `ResumedRunAuthorized`(run_id: RunId)
+- `ResumableRunReleased`(run_id: RunId)
+- `ResumableRunSettled`(run_id: RunId, reason: InputAbandonReason)
+- `RunSuspendedForStop`(run_id: RunId)
 
 ## Helpers
 - `runtime_authority_reconcile_decision`(observation_kind: RuntimeAuthorityObservationKind, state: Option<RuntimeLifecycleObservedState>, agent_runtime_id: Option<AgentRuntimeId>, fence_token: Option<FenceToken>, runtime_generation: Option<Generation>, runtime_epoch_id: Option<RuntimeEpochId>, current_run_id: Option<RunId>, pre_run_phase: Option<PreRunPhase>, malformed_reclaim_safe: Bool) -> `RuntimeAuthorityReconcileDecision`
@@ -1280,6 +1297,18 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `StageForRunRetired`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`
   - `StageForRunStopped`: `input_queued`, `input_lane_bound`, `input_sequence_bound`, `input_recovery_lane_bound`, `current_run_matches`, `homogeneous_run_authority`, `scoped_context_attached`
 - Emitted By Transitions: `RecordRunAssociation`
+
+### `AuthorizedResumedRun`
+- Authority: `AuthorizedResumedRun`
+- Source Inputs: `MarkRunResumable`, `ResumeRun`
+- Transitions: `MarkRunResumableInitializing`, `MarkRunResumableIdle`, `MarkRunResumableAttached`, `ResumeRunRunning`
+- Guard Expansion:
+  - `MarkRunResumableInitializing`: `no_current_run`, `no_other_resumable_run`
+  - `MarkRunResumableIdle`: `no_current_run`, `no_other_resumable_run`
+  - `MarkRunResumableAttached`: `no_current_run`, `no_other_resumable_run`
+  - `ResumeRunRunning`: `run_is_current`, `run_is_resumable`
+- Command Effects: `ResumableRunMarked`, `ResumedRunAuthorized`
+- Emitted By Transitions: `ResumableRunMarked`, `ResumedRunAuthorized`
 
 ### `AuthorizedRuntimeLoopRunCommit`
 - Authority: `AuthorizedRuntimeLoopRunCommit`
@@ -1457,6 +1486,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `running_has_current_run`
 - `deferred_stop_requires_active_runtime_phase`
 - `unregister_drain_obligations_require_draining`
+- `unregister_requeue_max_age_matches_disposition`
 - `current_run_only_while_running_or_retired`
 - `current_run_has_pre_run_phase`
 - `input_context_targets_are_governed`
@@ -1652,6 +1682,81 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `DurableTailRecoveryAuthorized`
 - To: `Retired`
 
+### `AuthorizeDurableTailRecoveryContinueIdle`
+- From: `Idle`
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
+- Guards:
+  - `no_current_run`
+  - `candidate_run_not_terminalized`
+  - `persisted_quiescent`
+  - `persisted_no_current_run`
+  - `prior_commit_admits_recovery`
+  - `inputs_continuable`
+  - `continuable_class`
+  - `runtime_not_retired`
+- Emits: `DurableTailRecoveryAuthorized`
+- To: `Idle`
+
+### `AuthorizeDurableTailRecoveryRepairContinuableRetiredIdle`
+- From: `Idle`
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
+- Guards:
+  - `no_current_run`
+  - `candidate_run_not_terminalized`
+  - `persisted_quiescent`
+  - `persisted_no_current_run`
+  - `prior_commit_admits_recovery`
+  - `inputs_attributable`
+  - `continuable_class`
+  - `retired_runtime`
+- Emits: `DurableTailRecoveryCommitAuthorized`
+- To: `Idle`
+
+### `AuthorizeDurableTailRecoveryRepairContinuableRetiredRetired`
+- From: `Retired`
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
+- Guards:
+  - `no_current_run`
+  - `candidate_run_not_terminalized`
+  - `persisted_quiescent`
+  - `persisted_no_current_run`
+  - `prior_commit_admits_recovery`
+  - `inputs_attributable`
+  - `continuable_class`
+  - `retired_runtime`
+- Emits: `DurableTailRecoveryCommitAuthorized`
+- To: `Retired`
+
+### `AuthorizeDurableTailRecoveryHoldContinuableRetiredIdle`
+- From: `Idle`
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
+- Guards:
+  - `no_current_run`
+  - `candidate_run_not_terminalized`
+  - `persisted_quiescent`
+  - `persisted_no_current_run`
+  - `prior_commit_admits_recovery`
+  - `unbound_content_input`
+  - `continuable_class`
+  - `retired_runtime`
+- Emits: `DurableTailRecoveryAuthorized`
+- To: `Idle`
+
+### `AuthorizeDurableTailRecoveryHoldContinuableRetiredRetired`
+- From: `Retired`
+- On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
+- Guards:
+  - `no_current_run`
+  - `candidate_run_not_terminalized`
+  - `persisted_quiescent`
+  - `persisted_no_current_run`
+  - `prior_commit_admits_recovery`
+  - `unbound_content_input`
+  - `continuable_class`
+  - `retired_runtime`
+- Emits: `DurableTailRecoveryAuthorized`
+- To: `Retired`
+
 ### `AuthorizeDurableTailRecoveryRefuseRunFactsIdle`
 - From: `Idle`
 - On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
@@ -1715,6 +1820,184 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `AuthorizeDurableTailRecovery`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
 - Emits: `DurableTailRecoveryAuthorized`
 - To: `Destroyed`
+
+### `AuthorizeOperatorDurableTailRepairIdle`
+- From: `Idle`
+- On: `AuthorizeOperatorDurableTailRepair`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
+- Guards:
+  - `operator_repair_admissible`
+- Emits: `DurableTailRecoveryCommitAuthorized`
+- To: `Idle`
+
+### `AuthorizeOperatorDurableTailRepairRetired`
+- From: `Retired`
+- On: `AuthorizeOperatorDurableTailRepair`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
+- Guards:
+  - `operator_repair_admissible`
+- Emits: `DurableTailRecoveryCommitAuthorized`
+- To: `Retired`
+
+### `AuthorizeOperatorDurableTailRepairRefuseIdle`
+- From: `Idle`
+- On: `AuthorizeOperatorDurableTailRepair`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
+- Guards:
+  - `operator_repair_not_admissible`
+- Emits: `DurableTailRecoveryAuthorized`
+- To: `Idle`
+
+### `AuthorizeOperatorDurableTailRepairRefuseRetired`
+- From: `Retired`
+- On: `AuthorizeOperatorDurableTailRepair`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
+- Guards:
+  - `operator_repair_not_admissible`
+- Emits: `DurableTailRecoveryAuthorized`
+- To: `Retired`
+
+### `AuthorizeOperatorDurableTailRepairRefuseNonQuiescentInitializing`
+- From: `Initializing`
+- On: `AuthorizeOperatorDurableTailRepair`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
+- Emits: `DurableTailRecoveryAuthorized`
+- To: `Initializing`
+
+### `AuthorizeOperatorDurableTailRepairRefuseNonQuiescentAttached`
+- From: `Attached`
+- On: `AuthorizeOperatorDurableTailRepair`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
+- Emits: `DurableTailRecoveryAuthorized`
+- To: `Attached`
+
+### `AuthorizeOperatorDurableTailRepairRefuseNonQuiescentRunning`
+- From: `Running`
+- On: `AuthorizeOperatorDurableTailRepair`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
+- Emits: `DurableTailRecoveryAuthorized`
+- To: `Running`
+
+### `AuthorizeOperatorDurableTailRepairRefuseNonQuiescentStopped`
+- From: `Stopped`
+- On: `AuthorizeOperatorDurableTailRepair`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
+- Emits: `DurableTailRecoveryAuthorized`
+- To: `Stopped`
+
+### `AuthorizeOperatorDurableTailRepairRefuseNonQuiescentDestroyed`
+- From: `Destroyed`
+- On: `AuthorizeOperatorDurableTailRepair`(session_id, candidate_id, candidate_run_id, class, observed_lifecycle, observed_current_run, last_committed_sequence, prior_commit, input_evidence)
+- Emits: `DurableTailRecoveryAuthorized`
+- To: `Destroyed`
+
+### `MarkRunResumableInitializing`
+- From: `Initializing`
+- On: `MarkRunResumable`(run_id)
+- Guards:
+  - `no_current_run`
+  - `no_other_resumable_run`
+- Emits: `ResumableRunMarked`
+- To: `Initializing`
+
+### `MarkRunResumableIdle`
+- From: `Idle`
+- On: `MarkRunResumable`(run_id)
+- Guards:
+  - `no_current_run`
+  - `no_other_resumable_run`
+- Emits: `ResumableRunMarked`
+- To: `Idle`
+
+### `MarkRunResumableAttached`
+- From: `Attached`
+- On: `MarkRunResumable`(run_id)
+- Guards:
+  - `no_current_run`
+  - `no_other_resumable_run`
+- Emits: `ResumableRunMarked`
+- To: `Attached`
+
+### `ResumeRunRunning`
+- From: `Running`
+- On: `ResumeRun`(run_id)
+- Guards:
+  - `run_is_current`
+  - `run_is_resumable`
+- Emits: `ResumedRunAuthorized`
+- To: `Running`
+
+### `ReleaseResumableRunInitializing`
+- From: `Initializing`
+- On: `ReleaseResumableRun`(run_id)
+- Guards:
+  - `run_is_resumable`
+- Emits: `ResumableRunReleased`
+- To: `Initializing`
+
+### `ReleaseResumableRunIdle`
+- From: `Idle`
+- On: `ReleaseResumableRun`(run_id)
+- Guards:
+  - `run_is_resumable`
+- Emits: `ResumableRunReleased`
+- To: `Idle`
+
+### `ReleaseResumableRunAttached`
+- From: `Attached`
+- On: `ReleaseResumableRun`(run_id)
+- Guards:
+  - `run_is_resumable`
+- Emits: `ResumableRunReleased`
+- To: `Attached`
+
+### `ReleaseResumableRunRetired`
+- From: `Retired`
+- On: `ReleaseResumableRun`(run_id)
+- Guards:
+  - `run_is_resumable`
+- Emits: `ResumableRunReleased`
+- To: `Retired`
+
+### `ReleaseResumableRunStopped`
+- From: `Stopped`
+- On: `ReleaseResumableRun`(run_id)
+- Guards:
+  - `run_is_resumable`
+- Emits: `ResumableRunReleased`
+- To: `Stopped`
+
+### `SettleResumableRunInitializing`
+- From: `Initializing`
+- On: `SettleResumableRun`(run_id, reason)
+- Guards:
+  - `run_is_resumable`
+- Emits: `ResumableRunSettled`
+- To: `Initializing`
+
+### `SettleResumableRunIdle`
+- From: `Idle`
+- On: `SettleResumableRun`(run_id, reason)
+- Guards:
+  - `run_is_resumable`
+- Emits: `ResumableRunSettled`
+- To: `Idle`
+
+### `SettleResumableRunAttached`
+- From: `Attached`
+- On: `SettleResumableRun`(run_id, reason)
+- Guards:
+  - `run_is_resumable`
+- Emits: `ResumableRunSettled`
+- To: `Attached`
+
+### `SettleResumableRunRetired`
+- From: `Retired`
+- On: `SettleResumableRun`(run_id, reason)
+- Guards:
+  - `run_is_resumable`
+- Emits: `ResumableRunSettled`
+- To: `Retired`
+
+### `SettleResumableRunStopped`
+- From: `Stopped`
+- On: `SettleResumableRun`(run_id, reason)
+- Guards:
+  - `run_is_resumable`
+- Emits: `ResumableRunSettled`
+- To: `Stopped`
 
 ### `PrepareTerminalSupervisorCleanupBindings`
 - From: `Destroyed`
@@ -2065,7 +2348,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `BeginUnregisterSessionIdle`
 - From: `Idle`
-- On: `BeginUnregisterSession`(session_id, agent_runtime_id, fence_token, generation, runtime_epoch_id)
+- On: `BeginUnregisterSession`(session_id, agent_runtime_id, fence_token, generation, runtime_epoch_id, queued_inputs, requeue_max_age_ms)
 - Guards:
   - `session_matches_current`
   - `runtime_binding_matches_observation`
@@ -2073,12 +2356,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `generation_binding_matches_observation`
   - `epoch_binding_matches_observation`
   - `not_already_draining`
+  - `queued_inputs_max_age_matches_disposition`
 - Emits: `RequestRuntimeLoopStopForUnregister`, `RequestCommsDrainExitForUnregister`, `RequestCompletionWaiterResolutionForUnregister`
 - To: `Idle`
 
 ### `BeginUnregisterSessionAttached`
 - From: `Attached`
-- On: `BeginUnregisterSession`(session_id, agent_runtime_id, fence_token, generation, runtime_epoch_id)
+- On: `BeginUnregisterSession`(session_id, agent_runtime_id, fence_token, generation, runtime_epoch_id, queued_inputs, requeue_max_age_ms)
 - Guards:
   - `session_matches_current`
   - `runtime_binding_matches_observation`
@@ -2086,12 +2370,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `generation_binding_matches_observation`
   - `epoch_binding_matches_observation`
   - `not_already_draining`
+  - `queued_inputs_max_age_matches_disposition`
 - Emits: `RequestRuntimeLoopStopForUnregister`, `RequestCommsDrainExitForUnregister`, `RequestCompletionWaiterResolutionForUnregister`
 - To: `Attached`
 
 ### `BeginUnregisterSessionRunning`
 - From: `Running`
-- On: `BeginUnregisterSession`(session_id, agent_runtime_id, fence_token, generation, runtime_epoch_id)
+- On: `BeginUnregisterSession`(session_id, agent_runtime_id, fence_token, generation, runtime_epoch_id, queued_inputs, requeue_max_age_ms)
 - Guards:
   - `session_matches_current`
   - `runtime_binding_matches_observation`
@@ -2099,12 +2384,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `generation_binding_matches_observation`
   - `epoch_binding_matches_observation`
   - `not_already_draining`
+  - `queued_inputs_max_age_matches_disposition`
 - Emits: `RequestRuntimeLoopStopForUnregister`, `RequestCommsDrainExitForUnregister`, `RequestCompletionWaiterResolutionForUnregister`
 - To: `Running`
 
 ### `BeginUnregisterSessionRetainsSnapshotRetired`
 - From: `Retired`
-- On: `BeginUnregisterSession`(session_id, agent_runtime_id, fence_token, generation, runtime_epoch_id)
+- On: `BeginUnregisterSession`(session_id, agent_runtime_id, fence_token, generation, runtime_epoch_id, queued_inputs, requeue_max_age_ms)
 - Guards:
   - `session_matches_current`
   - `runtime_binding_matches_observation`
@@ -2112,12 +2398,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `generation_binding_matches_observation`
   - `epoch_binding_matches_observation`
   - `not_already_draining`
+  - `queued_inputs_max_age_matches_disposition`
 - Emits: `RequestRuntimeLoopStopForUnregister`, `RequestCommsDrainExitForUnregister`, `RequestCompletionWaiterResolutionForUnregister`
 - To: `Retired`
 
 ### `BeginUnregisterSessionRetainsSnapshotStopped`
 - From: `Stopped`
-- On: `BeginUnregisterSession`(session_id, agent_runtime_id, fence_token, generation, runtime_epoch_id)
+- On: `BeginUnregisterSession`(session_id, agent_runtime_id, fence_token, generation, runtime_epoch_id, queued_inputs, requeue_max_age_ms)
 - Guards:
   - `session_matches_current`
   - `runtime_binding_matches_observation`
@@ -2125,6 +2412,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `generation_binding_matches_observation`
   - `epoch_binding_matches_observation`
   - `not_already_draining`
+  - `queued_inputs_max_age_matches_disposition`
 - Emits: `RequestRuntimeLoopStopForUnregister`, `RequestCommsDrainExitForUnregister`, `RequestCompletionWaiterResolutionForUnregister`
 - To: `Stopped`
 
@@ -7956,7 +8244,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputAcceptedQueueInitializing`
 - From: `Initializing`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
 - Guards:
   - `accepted_phase`
 - Emits: `RecoveredInputLifecycleNormalized`
@@ -7964,7 +8252,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputAcceptedQueueIdle`
 - From: `Idle`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
 - Guards:
   - `accepted_phase`
 - Emits: `RecoveredInputLifecycleNormalized`
@@ -7972,7 +8260,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputAcceptedQueueAttached`
 - From: `Attached`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
 - Guards:
   - `accepted_phase`
 - Emits: `RecoveredInputLifecycleNormalized`
@@ -7980,7 +8268,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputAcceptedQueueRunning`
 - From: `Running`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
 - Guards:
   - `accepted_phase`
 - Emits: `RecoveredInputLifecycleNormalized`
@@ -7988,7 +8276,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputAcceptedQueueRetired`
 - From: `Retired`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
 - Guards:
   - `accepted_phase`
 - Emits: `RecoveredInputLifecycleNormalized`
@@ -7996,7 +8284,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputAcceptedQueueStopped`
 - From: `Stopped`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
 - Guards:
   - `accepted_phase`
 - Emits: `RecoveredInputLifecycleNormalized`
@@ -8004,55 +8292,115 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputStagedInitializing`
 - From: `Initializing`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
 - Guards:
   - `staged_phase`
+  - `run_not_resumable`
 - Emits: `RecoveredInputLifecycleNormalized`
 - To: `Initializing`
 
 ### `NormalizeRecoveredInputStagedIdle`
 - From: `Idle`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
 - Guards:
   - `staged_phase`
+  - `run_not_resumable`
 - Emits: `RecoveredInputLifecycleNormalized`
 - To: `Idle`
 
 ### `NormalizeRecoveredInputStagedAttached`
 - From: `Attached`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
 - Guards:
   - `staged_phase`
+  - `run_not_resumable`
 - Emits: `RecoveredInputLifecycleNormalized`
 - To: `Attached`
 
 ### `NormalizeRecoveredInputStagedRunning`
 - From: `Running`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
 - Guards:
   - `staged_phase`
+  - `run_not_resumable`
 - Emits: `RecoveredInputLifecycleNormalized`
 - To: `Running`
 
 ### `NormalizeRecoveredInputStagedRetired`
 - From: `Retired`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
 - Guards:
   - `staged_phase`
+  - `run_not_resumable`
 - Emits: `RecoveredInputLifecycleNormalized`
 - To: `Retired`
 
 ### `NormalizeRecoveredInputStagedStopped`
 - From: `Stopped`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
 - Guards:
   - `staged_phase`
+  - `run_not_resumable`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Stopped`
+
+### `NormalizeRecoveredInputStagedResumableInitializing`
+- From: `Initializing`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
+- Guards:
+  - `staged_phase`
+  - `run_resumable`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Initializing`
+
+### `NormalizeRecoveredInputStagedResumableIdle`
+- From: `Idle`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
+- Guards:
+  - `staged_phase`
+  - `run_resumable`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Idle`
+
+### `NormalizeRecoveredInputStagedResumableAttached`
+- From: `Attached`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
+- Guards:
+  - `staged_phase`
+  - `run_resumable`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Attached`
+
+### `NormalizeRecoveredInputStagedResumableRunning`
+- From: `Running`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
+- Guards:
+  - `staged_phase`
+  - `run_resumable`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Running`
+
+### `NormalizeRecoveredInputStagedResumableRetired`
+- From: `Retired`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
+- Guards:
+  - `staged_phase`
+  - `run_resumable`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Retired`
+
+### `NormalizeRecoveredInputStagedResumableStopped`
+- From: `Stopped`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
+- Guards:
+  - `staged_phase`
+  - `run_resumable`
 - Emits: `RecoveredInputLifecycleNormalized`
 - To: `Stopped`
 
 ### `NormalizeRecoveredInputAppliedCommittedInitializing`
 - From: `Initializing`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
 - Guards:
   - `applied_phase`
   - `boundary_committed_observed`
@@ -8061,7 +8409,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputAppliedCommittedIdle`
 - From: `Idle`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
 - Guards:
   - `applied_phase`
   - `boundary_committed_observed`
@@ -8070,7 +8418,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputAppliedCommittedAttached`
 - From: `Attached`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
 - Guards:
   - `applied_phase`
   - `boundary_committed_observed`
@@ -8079,7 +8427,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputAppliedCommittedRunning`
 - From: `Running`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
 - Guards:
   - `applied_phase`
   - `boundary_committed_observed`
@@ -8088,7 +8436,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputAppliedCommittedRetired`
 - From: `Retired`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
 - Guards:
   - `applied_phase`
   - `boundary_committed_observed`
@@ -8097,7 +8445,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputAppliedCommittedStopped`
 - From: `Stopped`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
 - Guards:
   - `applied_phase`
   - `boundary_committed_observed`
@@ -8106,61 +8454,127 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputAppliedMissingReceiptInitializing`
 - From: `Initializing`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
 - Guards:
   - `applied_phase`
   - `boundary_missing_observed`
+  - `run_not_resumable`
 - Emits: `RecoveredInputLifecycleNormalized`
 - To: `Initializing`
 
 ### `NormalizeRecoveredInputAppliedMissingReceiptIdle`
 - From: `Idle`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
 - Guards:
   - `applied_phase`
   - `boundary_missing_observed`
+  - `run_not_resumable`
 - Emits: `RecoveredInputLifecycleNormalized`
 - To: `Idle`
 
 ### `NormalizeRecoveredInputAppliedMissingReceiptAttached`
 - From: `Attached`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
 - Guards:
   - `applied_phase`
   - `boundary_missing_observed`
+  - `run_not_resumable`
 - Emits: `RecoveredInputLifecycleNormalized`
 - To: `Attached`
 
 ### `NormalizeRecoveredInputAppliedMissingReceiptRunning`
 - From: `Running`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
 - Guards:
   - `applied_phase`
   - `boundary_missing_observed`
+  - `run_not_resumable`
 - Emits: `RecoveredInputLifecycleNormalized`
 - To: `Running`
 
 ### `NormalizeRecoveredInputAppliedMissingReceiptRetired`
 - From: `Retired`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
 - Guards:
   - `applied_phase`
   - `boundary_missing_observed`
+  - `run_not_resumable`
 - Emits: `RecoveredInputLifecycleNormalized`
 - To: `Retired`
 
 ### `NormalizeRecoveredInputAppliedMissingReceiptStopped`
 - From: `Stopped`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
 - Guards:
   - `applied_phase`
   - `boundary_missing_observed`
+  - `run_not_resumable`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Stopped`
+
+### `NormalizeRecoveredInputAppliedResumableInitializing`
+- From: `Initializing`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
+- Guards:
+  - `applied_phase`
+  - `boundary_missing_observed`
+  - `run_resumable`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Initializing`
+
+### `NormalizeRecoveredInputAppliedResumableIdle`
+- From: `Idle`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
+- Guards:
+  - `applied_phase`
+  - `boundary_missing_observed`
+  - `run_resumable`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Idle`
+
+### `NormalizeRecoveredInputAppliedResumableAttached`
+- From: `Attached`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
+- Guards:
+  - `applied_phase`
+  - `boundary_missing_observed`
+  - `run_resumable`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Attached`
+
+### `NormalizeRecoveredInputAppliedResumableRunning`
+- From: `Running`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
+- Guards:
+  - `applied_phase`
+  - `boundary_missing_observed`
+  - `run_resumable`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Running`
+
+### `NormalizeRecoveredInputAppliedResumableRetired`
+- From: `Retired`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
+- Guards:
+  - `applied_phase`
+  - `boundary_missing_observed`
+  - `run_resumable`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Retired`
+
+### `NormalizeRecoveredInputAppliedResumableStopped`
+- From: `Stopped`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
+- Guards:
+  - `applied_phase`
+  - `boundary_missing_observed`
+  - `run_resumable`
 - Emits: `RecoveredInputLifecycleNormalized`
 - To: `Stopped`
 
 ### `NormalizeRecoveredInputAppliedUnobservedReceiptInitializing`
 - From: `Initializing`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
 - Guards:
   - `applied_phase`
   - `boundary_receipt_unobserved`
@@ -8169,7 +8583,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputAppliedUnobservedReceiptIdle`
 - From: `Idle`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
 - Guards:
   - `applied_phase`
   - `boundary_receipt_unobserved`
@@ -8178,7 +8592,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputAppliedUnobservedReceiptAttached`
 - From: `Attached`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
 - Guards:
   - `applied_phase`
   - `boundary_receipt_unobserved`
@@ -8187,7 +8601,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputAppliedUnobservedReceiptRunning`
 - From: `Running`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
 - Guards:
   - `applied_phase`
   - `boundary_receipt_unobserved`
@@ -8196,7 +8610,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputAppliedUnobservedReceiptRetired`
 - From: `Retired`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
 - Guards:
   - `applied_phase`
   - `boundary_receipt_unobserved`
@@ -8205,7 +8619,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputAppliedUnobservedReceiptStopped`
 - From: `Stopped`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
 - Guards:
   - `applied_phase`
   - `boundary_receipt_unobserved`
@@ -8214,7 +8628,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputQueuedInitializing`
 - From: `Initializing`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
 - Guards:
   - `queued_phase`
 - Emits: `RecoveredInputLifecycleNormalized`
@@ -8222,7 +8636,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputQueuedIdle`
 - From: `Idle`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
 - Guards:
   - `queued_phase`
 - Emits: `RecoveredInputLifecycleNormalized`
@@ -8230,7 +8644,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputQueuedAttached`
 - From: `Attached`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
 - Guards:
   - `queued_phase`
 - Emits: `RecoveredInputLifecycleNormalized`
@@ -8238,7 +8652,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputQueuedRunning`
 - From: `Running`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
 - Guards:
   - `queued_phase`
 - Emits: `RecoveredInputLifecycleNormalized`
@@ -8246,7 +8660,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputQueuedRetired`
 - From: `Retired`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
 - Guards:
   - `queued_phase`
 - Emits: `RecoveredInputLifecycleNormalized`
@@ -8254,7 +8668,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `NormalizeRecoveredInputQueuedStopped`
 - From: `Stopped`
-- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed)
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, applied_boundary_committed, bound_run_resumable)
 - Guards:
   - `queued_phase`
 - Emits: `RecoveredInputLifecycleNormalized`
@@ -10383,6 +10797,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `completion_correlation_settled`
   - `run_starts_not_held`
+  - `no_other_resumable_run`
 - Emits: `SubmitRunPrimitive`
 - To: `Running`
 
@@ -10393,6 +10808,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `completion_correlation_unsettled`
   - `run_starts_not_held`
+  - `no_other_resumable_run`
 - Emits: `SubmitRunPrimitive`
 - To: `Running`
 
@@ -10411,6 +10827,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `completion_correlation_settled`
   - `run_starts_not_held`
+  - `no_other_resumable_run`
 - Emits: `SubmitRunPrimitive`
 - To: `Running`
 
@@ -10421,6 +10838,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
   - `completion_correlation_unsettled`
   - `run_starts_not_held`
+  - `no_other_resumable_run`
 - Emits: `SubmitRunPrimitive`
 - To: `Running`
 
@@ -11584,6 +12002,34 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `live_boundary_joins_retained_and_applied`
 - To: `Retired`
 
+### `SuspendRunForStopRunningToIdle`
+- From: `Running`
+- On: `SuspendRunForStop`(run_id, durable_session)
+- Guards:
+  - `pre_run_phase_matches_idle`
+  - `current_run_id_matches_binding`
+  - `run_turn_not_terminal`
+  - `requeue_stop`
+  - `durable_session`
+  - `no_other_resumable_run`
+  - `live_boundary_joins_retained_and_applied`
+- Emits: `RunSuspendedForStop`
+- To: `Idle`
+
+### `SuspendRunForStopRunningToAttached`
+- From: `Running`
+- On: `SuspendRunForStop`(run_id, durable_session)
+- Guards:
+  - `pre_run_phase_matches_attached`
+  - `current_run_id_matches_binding`
+  - `run_turn_not_terminal`
+  - `requeue_stop`
+  - `durable_session`
+  - `no_other_resumable_run`
+  - `live_boundary_joins_retained_and_applied`
+- Emits: `RunSuspendedForStop`
+- To: `Attached`
+
 ### `RecycleFromIdleOrRetired`
 - From: `Idle`, `Retired`
 - On: `Recycle`()
@@ -12163,6 +12609,56 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `RollbackStaged`(input_id, lane)
 - Guards:
   - `input_tracked`
+  - `input_not_live_boundary_joined`
+- Emits: `InputLifecycleNotice`
+- To: `Stopped`
+
+### `ReplayAppliedRunContributorIdle`
+- From: `Idle`
+- On: `ReplayAppliedRunContributor`(input_id, run_id, lane)
+- Guards:
+  - `input_applied`
+  - `input_bound_to_run`
+  - `input_not_live_boundary_joined`
+- Emits: `InputLifecycleNotice`
+- To: `Idle`
+
+### `ReplayAppliedRunContributorAttached`
+- From: `Attached`
+- On: `ReplayAppliedRunContributor`(input_id, run_id, lane)
+- Guards:
+  - `input_applied`
+  - `input_bound_to_run`
+  - `input_not_live_boundary_joined`
+- Emits: `InputLifecycleNotice`
+- To: `Attached`
+
+### `ReplayAppliedRunContributorRunning`
+- From: `Running`
+- On: `ReplayAppliedRunContributor`(input_id, run_id, lane)
+- Guards:
+  - `input_applied`
+  - `input_bound_to_run`
+  - `input_not_live_boundary_joined`
+- Emits: `InputLifecycleNotice`
+- To: `Running`
+
+### `ReplayAppliedRunContributorRetired`
+- From: `Retired`
+- On: `ReplayAppliedRunContributor`(input_id, run_id, lane)
+- Guards:
+  - `input_applied`
+  - `input_bound_to_run`
+  - `input_not_live_boundary_joined`
+- Emits: `InputLifecycleNotice`
+- To: `Retired`
+
+### `ReplayAppliedRunContributorStopped`
+- From: `Stopped`
+- On: `ReplayAppliedRunContributor`(input_id, run_id, lane)
+- Guards:
+  - `input_applied`
+  - `input_bound_to_run`
   - `input_not_live_boundary_joined`
 - Emits: `InputLifecycleNotice`
 - To: `Stopped`
@@ -27799,6 +28295,204 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `all_recipients_consumed_by_run`
   - `finalization_failed`
 - Emits: `CheckpointCompletionResultResolved`
+- To: `Stopped`
+
+### `ClassifyStopInputDispositionRetainInitializing`
+- From: `Initializing`
+- On: `ClassifyStopInputDisposition`(input_id, durability, directed, objective_bound)
+- Guards:
+  - `requeue_eligible`
+- Emits: `StopInputDispositionClassified`
+- To: `Initializing`
+
+### `ClassifyStopInputDispositionRetainIdle`
+- From: `Idle`
+- On: `ClassifyStopInputDisposition`(input_id, durability, directed, objective_bound)
+- Guards:
+  - `requeue_eligible`
+- Emits: `StopInputDispositionClassified`
+- To: `Idle`
+
+### `ClassifyStopInputDispositionRetainAttached`
+- From: `Attached`
+- On: `ClassifyStopInputDisposition`(input_id, durability, directed, objective_bound)
+- Guards:
+  - `requeue_eligible`
+- Emits: `StopInputDispositionClassified`
+- To: `Attached`
+
+### `ClassifyStopInputDispositionRetainRunning`
+- From: `Running`
+- On: `ClassifyStopInputDisposition`(input_id, durability, directed, objective_bound)
+- Guards:
+  - `requeue_eligible`
+- Emits: `StopInputDispositionClassified`
+- To: `Running`
+
+### `ClassifyStopInputDispositionRetainRetired`
+- From: `Retired`
+- On: `ClassifyStopInputDisposition`(input_id, durability, directed, objective_bound)
+- Guards:
+  - `requeue_eligible`
+- Emits: `StopInputDispositionClassified`
+- To: `Retired`
+
+### `ClassifyStopInputDispositionRetainStopped`
+- From: `Stopped`
+- On: `ClassifyStopInputDisposition`(input_id, durability, directed, objective_bound)
+- Guards:
+  - `requeue_eligible`
+- Emits: `StopInputDispositionClassified`
+- To: `Stopped`
+
+### `ClassifyStopInputDispositionRetainResumableInitializing`
+- From: `Initializing`
+- On: `ClassifyStopInputDisposition`(input_id, durability, directed, objective_bound)
+- Guards:
+  - `resumable_run_input`
+- Emits: `StopInputDispositionClassified`
+- To: `Initializing`
+
+### `ClassifyStopInputDispositionRetainResumableIdle`
+- From: `Idle`
+- On: `ClassifyStopInputDisposition`(input_id, durability, directed, objective_bound)
+- Guards:
+  - `resumable_run_input`
+- Emits: `StopInputDispositionClassified`
+- To: `Idle`
+
+### `ClassifyStopInputDispositionRetainResumableAttached`
+- From: `Attached`
+- On: `ClassifyStopInputDisposition`(input_id, durability, directed, objective_bound)
+- Guards:
+  - `resumable_run_input`
+- Emits: `StopInputDispositionClassified`
+- To: `Attached`
+
+### `ClassifyStopInputDispositionRetainResumableRunning`
+- From: `Running`
+- On: `ClassifyStopInputDisposition`(input_id, durability, directed, objective_bound)
+- Guards:
+  - `resumable_run_input`
+- Emits: `StopInputDispositionClassified`
+- To: `Running`
+
+### `ClassifyStopInputDispositionRetainResumableRetired`
+- From: `Retired`
+- On: `ClassifyStopInputDisposition`(input_id, durability, directed, objective_bound)
+- Guards:
+  - `resumable_run_input`
+- Emits: `StopInputDispositionClassified`
+- To: `Retired`
+
+### `ClassifyStopInputDispositionRetainResumableStopped`
+- From: `Stopped`
+- On: `ClassifyStopInputDisposition`(input_id, durability, directed, objective_bound)
+- Guards:
+  - `resumable_run_input`
+- Emits: `StopInputDispositionClassified`
+- To: `Stopped`
+
+### `ClassifyStopInputDispositionAbandonInitializing`
+- From: `Initializing`
+- On: `ClassifyStopInputDisposition`(input_id, durability, directed, objective_bound)
+- Guards:
+  - `not_requeue_eligible`
+  - `not_resumable_run_input`
+- Emits: `StopInputDispositionClassified`
+- To: `Initializing`
+
+### `ClassifyStopInputDispositionAbandonIdle`
+- From: `Idle`
+- On: `ClassifyStopInputDisposition`(input_id, durability, directed, objective_bound)
+- Guards:
+  - `not_requeue_eligible`
+  - `not_resumable_run_input`
+- Emits: `StopInputDispositionClassified`
+- To: `Idle`
+
+### `ClassifyStopInputDispositionAbandonAttached`
+- From: `Attached`
+- On: `ClassifyStopInputDisposition`(input_id, durability, directed, objective_bound)
+- Guards:
+  - `not_requeue_eligible`
+  - `not_resumable_run_input`
+- Emits: `StopInputDispositionClassified`
+- To: `Attached`
+
+### `ClassifyStopInputDispositionAbandonRunning`
+- From: `Running`
+- On: `ClassifyStopInputDisposition`(input_id, durability, directed, objective_bound)
+- Guards:
+  - `not_requeue_eligible`
+  - `not_resumable_run_input`
+- Emits: `StopInputDispositionClassified`
+- To: `Running`
+
+### `ClassifyStopInputDispositionAbandonRetired`
+- From: `Retired`
+- On: `ClassifyStopInputDisposition`(input_id, durability, directed, objective_bound)
+- Guards:
+  - `not_requeue_eligible`
+  - `not_resumable_run_input`
+- Emits: `StopInputDispositionClassified`
+- To: `Retired`
+
+### `ClassifyStopInputDispositionAbandonStopped`
+- From: `Stopped`
+- On: `ClassifyStopInputDisposition`(input_id, durability, directed, objective_bound)
+- Guards:
+  - `not_requeue_eligible`
+  - `not_resumable_run_input`
+- Emits: `StopInputDispositionClassified`
+- To: `Stopped`
+
+### `ResolveRuntimeCompletionWaitFailureRequeuedAcrossStopInitializing`
+- From: `Initializing`
+- On: `ResolveRuntimeCompletionWaitFailure`(session_id, failure)
+- Guards:
+  - `requeued_across_stop`
+- Emits: `RuntimeCompletionWaitFailureResolved`
+- To: `Initializing`
+
+### `ResolveRuntimeCompletionWaitFailureRequeuedAcrossStopIdle`
+- From: `Idle`
+- On: `ResolveRuntimeCompletionWaitFailure`(session_id, failure)
+- Guards:
+  - `requeued_across_stop`
+- Emits: `RuntimeCompletionWaitFailureResolved`
+- To: `Idle`
+
+### `ResolveRuntimeCompletionWaitFailureRequeuedAcrossStopAttached`
+- From: `Attached`
+- On: `ResolveRuntimeCompletionWaitFailure`(session_id, failure)
+- Guards:
+  - `requeued_across_stop`
+- Emits: `RuntimeCompletionWaitFailureResolved`
+- To: `Attached`
+
+### `ResolveRuntimeCompletionWaitFailureRequeuedAcrossStopRunning`
+- From: `Running`
+- On: `ResolveRuntimeCompletionWaitFailure`(session_id, failure)
+- Guards:
+  - `requeued_across_stop`
+- Emits: `RuntimeCompletionWaitFailureResolved`
+- To: `Running`
+
+### `ResolveRuntimeCompletionWaitFailureRequeuedAcrossStopRetired`
+- From: `Retired`
+- On: `ResolveRuntimeCompletionWaitFailure`(session_id, failure)
+- Guards:
+  - `requeued_across_stop`
+- Emits: `RuntimeCompletionWaitFailureResolved`
+- To: `Retired`
+
+### `ResolveRuntimeCompletionWaitFailureRequeuedAcrossStopStopped`
+- From: `Stopped`
+- On: `ResolveRuntimeCompletionWaitFailure`(session_id, failure)
+- Guards:
+  - `requeued_across_stop`
+- Emits: `RuntimeCompletionWaitFailureResolved`
 - To: `Stopped`
 
 ## Coverage

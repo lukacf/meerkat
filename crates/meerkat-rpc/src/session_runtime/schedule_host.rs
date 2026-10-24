@@ -117,13 +117,15 @@ impl SurfaceScheduleSessionHost for RpcScheduleTargetAdapter {
             });
         }
 
-        let persisted = runtime
-            .load_persisted_session(session_id)
+        // Presence and archive state, read body-free: a session another
+        // process runs holds a provisional tail from its first round commit,
+        // and a body read refuses throughout it.
+        match super::committed_source_archived(&runtime.service, session_id)
             .await
-            .map_err(rpc_to_schedule)?;
-        match persisted {
-            Some(_) => Ok(TargetProbeOutcome::Ready),
-            _ => Ok(TargetProbeOutcome::Missing {
+            .map_err(|error| rpc_to_schedule(super::session_error_to_rpc(error)))?
+        {
+            Some(false) => Ok(TargetProbeOutcome::Ready),
+            Some(true) | None => Ok(TargetProbeOutcome::Missing {
                 detail: Some(format!("session not found: {session_id}")),
             }),
         }
@@ -137,10 +139,25 @@ impl SurfaceScheduleSessionHost for RpcScheduleTargetAdapter {
         let Some(session_id) = binding.resolved_session_id() else {
             return Ok(None);
         };
+        // The owner identity is committed metadata, which a running durable
+        // run's provisional tail does not change: it reads the committed
+        // snapshot, and an archived session has none.
         let session = runtime
-            .load_persisted_session(session_id)
+            .service
+            .load_committed_session_tolerating_tail(session_id)
             .await
-            .map_err(rpc_to_schedule)?;
+            .map_err(|error| rpc_to_schedule(super::session_error_to_rpc(error)))?;
+        let session = match session {
+            Some(session) => {
+                let archived = runtime
+                    .service
+                    .session_archived_by_authority(session_id, &session)
+                    .await
+                    .map_err(|error| rpc_to_schedule(super::session_error_to_rpc(error)))?;
+                (!archived).then_some(session)
+            }
+            None => None,
+        };
         Ok(recover_mob_member_identity_from_session_target(
             binding,
             session.as_ref(),
@@ -191,6 +208,13 @@ impl SessionRuntime {
         }
 
         let mut slot = self.schedule_host.lock().await;
+        // A runtime whose shutdown began has stopped its firing host for
+        // good: a firing would admit work into a runtime that is stopping.
+        // Read under the slot, so an arming that waited on the shutdown's
+        // stop of the host does not start another one after it.
+        if self.runtime_registration_fence.is_closing() {
+            return Ok(());
+        }
         if slot.as_ref().is_some_and(|handle| handle.is_running()) {
             return Ok(());
         }
@@ -270,21 +294,20 @@ impl SessionRuntime {
         {
             return Ok(session_id.clone());
         }
-        if let Some(persisted) = self
-            .load_persisted_session(session_id)
+        // Presence and archive state, read body-free: the session may be
+        // running in another process, its provisional tail ahead of the
+        // committed snapshot.
+        match super::committed_source_archived(&self.service, session_id)
             .await
-            .map_err(rpc_to_schedule)?
+            .map_err(|error| rpc_to_schedule(super::session_error_to_rpc(error)))?
         {
-            if self
-                .session_archived_by_authority(session_id, &persisted)
-                .await
-                .map_err(rpc_to_schedule)?
-            {
+            Some(true) => {
                 return Err(ScheduleDomainError::InvalidSchedule(format!(
                     "materialized session is archived: {session_id}"
                 )));
             }
-            return Ok(session_id.clone());
+            Some(false) => return Ok(session_id.clone()),
+            None => {}
         }
 
         let mut build_config = scheduled_build_config(create)?;
@@ -597,6 +620,43 @@ impl SurfaceScheduleMobHost for RpcScheduleMobHost {
         host.deliver_identity_target(occurrence, identity, binding)
             .await
     }
+
+    /// A redelivery is the current mob host's to decide: its existing-only
+    /// answer reads the mob's durable external-delivery record, where the
+    /// trait default answers an unproven late one not admitted unread. A
+    /// gone runtime cannot show whether the earlier attempt was admitted,
+    /// so the occurrence stays reclaimable.
+    async fn deliver_existing_mob_target(
+        &self,
+        occurrence: &Occurrence,
+        identity: &ScheduleDeliveryIdentity,
+        binding: &meerkat::MobTargetBinding,
+        existing: meerkat::ExistingDelivery,
+    ) -> Result<meerkat::ExistingDeliveryAnswer, ScheduleDomainError> {
+        let host = self.current().map_err(redelivery_mob_host_unavailable)?;
+        host.deliver_existing_mob_target(occurrence, identity, binding, existing)
+            .await
+    }
+
+    async fn deliver_existing_identity_target(
+        &self,
+        occurrence: &Occurrence,
+        identity: &ScheduleDeliveryIdentity,
+        binding: &IdentityTargetBinding,
+        existing: meerkat::ExistingDelivery,
+    ) -> Result<Option<meerkat::ExistingDeliveryAnswer>, ScheduleDomainError> {
+        let host = self.current().map_err(redelivery_mob_host_unavailable)?;
+        host.deliver_existing_identity_target(occurrence, identity, binding, existing)
+            .await
+    }
+}
+
+/// The schedule error of a redelivery whose mob host is gone.
+#[cfg(feature = "mob")]
+fn redelivery_mob_host_unavailable(error: ScheduleDomainError) -> ScheduleDomainError {
+    ScheduleDomainError::DeliveryRepairDeferred {
+        detail: format!("mob host is unavailable for a redelivery: {error}"),
+    }
 }
 
 fn rpc_schedule_mob_host(runtime: &Arc<SessionRuntime>) -> Arc<dyn SurfaceScheduleMobHost> {
@@ -617,7 +677,7 @@ fn rpc_schedule_mob_host(runtime: &Arc<SessionRuntime>) -> Arc<dyn SurfaceSchedu
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use meerkat_core::skills::{SkillKey, SkillName, SourceUuid};
@@ -740,5 +800,260 @@ mod tests {
             1,
             "only this test still holds the machine"
         );
+    }
+
+    /// One occurrence of a schedule firing `target`.
+    #[cfg(feature = "mob")]
+    fn scheduled_occurrence(target: meerkat::TargetBinding) -> Occurrence {
+        let schedule = meerkat::Schedule::new(meerkat::CreateScheduleRequest {
+            name: Some("rpc-mob-redelivery".to_string()),
+            description: None,
+            trigger: meerkat::TriggerSpec::Interval(meerkat::IntervalTriggerSpec {
+                start_at_utc: chrono::Utc::now(),
+                every_seconds: 60,
+                end_at_utc: None,
+            }),
+            target,
+            misfire_policy: meerkat::MisfirePolicy::Skip,
+            overlap_policy: meerkat::OverlapPolicy::SkipIfRunning,
+            missing_target_policy: meerkat::MissingTargetPolicy::Skip,
+            labels: Default::default(),
+            planning_horizon_days: None,
+            planning_horizon_occurrences: None,
+        })
+        .expect("a mob schedule");
+        Occurrence::planned_from_schedule(
+            &schedule,
+            meerkat::OccurrenceOrdinal(0),
+            chrono::Utc::now(),
+        )
+        .expect("the occurrence plans")
+    }
+
+    /// The durable external-delivery record a first attempt leaves in mob
+    /// `ops`: its Begin under the occurrence's stable identity, then its
+    /// completed terminal.
+    #[cfg(feature = "mob")]
+    async fn record_completed_ops_delivery(
+        mob_state: &meerkat_mob_mcp::MobMcpState,
+        identity: &ScheduleDeliveryIdentity,
+        target_kind: meerkat_mob::MobExternalDeliveryTargetKind,
+        canonical_action: &str,
+    ) {
+        let intent = meerkat_mob::MobExternalDeliveryIntent::new(
+            meerkat_mob::MobId::from("ops"),
+            meerkat_mob::MobExternalDeliveryIdentity::new(
+                identity.idempotency_key.clone(),
+                identity.correlation_id.clone(),
+            )
+            .expect("the occurrence's delivery identity"),
+            target_kind,
+            canonical_action.as_bytes(),
+        )
+        .expect("the first attempt's intent");
+        assert_eq!(
+            mob_state
+                .mob_begin_external_delivery(&intent)
+                .await
+                .expect("the first attempt's Begin"),
+            meerkat_mob::MobExternalDeliveryBeginOutcome::Begun
+        );
+        mob_state
+            .mob_complete_external_delivery(
+                &intent,
+                &meerkat_mob::MobExternalDeliveryTerminal::Completed,
+            )
+            .await
+            .expect("the first attempt's terminal");
+    }
+
+    /// The RPC host's mob host forwards a redelivery to the mob host it
+    /// wraps, so a late one reads the mob's durable external-delivery
+    /// record: a mob target and a mob member's identity whose first attempt
+    /// mob `ops` recorded answer from that record (the mob has no member, so
+    /// only the record can complete them). The trait defaults the wrapper
+    /// fell back to answered both not admitted without the read.
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn late_redeliveries_read_the_mob_record_through_the_rpc_mob_host() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (_, bundle) = meerkat::open_realm_persistence_in(
+            temp.path(),
+            "schedule-mob-redelivery",
+            Some(meerkat_store::RealmBackend::Sqlite),
+            None,
+        )
+        .await
+        .expect("realm persistence");
+        let config_store: Arc<dyn meerkat_core::ConfigStore> =
+            Arc::new(meerkat_core::MemoryConfigStore::new(
+                meerkat_core::Config::default(),
+                meerkat_models::canonical(),
+            ));
+        let runtime = Arc::new(
+            SessionRuntime::new_with_config_store(
+                meerkat::AgentFactory::new(temp.path().join("sessions")),
+                meerkat_core::Config::default(),
+                config_store,
+                1,
+                bundle,
+                crate::router::NotificationSink::noop(),
+            )
+            .expect("compose the RPC session runtime"),
+        );
+        let mob_state = meerkat_mob_mcp::MobMcpState::new_in_memory();
+        let definition: meerkat_mob::MobDefinition = serde_json::from_value(serde_json::json!({
+            "id": "ops",
+            "profiles": {
+                "worker": {
+                    "model": "gpt-5.4",
+                    "external_addressable": true,
+                    "tools": { "comms": true }
+                }
+            }
+        }))
+        .expect("test mob definition should decode");
+        mob_state
+            .mob_create_definition(definition)
+            .await
+            .expect("the mob that recorded the first attempts");
+        runtime.set_mob_state(Arc::clone(&mob_state));
+        let host = rpc_schedule_mob_host(&runtime);
+
+        let mob_target = meerkat::MobTargetBinding::Member {
+            mob_id: "ops".to_string(),
+            member_id: "deploy-monitor".to_string(),
+            action: meerkat::ScheduledMobAction::Send {
+                content: "Check deploy state.".to_string().into(),
+                render_metadata: None,
+            },
+        };
+        let occurrence =
+            scheduled_occurrence(meerkat::TargetBinding::Mob(Box::new(mob_target.clone())));
+        let identity = ScheduleDeliveryIdentity::for_occurrence(&occurrence);
+        record_completed_ops_delivery(
+            &mob_state,
+            &identity,
+            meerkat_mob::MobExternalDeliveryTargetKind::MemberSend,
+            &mob_target.stable_key().expect("stable mob target key"),
+        )
+        .await;
+        let answer = host
+            .deliver_existing_mob_target(
+                &occurrence,
+                &identity,
+                &mob_target,
+                meerkat::ExistingDelivery::UnprovenLate,
+            )
+            .await
+            .expect("the mob host's record read answers");
+        let meerkat::ExistingDeliveryAnswer::Dispatch(dispatch) = answer else {
+            panic!("a recorded mob delivery replays from its record");
+        };
+        assert_eq!(
+            dispatch.receipt.stage,
+            meerkat::DeliveryReceiptStage::DispatchAccepted
+        );
+        assert_eq!(
+            dispatch.completion.await.expect("replay completion").phase,
+            meerkat::OccurrencePhase::Completed
+        );
+
+        let identity_target = IdentityTargetBinding::resumable(
+            meerkat::surface::mob_member_schedule_identity(&meerkat_core::MobMemberBinding {
+                mob_id: "ops".to_string(),
+                role: "worker".to_string(),
+                member: "deploy-monitor".to_string(),
+            }),
+            meerkat::ScheduledSessionAction::Prompt {
+                prompt: "Check deploy state.".to_string().into(),
+                system_prompt: None,
+                render_metadata: None,
+                skill_refs: Vec::new(),
+                additional_instructions: Vec::new(),
+            },
+        );
+        let occurrence = scheduled_occurrence(meerkat::TargetBinding::Identity(Box::new(
+            identity_target.clone(),
+        )));
+        let identity = ScheduleDeliveryIdentity::for_occurrence(&occurrence);
+        record_completed_ops_delivery(
+            &mob_state,
+            &identity,
+            meerkat_mob::MobExternalDeliveryTargetKind::MemberSend,
+            &identity_target
+                .stable_key()
+                .expect("stable identity target key"),
+        )
+        .await;
+        let answer = host
+            .deliver_existing_identity_target(
+                &occurrence,
+                &identity,
+                &identity_target,
+                meerkat::ExistingDelivery::UnprovenLate,
+            )
+            .await
+            .expect("the mob host's record read answers")
+            .expect("the mob host owns a mob member's identity");
+        let meerkat::ExistingDeliveryAnswer::Dispatch(dispatch) = answer else {
+            panic!("a recorded identity delivery replays from its record");
+        };
+        assert_eq!(
+            dispatch.receipt.stage,
+            meerkat::DeliveryReceiptStage::DispatchAccepted
+        );
+        assert_eq!(
+            dispatch.completion.await.expect("replay completion").phase,
+            meerkat::OccurrencePhase::Completed
+        );
+
+        runtime.try_shutdown().await.expect("shutdown");
+    }
+
+    /// A scheduled fire into a session that another runtime over the same
+    /// SQLite realm is running, its durable run held after a round commit:
+    /// the probe and the materialized-session reuse read presence and archive
+    /// state, and the owner identity reads committed metadata. Each read the
+    /// committed body before, which refuses while the run's provisional tail
+    /// stands.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rpc_schedule_fire_into_a_session_running_elsewhere() {
+        use super::super::committed_reads_tests::{HeldRun, mid_run, sqlite_runtime};
+
+        let held = HeldRun::start(true).await;
+        let reader = sqlite_runtime(held.root.path()).await;
+        let adapter = RpcScheduleTargetAdapter::new(&reader);
+        let binding = SessionTargetBinding::ResumableSession {
+            session_id: held.session_id.clone(),
+            action: meerkat::ScheduledSessionAction::Prompt {
+                prompt: meerkat_core::ContentInput::Text("scheduled".to_string()),
+                system_prompt: None,
+                render_metadata: None,
+                skill_refs: Vec::new(),
+                additional_instructions: Vec::new(),
+            },
+        };
+        let probe = mid_run(adapter.probe_session_target(&binding)).await;
+        assert!(
+            matches!(probe, Ok(TargetProbeOutcome::Ready)),
+            "the session running elsewhere probes present: {probe:?}"
+        );
+        let identity = mid_run(adapter.recover_session_target_identity(&binding)).await;
+        assert!(
+            matches!(identity, Ok(None)),
+            "an ordinary session's owner identity reads from its committed metadata: {identity:?}"
+        );
+        let materialized = mid_run(
+            reader.materialize_scheduled_session(&held.session_id, &materialization_spec()),
+        )
+        .await;
+        assert_eq!(
+            materialized.as_ref().ok(),
+            Some(&held.session_id),
+            "the occurrence reuses the running session: {materialized:?}"
+        );
+        let (result, _held) = held.release_and_finish().await;
+        assert_eq!(result.expect("the held run completes").text, "held answer");
     }
 }

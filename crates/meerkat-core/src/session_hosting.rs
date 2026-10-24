@@ -831,8 +831,22 @@ mod native {
     struct RegistryEntry {
         owner: HostingOwner,
         claim: Weak<ClaimInner>,
-        /// The OS lock is held as long as this file is open.
+        /// The OS lock is held through this file until the entry drops.
         _file: File,
+    }
+
+    /// An entry drops only when the registry removes it, after the last claim
+    /// of its lineage was released: a successor that took the entry over
+    /// keeps it, file and lock included. Its lock is released here, before
+    /// the file closes. The lock belongs to the open file description, and a
+    /// process spawned meanwhile holds a copy of the descriptor until it
+    /// executes its program, which would keep a claim released by the close
+    /// alone. The entry opened that description itself, so the unlock
+    /// releases no other holder's lock.
+    impl Drop for RegistryEntry {
+        fn drop(&mut self) {
+            let _ = self._file.unlock();
+        }
     }
 
     /// Session claims this process holds, keyed by lock path.
@@ -915,6 +929,8 @@ mod native {
 
     impl Drop for ClaimInner {
         fn drop(&mut self) {
+            #[cfg(test)]
+            tests::hold_release(&self.path);
             let mut registry = registry();
             // Remove (closing the file, so releasing the OS lock) only a dead
             // entry: a grant that found this lineage dead may already have
@@ -1087,6 +1103,13 @@ mod native {
         }
     }
 
+    /// Released before the file closes, as a registry entry's claim is.
+    impl Drop for ExclusiveProcessLock {
+        fn drop(&mut self) {
+            let _ = self._file.unlock();
+        }
+    }
+
     impl std::fmt::Debug for ExclusiveProcessLock {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.debug_struct("ExclusiveProcessLock")
@@ -1129,6 +1152,161 @@ mod native {
     #[allow(clippy::expect_used, clippy::panic)]
     mod tests {
         use super::*;
+        #[cfg(unix)]
+        use crate::process_isolation_tests::DescriptorCopy;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        /// One armed hold: the next release of a lineage of this lock path
+        /// acknowledges and waits for the test, before it takes the registry.
+        type ReleaseHold = (PathBuf, mpsc::Sender<()>, mpsc::Receiver<()>);
+
+        static RELEASE_HOLDS: Mutex<Vec<ReleaseHold>> = Mutex::new(Vec::new());
+
+        /// Called by a lineage's release (its last claim dropped) before it
+        /// takes the registry.
+        pub(super) fn hold_release(path: &Path) {
+            let hold = {
+                let mut holds = RELEASE_HOLDS
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                holds
+                    .iter()
+                    .position(|(held, _, _)| held == path)
+                    .map(|index| holds.remove(index))
+            };
+            if let Some((_, entered, release)) = hold {
+                let _ = entered.send(());
+                let _ = release.recv();
+            }
+        }
+
+        /// Hold the next release of a lineage of `path`.
+        fn hold_next_release(path: &Path) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+            let (entered_tx, entered_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            RELEASE_HOLDS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((path.to_path_buf(), entered_tx, release_rx));
+            (entered_rx, release_tx)
+        }
+
+        /// Whether another open of the lock file at `path` (another process's
+        /// open file description) can take its lock now. It gives back what
+        /// it took.
+        fn lock_is_free(path: &Path) -> bool {
+            let probe = open_lock_file(path).expect("lock file");
+            let free = probe.try_lock().is_ok();
+            if free {
+                probe.unlock().expect("give the probe's lock back");
+            }
+            free
+        }
+
+        /// A claim this process released is free at once for any other
+        /// claimant, while a process spawned meanwhile still holds a copy of
+        /// the claim's descriptor (as every process does until it executes
+        /// its program).
+        #[cfg(unix)]
+        #[test]
+        fn a_released_claim_is_free_while_a_spawned_process_holds_its_descriptor() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let lock_dir = dir.path().join("hosting");
+            let session = SessionId::new();
+            let path = session_hosting_lock_path(&lock_dir, &session);
+            let ClaimAttempt::Acquired { lock: claim, .. } =
+                try_claim_session(&lock_dir, &HostingOwner::mint(), &session)
+            else {
+                panic!("the session's claim");
+            };
+            let copy = DescriptorCopy::spawn(&registry().get(&path).expect("its entry")._file);
+            drop(claim);
+            assert!(
+                matches!(
+                    try_claim_session(&lock_dir, &HostingOwner::mint(), &session),
+                    ClaimAttempt::Acquired {
+                        acquisition: HostingAcquisition::AcquiredFresh,
+                        ..
+                    }
+                ),
+                "a released claim is free while a spawned process holds a copy of its descriptor"
+            );
+            drop(copy);
+        }
+
+        /// A claim a successor took over from a dead lineage keeps the OS
+        /// lock when its predecessor's release runs afterwards, while a
+        /// spawned process holds a copy of the claim's descriptor: the
+        /// predecessor no longer owns the file. Once the successor releases
+        /// it, the claim is free though the copy is still open.
+        #[cfg(unix)]
+        #[test]
+        fn a_claim_taken_over_by_a_successor_stays_held_after_its_predecessor_releases() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let lock_dir = dir.path().join("hosting");
+            let session = SessionId::new();
+            let path = session_hosting_lock_path(&lock_dir, &session);
+            let ClaimAttempt::Acquired {
+                lock: predecessor, ..
+            } = try_claim_session(&lock_dir, &HostingOwner::mint(), &session)
+            else {
+                panic!("the predecessor's claim");
+            };
+            let copy = DescriptorCopy::spawn(&registry().get(&path).expect("its entry")._file);
+
+            // The predecessor's last claim drops; its release holds before it
+            // takes the registry, its lineage already dead.
+            let (entered, release) = hold_next_release(&path);
+            let releasing = std::thread::spawn(move || drop(predecessor));
+            entered
+                .recv_timeout(Duration::from_secs(60))
+                .expect("the predecessor's release began");
+            let ClaimAttempt::Acquired {
+                lock: successor,
+                acquisition,
+            } = try_claim_session(&lock_dir, &HostingOwner::mint(), &session)
+            else {
+                panic!("the successor takes the dead lineage's entry over");
+            };
+            assert_eq!(acquisition, HostingAcquisition::TookOverDeadLineage);
+            release.send(()).expect("let the predecessor's release go");
+            releasing.join().expect("the predecessor's release");
+
+            assert!(
+                !lock_is_free(&path),
+                "the successor holds the claim after its predecessor's release"
+            );
+            assert!(
+                registry().contains_key(&path),
+                "the successor's entry stays"
+            );
+            drop(successor);
+            assert!(
+                lock_is_free(&path),
+                "a released claim is free while a spawned process holds a copy of its descriptor"
+            );
+            drop(copy);
+        }
+
+        /// The cold-delivery owner lock, released, is free at once while a
+        /// spawned process holds a copy of its descriptor.
+        #[cfg(unix)]
+        #[test]
+        fn a_released_exclusive_lock_is_free_while_a_spawned_process_holds_its_descriptor() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("cold-delivery.lock");
+            let ExclusiveAttempt::Acquired(lock) = try_exclusive_lock(&path) else {
+                panic!("the lock");
+            };
+            let copy = DescriptorCopy::spawn(&lock._file);
+            drop(lock);
+            assert!(
+                matches!(try_exclusive_lock(&path), ExclusiveAttempt::Acquired(_)),
+                "a released lock is free while a spawned process holds a copy of its descriptor"
+            );
+            drop(copy);
+        }
 
         /// A lineage of this process whose every claim was dropped before
         /// its last holder removed the registry entry is taken over with its

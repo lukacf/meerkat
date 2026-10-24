@@ -98,6 +98,58 @@ let tools: Vec<_> = registry.iter().collect();
 ```
 </Accordion>
 
+### Calls dispatched again after a restart
+
+Since 0.9.5 a run in a durable session continues after a crash from its last
+committed round, and the calls of a round whose results were not committed
+are dispatched again under the same call ids (see
+[Durable runs](/guides/durable-runs#tools-that-run-again)). Delivery is at
+least once. A tool whose effect must not happen twice overrides
+`dispatch_with_context` and deduplicates on the call's `ToolCallDedupeKey`:
+
+```rust
+use meerkat_core::ToolDispatchContext;
+
+#[async_trait]
+impl AgentToolDispatcher for PaymentTools {
+    // tools() and dispatch() as above.
+
+    async fn dispatch_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+    ) -> Result<ToolDispatchOutcome, ToolError> {
+        // `None` outside a run's tool round.
+        let key = context.tool_call_dedupe_key(call);
+        if let Some(key) = &key {
+            // A call dispatched again after a restart carries the same key
+            // (run id, round, call id and call digest): answer it from the
+            // ledger instead of repeating the effect.
+            if let Some(result) = self.ledger.result_for(key).await {
+                return Ok(result.into());
+            }
+        }
+        let outcome = self.dispatch(call).await?;
+        if let Some(key) = &key {
+            // Record the key together with the effect where the effect's
+            // store allows it, so a crash cannot fall between the two.
+            self.ledger.record(key, &outcome).await;
+        }
+        Ok(outcome)
+    }
+}
+```
+
+`ToolCallDedupeKey::new(run_id, round, call_id, tool_name, arguments)` derives
+the same key, digest included, from its parts, for a tool that records keys
+outside the dispatch. MCP tools and callback tools receive the same key:
+Core's MCP client adds it to the `tools/call` request's `_meta` under
+`io.meerkat/tool_call_dedupe_key` (`meerkat_core::TOOL_CALL_DEDUPE_KEY_META_KEY`),
+and callback requests carry it as `dedupe_key`. An `McpCallContextProvider`
+whose metadata uses that name is refused with `McpCallContextError::Denied`,
+as for `io.meerkat/origin`, and the model gets an `access_denied` tool error
+for that call.
+
 ### Multimodal tool results
 
 Tool results can carry either plain text or multimodal content blocks:
@@ -137,6 +189,10 @@ facade persistence boundary: one provider returns every required store in a
 Mob state is intentionally not a `RealmStoreSet` slot. The separate
 `meerkat-mob` crate owns its mob store to avoid a facade dependency cycle;
 Meta or another higher-level host composes it alongside the facade provider.
+
+Since 0.9.5 a host can also keep a realm's durable state in its own database
+by implementing `meerkat_core::host_store::HostStore`; Core builds the realm's
+stores over it. See the [Host Store SPI reference](/reference/host-store-spi).
 
 Each required slot declares a `DurabilityClass` and its actual
 `DurabilityResolution`. Startup fails closed when a durable slot resolves to
@@ -264,8 +320,10 @@ Provider implementations should run the published `meerkat-store-conformance`
 chapters for each supplied session, blob, and artifact trait capability. The
 suite covers session round trips, guarded revisions, incremental/rewrite
 semantics, concurrency, blob/artifact survival, and dangling references.
-Runtime, scheduler, WorkGraph, and job stores retain their own crate-level
-conformance suites, while facade composition enforces the provider's complete
+It is the only published suite. Runtime, scheduler, WorkGraph, and job store
+contracts are checked by tests inside the Meerkat repository, against the
+built-in memory and SQLite stores only; no published suite runs them against
+a provider's own stores. Facade composition enforces the provider's complete
 durability declaration set.
 
 A provider that versions its own SQLite domains can call
@@ -349,3 +407,4 @@ router.shutdown().await;
 - [Rust SDK overview](/rust/overview) - getting started, sessions, events
 - [Rust SDK advanced](/rust/advanced) - expert-only direct agent construction, providers, hooks
 - [Tools concept](/concepts/tools) - how the tool system works
+- [Durable runs and host stores](/guides/durable-runs) - per-round commits, calls dispatched again, host stores

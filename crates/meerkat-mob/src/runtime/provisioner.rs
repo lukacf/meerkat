@@ -428,6 +428,12 @@ pub struct ProvisionMemberRequest {
     /// step stopped there awaits the cleanup of what it holds and fails
     /// typed. It coordinates cancellation only and never supplies authority.
     pub(crate) held_bound: Option<super::held_spawn::HeldProvisionBound>,
+    /// The continuity intent of the incarnation this provision builds, as
+    /// its `MemberSpawned` records it. A durable identity is a durable
+    /// worker: when the mob has a `DurableResumeGate`, the backend binds it
+    /// on the worker's exact registration before the worker's actor is
+    /// created.
+    pub(crate) continuity_intent: super::handle::SpawnContinuityIntent,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -769,6 +775,9 @@ pub(crate) struct MaterializedMemberAck {
     pub(crate) launch_outcome: super::bridge_protocol::MaterializeLaunchOutcome,
     #[allow(dead_code)]
     pub(crate) resolved_auth_binding: Option<meerkat_core::AuthBindingRef>,
+    /// The first turn of the session a plain resume adopted, as its member
+    /// host reported it. Present only when the request asked.
+    pub(crate) adopted_first_turn: Option<super::bridge_protocol::BridgeAdoptedFirstTurn>,
 }
 
 /// Input to [`MobProvisioner::release_host_member`].
@@ -2386,6 +2395,10 @@ pub struct SessionBackend {
     // clones, so a later transaction on a registration that kept its gate
     // receives that gate's decision.
     member_surface_gate_routes: super::registration_hook::MemberSurfaceGateRoutes,
+    // Optional host check before a durable worker's interrupted run resumes;
+    // the backend binds it on the exact registration of each durable worker
+    // it provisions (a host's placed-member materialization binds none).
+    durable_resume: Option<super::durable_resume::DurableResumeBinding>,
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -2920,6 +2933,43 @@ async fn run_pre_boundary_step_test_gate(session_id: &SessionId) {
     }
 }
 
+/// Test hook: the next durability reload the turn-finalization boundary of a
+/// session's disposal asks for answers the runtime's repair-blocked refusal,
+/// once.
+#[cfg(test)]
+pub(crate) mod disposal_reload_test_hooks {
+    use meerkat_core::types::SessionId;
+    use std::sync::{Mutex, PoisonError};
+
+    static REFUSED_BOUNDARY_RELOADS: Mutex<Vec<SessionId>> = Mutex::new(Vec::new());
+
+    /// The reason of the refusal [`refuse_next_boundary_reload`] arms.
+    pub(crate) const INJECTED_REFUSAL: &str =
+        "injected repair-blocked refusal of the disposal's reload";
+
+    /// The next reload the disposal of `session` asks for at its
+    /// turn-finalization boundary is refused as repair-blocked, once.
+    pub(crate) fn refuse_next_boundary_reload(session: &SessionId) {
+        REFUSED_BOUNDARY_RELOADS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(session.clone());
+    }
+
+    pub(super) fn take_boundary_reload_refusal(session: &SessionId) -> bool {
+        let mut armed = REFUSED_BOUNDARY_RELOADS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        match armed.iter().position(|candidate| candidate == session) {
+            Some(index) => {
+                armed.remove(index);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
 #[cfg(test)]
 fn recovered_ops_after_hook_test_gates()
 -> &'static std::sync::Mutex<HashMap<SessionId, (oneshot::Sender<()>, oneshot::Receiver<()>)>> {
@@ -3031,6 +3081,75 @@ pub(super) enum DegradedUnregisterStep {
     TimedOut,
     /// The discard failed.
     Failed(String),
+}
+
+/// Why a durability reload
+/// ([`MemberSessionDisposalArc::reload_durability_degraded_registration_until`])
+/// did not settle.
+#[cfg(feature = "runtime-adapter")]
+#[derive(Debug)]
+pub(super) enum DurabilityReloadFailure {
+    /// The runtime answered the reload with this refusal.
+    Refused(meerkat_runtime::RuntimeDriverError),
+    /// The reload was not asked, or not answered within the deadline.
+    Session(SessionError),
+}
+
+#[cfg(feature = "runtime-adapter")]
+impl From<SessionError> for DurabilityReloadFailure {
+    fn from(error: SessionError) -> Self {
+        Self::Session(error)
+    }
+}
+
+#[cfg(feature = "runtime-adapter")]
+impl DurabilityReloadFailure {
+    /// The runtime's refusal, when it refused the reload.
+    pub(super) fn runtime_refusal(&self) -> Option<&meerkat_runtime::RuntimeDriverError> {
+        match self {
+            Self::Refused(error) => Some(error),
+            Self::Session(_) => None,
+        }
+    }
+
+    /// The session error a retirement reports for this failure of
+    /// `session_id`'s reload.
+    pub(super) fn into_session_error(self, session_id: &SessionId) -> SessionError {
+        match self {
+            Self::Refused(error) => MemberSessionDisposalArc::runtime_archive_error(format!(
+                "durability-reload disposal failed for {session_id}: {error}"
+            )),
+            Self::Session(error) => error,
+        }
+    }
+
+    /// The session error a retirement stage reports for this failure of
+    /// `session_id`'s reload: a repair-blocked refusal carries
+    /// [`MobError::MemberReloadRepairBlocked`]'s data, which
+    /// [`MemberSessionDisposalArc::map_runtime_retirement_error`] maps back to
+    /// that variant; any other failure is [`Self::into_session_error`].
+    pub(super) fn into_retire_error(self, session_id: &SessionId) -> SessionError {
+        let refusal = self
+            .runtime_refusal()
+            .and_then(super::handle::MemberReloadRefusal::from_runtime_refusal);
+        match (self, refusal) {
+            (
+                Self::Refused(error),
+                Some(super::handle::MemberReloadRefusal::RepairBlocked {
+                    reason,
+                    evidence_digest,
+                }),
+            ) => SessionError::FailedWithData {
+                message: format!("durability-reload disposal failed for {session_id}: {error}"),
+                data: MobError::member_reload_repair_blocked_data(
+                    session_id,
+                    &reason,
+                    evidence_digest.as_deref(),
+                ),
+            },
+            (failure, _) => failure.into_session_error(session_id),
+        }
+    }
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -3654,9 +3773,41 @@ impl MemberSessionDisposalArc {
                 session_id: session_id.clone(),
                 stage,
             }
+        } else if let Some(refused) = Self::runtime_member_reload_repair_blocked(session_id, &error)
+        {
+            refused
         } else {
             MobError::from(error)
         }
+    }
+
+    /// Read back the repair-blocked reload refusal
+    /// [`DurabilityReloadFailure::into_retire_error`] carries for
+    /// `session_id`, from its stable data fields.
+    fn runtime_member_reload_repair_blocked(
+        session_id: &SessionId,
+        error: &SessionError,
+    ) -> Option<MobError> {
+        let SessionError::FailedWithData { data, .. } = error else {
+            return None;
+        };
+        if data.get("kind").and_then(serde_json::Value::as_str)
+            != Some(MobError::MEMBER_RELOAD_REPAIR_BLOCKED_KIND)
+            || data.get("session_id").and_then(serde_json::Value::as_str)
+                != Some(session_id.to_string().as_str())
+        {
+            return None;
+        }
+        let reason = data.get("reason")?.as_str()?.to_string();
+        let evidence_digest = match data.get("evidence_digest") {
+            Some(digest) => Some(digest.as_str()?.to_string()),
+            None => None,
+        };
+        Some(MobError::MemberReloadRepairBlocked {
+            session_id: session_id.clone(),
+            reason,
+            evidence_digest,
+        })
     }
 
     /// Classify the session owner's structured retained-retirement outcome.
@@ -4016,6 +4167,16 @@ impl MemberSessionDisposalArc {
                     )?;
                     recovered_cold_successor = Some((registration, existing_ops_binding));
                 } else {
+                    #[cfg(test)]
+                    if disposal_reload_test_hooks::take_boundary_reload_refusal(session_id) {
+                        return Err(DurabilityReloadFailure::Refused(
+                            meerkat_runtime::RuntimeDriverError::RecoveryRepairBlocked {
+                                evidence_digest: None,
+                                reason: disposal_reload_test_hooks::INJECTED_REFUSAL.to_string(),
+                            },
+                        )
+                        .into_retire_error(session_id));
+                    }
                     let prior_ops_binding = Self::recoverable_ops_binding_witness(
                         self.ops_adapter.as_ref(),
                         session_id,
@@ -4042,9 +4203,7 @@ impl MemberSessionDisposalArc {
                         )
                     })?
                     .map_err(|error| {
-                        Self::runtime_archive_error(format!(
-                            "durability-reload disposal failed for {session_id}: {error}"
-                        ))
+                        DurabilityReloadFailure::Refused(error).into_retire_error(session_id)
                     })?;
                     if matches!(
                         disposition,
@@ -4239,14 +4398,44 @@ impl MemberSessionDisposalArc {
     /// boundary commit consumed only in memory is pending there again, so the
     /// retirement that follows records its fate instead of losing it with
     /// the in-memory run. A registration that is not degraded, or no longer
-    /// current, is left untouched (`NotDegraded`, `NotCurrent`).
+    /// current, is left untouched (`NotDegraded`, `NotCurrent`). A refusal
+    /// from the runtime stays typed ([`DurabilityReloadFailure::Refused`]).
     pub(super) async fn reload_durability_degraded_registration_until(
         adapter: &Arc<MeerkatMachine>,
         ops_adapter: Option<&Arc<super::ops_adapter::MobOpsAdapter>>,
         registration: &RuntimeSessionRegistrationWitness,
         session_id: &SessionId,
         deadline: Instant,
-    ) -> Result<meerkat_runtime::ReloadRequiredRegistrationDisposition, SessionError> {
+    ) -> Result<meerkat_runtime::ReloadRequiredRegistrationDisposition, DurabilityReloadFailure>
+    {
+        Self::reload_durability_degraded_registration_settlement_until(
+            adapter,
+            ops_adapter,
+            registration,
+            session_id,
+            deadline,
+        )
+        .await
+        .map(|settlement| settlement.disposition())
+    }
+
+    /// [`Self::reload_durability_degraded_registration_until`], answering
+    /// with the reload's settlement: `Discarded` carries the exact successor
+    /// the reload published. A caller that acts on the successor follows
+    /// that witness, never the session's registration read after the reload
+    /// returned, which can already be a later owner's.
+    pub(super) async fn reload_durability_degraded_registration_settlement_until(
+        adapter: &Arc<MeerkatMachine>,
+        ops_adapter: Option<&Arc<super::ops_adapter::MobOpsAdapter>>,
+        registration: &RuntimeSessionRegistrationWitness,
+        session_id: &SessionId,
+        deadline: Instant,
+    ) -> Result<meerkat_runtime::ReloadRequiredRegistrationSettlement, DurabilityReloadFailure>
+    {
+        use meerkat_runtime::{
+            ReloadRequiredRegistrationSettlement as Settlement,
+            ReloadRequiredRegistrationUseSettlement as UseSettlement,
+        };
         // A reload-required discard atomically replaces the registration
         // with a cold successor. The exact bound operation identity must
         // ride that replacement as a durable retention request so the
@@ -4255,10 +4444,11 @@ impl MemberSessionDisposalArc {
         let prior_ops_binding = Self::recoverable_ops_binding_witness(ops_adapter, session_id)?;
         let remaining =
             Self::retirement_remaining(session_id, deadline, "durability_reload_discard")?;
-        tokio::time::timeout(
+        let settlement = tokio::time::timeout(
             remaining,
-            adapter.recover_or_discard_reload_required_registration_with_operation_if_current(
+            adapter.reload_required_registration_settlement_if_current(
                 registration,
+                None,
                 prior_ops_binding
                     .as_ref()
                     .map(|witness| witness.retention_request()),
@@ -4266,11 +4456,18 @@ impl MemberSessionDisposalArc {
         )
         .await
         .map_err(|_| Self::runtime_retirement_in_progress(session_id, "durability_reload_discard"))?
-        .map_err(|error| {
-            Self::runtime_archive_error(format!(
-                "durability-reload disposal failed for {session_id}: {error}"
-            ))
-        })
+        .map_err(DurabilityReloadFailure::Refused)?;
+        match settlement {
+            UseSettlement::NotCurrent => Ok(Settlement::NotCurrent),
+            UseSettlement::NotDegraded => Ok(Settlement::NotDegraded),
+            UseSettlement::Discarded { successor, .. } => Ok(Settlement::Discarded { successor }),
+            // A reload asked without an expected use is never `Changed`.
+            other => Err(DurabilityReloadFailure::Session(
+                Self::runtime_archive_error(format!(
+                    "durability reload of {session_id}, asked without an expected use, answered {other:?}"
+                )),
+            )),
+        }
     }
 
     /// Before an exact unregister: discard `registration` first when its
@@ -4381,7 +4578,8 @@ impl MemberSessionDisposalArc {
                 session_id,
                 deadline,
             )
-            .await?;
+            .await
+            .map_err(|failure| failure.into_retire_error(session_id))?;
             if matches!(
                 disposition,
                 meerkat_runtime::ReloadRequiredRegistrationDisposition::Discarded
@@ -6098,6 +6296,7 @@ impl SessionBackend {
             settlement_ledger: None,
             member_runtime_registration_hook: None,
             member_surface_gate_routes: Default::default(),
+            durable_resume: None,
         }
     }
 
@@ -6113,6 +6312,26 @@ impl SessionBackend {
     ) -> Self {
         self.member_runtime_registration_hook = Some(hook);
         self
+    }
+
+    pub fn with_durable_resume_gate(mut self, gate: Arc<dyn super::DurableResumeGate>) -> Self {
+        self.durable_resume = Some(super::durable_resume::DurableResumeBinding::new(gate));
+        self
+    }
+
+    /// The resume gate bind `req` owes its member: one for a durable worker
+    /// when the mob has a gate and a runtime that can resume runs, none
+    /// otherwise.
+    fn durable_resume_bind(
+        &self,
+        req: &ProvisionMemberRequest,
+    ) -> Result<Option<super::durable_resume::PendingDurableResumeBind>, MobError> {
+        match (self.durable_resume.as_ref(), self.runtime_adapter.as_ref()) {
+            (Some(binding), Some(machine)) => {
+                binding.pending_bind(machine, &req.continuity_intent, &req.create_session)
+            }
+            _ => Ok(None),
+        }
     }
 
     fn registration_composition(&self) -> super::registration_hook::MemberRegistrationComposition {
@@ -6635,8 +6854,13 @@ impl SessionBackend {
 
         // The turn's outcome is its input's terminal, not a failed attempt
         // the runtime still retries.
-        let completion =
-            wait_for_runtime_input_terminal(adapter, session_id, &canonical_input_id, handle).await;
+        let (completion, input_terminal) =
+            match wait_for_runtime_input_terminal(adapter, session_id, &canonical_input_id, handle)
+                .await
+            {
+                Ok((outcome, input_terminal)) => (Ok(outcome), input_terminal),
+                Err(error) => (Err(error), None),
+            };
         drop(queued_context);
         let delivery_outcome = deferred_turn_outcome_from_completion(&completion);
         let committed_projection = enqueue_committed_parent_projection_after_runtime_completion(
@@ -6648,7 +6872,12 @@ impl SessionBackend {
         )
         .await;
         observe_committed_parent_projection_result(session_id, &committed_projection);
-        let result = runtime_completion_to_mob_result(session_id, completion);
+        let result = runtime_completion_to_mob_result(
+            session_id,
+            &canonical_input_id,
+            completion,
+            input_terminal.as_ref(),
+        );
         if let Some(delivery) = deferred_delivery {
             delivery.release(delivery_outcome);
         }
@@ -6917,22 +7146,38 @@ impl SessionBackend {
                                 input_id: input_id.clone(),
                             })
                         });
+                    // A replay of an input the next start ended as an expired
+                    // requeue is answered from its committed terminal, typed,
+                    // whatever its public completion reads.
+                    let requeue_expired = !matches!(
+                        &result,
+                        Ok(meerkat_runtime::completion::CompletionOutcome::Completed(_)
+                            | meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult)
+                    ) && replayed_input_requeue_expired(adapter, session_id, input_id).await;
                     if let Some(delivery) = deferred_delivery {
                         let outcome = match &result {
-                            Ok(completion) => {
+                            Ok(completion) if !requeue_expired => {
                                 deferred_turn_outcome_from_completion(&Ok(completion.clone()))
                             }
-                            Err(_) => DeferredTurnEventOutcome::Failed,
+                            Ok(_) | Err(_) => DeferredTurnEventOutcome::Failed,
                         };
                         delivery.release(outcome);
                     }
                     if let Some(completion_tx) = completion_tx {
-                        let _ = completion_tx.send(result.map(|terminal| {
-                            super::handle::ExactTurnCompletion {
+                        let completion = if requeue_expired {
+                            Ok(super::handle::ExactTurnCompletion {
+                                session_id: session_id.clone(),
+                                terminal: super::handle::ExactTurnTerminal::RequeueExpired {
+                                    input_id: input_id.clone(),
+                                },
+                            })
+                        } else {
+                            result.map(|terminal| super::handle::ExactTurnCompletion {
                                 session_id: session_id.clone(),
                                 terminal: super::handle::ExactTurnTerminal::Runtime(terminal),
-                            }
-                        }));
+                            })
+                        };
+                        let _ = completion_tx.send(completion);
                     }
                     return Ok(admission);
                 }
@@ -6951,10 +7196,23 @@ impl SessionBackend {
             };
 
             let completion_session_id = session_id.clone();
+            let completion_input_id = admission.as_ref().map_or_else(
+                || requested_input_id.clone(),
+                |admitted| admitted.input_id.clone(),
+            );
             let completion_adapter = Arc::clone(adapter);
             let completion_session_service = Arc::clone(&self.session_service);
             tokio::spawn(async move {
-                let completion = handle.wait().await;
+                // The committed terminal comes with the outcome, so a typed
+                // terminal (an expired requeue) is answered from it.
+                let (completion, input_terminal) =
+                    match handle.try_wait_with_terminal_outcome().await {
+                        Ok(observation) => {
+                            let (outcome, input_terminal) = observation.into_parts();
+                            (Ok(outcome), input_terminal)
+                        }
+                        Err(error) => (Err(error), None),
+                    };
                 drop(queued_context);
                 let delivery_outcome = deferred_turn_outcome_from_completion(&completion);
                 let committed_projection =
@@ -6966,7 +7224,12 @@ impl SessionBackend {
                         &completion,
                     )
                     .await;
-                let result = runtime_completion_to_exact_turn(&completion_session_id, completion);
+                let result = runtime_completion_to_exact_turn(
+                    &completion_session_id,
+                    &completion_input_id,
+                    completion,
+                    input_terminal.as_ref(),
+                );
                 observe_committed_parent_projection_result(
                     &completion_session_id,
                     &committed_projection,
@@ -6996,6 +7259,10 @@ impl SessionBackend {
 /// answered the input (a terminal without a receipt), when the runtime no
 /// longer holds it or its live registration, or when it is parked, the
 /// failed attempt stays the last outcome observed.
+///
+/// The input's committed terminal comes with the outcome when the wait
+/// observed it, so a caller answers a typed terminal (an expired requeue)
+/// from it rather than from the outcome's reason text.
 #[cfg(feature = "runtime-adapter")]
 async fn wait_for_runtime_input_terminal(
     adapter: &MeerkatMachine,
@@ -7003,7 +7270,10 @@ async fn wait_for_runtime_input_terminal(
     input_id: &InputId,
     handle: meerkat_runtime::completion::CompletionHandle,
 ) -> Result<
-    meerkat_runtime::completion::CompletionOutcome,
+    (
+        meerkat_runtime::completion::CompletionOutcome,
+        Option<meerkat_runtime::InputTerminalOutcome>,
+    ),
     meerkat_runtime::completion::CompletionWaitError,
 > {
     use meerkat_runtime::terminal_status::{
@@ -7011,7 +7281,7 @@ async fn wait_for_runtime_input_terminal(
     };
     let (attempt, input_terminal) = handle.try_wait_with_terminal_outcome().await?.into_parts();
     if input_terminal.is_some() {
-        return Ok(attempt);
+        return Ok((attempt, input_terminal));
     }
     let read_input = || {
         adapter.input_terminal_receipt(session_id, InteractionSelector::InputId(input_id.clone()))
@@ -7036,12 +7306,17 @@ async fn wait_for_runtime_input_terminal(
         {
             Ok(Ok(Some(InputTerminalReceiptWait::Resolved(read)))) => {
                 return Ok(match read.report {
-                    InputTerminalReceiptRead::Finalized(receipt) => receipt.into_outcome(),
-                    _ => attempt,
+                    InputTerminalReceiptRead::Finalized(receipt) => {
+                        let terminal = receipt.terminal().clone();
+                        (receipt.into_outcome(), Some(terminal))
+                    }
+                    _ => (attempt, None),
                 });
             }
-            Ok(Ok(_)) => return Ok(attempt),
-            Ok(Err(error)) => return retried_input_read_failure(input_id, error),
+            Ok(Ok(_)) => return Ok((attempt, None)),
+            Ok(Err(error)) => {
+                return retried_input_read_failure(input_id, error).map(|outcome| (outcome, None));
+            }
             Err(_elapsed) => match read_input().await {
                 Ok(Some(read)) => match read.report {
                     InputTerminalReceiptRead::Pending {
@@ -7058,16 +7333,20 @@ async fn wait_for_runtime_input_terminal(
                                 attempt_count,
                                 "retried input's session made no progress within its bound; reporting its failed attempt"
                             );
-                            return Ok(attempt);
+                            return Ok((attempt, None));
                         }
                     }
                     InputTerminalReceiptRead::Finalized(receipt) => {
-                        return Ok(receipt.into_outcome());
+                        let terminal = receipt.terminal().clone();
+                        return Ok((receipt.into_outcome(), Some(terminal)));
                     }
-                    _ => return Ok(attempt),
+                    _ => return Ok((attempt, None)),
                 },
-                Ok(None) => return Ok(attempt),
-                Err(error) => return retried_input_read_failure(input_id, error),
+                Ok(None) => return Ok((attempt, None)),
+                Err(error) => {
+                    return retried_input_read_failure(input_id, error)
+                        .map(|outcome| (outcome, None));
+                }
             },
         }
     }
@@ -7130,14 +7409,87 @@ fn retried_input_read_failure(
     }
 }
 
+/// The typed requeue answer of an admitted input's wait, if it has one: a
+/// graceful stop kept the input durably queued for the next start
+/// ([`CompletionWaitError::RequeuedAcrossStop`](meerkat_runtime::completion::CompletionWaitError::RequeuedAcrossStop)),
+/// or the next start ended it as older than its requeue bound (its committed
+/// terminal abandoned with
+/// [`InputAbandonReason::RequeueExpired`](meerkat_runtime::InputAbandonReason::RequeueExpired)).
+/// Neither is ever completion plumbing or an abandoned reason string.
+#[cfg(feature = "runtime-adapter")]
+fn requeue_terminal(
+    input_id: &InputId,
+    completion: &Result<
+        meerkat_runtime::completion::CompletionOutcome,
+        meerkat_runtime::completion::CompletionWaitError,
+    >,
+    input_terminal: Option<&meerkat_runtime::InputTerminalOutcome>,
+) -> Option<super::handle::ExactTurnTerminal> {
+    if let Err(meerkat_runtime::completion::CompletionWaitError::RequeuedAcrossStop { .. }) =
+        completion
+    {
+        return Some(super::handle::ExactTurnTerminal::RequeuedAcrossStop {
+            input_id: input_id.clone(),
+        });
+    }
+    match input_terminal {
+        Some(meerkat_runtime::InputTerminalOutcome::Abandoned {
+            reason: meerkat_runtime::InputAbandonReason::RequeueExpired,
+        }) => Some(super::handle::ExactTurnTerminal::RequeueExpired {
+            input_id: input_id.clone(),
+        }),
+        _ => None,
+    }
+}
+
+/// Whether `input_id`'s committed terminal is an expired requeue: the next
+/// start ended an input a graceful stop had kept queued, as older than its
+/// requeue bound. Read from the input's typed terminal, never from a reason
+/// string. A read that fails or finds no terminal says no.
+#[cfg(feature = "runtime-adapter")]
+async fn replayed_input_requeue_expired(
+    adapter: &MeerkatMachine,
+    session_id: &SessionId,
+    input_id: &InputId,
+) -> bool {
+    use meerkat_runtime::terminal_status::{InputTerminalReceiptRead, InteractionSelector};
+    let Ok(Some(read)) = adapter
+        .input_terminal_receipt(session_id, InteractionSelector::InputId(input_id.clone()))
+        .await
+    else {
+        return false;
+    };
+    let terminal = match &read.report {
+        InputTerminalReceiptRead::Finalized(receipt) => Some(receipt.terminal()),
+        InputTerminalReceiptRead::TerminalWithoutReceipt { terminal, .. } => Some(terminal),
+        InputTerminalReceiptRead::Pending { terminal, .. } => terminal.as_ref(),
+        // A read shape this crate does not know reports no terminal.
+        _ => None,
+    };
+    matches!(
+        terminal,
+        Some(meerkat_runtime::InputTerminalOutcome::Abandoned {
+            reason: meerkat_runtime::InputAbandonReason::RequeueExpired,
+        })
+    )
+}
+
 #[cfg(feature = "runtime-adapter")]
 fn runtime_completion_to_exact_turn(
     session_id: &SessionId,
+    input_id: &InputId,
     completion: Result<
         meerkat_runtime::completion::CompletionOutcome,
         meerkat_runtime::completion::CompletionWaitError,
     >,
+    input_terminal: Option<&meerkat_runtime::InputTerminalOutcome>,
 ) -> Result<super::handle::ExactTurnCompletion, MobError> {
+    if let Some(terminal) = requeue_terminal(input_id, &completion, input_terminal) {
+        return Ok(super::handle::ExactTurnCompletion {
+            session_id: session_id.clone(),
+            terminal,
+        });
+    }
     let outcome = completion.map_err(|error| {
         MobError::Internal(format!("runtime completion waiter failed: {error}"))
     })?;
@@ -7150,12 +7502,14 @@ fn runtime_completion_to_exact_turn(
 #[cfg(feature = "runtime-adapter")]
 fn runtime_completion_to_mob_result(
     session_id: &SessionId,
+    input_id: &InputId,
     completion: Result<
         meerkat_runtime::completion::CompletionOutcome,
         meerkat_runtime::completion::CompletionWaitError,
     >,
+    input_terminal: Option<&meerkat_runtime::InputTerminalOutcome>,
 ) -> Result<(), MobError> {
-    runtime_completion_to_exact_turn(session_id, completion)
+    runtime_completion_to_exact_turn(session_id, input_id, completion, input_terminal)
         .and_then(super::handle::legacy_exact_turn_result)
         .map(drop)
 }
@@ -8375,11 +8729,17 @@ impl PreparedServiceActorTransaction {
     /// and before the actor is created. A setup stopped there is aborted
     /// below like a failed create (awaited) and keeps its typed failure with
     /// that abort's cleanup outcome.
+    ///
+    /// A durable worker's `durable_resume` bind is made on the exact prepared
+    /// registration after the host hooks and before the actor is created, so
+    /// the mob's resume gate is in place before the runtime can resume a run
+    /// on it. A failed bind fails the create like a failed hook.
     pub(super) async fn create_owned_with_route(
         self,
         req: meerkat_core::service::CreateSessionRequest,
         route: super::session_service::SessionActorMaterializationRoute,
         registration_composition: super::registration_hook::MemberRegistrationComposition,
+        durable_resume: Option<super::durable_resume::PendingDurableResumeBind>,
         held_bound: Option<super::held_spawn::HeldProvisionBound>,
         restored: Option<RestoredMemberRefusalCleanup>,
     ) -> Result<(meerkat_core::RunResult, Self), MobError> {
@@ -8479,6 +8839,19 @@ impl PreparedServiceActorTransaction {
                                     .into(),
                             ));
                         }
+                    }
+                    if let Some(bind) = durable_resume {
+                        let registration = transaction
+                            .prepared()?
+                            .registration_witness()
+                            .await
+                            .ok_or_else(|| {
+                                MobError::Internal(
+                                    "durable worker resume gate install lost the exact prepared registration"
+                                        .into(),
+                                )
+                            })?;
+                        bind.bind_on(&registration).await?;
                     }
                     if let Some(stop) = held_stop() {
                         return Err(stop);
@@ -10113,6 +10486,93 @@ pub(super) async fn prepare_prepared_runtime_session_state(
 mod tests {
     use super::session_turn_error_to_mob_error;
 
+    /// A retirement stage carries the runtime's repair-blocked refusal of a
+    /// member reload as typed data, which the retirement maps to
+    /// `MobError::MemberReloadRepairBlocked` for that session only; any other
+    /// reload refusal maps as before.
+    #[cfg(feature = "runtime-adapter")]
+    #[test]
+    fn a_retire_maps_only_a_repair_blocked_reload_refusal_to_the_typed_error() {
+        use super::{DurabilityReloadFailure, MemberSessionDisposalArc};
+        use crate::MobError;
+        use meerkat_core::service::SessionError;
+        use meerkat_runtime::RuntimeDriverError;
+        let session_id = meerkat_core::types::SessionId::new();
+        let repair_blocked = || RuntimeDriverError::RecoveryRepairBlocked {
+            evidence_digest: Some("digest".to_string()),
+            reason: "commit outcome not reported".to_string(),
+        };
+        let carried =
+            DurabilityReloadFailure::Refused(repair_blocked()).into_retire_error(&session_id);
+        assert_eq!(
+            carried.to_string(),
+            format!(
+                "durability-reload disposal failed for {session_id}: {}",
+                repair_blocked()
+            ),
+            "the carrier keeps the reload failure's text"
+        );
+        match MemberSessionDisposalArc::map_runtime_retirement_error(&session_id, carried) {
+            MobError::MemberReloadRepairBlocked {
+                session_id: refused,
+                reason,
+                evidence_digest,
+            } => {
+                assert_eq!(refused, session_id);
+                assert_eq!(reason, "commit outcome not reported");
+                assert_eq!(evidence_digest.as_deref(), Some("digest"));
+            }
+            other => panic!("expected the typed repair-blocked refusal, got {other:?}"),
+        }
+
+        let other_session = meerkat_core::types::SessionId::new();
+        let carried =
+            DurabilityReloadFailure::Refused(repair_blocked()).into_retire_error(&session_id);
+        assert!(
+            matches!(
+                MemberSessionDisposalArc::map_runtime_retirement_error(&other_session, carried),
+                MobError::SessionError(SessionError::FailedWithData { .. })
+            ),
+            "another session's refusal is not typed as this one's"
+        );
+
+        let validation = || RuntimeDriverError::ValidationFailed {
+            reason: "not a reload refusal".to_string(),
+        };
+        let carried = DurabilityReloadFailure::Refused(validation()).into_retire_error(&session_id);
+        assert_eq!(
+            carried.to_string(),
+            DurabilityReloadFailure::Refused(validation())
+                .into_session_error(&session_id)
+                .to_string()
+        );
+        assert!(matches!(
+            MemberSessionDisposalArc::map_runtime_retirement_error(&session_id, carried),
+            MobError::SessionError(SessionError::Agent(_))
+        ));
+    }
+
+    /// A hosting refusal is not a proven no-effect refusal: the provision
+    /// ledger keeps its cleanup open, as for any preparation failure. Only
+    /// the two registration verdicts are proven pre-effect.
+    #[test]
+    fn a_hosting_refusal_keeps_provision_cleanup_open() {
+        let session_id = meerkat_core::types::SessionId::new();
+        let hosting = meerkat_runtime::RuntimeBindingsError::Hosting(
+            session_id.clone(),
+            meerkat_core::SessionError::ServedElsewhere {
+                id: session_id.clone(),
+            },
+        );
+        assert!(super::PreEffectRefusal::from_bindings_error(&hosting).is_none());
+        assert!(!hosting.rejected_before_effect());
+        let owned = meerkat_runtime::RuntimeBindingsError::RegistrationOwned(session_id);
+        assert_eq!(
+            super::PreEffectRefusal::from_bindings_error(&owned),
+            Some(super::PreEffectRefusal::RegistrationOwned)
+        );
+    }
+
     /// A retried input is still worked while a run holds it, however long
     /// that run takes, or while it gains attempts; requeued with no new
     /// attempt since the last read, it is parked.
@@ -11430,13 +11890,16 @@ mod tests {
         let session_id = SessionId::new();
         let err = runtime_completion_to_mob_result(
             &session_id,
+            &meerkat_core::lifecycle::InputId::new(),
             Ok(
                 meerkat_runtime::completion::CompletionOutcome::CallbackPending {
                     tool_use_id: "call-1".to_string(),
                     tool_name: "external_mock".to_string(),
                     args: json!({ "value": "browser" }),
+                    dedupe_key: None,
                 },
             ),
+            None,
         )
         .expect_err("callback pending should remain resumable mob state");
 
@@ -11446,6 +11909,7 @@ mod tests {
                 tool_use_id,
                 tool_name,
                 args,
+                ..
             } => {
                 assert_eq!(actual_session_id, session_id);
                 assert_eq!(tool_use_id, "call-1");
@@ -11461,11 +11925,13 @@ mod tests {
         let session_id = SessionId::new();
         let err = runtime_completion_to_mob_result(
             &session_id,
+            &meerkat_core::lifecycle::InputId::new(),
             Err(
                 meerkat_runtime::completion::CompletionWaitError::AuthorityUnavailable(
                     "generated runtime completion authority missing".to_string(),
                 ),
             ),
+            None,
         )
         .expect_err("waiter failure should not become a successful mob result");
 
@@ -11475,6 +11941,86 @@ mod tests {
                 assert!(message.contains("generated runtime completion authority missing"));
             }
             other => panic!("expected internal mob waiter error, got {other:?}"),
+        }
+    }
+
+    /// A wait a graceful stop answered by keeping the input queued, and a
+    /// terminal the next start ended as an expired requeue, are answered
+    /// typed with the input's id: never completion plumbing, never an
+    /// internal error, never an abandoned reason string. Any other abandoned
+    /// terminal keeps its runtime outcome.
+    #[test]
+    fn requeue_waits_and_terminals_are_answered_typed() {
+        use super::super::handle::ExactTurnTerminal;
+        use meerkat_runtime::{InputAbandonReason, InputTerminalOutcome};
+        let session_id = SessionId::new();
+        let input_id = meerkat_core::lifecycle::InputId::new();
+        let abandoned = || {
+            Ok(meerkat_runtime::completion::CompletionOutcome::Abandoned {
+                reason: "abandoned".to_string(),
+                error: meerkat_core::TurnErrorMetadata::runtime_apply_failure("abandoned"),
+            })
+        };
+        let requeued = || {
+            Err(
+                meerkat_runtime::completion::CompletionWaitError::RequeuedAcrossStop {
+                    stopped_at: chrono::Utc::now(),
+                },
+            )
+        };
+        let expired = InputTerminalOutcome::Abandoned {
+            reason: InputAbandonReason::RequeueExpired,
+        };
+        let stopped = InputTerminalOutcome::Abandoned {
+            reason: InputAbandonReason::Stopped,
+        };
+
+        let kept = runtime_completion_to_exact_turn(&session_id, &input_id, requeued(), None)
+            .expect("a requeued wait is a typed terminal");
+        assert!(
+            matches!(&kept.terminal, ExactTurnTerminal::RequeuedAcrossStop { input_id: kept_id } if kept_id == &input_id),
+            "{kept:?}"
+        );
+        let aged =
+            runtime_completion_to_exact_turn(&session_id, &input_id, abandoned(), Some(&expired))
+                .expect("an expired requeue is a typed terminal");
+        assert!(
+            matches!(&aged.terminal, ExactTurnTerminal::RequeueExpired { input_id: aged_id } if aged_id == &input_id),
+            "{aged:?}"
+        );
+        let other =
+            runtime_completion_to_exact_turn(&session_id, &input_id, abandoned(), Some(&stopped))
+                .expect("another abandoned terminal keeps its outcome");
+        assert!(
+            matches!(
+                &other.terminal,
+                ExactTurnTerminal::Runtime(
+                    meerkat_runtime::completion::CompletionOutcome::Abandoned { .. }
+                )
+            ),
+            "{other:?}"
+        );
+
+        match runtime_completion_to_mob_result(&session_id, &input_id, requeued(), None) {
+            Err(MobError::MemberInputRequeuedAcrossStop {
+                session_id: kept_session,
+                input_id: kept_id,
+            }) => assert_eq!(
+                (kept_session, kept_id),
+                (session_id.clone(), input_id.clone())
+            ),
+            other => panic!("expected the typed requeued answer, got {other:?}"),
+        }
+        match runtime_completion_to_mob_result(&session_id, &input_id, abandoned(), Some(&expired))
+        {
+            Err(MobError::MemberInputRequeueExpired {
+                session_id: aged_session,
+                input_id: aged_id,
+            }) => assert_eq!(
+                (aged_session, aged_id),
+                (session_id.clone(), input_id.clone())
+            ),
+            other => panic!("expected the typed expired answer, got {other:?}"),
         }
     }
 
@@ -11507,7 +12053,9 @@ mod tests {
 
         let synchronous = runtime_completion_to_mob_result(
             &session_id,
+            &meerkat_core::lifecycle::InputId::new(),
             Ok(meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult),
+            None,
         );
         observe_committed_parent_projection_result(&session_id, &projection);
         assert!(
@@ -11517,7 +12065,9 @@ mod tests {
 
         let tracked = runtime_completion_to_exact_turn(
             &session_id,
+            &meerkat_core::lifecycle::InputId::new(),
             Ok(meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult),
+            None,
         );
         observe_committed_parent_projection_result(&session_id, &projection);
         assert!(
@@ -11535,6 +12085,7 @@ mod tests {
                 tool_use_id: "call-1".to_string(),
                 tool_name: "external_mock".to_string(),
                 args: json!({ "value": "browser" }),
+                dedupe_key: None,
             }),
         );
 
@@ -11544,6 +12095,7 @@ mod tests {
                 tool_use_id,
                 tool_name,
                 args,
+                ..
             } => {
                 assert_eq!(actual_session_id, session_id);
                 assert_eq!(tool_use_id, "call-1");
@@ -11563,12 +12115,14 @@ mod tests {
                 tool_name: "ask_a".to_string(),
                 args: json!({"tool_use_id": "callback-a"}),
                 settlement_failures: Vec::new(),
+                dedupe_key: None,
             },
             meerkat_core::error::PendingCallbackToolCall {
                 tool_use_id: "callback-b".to_string(),
                 tool_name: "ask_b".to_string(),
                 args: json!({"tool_use_id": "callback-b"}),
                 settlement_failures: Vec::new(),
+                dedupe_key: None,
             },
         ];
         let err = session_turn_error_to_mob_error(
@@ -12702,6 +13256,25 @@ impl CoreExecutorInterruptHandle for MobSessionServiceInterruptHandle {
             })
             .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
     }
+
+    async fn suspend_run_if_current(
+        &self,
+        expected_run_id: &CoreRunId,
+        _reason: String,
+    ) -> Result<bool, CoreExecutorError> {
+        self.session_service
+            .suspend_run_with_machine_authority(
+                &self.bridge_session_id,
+                expected_run_id,
+                self.runtime_adapter.session_control_authority(),
+            )
+            .await
+            .or_else(|err| match err {
+                SessionError::NotRunning { .. } => Ok(false),
+                err => Err(err),
+            })
+            .map_err(|err| CoreExecutorError::control_failed_runtime(err.to_string()))
+    }
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -12970,6 +13543,16 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
             .map_err(|error| CoreExecutorError::Internal(error.to_string()))
     }
 
+    async fn acknowledge_compaction_finalization(
+        &mut self,
+        authority: &meerkat_core::CommittedSessionBoundaryAuthority,
+    ) -> Result<(), CoreExecutorError> {
+        self.session_service
+            .acknowledge_runtime_compaction_finalization(&self.bridge_session_id, authority)
+            .await
+            .map_err(|error| CoreExecutorError::Internal(error.to_string()))
+    }
+
     async fn abort_uncommitted_compaction_projections(&mut self) -> Result<(), CoreExecutorError> {
         self.session_service
             .abort_uncommitted_compaction_projections(&self.bridge_session_id)
@@ -13217,6 +13800,11 @@ impl SessionBackend {
                 "member registration hook requires the canonical runtime adapter".into(),
             ));
         }
+        // A durable worker owes its resume gate bind on the registration its
+        // owned create prepares (see `create_owned_with_route`). It is
+        // resolved before anything is held, so a worker that cannot carry
+        // its gate is refused before anything is created.
+        let mut durable_resume = backend.durable_resume_bind(&req)?;
         let mut prepared_materialization: Option<PreparedSessionMaterialization> = None;
         let mut attached_actor_recovery: Option<(
             PreparedAttachedSessionActorRecovery,
@@ -13624,6 +14212,7 @@ impl SessionBackend {
                     req.create_session,
                     actor_materialization_route,
                     backend.registration_composition(),
+                    durable_resume.take(),
                     held_bound.clone(),
                     restored_refusal_cleanup.take(),
                 )
@@ -13967,6 +14556,7 @@ impl ProvisionFinish {
             rollback_authority,
             materialized_ack: None,
             failed_restore_peer_ids: Vec::new(),
+            adopted_first_turn: None,
         })
         }
         .await;
@@ -15806,6 +16396,11 @@ impl MultiBackendProvisioner {
         self
     }
 
+    pub fn with_durable_resume_gate(mut self, gate: Arc<dyn super::DurableResumeGate>) -> Self {
+        self.session = self.session.with_durable_resume_gate(gate);
+        self
+    }
+
     pub(super) fn with_composition_signal_dispatcher(
         mut self,
         dispatcher: Option<meerkat_runtime::meerkat_machine::MeerkatCompositionSignalDispatcher>,
@@ -17323,6 +17918,7 @@ impl MultiBackendProvisioner {
             rollback_authority: None,
             materialized_ack: None,
             failed_restore_peer_ids: Vec::new(),
+            adopted_first_turn: None,
         })
     }
 }
@@ -17453,6 +18049,7 @@ impl MobProvisioner for MultiBackendProvisioner {
                         runtime_revival_intent: req.runtime_revival_intent,
                         direct_member_incarnation: None,
                         held_bound: req.held_bound,
+                        continuity_intent: req.continuity_intent,
                     })
                 })
                 .await
@@ -17532,6 +18129,11 @@ impl MobProvisioner for MultiBackendProvisioner {
         }
         let host_peer_id = host_peer.peer_id.to_string();
         let supervisor_peer_id = payload.supervisor.peer_id.clone();
+        let resume_launch = matches!(
+            payload.launch,
+            super::bridge_protocol::MaterializeLaunchMode::Resume { .. }
+        );
+        let report_adopted_first_turn = payload.report_adopted_first_turn;
         let command = super::bridge_protocol::BridgeCommand::MaterializeMember(payload);
         // ADJ-4: exactly ONE resend of the byte-identical command at the
         // same idempotency tuple, only on send-timeout / wire `Unavailable`
@@ -17563,6 +18165,17 @@ impl MobProvisioner for MultiBackendProvisioner {
             &host_peer_id,
             &supervisor_peer_id,
         )?;
+        // A spawn's ack must answer the launch it sent. A revival re-sends a
+        // committed member's tuple as a Resume and takes the recorded ack,
+        // whatever launch built it, so it is not checked here.
+        if matches!(operation_anchor, PlacedProvisionOperationAnchor::NewPending) {
+            validate_materialized_launch_ack(
+                &peer_name,
+                resume_launch,
+                report_adopted_first_turn,
+                &ack,
+            )?;
+        }
         let canonical_address =
             super::bridge_protocol::canonicalize_bridge_address(&ack.advertised_address);
         let member_pubkey = decode_ack_member_pubkey(&ack.member_pubkey)?;
@@ -17652,8 +18265,10 @@ impl MobProvisioner for MultiBackendProvisioner {
                             origin: Default::default(),
                         }
                     }),
+                    adopted_first_turn: ack.adopted_first_turn,
                 })),
                 failed_restore_peer_ids: Vec::new(),
+                adopted_first_turn: None,
             },
         })
     }
@@ -20618,6 +21233,41 @@ fn validate_turn_directive_delivery_response(
         }
     }
     Ok(())
+}
+
+/// A spawn's materialize ack answers the launch it was sent: a `Fresh`
+/// launch acks `Fresh`, a `Resume` launch acks a resumed outcome, and the
+/// adopted first turn is reported exactly when the request asked for it.
+#[cfg(feature = "runtime-adapter")]
+fn validate_materialized_launch_ack(
+    peer_name: &str,
+    resume_launch: bool,
+    report_adopted_first_turn: bool,
+    ack: &super::bridge_protocol::BridgeMaterializedResponse,
+) -> Result<(), MobError> {
+    let resumed = match ack.launch_outcome {
+        super::bridge_protocol::MaterializeLaunchOutcome::Fresh => false,
+        super::bridge_protocol::MaterializeLaunchOutcome::ResumedLive
+        | super::bridge_protocol::MaterializeLaunchOutcome::ResumedFromSnapshot => true,
+    };
+    if resumed != resume_launch {
+        return Err(MobError::WiringError(format!(
+            "materialize ack for '{peer_name}' reports launch outcome {:?} for a {} launch",
+            ack.launch_outcome,
+            if resume_launch { "Resume" } else { "Fresh" }
+        )));
+    }
+    match (report_adopted_first_turn, ack.adopted_first_turn) {
+        (true, None) => Err(MobError::WiringError(format!(
+            "materialize ack for '{peer_name}' omits the adopted first turn its request asked \
+             for"
+        ))),
+        (false, Some(_)) => Err(MobError::WiringError(format!(
+            "materialize ack for '{peer_name}' reports an adopted first turn its request did \
+             not ask for"
+        ))),
+        _ => Ok(()),
+    }
 }
 
 #[cfg(any(feature = "runtime-adapter", test))]

@@ -485,6 +485,13 @@ the registered tool and `arguments` contains its JSON arguments. In the result,
 omitted. A client can instead return a JSON-RPC `error` for the same request
 ID; the server projects it as a tool-execution error.
 
+Since 0.9.5 a request for a call made in a run's tool round also carries
+`dedupe_key`, an object with `run_id`, `round`, `call_id` and `call_digest`.
+A durable run that continues after a restart sends the same call again, with
+the same key. A tool whose effect must not happen twice records the key with
+the effect and answers a repeat from that record; see
+[Durable Runs: Tools That Run Again](/guides/durable-runs#tools-that-run-again).
+
 Keep reading and answering reverse requests while waiting for the turn's
 result, or the turn cannot finish its callback. This foreground RPC exchange
 is neither MCP's `pending_tool_calls`/`meerkat_resume` continuation nor the
@@ -586,9 +593,9 @@ Handshake. Returns server capabilities.
   "result": {
     "server_info": {
       "name": "meerkat-rpc",
-      "version": "0.9.4"
+      "version": "0.9.5"
     },
-    "contract_version": "0.9.4",
+    "contract_version": "0.9.5",
     "methods": [
       "initialize", "initialized",
       "session/create", "session/list", "session/read",
@@ -885,7 +892,7 @@ Trajectory Interchange Format) v1.7 trajectory document.
   "params": {
     "session_id": "01936f8a-7b2c-7000-8000-000000000001",
     "agent_name": "meerkat",
-    "agent_version": "0.9.4",
+    "agent_version": "0.9.5",
     "model_name": "claude-opus-5"
   }
 }
@@ -1274,6 +1281,16 @@ arrives while another turn on the same session is running is queued behind
 it: it runs once the running turn finishes, and the call returns its own
 result. It is not refused with `-32002` (`SESSION_BUSY`).
 
+Since 0.9.5, `"session_events": false` asks that the turn's events not be
+written as `session/event` notifications. A caller that reads them from a
+`session/stream_open` subscription, or reads only the run result, sends it so
+each event reaches it once. Absent or `true` keeps them. A turn that also
+carries the input of another request that wants them still writes them.
+`session/create` (for its first turn) and `mob/turn_start` take the same
+field. A server before 0.9.5 refuses it on `turn/start` and `mob/turn_start`,
+so the Python and TypeScript SDKs send it, from calls that do not stream
+their turn, only to a server whose contract version is 0.9.5 or later.
+
 A turn that fails returns the JSON-RPC code of its typed cause, as the
 [session error mapping](/reference/capability-matrix#error-codes) does for the
 same causes: `-32010` (provider error) for `llm_failure` and
@@ -1515,6 +1532,67 @@ Queue a runtime-backed external event for an existing session.
 }
 ```
 </CodeGroup>
+
+An optional `idempotency_key` makes the call safe to retry. A retry under the
+same key admits nothing new: it answers `outcome_type` `deduplicated` and
+names the first admission in `existing_id`. The same key with other event
+content is refused with `-32602` and `data.code` `INPUT_IDEMPOTENCY_CONFLICT`,
+naming the first admission in `data.existing_id`; the first admission stands.
+The key is scoped to the session and kept for the session's life, across
+restarts. Object key order inside `payload` does not matter. The key is
+canonical text: non-empty, no surrounding whitespace, no control characters,
+at most 256 bytes; any other key is refused with `-32602`. A server older than
+contract 0.9.5 ignores the field and admits the call unkeyed, so a raw JSON
+caller checks the `contract_version` from `initialize` before relying on it.
+
+### mob/member_send keys
+
+`mob/member_send` takes the same optional `idempotency_key`, deduplicated for
+the member identity: it survives a respawn. A keyed send is committed as a
+member continuation and the result carries `continuation`, a receipt and a
+delivery status, not a turn:
+
+```json
+{
+  "mob_id": "mob-1",
+  "agent_identity": "worker-1",
+  "member_ref": "...",
+  "handling_mode": "queue",
+  "continuation": {
+    "delivery_id": "continuation:...",
+    "committed_at_ms": 1792000000000,
+    "status": { "state": "admitted", "session_id": "...", "input_id": "..." }
+  }
+}
+```
+
+- A replay of the key repeats `delivery_id` and `committed_at_ms`; `status`
+  may advance.
+- Keys never expire. A key stays bound for the member identity across
+  respawns and across a re-creation of the mob under the same id (after a
+  destroy or a crash stop): its replay answers the first delivery and its
+  status, `stranded` when the incarnation it was bound to never admitted it.
+  Send new content under a new key.
+- `pending`: committed, not admitted yet. A `pending` that survives a server
+  restart is not proof of loss; do not resend it under a new key.
+- `admitted`: queued in `session_id` as `input_id`, not proof that a turn ran.
+  Follow it with `session/input_status`.
+- `stranded`: committed and never admitted, because the member incarnation it
+  was bound to was replaced. This is final: resend the content under a new key.
+- `refused`: settled as refused, never admitted; `reason` names why.
+
+Other content under a used key is refused with `-32602` and `data.kind`
+`input_idempotency_conflict`, naming the first delivery in `data.delivery_id`.
+A keyed send differs from an unkeyed one: the member's delivery owner admits
+it with system origin, it is ordered only among keyed sends, `render_metadata`
+is refused with a key (`-32602`), and a host without a continuation service or
+a governed runtime refuses it with `-32020` and `data.kind`
+`idempotency_unavailable` (`data.cause` `no_continuation_service` or
+`governed_runtime`). A first keyed send to a member without a session binding
+is refused with `-32020` before anything is committed. A status read that
+cannot be made now answers `-32032` (`data.kind`
+`continuation_status_unavailable`): the commit stands, retry the same key.
+`-32603` with `data.kind` `continuation_status_inconsistent` is not retryable.
 
 ### session/peer_response_terminal
 
@@ -1958,11 +2036,20 @@ control. Check `runtime/capabilities.features.multi_host_mobs` rather than
 inferring support from generic `mobs` or the server version.
 
 `mob/member_live_open` supports WebSocket transport only for both local and
-placed members. A request for `transport: "webrtc"` is rejected; WebRTC uses
-the session-scoped `live/open` and `live/webrtc/answer` flow below only when
-the caller can address the owning session directly. In multi-host v1,
+placed members. A request for `transport: "webrtc"` is rejected, and the
+session-scoped `live/open` and `live/webrtc/answer` flow below refuses a
+member's session, so WebRTC to a mob member is not available in 0.9.5:
+`mob/member_live_open` over WebSocket is the route. In multi-host v1,
 controller `session/*` methods do not proxy a placed member's host-local
-session, so there is no controller-side WebRTC path to a placed member.
+session either.
+
+The session-scoped `live/open` opens no live channel on a mob member's
+session, live or not, and never restores one from storage: the member's mob
+does both, after checking the member (not retiring, in cleanup or revoke, and
+restored). It answers `INVALID_PARAMS` (-32602) with data kind
+`mob_member_session_addressed_by_id` (and the session, mob and member), and
+nothing is opened or restored. Open the member's channel with
+`mob/member_live_open`.
 
 Durable member role migration is not part of `mob/spawn`, profiles, or any
 public JSON-RPC/SDK params. The one-shot `resume_from_role` declaration exists
@@ -1971,6 +2058,13 @@ only on trusted in-process `SpawnMemberSpec` and the private remote-host
 from the stored predecessor role while keeping mob ID, member identity,
 session, and transcript fixed; live sessions and mismatched declarations fail
 closed.
+
+A `mob/spawn` or `mob/spawn_many` item whose `launch_mode` resumes an existing
+session delivers the member's first turn (its kickoff or `initial_message`) only
+while that session's first turn has never started, and then once. Otherwise the
+resume runs no kickoff and does not deliver `initial_message`; a first turn that
+started and was interrupted is not re-run. A placed member follows the same rule;
+a resume on a member host of 0.9.4 or earlier still runs the first turn.
 
 ### workgraph/get
 
@@ -2374,7 +2468,7 @@ Create a session on a realtime-capable model and call `live/open`:
 }
 ```
 
-`live/open` returns a `LiveOpenResult` with transport bootstrap (e.g. WebSocket URL), `WireLiveChannelCapabilities`, and `WireLiveContinuityMode`.
+`live/open` returns a `LiveOpenResult` with transport bootstrap (e.g. WebSocket URL), `WireLiveChannelCapabilities`, and `WireLiveContinuityMode`, plus `advisories` when the open went ahead without something. Today that is `staged_prompt_refused`: a run-start hook refused the session's staged create-time prompt, so the realtime model was not given it, and it stays staged for the session's first text turn or a later open. The advisory vocabulary may grow: an advisory a client does not know is not an error, and the SDKs keep it as the string the server sent.
 
 <ParamField body="session_id" type="string" required>
   Session whose canonical history seeds the live channel.
@@ -2695,7 +2789,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
   "jsonrpc": "2.0",
   "id": 17,
   "result": {
-    "contract_version": {"major": 0, "minor": 9, "patch": 4},
+    "contract_version": {"major": 0, "minor": 9, "patch": 5},
     "providers": [
       {
         "provider": "anthropic",
@@ -2759,7 +2853,7 @@ synthesized with that status.
   "jsonrpc": "2.0",
   "id": 8,
   "result": {
-    "contract_version": {"major": 0, "minor": 9, "patch": 4},
+    "contract_version": {"major": 0, "minor": 9, "patch": 5},
     "capabilities": [
       {
         "id": "sessions",
@@ -3063,6 +3157,7 @@ live transport's realtime observations. See
 | Event | Description |
 |-------|-------------|
 | `run_started` | Agent execution began |
+| `run_resumed` | Since 0.9.5: a run continued after a restart from its last committed round, under its original run id; carries `run_id`, `round` and `resume_point` (`tools_pending` or `awaiting_model`). See [Durable runs](/guides/durable-runs#after-a-crash) |
 | `run_completed` | Agent run finished |
 | `extraction_succeeded` | Structured-output extraction succeeded after a completed run; `request_usage` has one usage row per extraction request |
 | `extraction_failed` | Structured-output extraction failed after a completed run; `request_usage` has one usage row per answered extraction request |
@@ -3075,12 +3170,12 @@ live transport's realtime observations. See
 | `server_tool_content` | Provider-executed tool content surfaced during a model turn |
 | `assistant_image_appended` | Canonical assistant image block appended to transcript history; `assistant_message_id` names the message that carries it |
 | `tool_call_requested` | LLM wants to call a tool |
-| `tool_result_received` | Tool result processed |
+| `tool_result_received` | Tool result processed; the only event that carries the result body (`content`) |
 | `turn_completed` | LLM call finished (every agent-loop call, including tool-loop calls with `stop_reason: tool_use`); absent `usage` means no accounting row, not zero tokens; `assistant_message_id` names the message the turn closes. It is a live signal, not the commit: only a history row carrying the id is the commit. It can precede boundary work, run-completed hooks and persistence that still fail the run, and it is absent when a run fails after the row was pushed. It is also absent on realtime materializer turns, whose rows pair by `realtime_origin.provider_item_ids` |
 | `turn_usage_accounting_unmeasured` | Provider accounting was absent; no zero row may be fabricated, and this observation alone does not assert turn completion |
 | `turn_usage_accounting_identity_disputed` | Reported counters exist but provider/model attribution differs; preserve the reported identity and counters |
 | `tool_execution_started` | Tool dispatch began |
-| `tool_execution_completed` | Tool returned a result |
+| `tool_execution_completed` | Tool call finished: `is_error` and `duration_ms`, no result body (since 0.9.5; read `tool_result_received` with the same `id`) |
 | `tool_execution_timed_out` | Tool exceeded timeout |
 | `compaction_started` | Context compaction began |
 | `compaction_completed` | Compaction finished. Since 0.9.4 it carries `summary_source` (who wrote the summary: `{"kind": "provider_call", "source_bound": ...}` with bound `whole`, `trimmed` (`through`) or `requests_only` (`kept`, `of`), `{"kind": "host_curator"}` or `{"kind": "mechanical_fallback"}`) and optional `estimated_history_tokens_after`, in the unit of `compaction_started`'s `estimated_history_tokens` |
@@ -3134,7 +3229,8 @@ without polling `live/status`. `reason` is one of:
 `reopen_recommended` is true only for a `media_fault` while the session's one
 reopen is still available; the reopened channel keeps its retained context.
 
-`stream_truncated` is subscriber-local. It reports UI-ring lag, not an
+`stream_truncated` is subscriber-local. It reports UI-ring lag or dropped
+source events at an explicit session stream's outbound queue, not an
 EventStore projection result. Use `events/list_since` or `events/snapshot`
 when that optional replay surface is healthy, and reconcile against current
 session state after receiving it.
@@ -3173,7 +3269,26 @@ from the source envelope's `event.seq`. Outer `stream_id` and `session_id`
 are routing fields; scoped streams can additionally carry `scope_id` and
 `scope_path`. None of these flattens or replaces `event.payload`.
 
+Temporary outbound admission or notification-channel saturation keeps the
+session subscription open. Before delivering its next source event, the
+server emits a `stream_truncated` marker with `event.seq: 0` and
+`reason: {"kind":"stream_lagged","dropped":N}`. The count includes source
+events that could not be admitted; refused synthetic markers do not increase
+it. Admission stays nonblocking, so a slow subscriber does not reserve capacity
+ahead of RPC responses or callback requests. This is a loss notice, not replay.
+Mob streams (member-scoped and aggregate) retain their existing overflow
+termination behavior. Aggregate recovery requires separate attribution because
+a mixed-member gap cannot be attributed to one member's event envelope.
+
 ### session/stream_end notifications
+
+Session and mob streams reserve terminal delivery capacity before opening.
+The process admits at most 4096 active or queued terminal obligations; an
+additional `session/stream_open` or `mob/stream_open` returns `BUDGET_EXHAUSTED`
+until capacity is released. Each terminal is bounded to 16 KiB, with diagnostic
+detail limited to 1 KiB of UTF-8 text. Data-event admission cannot consume these
+reservations. A slow reader retains its terminal reservation until the
+transport writes or discards the notification.
 
 An explicit session stream terminates with this notification:
 
@@ -3191,8 +3306,10 @@ An explicit session stream terminates with this notification:
 ```
 
 `outcome` is `"remote_end"`, `"terminal_error"`, or `"explicit_close"`.
-Calling `session/stream_close` terminates the handle with `explicit_close`;
-normal upstream exhaustion uses `remote_end`. When a terminal error is
+Calling `session/stream_close` normally terminates the handle with `explicit_close`;
+normal upstream exhaustion uses `remote_end`. If dropped events remain without
+a delivered gap marker, either path uses `terminal_error` with
+`stream_queue_overflow` and the unreported source-event count. When a terminal error is
 reported, the notification additionally contains
 `error: {"code":"stream_queue_overflow","message":"..."}` or
 `error: {"code":"stream_receiver_gone","message":"..."}`.
@@ -3201,6 +3318,13 @@ reported, the notification additionally contains
 protocol. Stop consuming a terminated handle and reopen/reconcile as needed.
 A disconnected transport or lost notification receiver cannot be relied on to
 deliver its final end notification.
+
+Python and TypeScript `EventSubscription` iterators drain earlier queued events,
+then raise `EventSubscriptionError` when the terminal contains an error. The
+error retains the raw terminal, including unknown server codes, and the last
+delivered RPC and envelope sequence values. Error-free `remote_end` and
+`explicit_close` still end iteration normally. Subscription failure does not
+itself establish that the agent's run failed or stopped.
 
 ### mob/stream_event notifications
 
@@ -3259,7 +3383,7 @@ and `data`, never on the message text.
 | -32700 | Parse error | Invalid JSON |
 | -32600 | Invalid request | Not a valid JSON-RPC request, or a request the target's current state does not admit (for example a `turn/start` on a retired runtime) |
 | -32601 | Method not found | Unknown method |
-| -32602 | Invalid params | Missing or invalid parameters. An input idempotency conflict names the input the key is bound to in `data.existing_id` |
+| -32602 | Invalid params | Missing or invalid parameters. An input idempotency conflict has `data.code` `INPUT_IDEMPOTENCY_CONFLICT` and names the input the key is bound to in `data.existing_id`; a keyed `mob/member_send` conflict has `data.kind` `input_idempotency_conflict` and `data.delivery_id` |
 | -32603 | Internal error | Server error |
 | -32001 | Session not found | Session ID does not exist |
 | -32002 | Session busy | The session cannot take this request now, for example a `turn/interrupt` while a deferred session is being materialized, a session hosted by another process, or a runtime teardown still in progress. A `turn/start` on a session with a running turn is queued, not refused. Also a refused `mob/claim_callback_route`, with `data` `{"mob_id", "reason"}`: `claim_token_mismatch` (the token is not the mob's), `not_claimable` (the mob has no claim token), or `held_by_open_connection` (another open connection holds the mob's callback route; once that connection closes, the first claim presenting the token wins) |

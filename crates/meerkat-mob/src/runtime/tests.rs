@@ -1705,6 +1705,10 @@ struct CreateSessionRecord {
     mob_member_binding: Option<meerkat_core::MobMemberBinding>,
     app_context: Option<serde_json::Value>,
     fork_source: Option<meerkat_core::ForkBuildSource>,
+    /// The typed source of a prompt-context fork child the build names.
+    prompt_context_fork_source: Option<meerkat_core::PromptContextForkSource>,
+    /// The session the create seats.
+    session_id: SessionId,
     /// Names of the tools the build's composed `external_tools` surface, in
     /// catalog order (the per-spawn overlay composed with mob-owned tools).
     external_tool_names: Vec<String>,
@@ -1970,6 +1974,34 @@ impl TestRuntimeControlBarrier {
     }
 }
 
+/// How the mock's durable read of a session refuses.
+#[derive(Debug, Clone, Copy)]
+enum PersistedSessionReadRefusal {
+    /// As a HeadCanonical store refuses a committed read once a running turn
+    /// has committed a round: the provisional tail sits ahead of the
+    /// committed snapshot, a typed `TranscriptRevisionConflict`.
+    RevisionConflict,
+    /// Any other store failure.
+    StoreFailure,
+}
+
+impl PersistedSessionReadRefusal {
+    fn error(self, session_id: &SessionId) -> SessionError {
+        match self {
+            Self::RevisionConflict => SessionError::Store(Box::new(
+                meerkat_core::SessionStoreError::TranscriptRevisionConflict {
+                    id: session_id.clone(),
+                    expected: "committed-snapshot-revision".to_string(),
+                    actual: "provisional-tail-revision".to_string(),
+                },
+            )),
+            Self::StoreFailure => SessionError::Store(Box::new(std::io::Error::other(format!(
+                "durable read of session {session_id} failed"
+            )))),
+        }
+    }
+}
+
 struct MockSessionService {
     sessions: RwLock<HashMap<SessionId, Arc<MockCommsRuntime>>>,
     /// The spawner restrictions handed to the build of each session this
@@ -2158,6 +2190,12 @@ struct MockSessionService {
     load_persisted_session_started: tokio::sync::Notify,
     live_durable_source_observations: AtomicUsize,
     fail_load_persisted_session: AtomicBool,
+    /// Sessions whose every durable read refuses, and how.
+    persisted_session_read_refusals_for:
+        std::sync::Mutex<HashMap<SessionId, PersistedSessionReadRefusal>>,
+    /// Whether a durable fork commits its child with its source's build
+    /// state, projected as the persistent service's fork projects it.
+    fork_carries_source_build_state: AtomicBool,
     load_persisted_session_calls: AtomicU64,
     load_persisted_session_metadata_calls: AtomicU64,
     /// #1250 seam: per-read delay for the metadata-only durable read, and
@@ -2259,6 +2297,10 @@ struct MockSessionService {
     /// Cleared by [`Self::keep_no_durable_sessions`]: the service then reports
     /// that it keeps no durable sessions, as an ephemeral service does.
     keeps_durable_sessions: AtomicBool,
+    /// Cleared by [`Self::keep_member_sessions_in_memory`]: the service keeps
+    /// the persistent-session contract, but its member sessions do not
+    /// outlive the process.
+    member_sessions_outlive_process: AtomicBool,
 }
 
 impl MockSessionService {
@@ -2377,6 +2419,8 @@ impl MockSessionService {
             load_persisted_session_started: tokio::sync::Notify::new(),
             live_durable_source_observations: AtomicUsize::new(0),
             fail_load_persisted_session: AtomicBool::new(false),
+            persisted_session_read_refusals_for: std::sync::Mutex::new(HashMap::new()),
+            fork_carries_source_build_state: AtomicBool::new(false),
             load_persisted_session_calls: AtomicU64::new(0),
             load_persisted_session_metadata_calls: AtomicU64::new(0),
             load_persisted_session_metadata_delay_ms: AtomicU64::new(0),
@@ -2425,12 +2469,20 @@ impl MockSessionService {
             interrupt_gate_entered: tokio::sync::Notify::new(),
             runtime_boundary_acknowledgements: RwLock::new(Vec::new()),
             keeps_durable_sessions: AtomicBool::new(true),
+            member_sessions_outlive_process: AtomicBool::new(true),
         }
     }
 
     /// Report, from now on, that this service keeps no durable sessions.
     fn keep_no_durable_sessions(&self) {
         self.keeps_durable_sessions.store(false, Ordering::SeqCst);
+    }
+
+    /// Report, from now on, that this service's member sessions do not
+    /// outlive the process, while it keeps the persistent-session contract.
+    fn keep_member_sessions_in_memory(&self) {
+        self.member_sessions_outlive_process
+            .store(false, Ordering::SeqCst);
     }
 
     async fn fail_subscribe_for_session(&self, session_id: SessionId) {
@@ -3156,6 +3208,19 @@ impl MockSessionService {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(session_id.clone(), count);
+    }
+
+    /// Make every durable read of `session_id`
+    /// ([`MobSessionService::load_persisted_session`]) refuse with `refusal`.
+    fn refuse_persisted_session_reads(
+        &self,
+        session_id: &SessionId,
+        refusal: PersistedSessionReadRefusal,
+    ) {
+        self.persisted_session_read_refusals_for
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session_id.clone(), refusal);
     }
 
     fn take_session_read_failure(&self, session_id: &SessionId) -> bool {
@@ -4034,6 +4099,11 @@ impl MockSessionService {
                     .build
                     .as_ref()
                     .and_then(|build| build.fork_source.clone()),
+                prompt_context_fork_source: req
+                    .build
+                    .as_ref()
+                    .and_then(|build| build.prompt_context_fork_source.clone()),
+                session_id: session_id.clone(),
                 external_tool_names: req
                     .build
                     .as_ref()
@@ -5343,9 +5413,18 @@ impl MobSessionService for MockSessionService {
                 id: source_session_id.clone(),
             })?;
         let selected_count = message_count.unwrap_or_else(|| source.messages().len());
-        let forked = source
+        let mut forked = source
             .fork_at_complete_boundary(selected_count)
             .map_err(|error| SessionError::Unsupported(error.to_string()))?;
+        if self.fork_carries_source_build_state.load(Ordering::Relaxed)
+            && let Some(build_state) = source
+                .try_build_state()
+                .map_err(|error| SessionError::Unsupported(error.to_string()))?
+        {
+            forked
+                .set_build_state(build_state.fork_child_projection())
+                .map_err(|error| SessionError::Unsupported(error.to_string()))?;
+        }
         let mut forked = factory_policy_session(forked, "test-model".to_string(), 1_024);
         let mut metadata = forked.session_metadata().ok_or_else(|| {
             SessionError::Unsupported(
@@ -5482,6 +5561,11 @@ impl MobSessionService for MockSessionService {
 
     fn supports_persistent_sessions(&self) -> bool {
         self.keeps_durable_sessions.load(Ordering::SeqCst)
+    }
+
+    fn keeps_durable_member_sessions(&self) -> bool {
+        self.supports_persistent_sessions()
+            && self.member_sessions_outlive_process.load(Ordering::SeqCst)
     }
 
     fn supports_runtime_turn_apply(&self) -> bool {
@@ -5843,6 +5927,15 @@ impl MobSessionService for MockSessionService {
                     "durable source body failed typed restore".to_string(),
                 ),
             ));
+        }
+        let refusal = self
+            .persisted_session_read_refusals_for
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_id)
+            .copied();
+        if let Some(refusal) = refusal {
+            return Err(refusal.error(session_id));
         }
         let _authority_guard = self.resume_authority_gate.lock().await;
         // Mirror PersistentSessionService: archived sessions have no loadable
@@ -7768,6 +7861,7 @@ fn sample_definition() -> MobDefinition {
             max_inline_peer_notifications: None,
             output_schema: None,
             provider_params: None,
+            durable: false,
         })),
     );
     profiles.insert(
@@ -7792,6 +7886,7 @@ fn sample_definition() -> MobDefinition {
             max_inline_peer_notifications: None,
             output_schema: None,
             provider_params: None,
+            durable: false,
         })),
     );
 
@@ -14863,6 +14958,7 @@ async fn archived_document_without_runtime_record_is_revivable() {
             generated_self_owned_operation_owner: Some(session_id.clone()),
             runtime_revival_intent: super::provisioner::RuntimeRevivalIntent::None,
             held_bound: None,
+            continuity_intent: crate::runtime::SpawnContinuityIntent::Ephemeral,
         })
         .await
         .expect("materialize imported archived document through the real resume transaction");
@@ -16696,6 +16792,188 @@ async fn test_existing_member_adoption_tool_update_and_resume_keep_identity_and_
         .expect("adopted session metadata");
     assert_eq!(metadata.tooling.shell, ToolCategoryOverride::Enable);
     resumed.shutdown().await.expect("shutdown resumed mob");
+}
+
+/// [`PersistentMockBuilder`], recording the external tool names each member
+/// build is offered.
+struct ToolRecordingBuilder {
+    builds: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+}
+
+#[async_trait]
+impl SessionAgentBuilder for ToolRecordingBuilder {
+    type Agent = PersistentMockAgent;
+
+    async fn build_agent(
+        &self,
+        req: &CreateSessionRequest,
+        event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
+    ) -> Result<Self::Agent, SessionError> {
+        let names = req
+            .build
+            .as_ref()
+            .and_then(|build| build.external_tools.as_ref())
+            .map(|tools| {
+                tools
+                    .tools()
+                    .iter()
+                    .map(|tool| tool.name.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.builds.lock().expect("recorded builds").push(names);
+        PersistentMockBuilder.build_agent(req, event_tx).await
+    }
+}
+
+/// An adopted identity converges by rebuilding its member from the sealed
+/// identity material. The sealed profile is portable and carries no
+/// runtime-owned tool bundles, so the rebuild mounts the bundles the mob's
+/// definition profile names: the member keeps its registered bundle's tools.
+#[tokio::test]
+async fn an_adopted_identity_keeps_its_profiles_registered_tool_bundle() {
+    let definition = with_unique_mob_id(
+        sample_definition_with_tool_bundle("bundle-a"),
+        "identity-bundle",
+    );
+    let mob_id = definition.id.clone();
+    let event_store = InMemoryMobEventStore::new();
+    let identity_store = Arc::new(InMemoryMobIdentityStore::paired_with_event_store(
+        &event_store,
+        Arc::new(crate::store::SystemMobIdentityStoreClock),
+    ));
+    let events: Arc<dyn MobEventStore> = Arc::new(event_store);
+    let session_store_dyn: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let blob_store: Arc<dyn meerkat_core::BlobStore> =
+        Arc::new(meerkat_store::MemoryBlobStore::new());
+    let builds = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let service = Arc::new(meerkat_session::PersistentSessionService::new(
+        ToolRecordingBuilder {
+            builds: Arc::clone(&builds),
+        },
+        16,
+        session_store_dyn,
+        runtime_store,
+        blob_store,
+    ));
+    let storage = MobStorage {
+        events,
+        runs: Arc::new(InMemoryMobRunStore::new()),
+        specs: Arc::new(InMemoryMobSpecStore::new()),
+        definition_projection_composition:
+            crate::storage::DefinitionProjectionComposition::Independent,
+        runtime_metadata: Arc::new(InMemoryMobRuntimeMetadataStore::new()),
+        identity: identity_store.clone(),
+        identity_member: Some(identity_store),
+        identity_status: Arc::new(InMemoryMobIdentityStatusStore::new()),
+        identity_status_projection_order: Default::default(),
+        realm_profiles: None,
+        forked_participants: None,
+    };
+    let handle = MobBuilder::new(definition, storage)
+        .with_session_service(service.clone())
+        .with_spawn_base_prompt_source(Arc::new(crate::StaticSpawnBasePromptSource(
+            "adoption test base prompt".to_string(),
+        )))
+        .register_tool_bundle("bundle-a", Arc::new(EchoBundleDispatcher))
+        .create()
+        .await
+        .expect("create the bundle adoption test mob");
+    let member = AgentIdentity::from("worker-1");
+    let mut spawn = SpawnMemberSpec::new(ProfileName::from("worker"), member.clone());
+    spawn.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle.spawn_spec(spawn).await.expect("spawn the member");
+    let session_id = handle
+        .resolve_bridge_session_id(&member)
+        .await
+        .expect("session-backed member");
+    let offers_the_bundle = |names: &Vec<String>| names.iter().any(|name| name == "bundle_echo");
+    assert!(
+        builds
+            .lock()
+            .expect("recorded builds")
+            .first()
+            .is_some_and(offers_the_bundle),
+        "the spawn mounts the registered bundle: {:?}",
+        builds.lock().expect("recorded builds")
+    );
+
+    handle
+        .adopt_member_identity_declaration(crate::identity::AdoptMemberIdentityDeclaration {
+            mob_id: mob_id.clone(),
+            agent_identity: member.clone(),
+            request_id: crate::identity::IdentityAdoptionId::new("adopt-worker-1")
+                .expect("valid adoption id"),
+            precondition: crate::identity::IdentityAdoptionPrecondition::ExpectedAbsent,
+            declaration_scope: crate::identity::IdentityDeclarationScopeId::new("bundle-policy")
+                .expect("valid declaration scope"),
+            declaration_revision: 1,
+            session: crate::identity::DesiredSessionTarget {
+                session_id: session_id.clone(),
+                lineage_id: meerkat_core::SessionLineageId::for_session(&session_id),
+                lineage_generation: meerkat_core::SessionGeneration::INITIAL,
+                authority_policy: crate::identity::DesiredSessionAuthorityPolicy::RequireExisting,
+            },
+            member: crate::identity::IdentityProfileMemberDeclaration {
+                profile_name: ProfileName::from("worker"),
+                profile_override: None,
+                model_override: None,
+                external_addressable_override: None,
+                context: None,
+                labels: None,
+                additional_instructions: None,
+                system_prompt_override: None,
+                tool_access_policy: None,
+                auth_binding: None,
+                budget_limits: None,
+                runtime_mode: Some(meerkat_contracts::wire::WireMobRuntimeMode::TurnDriven),
+                required_env_keys: Vec::new(),
+                required_local_callback_tools: Vec::new(),
+                execution: crate::identity::DesiredExecution::ControllingSession,
+            },
+            wiring_custody: crate::identity::IdentityWiringCustody::ExternalManaged,
+            owned_wiring: BTreeSet::new(),
+            convergence: crate::identity::IdentityConvergenceMode::Drain { max_wait_ms: 5_000 },
+        })
+        .await
+        .expect("adopt the member");
+    let rebuilt = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let converged = matches!(
+                handle
+                    .identity_convergence_status(&member)
+                    .await
+                    .expect("read adoption convergence"),
+                crate::identity::IdentityStoredObservation::Valid(
+                    crate::identity::IdentityConvergenceStatus {
+                        active_intent_revision: Some(1),
+                        decision: Some(crate::identity::IdentityReconcileDecision::Converged),
+                        ..
+                    }
+                )
+            );
+            if converged && builds.lock().expect("recorded builds").len() >= 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    let recorded = builds.lock().expect("recorded builds").clone();
+    handle
+        .shutdown()
+        .await
+        .expect("shutdown the bundle adoption test mob");
+    assert!(
+        rebuilt.is_ok(),
+        "the adoption converges by rebuilding the member: {recorded:?}"
+    );
+    assert!(
+        recorded.last().is_some_and(offers_the_bundle),
+        "the rebuilt member keeps its profile's registered bundle: {recorded:?}"
+    );
 }
 
 #[tokio::test]
@@ -29533,6 +29811,149 @@ async fn caller_turn_fork_child_is_built_with_the_source_build_inputs() {
         .await;
 }
 
+/// Whether the mock holds a committed durable session bound to `member`.
+async fn member_session_committed(service: &MockSessionService, member: &AgentIdentity) -> bool {
+    service
+        .persisted_sessions
+        .read()
+        .await
+        .values()
+        .any(|session| {
+            session
+                .session_metadata()
+                .and_then(|metadata| metadata.mob_member_binding)
+                .is_some_and(|binding| binding.member == member.as_str())
+        })
+}
+
+/// A `fork_off` from the source's own running turn whose source read meets
+/// that turn's round-commit tail (a HeadCanonical store refuses the committed
+/// read with a typed `TranscriptRevisionConflict`) still builds its child
+/// with the source's application context: the durable fork commits the child
+/// with the committed snapshot's build state, and the context is read back
+/// from that child. A context the request states still wins. Only that
+/// refusal, and only in a fork from the source's own turn, is answered from
+/// the child: the same refusal in a quiescent fork, or any other failed
+/// source read, refuses before anything is forked.
+#[tokio::test]
+async fn caller_turn_fork_under_its_turn_tail_reads_the_source_context_from_the_child() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    service.set_return_exact_run_result(true);
+    service
+        .fork_carries_source_build_state
+        .store(true, Ordering::Relaxed);
+    let source_identity = AgentIdentity::from("fork-tail-caller-source");
+    let source_session = spawn_fork_source_with_build_inputs(&handle, &source_identity).await;
+    service.refuse_persisted_session_reads(
+        &source_session,
+        PersistedSessionReadRefusal::RevisionConflict,
+    );
+
+    let quiescent_identity = AgentIdentity::from("fork-tail-quiescent-child");
+    let mut quiescent_spec =
+        SpawnMemberSpec::new(ProfileName::from("worker"), quiescent_identity.clone());
+    quiescent_spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    let refusal = handle
+        .fork_member(&source_identity, quiescent_spec, None)
+        .await
+        .expect_err("a quiescent fork never answers a refused source read from a child");
+    assert!(
+        matches!(
+            &refusal,
+            MobError::SessionError(error) if super::actor::is_transcript_revision_conflict(error)
+        ),
+        "the quiescent fork refuses with the source read's own refusal: {refusal:?}"
+    );
+    assert!(
+        handle
+            .get_member(&quiescent_identity)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        !member_session_committed(&service, &quiescent_identity).await,
+        "the refused quiescent fork committed no child"
+    );
+
+    let child_identity = AgentIdentity::from("fork-tail-caller-child");
+    let (_fork, run) = handle
+        .fork_member_then_run_detached(
+            &source_identity,
+            bounded_fork_child_spec(&child_identity),
+            None,
+            "fork_child_result",
+            256,
+            meerkat_core::DurableForkSourceAdmission::CallerTurn,
+            None,
+            None,
+        )
+        .await
+        .expect("a caller-turn fork under its turn's tail seats the child");
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), run.outcome()).await;
+    assert_child_built_as_source(&service, &source_identity, &source_session, &child_identity)
+        .await;
+
+    let stated_context = serde_json::json!({"domain": "stated-by-the-request"});
+    let stated_identity = AgentIdentity::from("fork-tail-caller-stated");
+    let mut stated_spec = bounded_fork_child_spec(&stated_identity);
+    stated_spec.context = Some(stated_context.clone());
+    let (_fork, run) = handle
+        .fork_member_then_run_detached(
+            &source_identity,
+            stated_spec,
+            None,
+            "fork_child_result",
+            256,
+            meerkat_core::DurableForkSourceAdmission::CallerTurn,
+            None,
+            None,
+        )
+        .await
+        .expect("a caller-turn fork under its turn's tail seats a child that states a context");
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), run.outcome()).await;
+    assert_eq!(
+        last_member_build(&service, &stated_identity)
+            .await
+            .app_context,
+        Some(stated_context),
+        "a context the request states wins over the committed child's"
+    );
+
+    service
+        .refuse_persisted_session_reads(&source_session, PersistedSessionReadRefusal::StoreFailure);
+    let failed_identity = AgentIdentity::from("fork-tail-caller-failed-read");
+    let refusal = match handle
+        .fork_member_then_run_detached(
+            &source_identity,
+            bounded_fork_child_spec(&failed_identity),
+            None,
+            "fork_child_result",
+            256,
+            meerkat_core::DurableForkSourceAdmission::CallerTurn,
+            None,
+            None,
+        )
+        .await
+    {
+        Ok(_) => panic!("a caller-turn fork answered a failed source read from a child"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            &refusal,
+            BoundedMemberRunError::Admission(MobError::SessionError(error @ SessionError::Store(_)))
+                if !super::actor::is_transcript_revision_conflict(error)
+        ),
+        "the caller-turn fork refuses with the source read's own failure: {refusal:?}"
+    );
+    assert!(handle.get_member(&failed_identity).await.unwrap().is_none());
+    assert!(
+        !member_session_committed(&service, &failed_identity).await,
+        "the refused caller-turn fork committed no child"
+    );
+}
+
 /// The external (`Quiescent`) fork contract seats its child the same way.
 #[tokio::test]
 async fn quiescent_fork_child_is_built_with_the_source_build_inputs() {
@@ -31861,6 +32282,464 @@ async fn fresh_spawn_refuses_resume_provider_params() {
     assert!(handle.get_member(&member).await.expect("read").is_none());
 }
 
+/// The sample definition with its `worker` profile declared durable (and
+/// externally addressable, so a policy auto-spawn of it is admitted up to
+/// the durable check).
+fn durable_worker_definition() -> MobDefinition {
+    let mut definition = sample_definition();
+    let worker = definition
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .and_then(ProfileBinding::as_inline_mut)
+        .expect("inline worker profile");
+    worker.durable = true;
+    worker.external_addressable = true;
+    definition
+}
+
+/// A mob over the mock service reporting that it keeps no durable sessions.
+async fn create_test_mob_without_persistent_sessions(
+    definition: MobDefinition,
+) -> (MobHandle, Arc<MockSessionService>) {
+    let service = Arc::new(MockSessionService::new());
+    service.keep_no_durable_sessions();
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(definition, MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .allow_ephemeral_sessions(true)
+        .create()
+        .await
+        .expect("create a mob without persistent sessions");
+    (handle, service)
+}
+
+/// A durable profile needs a session service that keeps persistent
+/// sessions: on a mob whose service keeps none, its spawn is refused typed
+/// before any session is built, and no member is left behind.
+#[tokio::test]
+async fn a_durable_profile_spawn_without_persistent_sessions_is_refused_typed() {
+    let (handle, service) =
+        create_test_mob_without_persistent_sessions(durable_worker_definition()).await;
+    let member = AgentIdentity::from("durable-worker-1");
+    let mut spec = SpawnMemberSpec::new(ProfileName::from("worker"), member.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    let error = handle
+        .spawn_spec(spec)
+        .await
+        .expect_err("a durable profile needs persistent sessions");
+    assert!(
+        matches!(
+            &error,
+            MobError::NonDurableService { member_id, profile }
+                if member_id == &member && profile.as_str() == "worker"
+        ),
+        "{error:?}"
+    );
+    assert_eq!(member_build_count(&service, &member).await, 0);
+    assert!(handle.get_member(&member).await.expect("read").is_none());
+
+    // The same mob still spawns an ordinary profile.
+    let ordinary = AgentIdentity::from("ordinary-lead-1");
+    handle
+        .spawn_spec(SpawnMemberSpec::new(
+            ProfileName::from("lead"),
+            ordinary.clone(),
+        ))
+        .await
+        .expect("an ordinary profile needs no persistent sessions");
+    assert!(handle.get_member(&ordinary).await.expect("read").is_some());
+}
+
+/// A service that keeps the persistent-session contract, but whose member
+/// sessions do not outlive the process (a persistent service over in-memory
+/// stores), answers `keeps_durable_member_sessions` false: a durable
+/// profile's spawn is refused typed before any session is built, and an
+/// ordinary profile still spawns on the same mob.
+#[tokio::test]
+async fn a_durable_profile_spawn_on_member_sessions_kept_in_memory_is_refused_typed() {
+    let service = Arc::new(MockSessionService::new());
+    service.keep_member_sessions_in_memory();
+    let _ = service.enable_runtime_adapter();
+    assert!(
+        service.supports_persistent_sessions(),
+        "the service keeps the persistent-session contract"
+    );
+    let handle = MobBuilder::new(durable_worker_definition(), MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create a mob whose member sessions live in memory");
+    let member = AgentIdentity::from("durable-worker-1");
+    let mut spec = SpawnMemberSpec::new(ProfileName::from("worker"), member.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    let error = handle
+        .spawn_spec(spec)
+        .await
+        .expect_err("a durable profile needs member sessions that outlive the process");
+    assert!(
+        matches!(
+            &error,
+            MobError::NonDurableService { member_id, profile }
+                if member_id == &member && profile.as_str() == "worker"
+        ),
+        "{error:?}"
+    );
+    assert_eq!(member_build_count(&service, &member).await, 0);
+    assert!(handle.get_member(&member).await.expect("read").is_none());
+
+    let ordinary = AgentIdentity::from("ordinary-lead-1");
+    handle
+        .spawn_spec(SpawnMemberSpec::new(
+            ProfileName::from("lead"),
+            ordinary.clone(),
+        ))
+        .await
+        .expect("an ordinary profile needs no durable member sessions");
+    assert!(handle.get_member(&ordinary).await.expect("read").is_some());
+}
+
+/// `keeps_durable_member_sessions` defaults to the persistent-session
+/// contract: a service that does not answer it (here a decorator that
+/// forwards only `supports_persistent_sessions`) answers what that contract
+/// answers, so a durable profile spawns exactly where it did before.
+#[test]
+fn durable_member_sessions_default_to_the_persistent_session_contract() {
+    let inner = Arc::new(MockSessionService::new());
+    let service = PersistedListingSessionService::new(Arc::clone(&inner));
+    assert!(service.supports_persistent_sessions());
+    assert!(MobSessionService::keeps_durable_member_sessions(&service));
+
+    inner.keep_no_durable_sessions();
+    assert!(!service.supports_persistent_sessions());
+    assert!(!MobSessionService::keeps_durable_member_sessions(&service));
+}
+
+/// A policy auto-spawn of a durable profile is refused the same way, before
+/// any session is built.
+#[tokio::test]
+async fn a_durable_policy_auto_spawn_without_persistent_sessions_is_refused_typed() {
+    let (handle, service) =
+        create_test_mob_without_persistent_sessions(durable_worker_definition()).await;
+    handle
+        .set_spawn_policy(Some(Arc::new(StaticWorkerSpawnPolicy)))
+        .await
+        .expect("set spawn policy");
+    let target = AgentIdentity::from("auto-durable-worker");
+    let result = handle
+        .submit_work(
+            AgentRuntimeId::initial(target.clone()),
+            FenceToken::new(0),
+            WorkRef::new(),
+            WorkSpec::new(
+                "work for a durable worker".to_string(),
+                WorkOrigin::External,
+            ),
+        )
+        .await;
+    assert!(
+        matches!(
+            &result,
+            Err(MobError::NonDurableService { member_id, profile })
+                if member_id == &target && profile.as_str() == "worker"
+        ),
+        "{result:?}"
+    );
+    assert!(handle.get_member(&target).await.expect("read").is_none());
+    assert_eq!(service.recorded_create_requests().await.len(), 0);
+    assert_eq!(service.active_session_count().await, 0);
+}
+
+/// A policy auto-spawn of a durable profile on a service that keeps the
+/// persistent-session contract, but whose member sessions do not outlive the
+/// process, is refused the same way as the explicit spawn: the auto-spawn
+/// check reads `keeps_durable_member_sessions` too.
+#[tokio::test]
+async fn a_durable_policy_auto_spawn_on_member_sessions_kept_in_memory_is_refused_typed() {
+    let service = Arc::new(MockSessionService::new());
+    service.keep_member_sessions_in_memory();
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(durable_worker_definition(), MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create a mob whose member sessions live in memory");
+    handle
+        .set_spawn_policy(Some(Arc::new(StaticWorkerSpawnPolicy)))
+        .await
+        .expect("set spawn policy");
+    let target = AgentIdentity::from("auto-durable-worker");
+    let result = handle
+        .submit_work(
+            AgentRuntimeId::initial(target.clone()),
+            FenceToken::new(0),
+            WorkRef::new(),
+            WorkSpec::new(
+                "work for a durable worker".to_string(),
+                WorkOrigin::External,
+            ),
+        )
+        .await;
+    assert!(
+        matches!(
+            &result,
+            Err(MobError::NonDurableService { member_id, profile })
+                if member_id == &target && profile.as_str() == "worker"
+        ),
+        "{result:?}"
+    );
+    assert!(handle.get_member(&target).await.expect("read").is_none());
+    assert_eq!(service.recorded_create_requests().await.len(), 0);
+    assert_eq!(service.active_session_count().await, 0);
+}
+
+/// Lets every durable worker's run resume.
+#[cfg(feature = "runtime-adapter")]
+struct ContinueResumeGate;
+
+#[cfg(feature = "runtime-adapter")]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl crate::DurableResumeGate for ContinueResumeGate {
+    async fn check(&self, _request: &crate::DurableResumeRequest) -> crate::DurableResumeVerdict {
+        crate::DurableResumeVerdict::Continue
+    }
+}
+
+/// Whether `identity`'s current registration on `machine` holds a resumed
+/// run admission.
+#[cfg(feature = "runtime-adapter")]
+async fn member_registration_holds_resume_admission(
+    handle: &MobHandle,
+    machine: &meerkat_runtime::MeerkatMachine,
+    identity: &AgentIdentity,
+) -> bool {
+    let session_id = handle
+        .resolve_bridge_session_id(identity)
+        .await
+        .expect("a session-backed member");
+    let registration = machine
+        .current_session_registration_witness(&session_id)
+        .await
+        .expect("the member's session is registered");
+    machine
+        .resumed_run_admission_bound(&registration)
+        .await
+        .expect("read the registration's admission")
+}
+
+/// The mob binds its durable resume gate on a durable worker's exact
+/// registration when the worker spawns, and on no other member's.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn a_durable_worker_spawns_with_the_resume_gate_bound_on_its_registration() {
+    let service = Arc::new(MockSessionService::new());
+    let machine = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(durable_worker_definition(), MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .with_durable_resume_gate(Arc::new(ContinueResumeGate))
+        .create()
+        .await
+        .expect("create mob");
+    let worker = AgentIdentity::from("durable-worker-1");
+    let mut spec = SpawnMemberSpec::new(ProfileName::from("worker"), worker.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle
+        .spawn_spec(spec)
+        .await
+        .expect("spawn the durable worker");
+    let ordinary = AgentIdentity::from("ordinary-lead-1");
+    handle
+        .spawn_spec(SpawnMemberSpec::new(
+            ProfileName::from("lead"),
+            ordinary.clone(),
+        ))
+        .await
+        .expect("spawn an ordinary member");
+
+    assert!(member_registration_holds_resume_admission(&handle, &machine, &worker).await);
+    assert!(!member_registration_holds_resume_admission(&handle, &machine, &ordinary).await);
+}
+
+/// A mob without a gate binds nothing, even on a durable worker.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn a_durable_worker_without_a_gate_has_no_resume_admission() {
+    let service = Arc::new(MockSessionService::new());
+    let machine = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(durable_worker_definition(), MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    let worker = AgentIdentity::from("durable-worker-1");
+    let mut spec = SpawnMemberSpec::new(ProfileName::from("worker"), worker.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle
+        .spawn_spec(spec)
+        .await
+        .expect("spawn the durable worker");
+    assert!(!member_registration_holds_resume_admission(&handle, &machine, &worker).await);
+}
+
+/// A durable worker restored after a crash, by a mob resumed in the same
+/// process on the same runtime, is rebuilt with the gate bound on its
+/// registration: the restore binds it on a fresh registration, and keeps
+/// the one an adopted registration already holds instead of failing.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn a_restored_durable_worker_keeps_its_resume_gate() {
+    let service = Arc::new(MockSessionService::new());
+    let machine = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let restart_storage = MobStorage::with_events_and_runtime_metadata(
+        storage.events.clone(),
+        storage.runtime_metadata.clone(),
+    );
+    let handle = MobBuilder::new(durable_worker_definition(), storage)
+        .with_session_service(service.clone())
+        .with_durable_resume_gate(Arc::new(ContinueResumeGate))
+        .create()
+        .await
+        .expect("create mob");
+    let worker = AgentIdentity::from("durable-worker-1");
+    let mut spec = SpawnMemberSpec::new(ProfileName::from("worker"), worker.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle
+        .spawn_spec(spec)
+        .await
+        .expect("spawn the durable worker");
+    let session = handle
+        .resolve_bridge_session_id(&worker)
+        .await
+        .expect("the worker's session");
+    MobSessionService::discard_live_session(service.as_ref(), &session)
+        .await
+        .expect("discard the live session");
+    crash_stop_and_release_routes(handle).await;
+
+    let resumed = MobBuilder::for_resume(restart_storage)
+        .with_session_service(service.clone())
+        .with_durable_resume_gate(Arc::new(ContinueResumeGate))
+        .resume()
+        .await
+        .expect("resume the mob");
+    assert_eq!(
+        resumed.resolve_bridge_session_id(&worker).await,
+        Some(session),
+        "the worker is restored on its own session"
+    );
+    assert!(member_registration_holds_resume_admission(&resumed, &machine, &worker).await);
+}
+
+/// A stopped mob's durable worker that an explicit resume rebuilds, after a
+/// crash in the same process, is rebuilt with the gate bound on its
+/// registration: the explicit resume provisions it with the continuity
+/// intent its incarnation was spawned with, read from the journal.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn an_explicitly_resumed_durable_worker_keeps_its_resume_gate() {
+    let service = Arc::new(MockSessionService::new());
+    let machine = service.enable_runtime_adapter();
+    let storage = MobStorage::in_memory();
+    let restart_storage = MobStorage::with_events_and_runtime_metadata(
+        storage.events.clone(),
+        storage.runtime_metadata.clone(),
+    );
+    let handle = MobBuilder::new(durable_worker_definition(), storage)
+        .with_session_service(service.clone())
+        .with_durable_resume_gate(Arc::new(ContinueResumeGate))
+        .create()
+        .await
+        .expect("create mob");
+    let worker = AgentIdentity::from("durable-worker-1");
+    let mut spec = SpawnMemberSpec::new(ProfileName::from("worker"), worker.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle
+        .spawn_spec(spec)
+        .await
+        .expect("spawn the durable worker");
+    let session = handle
+        .resolve_bridge_session_id(&worker)
+        .await
+        .expect("the worker's session");
+    handle.stop().await.expect("stop the mob");
+    MobSessionService::discard_live_session(service.as_ref(), &session)
+        .await
+        .expect("discard the live session");
+    crash_stop_and_release_routes(handle).await;
+
+    let resumed = MobBuilder::for_resume(restart_storage)
+        .with_session_service(service.clone())
+        .with_durable_resume_gate(Arc::new(ContinueResumeGate))
+        .resume()
+        .await
+        .expect("resume the stopped mob");
+    resumed
+        .resume()
+        .await
+        .expect("the explicit resume rebuilds the stopped worker");
+    assert_eq!(
+        resumed.resolve_bridge_session_id(&worker).await,
+        Some(session),
+        "the worker is rebuilt on its own session"
+    );
+    assert!(member_registration_holds_resume_admission(&resumed, &machine, &worker).await);
+}
+
+/// A durable worker whose idle executor the runtime retired (its live
+/// session and its registration gone) is revived on a fresh registration,
+/// with the gate bound on it: the warm revival provisions it with the
+/// continuity intent its incarnation was spawned with, read from the
+/// journal.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn a_warm_revived_durable_worker_keeps_its_resume_gate() {
+    let service = Arc::new(MockSessionService::new());
+    let machine = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(durable_worker_definition(), MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .with_durable_resume_gate(Arc::new(ContinueResumeGate))
+        .create()
+        .await
+        .expect("create mob");
+    let worker = AgentIdentity::from("durable-worker-1");
+    let mut spec = SpawnMemberSpec::new(ProfileName::from("worker"), worker.clone());
+    spec.runtime_mode = Some(crate::MobRuntimeMode::TurnDriven);
+    handle
+        .spawn_spec(spec)
+        .await
+        .expect("spawn the durable worker");
+    let session = handle
+        .resolve_bridge_session_id(&worker)
+        .await
+        .expect("the worker's session");
+    let builds_before = member_build_count(&service, &worker).await;
+
+    MobSessionService::discard_live_session(service.as_ref(), &session)
+        .await
+        .expect("discard the idle live session");
+    machine
+        .unregister_session(&session)
+        .await
+        .expect("the runtime unregisters the idle executor");
+    assert!(!machine.contains_session(&session).await);
+
+    handle
+        .ensure_member_live(&worker)
+        .await
+        .expect("the warm revival rebuilds the worker");
+    assert_eq!(
+        member_build_count(&service, &worker).await,
+        builds_before + 1,
+        "the worker is rebuilt once"
+    );
+    assert!(
+        machine.contains_session(&session).await,
+        "the worker is registered again on its own session"
+    );
+    assert!(member_registration_holds_resume_admission(&handle, &machine, &worker).await);
+}
+
 /// Appends its tag to the spec's labels, or fails when it has none.
 struct ChainStep(Option<&'static str>);
 
@@ -32080,6 +32959,108 @@ async fn test_fork_helper_tool_access_policy_reaches_session_metadata() {
         gated_policies,
         vec![policy],
         "fork_helper policy must reach exactly the helper's persisted metadata tooling section"
+    );
+}
+
+/// A prompt-context fork child's create request carries its typed source
+/// (`SessionBuildOptions::prompt_context_fork_source`): the source
+/// member's binding and its session. The child's creation is not a fork
+/// creation (its provenance is Unproven: the host forked it) and has no
+/// durable fork source, and no other create carries one.
+#[tokio::test]
+async fn test_fork_helper_create_carries_the_typed_prompt_context_source() {
+    let mut definition = sample_definition();
+    definition
+        .profiles
+        .get_mut(&ProfileName::from("worker"))
+        .and_then(|binding| binding.as_inline_mut())
+        .expect("worker profile")
+        .external_addressable = true;
+    let (handle, service) = create_test_mob(definition).await;
+    service.set_return_exact_run_result(true);
+    let source_id = AgentIdentity::from("typed-source");
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            source_id.clone(),
+            Some("source context".into()),
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn source member");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        handle.fork_helper(
+            &source_id,
+            AgentIdentity::from("typed-helper"),
+            "continue",
+            crate::launch::ForkContext::FullHistory,
+            HelperOptions {
+                role_name: Some(ProfileName::from("worker")),
+                runtime_mode: Some(crate::MobRuntimeMode::TurnDriven),
+                ..HelperOptions::default()
+            },
+            "typed-source-result",
+            256,
+        ),
+    )
+    .await
+    .expect("fork_helper must not hang")
+    .expect("fork_helper succeeds");
+
+    let creates = service.recorded_create_requests().await;
+    let create_of = |member: &str| {
+        creates
+            .iter()
+            .find(|record| {
+                record
+                    .mob_member_binding
+                    .as_ref()
+                    .is_some_and(|binding| binding.member == member)
+            })
+            .unwrap_or_else(|| panic!("the create request of {member}"))
+    };
+    let source = create_of("typed-source");
+    let helper = create_of("typed-helper");
+    let typed = helper
+        .prompt_context_fork_source
+        .as_ref()
+        .expect("the helper's create carries its typed source");
+    assert_eq!(
+        Some(&typed.source_member),
+        source.mob_member_binding.as_ref(),
+        "the typed source names the source member's binding"
+    );
+    assert_eq!(
+        typed.source_session_id.as_ref(),
+        Some(&source.session_id),
+        "the typed source names the source member's session"
+    );
+    assert!(helper.fork_source.is_none(), "no durable fork source");
+    assert!(
+        creates
+            .iter()
+            .filter(|record| record.prompt_context_fork_source.is_some())
+            .count()
+            == 1,
+        "only the fork child's create carries a typed source"
+    );
+    // The host forked the helper, so no member's spawn proves its
+    // ancestry; it is never a durable fork.
+    let snapshot = handle
+        .member_creation_for_session(&helper.session_id)
+        .await
+        .expect("the helper's creation reads")
+        .expect("the helper has a creation record");
+    assert_eq!(
+        snapshot.creation.provenance,
+        crate::member_creation::MemberCreationProvenance::Unproven,
+        "a host-forked prompt-context child is not a durable fork"
+    );
+    assert!(
+        snapshot.fork_source.is_none(),
+        "its creation names no fork source"
     );
 }
 
@@ -38304,6 +39285,131 @@ async fn test_attach_existing_session_restores_persisted_inactive_session() {
             |message| !matches!(message, Message::System(system) if system.content == resume_prompt)
         ),
         "resume build configuration must not append a new System row",
+    );
+}
+
+/// A session with no messages and no deferred-turn state is a deferred
+/// template: the session service marks its first turn pending when a
+/// deferred resume creates it. A resume of such a session therefore owes the
+/// member's first turn and delivers it.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn test_resume_of_a_deferred_template_session_delivers_the_first_turn() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let _adapter = service.enable_runtime_adapter();
+    let identity = AgentIdentity::from("w-template");
+    let seeded = service
+        .create_session(CreateSessionRequest {
+            injected_context: Vec::new(),
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "seed".to_string().into(),
+            system_prompt: meerkat_core::SystemPromptOverride::Inherit,
+            max_tokens: Some(4096),
+            event_tx: None,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                comms_name: Some(
+                    super::actor::render_member_comms_name(
+                        sample_definition().id.as_str(),
+                        "worker",
+                        identity.as_str(),
+                    )
+                    .expect("comms name"),
+                ),
+                ..Default::default()
+            }),
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            labels: None,
+        })
+        .await
+        .expect("seed the worker session");
+    let session_id = seeded.session_id.clone();
+    let seeded_session = service
+        .live_session_clone(&session_id)
+        .await
+        .expect("seeded live session");
+    let mut template = Session::with_id(session_id.clone());
+    template
+        .set_session_metadata(
+            seeded_session
+                .session_metadata()
+                .expect("seeded session metadata"),
+        )
+        .expect("template metadata");
+    assert!(
+        template.messages().is_empty()
+            && template
+                .try_deferred_turn_state()
+                .expect("template deferred-turn state")
+                .is_none(),
+        "the fixture is a deferred template"
+    );
+    service.replace_live_session(template).await;
+    MobSessionService::discard_live_session(service.as_ref(), &session_id)
+        .await
+        .expect("keep only the durable template");
+
+    handle
+        .spawn_spec(
+            SpawnMemberSpec::new("worker", identity.as_str())
+                .with_resume_bridge_session_id(session_id.clone()),
+        )
+        .await
+        .expect("resume the template session");
+    wait_for_keep_alive_start_turn_count(service.as_ref(), 1).await;
+    assert_eq!(
+        service.keep_alive_start_turn_call_count(),
+        1,
+        "the template's owed first turn runs once"
+    );
+}
+
+/// The resume witness owes the first turn exactly when the session service
+/// leaves it pending: a stored pending first turn, or a deferred template.
+#[test]
+fn adopted_first_turn_is_owed_only_while_the_first_turn_never_started() {
+    use super::handle::AdoptedFirstTurn;
+
+    assert_eq!(
+        AdoptedFirstTurn::of(&Session::new()),
+        AdoptedFirstTurn::Owed,
+        "a deferred template owes its first turn"
+    );
+
+    let mut pending = Session::new();
+    pending.push(Message::System(meerkat_core::types::SystemMessage::new(
+        "member prompt",
+    )));
+    let mut state = meerkat_core::SessionDeferredTurnState::default();
+    state.mark_initial_turn_pending();
+    pending
+        .set_deferred_turn_state(state.clone())
+        .expect("pending deferred-turn state");
+    assert_eq!(
+        AdoptedFirstTurn::of(&pending),
+        AdoptedFirstTurn::Owed,
+        "a stored pending first turn is owed"
+    );
+
+    let mut started = pending.clone();
+    assert!(state.mark_initial_turn_started(), "pending to consumed");
+    started
+        .set_deferred_turn_state(state)
+        .expect("consumed deferred-turn state");
+    assert_eq!(
+        AdoptedFirstTurn::of(&started),
+        AdoptedFirstTurn::Started,
+        "a consumed first turn is not owed"
+    );
+
+    let mut immediate = Session::new();
+    immediate.push(Message::User(meerkat_core::types::UserMessage::text(
+        "first turn of a session created without a deferred first turn",
+    )));
+    assert_eq!(
+        AdoptedFirstTurn::of(&immediate),
+        AdoptedFirstTurn::Started,
+        "a session that was not created deferred owes nothing"
     );
 }
 
@@ -47386,6 +48492,7 @@ async fn provision_runtime_backed_disposal_fixture(
             generated_self_owned_operation_owner: Some(session_id),
             runtime_revival_intent: super::provisioner::RuntimeRevivalIntent::None,
             held_bound: None,
+            continuity_intent: crate::runtime::SpawnContinuityIntent::Ephemeral,
         })
         .await
         .unwrap_or_else(|error| {
@@ -47537,6 +48644,179 @@ async fn test_reload_discard_cancelled_waiter_retry_rebinds_existing_cold_succes
     .expect("retry must reconstruct exact registry handoff from current cold successor");
     assert!(!adapter.contains_session(&session_id).await);
     assert!(!provisioner.ops_binding_present_for_test(&session_id));
+}
+
+/// A reload at a retirement's ingress detach (a member that degraded after
+/// its quiesce) carries the member's bound operation into the cold successor
+/// as a retention request. The detach acts on that successor, and the
+/// disposal that follows (the session archive stage) rebinds and retires the
+/// retained operation: nothing of the operation binding is left once the
+/// member's session is disposed.
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reload_at_the_ingress_detach_hands_its_retained_operation_to_the_disposal() {
+    struct FailingBoundaryExecutor;
+    #[async_trait::async_trait]
+    impl meerkat_core::lifecycle::core_executor::CoreExecutor for FailingBoundaryExecutor {
+        async fn apply(
+            &mut self,
+            run_id: meerkat_core::RunId,
+            primitive: meerkat_core::lifecycle::run_primitive::RunPrimitive,
+        ) -> Result<
+            meerkat_core::lifecycle::core_executor::CoreApplyOutput,
+            meerkat_core::lifecycle::core_executor::CoreExecutorError,
+        > {
+            Ok(
+                meerkat_core::lifecycle::core_executor::CoreApplyOutput::with_untyped_snapshot(
+                    meerkat_core::lifecycle::run_receipt::RunBoundaryReceiptDraft {
+                        run_id,
+                        boundary:
+                            meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
+                        contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                        conversation_digest: None,
+                        message_count: 0,
+                    },
+                    None,
+                    None,
+                ),
+            )
+        }
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+            Ok(())
+        }
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+            Ok(())
+        }
+    }
+    let service = Arc::new(MockSessionService::new());
+    let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let adapter = Arc::new(
+        meerkat_runtime::MeerkatMachine::persistent_without_blobs(runtime_store)
+            .expect("construct runtime authority"),
+    );
+    service.set_runtime_adapter(Arc::clone(&adapter));
+    let provisioner = Arc::new(super::provisioner::SessionBackend::new(
+        service,
+        Some(Arc::clone(&adapter)),
+        None,
+    ));
+    let session = Session::new();
+    let session_id = session.id().clone();
+    provision_runtime_backed_disposal_fixture(
+        provisioner.as_ref(),
+        session,
+        "ingress-stage-reload",
+    )
+    .await;
+    adapter
+        .ensure_session_with_executor(session_id.clone(), Box::new(FailingBoundaryExecutor))
+        .await
+        .expect("replace fixture executor");
+    let exact_operation_id = provisioner
+        .ops_binding_operation_id_for_test(&session_id)
+        .expect("fixture publishes one exact mob-child operation");
+    adapter
+        .persist_current_ops_lifecycle_for_test(&session_id)
+        .await
+        .expect("persist exact pre-fault mob-child operation authority");
+    assert!(
+        adapter
+            .force_session_durability_reload_required_for_test(&session_id)
+            .await
+    );
+    meerkat_runtime::SessionServiceRuntimeExt::accept_input(
+        adapter.as_ref(),
+        &session_id,
+        meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+            "trigger degraded teardown",
+            None,
+        )),
+    )
+    .await
+    .expect_err("degraded admission must start teardown");
+
+    // The ingress stage's reload: the registration current for the retiring
+    // member's session, through the quiesce's reload helper.
+    let registration = adapter
+        .current_session_registration_witness(&session_id)
+        .await
+        .expect("the degraded registration is current");
+    let settlement = tokio::time::timeout(
+        Duration::from_secs(5),
+        super::provisioner::MemberSessionDisposalArc::reload_durability_degraded_registration_settlement_until(
+            &adapter,
+            Some(&provisioner.session_ops_adapter()),
+            &registration,
+            &session_id,
+            Instant::now() + Duration::from_secs(5),
+        ),
+    )
+    .await
+    .expect("the reload settles")
+    .expect("the reload is not refused");
+    let meerkat_runtime::ReloadRequiredRegistrationSettlement::Discarded { successor } = settlement
+    else {
+        panic!("the degraded registration is discarded: {settlement:?}");
+    };
+    let successor_registry = adapter
+        .ops_lifecycle_registry_if_current_registration(&successor)
+        .await
+        .expect("the published successor is current");
+    assert!(
+        meerkat_core::ops_lifecycle::OpsLifecycleRegistry::snapshot(
+            successor_registry.as_ref(),
+            &exact_operation_id,
+        )
+        .expect("read the retained operation")
+        .is_some(),
+        "the reload retains the member's bound operation in the successor"
+    );
+    // The ingress detach on the successor, as the stage runs it.
+    match adapter
+        .update_peer_ingress_context(&session_id, false, None)
+        .await
+    {
+        Ok(_)
+        | Err(
+            meerkat_runtime::RuntimeDriverError::NotFound { .. }
+            | meerkat_runtime::RuntimeDriverError::Destroyed
+            | meerkat_runtime::RuntimeDriverError::NotReady { .. },
+        ) => {}
+        Err(error) => panic!("the successor's ingress detaches: {error}"),
+    }
+    assert!(matches!(
+        adapter.peer_ingress_owner(&session_id).await,
+        meerkat_runtime::PeerIngressOwner::Unattached
+    ));
+    assert_eq!(
+        adapter
+            .current_session_registration_witness(&session_id)
+            .await
+            .as_ref(),
+        Some(&successor),
+        "the detach leaves the published successor current"
+    );
+
+    // The session archive stage's disposal consumes the retention.
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        provisioner.dispose_inline_for_recovery_test(&session_id),
+    )
+    .await
+    .expect("the disposal stays bounded")
+    .expect("the disposal rebinds and retires the retained operation");
+    assert!(!adapter.contains_session(&session_id).await);
+    assert!(
+        !provisioner.ops_binding_present_for_test(&session_id),
+        "no operation binding of the member's session is left"
+    );
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -51045,6 +52325,7 @@ async fn test_provision_member_uses_local_bindings_before_routed_runtime_bound()
             generated_self_owned_operation_owner: Some(bridge_session_id.clone()),
             runtime_revival_intent: super::provisioner::RuntimeRevivalIntent::None,
             held_bound: None,
+            continuity_intent: crate::runtime::SpawnContinuityIntent::Ephemeral,
         })
         .await
         .expect("member provision should install local runtime resources");
@@ -51133,6 +52414,7 @@ async fn retained_resume_request(
         generated_self_owned_operation_owner: Some(session_id.clone()),
         runtime_revival_intent: super::provisioner::RuntimeRevivalIntent::None,
         held_bound: None,
+        continuity_intent: crate::runtime::SpawnContinuityIntent::Ephemeral,
     }
 }
 
@@ -51454,6 +52736,7 @@ async fn test_multi_backend_session_provision_forwards_injected_authorized_resum
             generated_self_owned_operation_owner: Some(session_id.clone()),
             runtime_revival_intent: super::provisioner::RuntimeRevivalIntent::None,
             held_bound: None,
+            continuity_intent: crate::runtime::SpawnContinuityIntent::Ephemeral,
         })
         .await
         .expect_err("stale injected authority must fail after Prepared");
@@ -51525,6 +52808,7 @@ async fn test_multi_backend_session_provision_forwards_injected_authorized_resum
             generated_self_owned_operation_owner: Some(session_id.clone()),
             runtime_revival_intent: super::provisioner::RuntimeRevivalIntent::None,
             held_bound: None,
+            continuity_intent: crate::runtime::SpawnContinuityIntent::Ephemeral,
         })
         .await
         .expect("session arm should consume the injected resume authorization");
@@ -51813,6 +53097,7 @@ async fn test_fresh_provision_failure_preserves_resumable_document_and_quiesces_
             generated_self_owned_operation_owner: Some(SessionId::new()),
             runtime_revival_intent: super::provisioner::RuntimeRevivalIntent::None,
             held_bound: None,
+            continuity_intent: crate::runtime::SpawnContinuityIntent::Ephemeral,
         })
         .await
         .expect_err("post-create owner mismatch must fail before receipt publication");
@@ -51890,6 +53175,7 @@ async fn test_fresh_provision_failure_preserves_resumable_document_and_quiesces_
             generated_self_owned_operation_owner: Some(session_id.clone()),
             runtime_revival_intent: super::provisioner::RuntimeRevivalIntent::None,
             held_bound: None,
+            continuity_intent: crate::runtime::SpawnContinuityIntent::Ephemeral,
         })
         .await
         .expect("explicit resume should reconstruct the preserved session");
@@ -51968,6 +53254,7 @@ async fn test_retired_session_revival_failure_preserves_resumable_document() {
             generated_self_owned_operation_owner: Some(session_id.clone()),
             runtime_revival_intent: super::provisioner::RuntimeRevivalIntent::None,
             held_bound: None,
+            continuity_intent: crate::runtime::SpawnContinuityIntent::Ephemeral,
         })
         .await
         .expect("seed session provision");
@@ -52046,6 +53333,7 @@ async fn test_retired_session_revival_failure_preserves_resumable_document() {
             generated_self_owned_operation_owner: Some(mismatched_owner),
             runtime_revival_intent: super::provisioner::RuntimeRevivalIntent::None,
             held_bound: None,
+            continuity_intent: crate::runtime::SpawnContinuityIntent::Ephemeral,
         })
         .await
         .expect_err("post-attachment validation must fail");
@@ -52133,6 +53421,7 @@ async fn test_retired_session_revival_failure_preserves_resumable_document() {
             generated_self_owned_operation_owner: Some(session_id.clone()),
             runtime_revival_intent: super::provisioner::RuntimeRevivalIntent::None,
             held_bound: None,
+            continuity_intent: crate::runtime::SpawnContinuityIntent::Ephemeral,
         })
         .await
         .expect("explicit resume should reconstruct the preserved promoted session");
@@ -81447,6 +82736,7 @@ async fn test_spawn_realm_ref_resolves_from_store() {
         max_inline_peer_notifications: None,
         output_schema: None,
         provider_params: None,
+        durable: false,
     };
     realm_store
         .create("shared-worker", &worker_profile)
@@ -84790,6 +86080,7 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         MobError::ResumeProviderParamsRequireResume { .. } => {
             "resume_provider_params_require_resume".to_string()
         }
+        MobError::NonDurableService { .. } => "non_durable_service".to_string(),
         MobError::MemberRoleMigrationRequired { .. } => {
             "member_role_migration_required".to_string()
         }
@@ -84798,6 +86089,8 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         }
         MobError::DeliveryInteractionConflict { .. } => "delivery_interaction_conflict".to_string(),
         MobError::ForkInstructionRefused { .. } => "fork_instruction_refused".to_string(),
+        MobError::ForkContextTooLarge { .. } => "fork_context_too_large".to_string(),
+        MobError::HostFeaturesProbeFailed { .. } => "host_features_probe_failed".to_string(),
         MobError::IncarnationInconsistent { .. } => "incarnation_inconsistent".to_string(),
         MobError::IncarnationDestroyed { .. } => "incarnation_destroyed".to_string(),
         MobError::ProvenanceUnavailable { .. } => "provenance_unavailable".to_string(),
@@ -84814,6 +86107,10 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         MobError::WorkInputCompletionUnavailable { .. } => {
             "work_input_completion_unavailable".to_string()
         }
+        MobError::MemberInputRequeuedAcrossStop { .. } => {
+            "member_input_requeued_across_stop".to_string()
+        }
+        MobError::MemberInputRequeueExpired { .. } => "member_input_requeue_expired".to_string(),
         MobError::MemberInputRefused { .. } => "member_input_refused".to_string(),
         MobError::GovernedInputUnbound { .. } => "governed_input_unbound".to_string(),
         MobError::InvalidTransition { from, to } => {
@@ -84872,6 +86169,10 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
             "member_startup_recovery_failed".to_string()
         }
         MobError::DurabilityFailStop { .. } => "durability_fail_stop".to_string(),
+        MobError::MemberDurableTailUnprovable { .. } => {
+            "member_durable_tail_unprovable".to_string()
+        }
+        MobError::MemberCustodyDeferred { .. } => "member_custody_deferred".to_string(),
         MobError::SpawnMemberAdmissionDenied { .. } => "spawn_member_admission_denied".to_string(),
         MobError::BridgeRequestTimedOut { .. } => "bridge_request_timed_out".to_string(),
         MobError::ForkSourceUnavailable { .. } => "fork_source_unavailable".to_string(),
@@ -84885,6 +86186,7 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         MobError::MemberAdmissionBacklogFull { .. } => "member_admission_backlog_full".to_string(),
         MobError::ActorCommandTimedOut { .. } => "actor_command_timed_out".to_string(),
         MobError::MemberReloadRefused { .. } => "member_reload_refused".to_string(),
+        MobError::MemberReloadRepairBlocked { .. } => "member_reload_repair_blocked".to_string(),
         MobError::HeldProvisionUnsupported { .. } => "held_provision_unsupported".to_string(),
         MobError::RespawnPredecessorRestrictionsUnavailable { .. } => {
             "respawn_predecessor_restrictions_unavailable".to_string()
@@ -84914,6 +86216,13 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         }
         MobError::SchemaValidation { .. } => "schema_validation".to_string(),
         MobError::InsufficientTargets { .. } => "insufficient_targets".to_string(),
+        MobError::FlowRoleTargetsRefused { refusal, .. } => {
+            format!("flow_role_targets_refused:{refusal:?}")
+        }
+        MobError::BoundFlowTargetsUnavailable { .. } => {
+            "bound_flow_targets_unavailable".to_string()
+        }
+        MobError::FlowRunIdempotencyConflict { .. } => "flow_run_idempotency_conflict".to_string(),
         MobError::TopologyViolation { .. } => "topology_violation".to_string(),
         MobError::BridgeDeliveryRejected { cause, .. } => {
             format!("bridge_delivery_rejected:{cause}")
@@ -85026,6 +86335,12 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         }
         MobError::MemberDestinationNotInstalled { .. } => {
             "member_destination_not_installed".to_string()
+        }
+        MobError::OperatorAuthorityCeilingRefused { reason, .. } => {
+            format!("operator_authority_ceiling_refused:{reason:?}")
+        }
+        MobError::MemberSendIdempotency { refusal, .. } => {
+            format!("member_send_idempotency:{}", refusal.kind())
         }
     }
 }
@@ -92589,6 +93904,58 @@ fn placement_fixture_uses_local_mob_authority_types() {
         "shared unit fixtures must not import the separately compiled self-dev-dependency",
     );
 }
+/// A turn-driven placed spawn with an initial message settles its activation
+/// without retaining a cleanup that would block graph-scoped controls.
+#[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+#[tokio::test(flavor = "multi_thread")]
+async fn turn_driven_placed_spawn_with_initial_message_retains_no_activation_cleanup() {
+    let _guard = placement_support::REAL_COMMS_TEST_LOCK.lock().await;
+    let scripted = placement_support::spawn_scripted_host_peer("td-cleanup-host").await;
+    let member_endpoint = Arc::new(
+        placement_support::spawn_peer_comms_endpoint("td-cleanup-member", true, None).await,
+    );
+    let member =
+        placement_support::spawn_scripted_member_turn_responder(Arc::clone(&member_endpoint));
+    scripted.script_member_identity(
+        "td-cleanup",
+        placement_support::member_identity_of(&member_endpoint),
+    );
+    scripted.bind_member_endpoint("td-cleanup", member_endpoint);
+    let controlling = placement_support::create_controlling_mob("td-cleanup").await;
+    let report = controlling.bind_scripted(&scripted).await;
+    let spec = placement_support::placed_spawn_spec("worker", "td-cleanup", &report.host_id)
+        .with_runtime_mode(crate::MobRuntimeMode::TurnDriven)
+        .with_initial_message("PLACED_INITIAL_MESSAGE token-tau".to_string());
+    let spawned =
+        tokio::time::timeout(Duration::from_secs(10), controlling.handle.spawn_spec(spec))
+            .await
+            .expect("the placed spawn settles");
+
+    let reply_rx = controlling
+        .handle
+        .enqueue_actor_command_for_test(|reply_tx| MobCommand::SpawnActivationCustodyProbe {
+            reply_tx,
+        })
+        .await
+        .expect("custody probe enqueue");
+    let census = tokio::time::timeout(Duration::from_secs(2), reply_rx)
+        .await
+        .expect("custody probe answers")
+        .expect("custody probe reply");
+    assert!(
+        spawned.is_ok(),
+        "the spawn commits: {spawned:?}; retained cleanups {}",
+        census.retained_cleanups
+    );
+    assert_eq!(census.total, 0, "no activation holds custody");
+    assert_eq!(
+        census.retained_cleanups, 0,
+        "no activation cleanup is retained to block graph-scoped controls"
+    );
+    assert_eq!(member.admitted_delivery_count(), 1);
+    member.shutdown();
+    scripted.shutdown();
+}
 /// D67: public ownership and the Closing admission state.
 mod admission_close;
 /// #1497 member continuations resolve through the mob roster.
@@ -92601,6 +93968,10 @@ mod delivery_scope_gates;
 /// Each in-loop durability fail-stop records its own cause.
 #[cfg(not(target_arch = "wasm32"))]
 mod fail_stop_cause;
+/// Role-targeted flow runs dispatch only to their admitted members; every
+/// refusal and shortfall is typed.
+#[cfg(not(target_arch = "wasm32"))]
+mod flow_role_targets;
 /// #1497 fork job terminals are committed once and validated on every read.
 mod fork_job_terminal;
 /// Producer bridge Part B: held spawns.

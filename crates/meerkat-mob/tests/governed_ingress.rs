@@ -1186,3 +1186,545 @@ async fn a_never_polled_internal_governed_submission_settles_not_admitted_once()
     assert_eq!(fixture.adapter.gate.entered(), 0, "no native admission");
     assert!(fixture.provider.requests().is_empty(), "nothing ran");
 }
+
+// ---------------------------------------------------------------------------
+// Host originals through Core's delivery owner, end to end: the observation a
+// namespace owner holds for the governed member's session is bound by the
+// owner's binder with `bind_scoped_original` (Core's admission key as the
+// event key) and admitted through `MachineContinuationSink` into the member's
+// session on the real scoped grant composition. Native admission decides.
+// ---------------------------------------------------------------------------
+
+mod host_original {
+    use super::*;
+    use meerkat::{
+        ContinuationDelivery, ContinuationDeliverySink, ContinuationHandling, ContinuationKey,
+        ContinuationOwner, ContinuationOwnerService, ContinuationProducer, ContinuationResultRef,
+        ContinuationStatus, RetainedJobSource, RuntimeDeliveryHost,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const NAMESPACE: &str = "app.ingest";
+    const OBSERVATION: &str = "work-7";
+    const KEY: &str = "ingest:work-7";
+    const BODY: &str = "a new item arrived for the governed member";
+
+    fn observation() -> ContinuationDelivery {
+        ContinuationDelivery {
+            key: ContinuationKey::new(KEY).expect("key"),
+            result: ContinuationResultRef {
+                producer: ContinuationProducer::Host {
+                    namespace: NAMESPACE.into(),
+                },
+                producer_id: OBSERVATION.into(),
+                result_digest: "sha256:work-7".into(),
+                summary: None,
+            },
+            body: BODY.into(),
+            handling: ContinuationHandling::Queue,
+        }
+    }
+
+    /// The original the adapter authenticates: `work-7` of the source owner.
+    fn original_work() -> OriginalWorkRef {
+        OriginalWorkRef {
+            authority: principal("source-owner"),
+            work: id("work-7"),
+        }
+    }
+
+    #[derive(Default)]
+    struct Custody {
+        accepted: Mutex<Vec<meerkat::HostOriginalAdmission>>,
+        dropped: AtomicUsize,
+    }
+
+    struct Settlement {
+        custody: Arc<Custody>,
+        settled: bool,
+    }
+
+    impl meerkat::HostOriginalSettlement for Settlement {
+        fn accepted(
+            mut self: Box<Self>,
+            admission: &meerkat::HostOriginalAdmission,
+        ) -> Result<(), String> {
+            self.settled = true;
+            self.custody
+                .accepted
+                .lock()
+                .expect("custody")
+                .push(admission.clone());
+            Ok(())
+        }
+    }
+
+    impl Drop for Settlement {
+        fn drop(&mut self) {
+            if !self.settled {
+                self.custody.dropped.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    /// The trusted host's binder over the fixture's composition: it pins the
+    /// member's live controller without waiting and binds Core's input to the
+    /// confirmed original with `bind_scoped_original`.
+    struct Binder {
+        service: Arc<EphemeralSessionService<FactoryAgentBuilder>>,
+        runtime: LogicalRuntimeId,
+        target: NativeWorkTarget,
+        controller: GrantLineageRef,
+        operation: GrantLineageRef,
+        custody: Arc<Custody>,
+        bound: Mutex<Vec<InputAuthorityAssociation>>,
+    }
+
+    #[async_trait]
+    impl meerkat::HostOriginalBinder for Binder {
+        async fn bind(
+            &self,
+            original: &meerkat::HostOriginalRef,
+            session: &SessionId,
+            input: Input,
+        ) -> Result<meerkat::BoundHostOriginal, meerkat::HostOriginalRefusal> {
+            let Some(witness) = self.service.live_session_actor_witness(session).await else {
+                return Err(meerkat::HostOriginalRefusal::NotReady(
+                    meerkat_core::authorization::ControllerReadinessFailure::ExecutorUnavailable,
+                ));
+            };
+            let pin = match self
+                .service
+                .try_pin_controller_client_for_actor(&witness)
+                .await
+            {
+                Ok(pin) => pin,
+                Err(meerkat_session::TryPinControllerError::TurnBoundaryHeld) => {
+                    return Err(meerkat::HostOriginalRefusal::NotReady(
+                        meerkat_core::authorization::ControllerReadinessFailure::TurnBoundaryHeld,
+                    ));
+                }
+                Err(error) => {
+                    return Err(meerkat::HostOriginalRefusal::Unavailable(error.to_string()));
+                }
+            };
+            let mut candidate = association(
+                &self.runtime,
+                self.controller.clone(),
+                self.operation.clone(),
+                pin.selection().clone(),
+            );
+            candidate.target = self.target.clone();
+            candidate.original_work = original.original_work.clone();
+            let association = InputAuthorityAssociation::new(candidate).expect("claims");
+            self.bound.lock().expect("bound").push(association.clone());
+            let key = input
+                .header()
+                .idempotency_key
+                .clone()
+                .expect("Core's admission key");
+            let bound = meerkat_runtime::meerkat_machine::bind_scoped_original(
+                input,
+                association,
+                key,
+                principal("requester"),
+                principal("ingress"),
+                RealmId::parse("governed-mob").expect("realm"),
+                evidence("original-authentication"),
+                pin,
+            )
+            .map_err(|error| meerkat::HostOriginalRefusal::Unavailable(error.to_string()))?;
+            Ok(meerkat::BoundHostOriginal::new(
+                bound,
+                Box::new(Settlement {
+                    custody: Arc::clone(&self.custody),
+                    settled: false,
+                }),
+            ))
+        }
+
+        async fn readiness(
+            &self,
+            _namespace: &str,
+            _owner: &ContinuationOwner,
+        ) -> meerkat::HostOriginalBinderReadiness {
+            meerkat::HostOriginalBinderReadiness::Ready
+        }
+
+        fn retain_unresolved(
+            &self,
+            _settlement: Box<dyn meerkat::HostOriginalSettlement>,
+            _detail: &str,
+        ) {
+        }
+    }
+
+    /// The ingest namespace's committed owner: it holds the observation owed
+    /// to the member's session and offers the binder.
+    struct NamespaceOwner {
+        facts: meerkat::HostOriginalFacts,
+        binder: Arc<Binder>,
+    }
+
+    #[async_trait]
+    impl RetainedJobSource for NamespaceOwner {
+        async fn retained_job(
+            &self,
+            _producer: &ContinuationProducer,
+            _job_id: &str,
+        ) -> meerkat::RetainedJobLookup {
+            meerkat::RetainedJobLookup::Absent
+        }
+
+        async fn host_original(
+            &self,
+            namespace: &str,
+            producer_id: &str,
+        ) -> meerkat::HostOriginalLookup {
+            if namespace == NAMESPACE && producer_id == OBSERVATION {
+                meerkat::HostOriginalLookup::Found(self.facts.clone())
+            } else {
+                meerkat::HostOriginalLookup::Absent
+            }
+        }
+
+        fn host_original_binder(
+            &self,
+            namespace: &str,
+        ) -> Option<Arc<dyn meerkat::HostOriginalBinder>> {
+            (namespace == NAMESPACE)
+                .then(|| Arc::clone(&self.binder) as Arc<dyn meerkat::HostOriginalBinder>)
+        }
+    }
+
+    struct NoJobs;
+
+    #[async_trait]
+    impl meerkat::JobDeliverySink for NoJobs {
+        async fn apply(
+            &self,
+            _application: meerkat::JobDeliveryApplication,
+        ) -> Result<(), meerkat::JobDeliveryApplyError> {
+            Ok(())
+        }
+    }
+
+    /// One process hosting the governed member's session, admitting
+    /// continuations through the machine sink of the fixture's machine.
+    struct Host {
+        machine: Arc<MeerkatMachine>,
+        source: Arc<NamespaceOwner>,
+    }
+
+    #[async_trait]
+    impl RuntimeDeliveryHost for Host {
+        async fn delivery_route(&self, _session_id: &SessionId) -> Option<meerkat::DeliveryRoute> {
+            Some(meerkat::DeliveryRoute::ServedHere(Arc::new(NoJobs)))
+        }
+
+        async fn claim_cold_delivery(
+            &self,
+            session_id: &SessionId,
+        ) -> Option<Result<meerkat_runtime::HostingClaim, meerkat_runtime::HostingRefused>>
+        {
+            Some(meerkat_runtime::grant_session_hosting(
+                &meerkat_runtime::HostingCapability::ProcessLocal,
+                &meerkat_runtime::HostingOwner::mint(),
+                session_id,
+            ))
+        }
+
+        async fn resolve_address(&self, address: &LogicalRuntimeId) -> meerkat::AddressResolution {
+            meerkat::default_address_resolution(address)
+        }
+
+        async fn continuation_sink(
+            &self,
+            _session_id: &SessionId,
+        ) -> Option<Arc<dyn ContinuationDeliverySink>> {
+            Some(Arc::new(meerkat::MachineContinuationSink::new(Arc::clone(
+                &self.machine,
+            ))))
+        }
+
+        fn retained_job_source(&self) -> Option<Arc<dyn RetainedJobSource>> {
+            Some(Arc::clone(&self.source) as Arc<dyn RetainedJobSource>)
+        }
+    }
+
+    /// The observation committed for the member's session from its namespace
+    /// owner, with Core's delivery owner armed over its inbox.
+    struct Delivered {
+        continuations: ContinuationOwnerService,
+        owner: ContinuationOwner,
+        binder: Arc<Binder>,
+        custody: Arc<Custody>,
+        passes: tokio::sync::watch::Receiver<meerkat::RuntimeDeliveryPass>,
+        _handle: meerkat::RuntimeDeliveryOwnerHandle,
+    }
+
+    impl Delivered {
+        async fn status(&self) -> ContinuationStatus {
+            self.continuations
+                .continuation_status(&self.owner, &ContinuationKey::new(KEY).expect("key"))
+                .await
+                .expect("status")
+        }
+
+        async fn settled(&mut self) -> ContinuationStatus {
+            let settled = tokio::time::timeout(WAIT, async {
+                loop {
+                    let status = self.status().await;
+                    if matches!(
+                        status,
+                        ContinuationStatus::Applied { .. } | ContinuationStatus::Refused { .. }
+                    ) {
+                        return status;
+                    }
+                    self.passes.changed().await.expect("owner pass channel");
+                }
+            })
+            .await;
+            settled.unwrap_or_else(|_| {
+                panic!(
+                    "the host original was neither applied nor settled; last pass {:?}",
+                    self.passes.borrow().clone()
+                )
+            })
+        }
+    }
+
+    async fn deliver(fixture: &Fixture) -> Delivered {
+        let inbox = meerkat_runtime::RuntimeDeliveryInbox::new(Arc::new(
+            meerkat_runtime::InMemoryRuntimeStore::new(),
+        ));
+        let continuations = ContinuationOwnerService::new(
+            inbox.clone(),
+            Arc::new(meerkat::SessionAddressResolver),
+            Arc::clone(&fixture.machine),
+        );
+        let owner = ContinuationOwner::Session {
+            session_id: fixture.session_id.clone(),
+        };
+        let custody = Arc::new(Custody::default());
+        let binder = Arc::new(Binder {
+            service: Arc::clone(&fixture.service),
+            runtime: fixture.runtime.clone(),
+            target: fixture.target.clone(),
+            controller: fixture.controller.clone(),
+            operation: fixture.operation.clone(),
+            custody: Arc::clone(&custody),
+            bound: Mutex::new(Vec::new()),
+        });
+        let source = Arc::new(NamespaceOwner {
+            facts: meerkat::HostOriginalFacts::new(owner.clone(), observation(), original_work()),
+            binder: Arc::clone(&binder),
+        });
+        let record =
+            meerkat::HostOriginalRecord::from_owner(source.as_ref(), NAMESPACE, OBSERVATION)
+                .await
+                .expect("read the namespace owner")
+                .expect("the namespace owner holds the observation");
+        continuations
+            .submit_host_original(&owner, observation(), &record, 1)
+            .await
+            .expect("a governed runtime commits the host original");
+        let handle = meerkat::RuntimeDeliveryOwner::new(
+            Arc::new(meerkat::MemoryDetachedJobStore::new()),
+            inbox,
+        )
+        .arm(Arc::new(Host {
+            machine: Arc::clone(&fixture.machine),
+            source,
+        }))
+        .expect("arm Core's delivery owner");
+        Delivered {
+            continuations,
+            owner,
+            binder,
+            custody,
+            passes: handle.subscribe_passes(),
+            _handle: handle,
+        }
+    }
+
+    #[derive(serde::Deserialize)]
+    struct AuditProjection {
+        #[serde(default)]
+        authorization_audit:
+            Vec<meerkat_authorization_contracts::audit::StoredAuthorizationAuditObservation>,
+    }
+
+    /// Allowed: the host original lands in the governed member's session
+    /// through its binder; the admitted row retains exactly the bound
+    /// association; the host's custody is promoted once; and the member's run
+    /// is authorized and audited under that association.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_host_original_lands_in_the_governed_member_through_its_binder_and_runs() {
+        let fixture = Fixture::new().await;
+        let mut delivered = deliver(&fixture).await;
+        let status = delivered.settled().await;
+        let ContinuationStatus::Applied { session, input, .. } = status else {
+            panic!("the host original lands, got {status:?}");
+        };
+        assert_eq!(session, fixture.session_id);
+        let stored = fixture
+            .machine
+            .input_state(&fixture.session_id, &input)
+            .await
+            .expect("native row query")
+            .expect("the member session admitted the host original");
+        assert_eq!(stored.state.authority_contributors.len(), 1);
+        assert_eq!(stored.state.authority_contributors[0].input_id(), &input);
+        let bound = delivered.binder.bound.lock().expect("bound").clone();
+        assert_eq!(bound.len(), 1, "bound once");
+        assert!(
+            &bound[0] == stored.state.authority_contributors[0].association(),
+            "the admitted row retains exactly the association its binder bound"
+        );
+        let accepted = delivered.custody.accepted.lock().expect("custody").clone();
+        assert_eq!(accepted.len(), 1, "custody promoted once");
+        assert_eq!(accepted[0].input, input);
+        assert_eq!(delivered.custody.dropped.load(Ordering::SeqCst), 0);
+
+        wait_until("the member ran the host original", || {
+            fixture.provider.requests().iter().any(|messages| {
+                serde_json::to_string(messages)
+                    .expect("render")
+                    .contains(BODY)
+            })
+        })
+        .await;
+        let audit = tokio::time::timeout(WAIT, async {
+            loop {
+                let row = fixture
+                    .machine
+                    .input_state(&fixture.session_id, &input)
+                    .await
+                    .expect("native row query")
+                    .expect("row");
+                let audit = serde_json::from_value::<AuditProjection>(
+                    serde_json::to_value(&row).expect("row renders"),
+                )
+                .expect("audit projection")
+                .authorization_audit;
+                if !audit.is_empty() {
+                    return audit;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the run's operation is audited on the admitted row");
+        assert!(
+            audit.iter().all(|record| {
+                record.contributors.iter().any(|contributor| {
+                    contributor.input_id == input
+                        && contributor.requester == principal("requester")
+                        && contributor.logical_executor == principal("executor")
+                })
+            }),
+            "every audit record names the admitted input under the bound association"
+        );
+    }
+
+    /// The observation is refused `AuthorityDenied` by native admission: no
+    /// input row exists, the custody is dropped, and nothing ran.
+    async fn refused_by_native_admission(fixture: &Fixture, delivered: &mut Delivered) {
+        let status = delivered.settled().await;
+        assert!(
+            matches!(
+                status,
+                ContinuationStatus::Refused {
+                    reason: meerkat_runtime::RuntimeDeliveryRefusalReason::AuthorityDenied,
+                    ..
+                }
+            ),
+            "{status:?}"
+        );
+        assert!(
+            delivered
+                .custody
+                .accepted
+                .lock()
+                .expect("custody")
+                .is_empty()
+        );
+        assert_eq!(
+            delivered.custody.dropped.load(Ordering::SeqCst),
+            1,
+            "the custody is dropped"
+        );
+        assert!(
+            fixture
+                .machine
+                .list_active_inputs(&fixture.session_id)
+                .await
+                .expect("active inputs")
+                .is_empty(),
+            "no input was admitted"
+        );
+        assert!(fixture.provider.requests().is_empty(), "nothing ran");
+    }
+
+    struct AnyCustody;
+
+    impl meerkat_authorization_contracts::grant_mutation::ControllerGrantMutationCustody
+        for AnyCustody
+    {
+        fn with_unreferenced_controller_grant<T, E>(
+            &mut self,
+            _: &GrantLineageRef,
+            mutate: impl FnOnce() -> Result<T, E>,
+        ) -> Result<
+            Result<T, E>,
+            meerkat_authorization_contracts::grant_mutation::ControllerCustodyRefusal,
+        > {
+            Ok(mutate())
+        }
+    }
+
+    /// The invocation policy denies: the requester's invocation grant is
+    /// revoked, so the host invocation policy denies the requester.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_host_original_the_invocation_policy_denies_is_refused_authority_denied() {
+        let fixture = Fixture::new().await;
+        fixture
+            .grants
+            .revoke(
+                &principal("grant-owner"),
+                &fixture.invocation,
+                &mut AnyCustody,
+            )
+            .expect("revoke the requester's invocation grant");
+        let mut delivered = deliver(&fixture).await;
+        refused_by_native_admission(&fixture, &mut delivered).await;
+    }
+
+    /// The original is cancelled: the source owner cancelled the original's
+    /// operations before the drain.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_host_original_whose_original_is_cancelled_is_refused_authority_denied() {
+        let fixture = Fixture::new().await;
+        fixture.adapter.cancelled.store(true, Ordering::SeqCst);
+        let mut delivered = deliver(&fixture).await;
+        refused_by_native_admission(&fixture, &mut delivered).await;
+    }
+
+    /// The grant lineage is revoked: the controller grant the binding names is
+    /// revoked before the drain.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_host_original_whose_controller_grant_is_revoked_is_refused_authority_denied() {
+        let fixture = Fixture::new().await;
+        fixture
+            .grants
+            .revoke(
+                &principal("grant-owner"),
+                &fixture.controller,
+                &mut AnyCustody,
+            )
+            .expect("revoke the controller grant");
+        let mut delivered = deliver(&fixture).await;
+        refused_by_native_admission(&fixture, &mut delivered).await;
+    }
+}

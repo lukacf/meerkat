@@ -125,8 +125,36 @@ export interface MobEventsResult {
 
 export type WireHandlingMode = "queue" | "steer";
 
+export interface WireContinuationStatusPending {
+  state: "pending";
+}
+
+export interface WireContinuationStatusAdmitted {
+  input_id: string;
+  session_id: string;
+  state: "admitted";
+}
+
+export interface WireContinuationStatusStranded {
+  state: "stranded";
+}
+
+export interface WireContinuationStatusRefused {
+  reason: string;
+  state: "refused";
+}
+
+export type WireContinuationStatus = WireContinuationStatusPending | WireContinuationStatusAdmitted | WireContinuationStatusStranded | WireContinuationStatusRefused;
+
+export interface WireContinuationReceipt {
+  committed_at_ms: number;
+  delivery_id: string;
+  status: WireContinuationStatus;
+}
+
 export interface MobMemberSendResult {
   agent_identity: string;
+  continuation?: WireContinuationReceipt | null;
   handling_mode: WireHandlingMode;
   member_ref: WireMemberRef;
   mob_id: string;
@@ -252,11 +280,21 @@ export type WireMemberPreviewUnavailable = "observation_deadline" | "read_failed
 
 export type WireMemberRegistrationHookCall = "select_destination" | "select_agent_mandate" | "prepare_member_surface" | "verify_member_surface";
 
+export type WireMemberCustodyRestore = "startup_binding" | "cleanup_delivery";
+
+export type WireMemberCustodyDeferralCause = "served_elsewhere" | "hosting_unavailable" | "durable_tail_unprovable";
+
+export interface WireMemberCustodyDeferral {
+  cause: WireMemberCustodyDeferralCause;
+  restore: WireMemberCustodyRestore;
+}
+
 export interface MobMemberStatusResult {
   activity?: Record<string, unknown> | null;
   comms_reachability?: WireReachability | null;
   control_reachability?: WireReachability | null;
   current_session_id?: string | null;
+  custody_deferred?: WireMemberCustodyDeferral | null;
   detached_jobs?: Record<string, unknown> | null;
   error?: string | null;
   external_member?: unknown;
@@ -284,9 +322,44 @@ export interface MobAppendSystemContextResult {
   status: "applied" | "duplicate";
 }
 
+export interface WireMemberReloadRefusalRepairBlocked {
+  evidence_digest?: string | null;
+  kind: "repair_blocked";
+  reason: string;
+}
+
+export interface WireMemberReloadRefusalUnknown {
+  kind: "unknown";
+}
+
+export type WireMemberReloadRefusal = WireMemberReloadRefusalRepairBlocked | WireMemberReloadRefusalUnknown;
+
+export interface WireMobDestroyMemberRefusal {
+  member: string;
+  refusal: WireMemberReloadRefusal;
+}
+
+export interface WireMobDestroyReport {
+  errors?: string[];
+  events_cleared?: boolean;
+  force_destroyed_members?: string[];
+  member_reload_refusals?: WireMobDestroyMemberRefusal[];
+  metadata_scrubbed?: boolean;
+  namespace_cleaned?: boolean;
+  orphaned_remote_members?: string[];
+  reloaded_members?: string[];
+  remote_cleanup_deadline_exceeded?: boolean;
+}
+
+export interface WireMobDestroyIncompleteData {
+  code: string;
+  destroy_report: WireMobDestroyReport;
+  retryable: boolean;
+}
+
 export interface MobLifecycleResult {
   action: "stop" | "resume" | "complete" | "reset" | "destroy";
-  destroy_report?: unknown;
+  destroy_report?: WireMobDestroyReport | null;
   mob_id: string;
   ok: boolean;
   stop_report?: unknown;

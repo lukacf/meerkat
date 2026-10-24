@@ -28,6 +28,10 @@ from .types import (  # noqa: F401
     ContentBlock,
     ContentInput,
     ExternalToolDeltaPhase,
+    ForkNoticeKind,
+    ForkNoticeSystemPrompt,
+    ForkNoticeTools,
+    ForkToolsNotComparedReason,
     InteractionId,
     InterruptedInputKind,
     InterruptedToolRunDisposition,
@@ -1267,6 +1271,31 @@ class ModelFallbackSkippedTarget(TypedDict, total=False):
 OperationObservationPhase = Literal['outcome']
 
 
+class ToolCallDedupeKey(TypedDict, total=False):
+    """Deduplication key a tool sees for one call of one round of one run.
+
+    A resumed run dispatches the calls of a round whose results were not
+    committed again, under the same key, so a tool with external effects can
+    recognize a repeat. A round that had no committed model response is asked
+    of the model again, and a provider may reuse a call id for a different
+    call; the digest of the call's tool name and arguments keeps such calls
+    apart, so a repeat is only a call with the same name and arguments.
+
+    Build it with [`ToolCallDedupeKey::new`], which computes the digest, so
+    every producer derives the same key for the same call.
+
+    Every kind of tool receives it unchanged: an in-process tool from
+    [`crate::ToolDispatchContext::tool_call_dedupe_key`], an MCP tool as the
+    `tools/call` `_meta` entry [`crate::TOOL_CALL_DEDUPE_KEY_META_KEY`], and a
+    callback tool as the `dedupe_key` of its request or pending call. A call
+    outside an agent-loop round has no key.
+    """
+    call_digest: Required[str]
+    call_id: Required[str]
+    round: Required[int]
+    run_id: Required[RunId]
+
+
 class ToolDispatchSettlementFailure(TypedDict, total=False):
     """A diagnostic that accompanies, and never replaces, the physical result.
 
@@ -1285,6 +1314,7 @@ class PendingCallbackToolCall(TypedDict, total=False):
     tool-use batch.
     """
     args: Required[Any]
+    dedupe_key: NotRequired[Optional[ToolCallDedupeKey]]
     settlement_failures: NotRequired[list[ToolDispatchSettlementFailure]]
     tool_name: Required[str]
     tool_use_id: Required[str]
@@ -1395,6 +1425,10 @@ class RunInputPendingToolResults(TypedDict, total=False):
 # The pending-tail case is its own typed variant — run-boundary events and
 # hooks never fabricate an empty-string prompt to stand in for it.
 RunInput = RunInputContent | RunInputPendingToolResults
+
+
+# Where a resumed run continues, as [`AgentEvent::RunResumed`] reports it.
+RunResumePointKind = Literal['tools_pending', 'awaiting_model']
 
 
 class SchemaWarning(TypedDict, total=False):
@@ -1599,6 +1633,63 @@ class RuntimeAppendOrigin(TypedDict, total=False):
     input_id: Required[InputId]
     run_id: Required[RunId]
     session_id: Required[SessionId]
+
+
+class MobMemberBinding(TypedDict, total=False):
+    """Durable, typed identity of a mob member, carried on
+    [`SessionMetadata`](crate::session::SessionMetadata).
+
+    This is the canonical owner of the `(mob_id, role, member)` identity fact
+    that ownership routing (`owns_persisted_bridge_session`) and outbound
+    peer-added payloads previously recovered by splitting the untyped
+    `comms_name` string and re-deriving the realm by format convention.
+
+    `comms_name`/`realm_id`/`peer_meta` remain on the metadata as the transport
+    routing name and discovery metadata - identity and transport are separate
+    facts. Old persisted rows written before this field existed deserialize as
+    `None` (the field is `#[serde(default, skip_serializing_if)]` on the
+    metadata), so back-read is safe.
+    """
+    member: Required[str]
+    mob_id: Required[str]
+    role: Required[str]
+
+
+class ForkNoticeSource(TypedDict, total=False):
+    """The source a fork notice names: the source member when a mob forked one
+    of its members, and the source session when the forking side knows it.
+    """
+    member: NotRequired[Optional[MobMemberBinding]]
+    session_id: NotRequired[Optional[str]]
+
+
+class InstructionKeyRef(TypedDict, total=False):
+    """One instruction key a fork notice names.
+    """
+    key: Required[str]
+    namespace: Required[str]
+
+
+class ForkBoundaryNotice(TypedDict, total=False):
+    """What a fork child was given of its source, by name only: the typed
+    content of a [`SystemNoticeBlock::ForkBoundary`](crate::types::SystemNoticeBlock)
+    notice. `summary` is the notice as the model reads it; a reader that does
+    not know the block type decodes it as an unknown notice with that summary.
+    """
+    child_session_id: Required[str]
+    earlier_rows_omitted: NotRequired[int]
+    fork: Required[ForkNoticeKind]
+    injected_rows_carried: NotRequired[int]
+    injected_rows_removed: NotRequired[int]
+    instructions_added: NotRequired[list[InstructionKeyRef]]
+    instructions_carried: NotRequired[list[InstructionKeyRef]]
+    instructions_removed: NotRequired[list[InstructionKeyRef]]
+    skills_carried: NotRequired[list[SkillKey]]
+    skills_removed: NotRequired[list[SkillKey]]
+    source: Required[ForkNoticeSource]
+    source_system_prompt: Required[ForkNoticeSystemPrompt]
+    summary: Required[str]
+    tools: Required[ForkNoticeTools]
 
 
 class SystemNoticePeer(TypedDict, total=False):
@@ -2037,10 +2128,10 @@ class AgentEventToolResultReceived(TypedDict, total=False):
     """Tool result received (injected into conversation).
 
     The conversation-level fact for a tool call: this result entered the
-    transcript. [`AgentEvent::ToolExecutionCompleted`] is the paired
-    execution-level fact for the same `id` and currently carries a full
-    copy of these same blocks - see that variant before persisting both, or
-    a durable consumer stores every result body twice.
+    transcript. It is the only event that carries the result body
+    (`content`). [`AgentEvent::ToolExecutionCompleted`] is the paired
+    execution-level fact for the same `id`: whether the call failed and
+    how long it took. Join the two on `id`.
     """
     content: Required[list[ContentBlock]]
     id: Required[str]
@@ -2096,34 +2187,16 @@ class AgentEventToolExecutionStarted(TypedDict, total=False):
 class AgentEventToolExecutionCompleted(TypedDict, total=False):
     """Tool execution completed.
 
-    # This carries a SECOND COPY of the result body
+    The execution-level fact for a tool call: the call finished, whether
+    it failed, and how long it took. It carries no result body. The body
+    is on [`AgentEvent::ToolResultReceived`] for the same `id`, the
+    conversation-level fact, so a consumer that keeps both events stores
+    each body once and joins the two on `id`.
 
-    This event and [`AgentEvent::ToolResultReceived`] are both emitted for
-    every tool call, and they differ by exactly one field: `duration_ms`.
-    Both carry the full `content` blocks. The two facts are genuinely
-    distinct and both deserve to exist - `ToolResultReceived` is the
-    CONVERSATION fact (this result was injected into the transcript),
-    this is the EXECUTION fact (the call finished, and here is how long it
-    took) - but the cost of the execution fact currently scales with the
-    size of the result rather than with the fact itself.
-
-    A consumer that durably persists BOTH events therefore stores every
-    tool result body twice. This is not hypothetical: it was measured
-    independently on two adopter fleets with different storage engines and
-    different payload shapes - a console frame store (~348 MB against
-    ~348 MB, pairwise-identical maxima, from 153 camera-tool calls) and a
-    warehouse events table (89,033 rows / 3.35 GB against 88,934 rows /
-    1.69 GB). Neither had configured it; both inherited it from this
-    vocabulary. Note it is a PER-CALL cost, not a scale problem: one tool
-    returning a large blob is enough.
-
-    `id` is present on both events and is already the join key. A consumer
-    persisting both should store the body once against `id` and join for
-    the execution fact, rather than capping bytes at its own writer - a cap
-    applied downstream still writes the body twice, only smaller, and every
-    consumer would have to reimplement it.
+    Before 0.9.5 this event also carried a copy of the body in `content`.
+    A stored event that still has the field decodes, and the field is
+    ignored.
     """
-    content: Required[list[ContentBlock]]
     duration_ms: Required[int]
     id: Required[str]
     is_error: Required[bool]
@@ -2488,10 +2561,29 @@ class AgentEventRequestReasoningLowered(TypedDict, total=False):
     type: Required[Literal['request_reasoning_lowered']]
 
 
+class AgentEventRunResumed(TypedDict, total=False):
+    """A durable run resumed from its run cursor after a restart, in place of
+    `run_started`: the same run continues under its run id, and its
+    terminal follows as for any run.
+
+    At `tools_pending` the run takes the round's staged assistant message
+    as the model's response and dispatches its tool calls again under
+    their call ids; nothing is published again for the staged message (no
+    `tool_call_requested`, no `turn_completed`). At `awaiting_model` the
+    run continues with its next model call, after the last committed
+    round.
+    """
+    resume_point: Required[RunResumePointKind]
+    round: Required[int]
+    run_id: Required[RunId]
+    session_id: Required[SessionId]
+    type: Required[Literal['run_resumed']]
+
+
 # Events emitted during agent execution
 #
 # These events form the streaming API for consumers.
-AgentEvent = AgentEventRunStarted | AgentEventRunCompleted | AgentEventExtractionSucceeded | AgentEventExtractionFailed | AgentEventRunFailed | AgentEventHookStarted | AgentEventHookCompleted | AgentEventHookFailed | AgentEventHookDenied | AgentEventTurnStarted | AgentEventReasoningDelta | AgentEventReasoningComplete | AgentEventTextDelta | AgentEventTextComplete | AgentEventServerToolContent | AgentEventAssistantImageAppended | AgentEventToolCallRequested | AgentEventToolResultReceived | AgentEventTurnCompleted | AgentEventToolExecutionStarted | AgentEventToolExecutionCompleted | AgentEventToolExecutionTimedOut | AgentEventCompactionStarted | AgentEventCompactionCompleted | AgentEventCompactionFailed | AgentEventBudgetWarning | AgentEventRetrying | AgentEventSkillsResolved | AgentEventSkillResolutionFailed | AgentEventInteractionComplete | AgentEventInteractionCallbackPending | AgentEventInteractionFailed | AgentEventStreamTruncated | AgentEventToolConfigChanged | AgentEventBackgroundJobCompleted | AgentEventTranscriptRewriteCommitted | AgentEventTranscriptRewriteAuditReceiptCommitted | AgentEventProviderCacheBreakpointsDiscarded | AgentEventPeerContentIngested | AgentEventTurnUsageAccountingUnmeasured | AgentEventTurnUsageAccountingIdentityDisputed | AgentEventModelFallbackSkipped | AgentEventModelFallbackStaged | AgentEventModelFallbackCommitted | AgentEventModelFallbackTargetFailed | AgentEventBoundaryAppendApplied | AgentEventBoundaryAppendsDiscarded | AgentEventLiveChannelClosed | AgentEventOperationObservationFailed | AgentEventHookLaunchRefused | AgentEventRequestReasoningLowered
+AgentEvent = AgentEventRunStarted | AgentEventRunCompleted | AgentEventExtractionSucceeded | AgentEventExtractionFailed | AgentEventRunFailed | AgentEventHookStarted | AgentEventHookCompleted | AgentEventHookFailed | AgentEventHookDenied | AgentEventTurnStarted | AgentEventReasoningDelta | AgentEventReasoningComplete | AgentEventTextDelta | AgentEventTextComplete | AgentEventServerToolContent | AgentEventAssistantImageAppended | AgentEventToolCallRequested | AgentEventToolResultReceived | AgentEventTurnCompleted | AgentEventToolExecutionStarted | AgentEventToolExecutionCompleted | AgentEventToolExecutionTimedOut | AgentEventCompactionStarted | AgentEventCompactionCompleted | AgentEventCompactionFailed | AgentEventBudgetWarning | AgentEventRetrying | AgentEventSkillsResolved | AgentEventSkillResolutionFailed | AgentEventInteractionComplete | AgentEventInteractionCallbackPending | AgentEventInteractionFailed | AgentEventStreamTruncated | AgentEventToolConfigChanged | AgentEventBackgroundJobCompleted | AgentEventTranscriptRewriteCommitted | AgentEventTranscriptRewriteAuditReceiptCommitted | AgentEventProviderCacheBreakpointsDiscarded | AgentEventPeerContentIngested | AgentEventTurnUsageAccountingUnmeasured | AgentEventTurnUsageAccountingIdentityDisputed | AgentEventModelFallbackSkipped | AgentEventModelFallbackStaged | AgentEventModelFallbackCommitted | AgentEventModelFallbackTargetFailed | AgentEventBoundaryAppendApplied | AgentEventBoundaryAppendsDiscarded | AgentEventLiveChannelClosed | AgentEventOperationObservationFailed | AgentEventHookLaunchRefused | AgentEventRequestReasoningLowered | AgentEventRunResumed
 
 
 class StreamScopeFramePrimary(TypedDict, total=False):

@@ -572,6 +572,7 @@ mod tests {
             .await
             .expect("reads pass while the fence is held");
 
+        foreign.unlock().expect("release the foreign fence");
         drop(foreign);
         store
             .put_image("image/png", "BBBB")

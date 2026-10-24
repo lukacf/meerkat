@@ -2647,6 +2647,20 @@ struct SessionPersistenceVersionFieldSpec {
     current_accessor: &'static str,
     /// `pub fn` authorizing a restore of an observed version for this field.
     restore_fn: &'static str,
+    /// Per-row versioning, for a field whose rows are written at a baseline
+    /// version unless they carry a fact only the current version can read.
+    row_version: Option<SessionPersistenceRowVersionSpec>,
+}
+
+/// Naming facts of a per-row versioned field.
+#[derive(Debug, Clone, Copy)]
+struct SessionPersistenceRowVersionSpec {
+    /// Machine state field holding the baseline version.
+    baseline_state_field: &'static str,
+    /// `pub const` identifier holding the baseline version.
+    baseline_const: &'static str,
+    /// `pub fn` choosing one row's version.
+    row_fn: &'static str,
 }
 
 /// Fully schema-derived emit plan for one persistence-version field.
@@ -2665,6 +2679,9 @@ struct SessionPersistenceVersionFieldPlan {
     /// other accepted version (legacy default, missing-version fold) fails the
     /// walk loudly.
     accepted_versions: Vec<u32>,
+    /// The baseline version of a per-row versioned field, read from its
+    /// init field: accepted, and below the current version.
+    baseline_version: Option<u32>,
 }
 
 fn session_persistence_init_u32(machine: &MachineSchema, field: &str) -> Result<u32> {
@@ -2871,10 +2888,26 @@ fn session_persistence_derive_field_plan(
     accepted_versions.sort_unstable();
     accepted_versions.dedup();
 
+    let current_version = session_persistence_init_u32(machine, &current_state_field)?;
+    let baseline_version = match spec.row_version {
+        None => None,
+        Some(row_version) => {
+            let baseline = session_persistence_init_u32(machine, row_version.baseline_state_field)?;
+            if baseline >= current_version || !accepted_versions.contains(&baseline) {
+                bail!(
+                    "{} baseline version {baseline} must be an accepted version below current {current_version}",
+                    spec.enum_variant
+                );
+            }
+            Some(baseline)
+        }
+    };
+
     Ok(SessionPersistenceVersionFieldPlan {
         spec,
-        current_version: session_persistence_init_u32(machine, &current_state_field)?,
+        current_version,
         accepted_versions,
+        baseline_version,
     })
 }
 
@@ -2901,6 +2934,7 @@ const SESSION_PERSISTENCE_FIELD_SPECS: [SessionPersistenceVersionFieldSpec; 3] =
         current_const: "SESSION_VERSION",
         current_accessor: "session_envelope_version",
         restore_fn: "restore_session_envelope_version",
+        row_version: None,
     },
     SessionPersistenceVersionFieldSpec {
         enum_variant: "StoredInputState",
@@ -2908,6 +2942,11 @@ const SESSION_PERSISTENCE_FIELD_SPECS: [SessionPersistenceVersionFieldSpec; 3] =
         current_const: "STORED_INPUT_STATE_VERSION",
         current_accessor: "stored_input_state_version",
         restore_fn: "restore_stored_input_state_version",
+        row_version: Some(SessionPersistenceRowVersionSpec {
+            baseline_state_field: "stored_input_state_baseline_version",
+            baseline_const: "STORED_INPUT_STATE_BASELINE_VERSION",
+            row_fn: "stored_input_state_version_for_row",
+        }),
     },
     SessionPersistenceVersionFieldSpec {
         enum_variant: "SessionMetadataSchema",
@@ -2915,6 +2954,7 @@ const SESSION_PERSISTENCE_FIELD_SPECS: [SessionPersistenceVersionFieldSpec; 3] =
         current_const: "SESSION_METADATA_SCHEMA_VERSION",
         current_accessor: "session_metadata_schema_version",
         restore_fn: "restore_session_metadata_schema_version",
+        row_version: None,
     },
 ];
 
@@ -3043,6 +3083,17 @@ fn generate_session_persistence_version_authority(machine: &MachineSchema) -> Re
             field.spec.current_const, field.current_version
         )?;
     }
+    for field in &plan.fields {
+        if let (Some(row_version), Some(baseline)) =
+            (field.spec.row_version, field.baseline_version)
+        {
+            writeln!(
+                &mut out,
+                "pub const {}: u32 = {};",
+                row_version.baseline_const, baseline
+            )?;
+        }
+    }
     writeln!(&mut out)?;
 
     // (2) The closed field enum, emitted from the schema's
@@ -3069,6 +3120,35 @@ fn generate_session_persistence_version_authority(machine: &MachineSchema) -> Re
             field.spec.current_accessor
         )?;
         writeln!(&mut out, "    {}", field.spec.current_const)?;
+        writeln!(&mut out, "}}")?;
+    }
+
+    // (4b) Per-row version choice: the baseline, unless the row carries a
+    // fact only the current version can read.
+    for field in &plan.fields {
+        let Some(row_version) = field.spec.row_version else {
+            continue;
+        };
+        writeln!(&mut out)?;
+        writeln!(
+            &mut out,
+            "/// The version one row is written with: the current version when it"
+        )?;
+        writeln!(
+            &mut out,
+            "/// carries a fact only the current version can read, the baseline otherwise."
+        )?;
+        writeln!(&mut out, "#[must_use]")?;
+        writeln!(
+            &mut out,
+            "pub fn {}(carries_current_only_facts: bool) -> u32 {{",
+            row_version.row_fn
+        )?;
+        writeln!(&mut out, "    if carries_current_only_facts {{")?;
+        writeln!(&mut out, "        {}", field.spec.current_const)?;
+        writeln!(&mut out, "    }} else {{")?;
+        writeln!(&mut out, "        {}", row_version.baseline_const)?;
+        writeln!(&mut out, "    }}")?;
         writeln!(&mut out, "}}")?;
     }
 
@@ -4929,6 +5009,7 @@ fn generate_session_document_authority(machine: &MachineSchema) -> Result<String
         "DurableTailStopReason",
         "DurableTailRecoveryClass",
         "DurableHeadRelation",
+        "DurableTailRunCursor",
         "RuntimeCheckpointProjectionDisposition",
         "SessionDocumentLifecycleMerge",
         "SessionDocumentLifecycle",
@@ -5034,6 +5115,7 @@ fn session_document_default_variant(name: &str) -> Result<&'static str> {
         "DurableTailStopReason" => Ok("Absent"),
         "DurableTailRecoveryClass" => Ok("Ambiguous"),
         "DurableHeadRelation" => Ok("AbsentOrExact"),
+        "DurableTailRunCursor" => Ok("Disagrees"),
         "RuntimeCheckpointProjectionDisposition" => Ok("IgnoreArchived"),
         "SessionDocumentLifecycleMerge" => Ok("CarryArchived"),
         "SessionDocumentLifecycle" => Ok("Active"),
@@ -6123,6 +6205,7 @@ fn validate_session_document_authority_schema(machine: &MachineSchema) -> Result
         "DurableTailStopReason",
         "DurableTailRecoveryClass",
         "DurableHeadRelation",
+        "DurableTailRunCursor",
         "RuntimeCheckpointProjectionDisposition",
         "SessionDocumentLifecycleMerge",
         "SessionDocumentLifecycle",

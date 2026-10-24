@@ -251,7 +251,9 @@ async fn destroy_during_a_pending_stop_runs_after_it() {
 /// Shutdown cancels a member's in-flight turn immediately (it does not wait
 /// for the turn's next boundary), reports the run as cancelled by shutdown,
 /// and a second Shutdown arriving meanwhile joins it and receives its result
-/// without interrupting the member again.
+/// without interrupting the member again. The mob's runtime keeps no
+/// persistence store, so its member is not durable: the default Shutdown
+/// still ends its kickoff and cancels its run.
 #[tokio::test]
 async fn shutdown_cancels_a_member_turn_and_a_second_shutdown_joins_it() {
     let (handle, service) = create_test_mob(sample_definition()).await;
@@ -282,6 +284,7 @@ async fn shutdown_cancels_a_member_turn_and_a_second_shutdown_joins_it() {
     let mut second = handle
         .enqueue_actor_command_for_test(|reply_tx| MobCommand::Shutdown {
             deadline: None,
+            queued_inputs: crate::runtime::QueuedInputsOnShutdown::Stop,
             reply_tx,
         })
         .await

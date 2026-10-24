@@ -342,6 +342,164 @@ Hosts embedding `PersistentSessionService` call
 `repair_whole_blob_audited_endpoint(session_id, apply, accept_shorter)` for
 the same procedure.
 
+## Resolve A Durable Tail Held For Recovery
+
+Symptom: a turn or resume of a persistent session answers
+`SESSION_DURABLE_TAIL_HELD_FOR_RECOVERY` (resume hold
+`tail_held_for_recovery`), and opening the session again does not clear it.
+Recovery found a durable tail past the session's last committed boundary
+whose evidence is ambiguous, for example a transcript that ends in a tool
+call without its result, and holds the tail rather than guess what happened
+(see [Session contracts: durable-tail recovery](/reference/session-contracts#durable-tail-recovery)).
+The same answer can come from a tail this command does not resolve, for
+example one whose input rows cannot be attributed to its run; for those,
+the command answers `held_otherwise` with the reason. Since 0.9.5 an
+operator can resolve a hold over ambiguous evidence, and one hold over
+input rows that only pre-release builds of 0.9.5, or a store fault, leave (see
+[An interrupted tail held beside a stranded input](#an-interrupted-tail-held-beside-a-stranded-input)):
+
+1. Stop every host of the session. The repair is refused while the
+   session's persisted runtime state shows it in use (for example attached
+   or running) or holds a current run, and a refusal is never retried. A
+   host whose runtime is idle does not show in that state, so stopping the
+   hosts first is the operator's part.
+2. Run the command without `--apply`. This dry run writes nothing and
+   reports the candidate and its run, the facts that made the tail
+   ambiguous (its run rows, the last stop reason, the calls without a
+   result, results that answer no call, rows after the terminal reply, the
+   run cursor and whether its inputs are still bound), the messages it
+   keeps, the calls it would answer, the inputs it would end, whether the
+   persisted lifecycle is quiescent, and the verdict.
+3. Apply it.
+
+```bash
+# Dry run (the default): reports what the repair would do; writes nothing.
+rkat session resolve-held-tail <session-id>
+
+# Apply: commit the held tail as interrupted.
+rkat session resolve-held-tail <session-id> --apply
+
+# A runtime database named directly (a sqlite realm's sessions.sqlite3, a
+# jsonl realm's runtime.sqlite3, or a host's own runtime file) needs the
+# full session UUID.
+rkat session resolve-held-tail <session-uuid> --runtime-store <state_dir>/runtime.sqlite --apply
+```
+
+Without `--runtime-store`, the command opens the runtime store of the realm
+it is scoped to (`--state-root`, `--realm`): a `sqlite` realm's
+`sessions.sqlite3` or a `jsonl` realm's `runtime.sqlite3`. It refuses a
+memory realm, and a realm whose runtime store an external storage provider
+owns: name that runtime database with `--runtime-store`, or, for a realm
+kept in a host's own database, use the library call below. It refuses a
+missing database, or one with another schema version than the `rkat`
+binary's, without creating or migrating anything. Without `--apply` it
+writes nothing to the session: it checks the database read-only before it
+opens it, and refuses one whose switch to another storage profile is still
+in progress instead of completing it. As for `repair-wholeblob`, the only
+writes an open can make are SQLite's own: the `.mfence` lock sibling, the
+WAL sidecars, and the journal-mode conversion to WAL for a database not
+already in WAL mode. A database whose schema is older than the binary's, or
+whose storage profile switch is still pending, is opened once with the host
+that owns it; then run the command again. A newer schema needs a matching or
+newer `rkat`. `--json` prints the report as one JSON object.
+
+Applied, the repair commits the held tail as interrupted, through the same
+recovery commit as a crash:
+
+- every durable message is kept;
+- each call without a result, in the tail's last assistant message or in a
+  round's response saved in the run cursor, is answered with an
+  `outcome_uncertain` tool error whose reason names `resolve-held-tail` and
+  the candidate;
+- a notice tells the model that an operator resolved the held run, that
+  every durable message was kept and that the run was closed as
+  interrupted;
+- the inputs proved bound to the run end and never run again, and other
+  queued inputs stay queued.
+
+The recovery record names the operator's disposition and the candidate.
+The session then opens and serves as usual.
+
+The command answers in one of these ways (`resolution` in the JSON report):
+
+| Answer | Meaning | Exit |
+|--------|---------|------|
+| `no_tail` | The session has no held tail | 0 |
+| `not_held` | The tail is not held: ordinary recovery commits or continues it when the session next resumes. Nothing is written | 0 |
+| `held_otherwise` | The tail is held for a reason this command does not resolve, given in the report: ordinary recovery holds it because its input rows cannot be attributed to its run, or refuses it (a runtime in use, or a commit that already covers or contradicts the tail); the store cannot prove an exact recovery source or boundary, or that the tail descends from the committed head (an unproven rewrite); an incomplete HeadCanonical intent, which ordinary recovery rolls back at the next resume; or a recovery of this exact tail that has already committed | Error |
+| `ambiguous` | The repair report, with the verdict `would_repair` (a dry run), `refused` (nothing written) or `repaired` (with the boundary sequence it committed) | 0, or an error for `refused` |
+| `stranded_inputs` | An interrupted tail held only beside inputs another run left staged or queued (below): the same repair report, whose `requeued_inputs` lists the inputs the repair puts back in their queue | 0, or an error for `refused` |
+
+A `refused` verdict means the session's persisted runtime state shows it in
+use (stop every host of the session and run the command again), a commit
+already covers or contradicts the tail, or an input cannot be attributed to
+the run. An error means the repair could not proceed (the evidence could
+not be verified, or the store refused the write); the session stays held. A
+call without a result anywhere but in the tail's last assistant message is
+such an error: the repair only appends, and a result must follow its call.
+So is a run cursor that cannot be read, or whose saved response has calls
+but no message id: those calls may have run, and the repair cannot place
+their results. The results after the tail's last assistant message are
+paired with its calls by position, since providers repeat call ids across
+responses; when that pairing does not leave exactly the calls the
+transcript shows without a result, the command answers with an error too.
+An answer this version of `rkat` does not know also exits with an error.
+With `--json`, an answer that fails the command (`held_otherwise`,
+`refused`, or an unknown answer) still prints its report to standard
+output, and the error's message goes to standard error. An error before any
+answer (the store cannot be opened, or the evidence cannot be verified)
+prints only the error.
+
+Only these holds have an operator path. A session answering
+`SESSION_DURABLE_EVIDENCE_QUARANTINED` stays quarantined;
+`SESSION_DURABLE_TAIL_RECOVERY_REFUSED` clears once the conflicting runtime
+quiesces (a refusal over receipts that cover or contradict the tail does
+not); `SESSION_WHOLEBLOB_AUDITED_ENDPOINT_DIVERGENCE` is repaired with
+`rkat session repair-wholeblob` (above). Hosts that embed the runtime,
+including any host that keeps a realm in its own database, call
+`meerkat_runtime::recovery::resolve_held_durable_tail` with the store, the
+session id and whether to apply. It answers `HeldTailResolution` and works
+on any runtime store, a host store included.
+
+### An interrupted tail held beside a stranded input
+
+Builds of 0.9.5 from before its release did not close a run when it was
+interrupted: the run's last round commit stayed as the session's durable
+tail. A turn submitted after the interrupt was then staged for a new run
+that never committed, and recovery holds the interrupted tail beside that
+input, because the input could be the tail's own. The command resolves
+this hold when the store proves that the input is not the tail's own:
+
+- the tail carries a run cursor, which binds exactly the inputs whose
+  content the tail holds, and the cursor does not bind the input;
+- the input carries content, is staged or queued, and names another run as
+  its run, and that run has neither a boundary receipt nor a durable tail
+  (the store keeps one tail per session, the interrupted run's).
+
+An input the cursor binds is the tail's own, whatever run it names now (a
+steer the interrupt put back in its queue and a later run took again, for
+one): the repair consumes it with the tail, once. An input that carries
+content and names no run is not in the tail either, and stays queued.
+
+Nothing is inferred from timing or order. The answer is `stranded_inputs`,
+with the report an `ambiguous` hold gets plus the inputs the repair
+requeues. Applied, the repair commits the tail as interrupted, as recovery
+commits any interrupted run: every row is kept, the interrupted notice is
+appended, and the run's own inputs do not run again. In the same commit it
+puts each stranded input back in its queue with its content, bound to no
+run, so it runs once, after the interrupted run, when the session next
+starts. The command requeues no input this proof does not cover (one that
+names a run with a receipt, one that names the interrupted run without its
+cursor binding it, or one in another phase): while such an input stands
+beside the tail, the answer stays `held_otherwise` and nothing is
+written.
+
+On a WholeBlob session, run the command before 0.9.5 opens the session.
+The first open ends the stranded input as abandoned, and the next start
+then closes the interrupted run by itself; the abandoned input does not
+run, so submit it again. An interrupted tail with no input beside it needs
+no operator: the next start closes it as interrupted.
+
 ## Blob Digests In Meerkat And Meta
 
 Meerkat and Meta both render image blob ids as `sha256:<64 lowercase hex
@@ -450,6 +608,16 @@ creates at that moment is seen whole or not at all, and a delivery whose
 projection failed is retried on the next delivery wake (see
 [durable jobs](/guides/durable-jobs)).
 
+## Write Volume Of Per-Round Commits
+
+Since 0.9.5 a run in a durable session commits twice per tool round (see
+[Durable runs](/guides/durable-runs)). On a `sqlite` realm, a HeadCanonical
+store, each commit writes the rows the round added. A `jsonl` realm's runtime
+store is WholeBlob: each commit writes the whole session document, so the
+bytes a run writes grow with the square of its tool rounds. A realm kept in a
+host's own database through the [host store SPI](/reference/host-store-spi)
+is WholeBlob as well. Choose a `sqlite` realm for long, tool-heavy runs.
+
 ## Operational Runbook
 
 For an unreadable or refused realm:
@@ -473,5 +641,6 @@ For an unreadable or refused realm:
 - [CLI commands](/cli/commands)
 - [Session contracts](/reference/session-contracts)
 - [Durable jobs and monitors](/guides/durable-jobs)
+- [Durable runs and host stores](/guides/durable-runs)
 - [Upgrading](/guides/upgrading) for the one-way schema migrations each
   release performs, and the 0.8.50 SQLite session data note.

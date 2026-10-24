@@ -13,6 +13,10 @@
     not(feature = "session-store"),
     allow(dead_code, unused_imports, unused_variables)
 )]
+// The clap-derive doc comments below are rkat's --help text, so their
+// placeholders (`<state-root>`, `<id>`, ...) stay literal: rustdoc would
+// read them as unclosed HTML tags.
+#![allow(rustdoc::invalid_html_tags)]
 
 mod cli_parse;
 mod exit_status;
@@ -337,12 +341,14 @@ fn completion_outcome_to_cli_runtime_turn_result(
             tool_use_id,
             tool_name,
             args,
+            dedupe_key,
         } => {
             let pending_tool_calls = vec![meerkat_core::error::PendingCallbackToolCall {
                 tool_use_id,
                 tool_name: tool_name.clone(),
                 args: args.clone(),
                 settlement_failures: Vec::new(),
+                dedupe_key,
             }];
             Ok(CliRuntimeTurnResult::CallbackPending(CliCallbackPending {
                 session_id: session_id.clone(),
@@ -422,6 +428,7 @@ fn callback_pending_contract(
                 tool_name: call.tool_name.clone(),
                 args: call.args.clone(),
                 settlement_failures: call.settlement_failures.clone(),
+                dedupe_key: call.dedupe_key.clone(),
             })
             .collect(),
     )
@@ -2960,6 +2967,39 @@ enum SessionCommands {
         json: bool,
     },
 
+    /// Report, and with --apply resolve, a session's held durable tail
+    ///
+    /// Reports why durable-tail recovery holds the session's tail as
+    /// ambiguous (the run's rows, its last stop, the calls without a result,
+    /// the run cursor), or holds an interrupted tail beside inputs another
+    /// run left staged or queued (a shape only pre-release builds of 0.9.5,
+    /// or a store fault, leave), and what the repair keeps, answers, ends and
+    /// requeues. With --apply, a repair the runtime machine authorizes
+    /// commits the tail as an interrupted run: every row is kept, the open
+    /// calls are answered as outcome unknown, the inputs bound to the run end
+    /// (beside a run cursor, the inputs it binds), and another run's stranded
+    /// inputs go back to their queue. Stop every host of the session first:
+    /// the repair is refused while the persisted lifecycle row is not
+    /// quiescent, and an idle live host is not detected. A refusal is never
+    /// retried.
+    ResolveHeldTail {
+        /// Session ID
+        id: String,
+        /// Commit the repair (default: report only)
+        #[arg(long)]
+        apply: bool,
+        /// Open this runtime database directly instead of the realm's runtime
+        /// store from the CLI scope (a SQLite realm's session database, a
+        /// JSONL realm's `runtime.sqlite3`). Hosts that open one runtime
+        /// SQLite file themselves name it here; the session id must then be
+        /// a full session UUID.
+        #[arg(long, value_name = "FILE")]
+        runtime_store: Option<PathBuf>,
+        /// Print the report as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Export a persisted session as an ATIF trajectory.
     ExportAtif {
         /// Session ID, short handle, or realm-qualified session reference.
@@ -3802,6 +3842,8 @@ enum MobCommands {
         #[arg(long)]
         model: Option<String>,
         /// Auth binding to use (REALM:BINDING[:PROFILE]).
+        // --help text: `[:PROFILE]` is an optional part, not a doc link.
+        #[allow(rustdoc::broken_intra_doc_links)]
         #[arg(long)]
         auth_binding: Option<String>,
         /// Label attached to the certified bounded result.
@@ -3833,6 +3875,8 @@ enum MobCommands {
         #[arg(long)]
         model: Option<String>,
         /// Auth binding to use (REALM:BINDING[:PROFILE]).
+        // --help text: `[:PROFILE]` is an optional part, not a doc link.
+        #[allow(rustdoc::broken_intra_doc_links)]
         #[arg(long)]
         auth_binding: Option<String>,
         /// Label attached to the certified bounded result.
@@ -4541,6 +4585,12 @@ async fn cli_main() -> anyhow::Result<ExitCode> {
                 )
                 .await
             }
+            SessionCommands::ResolveHeldTail {
+                id,
+                apply,
+                runtime_store,
+                json,
+            } => resolve_held_tail_session(&id, apply, runtime_store, json, &cli_scope).await,
             SessionCommands::ExportAtif { id, output } => {
                 let destination = export_session_atif(&id, output, &cli_scope).await?;
                 println!("Wrote ATIF trajectory to {}", destination.display());
@@ -12492,6 +12542,20 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
             })
     }
 
+    async fn acknowledge_compaction_finalization(
+        &mut self,
+        authority: &meerkat_core::CommittedSessionBoundaryAuthority,
+    ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+        self.service
+            .acknowledge_runtime_compaction_finalization(&self.session_id, authority)
+            .await
+            .map_err(|error| {
+                meerkat_core::lifecycle::core_executor::CoreExecutorError::Internal(
+                    error.to_string(),
+                )
+            })
+    }
+
     async fn abort_uncommitted_compaction_projections(
         &mut self,
     ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
@@ -12767,6 +12831,16 @@ impl SessionService for RunMobSessionService {
     ) -> Result<(), meerkat_core::service::SessionError> {
         self.inner
             .reconcile_runtime_compaction_projections(id, intents)
+            .await
+    }
+
+    async fn acknowledge_runtime_compaction_finalization(
+        &self,
+        id: &SessionId,
+        authority: &meerkat_core::CommittedSessionBoundaryAuthority,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        self.inner
+            .acknowledge_runtime_compaction_finalization(id, authority)
             .await
     }
 
@@ -13085,6 +13159,17 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
         .await
     }
 
+    async fn settle_durable_tail_before_cold_start_reporting(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_mob::ColdStartTailSettlement, meerkat_core::service::SessionError> {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::settle_durable_tail_before_cold_start_reporting(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
     async fn create_session_under_runtime_turn_boundary(
         &self,
         req: meerkat_core::service::CreateSessionRequest,
@@ -13173,6 +13258,11 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
         // CLI run/resume keeps sessions in-memory, but this path still satisfies
         // the mob runtime contract for a single process execution.
         true
+    }
+
+    fn keeps_durable_member_sessions(&self) -> bool {
+        // The wrapped ephemeral service's sessions die with the process.
+        false
     }
 
     fn acquire_runtime_adapter(
@@ -13269,6 +13359,17 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
         .await
     }
 
+    async fn load_persisted_session_tolerating_tail(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<Session>, meerkat_core::service::SessionError> {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::load_persisted_session_tolerating_tail(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
     async fn load_retained_session_metadata(
         &self,
         session_id: &SessionId,
@@ -13335,6 +13436,17 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
         session_id: &SessionId,
     ) -> Result<Option<meerkat_core::ToolScopeSnapshot>, meerkat_core::service::SessionError> {
         <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::tool_scope_snapshot(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
+    async fn fork_source_tools(
+        &self,
+        session_id: &SessionId,
+    ) -> meerkat_core::fork_notice::ForkSeedSourceTools {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::fork_source_tools(
             &self.inner,
             session_id,
         )
@@ -14597,6 +14709,7 @@ async fn run_agent(
             app_context: parsed_app_context,
             // A CLI-created session is never a mob fork seating.
             fork_source: None,
+            prompt_context_fork_source: None,
             additional_instructions: if instructions.is_empty() {
                 None
             } else {
@@ -15998,6 +16111,59 @@ impl SurfaceScheduleMobHost for CliScheduleMobHost {
             .deliver_identity_target(occurrence, identity, binding)
             .await
     }
+
+    /// A redelivery is the mob host's to decide: its existing-only answer
+    /// reads the mob's durable external-delivery record, where the trait
+    /// default answers an unproven late one not admitted unread. A mob state
+    /// that cannot be hydrated cannot show whether the earlier attempt was
+    /// admitted, so the occurrence stays reclaimable.
+    async fn deliver_existing_mob_target(
+        &self,
+        occurrence: &meerkat::Occurrence,
+        identity: &meerkat::ScheduleDeliveryIdentity,
+        binding: &meerkat::MobTargetBinding,
+        existing: meerkat::ExistingDelivery,
+    ) -> Result<meerkat::ExistingDeliveryAnswer, meerkat::ScheduleDomainError> {
+        let state = get_or_hydrate_cli_mob_state(
+            &self.scope,
+            Arc::clone(&self.service),
+            Arc::clone(&self.runtime_adapter),
+            Arc::clone(&self.mob_state_cache),
+        )
+        .await
+        .map_err(cli_redelivery_mob_state_unavailable)?;
+        meerkat_mob_mcp::MobMcpScheduleHost::new(state)
+            .deliver_existing_mob_target(occurrence, identity, binding, existing)
+            .await
+    }
+
+    async fn deliver_existing_identity_target(
+        &self,
+        occurrence: &meerkat::Occurrence,
+        identity: &meerkat::ScheduleDeliveryIdentity,
+        binding: &meerkat::IdentityTargetBinding,
+        existing: meerkat::ExistingDelivery,
+    ) -> Result<Option<meerkat::ExistingDeliveryAnswer>, meerkat::ScheduleDomainError> {
+        let state = get_or_hydrate_cli_mob_state(
+            &self.scope,
+            Arc::clone(&self.service),
+            Arc::clone(&self.runtime_adapter),
+            Arc::clone(&self.mob_state_cache),
+        )
+        .await
+        .map_err(cli_redelivery_mob_state_unavailable)?;
+        meerkat_mob_mcp::MobMcpScheduleHost::new(state)
+            .deliver_existing_identity_target(occurrence, identity, binding, existing)
+            .await
+    }
+}
+
+/// The schedule error of a redelivery whose mob state cannot be hydrated.
+#[cfg(all(feature = "mob", feature = "session-store"))]
+fn cli_redelivery_mob_state_unavailable(error: anyhow::Error) -> meerkat::ScheduleDomainError {
+    meerkat::ScheduleDomainError::DeliveryRepairDeferred {
+        detail: format!("mob state is unavailable for a redelivery: {error}"),
+    }
 }
 
 #[cfg(all(not(feature = "mob"), feature = "session-store"))]
@@ -16054,10 +16220,12 @@ impl CliScheduleSessionHost {
         &self,
         session_id: &SessionId,
     ) -> Result<(), meerkat::ScheduleDomainError> {
+        // A session another process is running holds a provisional tail
+        // ahead of its committed snapshot; presence reads that snapshot.
         let session_exists = self.service.read(session_id).await.is_ok()
             || self
                 .service
-                .load_authoritative_session(session_id)
+                .load_committed_session_tolerating_tail(session_id)
                 .await
                 .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?
                 .is_some();
@@ -16082,12 +16250,14 @@ impl CliScheduleSessionHost {
         &self,
         session_id: &SessionId,
     ) -> Result<(), meerkat::ScheduleDomainError> {
+        // The keep-alive is committed metadata, read from the committed
+        // snapshot while the session's durable run holds a provisional tail.
+        // A read failure is an error, never a keep-alive turned off.
         let keep_alive = self
             .service
-            .load_authoritative_session(session_id)
+            .load_committed_session_tolerating_tail(session_id)
             .await
-            .ok()
-            .flatten()
+            .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?
             .and_then(|session| {
                 session
                     .session_metadata()
@@ -16190,19 +16360,24 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
             });
         }
 
-        let persisted = self
+        // Presence and archive state, read body-free: a session another
+        // process runs holds a provisional tail from its first round commit,
+        // and a body read refuses throughout it.
+        match self
             .service
-            .load_authoritative_session(session_id)
+            .observe_live_durable_source(session_id)
             .await
-            .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
-        if let Some(session) = persisted {
-            let archived = self
-                .service
-                .session_archived_by_authority(session_id, &session)
-                .await
-                .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
-            if !archived {
+            .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?
+        {
+            meerkat::LiveDurableSourceObservation::Committed { .. } => {
                 return Ok(meerkat::TargetProbeOutcome::Ready);
+            }
+            meerkat::LiveDurableSourceObservation::Archived
+            | meerkat::LiveDurableSourceObservation::Absent => {}
+            other => {
+                return Err(meerkat::ScheduleDomainError::Internal(format!(
+                    "the durable source of session {session_id} answered a classification this rkat does not know: {other:?}"
+                )));
             }
         }
         Ok(meerkat::TargetProbeOutcome::Missing {
@@ -16217,9 +16392,11 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
         let Some(session_id) = binding.resolved_session_id() else {
             return Ok(None);
         };
+        // The owner identity is committed metadata, which a running durable
+        // run's provisional tail does not change.
         let session = self
             .service
-            .load_authoritative_session(session_id)
+            .load_committed_session_tolerating_tail(session_id)
             .await
             .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
         Ok(recover_mob_member_identity_from_session_target(
@@ -16548,6 +16725,16 @@ impl SessionService for MobCliSessionService {
     ) -> Result<(), meerkat_core::service::SessionError> {
         self.inner
             .reconcile_runtime_compaction_projections(id, intents)
+            .await
+    }
+
+    async fn acknowledge_runtime_compaction_finalization(
+        &self,
+        id: &SessionId,
+        authority: &meerkat_core::CommittedSessionBoundaryAuthority,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        self.inner
+            .acknowledge_runtime_compaction_finalization(id, authority)
             .await
     }
 
@@ -16895,6 +17082,17 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
         .await
     }
 
+    async fn settle_durable_tail_before_cold_start_reporting(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<meerkat_mob::ColdStartTailSettlement, meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::settle_durable_tail_before_cold_start_reporting(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
     async fn create_session_under_runtime_turn_boundary(
         &self,
         req: meerkat_core::service::CreateSessionRequest,
@@ -17129,6 +17327,20 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
         .await
     }
 
+    /// The wrapped persistent service's tolerant committed read: a reader of
+    /// a member whose durable run holds a provisional tail gets the committed
+    /// snapshot.
+    async fn load_persisted_session_tolerating_tail(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<Session>, meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::load_persisted_session_tolerating_tail(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
     async fn load_revivable_retired_session(
         &self,
         session_id: &SessionId,
@@ -17244,6 +17456,17 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
         session_id: &SessionId,
     ) -> Result<Option<meerkat_core::ToolScopeSnapshot>, meerkat_core::service::SessionError> {
         <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::tool_scope_snapshot(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
+    async fn fork_source_tools(
+        &self,
+        session_id: &SessionId,
+    ) -> meerkat_core::fork_notice::ForkSeedSourceTools {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::fork_source_tools(
             &self.inner,
             session_id,
         )
@@ -17842,6 +18065,412 @@ async fn repair_wholeblob_session(
     }
 }
 
+/// Report, and with `apply` resolve, a session's held durable tail
+/// (`rkat session resolve-held-tail`).
+///
+/// A thin wrapper over the runtime's operator primitive
+/// [`meerkat_runtime::recovery::resolve_held_durable_tail`]: the runtime
+/// machine decides whether the repair is authorized, and this command only
+/// opens the store, asks once, and reports. A refusal is never retried.
+async fn resolve_held_tail_session(
+    id: &str,
+    apply: bool,
+    runtime_store: Option<PathBuf>,
+    json: bool,
+    scope: &RuntimeScope,
+) -> anyhow::Result<()> {
+    #[cfg(not(feature = "session-store"))]
+    {
+        let _ = (id, apply, runtime_store, json, scope);
+        anyhow::bail!("resolving a held durable tail requires the session-store feature");
+    }
+    #[cfg(feature = "session-store")]
+    {
+        // As for `repair-wholeblob`, open only the runtime database that
+        // holds the session's durable authority, with none of a host's
+        // open-time maintenance: no realm manifest write, no other store, no
+        // migration, no activation. The database's own rows decide its
+        // persistence profile, so a head-canonical database and a WholeBlob
+        // one both open. No actor can own the session in this process; the
+        // operator stops every host of the session first, and the repair is
+        // refused while the persisted lifecycle row is not quiescent. A row a
+        // host left Stopped when it ended before unregistering counts as the
+        // Idle row a start would normalize it to, and the repair writes it.
+        let (session_id, database) = match runtime_store {
+            Some(path) => {
+                let session_id = SessionId::parse(id).map_err(|error| {
+                    anyhow::anyhow!(
+                        "--runtime-store takes a full session UUID, not a realm-scoped locator: \
+                         '{id}': {error}"
+                    )
+                })?;
+                (session_id, path)
+            }
+            None => (
+                resolve_scoped_session_id(id, scope)?,
+                realm_runtime_database_for_operator(scope)?,
+            ),
+        };
+        let store = meerkat_runtime::store::SqliteRuntimeStore::open_existing(database.clone())
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "cannot open the runtime store {}: {error}",
+                    database.display()
+                )
+            })?;
+        let resolution =
+            meerkat_runtime::recovery::resolve_held_durable_tail(&store, &session_id, apply)
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!("the durable tail of session {session_id} stays held: {error}")
+                })?;
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&held_tail_resolution_json(
+                    &session_id,
+                    apply,
+                    &resolution
+                ))?
+            );
+        } else {
+            print_held_tail_resolution(&session_id, &resolution);
+        }
+        match held_tail_resolution_failure(&session_id, &resolution) {
+            Some(failure) => Err(anyhow::anyhow!(failure)),
+            None => Ok(()),
+        }
+    }
+}
+
+/// The realm's runtime database, where the realm's manifest places it: a
+/// SQLite realm keeps its runtime store in the session database, a JSONL
+/// realm in `runtime.sqlite3`. The manifest is read without creating or
+/// updating the realm.
+#[cfg(feature = "session-store")]
+fn realm_runtime_database_for_operator(scope: &RuntimeScope) -> anyhow::Result<PathBuf> {
+    let realm = scope.locator.realm.as_str();
+    let paths = meerkat_store::realm_paths_in(&scope.locator.state_root, realm);
+    let pin = meerkat_store::read_realm_manifest_pin(&paths.manifest_path).map_err(|error| {
+        anyhow::anyhow!(
+            "cannot read the manifest of realm '{realm}' under {}: {error}; point --state-root \
+             at the realms root and --realm at an existing realm, or name the runtime database \
+             with --runtime-store",
+            scope.locator.state_root.display()
+        )
+    })?;
+    let Some(manifest) = pin.as_builtin() else {
+        anyhow::bail!(
+            "an external storage provider owns the runtime store of realm '{realm}'; name its \
+             runtime database with --runtime-store"
+        );
+    };
+    match manifest.backend {
+        // A SQLite realm's runtime store shares the session database.
+        RealmBackend::Sqlite => Ok(paths.sessions_sqlite_path),
+        #[cfg(feature = "jsonl-store")]
+        RealmBackend::Jsonl => Ok(paths.runtime_sqlite_path),
+        // A memory realm keeps nothing durable, and this rkat opens no other
+        // backend's runtime database.
+        #[allow(unreachable_patterns)]
+        other => anyhow::bail!(
+            "realm '{realm}' ({} backend) has no runtime database this rkat can open",
+            other.as_str()
+        ),
+    }
+}
+
+/// The wire name of a durable-tail recovery class.
+#[cfg(feature = "session-store")]
+fn durable_tail_recovery_class_name(
+    class: meerkat_runtime::recovery::DurableTailRecoveryClass,
+) -> &'static str {
+    use meerkat_runtime::recovery::DurableTailRecoveryClass as Class;
+    match class {
+        Class::CompletedCandidate => "completed_candidate",
+        Class::InterruptedRepairableCandidate => "interrupted_repairable_candidate",
+        Class::Ambiguous => "ambiguous",
+        Class::ContinuableCandidate => "continuable_candidate",
+    }
+}
+
+/// The `--json` report of `rkat session resolve-held-tail`.
+#[cfg(feature = "session-store")]
+fn held_tail_resolution_json(
+    session_id: &SessionId,
+    apply: bool,
+    resolution: &meerkat_runtime::recovery::HeldTailResolution,
+) -> serde_json::Value {
+    use meerkat_runtime::recovery::HeldTailResolution;
+    let mut report = serde_json::Map::new();
+    report.insert("session_id".into(), session_id.to_string().into());
+    report.insert("apply".into(), apply.into());
+    match resolution {
+        HeldTailResolution::NoTail => {
+            report.insert("resolution".into(), "no_tail".into());
+        }
+        HeldTailResolution::NotHeld { class } => {
+            report.insert("resolution".into(), "not_held".into());
+            report.insert(
+                "class".into(),
+                durable_tail_recovery_class_name(*class).into(),
+            );
+        }
+        HeldTailResolution::HeldOtherwise { reason } => {
+            report.insert("resolution".into(), "held_otherwise".into());
+            report.insert("reason".into(), reason.clone().into());
+        }
+        HeldTailResolution::Ambiguous(repair) => {
+            report.insert("resolution".into(), "ambiguous".into());
+            report.insert("repair".into(), held_tail_repair_json(repair));
+        }
+        HeldTailResolution::StrandedInputs(repair) => {
+            report.insert("resolution".into(), "stranded_inputs".into());
+            report.insert("repair".into(), held_tail_repair_json(repair));
+        }
+        _ => {
+            report.insert("resolution".into(), "unknown".into());
+        }
+    }
+    serde_json::Value::Object(report)
+}
+
+/// The `repair` object of a `--json` report: the plan, and its verdict.
+#[cfg(feature = "session-store")]
+fn held_tail_repair_json(repair: &meerkat_runtime::recovery::HeldTailRepair) -> serde_json::Value {
+    use meerkat_runtime::recovery::HeldTailRepairVerdict;
+    let (verdict, boundary_sequence) = match repair.verdict {
+        HeldTailRepairVerdict::WouldRepair => ("would_repair", None),
+        HeldTailRepairVerdict::Refused => ("refused", None),
+        HeldTailRepairVerdict::Repaired { boundary_sequence } => {
+            ("repaired", Some(boundary_sequence))
+        }
+        _ => ("unknown", None),
+    };
+    let facts = &repair.facts;
+    let mut repair_json = serde_json::json!({
+        "candidate_id": repair.candidate_id,
+        "run_id": repair.run_id.to_string(),
+        "facts": {
+            "run_rows": facts.run_rows,
+            "last_stop": facts.last_stop,
+            "dangling_calls": facts.dangling_calls,
+            "orphan_results": facts.orphan_results,
+            "rows_after_terminal_reply": facts.rows_after_terminal_reply,
+            "run_cursor": facts.run_cursor,
+            "cursor_inputs_bound": facts.cursor_inputs_bound,
+        },
+        "messages_before": repair.messages_before,
+        "messages_after": repair.messages_after,
+        "closed_calls": repair.closed_calls,
+        "terminalized_inputs": repair
+            .terminalized_inputs
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        "requeued_inputs": repair
+            .requeued_inputs
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        "runtime_quiescent": repair.runtime_quiescent,
+        "normalizes_stopped_lifecycle": repair.normalizes_stopped_lifecycle,
+        "verdict": verdict,
+    });
+    if let (Some(sequence), Some(object)) = (boundary_sequence, repair_json.as_object_mut()) {
+        object.insert("boundary_sequence".into(), sequence.into());
+    }
+    repair_json
+}
+
+/// The human report of `rkat session resolve-held-tail`.
+#[cfg(feature = "session-store")]
+fn print_held_tail_resolution(
+    session_id: &SessionId,
+    resolution: &meerkat_runtime::recovery::HeldTailResolution,
+) {
+    use meerkat_runtime::recovery::HeldTailResolution;
+    match resolution {
+        HeldTailResolution::NoTail => {
+            println!("session {session_id}: no durable tail is held; nothing to resolve");
+        }
+        HeldTailResolution::NotHeld { class } => {
+            println!(
+                "session {session_id}: the durable tail is not held ({}); ordinary recovery \
+                 commits or continues it when the session next resumes. Nothing was written.",
+                durable_tail_recovery_class_name(*class)
+            );
+        }
+        HeldTailResolution::HeldOtherwise { reason } => {
+            println!(
+                "session {session_id}: the durable tail is held for a reason this command does \
+                 not resolve: {reason}"
+            );
+        }
+        HeldTailResolution::Ambiguous(repair) => {
+            println!(
+                "session {session_id}: held durable tail, candidate {}, run {}",
+                repair.candidate_id, repair.run_id
+            );
+            print_held_tail_repair(repair);
+        }
+        HeldTailResolution::StrandedInputs(repair) => {
+            println!(
+                "session {session_id}: durable tail of interrupted run {}, candidate {}, held \
+                 beside another run's stranded inputs",
+                repair.run_id, repair.candidate_id
+            );
+            println!(
+                "  {} inputs staged for, or queued after, a run that never committed stand \
+                 beside the tail [{}]; the tail's run cursor binds none of them",
+                repair.requeued_inputs.len(),
+                repair
+                    .requeued_inputs
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            print_held_tail_repair(repair);
+        }
+        other => println!("session {session_id}: {other:?}"),
+    }
+}
+
+/// The facts, the plan and the verdict of an operator repair, for the human
+/// report.
+#[cfg(feature = "session-store")]
+fn print_held_tail_repair(repair: &meerkat_runtime::recovery::HeldTailRepair) {
+    use meerkat_runtime::recovery::HeldTailRepairVerdict;
+    let yes_no = |value: bool| if value { "yes" } else { "no" };
+    let ids = |inputs: &[meerkat_core::InputId]| {
+        inputs
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let facts = &repair.facts;
+    println!("why it is held:");
+    println!("  run rows: {}", facts.run_rows);
+    println!("  last stop: {}", facts.last_stop);
+    println!(
+        "  calls without a result: {} [{}]",
+        facts.dangling_calls.len(),
+        facts.dangling_calls.join(", ")
+    );
+    println!("  results that answer no call: {}", facts.orphan_results);
+    println!(
+        "  rows after the terminal reply: {}",
+        yes_no(facts.rows_after_terminal_reply)
+    );
+    println!(
+        "  run cursor: {}; inputs bound to the run: {}",
+        facts.run_cursor,
+        yes_no(facts.cursor_inputs_bound)
+    );
+    println!("repair:");
+    println!(
+        "  keeps all {} messages ({} after the repair)",
+        repair.messages_before, repair.messages_after
+    );
+    println!(
+        "  answers {} calls as outcome unknown [{}]",
+        repair.closed_calls.len(),
+        repair.closed_calls.join(", ")
+    );
+    println!(
+        "  ends {} inputs bound to the run [{}]",
+        repair.terminalized_inputs.len(),
+        ids(&repair.terminalized_inputs)
+    );
+    if !repair.requeued_inputs.is_empty() {
+        println!(
+            "  requeues {} stranded inputs with their content, to run once after the repaired \
+             run [{}]",
+            repair.requeued_inputs.len(),
+            ids(&repair.requeued_inputs)
+        );
+    }
+    println!(
+        "  persisted lifecycle quiescent: {}",
+        yes_no(repair.runtime_quiescent)
+    );
+    if repair.normalizes_stopped_lifecycle {
+        println!(
+            "  the persisted lifecycle row is Stopped (a host stopped the runtime and ended \
+             before unregistering it): the repair writes the clean Idle row a start would \
+             normalize it to"
+        );
+    }
+    match repair.verdict {
+        HeldTailRepairVerdict::WouldRepair => println!(
+            "verdict: the runtime machine authorizes the repair; nothing was written. Run again \
+             with --apply to commit it."
+        ),
+        HeldTailRepairVerdict::Refused => {
+            println!("verdict: refused; nothing was written");
+        }
+        HeldTailRepairVerdict::Repaired { boundary_sequence } => println!(
+            "verdict: repaired; the tail is committed as an interrupted run at boundary sequence \
+             {boundary_sequence}"
+        ),
+        other => println!("verdict: {other:?}"),
+    }
+}
+
+/// The failure a resolution ends `rkat session resolve-held-tail` with, if
+/// any: a tail held for another reason, a refused repair, or an answer this
+/// rkat does not know. The command never retries.
+#[cfg(feature = "session-store")]
+fn held_tail_resolution_failure(
+    session_id: &SessionId,
+    resolution: &meerkat_runtime::recovery::HeldTailResolution,
+) -> Option<String> {
+    use meerkat_runtime::recovery::HeldTailResolution;
+    match resolution {
+        HeldTailResolution::NoTail | HeldTailResolution::NotHeld { .. } => None,
+        HeldTailResolution::HeldOtherwise { reason } => Some(format!(
+            "the durable tail of session {session_id} is held for a reason this command does not \
+             resolve: {reason}"
+        )),
+        HeldTailResolution::Ambiguous(repair) | HeldTailResolution::StrandedInputs(repair) => {
+            held_tail_repair_failure(session_id, repair)
+        }
+        other => Some(format!(
+            "the durable tail of session {session_id} answered a resolution this rkat does not \
+             know: {other:?}"
+        )),
+    }
+}
+
+/// The failure an operator repair's verdict ends the command with, if any.
+#[cfg(feature = "session-store")]
+fn held_tail_repair_failure(
+    session_id: &SessionId,
+    repair: &meerkat_runtime::recovery::HeldTailRepair,
+) -> Option<String> {
+    use meerkat_runtime::recovery::HeldTailRepairVerdict;
+    match repair.verdict {
+        HeldTailRepairVerdict::WouldRepair | HeldTailRepairVerdict::Repaired { .. } => None,
+        HeldTailRepairVerdict::Refused if !repair.runtime_quiescent => Some(format!(
+            "the repair of session {session_id}'s held durable tail was refused: the \
+             persisted lifecycle row is not quiescent (a runtime is attached or running, or \
+             a run is current); stop every host of the session first, then run the command \
+             again"
+        )),
+        HeldTailRepairVerdict::Refused => Some(format!(
+            "the repair of session {session_id}'s held durable tail was refused by the \
+             runtime machine: a prior recovery commit covers or contradicts the tail, or the \
+             run's inputs are not attributable to it; nothing was written"
+        )),
+        other => Some(format!(
+            "the repair of session {session_id}'s held durable tail answered a verdict this \
+             rkat does not know: {other:?}"
+        )),
+    }
+}
+
 async fn show_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
     #[cfg(not(feature = "session-store"))]
     {
@@ -17855,8 +18484,10 @@ async fn show_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
 
         let (config, _) = load_config(scope).await?;
         let (service, _runtime_adapter) = build_cli_persistent_service(scope, config).await?;
+        // A session another process is running shows its committed snapshot:
+        // the run's provisional tail is not the session's history yet.
         let session = service
-            .load_authoritative_session(&session_id)
+            .load_committed_session_tolerating_tail(&session_id)
             .await
             .map_err(|e| exit_status::typed_failure(e, |e| format!("Failed to load session: {e}")))?
             .ok_or_else(|| exit_status::session_not_found(&session_id))?;
@@ -19553,6 +20184,7 @@ mod mob_typed_exit_tests {
                 provider_native_resume: false,
             },
             continuity: meerkat_contracts::wire::WireLiveContinuityMode::Fresh,
+            advisories: Vec::new(),
         };
 
         let captured = Arc::new(Mutex::new(Vec::<u8>::new()));
@@ -22041,8 +22673,9 @@ impl meerkat::HostConfigLayer for DeployConfigLayers {
 
 /// Whether the deploy runtime provides a typed capability that gates a pack
 /// deploy knob. Mirrors the token-based runtime surface in
-/// [`runtime_capabilities`] but in the typed [`CapabilityId`] vocabulary the
-/// deploy policy gates against.
+/// [`runtime_capabilities`] but in the typed
+/// [`CapabilityId`](meerkat_contracts::capability::CapabilityId) vocabulary
+/// the deploy policy gates against.
 #[cfg(feature = "mob")]
 fn deploy_runtime_provides_capability(
     capability: meerkat_contracts::capability::CapabilityId,
@@ -22119,7 +22752,8 @@ fn runtime_capabilities(
     caps
 }
 
-/// K18: required capabilities are compared by typed [`MobpackCapabilityId`],
+/// K18: required capabilities are compared by typed
+/// [`MobpackCapabilityId`](meerkat_contracts::capability::MobpackCapabilityId),
 /// never by raw token string. A requirement that does not classify into the
 /// typed vocabulary (`Unknown`) can never be satisfied and fails closed.
 #[cfg(feature = "mob")]
@@ -22514,6 +23148,8 @@ mod tests {
     use std::sync::Arc;
     use std::sync::Mutex;
     use tokio::sync::RwLock;
+
+    mod committed_reads_tests;
 
     /// Only a revocation is reported as one; every other attempt says what
     /// it did, never that the grant is live.
@@ -26031,6 +26667,7 @@ default_model = "gemma"
                 tool_use_id: "call-1".to_string(),
                 tool_name: "external_mock".into(),
                 args: serde_json::json!({ "value": "browser" }),
+                dedupe_key: None,
             },
             &session_id,
             &realm,
@@ -26058,6 +26695,52 @@ default_model = "gemma"
         assert_eq!(
             pending_json["pending_tool_calls"][0]["tool_name"],
             "external_mock"
+        );
+        assert!(
+            pending_json["pending_tool_calls"][0]
+                .get("dedupe_key")
+                .is_none(),
+            "a call without a dedupe key omits the field"
+        );
+    }
+
+    /// The CLI's pending output carries a pending callback call's dedupe key
+    /// unchanged. (Unrun until the candidate's validation.)
+    #[test]
+    fn completion_outcome_to_cli_runtime_turn_result_carries_the_callback_dedupe_key() {
+        let session_id = SessionId::new();
+        let realm = meerkat_core::connection::RealmId::parse("test-realm")
+            .expect("test-realm is a valid realm id");
+        let arguments = serde_json::value::RawValue::from_string(r#"{"value":"browser"}"#.into())
+            .expect("valid arguments");
+        let key = meerkat_core::ToolCallDedupeKey::new(
+            meerkat_core::RunId::new(),
+            2,
+            "call-1",
+            "external_mock",
+            &arguments,
+        )
+        .expect("valid dedupe key");
+        let result = completion_outcome_to_cli_runtime_turn_result(
+            meerkat_runtime::completion::CompletionOutcome::CallbackPending {
+                tool_use_id: "call-1".to_string(),
+                tool_name: "external_mock".into(),
+                args: serde_json::json!({ "value": "browser" }),
+                dedupe_key: Some(key.clone()),
+            },
+            &session_id,
+            &realm,
+            true,
+        )
+        .expect("callback pending should surface as resumable CLI metadata");
+        let CliRuntimeTurnResult::CallbackPending(pending) = result else {
+            panic!("expected callback pending CLI turn result");
+        };
+        let pending_json = serde_json::to_value(callback_pending_contract(&pending))
+            .expect("callback pending contract should serialize");
+        assert_eq!(
+            pending_json["pending_tool_calls"][0]["dedupe_key"],
+            serde_json::to_value(&key).expect("key serializes")
         );
     }
 
@@ -33701,6 +34384,21 @@ default_model = "gpt-5.4"
 
     #[cfg(feature = "mob")]
     #[tokio::test]
+    async fn run_mob_session_service_keeps_no_durable_member_sessions() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .builtins(false)
+            .shell(false);
+        let inner = Arc::new(build_cli_service(factory, Config::default(), None));
+        let wrapper = RunMobSessionService::new(inner);
+        // `rkat run` keeps the mob contract for the one process execution,
+        // but its sessions die with the process: a durable profile is refused.
+        assert!(meerkat_mob::MobSessionService::supports_persistent_sessions(&wrapper));
+        assert!(!meerkat_mob::MobSessionService::keeps_durable_member_sessions(&wrapper));
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
     async fn run_mob_session_service_retained_metadata_preserves_unsupported() {
         let temp = tempfile::tempdir().unwrap();
         let factory = AgentFactory::new(temp.path().join("sessions"))
@@ -34457,6 +35155,217 @@ default_model = "gpt-5.4"
             .expect("mob identity should be handled by mob adapter");
         let terminal = dispatch.completion.await.expect("delivery terminal");
         assert_eq!(terminal.phase, meerkat::OccurrencePhase::Completed);
+    }
+
+    /// One occurrence of a schedule firing `target`.
+    #[cfg(all(feature = "mob", feature = "session-store"))]
+    fn cli_scheduled_occurrence(target: meerkat::TargetBinding) -> meerkat::Occurrence {
+        let schedule = meerkat::Schedule::new(meerkat::CreateScheduleRequest {
+            name: Some("cli-mob-redelivery".to_string()),
+            description: None,
+            trigger: meerkat::TriggerSpec::Interval(meerkat::IntervalTriggerSpec {
+                start_at_utc: chrono::Utc::now(),
+                every_seconds: 60,
+                end_at_utc: None,
+            }),
+            target,
+            misfire_policy: meerkat::MisfirePolicy::Skip,
+            overlap_policy: meerkat::OverlapPolicy::SkipIfRunning,
+            missing_target_policy: meerkat::MissingTargetPolicy::Skip,
+            labels: Default::default(),
+            planning_horizon_days: None,
+            planning_horizon_occurrences: None,
+        })
+        .expect("a mob schedule");
+        meerkat::Occurrence::planned_from_schedule(
+            &schedule,
+            meerkat::OccurrenceOrdinal(0),
+            chrono::Utc::now(),
+        )
+        .expect("the occurrence plans")
+    }
+
+    /// The durable external-delivery record a first attempt leaves in mob
+    /// `ops`: its Begin under the occurrence's stable identity, then its
+    /// completed terminal.
+    #[cfg(all(feature = "mob", feature = "session-store"))]
+    async fn record_completed_cli_ops_delivery(
+        mob_state: &meerkat_mob_mcp::MobMcpState,
+        identity: &meerkat::ScheduleDeliveryIdentity,
+        canonical_action: &str,
+    ) {
+        let intent = meerkat_mob::MobExternalDeliveryIntent::new(
+            meerkat_mob::MobId::from("ops"),
+            meerkat_mob::MobExternalDeliveryIdentity::new(
+                identity.idempotency_key.clone(),
+                identity.correlation_id.clone(),
+            )
+            .expect("the occurrence's delivery identity"),
+            meerkat_mob::MobExternalDeliveryTargetKind::MemberSend,
+            canonical_action.as_bytes(),
+        )
+        .expect("the first attempt's intent");
+        assert_eq!(
+            mob_state
+                .mob_begin_external_delivery(&intent)
+                .await
+                .expect("the first attempt's Begin"),
+            meerkat_mob::MobExternalDeliveryBeginOutcome::Begun
+        );
+        mob_state
+            .mob_complete_external_delivery(
+                &intent,
+                &meerkat_mob::MobExternalDeliveryTerminal::Completed,
+            )
+            .await
+            .expect("the first attempt's terminal");
+    }
+
+    /// The CLI host's mob host (the wrapper the schedule host composes,
+    /// not the mob host it wraps) forwards a redelivery to the mob host, so
+    /// a late one reads the mob's durable external-delivery record: a mob
+    /// target and a mob member's identity whose first attempt mob `ops`
+    /// recorded answer from that record (the mob has no member, so only the
+    /// record can complete them). The trait defaults the wrapper fell back
+    /// to answered both not admitted without the read.
+    #[cfg(all(feature = "mob", feature = "session-store"))]
+    #[tokio::test]
+    async fn test_cli_schedule_mob_host_forwards_late_redeliveries_to_the_mob_record() {
+        let temp = tempfile::tempdir().expect("tempdir must be created");
+        let session_store = sqlite_session_store(&temp);
+        let persistence = PersistenceBundle::new(
+            Arc::clone(&session_store),
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+            Arc::new(meerkat_store::MemoryBlobStore::default()),
+        )
+        .expect("construct runtime authority");
+        let factory = AgentFactory::new(temp.path().join("sessions"))
+            .session_store(session_store)
+            .builtins(false)
+            .shell(false);
+        let (service, runtime_adapter) = build_cli_runtime_backed_service_with_defaults(
+            factory,
+            Config::default(),
+            persistence,
+            temp.path().join("config_state.json"),
+            None,
+            None,
+            None,
+        )
+        .expect("compose the CLI runtime-backed service");
+        let mob_state = meerkat_mob_mcp::MobMcpState::new_in_memory();
+        let definition: meerkat_mob::MobDefinition = serde_json::from_value(serde_json::json!({
+            "id": "ops",
+            "profiles": {
+                "worker": {
+                    "model": "gpt-5.4",
+                    "external_addressable": true,
+                    "tools": {
+                        "comms": true
+                    }
+                }
+            }
+        }))
+        .expect("test mob definition should decode");
+        mob_state
+            .mob_create_definition(definition)
+            .await
+            .expect("the mob that recorded the first attempts");
+        // The cache holds the hydrated state, so the wrapper never hydrates.
+        let host = build_cli_schedule_mob_host(
+            test_scope(temp.path().to_path_buf(), "cli-mob-redelivery"),
+            service,
+            runtime_adapter,
+            Arc::new(CliMobStateCache {
+                state: tokio::sync::Mutex::new(Some(Arc::clone(&mob_state))),
+            }),
+        );
+
+        let mob_target = meerkat::MobTargetBinding::Member {
+            mob_id: "ops".to_string(),
+            member_id: "deploy-monitor".to_string(),
+            action: meerkat::ScheduledMobAction::Send {
+                content: "Check deploy state.".to_string().into(),
+                render_metadata: None,
+            },
+        };
+        let occurrence =
+            cli_scheduled_occurrence(meerkat::TargetBinding::Mob(Box::new(mob_target.clone())));
+        let identity = meerkat::ScheduleDeliveryIdentity::for_occurrence(&occurrence);
+        record_completed_cli_ops_delivery(
+            &mob_state,
+            &identity,
+            &mob_target.stable_key().expect("stable mob target key"),
+        )
+        .await;
+        let answer = host
+            .deliver_existing_mob_target(
+                &occurrence,
+                &identity,
+                &mob_target,
+                meerkat::ExistingDelivery::UnprovenLate,
+            )
+            .await
+            .expect("the mob host's record read answers");
+        let meerkat::ExistingDeliveryAnswer::Dispatch(dispatch) = answer else {
+            panic!("a recorded mob delivery replays from its record");
+        };
+        assert_eq!(
+            dispatch.receipt.stage,
+            meerkat::DeliveryReceiptStage::DispatchAccepted
+        );
+        assert_eq!(
+            dispatch.completion.await.expect("replay completion").phase,
+            meerkat::OccurrencePhase::Completed
+        );
+
+        let identity_target = meerkat::IdentityTargetBinding::resumable(
+            meerkat::surface::mob_member_schedule_identity(&meerkat_core::MobMemberBinding {
+                mob_id: "ops".to_string(),
+                role: "worker".to_string(),
+                member: "deploy-monitor".to_string(),
+            }),
+            meerkat::ScheduledSessionAction::Prompt {
+                prompt: "Check deploy state.".to_string().into(),
+                system_prompt: None,
+                render_metadata: None,
+                skill_refs: Vec::new(),
+                additional_instructions: Vec::new(),
+            },
+        );
+        let occurrence = cli_scheduled_occurrence(meerkat::TargetBinding::Identity(Box::new(
+            identity_target.clone(),
+        )));
+        let identity = meerkat::ScheduleDeliveryIdentity::for_occurrence(&occurrence);
+        record_completed_cli_ops_delivery(
+            &mob_state,
+            &identity,
+            &identity_target
+                .stable_key()
+                .expect("stable identity target key"),
+        )
+        .await;
+        let answer = host
+            .deliver_existing_identity_target(
+                &occurrence,
+                &identity,
+                &identity_target,
+                meerkat::ExistingDelivery::UnprovenLate,
+            )
+            .await
+            .expect("the mob host's record read answers")
+            .expect("the mob host owns a mob member's identity");
+        let meerkat::ExistingDeliveryAnswer::Dispatch(dispatch) = answer else {
+            panic!("a recorded identity delivery replays from its record");
+        };
+        assert_eq!(
+            dispatch.receipt.stage,
+            meerkat::DeliveryReceiptStage::DispatchAccepted
+        );
+        assert_eq!(
+            dispatch.completion.await.expect("replay completion").phase,
+            meerkat::OccurrencePhase::Completed
+        );
     }
 
     #[tokio::test]
@@ -36837,6 +37746,7 @@ supports_reasoning = true
             schema_version: 4,
             root_step_outputs: Default::default(),
             loop_iteration_outputs: Default::default(),
+            role_targets: None,
         };
 
         let run_json = render_flow_status_json(Some(run)).expect("encode run json");

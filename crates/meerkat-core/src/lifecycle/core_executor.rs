@@ -307,6 +307,16 @@ pub enum CoreExecutorError {
     #[error("Run was cancelled")]
     Cancelled,
 
+    /// The applied run was suspended by a stop that keeps the session's
+    /// queued work ([`AgentError::RunSuspended`]): it is neither cancelled
+    /// nor failed. Its turn stopped at an await point and wrote nothing more,
+    /// so its last round commit stays its resume point. The runtime loop
+    /// realizes no terminal for it and leaves its inputs as they are; it is
+    /// never a cancellation, which realizes `RunCancelled` and abandons the
+    /// inputs, and never an apply failure, which requeues them.
+    #[error("Run {run_id} was suspended; it resumes from its last round commit")]
+    Suspended { run_id: RunId },
+
     /// Internal error.
     #[error("Internal error: {0}")]
     Internal(String),
@@ -387,6 +397,11 @@ impl CoreExecutorError {
         if let SessionError::Agent(agent_error) = error.primary_error() {
             match agent_error.primary_error() {
                 AgentError::Cancelled => return Self::Cancelled,
+                AgentError::RunSuspended { run_id } => {
+                    return Self::Suspended {
+                        run_id: run_id.clone(),
+                    };
+                }
                 AgentError::StickyModelFallbackAuthorityUnknown { message } => {
                     return Self::session_unavailable_requires_teardown(message.clone());
                 }
@@ -423,6 +438,15 @@ impl CoreExecutorError {
 
     pub fn is_cancelled(&self) -> bool {
         matches!(self, Self::Cancelled)
+    }
+
+    /// The suspended run's id, when the applied run was suspended
+    /// ([`Self::Suspended`]).
+    pub fn suspended_run_id(&self) -> Option<&RunId> {
+        match self {
+            Self::Suspended { run_id } => Some(run_id),
+            _ => None,
+        }
     }
 
     pub fn requires_runtime_teardown(&self) -> bool {
@@ -467,6 +491,9 @@ impl CoreExecutorError {
             }
             Self::Stopped => CoreApplyFailureCause::executor_stopped(),
             Self::Cancelled => CoreApplyFailureCause::runtime_turn("cancelled"),
+            Self::Suspended { run_id } => CoreApplyFailureCause::executor_internal(format!(
+                "suspended run {run_id} escaped runtime-loop handling"
+            )),
             Self::Internal(message) => CoreApplyFailureCause::executor_internal(message.clone()),
         }
     }
@@ -490,6 +517,9 @@ pub enum CoreApplyTerminal {
         tool_use_id: String,
         tool_name: String,
         args: Value,
+        /// The call's dedupe key, as on
+        /// [`crate::error::PendingCallbackToolCall`].
+        dedupe_key: Option<crate::ToolCallDedupeKey>,
     },
     /// The run committed one assistant batch containing multiple external
     /// callback calls. All results must be supplied as one exact set.
@@ -1474,6 +1504,8 @@ impl CoreApplyOutput {
         )
     }
 
+    /// A callback-pending terminal with no dedupe key; a call that has one
+    /// builds [`CoreApplyTerminal::CallbackPending`] with it instead.
     pub fn with_callback_pending(
         receipt: RunBoundaryReceiptDraft,
         untyped_snapshot: Option<Vec<u8>>,
@@ -1488,6 +1520,7 @@ impl CoreApplyOutput {
                 tool_use_id: tool_use_id.into(),
                 tool_name: tool_name.into(),
                 args,
+                dedupe_key: None,
             }),
         )
     }
@@ -1663,6 +1696,25 @@ pub trait CoreExecutorInterruptHandle: Send + Sync {
         expected_run_id: &RunId,
         reason: String,
     ) -> Result<bool, CoreExecutorError>;
+
+    /// Suspend one exact active run for a graceful requeue stop: the turn is
+    /// dropped at its next await point, as a hard cancel drops it, but the run
+    /// ends with no terminal and no closing write, so its last committed round
+    /// stays the point the next start resumes from. The executor's `apply`
+    /// then answers with a suspended outcome for the run.
+    ///
+    /// `Ok(false)` means the run is not current, or this surface cannot
+    /// suspend; the stop then hard-cancels the run. The default suspends
+    /// nothing. The same exact-run comparison as
+    /// [`Self::hard_cancel_run_if_current`] applies.
+    async fn suspend_run_if_current(
+        &self,
+        expected_run_id: &RunId,
+        reason: String,
+    ) -> Result<bool, CoreExecutorError> {
+        let _ = (expected_run_id, reason);
+        Ok(false)
+    }
 }
 
 /// Cloneable capability for exact durable interaction-terminal publication.
@@ -2053,6 +2105,30 @@ pub trait CoreExecutor: Send + Sync {
         ))
     }
 
+    /// Adopt the runtime's HeadCanonical compaction-outbox finalization on the
+    /// live actor.
+    ///
+    /// After a compacting run's boundary, the runtime finalizes the committed
+    /// compaction projection intents in a store-owned, metadata-only head
+    /// mutation (`authority` names the resulting committed head). The live
+    /// actor removed the same intents from its own session when it reconciled
+    /// them, so its HeadCanonical metadata baseline must adopt that commit;
+    /// otherwise its next boundary preparation names a predecessor the store
+    /// no longer holds and is refused. The runtime asks only for a
+    /// HeadCanonical store, after every intent finalized. Every store-backed
+    /// executor that reconciles committed compaction projections should
+    /// implement this hook. The default refuses, typed; the runtime logs a
+    /// refusal and carries on, leaving the unadopted actor to the store's
+    /// refusal of its next preparation and the resync that follows.
+    async fn acknowledge_compaction_finalization(
+        &mut self,
+        _authority: &CommittedSessionBoundaryAuthority,
+    ) -> Result<(), CoreExecutorError> {
+        Err(CoreExecutorError::Internal(
+            "executor cannot adopt a HeadCanonical compaction finalization".to_string(),
+        ))
+    }
+
     /// Reconcile and finalize semantic-memory compaction stages named by the
     /// exact RuntimeStore atomic outbox. The empty slice is authoritative: a
     /// durable implementation must use it to abort any invisible stage left by
@@ -2230,6 +2306,29 @@ mod tests {
             err.apply_failure_cause().kind,
             CoreApplyFailureCauseKind::RuntimeTurn
         );
+    }
+
+    /// A run suspended by a stop that keeps the session's queued work stays
+    /// typed at the executor boundary, with its run id: it is neither a
+    /// cancellation, which realizes `RunCancelled` and abandons the inputs,
+    /// nor an apply failure, which requeues them.
+    #[test]
+    fn suspended_session_error_remains_typed_at_runtime_executor_boundary() {
+        let run_id = RunId::new();
+        let err = CoreExecutorError::apply_failed_from_session_error(SessionError::Agent(
+            AgentError::RunSuspended {
+                run_id: run_id.clone(),
+            },
+        ));
+
+        assert_eq!(err.suspended_run_id(), Some(&run_id));
+        assert!(!err.is_cancelled(), "a suspension is not a cancellation");
+        assert!(!err.requires_runtime_teardown());
+        assert!(
+            !matches!(err, CoreExecutorError::ApplyFailed { .. }),
+            "a suspension is not an apply failure: {err:?}"
+        );
+        assert_eq!(CoreExecutorError::Cancelled.suspended_run_id(), None);
     }
 
     #[test]

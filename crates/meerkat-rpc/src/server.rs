@@ -971,6 +971,10 @@ pub struct RpcServer<R, W> {
     /// Process shutdown (SIGTERM or interrupt): when it fires, the read loop
     /// ends as on EOF and the same graceful drain runs.
     shutdown_signal: Option<tokio::sync::watch::Receiver<bool>>,
+    /// A shared runtime's process shutdown (TCP): the connection holds its
+    /// tracked requests until the runtime has shut down
+    /// ([`SharedRuntimeShutdownHold`]).
+    shared_runtime_shutdown: Option<SharedRuntimeShutdownHold>,
     /// Ordinary (inline) request handlers this connection started. The
     /// connection owns them: when it ends, they are joined (bounded by
     /// [`INLINE_REQUEST_DRAIN`]) before the runtime is shut down, so a
@@ -982,6 +986,20 @@ pub struct RpcServer<R, W> {
 /// How long a closing connection waits for its inline request handlers
 /// before aborting the rest.
 const INLINE_REQUEST_DRAIN: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The hold a TCP connection keeps on its tracked requests across its
+/// listener's process shutdown ([`serve_tcp_with_options_until`]). When the
+/// connection's read loop ended on the process shutdown and its inline
+/// handlers have settled, it reports that it holds its requests and keeps
+/// them tracked until the shared runtime has shut down: the runtime's
+/// unregisters then keep a durable session's run in flight and answer its
+/// waiter before the connection cancels the requests still tracked.
+struct SharedRuntimeShutdownHold {
+    /// Told once, when the connection holds its tracked requests.
+    held: mpsc::UnboundedSender<()>,
+    /// Turns true once the shared runtime has shut down.
+    released: tokio::sync::watch::Receiver<bool>,
+}
 
 /// Resolves once `signal` fires; never when there is none or its sender is
 /// gone without firing.
@@ -1065,6 +1083,7 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
             callback_response_admission: RpcCallbackResponseAdmission::production(),
             skip_shutdown_on_eof: false,
             shutdown_signal: None,
+            shared_runtime_shutdown: None,
             inline_requests: tokio::task::JoinSet::new(),
         })
     }
@@ -1227,6 +1246,7 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
             callback_response_admission: RpcCallbackResponseAdmission::production(),
             skip_shutdown_on_eof: false,
             shutdown_signal: None,
+            shared_runtime_shutdown: None,
             inline_requests: tokio::task::JoinSet::new(),
         }
     }
@@ -1565,9 +1585,15 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         // Graceful shutdown: close all sessions (unless this is a shared TCP
         // runtime where client disconnect should not destroy state). It runs
         // on a transport error too, which keeps the connection error and
-        // logs any cleanup error beside it.
-        self.request_executor.shutdown_and_abort_stragglers().await;
+        // logs any cleanup error beside it. The runtime shuts down before the
+        // tracked requests are cancelled: its unregisters requeue on a
+        // runtime with a persistence store, so the run in flight of a session
+        // that commits each round is kept for the session's next open and
+        // its waiter answered, where cancelling its request first would
+        // cancel the run. The requests still tracked after it are cancelled
+        // and, past their grace, aborted.
         let cleanup = if self.skip_shutdown_on_eof {
+            self.hold_requests_for_shared_runtime_shutdown().await;
             Ok(())
         } else {
             self.router.runtime().try_shutdown().await.map_err(|error| {
@@ -1576,6 +1602,7 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
                 )))
             })
         };
+        self.request_executor.shutdown_and_abort_stragglers().await;
         match (connection_result, cleanup) {
             (Err(connection), Err(cleanup)) => {
                 tracing::error!(%cleanup, "runtime shutdown after a connection error also failed");
@@ -1584,6 +1611,27 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
             (Err(connection), Ok(())) => Err(connection),
             (Ok(()), cleanup) => cleanup,
         }
+    }
+
+    /// At its listener's process shutdown, a connection to a shared runtime
+    /// reports that it holds its tracked requests and waits until the runtime
+    /// has shut down ([`SharedRuntimeShutdownHold`]). A connection that ended
+    /// while the process keeps running (its client closed it) does not wait:
+    /// its requests are cancelled at once, as before.
+    async fn hold_requests_for_shared_runtime_shutdown(&mut self) {
+        let process_shutting_down = self
+            .shutdown_signal
+            .as_ref()
+            .is_some_and(|signal| *signal.borrow());
+        if !process_shutting_down {
+            return;
+        }
+        let Some(hold) = self.shared_runtime_shutdown.as_mut() else {
+            return;
+        };
+        let _ = hold.held.send(());
+        // An owner that is gone releases the hold too.
+        let _ = hold.released.wait_for(|released| *released).await;
     }
 
     async fn drain_inline_requests(&mut self) {
@@ -2048,6 +2096,7 @@ pub async fn serve_tcp_connection_with_options(
         None,
         connection_permit,
         None,
+        None,
     )
     .await
 }
@@ -2062,6 +2111,7 @@ async fn serve_tcp_connection_with_options_and_admission(
     admission: Option<RpcRequestAdmission>,
     _connection_permit: OwnedSemaphorePermit,
     shutdown_signal: Option<tokio::sync::watch::Receiver<bool>>,
+    shared_runtime_shutdown: Option<SharedRuntimeShutdownHold>,
 ) -> Result<(), ServerError> {
     let (read_half, write_half) = stream.into_split();
     let reader = BufReader::new(read_half);
@@ -2087,6 +2137,7 @@ async fn serve_tcp_connection_with_options_and_admission(
     }
     server.skip_shutdown_on_eof = true;
     server.shutdown_signal = shutdown_signal;
+    server.shared_runtime_shutdown = shared_runtime_shutdown;
     server.run().await
 }
 
@@ -2143,6 +2194,7 @@ pub async fn serve_tcp_with_options(
                 Some(admission),
                 connection_permit,
                 None,
+                None,
             )
             .await
             {
@@ -2155,11 +2207,13 @@ pub async fn serve_tcp_with_options(
 }
 
 /// [`serve_tcp_with_options`] that also shuts down when `shutdown` resolves
-/// (for example on SIGTERM). The listener stops accepting first, then every
-/// connection ends as on EOF (each keeps the shared runtime alive, as a
-/// client disconnect does), all connection tasks are joined, and only then is
-/// the shared runtime shut down. A connection ending on its own leaves the
-/// runtime running, unchanged.
+/// (for example on SIGTERM). The listener stops accepting first; every
+/// connection then stops reading as on EOF and settles its inline handlers,
+/// but keeps its tracked requests until the shared runtime has shut down, so
+/// the runtime's unregisters keep a durable session's run in flight before
+/// the requests still tracked are cancelled. All connection tasks are joined
+/// last. A connection ending on its own leaves the runtime running,
+/// unchanged.
 pub async fn serve_tcp_with_options_until(
     addr: &str,
     runtime: Arc<SessionRuntime>,
@@ -2172,6 +2226,8 @@ pub async fn serve_tcp_with_options_until(
     let rpc_request_admission = RpcRequestAdmission::production();
     let connection_admission = RpcTcpConnectionAdmission::production();
     let (stop, stopped) = tokio::sync::watch::channel(false);
+    let (held_tx, mut held_rx) = mpsc::unbounded_channel::<()>();
+    let (release, released) = tokio::sync::watch::channel(false);
     let mut connections = tokio::task::JoinSet::new();
     tracing::info!("RPC TCP listener bound to {addr}");
     tokio::pin!(shutdown);
@@ -2199,6 +2255,10 @@ pub async fn serve_tcp_with_options_until(
         let live = live.clone();
         let admission = rpc_request_admission.clone();
         let stopped = stopped.clone();
+        let hold = SharedRuntimeShutdownHold {
+            held: held_tx.clone(),
+            released: released.clone(),
+        };
         connections.spawn(async move {
             if let Err(e) = serve_tcp_connection_with_options_and_admission(
                 stream,
@@ -2209,6 +2269,7 @@ pub async fn serve_tcp_with_options_until(
                 Some(admission),
                 connection_permit,
                 Some(stopped),
+                Some(hold),
             )
             .await
             {
@@ -2218,15 +2279,41 @@ pub async fn serve_tcp_with_options_until(
             }
         });
     };
-    // Stop admission: no new connection, then every connection drains.
+    // Stop admission: no new connection. Every connection then stops
+    // reading, settles its inline handlers and holds its tracked requests,
+    // unless it ends on its own first. The shared runtime shuts down only
+    // then: its unregisters requeue on a runtime with a persistence store,
+    // keeping the run in flight of a session that commits each round and
+    // answering its waiter, where a connection cancelling its requests first
+    // would cancel the run. The connections then cancel the requests still
+    // tracked and end.
     drop(listener);
+    drop(held_tx);
     stop.send_replace(true);
-    while connections.join_next().await.is_some() {}
+    let mut unsettled = connections.len();
+    while unsettled > 0 {
+        tokio::select! {
+            joined = connections.join_next() => {
+                if joined.is_none() {
+                    break;
+                }
+                unsettled -= 1;
+            }
+            held = held_rx.recv() => {
+                if held.is_none() {
+                    break;
+                }
+                unsettled -= 1;
+            }
+        }
+    }
     let shutdown_result = runtime.try_shutdown().await.map_err(|error| {
         ServerError::Io(std::io::Error::other(format!(
             "session shutdown error: {error}"
         )))
     });
+    release.send_replace(true);
+    while connections.join_next().await.is_some() {}
     accept_result.and(shutdown_result)
 }
 
@@ -4074,8 +4161,10 @@ mod tests {
     }
 
     /// SIGTERM-style shutdown of the TCP server: the listener stops, the open
-    /// connection drains (the client sees EOF) and only then is the shared
-    /// runtime shut down. A connection ending on its own does not.
+    /// connection stops reading and holds its (here no) tracked requests, the
+    /// shared runtime shuts down, and only then does the connection end (the
+    /// client sees EOF). A connection ending on its own does not shut the
+    /// runtime down.
     #[tokio::test]
     async fn tcp_until_drains_connections_then_shuts_the_runtime_down() {
         use tokio::io::AsyncReadExt;

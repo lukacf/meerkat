@@ -18,6 +18,13 @@ machine! {
             session_envelope_version: u64,
             session_envelope_released_v3: u64,
             stored_input_state_version: u64,
+            // The version a stored input row is written with when it carries
+            // no fact only the current version can read. A requeue-across-stop
+            // fact (a stop's requeue mark or the requeue-expired abandon
+            // reason) needs the current version; every other row stays at the
+            // baseline, so a host that never requeues keeps the older
+            // reader's downgrade.
+            stored_input_state_baseline_version: u64,
             stored_input_state_migration_v6: u64,
             stored_input_state_migration_v5: u64,
             stored_input_state_migration_v4: u64,
@@ -28,7 +35,8 @@ machine! {
         init(Ready) {
             session_envelope_version = 4,
             session_envelope_released_v3 = 3,
-            stored_input_state_version = 7,
+            stored_input_state_version = 8,
+            stored_input_state_baseline_version = 7,
             stored_input_state_migration_v6 = 6,
             stored_input_state_migration_v5 = 5,
             stored_input_state_migration_v4 = 4,
@@ -90,6 +98,20 @@ machine! {
             guard {
                 self.lifecycle_phase == Phase::Ready
                 && persisted_version == self.stored_input_state_version
+            }
+            update {}
+            to Ready
+            emit VersionRestoreAuthorized {
+                field: SessionPersistenceVersionField::StoredInputState,
+                version: self.stored_input_state_version
+            }
+        }
+
+        transition RestoreBaselineStoredInputStateVersion {
+            on input RestoreStoredInputStateVersion { persisted_version }
+            guard {
+                self.lifecycle_phase == Phase::Ready
+                && persisted_version == self.stored_input_state_baseline_version
             }
             update {}
             to Ready

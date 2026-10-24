@@ -232,6 +232,7 @@ mod tests {
                 provider_native_resume: false,
             },
             continuity: WireLiveContinuityMode::Fresh,
+            advisories: Vec::new(),
         }
     }
 

@@ -2,7 +2,7 @@
 //!
 //! A mobpack is untrusted-by-default: deploying it must not let pack-authored
 //! TOML reach arbitrary runtime configuration. The old path merged the pack's
-//! raw `config/defaults.toml` bytes into [`meerkat_core::Config`] as a base
+//! raw `config/defaults.toml` bytes into `meerkat_core::Config` as a base
 //! layer with no allow-list, so a pack could silently set realm connection
 //! sets, self-hosted provider endpoints, provider-tool keys, comms credentials,
 //! shell security mode, or hook commands.

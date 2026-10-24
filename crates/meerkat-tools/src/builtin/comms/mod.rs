@@ -1,8 +1,9 @@
 //! Comms tools as a separate tool surface
 //!
 //! Comms is infrastructure, not a tool category. These tools enable inter-agent
-//! communication and are composed with other dispatchers via [`ToolGateway`],
-//! NOT bundled into [`CompositeDispatcher`].
+//! communication and are composed with other dispatchers via
+//! [`ToolGateway`](meerkat_core::ToolGateway), NOT bundled into
+//! [`CompositeDispatcher`](crate::builtin::CompositeDispatcher).
 //!
 //! # Usage
 //!

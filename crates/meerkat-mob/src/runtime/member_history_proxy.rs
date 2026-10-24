@@ -17,13 +17,22 @@ use meerkat_core::comms::TrustedPeerDescriptor;
 
 use super::MobSupervisorBridge;
 use super::bridge_protocol::{
-    BridgeCommand, BridgeMemberHistoryPage, BridgeProtocolVersion, BridgeReadHistoryPayload,
+    BridgeCommand, BridgeMemberHistoryPage, BridgeMemberIncarnation,
+    BridgeMemberVisibleToolsResponse, BridgeProtocolVersion, BridgeReadHistoryPayload,
+    BridgeReadVisibleToolsPayload, BridgeRejectionCause,
 };
 use crate::MobError;
 use crate::machines::mob_machine as mob_dsl;
+use crate::tokio;
 
 /// DEC-P6E-24: the `ReadMemberHistory` bridge budget per page.
 pub(crate) const HISTORY_BRIDGE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// The bound on reading a placed fork source's visible tools (V7
+/// `ReadMemberVisibleTools`). A fork does not wait on a slow member host:
+/// past it the child's fork notice says the source's tools were not
+/// compared (`placed_source`).
+pub(crate) const VISIBLE_TOOLS_BRIDGE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Domain carrier for one member-history page (local or remote — one
 /// shape). `page` IS the shared wire body: pagination facts live inside it
@@ -286,4 +295,145 @@ pub(crate) async fn read_remote_member_history_tail(
         return Ok(first);
     }
     finish_remote_history_snapshot(bridge, peer, placement, &expected_member, first).await
+}
+
+/// A placed fork source's visible tool names, read from its member host for
+/// the child's fork notice (V7 `ReadMemberVisibleTools`), within
+/// [`VISIBLE_TOOLS_BRIDGE_TIMEOUT`].
+pub(crate) async fn read_remote_member_visible_tools(
+    bridge: &Arc<MobSupervisorBridge>,
+    peer: &TrustedPeerDescriptor,
+    expected_member: &BridgeMemberIncarnation,
+) -> meerkat_core::fork_notice::ForkSeedSourceTools {
+    let read = async {
+        let authority = bridge.authority().await;
+        let sup_spec = bridge.supervisor_spec_for_recipient(peer).await?;
+        let command = BridgeCommand::ReadMemberVisibleTools(BridgeReadVisibleToolsPayload {
+            supervisor: sup_spec.into(),
+            epoch: authority.epoch,
+            protocol_version: BridgeProtocolVersion::V7,
+            expected_member: expected_member.clone(),
+        });
+        let _ = bridge.trust_recipient(peer).await?;
+        let value = bridge
+            .send_bridge_command(peer, &command, VISIBLE_TOOLS_BRIDGE_TIMEOUT)
+            .await?;
+        super::bridge_protocol::decode_bridge_payload::<BridgeMemberVisibleToolsResponse>(
+            &command,
+            value,
+            "read member visible tools",
+        )
+    };
+    let reply = tokio::time::timeout(VISIBLE_TOOLS_BRIDGE_TIMEOUT, read)
+        .await
+        .unwrap_or_else(|_| {
+            Err(MobError::Internal(
+                "member visible tools read did not answer in time".to_string(),
+            ))
+        });
+    visible_tools_from_reply(reply)
+}
+
+/// What a visible-tools read tells the fork notice: the names when the
+/// member host read them; `source_not_live` when the source session is not
+/// live there; `member_host_unsupported` when the host refused the read
+/// before reading it (a host before protocol V7); `placed_source` for any
+/// other failure, a timeout included.
+pub(crate) fn visible_tools_from_reply(
+    reply: Result<BridgeMemberVisibleToolsResponse, MobError>,
+) -> meerkat_core::fork_notice::ForkSeedSourceTools {
+    use meerkat_core::fork_notice::{ForkSeedSourceTools, ForkToolsNotComparedReason};
+    match reply {
+        Ok(BridgeMemberVisibleToolsResponse {
+            names: Some(names), ..
+        }) => ForkSeedSourceTools::Read {
+            names: names
+                .into_iter()
+                .map(meerkat_core::types::ToolName::from)
+                .collect(),
+        },
+        Ok(_) => ForkSeedSourceTools::NotRead {
+            reason: ForkToolsNotComparedReason::SourceNotLive,
+        },
+        Err(MobError::BridgeCommandRejected {
+            cause:
+                BridgeRejectionCause::UnsupportedProtocolVersion | BridgeRejectionCause::Unsupported,
+            ..
+        }) => ForkSeedSourceTools::NotRead {
+            reason: ForkToolsNotComparedReason::MemberHostUnsupported,
+        },
+        Err(_) => ForkSeedSourceTools::NotRead {
+            reason: ForkToolsNotComparedReason::PlacedSource,
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use meerkat_core::fork_notice::{ForkSeedSourceTools, ForkToolsNotComparedReason};
+
+    fn rejected(cause: BridgeRejectionCause) -> Result<BridgeMemberVisibleToolsResponse, MobError> {
+        Err(MobError::BridgeCommandRejected {
+            cause,
+            reason: "refused".to_string(),
+        })
+    }
+
+    fn not_read(reason: ForkToolsNotComparedReason) -> ForkSeedSourceTools {
+        ForkSeedSourceTools::NotRead { reason }
+    }
+
+    #[test]
+    fn a_read_reply_compares_the_names() {
+        let names = vec!["shell".to_string(), "view_image".to_string()];
+        assert_eq!(
+            visible_tools_from_reply(Ok(BridgeMemberVisibleToolsResponse { names: Some(names) })),
+            ForkSeedSourceTools::Read {
+                names: vec!["shell".into(), "view_image".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn a_source_not_live_on_its_host_is_not_compared_as_not_live() {
+        assert_eq!(
+            visible_tools_from_reply(Ok(BridgeMemberVisibleToolsResponse::default())),
+            not_read(ForkToolsNotComparedReason::SourceNotLive)
+        );
+    }
+
+    /// A member host before protocol V7 refuses the read before it
+    /// reads it, typed.
+    #[test]
+    fn a_host_before_v7_is_not_compared_as_unsupported() {
+        for cause in [
+            BridgeRejectionCause::UnsupportedProtocolVersion,
+            BridgeRejectionCause::Unsupported,
+        ] {
+            assert_eq!(
+                visible_tools_from_reply(rejected(cause)),
+                not_read(ForkToolsNotComparedReason::MemberHostUnsupported)
+            );
+        }
+    }
+
+    /// A held reply past the bound, or any other failure, is a placed
+    /// source whose tools were not read.
+    #[test]
+    fn a_timeout_or_other_failure_is_not_compared_as_placed() {
+        for reply in [
+            Err(MobError::BridgeRequestTimedOut {
+                request_envelope_id: "envelope".to_string(),
+                timeout_ms: 5_000,
+            }),
+            rejected(BridgeRejectionCause::Unavailable),
+            rejected(BridgeRejectionCause::StaleFence),
+        ] {
+            assert_eq!(
+                visible_tools_from_reply(reply),
+                not_read(ForkToolsNotComparedReason::PlacedSource)
+            );
+        }
+    }
 }

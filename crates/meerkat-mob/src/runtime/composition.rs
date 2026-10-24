@@ -8,8 +8,8 @@
 //! * `RequestRuntimeRetire`  — producer `mob`, consumer `meerkat.Retire`
 //! * `RequestRuntimeDestroy` — producer `mob`, consumer `meerkat.Destroy`
 //!
-//! Wave-b B-5 landed the typed [`CompositionDispatcher`][cd] trait +
-//! [`CompositionBinding`][cb] discriminant in `meerkat-runtime`. The mob
+//! Wave-b B-5 landed the typed [`CompositionDispatcher`] trait +
+//! [`CompositionBinding`] discriminant in `meerkat-runtime`. The mob
 //! producer now carries the canonical DSL `MobMachineEffect` directly across
 //! the composition seam; this module only supplies the dispatcher trait
 //! projection that turns schema-declared [`FieldId`] bindings into typed
@@ -22,8 +22,6 @@
 //! in [`dispatch_routed_effect`] propagates that as a typed [`MobError`]
 //! rather than silently dropping the effect.
 //!
-//! [cd]: meerkat_runtime::composition::CompositionDispatcher
-//! [cb]: meerkat_runtime::composition::CompositionBinding
 //! [cs]: meerkat_runtime::composition::ConsumerSurface
 //! [ccd]: meerkat_runtime::composition::CatalogCompositionDispatcher
 //! [dr]: meerkat_runtime::composition::DispatchRefusal

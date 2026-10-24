@@ -104,6 +104,9 @@ pub enum DurableTailRecoveryClass {
     InterruptedRepairableCandidate,
     #[default]
     Ambiguous,
+    /// A durable session's open run at a committed round. Declared last,
+    /// as in the catalog.
+    ContinuableCandidate,
 }
 
 /// The machine's recovery verdict. Bridging copy of the catalog type. Nothing
@@ -116,6 +119,13 @@ pub enum DurableTailRecoveryDisposition {
     RepairAndCommitInterrupted,
     CommitCompletedRetainInputs,
     HoldIntact,
+    /// Continue the open run from its last committed round; nothing is
+    /// written. Declared after the earlier variants, as in the catalog.
+    ContinueRun,
+    /// An operator attested a held tail as an interrupted run
+    /// (`resolve-held-tail`); it commits as interrupted, every row kept.
+    /// Declared last, as in the catalog.
+    OperatorRepairAndCommitInterrupted,
 }
 
 /// Typed projection of the PERSISTED machine-lifecycle row observed at
@@ -2382,6 +2392,10 @@ pub enum RuntimeCompletionWaitFailureObservation {
     #[default]
     ChannelClosed,
     AuthorityUnavailable,
+    /// A graceful stop kept the waited input durably queued for the
+    /// session's next start (`ClassifyStopInputDisposition` answered
+    /// `Retain`). The input is not terminal.
+    RequeuedAcrossStop,
 }
 
 /// Generated public error class for mechanical runtime completion waiter
@@ -2390,6 +2404,8 @@ pub enum RuntimeCompletionWaitFailureObservation {
 pub enum RuntimeCompletionWaitFailurePublicErrorClass {
     #[default]
     InternalError,
+    /// The session is not running: its waited input runs on the next start.
+    SessionNotRunning,
 }
 
 /// Generated public reason classifier for mechanical runtime completion waiter
@@ -2399,6 +2415,7 @@ pub enum RuntimeCompletionWaitFailurePublicReason {
     #[default]
     CompletionChannelClosed,
     CompletionAuthorityUnavailable,
+    RequeuedAcrossStop,
 }
 
 /// Generated durability action for runtime-owned ops lifecycle snapshots.
@@ -2990,7 +3007,8 @@ pub enum LiveContextRowDisposition {
 pub use meerkat_machine_schema::catalog::dsl::meerkat_machine::{
     LiveContextDeliveryReadiness, LiveContextPayloadAvailability, LiveContextPreparationFailure,
     LiveContextPreparationPhase, LiveContextRowAuthor, LiveContextRowSource,
-    LiveConversationStartCause, RunStartHoldReason,
+    LiveConversationStartCause, RunStartHoldReason, StopInputDisposition,
+    UnregisterQueuedInputsDisposition,
 };
 
 /// Bridging copy of the catalog-owned delegation result disposition.
@@ -3673,6 +3691,12 @@ pub enum InputAbandonReason {
     /// The input's in-flight run had a tool process that host process custody
     /// proved had started; the input is settled instead of replayed.
     ToolProcessInterrupted,
+    /// A graceful stop kept the input queued for the next start, and the next
+    /// start found it older than that stop's max age.
+    RequeueExpired,
+    /// The input's run was left open by a restart and was not resumed: the
+    /// host's resumed-run admission refused it.
+    ResumeRefused,
 }
 
 impl From<&crate::input_state::InputAbandonReason> for InputAbandonReason {
@@ -3690,6 +3714,8 @@ impl From<&crate::input_state::InputAbandonReason> for InputAbandonReason {
             crate::input_state::InputAbandonReason::ToolProcessInterrupted => {
                 Self::ToolProcessInterrupted
             }
+            crate::input_state::InputAbandonReason::RequeueExpired => Self::RequeueExpired,
+            crate::input_state::InputAbandonReason::ResumeRefused => Self::ResumeRefused,
         }
     }
 }
@@ -3708,6 +3734,8 @@ impl InputAbandonReason {
             Self::MaxAttemptsExhausted => "max_attempts_exhausted",
             Self::NeverExecuted => "never_executed",
             Self::ToolProcessInterrupted => "tool_process_interrupted",
+            Self::RequeueExpired => "requeue_expired",
+            Self::ResumeRefused => "resume_refused",
         }
     }
 }
@@ -4123,6 +4151,8 @@ pub enum RecoveredInputNormalizationReasonKind {
     RollbackStaged,
     BoundaryReceiptCommitted,
     MissingBoundaryReceipt,
+    /// The input stays bound to the run this registration resumes.
+    ResumableRun,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -4258,11 +4288,24 @@ pub enum RecoveredRuntimeExecutionKind {
     ResumePending,
 }
 
-impl From<meerkat_core::lifecycle::RuntimeExecutionKind> for RecoveredRuntimeExecutionKind {
-    fn from(kind: meerkat_core::lifecycle::RuntimeExecutionKind) -> Self {
+/// A stored input carried an execution kind that only a dispatch may carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("execution kind {0:?} is a dispatch kind and is never admitted or recovered")]
+pub struct DispatchOnlyExecutionKind(pub meerkat_core::lifecycle::RuntimeExecutionKind);
+
+impl TryFrom<meerkat_core::lifecycle::RuntimeExecutionKind> for RecoveredRuntimeExecutionKind {
+    type Error = DispatchOnlyExecutionKind;
+
+    fn try_from(kind: meerkat_core::lifecycle::RuntimeExecutionKind) -> Result<Self, Self::Error> {
         match kind {
-            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn => Self::ContentTurn,
-            meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending => Self::ResumePending,
+            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn => Ok(Self::ContentTurn),
+            meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending => Ok(Self::ResumePending),
+            // The resumed-run step stamps ResumeRun on the run it dispatches,
+            // never on an admitted input, so a stored input that carries it
+            // is corrupt.
+            kind @ meerkat_core::lifecycle::RuntimeExecutionKind::ResumeRun => {
+                Err(DispatchOnlyExecutionKind(kind))
+            }
         }
     }
 }

@@ -18,7 +18,7 @@ use crate::ids::{AgentIdentity, FlowId, FlowNodeId, FrameId, ProfileName, RunId,
 use crate::machines::mob_machine as mob_dsl;
 use crate::run::flow_run;
 use crate::run::{
-    FailureLedgerEntry, FlowContext, FlowRunConfig, MobMachineFlowAuthorityToken,
+    FailureLedgerEntry, FlowContext, FlowRoleTargets, FlowRunConfig, MobMachineFlowAuthorityToken,
     MobMachineFlowRunCommand, MobRun, MobRunProvenanceAuthority, MobRunStatus, StepLedgerEntry,
     StepRunStatus, apply_mob_machine_flow_run_command, mob_machine_run_status_is_terminal,
     mob_machine_step_status_is_terminal,
@@ -109,10 +109,14 @@ impl FlowEngine {
         }
     }
 
+    /// Execute one admitted run. `role_targets` is the binding the actor
+    /// admitted for this run (`None` for a role-wide run): carried here in
+    /// memory, like `config`, never re-read from the run store.
     pub async fn execute_flow(
         &self,
         run_id: RunId,
         config: FlowRunConfig,
+        role_targets: Option<Arc<FlowRoleTargets>>,
         activation_params: serde_json::Value,
         cancel: CancellationToken,
     ) -> Result<(), MobError> {
@@ -150,6 +154,7 @@ impl FlowEngine {
             let adapter = FlowTurnExecutorAdapter::new(
                 self.clone(),
                 config.clone(),
+                role_targets,
                 cancel.clone(),
                 flow_deadline,
             );
@@ -538,6 +543,7 @@ impl FlowEngine {
             step,
             context,
             config,
+            role_targets,
         } = request;
         let StepExecutionControl {
             evaluate_condition_guard,
@@ -610,7 +616,7 @@ impl FlowEngine {
         }
 
         // ── 4. Target selection ────────────────────────────────────────────
-        let mut targets: Vec<AgentIdentity> = self
+        let runnable_role_members: Vec<AgentIdentity> = self
             .handle
             .list_runnable_members()
             .await
@@ -618,7 +624,51 @@ impl FlowEngine {
             .filter(|entry| entry.role == step.role)
             .map(|entry| entry.agent_identity)
             .collect();
-        targets.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        let mut targets: Vec<AgentIdentity> = match role_targets {
+            // A role-targeted run: the candidates are exactly the members
+            // admitted for this role that the same projection still lists as
+            // Active holders of the role. Membership can change after
+            // admission (steps run later, every loop iteration runs again),
+            // so this re-check runs at every execution of the step. The
+            // step's collection policy decides whether the remaining bound
+            // members are enough; when they are not, the run fails before
+            // this step registers or dispatches anything. A bound run never
+            // substitutes another member and never waits for one.
+            Some(role_targets) => {
+                let bound = role_targets.members(&step.role).ok_or_else(|| {
+                    MobError::Internal(format!(
+                        "role-targeted run '{run_id}' has no binding for role '{}' of step '{step_id}'",
+                        step.role
+                    ))
+                })?;
+                let (available, unavailable): (Vec<AgentIdentity>, Vec<AgentIdentity>) = bound
+                    .iter()
+                    .cloned()
+                    .partition(|member| runnable_role_members.contains(member));
+                let required = match (&step.dispatch_mode, &step.collection_policy) {
+                    (DispatchMode::OneToOne, _) | (_, CollectionPolicy::Any) => 1,
+                    (_, CollectionPolicy::All) => bound.len(),
+                    (_, CollectionPolicy::Quorum { n }) => usize::from(*n),
+                };
+                if available.len() < required {
+                    return Err(MobError::BoundFlowTargetsUnavailable {
+                        run_id: run_id.clone(),
+                        step_id: step_id.clone(),
+                        required,
+                        available,
+                        unavailable,
+                    });
+                }
+                // The binding is a sorted set, so this is the same order the
+                // role-wide branch sorts into.
+                available
+            }
+            None => {
+                let mut targets = runnable_role_members;
+                targets.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+                targets
+            }
+        };
 
         let available_targets = targets.len();
         if let CollectionPolicy::Quorum { n } = step.collection_policy
@@ -2211,6 +2261,8 @@ pub(crate) struct StepExecutionRequest<'a> {
     step: &'a FlowStepSpec,
     context: &'a FlowContext,
     config: &'a FlowRunConfig,
+    /// The run's admitted role targets; `None` for a role-wide run.
+    role_targets: Option<&'a FlowRoleTargets>,
 }
 
 pub(crate) struct StepExecutionControl<'a> {
@@ -2832,6 +2884,7 @@ fn render_content_input_template(
 struct FlowTurnExecutorAdapter {
     engine: FlowEngine,
     config: FlowRunConfig,
+    role_targets: Option<Arc<FlowRoleTargets>>,
     cancel: CancellationToken,
     flow_deadline: Option<Instant>,
 }
@@ -2840,12 +2893,14 @@ impl FlowTurnExecutorAdapter {
     fn new(
         engine: FlowEngine,
         config: FlowRunConfig,
+        role_targets: Option<Arc<FlowRoleTargets>>,
         cancel: CancellationToken,
         flow_deadline: Option<Instant>,
     ) -> Self {
         Self {
             engine,
             config,
+            role_targets,
             cancel,
             flow_deadline,
         }
@@ -2899,6 +2954,7 @@ impl super::flow_frame_engine::FrameStepExecutor for FlowTurnExecutorAdapter {
                     step: &step,
                     context,
                     config: &self.config,
+                    role_targets: self.role_targets.as_deref(),
                 },
                 StepExecutionControl {
                     evaluate_condition_guard: true,

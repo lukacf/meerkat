@@ -999,8 +999,9 @@ impl McpRouterAdapter {
     /// After a successful login for `target`, stage again the failed
     /// operation awaiting exactly that target ([`McpRouter::retry_authorized`]).
     /// It takes the router write lock that shutdown takes, so a router
-    /// already shut down is [`AuthorizedRetry::RouterClosed`] and nothing is
-    /// reinstalled from a detached adapter.
+    /// already shut down is
+    /// [`AuthorizedRetry::RouterClosed`](crate::AuthorizedRetry::RouterClosed)
+    /// and nothing is reinstalled from a detached adapter.
     pub async fn retry_authorized(
         &self,
         target: &meerkat_auth_core::McpServerIdentity,

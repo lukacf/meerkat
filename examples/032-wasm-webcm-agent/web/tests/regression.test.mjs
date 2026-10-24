@@ -130,7 +130,9 @@ test("WebCM regressions run actual browser modules and local synthetic shell inp
         check(before.includes("scalar input") && before.includes("block input"), "typed prompt omitted");
         for (const id of ["a", "b"]) send({ type: "tool_call_requested", id, name: "shell", args: { command: id } });
         const a = panel.pendingCards.get("a"), b = panel.pendingCards.get("b");
-        send({ type: "tool_execution_completed", id: "b", content: [{ type: "text", text: "result b" }, { type: "image", source: {} }], is_error: false });
+        send({ type: "tool_execution_completed", id: "b", is_error: false, duration_ms: 3 });
+        check(panel.pendingCards.has("b"), "an execution fact without a body resolved its card");
+        send({ type: "tool_result_received", id: "b", content: [{ type: "text", text: "result b" }, { type: "image", source: {} }], is_error: false });
         send({ type: "tool_result_received", id: "a", content: [{ type: "text", text: "result a" }], is_error: true });
         send({ type: "tool_result_received", id: "b", content: [{ type: "text", text: "must not overwrite" }], is_error: false });
         check(a.textContent.includes("result a") && b.textContent.includes("result b"), "cross-assigned results");
@@ -149,8 +151,8 @@ test("WebCM regressions run actual browser modules and local synthetic shell inp
         check(container.textContent.includes("without a tool result"), "termination fabricated success");
         // Reverse completion order, including per-call error.
         for (const id of ["e", "f"]) send({ type: "tool_call_requested", id, name: "shell" });
-        send({ type: "tool_execution_completed", id: "e", content: [{ type: "text", text: "e first" }], is_error: true });
-        send({ type: "tool_execution_completed", id: "f", content: [{ type: "text", text: "f last" }], is_error: false });
+        send({ type: "tool_result_received", id: "e", content: [{ type: "text", text: "e first" }], is_error: true });
+        send({ type: "tool_result_received", id: "f", content: [{ type: "text", text: "f last" }], is_error: false });
         check(!panel.pendingCards.size, "reverse order left cards");
       });
     });

@@ -50,7 +50,8 @@ impl CommsEventInjector {
     /// caller that returns the same id as a public handle yields a *correlated*
     /// interaction id — the returned handle correlates with the injected event
     /// rather than being a fresh unrelated UUID. No subscriber channel is
-    /// reserved (that is [`SubscribableInjector::inject_with_subscription`]'s
+    /// reserved (that is
+    /// [`SubscribableInjector::inject_with_subscription`](meerkat_core::event_injector::SubscribableInjector::inject_with_subscription)'s
     /// job); this is the non-stream correlation case.
     pub fn inject_with_interaction_id(
         &self,

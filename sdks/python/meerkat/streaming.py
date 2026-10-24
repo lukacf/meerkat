@@ -16,10 +16,12 @@ from .consent import CONSENT_NOTICE_NOTIFICATION
 from .event_envelope import parse_agent_event_envelope
 from .errors import (
     COMMS_SEND_ERROR_CODES,
+    EventSubscriptionError,
     MeerkatError,
     meerkat_error_from_jsonrpc_code,
 )
-from .events import Event, TextDelta
+from .events import Event, StreamTruncated, TextDelta
+from .tools import ToolCallDedupeKey
 
 if TYPE_CHECKING:
     from .session import Session
@@ -104,6 +106,22 @@ class _StderrTail:
             self._eof.set()
 
 
+@dataclass(frozen=True)
+class _SubscriptionEvent:
+    """Keep RPC delivery order separate from the canonical event envelope."""
+
+    event: dict[str, Any]
+    rpc_sequence: int | None
+
+
+@dataclass(frozen=True)
+class _SubscriptionEnd:
+    terminal_outcome: dict[str, Any]
+
+
+_SubscriptionItem = _SubscriptionEvent | _SubscriptionEnd | None
+
+
 class _StdoutDispatcher:
     """Background reader that multiplexes stdout lines to response futures and event queues."""
 
@@ -112,10 +130,10 @@ class _StdoutDispatcher:
         self._stderr_tail: _StderrTail | None = None
         self._pending_responses: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._event_queues: dict[str, asyncio.Queue[dict[str, Any] | None]] = {}
-        self._stream_queues: dict[str, asyncio.Queue[dict[str, Any] | None]] = {}
+        self._stream_queues: dict[str, asyncio.Queue[_SubscriptionItem]] = {}
         self._pending_stream_queues: dict[int, asyncio.Queue[dict[str, Any] | None]] = {}
         self._unmatched_buffer: dict[str, list[dict[str, Any]]] = {}
-        self._unmatched_stream_buffer: dict[str, list[dict[str, Any]]] = {}
+        self._unmatched_stream_buffer: dict[str, list[_SubscriptionEvent]] = {}
         self._stream_terminal: dict[str, dict[str, Any]] = {}
         self._unmatched_stream_end: set[str] = set()
         self._task: asyncio.Task[None] | None = None
@@ -168,13 +186,18 @@ class _StdoutDispatcher:
     def unsubscribe_events(self, session_id: str) -> None:
         self._event_queues.pop(session_id, None)
 
-    def subscribe_stream(self, stream_id: str) -> asyncio.Queue[dict[str, Any] | None]:
-        queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
-        self._stream_queues[stream_id] = queue
+    def subscribe_stream(self, stream_id: str) -> asyncio.Queue[_SubscriptionItem]:
+        queue: asyncio.Queue[_SubscriptionItem] = asyncio.Queue()
+        if self.transport_fault is None:
+            self._stream_queues[stream_id] = queue
         for event in self._unmatched_stream_buffer.pop(stream_id, []):
             queue.put_nowait(event)
         if stream_id in self._unmatched_stream_end:
             self._unmatched_stream_end.discard(stream_id)
+            queue.put_nowait(_SubscriptionEnd(self._stream_terminal[stream_id]))
+        elif self.transport_fault is not None:
+            # An accepted open can resume after EOF. Drain any received prefix
+            # and then end, just as an already-registered queue does on EOF.
             queue.put_nowait(None)
         return queue
 
@@ -346,11 +369,22 @@ class _StdoutDispatcher:
                         }
                     else:
                         event = raw_event
+                    sequence = params.get("sequence")
+                    delivery = _SubscriptionEvent(
+                        event=event,
+                        rpc_sequence=(
+                            sequence
+                            if isinstance(sequence, int)
+                            and not isinstance(sequence, bool)
+                            and 0 <= sequence <= (1 << 64) - 1
+                            else None
+                        ),
+                    )
                     queue = self._stream_queues.get(stream_id)
                     if queue is not None:
-                        await queue.put(event)
+                        await queue.put(delivery)
                     elif stream_id:
-                        self._unmatched_stream_buffer.setdefault(stream_id, []).append(event)
+                        self._unmatched_stream_buffer.setdefault(stream_id, []).append(delivery)
                     continue
                 if method in {"session/stream_end", "mob/stream_end"}:
                     stream_id = str(params.get("stream_id", ""))
@@ -358,7 +392,7 @@ class _StdoutDispatcher:
                         self._stream_terminal[stream_id] = dict(params)
                     queue = self._stream_queues.get(stream_id)
                     if queue is not None:
-                        await queue.put(None)
+                        await queue.put(_SubscriptionEnd(dict(params)))
                     elif stream_id:
                         self._unmatched_stream_end.add(stream_id)
                     continue
@@ -385,7 +419,15 @@ class _StdoutDispatcher:
         if method == "tool/execute" and self._tool_handler is not None:
             tool_name = params.get("name", "")
             arguments = params.get("arguments", {})
-            content, is_error = await self._tool_handler.handle(tool_name, arguments)
+            # Present when an agent-loop round dispatched the call; absent or
+            # unparseable is no key, never a failed call.
+            dedupe_key = ToolCallDedupeKey.from_wire(params.get("dedupe_key"))
+            if dedupe_key is None:
+                content, is_error = await self._tool_handler.handle(tool_name, arguments)
+            else:
+                content, is_error = await self._tool_handler.handle(
+                    tool_name, arguments, dedupe_key=dedupe_key
+                )
             response = {
                 "jsonrpc": "2.0",
                 "id": request_id,
@@ -430,9 +472,15 @@ class _StdoutDispatcher:
         for queue in self._stream_queues.values():
             queue.put_nowait(None)
         self._stream_queues.clear()
-        self._unmatched_stream_buffer.clear()
-        self._unmatched_stream_end.clear()
-        self._stream_terminal.clear()
+        # The open response may already be resolved while its caller has not
+        # resumed to register a queue. Retain that received prefix and terminal
+        # until subscribe_stream transfers custody. No producer remains after
+        # the transport fault; other terminal records already live in queues.
+        self._stream_terminal = {
+            stream_id: terminal
+            for stream_id, terminal in self._stream_terminal.items()
+            if stream_id in self._unmatched_stream_end
+        }
         for queue in self._pending_stream_queues.values():
             queue.put_nowait(None)
         self._pending_stream_queues.clear()
@@ -568,13 +616,13 @@ class EventStream:
 
 
 class EventSubscription:
-    """Async iterable standalone event subscription (session/member/mob)."""
+    """Standalone session/member/mob events; terminal errors raise after drain."""
 
     def __init__(
         self,
         *,
         stream_id: str,
-        event_queue: asyncio.Queue[dict[str, Any] | None],
+        event_queue: asyncio.Queue[_SubscriptionItem],
         dispatcher: _StdoutDispatcher,
         close_remote: Callable[[str], Any],
         parse_event_fn: Callable[[dict[str, Any]], Any],
@@ -585,6 +633,9 @@ class EventSubscription:
         self._close_remote = close_remote
         self._parse_event_fn = parse_event_fn
         self._closed = False
+        self._last_rpc_sequence: int | None = None
+        self._last_event_seq: int | None = None
+        self._terminal_outcome: dict[str, Any] | None = None
 
     @property
     def stream_id(self) -> str:
@@ -592,13 +643,38 @@ class EventSubscription:
 
     @property
     def terminal_outcome(self) -> dict[str, Any] | None:
-        return self._dispatcher.stream_terminal(self._stream_id)
+        return self._terminal_outcome or self._dispatcher.stream_terminal(self._stream_id)
+
+    @property
+    def last_rpc_sequence(self) -> int | None:
+        """RPC sequence of the last delivered event, if provided by the server."""
+        return self._last_rpc_sequence
+
+    @property
+    def last_event_seq(self) -> int | None:
+        """Last delivered canonical event seq, not a replay cursor.
+
+        Gap markers do not replace it.
+        """
+        return self._last_event_seq
 
     async def __aenter__(self) -> EventSubscription:
         return self
 
-    async def __aexit__(self, *_exc: object) -> None:
-        await self.close()
+    async def __aexit__(
+        self,
+        _exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        _traceback: object,
+    ) -> None:
+        try:
+            await self.close()
+        except BaseException:
+            # Cleanup must not replace the iterator's terminal error (or the
+            # caller's cancellation). With no primary failure, close rejection
+            # still propagates, as it does for an explicit close() call.
+            if exc is None:
+                raise
 
     async def close(self) -> None:
         if self._closed:
@@ -617,7 +693,24 @@ class EventSubscription:
 
     async def _iter_events(self) -> AsyncIterator[Any]:
         while True:
-            raw = await self._event_queue.get()
-            if raw is None:
+            delivery = await self._event_queue.get()
+            if delivery is None or isinstance(delivery, _SubscriptionEnd):
+                if isinstance(delivery, _SubscriptionEnd):
+                    # Keep the received terminal even if client/transport cleanup
+                    # clears the dispatcher's registry before this queue drains.
+                    self._terminal_outcome = delivery.terminal_outcome
+                terminal = self.terminal_outcome
+                if terminal is not None and terminal.get("error") is not None:
+                    raise EventSubscriptionError(
+                        self._stream_id,
+                        terminal,
+                        self._last_rpc_sequence,
+                        self._last_event_seq,
+                    )
                 return
-            yield self._parse_event_fn(raw)
+            event = self._parse_event_fn(delivery.event)
+            envelope = getattr(event, "envelope", event)
+            self._last_rpc_sequence = delivery.rpc_sequence
+            if not isinstance(getattr(envelope, "payload", None), StreamTruncated):
+                self._last_event_seq = getattr(envelope, "seq", None)
+            yield event

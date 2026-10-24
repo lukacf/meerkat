@@ -234,6 +234,83 @@ pub struct LiveOpenResult {
     pub transport: WireLiveTransportBootstrap,
     pub capabilities: WireLiveChannelCapabilities,
     pub continuity: WireLiveContinuityMode,
+    /// What the open went ahead without: advisories, not failures. Omitted
+    /// when there are none. The vocabulary may grow: a reader keeps an
+    /// advisory it does not know as it was sent instead of refusing the
+    /// result.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub advisories: Vec<WireLiveOpenAdvisory>,
+}
+
+/// An advisory on a successful `live/open`: something the open went ahead
+/// without. The vocabulary may grow: an advisory this version does not know
+/// reads as [`Self::Unknown`] with the value as it was sent, and is written
+/// back the same.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
+#[non_exhaustive]
+pub enum WireLiveOpenAdvisory {
+    /// A `RunStarted` hook refused the session's staged create-time prompt,
+    /// so the realtime model was not given it. It stays staged for the
+    /// session's first text turn or a later open.
+    StagedPromptRefused,
+    /// An advisory this version does not know, as it was sent.
+    Unknown(String),
+}
+
+impl WireLiveOpenAdvisory {
+    /// The value on the wire.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::StagedPromptRefused => "staged_prompt_refused",
+            Self::Unknown(raw) => raw,
+        }
+    }
+}
+
+impl From<String> for WireLiveOpenAdvisory {
+    fn from(raw: String) -> Self {
+        match raw.as_str() {
+            "staged_prompt_refused" => Self::StagedPromptRefused,
+            _ => Self::Unknown(raw),
+        }
+    }
+}
+
+impl From<WireLiveOpenAdvisory> for String {
+    fn from(advisory: WireLiveOpenAdvisory) -> Self {
+        match advisory {
+            WireLiveOpenAdvisory::Unknown(raw) => raw,
+            known => known.as_str().to_owned(),
+        }
+    }
+}
+
+/// The schema lists the advisories this version knows and accepts any other
+/// string, so a generated reader keeps an advisory it does not know.
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for WireLiveOpenAdvisory {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "WireLiveOpenAdvisory".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "description": "An advisory on a successful live/open: something the open went ahead\nwithout. The vocabulary may grow: a reader keeps an advisory it does not\nknow as it was sent.",
+            "anyOf": [
+                {
+                    "const": "staged_prompt_refused",
+                    "description": "A RunStarted hook refused the session's staged create-time prompt,\nso the realtime model was not given it. It stays staged for the\nsession's first text turn or a later open.",
+                    "type": "string"
+                },
+                {
+                    "description": "An advisory this version does not know, as it was sent.",
+                    "type": "string"
+                }
+            ]
+        })
+    }
 }
 
 /// Wire projection of [`meerkat_core::live_adapter::LiveTransportBootstrap`].
@@ -3018,14 +3095,71 @@ mod tests {
                 provider_native_resume: false,
             },
             continuity: WireLiveContinuityMode::TranscriptOnly,
+            advisories: Vec::new(),
         };
         let j = serde_json::to_value(&v).expect("round-trip should succeed");
         // Typed access at the JSON layer too.
         assert_eq!(j["capabilities"]["audio_in"], true);
         assert_eq!(j["capabilities"]["image_in"], false);
         assert_eq!(j["continuity"]["mode"], "transcript_only");
+        assert!(
+            j.get("advisories").is_none(),
+            "an open with no advisories writes no advisories field: {j}"
+        );
         let back: LiveOpenResult = serde_json::from_value(j).expect("round-trip should succeed");
         assert_eq!(v, back);
+    }
+
+    /// The advisory vocabulary may grow. A known advisory reads as its
+    /// variant; one this version does not know reads as `Unknown` with the
+    /// value as sent and is written back unchanged; a result from a server
+    /// that sends no advisories reads as none and writes the field back
+    /// absent.
+    #[test]
+    fn live_open_advisories_read_unknown_values_and_stay_absent_when_empty() {
+        let base = serde_json::json!({
+            "channel_id": "live_1",
+            "transport": {
+                "transport": "websocket",
+                "url": "wss://example/live",
+                "token": "tok"
+            },
+            "capabilities": {
+                "audio_in": true,
+                "audio_out": true,
+                "text_in": true,
+                "text_out": true,
+                "image_in": false,
+                "video_in": false,
+                "transcript_supported": true,
+                "barge_in_supported": true,
+                "provider_native_resume": false
+            },
+            "continuity": { "mode": "transcript_only" }
+        });
+        let without: LiveOpenResult =
+            serde_json::from_value(base.clone()).expect("a result without advisories reads");
+        let without_back = serde_json::to_value(&without).expect("writes");
+
+        let mut with = base;
+        with["advisories"] = serde_json::json!(["staged_prompt_refused", "a_later_advisory"]);
+        let parsed: LiveOpenResult =
+            serde_json::from_value(with.clone()).expect("an unknown advisory never fails the read");
+        let parsed_back = serde_json::to_value(&parsed).expect("writes");
+
+        assert!(
+            without.advisories.is_empty()
+                && without_back.get("advisories").is_none()
+                && parsed.advisories
+                    == [
+                        WireLiveOpenAdvisory::StagedPromptRefused,
+                        WireLiveOpenAdvisory::Unknown("a_later_advisory".into()),
+                    ]
+                && parsed.advisories[0].as_str() == "staged_prompt_refused"
+                && parsed_back == with,
+            "advisories read tolerantly and round-trip as sent: without={without:?} \
+             without_back={without_back} parsed={parsed:?} parsed_back={parsed_back}"
+        );
     }
 
     // FIX-SDK-OBS — typed `LiveAdapterObservation` wire mirror.

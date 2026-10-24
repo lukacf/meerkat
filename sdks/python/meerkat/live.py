@@ -117,7 +117,9 @@ class LiveChannel:
 
         Stores the returned ``channel_id`` for subsequent operations.
         Returns the full ``LiveOpenResult`` dict (``channel_id``,
-        ``transport``, ``capabilities``, ``continuity``).
+        ``transport``, ``capabilities``, ``continuity``, and ``advisories``
+        when the open went ahead without something, such as a staged
+        create-time prompt a run-start hook refused).
 
         If ``seed_max_chars`` was supplied at construction time, the server
         may seed a whole-turn suffix. Any truncation is surfaced as degraded

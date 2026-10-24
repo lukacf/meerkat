@@ -10,6 +10,12 @@ use serde::{Deserialize, Serialize};
 /// Native-owned MCP metadata key. A host context provider cannot replace it.
 pub const CALL_ORIGIN_META_KEY: &str = "io.meerkat/origin";
 
+/// Native-owned MCP metadata key of a tool call's dedupe key: Core's MCP
+/// client sends the call's [`crate::ToolCallDedupeKey`] under it on every
+/// `tools/call` that has one, as `{run_id, round, call_id, call_digest}`. A
+/// host context provider cannot replace it.
+pub const TOOL_CALL_DEDUPE_KEY_META_KEY: &str = "io.meerkat/tool_call_dedupe_key";
+
 /// Transport projection, never independent evidence of permission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]

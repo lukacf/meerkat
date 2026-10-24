@@ -358,8 +358,11 @@ pub trait SurfaceScheduleSessionHost: Send + Sync {
     /// Whether this host decides a redelivery's existing-only admission
     /// ([`ExistingDelivery`]): its [`Self::deliver_prompt`] and
     /// [`Self::deliver_event`] admit through
-    /// [`accept_schedule_runtime_input_with_reconciliation`], on the task
-    /// that calls them, with the runtime they admit through. The adapter then
+    /// [`accept_schedule_runtime_input_with_reconciliation`] (or, when their
+    /// admission is fenced,
+    /// [`accept_fenced_schedule_runtime_input_with_reconciliation`] under
+    /// that fence), on the task that calls them, with the runtime they admit
+    /// through. The adapter then
     /// runs a redelivery inside a redelivery scope that helper reads, so the
     /// runtime only finds the earlier admission and never admits the
     /// delivery fresh; a host that declares this and admits any other way is
@@ -1237,11 +1240,13 @@ impl ScheduleTargetDelivery for SharedScheduleTargetAdapter {
 
     /// Redeliver a reclaimed occurrence whose earlier attempt recorded its
     /// dispatch. Nothing is materialized or created first: an on-demand
-    /// session target that was never bound has no earlier admission. A
-    /// session target's runtime admission may only deduplicate against the
-    /// earlier input (the runtime's deduplicate-only admission, decided where
-    /// it decides deduplication); mob targets and mob-owned identities go to
-    /// the mob host.
+    /// session target the occurrence holds unbound is looked for only where an
+    /// earlier attempt could have admitted it
+    /// (`Self::deliver_existing_unbound_session`). A session target's
+    /// runtime admission may only deduplicate against the earlier input (the
+    /// runtime's deduplicate-only admission, decided where it decides
+    /// deduplication); mob targets and mob-owned identities go to the mob
+    /// host.
     #[cfg(not(target_arch = "wasm32"))]
     async fn deliver_existing_occurrence(
         &self,
@@ -1266,7 +1271,16 @@ impl ScheduleTargetDelivery for SharedScheduleTargetAdapter {
                     SessionTargetBinding::MaterializeOnDemandSession {
                         bound_session_id: None,
                         ..
-                    } => return Ok(existing_delivery_unknown(occurrence, identity, existing)),
+                    } => {
+                        return self
+                            .deliver_existing_unbound_session(
+                                occurrence,
+                                identity,
+                                binding.action(),
+                                existing,
+                            )
+                            .await;
+                    }
                 };
                 let materialized_session_id = bound_target_session_id(&occurrence.target_snapshot);
                 let resolved = ResolvedScheduledSession {
@@ -1371,6 +1385,92 @@ fn existing_admission_scope() -> Option<ExistingAdmissionScope> {
 }
 
 impl SharedScheduleTargetAdapter {
+    /// Redeliver to an on-demand session target the occurrence holds unbound.
+    ///
+    /// Nothing is materialized. The binding is read again first, as the
+    /// ordinary delivery does before it materializes: another attempt may
+    /// have committed it since this occurrence was claimed. Without one, the
+    /// occurrence's own deterministic session
+    /// ([`Occurrence::materialized_session_id`]) is probed read-only, since an
+    /// earlier attempt that materialized and admitted into it while no bind
+    /// reached this occurrence left the admission only there. A session that
+    /// does not exist, or a probe that cannot read it, holds no admission this
+    /// redelivery can find.
+    ///
+    /// The dispatch reports the probed session as materialized only when the
+    /// runtime found the earlier admission in it (deduplicated), so the
+    /// driver binds and records it exactly as it does for an ordinary
+    /// dispatch; a failure, or nothing admitted, binds nothing.
+    ///
+    /// Known limitation: two overlapping occurrences of one on-demand
+    /// schedule can each materialize their own session before either bind
+    /// lands. The occurrence whose bind loses admits into its own session; if
+    /// its process stops before the driver records that session on it, its
+    /// reclaim copies the other occurrence's binding onto it (the reclaim's
+    /// target sync), and its redelivery looks only in that session, where its
+    /// admission is not. An admitted redelivery then ends delivery_failed and
+    /// an unproven late one misfires, although the input was admitted.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn deliver_existing_unbound_session(
+        &self,
+        occurrence: &Occurrence,
+        identity: &ScheduleDeliveryIdentity,
+        action: &ScheduledSessionAction,
+        existing: ExistingDelivery,
+    ) -> Result<ExistingDeliveryAnswer, ScheduleDomainError> {
+        if let Some(bound) = self.authoritative_bound_session_id(occurrence).await {
+            let resolved = ResolvedScheduledSession {
+                session_id: bound.clone(),
+                materialized_session_id: Some(bound),
+            };
+            return self
+                .deliver_existing_session_action(occurrence, identity, resolved, action, existing)
+                .await;
+        }
+        let session_id = occurrence.materialized_session_id();
+        let probe = SessionTargetBinding::ExactSession {
+            session_id: session_id.clone(),
+            action: action.clone(),
+        };
+        match self.session_host.probe_session_target(&probe).await {
+            Ok(TargetProbeOutcome::Ready | TargetProbeOutcome::Busy { .. }) => {}
+            Ok(TargetProbeOutcome::Missing { .. }) => {
+                return Ok(existing_delivery_unknown(occurrence, identity, existing));
+            }
+            Err(error) => {
+                tracing::warn!(
+                    occurrence_id = %occurrence.occurrence_id,
+                    %session_id,
+                    %error,
+                    "a redelivery could not probe its occurrence's own session; it finds no earlier admission"
+                );
+                return Ok(existing_delivery_unknown(occurrence, identity, existing));
+            }
+        }
+        let resolved = ResolvedScheduledSession {
+            session_id: session_id.clone(),
+            materialized_session_id: None,
+        };
+        let answer = self
+            .deliver_existing_session_action(occurrence, identity, resolved, action, existing)
+            .await?;
+        let mut dispatch = match answer {
+            ExistingDeliveryAnswer::Dispatch(dispatch) => dispatch,
+            not_dispatched => return Ok(not_dispatched),
+        };
+        let found_earlier_admission = dispatch.receipt.stage
+            == DeliveryReceiptStage::DispatchAccepted
+            && matches!(
+                dispatch.receipt.runtime_outcome,
+                Some(meerkat_schedule::RuntimeDeliveryOutcome::AdmissionDeduplicated)
+            );
+        if found_earlier_admission {
+            dispatch.materialized_session_id = Some(session_id.clone());
+            dispatch.receipt.materialized_session_id = Some(session_id);
+        }
+        Ok(ExistingDeliveryAnswer::Dispatch(dispatch))
+    }
+
     /// Deliver a session action as a redelivery that may only find the
     /// earlier admission.
     ///
@@ -2316,11 +2416,14 @@ fn wait_failure_completion(error: &CompletionWaitError) -> ScheduleDomainError {
 
 /// The completion of a live wait that failed.
 ///
-/// A rolled-back boundary ([`CompletionWaitError::BoundaryRolledBack`]) or an
+/// A rolled-back boundary ([`CompletionWaitError::BoundaryRolledBack`]), an
 /// unknown durable outcome ([`CompletionWaitError::DurableOutcomeUnknown`])
-/// leaves the input durably admitted with its terminal still to come: it runs
-/// again after its session reloads, or its stalled commit lands. Neither
-/// failure is the input's outcome, so when the host knows the input
+/// or a failure the generated wait-failure authority resolves as resumable (a
+/// graceful stop that kept the input queued,
+/// [`CompletionWaitError::RequeuedAcrossStop`]) leaves the input durably
+/// admitted with its terminal still to come: it runs again after its session
+/// reloads, its stalled commit lands, or the next start runs it. None of these
+/// failures is the input's outcome, so when the host knows the input
 /// (`outcome_read`), the completion reads the input's own terminal through
 /// the bounded re-read loop ([`reread_admitted_input_outcome`]), under the
 /// driver's lease renewal, and resolves the occurrence from it; at the bound
@@ -2331,13 +2434,18 @@ async fn completion_after_wait_failure(
     error: CompletionWaitError,
     outcome_read: Option<AdmittedInputOutcomeRead>,
 ) -> Result<CompletionOutcome, ScheduleDomainError> {
-    match outcome_read {
-        Some(outcome_read)
-            if error.is_boundary_rolled_back() || error.is_durable_outcome_unknown() =>
-        {
-            reread_admitted_input_outcome(outcome_read.into_reread(error.to_string())).await
-        }
-        _ => Err(wait_failure_completion(&error)),
+    let Some(outcome_read) = outcome_read else {
+        return Err(wait_failure_completion(&error));
+    };
+    let input_continues =
+        error.is_boundary_rolled_back() || error.is_durable_outcome_unknown() || {
+            let resumable = (outcome_read.resumable)(error.clone());
+            resumable.await
+        };
+    if input_continues {
+        reread_admitted_input_outcome(outcome_read.into_reread(error.to_string())).await
+    } else {
+        Err(wait_failure_completion(&error))
     }
 }
 
@@ -2358,6 +2466,11 @@ fn completion_wait_failure_reason(error: &CompletionWaitError) -> DeliveryComple
             DeliveryCompletionFailureReason::RuntimeCompletionChannelClosed
         }
         Some(RuntimeCompletionWaitFailureObservation::AuthorityUnavailable) => {
+            DeliveryCompletionFailureReason::RuntimeCompletionAuthorityUnavailable
+        }
+        // A kept input the host cannot read past: this delivery holds no
+        // authority over the outcome the next start gives it.
+        Some(RuntimeCompletionWaitFailureObservation::RequeuedAcrossStop) => {
             DeliveryCompletionFailureReason::RuntimeCompletionAuthorityUnavailable
         }
         // A disclosure refusal is no wait failure. It is only reached for an
@@ -2591,6 +2704,19 @@ type AdmittedOutcomeReadFn = Box<dyn FnMut() -> AdmittedOutcomeReadFuture + Send
 type AdmittedCompletionWait =
     Pin<Box<dyn Future<Output = Result<CompletionOutcome, CompletionWaitError>> + Send>>;
 
+/// Whether the generated wait-failure authority resolves a failed live wait
+/// as resumable: the input stays admitted and its terminal is still to come.
+#[cfg(not(target_arch = "wasm32"))]
+type AdmittedWaitResumableFuture = Pin<Box<dyn Future<Output = bool> + Send>>;
+#[cfg(target_arch = "wasm32")]
+type AdmittedWaitResumableFuture = Pin<Box<dyn Future<Output = bool>>>;
+
+/// The resolution [`completion_after_wait_failure`] asks: the runtime's
+/// generated wait-failure authority for the input's session
+/// ([`runtime_wait_failure_resumable`]).
+type AdmittedWaitResumableFn =
+    Box<dyn Fn(CompletionWaitError) -> AdmittedWaitResumableFuture + Send>;
+
 /// How to read one admitted input's own terminal past a live wait that
 /// failed without saying it: the input, the bounds of the wait and the read.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
@@ -2598,6 +2724,7 @@ struct AdmittedInputOutcomeRead {
     input_id: InputId,
     bounds: AdmittedOutcomeRereadBounds,
     read: AdmittedOutcomeReadFn,
+    resumable: AdmittedWaitResumableFn,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2841,6 +2968,28 @@ fn runtime_admitted_outcome_read(
     })
 }
 
+/// The generated wait-failure resolution of `session_id`'s failed waits, as
+/// [`completion_after_wait_failure`] asks it. A resolution that fails says
+/// not resumable.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+fn runtime_wait_failure_resumable(
+    runtime_adapter: &MeerkatMachine,
+    session_id: &SessionId,
+) -> AdmittedWaitResumableFn {
+    let runtime_adapter = runtime_adapter.clone();
+    let session_id = session_id.clone();
+    Box::new(move |error| {
+        let runtime_adapter = runtime_adapter.clone();
+        let session_id = session_id.clone();
+        Box::pin(async move {
+            runtime_adapter
+                .resolve_runtime_completion_wait_failure(&session_id, &error)
+                .await
+                .is_ok_and(|authority| authority.resumable)
+        })
+    })
+}
+
 /// Project one runtime admission into the schedule driver's typed delivery
 /// contract.
 ///
@@ -2911,8 +3060,9 @@ pub async fn runtime_delivery_dispatch_from_admission(
 
     let accepted = match handle {
         Some(handle) => {
-            // A wait that fails with a rolled-back boundary or an unknown
-            // durable outcome reads this input's own terminal.
+            // A wait that fails with a rolled-back boundary, an unknown
+            // durable outcome or a failure the generated authority resolves
+            // as resumable reads this input's own terminal.
             let read = runtime_admitted_outcome_read(runtime_adapter, session_id, &input_id);
             AcceptedScheduledInput {
                 correlation_id: correlation_id.clone(),
@@ -2923,6 +3073,7 @@ pub async fn runtime_delivery_dispatch_from_admission(
                         input_id,
                         bounds: AdmittedOutcomeRereadBounds::for_host(),
                         read,
+                        resumable: runtime_wait_failure_resumable(runtime_adapter, session_id),
                     }),
                 },
             }
@@ -2961,6 +3112,11 @@ pub async fn runtime_delivery_dispatch_from_admission(
 /// may return an ordinary pre-admission error; a committed binding or an
 /// unavailable reconciliation read remains reclaimable as
 /// `DeliveryRepairDeferred`.
+///
+/// `accept` must admit without an attachment or member-residency fence; a
+/// host whose admission is fenced uses
+/// [`accept_fenced_schedule_runtime_input_with_reconciliation`], so that a
+/// redelivery's existing-only admission keeps the same fence.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub async fn accept_schedule_runtime_input_with_reconciliation<F, Fut, E>(
     runtime_adapter: &MeerkatMachine,
@@ -2969,6 +3125,70 @@ pub async fn accept_schedule_runtime_input_with_reconciliation<F, Fut, E>(
     identity: &ScheduleDeliveryIdentity,
     input: meerkat_runtime::Input,
     materialized_session_id: Option<SessionId>,
+    accept: F,
+) -> Result<DeliveryDispatch, ScheduleDomainError>
+where
+    F: FnMut(meerkat_runtime::Input) -> Fut,
+    Fut: std::future::Future<
+            Output = Result<
+                (
+                    meerkat_runtime::AcceptOutcome,
+                    Option<meerkat_runtime::CompletionHandle>,
+                ),
+                E,
+            >,
+        >,
+    E: std::fmt::Display,
+{
+    accept_fenced_schedule_runtime_input_with_reconciliation(
+        runtime_adapter,
+        session_id,
+        occurrence,
+        identity,
+        input,
+        materialized_session_id,
+        ScheduleAdmissionFence::Unfenced,
+        accept,
+    )
+    .await
+}
+
+/// The fence a session host admits a scheduled input under. A redelivery's
+/// existing-only admission runs under the same fence as the host's ordinary
+/// admission ([`accept_fenced_schedule_runtime_input_with_reconciliation`]).
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub enum ScheduleAdmissionFence<'a> {
+    /// The runtime's admission with no attachment or member-residency fence.
+    Unfenced,
+    /// A mob member's session, admitted as
+    /// [`MeerkatMachine::accept_input_with_completion_for_attachment_and_member_residency`]
+    /// admits: only through this exact executor attachment, and only while
+    /// the member's residency is `expected_member` (`None` is a peer-only
+    /// member, never a vacant placement).
+    AttachmentAndMemberResidency {
+        attachment: &'a meerkat_runtime::RuntimeExecutorAttachmentWitness,
+        expected_member:
+            Option<&'a meerkat_contracts::wire::supervisor_bridge::BridgeMemberIncarnation>,
+    },
+}
+
+/// [`accept_schedule_runtime_input_with_reconciliation`] for a host whose
+/// `accept` admits under `fence`. A redelivery's existing-only admission
+/// runs under the same fence, so it never answers from an attachment or a
+/// member incarnation the host's ordinary admission would refuse; a fence
+/// refusal there says nothing about the earlier admission and leaves the
+/// occurrence reclaimable, as any other runtime error does.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+#[allow(clippy::too_many_arguments)]
+pub async fn accept_fenced_schedule_runtime_input_with_reconciliation<F, Fut, E>(
+    runtime_adapter: &MeerkatMachine,
+    session_id: &SessionId,
+    occurrence: &Occurrence,
+    identity: &ScheduleDeliveryIdentity,
+    input: meerkat_runtime::Input,
+    materialized_session_id: Option<SessionId>,
+    fence: ScheduleAdmissionFence<'_>,
     mut accept: F,
 ) -> Result<DeliveryDispatch, ScheduleDomainError>
 where
@@ -3014,6 +3234,7 @@ where
             input,
             materialized_session_id,
             existing,
+            fence,
         )
         .await;
     }
@@ -3096,8 +3317,14 @@ where
 /// - No earlier admission of an unproven late redelivery: the adapter answers
 ///   that the target never admitted it, and the occurrence ends misfired.
 /// - Any other error says nothing about the earlier admission: the
-///   occurrence stays reclaimable (`DeliveryRepairDeferred`).
+///   occurrence stays reclaimable (`DeliveryRepairDeferred`). A refusal of
+///   the host's `fence` is one: the lookup did not run, and the next attempt
+///   takes the host's attachment and member residency afresh.
+///
+/// The admission runs under the host's `fence`, as its ordinary admission
+/// does.
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
 async fn accept_existing_schedule_runtime_input(
     runtime_adapter: &MeerkatMachine,
     session_id: &SessionId,
@@ -3106,11 +3333,28 @@ async fn accept_existing_schedule_runtime_input(
     input: meerkat_runtime::Input,
     materialized_session_id: Option<SessionId>,
     scope: ExistingAdmissionScope,
+    fence: ScheduleAdmissionFence<'_>,
 ) -> Result<DeliveryDispatch, ScheduleDomainError> {
-    match runtime_adapter
-        .accept_existing_input_with_completion(session_id, input)
-        .await
-    {
+    let admitted = match fence {
+        ScheduleAdmissionFence::Unfenced => {
+            runtime_adapter
+                .accept_existing_input_with_completion(session_id, input)
+                .await
+        }
+        ScheduleAdmissionFence::AttachmentAndMemberResidency {
+            attachment,
+            expected_member,
+        } => {
+            runtime_adapter
+                .accept_existing_input_with_completion_for_attachment_and_member_residency(
+                    attachment,
+                    input,
+                    expected_member,
+                )
+                .await
+        }
+    };
+    match admitted {
         Ok((outcome, handle)) => {
             runtime_delivery_dispatch_from_admission(
                 runtime_adapter,
@@ -3153,6 +3397,7 @@ async fn accept_existing_schedule_runtime_input(
 
 /// Browser builds run no schedule driver, so nothing redelivers there.
 #[cfg(target_arch = "wasm32")]
+#[allow(clippy::too_many_arguments)]
 async fn accept_existing_schedule_runtime_input(
     _runtime_adapter: &MeerkatMachine,
     _session_id: &SessionId,
@@ -3161,6 +3406,7 @@ async fn accept_existing_schedule_runtime_input(
     _input: meerkat_runtime::Input,
     _materialized_session_id: Option<SessionId>,
     scope: std::convert::Infallible,
+    _fence: ScheduleAdmissionFence<'_>,
 ) -> Result<DeliveryDispatch, ScheduleDomainError> {
     match scope {}
 }
@@ -4326,6 +4572,7 @@ mod tests {
                 tool_use_id: "call-1".to_string(),
                 tool_name: "external_approval".to_string(),
                 args: serde_json::json!({"ticket": "INC-1"}),
+                dedupe_key: None,
             },
             None,
         );
@@ -4813,16 +5060,22 @@ mod tests {
     }
 
     /// A redelivery never materializes a session: an on-demand target that
-    /// was never bound holds no earlier admission. An admitted redelivery
-    /// ends delivery_failed with nothing admitted, and an unproven late one
-    /// answers that the target never admitted it.
+    /// was never bound, and whose own deterministic session does not exist,
+    /// holds no earlier admission. The redelivery probes that session
+    /// read-only. An admitted redelivery ends delivery_failed with nothing
+    /// admitted, and an unproven late one answers that the target never
+    /// admitted it.
     #[tokio::test]
     async fn redelivery_of_an_unbound_on_demand_target_materializes_nothing() {
         let store =
             Arc::new(meerkat_schedule::MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>;
         let service = ScheduleService::new(store);
         let materialize_calls = Arc::new(AtomicUsize::new(0));
-        let session_host: Arc<dyn SurfaceScheduleSessionHost> = Arc::new(PanicOnMaterializeHost {
+        let probes = Arc::new(AtomicUsize::new(0));
+        let session_host: Arc<dyn SurfaceScheduleSessionHost> = Arc::new(OwnSessionHost {
+            runtime: Arc::new(MeerkatMachine::ephemeral()),
+            present: None,
+            probes: Arc::clone(&probes),
             materialize_calls: Arc::clone(&materialize_calls),
         });
         let mob_host: Arc<dyn SurfaceScheduleMobHost> =
@@ -4888,6 +5141,369 @@ mod tests {
             materialize_calls.load(Ordering::SeqCst),
             0,
             "a redelivery materializes nothing"
+        );
+        assert_eq!(
+            probes.load(Ordering::SeqCst),
+            2,
+            "each redelivery probes the occurrence's own session"
+        );
+    }
+
+    /// A session host whose sessions are the runtime's: it holds exactly the
+    /// session `present` (every other exact session probes missing), decides
+    /// a redelivery's existing-only admission, admits through
+    /// [`accept_schedule_runtime_input_with_reconciliation`], and never
+    /// materializes.
+    struct OwnSessionHost {
+        runtime: Arc<MeerkatMachine>,
+        present: Option<SessionId>,
+        probes: Arc<AtomicUsize>,
+        materialize_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl SurfaceScheduleSessionHost for OwnSessionHost {
+        fn decides_existing_admission(&self) -> bool {
+            true
+        }
+
+        async fn probe_session_target(
+            &self,
+            binding: &SessionTargetBinding,
+        ) -> Result<TargetProbeOutcome, ScheduleDomainError> {
+            self.probes.fetch_add(1, Ordering::SeqCst);
+            match binding.resolved_session_id() {
+                Some(session_id) if self.present.as_ref() != Some(session_id) => {
+                    Ok(TargetProbeOutcome::Missing {
+                        detail: Some(format!("session not found: {session_id}")),
+                    })
+                }
+                _ => Ok(TargetProbeOutcome::Ready),
+            }
+        }
+
+        async fn materialize_session(
+            &self,
+            _occurrence: &Occurrence,
+            _create: &SessionMaterializationSpec,
+        ) -> Result<SessionId, ScheduleDomainError> {
+            self.materialize_calls.fetch_add(1, Ordering::SeqCst);
+            Err(ScheduleDomainError::Internal(
+                "this host never materializes".to_string(),
+            ))
+        }
+
+        async fn deliver_prompt(
+            &self,
+            session_id: &SessionId,
+            occurrence: &Occurrence,
+            identity: &ScheduleDeliveryIdentity,
+            dispatch: ScheduledPromptDispatch,
+        ) -> Result<DeliveryDispatch, ScheduleDomainError> {
+            let mut prompt =
+                meerkat_runtime::PromptInput::from_content_input(dispatch.prompt, None);
+            prompt.header.idempotency_key = Some(meerkat_runtime::IdempotencyKey::new(
+                identity.idempotency_key.clone(),
+            ));
+            prompt.header.correlation_id = Some(schedule_runtime_correlation_id(identity)?);
+            accept_schedule_runtime_input_with_reconciliation(
+                &self.runtime,
+                session_id,
+                occurrence,
+                identity,
+                meerkat_runtime::Input::Prompt(prompt),
+                dispatch.materialized_session_id,
+                |input| self.runtime.accept_input_with_completion(session_id, input),
+            )
+            .await
+        }
+
+        async fn deliver_event(
+            &self,
+            _session_id: &SessionId,
+            _occurrence: &Occurrence,
+            _identity: &ScheduleDeliveryIdentity,
+            _dispatch: ScheduledEventDispatch,
+        ) -> Result<DeliveryDispatch, ScheduleDomainError> {
+            Err(ScheduleDomainError::Internal(
+                "this host delivers prompts only".to_string(),
+            ))
+        }
+    }
+
+    /// The planned occurrences of a new schedule whose target is an unbound
+    /// on-demand session, earliest first.
+    async fn unbound_on_demand_occurrences(
+        service: &ScheduleService,
+        name: &str,
+        occurrences: u32,
+    ) -> Vec<Occurrence> {
+        let schedule = service
+            .create(meerkat_schedule::CreateScheduleRequest {
+                name: Some(name.to_string()),
+                description: None,
+                trigger: meerkat_schedule::TriggerSpec::Interval(
+                    meerkat_schedule::IntervalTriggerSpec {
+                        start_at_utc: chrono::Utc::now(),
+                        every_seconds: 60,
+                        end_at_utc: None,
+                    },
+                ),
+                target: materialize_on_demand_target(),
+                misfire_policy: meerkat_schedule::MisfirePolicy::Skip,
+                overlap_policy: meerkat_schedule::OverlapPolicy::AllowConcurrent,
+                missing_target_policy: meerkat_schedule::MissingTargetPolicy::Skip,
+                labels: BTreeMap::new(),
+                planning_horizon_days: Some(1),
+                planning_horizon_occurrences: Some(occurrences),
+            })
+            .await
+            .expect("schedule create should plan its occurrences");
+        let mut planned = service
+            .list_occurrences(&schedule.schedule_id)
+            .await
+            .expect("list occurrences");
+        planned.sort_by_key(|occurrence| occurrence.due_at_utc);
+        assert_eq!(planned.len(), occurrences as usize);
+        planned
+    }
+
+    /// The prompt an on-demand target's occurrence dispatches, as its first
+    /// attempt does before any bind reaches the occurrence.
+    fn unbound_prompt_dispatch() -> ScheduledPromptDispatch {
+        ScheduledPromptDispatch {
+            prompt: ContentInput::Text("scheduled prompt".to_string()),
+            transient_turn_context: None,
+            system_prompt: None,
+            render_metadata: None,
+            skill_refs: Vec::new(),
+            additional_instructions: Vec::new(),
+            materialized_session_id: None,
+        }
+    }
+
+    /// Constructed state. No sequence at this base leaves an occurrence that
+    /// is unbound at its redelivery holding an admission in its own
+    /// deterministic session: the ordinary delivery binds what it
+    /// materialized before it admits, a failed bind admits nothing, a bind
+    /// skipped because the schedule moved to another revision or went away
+    /// supersedes the occurrence or fails its reclaim, and the reclaim copies
+    /// the schedule's binding onto the occurrence before it redelivers. The
+    /// redelivery still looks there, read-only, as a defensive step: a late
+    /// one finds the earlier admission instead of misfiring a delivery that
+    /// ran, admits nothing new, and reports the session as materialized so
+    /// the driver binds and records it. Before, it answered not admitted
+    /// without a read.
+    #[tokio::test]
+    async fn a_late_redelivery_finds_an_earlier_admission_in_the_occurrences_own_session() {
+        let service = ScheduleService::new(
+            Arc::new(meerkat_schedule::MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>
+        );
+        let occurrence = unbound_on_demand_occurrences(&service, "redelivery-own-session", 1)
+            .await
+            .remove(0);
+        let session_id = occurrence.materialized_session_id();
+        let runtime = Arc::new(MeerkatMachine::ephemeral());
+        runtime
+            .register_session(session_id.clone())
+            .await
+            .expect("register the occurrence's own session");
+        let probes = Arc::new(AtomicUsize::new(0));
+        let materialize_calls = Arc::new(AtomicUsize::new(0));
+        let host = Arc::new(OwnSessionHost {
+            runtime: Arc::clone(&runtime),
+            present: Some(session_id.clone()),
+            probes: Arc::clone(&probes),
+            materialize_calls: Arc::clone(&materialize_calls),
+        });
+        let identity = ScheduleDeliveryIdentity::for_occurrence(&occurrence);
+        let earlier = host
+            .deliver_prompt(
+                &session_id,
+                &occurrence,
+                &identity,
+                unbound_prompt_dispatch(),
+            )
+            .await
+            .expect("the earlier attempt admits into the occurrence's own session");
+        assert_eq!(
+            earlier.receipt.runtime_outcome,
+            Some(meerkat_schedule::RuntimeDeliveryOutcome::AdmissionAccepted)
+        );
+        let mob_host: Arc<dyn SurfaceScheduleMobHost> =
+            Arc::new(NoopScheduleMobHost::new("mob targets unused here"));
+        let adapter = SharedScheduleTargetAdapter::new(service, host, mob_host);
+
+        let answer = adapter
+            .deliver_existing_occurrence(&occurrence, &identity, ExistingDelivery::UnprovenLate)
+            .await
+            .expect("the unproven late redelivery answers");
+        let ExistingDeliveryAnswer::Dispatch(dispatch) = answer else {
+            panic!("the redelivery finds the earlier admission: {answer:?}");
+        };
+        assert_eq!(
+            dispatch.receipt.stage,
+            DeliveryReceiptStage::DispatchAccepted
+        );
+        assert_eq!(
+            dispatch.receipt.runtime_outcome,
+            Some(meerkat_schedule::RuntimeDeliveryOutcome::AdmissionDeduplicated)
+        );
+        assert_eq!(dispatch.materialized_session_id, Some(session_id.clone()));
+        assert_eq!(
+            dispatch.receipt.materialized_session_id,
+            Some(session_id.clone())
+        );
+        assert_eq!(
+            admitted_input_count(&runtime, &session_id).await,
+            1,
+            "the redelivery admits nothing new"
+        );
+        assert_eq!(probes.load(Ordering::SeqCst), 1);
+        assert_eq!(materialize_calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// The occurrence's own session exists but holds no admission of it: an
+    /// admitted redelivery ends delivery_failed and an unproven late one
+    /// answers not admitted, nothing is admitted, and neither reports the
+    /// session, so the driver binds nothing.
+    #[tokio::test]
+    async fn a_redelivery_into_its_own_session_without_the_admission_binds_nothing() {
+        let service = ScheduleService::new(
+            Arc::new(meerkat_schedule::MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>
+        );
+        let occurrence = unbound_on_demand_occurrences(&service, "redelivery-own-empty", 1)
+            .await
+            .remove(0);
+        let session_id = occurrence.materialized_session_id();
+        let runtime = Arc::new(MeerkatMachine::ephemeral());
+        runtime
+            .register_session(session_id.clone())
+            .await
+            .expect("register the occurrence's own session");
+        let host = Arc::new(OwnSessionHost {
+            runtime: Arc::clone(&runtime),
+            present: Some(session_id.clone()),
+            probes: Arc::new(AtomicUsize::new(0)),
+            materialize_calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let mob_host: Arc<dyn SurfaceScheduleMobHost> =
+            Arc::new(NoopScheduleMobHost::new("mob targets unused here"));
+        let adapter = SharedScheduleTargetAdapter::new(service, host, mob_host);
+        let identity = ScheduleDeliveryIdentity::for_occurrence(&occurrence);
+
+        let admitted = adapter
+            .deliver_existing_occurrence(&occurrence, &identity, ExistingDelivery::Admitted)
+            .await
+            .expect("the admitted redelivery answers");
+        let ExistingDeliveryAnswer::Dispatch(dispatch) = admitted else {
+            panic!("an admitted redelivery answers with a dispatch: {admitted:?}");
+        };
+        assert_eq!(dispatch.materialized_session_id, None);
+        assert_eq!(dispatch.receipt.materialized_session_id, None);
+        let terminal = dispatch.completion.await.expect("the failure terminal");
+        assert_eq!(terminal.phase, OccurrencePhase::DeliveryFailed);
+
+        let unproven = adapter
+            .deliver_existing_occurrence(&occurrence, &identity, ExistingDelivery::UnprovenLate)
+            .await
+            .expect("the unproven redelivery answers");
+        assert!(
+            matches!(unproven, ExistingDeliveryAnswer::NotAdmittedPastDeadline),
+            "{unproven:?}"
+        );
+        assert_eq!(admitted_input_count(&runtime, &session_id).await, 0);
+    }
+
+    /// The binding a redelivery's found admission leads to is the ordinary
+    /// one: the driver binds the reported session for the schedule and its
+    /// pending occurrences (the same bind as an ordinary dispatch), so a
+    /// later ordinary occurrence delivers into it and materializes nothing;
+    /// and that bind never overwrites a binding another occurrence committed
+    /// first.
+    #[tokio::test]
+    async fn a_found_admission_binds_its_session_for_later_occurrences_and_never_rebinds() {
+        let service = ScheduleService::new(
+            Arc::new(meerkat_schedule::MemoryScheduleStore::new()) as Arc<dyn ScheduleStore>
+        );
+        let planned = unbound_on_demand_occurrences(&service, "redelivery-binds", 2).await;
+        let (first, later) = (&planned[0], &planned[1]);
+        let session_id = first.materialized_session_id();
+        let runtime = Arc::new(MeerkatMachine::ephemeral());
+        runtime
+            .register_session(session_id.clone())
+            .await
+            .expect("register the first occurrence's own session");
+        let materialize_calls = Arc::new(AtomicUsize::new(0));
+        let host = Arc::new(OwnSessionHost {
+            runtime: Arc::clone(&runtime),
+            present: Some(session_id.clone()),
+            probes: Arc::new(AtomicUsize::new(0)),
+            materialize_calls: Arc::clone(&materialize_calls),
+        });
+        let first_identity = ScheduleDeliveryIdentity::for_occurrence(first);
+        host.deliver_prompt(
+            &session_id,
+            first,
+            &first_identity,
+            unbound_prompt_dispatch(),
+        )
+        .await
+        .expect("the earlier attempt admits");
+        let mob_host: Arc<dyn SurfaceScheduleMobHost> =
+            Arc::new(NoopScheduleMobHost::new("mob targets unused here"));
+        let adapter = SharedScheduleTargetAdapter::new(
+            service.clone(),
+            Arc::clone(&host) as Arc<dyn SurfaceScheduleSessionHost>,
+            mob_host,
+        );
+        let answer = adapter
+            .deliver_existing_occurrence(first, &first_identity, ExistingDelivery::UnprovenLate)
+            .await
+            .expect("the redelivery answers");
+        let ExistingDeliveryAnswer::Dispatch(dispatch) = answer else {
+            panic!("the redelivery finds the earlier admission: {answer:?}");
+        };
+        let reported = dispatch
+            .materialized_session_id
+            .clone()
+            .expect("the found admission reports its session");
+        // What the driver does with a dispatch that reports its session.
+        service
+            .bind_materialized_session_for_occurrence(first, &reported)
+            .await
+            .expect("the driver's bind");
+
+        let later = service
+            .list_occurrences(&later.schedule_id)
+            .await
+            .expect("list occurrences")
+            .into_iter()
+            .find(|occurrence| occurrence.occurrence_id == later.occurrence_id)
+            .expect("the later occurrence is still planned");
+        let later_dispatch = adapter
+            .deliver_occurrence(&later, &ScheduleDeliveryIdentity::for_occurrence(&later))
+            .await
+            .expect("the later occurrence delivers");
+        assert_eq!(
+            later_dispatch.materialized_session_id,
+            Some(session_id.clone())
+        );
+        assert_eq!(admitted_input_count(&runtime, &session_id).await, 2);
+        assert_eq!(materialize_calls.load(Ordering::SeqCst), 0);
+
+        service
+            .bind_materialized_session_for_occurrence(first, &SessionId::new())
+            .await
+            .expect("a second bind answers");
+        let schedule = service.get(&first.schedule_id).await.expect("the schedule");
+        let TargetBinding::Session(binding) = &schedule.target else {
+            panic!("a session target");
+        };
+        assert_eq!(
+            binding.resolved_session_id(),
+            Some(&session_id),
+            "a bind never overwrites the committed binding"
         );
     }
 
@@ -7202,6 +7818,7 @@ mod tests {
                         input_id: InputId::new(),
                         bounds: AdmittedOutcomeRereadBounds::for_host(),
                         read: (self.read)(),
+                        resumable: unregistered_runtime_wait_failure_resumable(),
                     }),
                 },
                 None => {
@@ -7566,8 +8183,10 @@ mod tests {
     // A run whose boundary commit rolled back (`BoundaryRolledBack`) or whose
     // durable outcome is unknown (`DurableOutcomeUnknown`) fails its live
     // completion waiters. The input stays admitted and reaches its own
-    // terminal after its session reloads. These tests script the failed wait
-    // and the reads of the input's terminal that follow it.
+    // terminal after its session reloads. A graceful stop that kept a queued
+    // input (`RequeuedAcrossStop`) leaves it admitted the same way, until the
+    // next start runs it. These tests script the failed wait and the reads of
+    // the input's terminal that follow it.
 
     fn rolled_back_boundary() -> CompletionWaitError {
         CompletionWaitError::BoundaryRolledBack {
@@ -7582,13 +8201,28 @@ mod tests {
         }
     }
 
+    fn requeued_across_stop() -> CompletionWaitError {
+        CompletionWaitError::RequeuedAcrossStop {
+            stopped_at: chrono::Utc::now(),
+        }
+    }
+
+    /// The production resolution ([`runtime_wait_failure_resumable`]) on a
+    /// runtime that holds no session: only a failure the generated authority
+    /// resolves without the session, a graceful stop's requeue, is
+    /// resumable.
+    fn unregistered_runtime_wait_failure_resumable() -> AdmittedWaitResumableFn {
+        runtime_wait_failure_resumable(&MeerkatMachine::ephemeral(), &SessionId::new())
+    }
+
     /// Which wait failures read the input's own terminal: a rolled-back
-    /// boundary and an unknown durable outcome, when the host knows the
-    /// input. Every other wait failure, and a handle built without its input
-    /// (`AcceptedScheduledInput::with_runtime_handle`), ends the delivery with
-    /// the wait failure at once, with no read.
+    /// boundary, an unknown durable outcome and a failure the generated
+    /// wait-failure authority resolves as resumable (a graceful stop's
+    /// requeue), when the host knows the input. Every other wait failure, and a handle
+    /// built without its input (`AcceptedScheduledInput::with_runtime_handle`),
+    /// ends the delivery with the wait failure at once, with no read.
     #[tokio::test]
-    async fn only_a_rolled_back_or_unknown_wait_reads_the_inputs_terminal() {
+    async fn only_a_wait_that_leaves_the_input_admitted_reads_its_terminal() {
         use DeliveryCompletionFailureReason::{
             RuntimeCompletionAuthorityUnavailable, RuntimeCompletionChannelClosed,
         };
@@ -7615,6 +8249,18 @@ mod tests {
             (
                 "an unknown durable outcome without its input",
                 unknown_durable_outcome(),
+                false,
+                Some(RuntimeCompletionAuthorityUnavailable),
+            ),
+            (
+                "a requeue across a graceful stop",
+                requeued_across_stop(),
+                true,
+                None,
+            ),
+            (
+                "a requeue across a graceful stop without its input",
+                requeued_across_stop(),
                 false,
                 Some(RuntimeCompletionAuthorityUnavailable),
             ),
@@ -7647,6 +8293,7 @@ mod tests {
                 read: scripted_outcome_read(Arc::clone(&calls), |_| {
                     Some(Ok(Some(CompletionOutcome::CompletedWithoutResult)))
                 }),
+                resumable: unregistered_runtime_wait_failure_resumable(),
             });
             let wait_error = error.clone();
             let accepted = AcceptedScheduledInput {

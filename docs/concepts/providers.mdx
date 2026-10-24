@@ -293,11 +293,11 @@ Rust applications can select only the provider adapters they use:
 <CodeGroup>
 
 ```toml Anthropic-only feature selection
-meerkat = { version = "=0.9.4", default-features = false, features = ["anthropic", "jsonl-store"] }
+meerkat = { version = "=0.9.5", default-features = false, features = ["anthropic", "jsonl-store"] }
 ```
 
 ```toml All providers
-meerkat = { version = "=0.9.4", features = ["all-providers", "jsonl-store"] }
+meerkat = { version = "=0.9.5", features = ["all-providers", "jsonl-store"] }
 ```
 
 </CodeGroup>
@@ -423,6 +423,32 @@ Provider-native web search is enabled by default for catalog models that
 support it. Disable the relevant `provider_tools.<provider>` toggle in config
 or use `rkat run --no-web-search` for one run.
 
+### What later steps see of a search
+
+A provider-native search runs inside one model step. What the next steps of
+the same turn, and later turns, still see of it depends on the provider:
+
+- **OpenAI** (Responses, stateless with `store: false`, the default): on the
+  public OpenAI API, a request with the hosted search tool asks for the
+  sources each search consulted (`include: ["web_search_call.action.sources"]`).
+  Later steps replay the search call with its query and those sources, and
+  the answer with its `url_citation` annotations, plus the encrypted
+  reasoning when reasoning is on. The text of the pages never comes back: a
+  later step can name and search the sources again, but cannot quote what it
+  read. The ChatGPT backend, Azure OpenAI and GitHub Copilot Responses wires
+  replay the search call without its sources and the answer without its
+  citations.
+- **Anthropic**: later steps replay the search results themselves, with their
+  encrypted content.
+- **Gemini**: grounding metadata has no place in a request, so later steps see
+  only the model's text.
+
+For full continuity on OpenAI, set `store: true` in the OpenAI provider
+params: OpenAI then keeps each response and the next step continues from it
+(`previous_response_id`), which is a retention choice. The Meerkat
+`web_search` fallback tool returns its results as an ordinary tool result,
+which every later step sees.
+
 ## Refusals and Content Filters
 
 Since 0.9.4, when a provider refuses a response or its content filter blocks
@@ -544,7 +570,7 @@ current REST router does not expose a blob-byte fetch route. See
 
 ```toml
 # Exactly pin the pre-1.0 Meerkat crate family.
-meerkat = { version = "=0.9.4", features = ["sqlite-store", "session-store"] }
+meerkat = { version = "=0.9.5", features = ["sqlite-store", "session-store"] }
 ```
 
 The `meerkat` facade enables `anthropic`, `openai`, and `gemini` by

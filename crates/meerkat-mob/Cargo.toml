@@ -110,6 +110,8 @@ meerkat-authorization = { workspace = true }
 meerkat-authorization-contracts = { workspace = true }
 meerkat-llm-core = { workspace = true }
 meerkat-store = { workspace = true, features = ["jsonl", "sqlite"] }
+# The long run and durable worker conformance chapters (tests/long_run_conformance.rs).
+meerkat-store-conformance = { workspace = true }
 meerkat-machine-schema.workspace = true
 meerkat-machine-kernels = { workspace = true, features = ["test-oracle"] }
 # Phase 6b live battery (cross_host_live.rs + support/live_plane.rs): the

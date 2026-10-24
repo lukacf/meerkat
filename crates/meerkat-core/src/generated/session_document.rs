@@ -236,6 +236,7 @@ pub enum RunIdCardinality {
     NoRunId,
     SingleRunId,
     MultipleRunIds,
+    NoRunRows,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -253,6 +254,7 @@ pub enum DurableTailRecoveryClass {
     InterruptedRepairableCandidate,
     #[default]
     Ambiguous,
+    ContinuableCandidate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -264,6 +266,14 @@ pub enum DurableHeadRelation {
     Diverged,
     Unverifiable,
     VerifiedRewriteDescendant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum DurableTailRunCursor {
+    #[default]
+    Disagrees,
+    Absent,
+    Agrees,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -616,6 +626,8 @@ pub enum SessionDocumentInput {
         dangling_tool_use_count: u64,
         orphan_tool_result_count: u64,
         messages_after_terminal: bool,
+        run_cursor: DurableTailRunCursor,
+        cursor_inputs_open: bool,
     },
     ApplyPendingToolResults {
         session_id: SessionDocumentKey,
@@ -1008,6 +1020,7 @@ enum SessionDocumentTransition {
     RecoverSessionFromStoreUnrecoverable,
     ClassifyDurableTailCompleted,
     ClassifyDurableTailRepairable,
+    ClassifyDurableTailContinuable,
     ClassifyDurableTailAmbiguous,
     ResolveRuntimeCheckpointProjectionActive,
     ResolveRuntimeCheckpointProjectionArchived,
@@ -5328,6 +5341,8 @@ impl SessionDocumentMachineAuthority {
                 dangling_tool_use_count,
                 orphan_tool_result_count,
                 messages_after_terminal,
+                run_cursor,
+                cursor_inputs_open,
             } => {
                 let mut matches = Vec::new();
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
@@ -5337,30 +5352,63 @@ impl SessionDocumentMachineAuthority {
                         && (terminal_stop_reason == DurableTailStopReason::EndTurn)
                         && (dangling_tool_use_count == 0)
                         && (orphan_tool_result_count == 0)
-                        && (messages_after_terminal == false))
+                        && (messages_after_terminal == false)
+                        && (run_cursor == DurableTailRunCursor::Absent))
                 {
                     matches.push(SessionDocumentTransition::ClassifyDurableTailCompleted);
                 }
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
                     && (((relation == DurableHeadRelation::VerifiedStrictDescendant)
                         || (relation == DurableHeadRelation::VerifiedRewriteDescendant))
-                        && (run_id_cardinality == RunIdCardinality::SingleRunId)
+                        && ((run_id_cardinality == RunIdCardinality::SingleRunId)
+                            || ((run_id_cardinality == RunIdCardinality::NoRunRows)
+                                && (terminal_stop_reason == DurableTailStopReason::Absent)
+                                && ((relation == DurableHeadRelation::VerifiedStrictDescendant)
+                                    || (run_cursor == DurableTailRunCursor::Agrees))))
                         && (dangling_tool_use_count == 0)
                         && (orphan_tool_result_count == 0)
                         && (messages_after_terminal == false)
                         && ((terminal_stop_reason == DurableTailStopReason::ToolUse)
-                            || (terminal_stop_reason == DurableTailStopReason::Absent)))
+                            || (terminal_stop_reason == DurableTailStopReason::Absent))
+                        && ((run_cursor == DurableTailRunCursor::Absent)
+                            || ((run_cursor == DurableTailRunCursor::Agrees)
+                                && (cursor_inputs_open == false))))
                 {
                     matches.push(SessionDocumentTransition::ClassifyDurableTailRepairable);
                 }
                 if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
+                    && (((relation == DurableHeadRelation::VerifiedStrictDescendant)
+                        || (relation == DurableHeadRelation::VerifiedRewriteDescendant))
+                        && ((run_id_cardinality == RunIdCardinality::SingleRunId)
+                            || ((run_id_cardinality == RunIdCardinality::NoRunRows)
+                                && (terminal_stop_reason == DurableTailStopReason::Absent)
+                                && ((relation == DurableHeadRelation::VerifiedStrictDescendant)
+                                    || (run_cursor == DurableTailRunCursor::Agrees))))
+                        && (dangling_tool_use_count == 0)
+                        && (orphan_tool_result_count == 0)
+                        && (messages_after_terminal == false)
+                        && ((terminal_stop_reason == DurableTailStopReason::ToolUse)
+                            || (terminal_stop_reason == DurableTailStopReason::Absent))
+                        && (run_cursor == DurableTailRunCursor::Agrees)
+                        && (cursor_inputs_open == true))
+                {
+                    matches.push(SessionDocumentTransition::ClassifyDurableTailContinuable);
+                }
+                if (self.state.lifecycle_phase == SessionDocumentPhase::Ready)
                     && (((relation != DurableHeadRelation::VerifiedStrictDescendant)
                         && (relation != DurableHeadRelation::VerifiedRewriteDescendant))
-                        || (run_id_cardinality != RunIdCardinality::SingleRunId)
+                        || (!((run_id_cardinality == RunIdCardinality::SingleRunId)
+                            || ((run_id_cardinality == RunIdCardinality::NoRunRows)
+                                && (terminal_stop_reason == DurableTailStopReason::Absent)
+                                && ((relation == DurableHeadRelation::VerifiedStrictDescendant)
+                                    || (run_cursor == DurableTailRunCursor::Agrees)))))
                         || (orphan_tool_result_count != 0)
                         || (messages_after_terminal == true)
                         || (terminal_stop_reason == DurableTailStopReason::Other)
-                        || (dangling_tool_use_count != 0))
+                        || (dangling_tool_use_count != 0)
+                        || (run_cursor == DurableTailRunCursor::Disagrees)
+                        || ((terminal_stop_reason == DurableTailStopReason::EndTurn)
+                            && (run_cursor != DurableTailRunCursor::Absent)))
                 {
                     matches.push(SessionDocumentTransition::ClassifyDurableTailAmbiguous);
                 }
@@ -5378,6 +5426,13 @@ impl SessionDocumentMachineAuthority {
                         Ok(vec![SessionDocumentEffect::DurableTailClassified {
                             candidate_id: candidate_id,
                             class: DurableTailRecoveryClass::InterruptedRepairableCandidate,
+                        }])
+                    }
+                    SessionDocumentTransition::ClassifyDurableTailContinuable => {
+                        self.state.lifecycle_phase = SessionDocumentPhase::Ready;
+                        Ok(vec![SessionDocumentEffect::DurableTailClassified {
+                            candidate_id: candidate_id,
+                            class: DurableTailRecoveryClass::ContinuableCandidate,
                         }])
                     }
                     SessionDocumentTransition::ClassifyDurableTailAmbiguous => {
@@ -6347,6 +6402,8 @@ impl SessionDocumentMachineAuthority {
         dangling_tool_use_count: u64,
         orphan_tool_result_count: u64,
         messages_after_terminal: bool,
+        run_cursor: DurableTailRunCursor,
+        cursor_inputs_open: bool,
     ) -> Result<Vec<SessionDocumentEffect>, SessionDocumentError> {
         self.apply_input(SessionDocumentInput::ClassifyDurableTail {
             session_id,
@@ -6357,6 +6414,8 @@ impl SessionDocumentMachineAuthority {
             dangling_tool_use_count,
             orphan_tool_result_count,
             messages_after_terminal,
+            run_cursor,
+            cursor_inputs_open,
         })
     }
 

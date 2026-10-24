@@ -11,8 +11,9 @@ use meerkat::surface::{
     NoopScheduleMobHost, SurfaceScheduleMobHost, parse_mob_member_schedule_identity,
 };
 use meerkat::{
-    DeliveryDispatch, IdentityTargetBinding, MobTargetBinding, Occurrence,
-    ScheduleDeliveryIdentity, ScheduleDomainError, TargetProbeOutcome,
+    DeliveryDispatch, ExistingDelivery, ExistingDeliveryAnswer, IdentityTargetBinding,
+    MobTargetBinding, Occurrence, ScheduleDeliveryIdentity, ScheduleDomainError,
+    TargetProbeOutcome,
 };
 use meerkat_core::types::SessionId;
 
@@ -191,6 +192,21 @@ impl SurfaceScheduleMobHost for HostObservationScheduleMobHost {
         // uses the ordinary session host so there is only one delivery seam.
         Ok(None)
     }
+
+    /// A redelivery takes the ordinary delivery's route: the resolution
+    /// above binds the exact session, and the session host's existing-only
+    /// admission answers from that session's earlier input. The trait
+    /// default answers an unproven late redelivery to a resident member not
+    /// admitted, without that read.
+    async fn deliver_existing_identity_target(
+        &self,
+        _occurrence: &Occurrence,
+        _identity: &ScheduleDeliveryIdentity,
+        _binding: &IdentityTargetBinding,
+        _existing: ExistingDelivery,
+    ) -> Result<Option<ExistingDeliveryAnswer>, ScheduleDomainError> {
+        Ok(None)
+    }
 }
 
 #[cfg(test)]
@@ -367,5 +383,65 @@ mod tests {
             sessions: BTreeMap::from([(first.to_string(), corrupt_row)]),
         });
         assert!(corrupt.probe_identity_target(&binding).await.is_err());
+    }
+
+    /// A redelivery to a resident member takes the ordinary delivery's
+    /// route, the session host's existing-only admission on the exact
+    /// session, for an admitted and for an unproven late one alike. The
+    /// trait default answered the unproven late one not admitted without
+    /// reading the session's earlier input.
+    #[tokio::test]
+    async fn a_redelivery_to_a_resident_member_is_the_session_hosts() {
+        let session_id = SessionId::new();
+        let adapter = host(HostObservationProjection {
+            sessions: BTreeMap::from([(
+                session_id.to_string(),
+                observation_row(&session_id, "mob-1", "worker-1"),
+            )]),
+        });
+        let binding = identity_binding("mob-1", "worker-1");
+        let schedule = meerkat::Schedule::new(meerkat::CreateScheduleRequest {
+            name: Some("member-host-redelivery".to_string()),
+            description: None,
+            trigger: meerkat::TriggerSpec::Interval(meerkat::IntervalTriggerSpec {
+                start_at_utc: chrono::Utc::now(),
+                every_seconds: 60,
+                end_at_utc: None,
+            }),
+            target: meerkat::TargetBinding::Identity(Box::new(binding.clone())),
+            misfire_policy: meerkat::MisfirePolicy::Skip,
+            overlap_policy: meerkat::OverlapPolicy::SkipIfRunning,
+            missing_target_policy: meerkat::MissingTargetPolicy::Skip,
+            labels: Default::default(),
+            planning_horizon_days: None,
+            planning_horizon_occurrences: None,
+        })
+        .expect("an identity target schedule");
+        let occurrence = meerkat::Occurrence::planned_from_schedule(
+            &schedule,
+            meerkat::OccurrenceOrdinal(0),
+            chrono::Utc::now(),
+        )
+        .expect("the occurrence plans");
+        let delivery_identity = meerkat::ScheduleDeliveryIdentity::for_occurrence(&occurrence);
+
+        for existing in [
+            meerkat::ExistingDelivery::Admitted,
+            meerkat::ExistingDelivery::UnprovenLate,
+        ] {
+            assert!(
+                adapter
+                    .deliver_existing_identity_target(
+                        &occurrence,
+                        &delivery_identity,
+                        &binding,
+                        existing,
+                    )
+                    .await
+                    .expect("the member host answers")
+                    .is_none(),
+                "a {existing:?} redelivery to a resident member is the session host's"
+            );
+        }
     }
 }

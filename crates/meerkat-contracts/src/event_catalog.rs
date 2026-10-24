@@ -61,4 +61,8 @@ pub const KNOWN_AGENT_EVENT_TYPES: &[&str] = &[
     // the batch's requested disposition, the attempt's baseline effort and
     // what the attempt sent.
     "request_reasoning_lowered",
+    // A durable run resumed from its run cursor after a restart, in place of
+    // `run_started`: its run id, the cursor's round and where it continues
+    // (`tools_pending` or `awaiting_model`).
+    "run_resumed",
 ];

@@ -4,8 +4,8 @@ use meerkat::session_runtime::admission::{
     RuntimeRegistrationLockLease,
 };
 #[cfg(test)]
-use meerkat::{CreateSessionRequest, RunResult};
-use meerkat::{FactoryAgentBuilder, PersistentSessionService, Session, SessionServiceControlExt};
+use meerkat::{CreateSessionRequest, RunResult, Session};
+use meerkat::{FactoryAgentBuilder, PersistentSessionService, SessionServiceControlExt};
 use meerkat_core::agent::AgentToolDispatcher;
 use meerkat_core::error::AgentError;
 use meerkat_core::event::AgentEvent;
@@ -258,6 +258,10 @@ fn wrap_mcp_runtime_pre_admission_cleanup(
             Err(error) if error.is_attachment_replaced() => {
                 McpRuntimeCompletionCleanup::StaleAttachment { error }
             }
+            // The generated wait-failure authority resolves whether this
+            // attachment's request-local admission is released, for an input
+            // a graceful stop kept durably queued too: a later start's
+            // attachment runs that input, never this one.
             Err(error) => {
                 let release_pre_admission = context
                     .runtime_wait_failure_releases_pre_admission(&session_id, &error)
@@ -1413,25 +1417,15 @@ impl McpRuntimeIngressContext {
         .await;
     }
 
-    async fn session_archived_by_authority(
-        &self,
-        session_id: &SessionId,
-        session: &Session,
-    ) -> Result<bool, SessionError> {
-        self.service
-            .session_archived_by_authority(session_id, session)
-            .await
-    }
-
+    /// Whether the RuntimeStore holds an absorbing archive terminal for the
+    /// session. It reads no body, so an ingress into a running session, a
+    /// live MCP change and a run resumed over its open provisional tail are
+    /// not refused by the tail's revision conflict.
     async fn authoritative_session_archived(
         &self,
         session_id: &SessionId,
     ) -> Result<bool, SessionError> {
-        let Some(session) = self.service.load_authoritative_session(session_id).await? else {
-            return Ok(false);
-        };
-        self.session_archived_by_authority(session_id, &session)
-            .await
+        Ok(committed_source_archived(&self.service, session_id).await? == Some(true))
     }
 
     /// Resolve completion cleanup from one exact attachment observation.
@@ -1915,6 +1909,31 @@ pub(crate) fn resume_required_tool_error(
             "reason": reason,
         })),
     )
+}
+
+/// Body-free archive and presence answer for `session_id`'s committed
+/// source: `None` when no committed session exists, otherwise whether the
+/// RuntimeStore holds an absorbing archive terminal for it.
+///
+/// It reads [`PersistentSessionService::observe_live_durable_source`], which
+/// applies the archive rule of `session_archived_by_authority` (a rule that
+/// never reads the body) and never materializes the session body. A body read
+/// of the committed boundary refuses with `TranscriptRevisionConflict` from a
+/// durable run's first HeadCanonical round commit until its boundary commit,
+/// so a precheck that needs only presence and archive state reads no body. A
+/// classification this build does not know is a fault, never presence.
+pub(crate) async fn committed_source_archived(
+    service: &PersistentSessionService<FactoryAgentBuilder>,
+    session_id: &SessionId,
+) -> Result<Option<bool>, SessionError> {
+    match service.observe_live_durable_source(session_id).await? {
+        meerkat::LiveDurableSourceObservation::Absent => Ok(None),
+        meerkat::LiveDurableSourceObservation::Archived => Ok(Some(true)),
+        meerkat::LiveDurableSourceObservation::Committed { .. } => Ok(Some(false)),
+        other => Err(SessionError::Agent(AgentError::InternalError(format!(
+            "the durable source of session {session_id} answered a classification this build does not know: {other:?}"
+        )))),
+    }
 }
 
 pub(crate) fn session_error_to_tool_error(
@@ -2447,6 +2466,26 @@ impl CoreExecutorInterruptHandle for McpSessionRuntimeInterruptHandle {
             })
             .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))
     }
+
+    async fn suspend_run_if_current(
+        &self,
+        expected_run_id: &meerkat_core::lifecycle::RunId,
+        _reason: String,
+    ) -> Result<bool, CoreExecutorError> {
+        self.context
+            .service
+            .suspend_run_with_machine_authority(
+                &self.session_id,
+                expected_run_id,
+                self.context.runtime_adapter.session_control_authority(),
+            )
+            .await
+            .or_else(|err| match err {
+                SessionError::NotRunning { .. } => Ok(false),
+                err => Err(err),
+            })
+            .map_err(|error| CoreExecutorError::control_failed_runtime(error.to_string()))
+    }
 }
 
 impl McpSessionRuntimeExecutor {
@@ -2710,6 +2749,17 @@ impl CoreExecutor for McpSessionRuntimeExecutor {
         self.context
             .service
             .reconcile_runtime_compaction_projections(&self.session_id, intents.to_vec())
+            .await
+            .map_err(|error| CoreExecutorError::Internal(error.to_string()))
+    }
+
+    async fn acknowledge_compaction_finalization(
+        &mut self,
+        authority: &meerkat_core::CommittedSessionBoundaryAuthority,
+    ) -> Result<(), CoreExecutorError> {
+        self.context
+            .service
+            .acknowledge_runtime_compaction_finalization(&self.session_id, authority)
             .await
             .map_err(|error| CoreExecutorError::Internal(error.to_string()))
     }

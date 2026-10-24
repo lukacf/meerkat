@@ -39,6 +39,9 @@ pub(crate) enum MobMachineCommand {
         external_delivery_intent: Option<crate::store::MobExternalDeliveryIntent>,
         scoped_event_tx: Option<tokio::sync::mpsc::Sender<meerkat_core::ScopedAgentEvent>>,
         exact_operation: Option<crate::runtime::FlowOperationCustody>,
+        /// The run's role targets; the actor admits them before anything is
+        /// written. `None` runs every step role-wide.
+        role_targets: Option<Arc<crate::run::FlowRoleTargets>>,
     },
     CancelFlow {
         run_id: RunId,
@@ -177,6 +180,9 @@ pub(crate) enum MobMachineCommand {
     Shutdown {
         /// Caller-owned bound for the Shutdown's waits (`ShutdownOptions`).
         deadline: Option<meerkat_core::time_compat::Instant>,
+        /// What the Shutdown does with inputs still queued behind a member's
+        /// running turn (`ShutdownOptions`).
+        queued_inputs: crate::runtime::QueuedInputsOnShutdown,
     },
     ForceCancel {
         agent_identity: AgentIdentity,

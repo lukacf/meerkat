@@ -334,6 +334,8 @@ trap 'rm -rf "$tlc_env_tmp"' EXIT
 # and with --mutants each seeded defect's property violated.
 # run_start_hold_audit.sh requires each of its seven reachability witnesses
 # to be reported violated.
+# requeue_across_stop_audit.sh requires each of its eight reachability
+# witnesses to be reported violated.
 # live_delegation_worker_start_after_close_audit.sh requires its two goals to
 # be reported violated.
 # live_context_result_barrier_audit.sh with --mutants requires its
@@ -385,6 +387,14 @@ printf '%s\n' \
   'echo "Error: Invariant NotAuditWitnessRegisteredHeldRefused is violated."' \
   'echo "Error: Invariant NotAuditWitnessStillHeldRefused is violated."' \
   'echo "Error: Invariant NotAuditWitnessStoppedHoldSurvivesResume is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRetainedRunsAfterGracefulStop is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRetainedRunsAfterCrash is violated."' \
+  'echo "Error: Invariant NotAuditWitnessExpiredSettled is violated."' \
+  'echo "Error: Invariant NotAuditWitnessStagedNotRetained is violated."' \
+  'echo "Error: Invariant NotAuditWitnessStopAbandonsEligible is violated."' \
+  'echo "Error: Invariant NotAuditWitnessPlainStopAbandons is violated."' \
+  'echo "Error: Invariant NotAuditWitnessRequeuedWaitAnswered is violated."' \
+  'echo "Error: Invariant NotAuditWitnessSuspendedRunResumes is violated."' \
   'echo "Error: Action property AuditNeverUnregisters is violated."' \
   'echo "Error: Action property AuditNeverUnregistersWithPreparation is violated."' \
   'echo "Error: Invariant AuditNeverCancelsRecovery is violated."' \
@@ -455,6 +465,10 @@ printf '%s\n' \
   'echo "Error: Invariant AuditRewriteWithoutOneRunIdHolds is violated by the initial state:"' \
   'echo "Error: Invariant AuditRewriteEndTurnCompletes is violated by the initial state:"' \
   'echo "Error: Invariant AuditRewriteToolUseRepairs is violated by the initial state:"' \
+  'echo "Error: Invariant AuditRewriteUnattributedHolds is violated by the initial state:"' \
+  'echo "Error: Invariant AuditDisagreeingCursorHolds is violated by the initial state:"' \
+  'echo "Error: Invariant AuditCursorOnEndTurnHolds is violated by the initial state:"' \
+  'echo "Error: Invariant AuditContinuableNeedsAgreeingBoundCursor is violated by the initial state:"' \
   'echo "Error: The first argument of <= should be an integer, but instead it is:"' \
   'echo "100000 states generated, 100000 distinct states found, 0 states left on queue."' \
   'echo "The coverage statistics at 2026-01-01 00:00:00"' \

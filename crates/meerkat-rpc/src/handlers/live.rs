@@ -236,6 +236,13 @@ fn live_open_projection_error_code(error: &RealtimeSessionOpenProjectionError) -
         // Another open on this host holds the process's open-projection
         // admission: busy, and the same open succeeds on a later retry.
         RealtimeSessionOpenProjectionError::Backpressured => crate::error::SESSION_BUSY,
+        // A mob member's session is opened through the mob's member live
+        // surface, never restored by session id here.
+        RealtimeSessionOpenProjectionError::Session(source)
+            if source.is_mob_member_session_addressed_by_id() =>
+        {
+            crate::error::INVALID_PARAMS
+        }
         RealtimeSessionOpenProjectionError::Session(_)
         | RealtimeSessionOpenProjectionError::SessionMismatch { .. }
         | RealtimeSessionOpenProjectionError::Seed(
@@ -332,6 +339,19 @@ fn live_open_error_response(id: Option<RpcId>, error: LiveOpenError) -> RpcRespo
         LiveOpenError::SessionStateFault(source) => {
             let rpc = crate::session_runtime::session_error_to_rpc(source);
             RpcResponse::from_error(id, rpc)
+        }
+        // A mob member's session is opened through the mob's member live
+        // surface and never restored by session id here: the typed refusal
+        // keeps its session-error code and data.
+        LiveOpenError::OpenConfig(RealtimeSessionOpenProjectionError::Session(source))
+            if source.is_mob_member_session_addressed_by_id() =>
+        {
+            RpcResponse::from_error(id, crate::session_runtime::session_error_to_rpc(source))
+        }
+        LiveOpenError::Precheck(LiveOpenPrecheckError::SessionLookup { source, .. })
+            if source.is_mob_member_session_addressed_by_id() =>
+        {
+            RpcResponse::from_error(id, crate::session_runtime::session_error_to_rpc(source))
         }
         LiveOpenError::OpenConfig(source) => RpcResponse::error(
             id,
@@ -2283,6 +2303,42 @@ mod tests {
         serde_json::from_str(&s).expect("deserialize")
     }
 
+    /// The session-scoped `live/open` refuses to restore a mob member's
+    /// session, at the projection or at the precheck: either way the answer
+    /// is invalid params with the refusal's data (its kind, session, mob and
+    /// member), never an internal error.
+    #[test]
+    fn a_mob_member_session_refusal_answers_invalid_params_with_its_data() {
+        use meerkat::session_runtime::errors::LiveOpenPrecheckError;
+
+        let session_id = meerkat_core::types::SessionId::new();
+        let refusal = || {
+            meerkat_core::SessionError::mob_member_session_addressed_by_id(
+                &session_id,
+                "cold-mob",
+                "cold-worker",
+            )
+        };
+        for open_error in [
+            LiveOpenError::OpenConfig(RealtimeSessionOpenProjectionError::Session(refusal())),
+            LiveOpenError::Precheck(LiveOpenPrecheckError::SessionLookup {
+                session_id: session_id.clone(),
+                source: refusal(),
+            }),
+        ] {
+            let response = live_open_error_response(None, open_error);
+            let rpc_error = response.error.expect("the refusal is an error response");
+            assert_eq!(rpc_error.code, error::INVALID_PARAMS, "{rpc_error:?}");
+            let data = rpc_error.data.expect("the refusal keeps its data");
+            assert_eq!(
+                data["kind"],
+                meerkat_core::SessionError::MOB_MEMBER_SESSION_ADDRESSED_BY_ID_KIND
+            );
+            assert_eq!(data["mob_id"], "cold-mob");
+            assert_eq!(data["member"], "cold-worker");
+        }
+    }
+
     #[test]
     fn immediate_send_input_config_rejection_keeps_typed_error_data() {
         let host_error = LiveAdapterHostError::AdapterError(LiveAdapterError::ProviderError {
@@ -2456,6 +2512,7 @@ mod tests {
                 provider_native_resume: false,
             },
             continuity: meerkat_contracts::WireLiveContinuityMode::Degraded,
+            advisories: Vec::new(),
         };
         assert_eq!(round_trip(&v), v);
     }

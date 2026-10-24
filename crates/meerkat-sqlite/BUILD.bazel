@@ -63,7 +63,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-sqlite",
     },
     proc_macro_deps = all_crate_deps(
@@ -97,7 +97,7 @@ rust_library(
         "//crates/meerkat:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-sqlite",
     },
     proc_macro_deps = all_crate_deps(
@@ -132,7 +132,7 @@ rust_test(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-sqlite",
     },
     tags = [
@@ -183,7 +183,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "kept_connection_archive",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-sqlite",
     },
@@ -234,7 +234,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "kept_connection_presence",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-sqlite",
     },
@@ -285,7 +285,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "lock_profile",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-sqlite",
     },
@@ -336,7 +336,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "lock_profile_sources",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-sqlite",
     },
@@ -403,7 +403,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "process_wide_locks_bench",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-sqlite",
     },
@@ -456,7 +456,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "process_wide_mutexes",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-sqlite",
     },
@@ -507,7 +507,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "statistics_switch_first",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-sqlite",
     },
@@ -558,7 +558,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.9.4",
+        "CARGO_PKG_VERSION": "0.9.5",
         "CARGO_BIN_NAME": "statistics_switch_late",
         "CARGO_MANIFEST_DIR": "./crates/meerkat-sqlite",
     },

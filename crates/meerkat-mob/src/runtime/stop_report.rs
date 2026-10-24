@@ -52,19 +52,25 @@ pub struct StopOptions {
 impl StopOptions {
     /// Leave every member's current run running: an autonomous member's run
     /// is not cancelled at its next boundary, as a plain Stop does. Its run
-    /// starts are held and its kickoff stop intent is recorded as usual, and
-    /// the Stop reports the run `LeftRunning` and returns without waiting
-    /// for any turn. A Stop that arrives while a plain Stop still waits for
-    /// the turns it cancelled joins that Stop and returns its report. A Stop
-    /// with this option does not recall cancels that an earlier, failed
-    /// plain Stop already dispatched: those runs still end at their next
-    /// boundary.
+    /// starts are held, and the Stop reports the run `LeftRunning` and
+    /// returns without waiting for any turn. Its kickoff stop intent is
+    /// recorded as with a plain Stop, except for a local autonomous member
+    /// whose session commits each round: that member's kickoff stays open
+    /// for the Shutdown that follows to decide. A Stop that arrives while a
+    /// plain Stop still waits for the turns it cancelled joins that Stop and
+    /// returns its report. A Stop with this option does not recall cancels
+    /// that an earlier, failed plain Stop already dispatched: those runs
+    /// still end at their next boundary.
     ///
     /// Meant for Stop, then
     /// [`MobHandle::drain_stopped_runs`](super::MobHandle::drain_stopped_runs),
-    /// then Shutdown, which cancels what is still running. A host that stops
-    /// with this option and never shuts down leaves autonomous turns running
-    /// under a Stopped mob.
+    /// then Shutdown. The default Shutdown keeps a run that commits each
+    /// round, and a durable member's kickoff with it, for the mob's next
+    /// start, and ends every other run still running; a Shutdown with an
+    /// explicit [`QueuedInputsOnShutdown::Stop`](super::QueuedInputsOnShutdown::Stop)
+    /// ends them all. A host that stops with this option and never shuts
+    /// down leaves autonomous turns running under a Stopped mob, and a
+    /// durable member's kickoff open until its run ends.
     #[must_use]
     pub fn leave_runs_running(mut self) -> Self {
         self.leave_runs_running = true;

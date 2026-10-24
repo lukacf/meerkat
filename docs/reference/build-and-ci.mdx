@@ -236,6 +236,7 @@ the exact-tree attestation; nightly and the release tag carry the rest):
 | `integration` per suite: `nextest -p <package> --test '*'` for each `INTEGRATION_SUITES` entry in `scripts/ci-cargo-lanes.mjs` whose trigger packages or paths changed; plus the reader rows (below) | the suites whose package does not compile meerkat-mob, and the reader rows outside that chain | every selected suite, and reader rows for lib, bin and example targets when the push has no `main-unit` | `make test-int` | Bazel integration lanes |
 | `closure-tests`: the deterministic workspace test lanes (`scripts/pre-push-unit.sh`) for the test scope: integration-fast, HeadCanonical and `e2e-fast` rows | deferred | yes | `make test-int`, `make e2e-fast` | Bazel integration lanes |
 | `closure-check`: `cargo check --all-features` (lib and bin targets) over the reverse-dependency closure | deferred | yes | - | - |
+| `rustdoc` (two parallel legs, default features and `--all-features`): `cargo doc --workspace --no-deps` with `RUSTDOCFLAGS=-Dwarnings`: every crate's documentation, its intra-doc links included. It documents the whole workspace, so an error that only `cargo doc -p <crate>` shows (features unify across members) is outside it | deferred | yes | - | - |
 | `feature-check`: the changed packages' Bazel feature sets and the Make feature-matrix check rows | deferred | yes | feature matrix | Bazel graph |
 | `governed-jsonl`, `mcp-confinement-positive`: the non-MCP governed JSONL tests and the Linux positive confinement cases | when the pull request touches the lane's own inputs (`GUARD_LANE_INPUTS`: the files defining the selected cases and their crates' manifests), changes its definition between base and head (`GUARD_LANE_DEFINITIONS`: its ci.yml job without comments, the Makefile's confinement rule and assignments, the default nextest profile's selection, the selected modules' declarations) or has no diff, deferred otherwise | yes | - | - |
 | `wasm-check` | when the web runtime or a workspace crate it compiles (its dependency closure, the provider crates included) or the CLI web template changes, or the plan is the whole workspace | yes | browser contract suite | Bazel wasm-check |
@@ -324,6 +325,18 @@ it enforces two limits:
   carried-over lane keeps its attempt's clock. Past the ceiling a run's jobs
   are stuck. Waiting for runners alone never fails it.
 
+Both limits hold every lane a pull request plans for ordinary reasons. An
+exact-profile lane (`governed-jsonl`, `mcp-confinement-positive`) that the
+plan runs only because the change touches its inputs or changes its
+definition (`GUARD_LANE_INPUTS`, `GUARD_LANE_DEFINITIONS`; the plan exports
+the reason as `guard_lane_reasons`) is outside both: the confinement lane's
+cold build alone takes 27.5-32.5 minutes. The gate still requires it to
+succeed, its own `timeout-minutes` (40 on a pull request) bounds it, and the
+gate names it, with its seconds and the reason, in a `Guard lane outside the
+budget` warning and the `guard_lanes_outside_budget` output. A guard lane run
+on every Rust change (a push, a dispatch, a release projection) or for an
+unknown diff stays in the budget.
+
 Runner queue wait is reported, not budgeted: at 300 s or more on the critical
 path (`CI_QUEUE_WARN_SECONDS`) the gate emits a `CI runner queue wait`
 warning. The account runs at most 40 hosted jobs at once, shared by every
@@ -369,8 +382,9 @@ path escalates to the whole workspace (packed into at most eight shards by
 estimated build-and-link cost); a
 classifier error fails the `changes` job and therefore the gate. The gate
 asserts that clippy and unit (or a named unit deferral) ran and succeeded for
-a build-relevant change, that a push also ran closure-check, governed JSONL
-and the confinement lane, and it fails when the classifier produced no lanes.
+a build-relevant change, that a push also ran closure-check, the workspace
+rustdoc, governed JSONL and the confinement lane, and it fails when the
+classifier produced no lanes.
 `make ci-lanes-selftest` (`scripts/ci-cargo-lanes-selftest.mjs`) pins these
 properties with fixtures for a core touch, docs-only, `Cargo.lock`-only,
 machine-authority-only, an unmapped `.rs`, and a missing base.

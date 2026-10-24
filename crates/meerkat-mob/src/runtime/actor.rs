@@ -202,6 +202,10 @@ const MEMBER_LIFECYCLE_HANG_GUARD: Duration = Duration::from_secs(600);
 /// actor behind a slow or wedged session-runtime read. Unknown progress is a
 /// truthful result; delaying lifecycle commands is not.
 const MEMBER_PROGRESS_OBSERVATION_TIMEOUT: Duration = Duration::from_millis(250);
+/// The bound on a placed prompt-context fork's `HostFeatures` probe of its
+/// member host: the bound of the controller's other host-addressed reads
+/// (`HostStatus`). Past it the spawn fails before anything is recorded.
+pub(super) const HOST_FEATURES_BRIDGE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Retirement lifecycle notices are advisory - MobMachine topology and the
 /// generated trust mutations below own the actual cleanup. A retiring
 /// member's comms drain may already be quiescent after `StopHostLoop`, so an
@@ -438,7 +442,7 @@ enum IdentitySessionLoadErrorClass {
 /// Whether a session read failed because the committed runtime boundary no
 /// longer names the session's physical head: its store refused the read as a
 /// transcript revision conflict.
-fn is_transcript_revision_conflict(error: &meerkat_core::service::SessionError) -> bool {
+pub(super) fn is_transcript_revision_conflict(error: &meerkat_core::service::SessionError) -> bool {
     matches!(
         error,
         meerkat_core::service::SessionError::Store(error)
@@ -451,6 +455,36 @@ fn is_transcript_revision_conflict(error: &meerkat_core::service::SessionError) 
                     )
                 })
     )
+}
+
+/// Whether a member's session is still present, live or durable, as read by
+/// a step that decides whether the member's session archive is still owed.
+///
+/// A turn stopped between its end-of-run checkpoint and its runtime boundary
+/// commit leaves a durable tail ahead of the runtime boundary, and every
+/// committed read of the session refuses with the typed
+/// `TranscriptRevisionConflict` until something settles that tail. The
+/// refusal itself proves the session is present and not archived. Only the
+/// session archive settles the tail, under the turn boundary and recovery
+/// gate it holds (or ends typed when the tail is held or refused), so a
+/// retirement, a destroy or a disposal goes on to that archive instead of
+/// ending on the refusal here. Nothing settles in this read, and every other
+/// read failure is returned.
+async fn member_session_present(
+    service: &dyn MobSessionService,
+    session: &SessionId,
+) -> Result<bool, MobError> {
+    match service.has_live_session(session).await {
+        Ok(true) => return Ok(true),
+        Ok(false) => {}
+        Err(error) if is_transcript_revision_conflict(&error) => return Ok(true),
+        Err(error) => return Err(error.into()),
+    }
+    match service.load_persisted_session(session).await {
+        Ok(persisted) => Ok(persisted.is_some()),
+        Err(error) if is_transcript_revision_conflict(&error) => Ok(true),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Classify a session read failure by its typed cause. Durable corruption and
@@ -935,6 +969,172 @@ impl IdentityReconcileCompletionAuthority {
             intent: IdentityReconcileAuthorityKey::from_permit(permit),
             lease_epoch: Some(permit.lease_epoch),
         }
+    }
+}
+
+/// One member's startup custody restore that the start deferred instead of
+/// failing the whole mob: the restore, the member session it restores, the
+/// typed cause of its last failed attempt, and when it is re-attempted next
+/// (the identity reconcile's backoff).
+#[derive(Debug, Clone)]
+pub(super) struct DeferredMemberCustody {
+    pub(super) session: SessionId,
+    pub(super) restore: crate::MemberCustodyRestore,
+    pub(super) cause: Arc<MobError>,
+    pub(super) attempts: u32,
+    pub(super) next_attempt: Instant,
+}
+
+/// The member custody restores a start deferred, keyed by member. Volatile:
+/// the durable fact behind each entry (a retiring member's started
+/// retirement, a member's failed restore) re-derives it at every start.
+#[derive(Debug, Default)]
+pub(super) struct DeferredMemberCustodyRegistry {
+    entries: BTreeMap<AgentIdentity, DeferredMemberCustody>,
+    /// What member status reads see of each entry: its restore and the
+    /// cause its last attempt met. Shared with the mob's handles; kept in
+    /// step with `entries` by every change below.
+    view: super::handle::MemberCustodyDeferrals,
+}
+
+impl DeferredMemberCustodyRegistry {
+    /// An empty registry that publishes its entries to `view`.
+    pub(super) fn publishing(view: super::handle::MemberCustodyDeferrals) -> Self {
+        Self {
+            entries: BTreeMap::new(),
+            view,
+        }
+    }
+
+    /// The view member status reads see this registry's entries through.
+    pub(super) fn view(&self) -> super::handle::MemberCustodyDeferrals {
+        Arc::clone(&self.view)
+    }
+
+    /// Publish `identity`'s deferral (or its absence) to member status reads.
+    fn publish(&self, identity: &AgentIdentity, deferral: Option<crate::MemberCustodyDeferral>) {
+        let mut view = match self.view.write() {
+            Ok(view) => view,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        match deferral {
+            Some(deferral) => {
+                view.insert(identity.clone(), deferral);
+            }
+            None => {
+                view.remove(identity);
+            }
+        }
+    }
+
+    /// Record `identity`'s deferred `restore` for `session` after its first
+    /// failed attempt; its next attempt is backed off from `now`.
+    pub(super) fn defer(
+        &mut self,
+        identity: AgentIdentity,
+        session: SessionId,
+        restore: crate::MemberCustodyRestore,
+        cause: MobError,
+        now: Instant,
+    ) {
+        self.publish(
+            &identity,
+            crate::MemberCustodyDeferral::new(restore, &cause),
+        );
+        self.entries.insert(
+            identity,
+            DeferredMemberCustody {
+                session,
+                restore,
+                cause: Arc::new(cause),
+                attempts: 1,
+                next_attempt: now
+                    .checked_add(identity_reconcile_backoff_delay(1))
+                    .unwrap_or(now),
+            },
+        );
+    }
+
+    /// The restore deferred for `identity`, if any.
+    pub(super) fn pending(
+        &self,
+        identity: &AgentIdentity,
+    ) -> Option<(SessionId, crate::MemberCustodyRestore)> {
+        self.entries
+            .get(identity)
+            .map(|entry| (entry.session.clone(), entry.restore))
+    }
+
+    pub(super) fn contains(&self, identity: &AgentIdentity) -> bool {
+        self.entries.contains_key(identity)
+    }
+
+    pub(super) fn identities(&self) -> Vec<AgentIdentity> {
+        self.entries.keys().cloned().collect()
+    }
+
+    pub(super) fn get(&self, identity: &AgentIdentity) -> Option<&DeferredMemberCustody> {
+        self.entries.get(identity)
+    }
+
+    /// Settle one re-attempt of `identity`'s deferred restore, at `now`.
+    /// Success removes the entry. A failure with a cause the start may defer
+    /// ([`MobError::is_deferrable_custody_cause`]) keeps it, backs off its
+    /// next attempt, and answers [`MobError::MemberCustodyDeferred`]; any
+    /// other failure is answered as it is, its next attempt backed off as
+    /// well.
+    pub(super) fn settle(
+        &mut self,
+        identity: &AgentIdentity,
+        outcome: Result<(), MobError>,
+        now: Instant,
+    ) -> Result<(), MobError> {
+        let error = match outcome {
+            Ok(()) => {
+                self.entries.remove(identity);
+                self.publish(identity, None);
+                return Ok(());
+            }
+            Err(error) => error,
+        };
+        let Some(entry) = self.entries.get_mut(identity) else {
+            return Err(error);
+        };
+        entry.attempts = entry.attempts.saturating_add(1);
+        entry.next_attempt = now
+            .checked_add(identity_reconcile_backoff_delay(entry.attempts))
+            .unwrap_or(now);
+        if !error.is_deferrable_custody_cause() {
+            return Err(error);
+        }
+        let cause = Arc::new(error);
+        entry.cause = Arc::clone(&cause);
+        let deferred = MobError::MemberCustodyDeferred {
+            member_id: identity.clone(),
+            session_id: entry.session.clone(),
+            restore: entry.restore,
+            cause: Arc::clone(&cause),
+        };
+        let deferral = crate::MemberCustodyDeferral::new(entry.restore, cause.as_ref());
+        self.publish(identity, deferral);
+        Err(deferred)
+    }
+
+    /// The time from `now` until the earliest entry is due, `None` with none.
+    pub(super) fn next_wait(&self, now: Instant) -> Option<Duration> {
+        self.entries
+            .values()
+            .map(|entry| entry.next_attempt.saturating_duration_since(now))
+            .min()
+    }
+
+    /// The members whose next attempt is due at `now`.
+    pub(super) fn due(&self, now: Instant) -> Vec<AgentIdentity> {
+        self.entries
+            .iter()
+            .filter(|(_, entry)| entry.next_attempt <= now)
+            .map(|(identity, _)| identity.clone())
+            .collect()
     }
 }
 
@@ -1480,6 +1680,238 @@ fn identity_member_actuation_disposition(
 }
 
 #[cfg(test)]
+mod deferred_member_custody_tests {
+    use super::{DeferredMemberCustodyRegistry, identity_reconcile_backoff_delay};
+    use crate::ids::AgentIdentity;
+    use crate::{MemberCustodyRestore, MobError};
+    use meerkat_core::time_compat::{Duration, Instant};
+    use meerkat_core::types::SessionId;
+
+    fn served_elsewhere(session: &SessionId) -> MobError {
+        MobError::SessionError(meerkat_core::SessionError::ServedElsewhere {
+            id: session.clone(),
+        })
+    }
+
+    fn hosting_unavailable(session: &SessionId) -> MobError {
+        MobError::SessionError(meerkat_core::SessionError::HostingUnavailable {
+            id: session.clone(),
+        })
+    }
+
+    /// Without a deferred restore there is nothing to re-attempt and no wake.
+    #[test]
+    fn a_member_without_a_deferred_custody_restore_has_nothing_to_reattempt() {
+        let registry = DeferredMemberCustodyRegistry::default();
+        let member = AgentIdentity::from("member");
+        let now = Instant::now();
+        assert_eq!(registry.pending(&member), None);
+        assert!(!registry.contains(&member));
+        assert_eq!(registry.next_wait(now), None);
+        assert!(registry.due(now).is_empty());
+    }
+
+    /// A re-attempt that fails with a cause the start may defer keeps the
+    /// entry, backs its next attempt off by the identity reconcile's backoff,
+    /// keeps the newest cause, and answers the typed deferral naming the
+    /// member, its session, the restore and the cause.
+    #[test]
+    fn a_deferred_restore_that_still_fails_skippably_stays_deferred_and_backs_off() {
+        let mut registry = DeferredMemberCustodyRegistry::default();
+        let member = AgentIdentity::from("member");
+        let session = SessionId::new();
+        let start = Instant::now();
+        registry.defer(
+            member.clone(),
+            session.clone(),
+            MemberCustodyRestore::CleanupDelivery,
+            served_elsewhere(&session),
+            start,
+        );
+        assert_eq!(
+            registry.pending(&member),
+            Some((session.clone(), MemberCustodyRestore::CleanupDelivery))
+        );
+        assert_eq!(
+            registry.next_wait(start),
+            Some(identity_reconcile_backoff_delay(1))
+        );
+
+        let retry = start + Duration::from_secs(1);
+        let answer = registry.settle(&member, Err(hosting_unavailable(&session)), retry);
+        match answer {
+            Err(MobError::MemberCustodyDeferred {
+                member_id,
+                session_id,
+                restore,
+                cause,
+            }) => {
+                assert_eq!(member_id, member);
+                assert_eq!(session_id, session);
+                assert_eq!(restore, MemberCustodyRestore::CleanupDelivery);
+                assert!(matches!(
+                    cause.as_ref(),
+                    MobError::SessionError(meerkat_core::SessionError::HostingUnavailable { .. })
+                ));
+            }
+            other => panic!("a skippable failure answers the typed deferral: {other:?}"),
+        }
+        let entry = registry.get(&member).expect("the entry stays");
+        assert_eq!(entry.attempts, 2);
+        assert_eq!(
+            entry.next_attempt,
+            retry + identity_reconcile_backoff_delay(2),
+            "the next attempt is backed off from the re-attempt"
+        );
+        assert!(matches!(
+            entry.cause.as_ref(),
+            MobError::SessionError(meerkat_core::SessionError::HostingUnavailable { .. })
+        ));
+        assert!(registry.due(retry).is_empty(), "not due before its backoff");
+        let due = retry + identity_reconcile_backoff_delay(2);
+        assert_eq!(registry.due(due), vec![member.clone()]);
+
+        // A durable tail its recovery kept unprovable is a cause the start
+        // may defer as well.
+        let answer = registry.settle(
+            &member,
+            Err(MobError::MemberDurableTailUnprovable {
+                member_id: member.clone(),
+                session_id: session.clone(),
+            }),
+            due,
+        );
+        assert!(
+            matches!(
+                &answer,
+                Err(MobError::MemberCustodyDeferred { cause, .. })
+                    if matches!(cause.as_ref(), MobError::MemberDurableTailUnprovable { .. })
+            ),
+            "{answer:?}"
+        );
+        let entry = registry.get(&member).expect("the entry stays");
+        assert_eq!(entry.attempts, 3);
+        assert_eq!(
+            entry.next_attempt,
+            due + identity_reconcile_backoff_delay(3)
+        );
+    }
+
+    /// A re-attempt that restores the custody removes the entry.
+    #[test]
+    fn a_deferred_restore_that_succeeds_is_removed() {
+        let mut registry = DeferredMemberCustodyRegistry::default();
+        let member = AgentIdentity::from("member");
+        let session = SessionId::new();
+        let now = Instant::now();
+        registry.defer(
+            member.clone(),
+            session.clone(),
+            MemberCustodyRestore::StartupBinding,
+            served_elsewhere(&session),
+            now,
+        );
+        registry
+            .settle(&member, Ok(()), now)
+            .expect("a restored custody answers Ok");
+        assert_eq!(registry.pending(&member), None);
+        assert_eq!(registry.next_wait(now), None);
+    }
+
+    /// Any other failure is answered as it is, not as a deferral; the entry
+    /// stays with its next attempt backed off and its deferral cause kept.
+    #[test]
+    fn a_deferred_restore_that_fails_otherwise_answers_its_own_error() {
+        let mut registry = DeferredMemberCustodyRegistry::default();
+        let member = AgentIdentity::from("member");
+        let session = SessionId::new();
+        let now = Instant::now();
+        registry.defer(
+            member.clone(),
+            session.clone(),
+            MemberCustodyRestore::CleanupDelivery,
+            served_elsewhere(&session),
+            now,
+        );
+        let answer = registry.settle(
+            &member,
+            Err(MobError::Internal("store read failed".to_string())),
+            now,
+        );
+        assert!(
+            matches!(&answer, Err(MobError::Internal(message)) if message == "store read failed"),
+            "{answer:?}"
+        );
+        let entry = registry.get(&member).expect("the entry stays");
+        assert_eq!(entry.attempts, 2);
+        assert!(matches!(
+            entry.cause.as_ref(),
+            MobError::SessionError(meerkat_core::SessionError::ServedElsewhere { .. })
+        ));
+    }
+
+    /// Member status reads see each deferral as the registry holds it: its
+    /// restore and the cause its last attempt met, the newest deferrable
+    /// cause after a re-attempt, the same deferral after a failure that
+    /// defers nothing, and nothing once the restore succeeds.
+    #[test]
+    fn the_published_deferral_follows_the_registry() {
+        let view = super::super::handle::MemberCustodyDeferrals::default();
+        let mut registry = DeferredMemberCustodyRegistry::publishing(view.clone());
+        let member = AgentIdentity::from("member");
+        let session = SessionId::new();
+        let now = Instant::now();
+        let published = || {
+            view.read()
+                .expect("the published view")
+                .get(&member)
+                .copied()
+        };
+        assert_eq!(published(), None);
+        registry.defer(
+            member.clone(),
+            session.clone(),
+            MemberCustodyRestore::StartupBinding,
+            served_elsewhere(&session),
+            now,
+        );
+        assert_eq!(
+            published(),
+            Some(crate::MemberCustodyDeferral {
+                restore: MemberCustodyRestore::StartupBinding,
+                cause: crate::MemberCustodyDeferralCause::ServedElsewhere,
+            })
+        );
+        let _ = registry.settle(&member, Err(hosting_unavailable(&session)), now);
+        assert_eq!(
+            published(),
+            Some(crate::MemberCustodyDeferral {
+                restore: MemberCustodyRestore::StartupBinding,
+                cause: crate::MemberCustodyDeferralCause::HostingUnavailable,
+            }),
+            "the newest deferrable cause is shown"
+        );
+        let _ = registry.settle(
+            &member,
+            Err(MobError::Internal("store read failed".to_string())),
+            now,
+        );
+        assert_eq!(
+            published(),
+            Some(crate::MemberCustodyDeferral {
+                restore: MemberCustodyRestore::StartupBinding,
+                cause: crate::MemberCustodyDeferralCause::HostingUnavailable,
+            }),
+            "a failure that defers nothing leaves the deferral as it was"
+        );
+        registry
+            .settle(&member, Ok(()), now)
+            .expect("a restored custody answers Ok");
+        assert_eq!(published(), None, "a restored custody clears the deferral");
+    }
+}
+
+#[cfg(test)]
 mod identity_recovery_slice_tests {
     use super::{
         IDENTITY_RECONCILE_BACKOFF_BASE, IDENTITY_RECONCILE_BACKOFF_CAP,
@@ -1979,6 +2411,146 @@ impl InitialTurnHandle {
     }
 }
 
+/// What answers an autonomous kickoff's waiter.
+#[cfg(feature = "runtime-adapter")]
+enum KickoffCompletion {
+    /// The kickoff input's live completion.
+    Live(meerkat_runtime::completion::CompletionHandle),
+    /// The kickoff input was terminal already when it was admitted again
+    /// under its key, so no completion will come: its receipt answers.
+    Terminal {
+        adapter: Arc<meerkat_runtime::MeerkatMachine>,
+        session_id: SessionId,
+        input_id: meerkat_core::lifecycle::InputId,
+    },
+    /// The admission refused the kickoff input: nothing will run it.
+    Refused(String),
+}
+
+#[cfg(feature = "runtime-adapter")]
+impl KickoffCompletion {
+    /// What the waiter of an admission of a kickoff input waits on: the
+    /// handle the admission answered, for a deduplicated admission of an
+    /// input already terminal that input's receipt, and for a refused
+    /// admission its refusal. `None` only for an accepted admission that
+    /// answered no handle.
+    fn of_admission(
+        adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+        session_id: &SessionId,
+        outcome: &meerkat_runtime::AcceptOutcome,
+        handle: Option<meerkat_runtime::completion::CompletionHandle>,
+    ) -> Option<Self> {
+        match (handle, outcome) {
+            (Some(handle), _) => Some(Self::Live(handle)),
+            (None, meerkat_runtime::AcceptOutcome::Deduplicated { existing_id, .. }) => {
+                Some(Self::Terminal {
+                    adapter: Arc::clone(adapter),
+                    session_id: session_id.clone(),
+                    input_id: existing_id.clone(),
+                })
+            }
+            (None, meerkat_runtime::AcceptOutcome::Rejected { reason, .. }) => {
+                Some(Self::Refused(format!("{reason:?}")))
+            }
+            (None, _) => None,
+        }
+    }
+
+    async fn wait(
+        self,
+    ) -> Result<
+        meerkat_runtime::completion::CompletionOutcome,
+        meerkat_runtime::completion::CompletionWaitError,
+    > {
+        match self {
+            Self::Live(handle) => handle.wait().await,
+            Self::Terminal {
+                adapter,
+                session_id,
+                input_id,
+            } => terminal_kickoff_outcome(&adapter, &session_id, &input_id).await,
+            Self::Refused(reason) => Err(
+                meerkat_runtime::completion::CompletionWaitError::AuthorityUnavailable(format!(
+                    "the kickoff input was refused at admission: {reason}"
+                )),
+            ),
+        }
+    }
+}
+
+/// The outcome of a kickoff whose input is terminal already, read from the
+/// input's terminal receipt: its finalized outcome, or a typed failure
+/// naming why there is none. A kickoff never waits on an input that can
+/// answer no completion.
+#[cfg(feature = "runtime-adapter")]
+async fn terminal_kickoff_outcome(
+    adapter: &meerkat_runtime::MeerkatMachine,
+    session_id: &SessionId,
+    input_id: &meerkat_core::lifecycle::InputId,
+) -> Result<
+    meerkat_runtime::completion::CompletionOutcome,
+    meerkat_runtime::completion::CompletionWaitError,
+> {
+    use meerkat_runtime::completion::CompletionWaitError;
+    use meerkat_runtime::terminal_status::{InputTerminalReceiptRead, InteractionSelector};
+
+    let refused = |detail: String| {
+        Err(CompletionWaitError::AuthorityUnavailable(format!(
+            "the kickoff input {input_id} {detail}"
+        )))
+    };
+    match adapter
+        .input_terminal_receipt(session_id, InteractionSelector::InputId(input_id.clone()))
+        .await
+    {
+        Ok(Some(read)) => match read.report {
+            InputTerminalReceiptRead::Finalized(receipt) => Ok((*receipt).into_outcome()),
+            InputTerminalReceiptRead::TerminalWithoutReceipt { terminal, .. } => {
+                refused(format!("ended without a run: {terminal:?}"))
+            }
+            _ => refused("answered no completion and has no terminal".to_string()),
+        },
+        Ok(None) => refused("has no terminal read".to_string()),
+        Err(error) => refused(format!("could not be read: {error}")),
+    }
+}
+
+/// Own an autonomous kickoff's completion wait: once `completion` answers,
+/// re-enter the actor with `KickoffOutcomeResolved` and wait for its
+/// acknowledgement. Without a completion the task ends at once.
+#[cfg(feature = "runtime-adapter")]
+fn spawn_kickoff_outcome_waiter(
+    command_tx: mpsc::Sender<RoutedMobCommand>,
+    agent_identity: AgentIdentity,
+    completion: Option<KickoffCompletion>,
+) -> InitialTurnHandle {
+    let handle = tokio::spawn(async move {
+        if let Some(completion) = completion {
+            let outcome = completion.wait().await;
+            let (ack_tx, ack_rx) = oneshot::channel();
+            if command_tx
+                .send(RoutedMobCommand::internal(
+                    MobCommand::KickoffOutcomeResolved {
+                        agent_identity: agent_identity.clone(),
+                        outcome,
+                        ack_tx,
+                    },
+                ))
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    agent_identity = %agent_identity,
+                    "mob actor dropped before kickoff outcome could be recorded"
+                );
+            } else {
+                let _ = ack_rx.await;
+            }
+        }
+    });
+    InitialTurnHandle { handle }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct AutonomousStopInterruptIncarnation {
     member_ref: MemberRef,
@@ -2025,6 +2597,32 @@ pub(super) struct AutonomousMemberStopOutcome {
 enum PendingAutonomousStopKind {
     Stop,
     Shutdown,
+}
+
+/// Which autonomous members a stop keeps for the next start: their kickoff
+/// origin stays open and their running turn is not interrupted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutonomousStopKeep {
+    /// None: a Stop that interrupts runs closes every kickoff origin.
+    Nothing,
+    /// Every local member whose session commits each round: a Stop that
+    /// leaves runs running leaves their kickoff to the Shutdown that follows.
+    DurableMembers,
+    /// The members whose durable run the Shutdown in progress keeps.
+    ShutdownChoice,
+}
+
+/// What one stop does with one autonomous member, as MobMachine resolves it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutonomousStopMemberAction {
+    /// Close its kickoff origin and interrupt its running turn.
+    Interrupt,
+    /// Nothing: its registration already stopped, or it is a terminal
+    /// retirement retry anchor.
+    Skip,
+    /// A Shutdown that keeps the member's durable run for the next start:
+    /// its kickoff stays open and the runtime stop suspends its running turn.
+    KeepForResume,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3844,6 +4442,44 @@ fn machine_kickoff_turn_metadata(
     )
 }
 
+/// The idempotency key of a local autonomous member's kickoff input, one per
+/// member incarnation. A start after a Shutdown that kept the kickoff's run
+/// finds that input by it and never admits the kickoff again.
+#[cfg(feature = "runtime-adapter")]
+fn local_kickoff_idempotency_key(
+    agent_runtime_id: &AgentRuntimeId,
+) -> meerkat_runtime::IdempotencyKey {
+    meerkat_runtime::IdempotencyKey::new(format!("mob-kickoff:{agent_runtime_id}"))
+}
+
+/// The deduplicate-only input that finds a kept kickoff input by its
+/// incarnation key. Its own content is never admitted: without an earlier
+/// input under the key, the admission refuses and admits nothing.
+#[cfg(feature = "runtime-adapter")]
+fn kept_kickoff_reattach_input(agent_runtime_id: &AgentRuntimeId) -> meerkat_runtime::Input {
+    use meerkat_runtime::{Input, InputHeader, PromptInput};
+
+    Input::Prompt(PromptInput {
+        injected_context: Vec::new(),
+        header: InputHeader {
+            ingress_context: None,
+            retained_resume: None,
+            authority_association: None,
+            id: meerkat_core::lifecycle::InputId::new(),
+            timestamp: chrono::Utc::now(),
+            source: meerkat_runtime::InputOrigin::Operator,
+            durability: meerkat_runtime::InputDurability::Durable,
+            visibility: meerkat_runtime::InputVisibility::default(),
+            idempotency_key: Some(local_kickoff_idempotency_key(agent_runtime_id)),
+            supersession_key: None,
+            correlation_id: None,
+        },
+        content: ContentInput::Text("re-attach the kept kickoff".to_string()),
+        typed_turn_appends: Vec::new(),
+        turn_metadata: None,
+    })
+}
+
 #[cfg(feature = "runtime-adapter")]
 fn kickoff_resolution_input(
     agent_identity: &AgentIdentity,
@@ -5565,106 +6201,6 @@ fn mob_bridge_rejection_cause(
     }
 }
 
-/// Render forked conversation rows as a text context block for the new
-/// member. ONE renderer over the ONE page row vocabulary
-/// (`WireSessionMessage`, DEC-P6E-20): the local fork branch projects its
-/// domain page through `WireMemberHistoryPageBody::try_from_history_page` and
-/// the remote branch decodes the bridge page — both render here, so local
-/// and remote fork context are byte-identical by construction.
-fn render_fork_context(
-    source_member_id: &AgentIdentity,
-    rows: &[meerkat_contracts::wire::WireHistoryRow],
-) -> String {
-    use meerkat_contracts::wire::{
-        WireAssistantBlock, WireContentBlock, WireContentInput, WireSessionMessage,
-        WireToolResultContent,
-    };
-
-    fn content_input_text(content: &WireContentInput) -> String {
-        match content {
-            WireContentInput::Text(text) => text.clone(),
-            WireContentInput::Blocks(blocks) => blocks
-                .iter()
-                .filter_map(|block| match block {
-                    WireContentBlock::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join(""),
-        }
-    }
-
-    let mut lines = Vec::new();
-    lines.push(format!(
-        "[Forked conversation context from member '{source_member_id}']"
-    ));
-    for row in rows {
-        match &row.0 {
-            WireSessionMessage::System { content, .. } => {
-                lines.push(format!("[system]: {content}"));
-            }
-            WireSessionMessage::SystemNotice { body, .. } => {
-                lines.push(format!(
-                    "[system_notice]: {}",
-                    body.clone().unwrap_or_default()
-                ));
-            }
-            WireSessionMessage::User { content, .. } => {
-                lines.push(format!("[user]: {}", content_input_text(content)));
-            }
-            WireSessionMessage::BlockAssistant { blocks, .. } => {
-                // Both `Text` (display) and `Transcript` (spoken) lanes
-                // project to the rendered text stream; supervisor sees the
-                // assistant's full visible output regardless of lane.
-                let text: String = blocks
-                    .iter()
-                    .filter_map(|block| match block {
-                        WireAssistantBlock::Text { text, .. }
-                        | WireAssistantBlock::Transcript { text, .. } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("");
-                if !text.is_empty() {
-                    lines.push(format!("[assistant]: {text}"));
-                }
-            }
-            WireSessionMessage::ToolResults { results, .. } => {
-                for result in results {
-                    let text: String = match &result.content {
-                        WireToolResultContent::Text(text) => text.clone(),
-                        WireToolResultContent::Blocks(blocks) => blocks
-                            .iter()
-                            .filter_map(|block| match block {
-                                WireContentBlock::Text { text } => Some(text.as_str()),
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>()
-                            .join(""),
-                    };
-                    if !text.is_empty() {
-                        let preview = if text.len() > 200 {
-                            // Find a valid UTF-8 char boundary at or before byte 200
-                            let end = text
-                                .char_indices()
-                                .map(|(i, _)| i)
-                                .take_while(|&i| i <= 200)
-                                .last()
-                                .unwrap_or(0);
-                            format!("{}...", &text[..end])
-                        } else {
-                            text
-                        };
-                        lines.push(format!("[tool_result({})]: {preview}", result.tool_use_id));
-                    }
-                }
-            }
-        }
-    }
-    lines.push("[End of forked context]".to_string());
-    lines.join("\n")
-}
-
 /// Local branch of the placement-switched member history read (DEC-P6E-20/21):
 /// the SAME serving semantics as the member host's `ReadMemberHistory` arm
 /// (tail addressing, per-page cap) over the local session service, projected
@@ -5727,7 +6263,10 @@ pub(super) struct PendingSpawn {
     pub(super) initial_turn_prompt: Option<ContentInput>,
     /// Identity reconciliation resumes an already authoritative transcript.
     /// Starting its autonomous runtime must not manufacture a fresh kickoff
-    /// prompt when the sealed intent has no pending initial delivery.
+    /// prompt when the sealed intent has no pending initial delivery. A
+    /// plain resume gets the same suppression when its provision shows the
+    /// adopted session's first turn already started
+    /// (`MobActor::adopted_session_first_turn_delivery`).
     pub(super) suppress_autonomous_initial_prompt: bool,
     /// Target-local identity authority for the final structural member CAS.
     /// The built-in member store revalidates this after provisioning; it is
@@ -5857,6 +6396,8 @@ struct DeferredResumeProvision {
     ops_registry: Option<Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>>,
     generated_self_owned_operation_owner: Option<SessionId>,
     direct_member_incarnation: Option<super::bridge_protocol::BridgeDirectMemberIncarnation>,
+    /// The incarnation's continuity intent, for the provision request.
+    continuity_intent: super::handle::SpawnContinuityIntent,
 }
 
 impl SpawnProvisionInput {
@@ -5957,6 +6498,7 @@ impl DeferredResumeProvision {
             ops_registry,
             generated_self_owned_operation_owner,
             direct_member_incarnation,
+            continuity_intent,
         } = *self;
 
         let authorized_resume = session_service
@@ -6016,6 +6558,7 @@ impl DeferredResumeProvision {
             runtime_revival_intent: super::provisioner::RuntimeRevivalIntent::None,
             direct_member_incarnation,
             held_bound: None,
+            continuity_intent,
         };
         let materialized_session_id = admit_bridge_session_for_spawn(&mut request.create_session);
         if materialized_session_id != resume_id {
@@ -6150,11 +6693,69 @@ pub(super) struct ForkSourceHistoryRead {
     source_member_id: AgentIdentity,
     fork_context: crate::launch::ForkContext,
     location: ForkSourceHistoryLocation,
+    /// The host's policy, which decides what of the source's history the
+    /// child is given (`super::fork_context`).
+    fork_instruction_policy: meerkat_core::ForkInstructionPolicy,
+    /// The source's typed identity, for the child's create build.
+    prompt_context_source: meerkat_core::PromptContextForkSource,
 }
 
 impl ForkSourceHistoryRead {
-    fn source_member_id(&self) -> &AgentIdentity {
-        &self.source_member_id
+    /// The source's visible tools for the child's fork notice: a local
+    /// source's, read without waiting on a running turn; a placed source's,
+    /// read from its member host within a bound.
+    async fn source_tools(
+        &self,
+        session_service: &dyn MobSessionService,
+    ) -> meerkat_core::fork_notice::ForkSeedSourceTools {
+        match &self.location {
+            ForkSourceHistoryLocation::Local { source_session_id } => {
+                session_service.fork_source_tools(source_session_id).await
+            }
+            ForkSourceHistoryLocation::Remote {
+                supervisor_bridge,
+                peer,
+                expected_member,
+                ..
+            } => {
+                super::member_history_proxy::read_remote_member_visible_tools(
+                    supervisor_bridge,
+                    peer,
+                    expected_member,
+                )
+                .await
+            }
+        }
+    }
+
+    /// Read the source's rows and decide them under the host's fork
+    /// instruction policy, fitted to `max_bytes` (`super::fork_context`).
+    async fn read_plan(
+        &self,
+        session_service: &dyn MobSessionService,
+        max_bytes: usize,
+    ) -> Result<super::fork_context::ForkContextPlan, MobError> {
+        let rows = self.read_rows(session_service).await?;
+        super::fork_context::ForkContextPlan::new(
+            &self.source_member_id,
+            self.source_session().as_ref(),
+            rows,
+            self.fork_instruction_policy,
+            max_bytes,
+        )
+    }
+
+    /// The session the source's history is read from: the local session,
+    /// or the placed member's session on its host.
+    fn source_session(&self) -> Option<SessionId> {
+        match &self.location {
+            ForkSourceHistoryLocation::Local { source_session_id } => {
+                Some(source_session_id.clone())
+            }
+            ForkSourceHistoryLocation::Remote {
+                expected_member, ..
+            } => SessionId::parse(&expected_member.member_session_id).ok(),
+        }
     }
 
     async fn read_rows(
@@ -7625,12 +8226,15 @@ struct RestoredMemberOperationBinding {
 /// runs against a fresh ops adapter, so any surviving binding is an invariant
 /// violation and the strict bind applies. The explicit same-handle resume
 /// post-commit step runs against the live adapter, where a parent-owned
-/// member legitimately still holds its coordinator-owned binding.
+/// member legitimately still holds its coordinator-owned binding. A deferred
+/// startup restore re-attempted in the running actor restores a binding this
+/// incarnation never established, so the strict bind applies as at startup.
 #[cfg(feature = "runtime-adapter")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RestoredOperationBindingSeam {
     ActorStartup,
     ExplicitResumePostCommit,
+    DeferredReattempt,
 }
 
 /// Outcome of rehydrating a member's composition delivery custody.
@@ -7872,11 +8476,20 @@ pub(super) struct MobActor {
     pub(super) shutdown_report: super::MobShutdownReport,
     /// Caller-owned bound of the Shutdown in progress (`ShutdownOptions`).
     pub(super) shutdown_deadline: Option<Instant>,
+    /// What the Shutdown in progress does with inputs still queued behind a
+    /// member's running turn (`ShutdownOptions`).
+    #[cfg(feature = "runtime-adapter")]
+    pub(super) shutdown_queued_inputs: super::QueuedInputsOnShutdown,
     /// A Shutdown parked while its runtime teardown runs off the actor loop.
     pub(super) pending_shutdown_teardown: Option<shutdown_teardown::PendingShutdownTeardown>,
     /// Stuck retirements a resume handed back for re-drive, started one at a
     /// time from the actor loop.
     pub(super) pending_stuck_redrives: VecDeque<AgentIdentity>,
+    /// Startup restores of member custody deferred instead of failing the
+    /// whole start. An operation that acts on such a member's session passes
+    /// `reattempt_deferred_member_custody` first, and the identity reconcile's
+    /// backoff wake re-attempts each due entry.
+    pub(super) deferred_member_custody: DeferredMemberCustodyRegistry,
     pub(super) next_retirement_ticket: u64,
     pub(super) retirement_batch: Option<retirement_io::RetirementBatch>,
     pub(super) wiring_io_tasks: tokio::task::JoinSet<wiring_io::WiringIoCompletion>,
@@ -11252,6 +11865,38 @@ impl MobActor {
         Ok(())
     }
 
+    /// Mount the tool bundles the mob's definition profile names on a member
+    /// lowered from sealed identity material. The sealed profile is portable
+    /// and carries no runtime-owned bundles (they cannot cross hosts), so a
+    /// local materialization takes them from the definition profile of the
+    /// same name, as any member of that profile does; the mob's registered
+    /// bundles stay the ceiling at the build. A role the definition does not
+    /// define has no bundles to mount.
+    async fn mount_definition_tool_bundles(
+        &self,
+        spec: &mut super::handle::SpawnMemberSpec,
+    ) -> Result<(), MobError> {
+        if !self.definition.profiles.contains_key(&spec.role_name) {
+            return Ok(());
+        }
+        let Some(profile) = spec.override_profile.as_mut() else {
+            return Ok(());
+        };
+        let definition_profile = self
+            .definition
+            .resolve_profile(&spec.role_name, self.realm_profile_store.as_ref())
+            .await?;
+        profile
+            .tools
+            .rust_bundles
+            .clone_from(&definition_profile.tools.rust_bundles);
+        profile
+            .tools
+            .bundles
+            .clone_from(&definition_profile.tools.bundles);
+        Ok(())
+    }
+
     /// The signal that records a failed revival of `agent_identity`'s
     /// session `session_id`, with the reason it records. A host refusal of
     /// the member's registration keeps its typed code and the host's own
@@ -14324,6 +14969,8 @@ impl MobActor {
                 resume_from_role: None,
             },
             forked_participant_attachment: None,
+            prompt_context_fork: None,
+            report_adopted_first_turn: false,
         });
 
         // §19.L5: the ops owner for a placed member is the owner bridge
@@ -14489,6 +15136,25 @@ impl MobActor {
         })
     }
 
+    /// Whether MobMachine records `identity` as an Active member holding
+    /// `profile_name`: the one "Active and holds the role" predicate over
+    /// machine-owned member facts. Same-profile auto-wiring and role-targets
+    /// admission both decide through it.
+    fn machine_member_is_active_with_profile(
+        dsl: &mob_dsl::MobMachineState,
+        identity: &mob_dsl::AgentIdentity,
+        profile_name: &ProfileName,
+    ) -> bool {
+        dsl.member_profile_names
+            .get(identity)
+            .is_some_and(|machine_profile_name| {
+                machine_profile_name.as_str() == profile_name.as_str()
+            })
+            && MobMemberLifecycleProjection::is_active_machine_lifecycle(
+                &dsl.member_lifecycle_for_identity(identity),
+            )
+    }
+
     fn active_machine_member_ids_for_profile(
         &self,
         profile_name: &ProfileName,
@@ -14496,19 +15162,82 @@ impl MobActor {
     ) -> Vec<AgentIdentity> {
         let dsl = self.dsl_authority.state();
         dsl.member_profile_names
-            .iter()
-            .filter_map(|(identity, machine_profile_name)| {
-                if machine_profile_name.as_str() != profile_name.as_str()
-                    || identity.0.as_str() == excluded_identity.as_str()
-                    || !MobMemberLifecycleProjection::is_active_machine_lifecycle(
-                        &dsl.member_lifecycle_for_identity(identity),
-                    )
-                {
-                    return None;
-                }
-                Some(AgentIdentity::from(identity.0.as_str()))
+            .keys()
+            .filter(|identity| {
+                identity.0.as_str() != excluded_identity.as_str()
+                    && Self::machine_member_is_active_with_profile(dsl, identity, profile_name)
             })
+            .map(|identity| AgentIdentity::from(identity.0.as_str()))
             .collect()
+    }
+
+    /// Admit a flow run's role targets: the binding must fit the flow
+    /// (every bound role is a step role, every step role is bound, no quorum
+    /// exceeds its role's bound set), and every bound identity must be an
+    /// Active member of this mob holding that role.
+    ///
+    /// Called once per run, inside the run-flow actor command and before any
+    /// durable write, provisioning, `FlowStarted` or dispatch, so no lifecycle
+    /// transition can land between the verdict and the run record. It reads
+    /// MobMachine's own member facts through the shared predicate; the
+    /// refusal kind is only named after that predicate refused.
+    fn admit_flow_role_targets(
+        &self,
+        config: &FlowRunConfig,
+        role_targets: &crate::run::FlowRoleTargets,
+    ) -> Result<(), MobError> {
+        let refuse = |refusal| MobError::FlowRoleTargetsRefused {
+            flow_id: config.flow_id.clone(),
+            refusal,
+        };
+        role_targets
+            .check_against_flow(&config.flow_spec)
+            .map_err(refuse)?;
+        let dsl = self.dsl_authority.state();
+        for (role, members) in role_targets.bound_roles() {
+            for member in members {
+                let identity = mob_dsl::AgentIdentity::from_domain(member);
+                if Self::machine_member_is_active_with_profile(dsl, &identity, role) {
+                    continue;
+                }
+                let refusal = match dsl.member_profile_names.get(&identity) {
+                    None => crate::error::FlowRoleTargetRefusal::NotAMember {
+                        role: role.clone(),
+                        member: member.clone(),
+                    },
+                    Some(member_role) if member_role.as_str() != role.as_str() => {
+                        crate::error::FlowRoleTargetRefusal::RoleMismatch {
+                            role: role.clone(),
+                            member: member.clone(),
+                            member_role: ProfileName::from(member_role.as_str()),
+                        }
+                    }
+                    Some(_) => crate::error::FlowRoleTargetRefusal::NotActive {
+                        role: role.clone(),
+                        member: member.clone(),
+                        status: match dsl.member_lifecycle_for_identity(&identity).status {
+                            mob_dsl::MobMemberLifecycleStatus::Active => {
+                                super::handle::MobMemberStatus::Active
+                            }
+                            mob_dsl::MobMemberLifecycleStatus::Retiring => {
+                                super::handle::MobMemberStatus::Retiring
+                            }
+                            mob_dsl::MobMemberLifecycleStatus::Broken => {
+                                super::handle::MobMemberStatus::Broken
+                            }
+                            mob_dsl::MobMemberLifecycleStatus::Completed => {
+                                super::handle::MobMemberStatus::Completed
+                            }
+                            mob_dsl::MobMemberLifecycleStatus::Unknown => {
+                                super::handle::MobMemberStatus::Unknown
+                            }
+                        },
+                    },
+                };
+                return Err(refuse(refusal));
+            }
+        }
+        Ok(())
     }
 
     async fn project_member_list_from_machine(
@@ -14597,6 +15326,7 @@ impl MobActor {
             #[cfg(feature = "runtime-adapter")]
             runtime_adapter: self.runtime_adapter.clone(),
             restore_diagnostics: self.restore_diagnostics.clone(),
+            custody_deferrals: self.deferred_member_custody.view(),
             supervisor_bridge: self.supervisor_bridge.clone(),
             machine_state_watch_rx: self.machine_state_watch_tx.subscribe(),
             reachability_observations: Arc::clone(&self.reachability_observations),
@@ -16660,6 +17390,37 @@ impl MobActor {
         )
     }
 
+    /// The first-turn delivery of a spawn, given what a plain resume found in
+    /// the session it adopted ([`super::handle::AdoptedFirstTurn`]).
+    ///
+    /// A resume of a session whose first turn already started adopts an
+    /// authoritative transcript: it runs no autonomous kickoff and no
+    /// turn-driven initial turn, with or without an initial message. A
+    /// resume that owes the first turn, and every other spawn, keeps its
+    /// delivery.
+    fn adopted_session_first_turn_delivery(
+        &self,
+        agent_identity: &AgentIdentity,
+        adopted_first_turn: Option<super::handle::AdoptedFirstTurn>,
+        suppress_autonomous_initial_prompt: bool,
+        initial_turn_prompt: Option<ContentInput>,
+    ) -> (bool, Option<ContentInput>) {
+        if adopted_first_turn != Some(super::handle::AdoptedFirstTurn::Started) {
+            return (suppress_autonomous_initial_prompt, initial_turn_prompt);
+        }
+        // `initial_turn_prompt` is present exactly when the spawn carried an
+        // initial message.
+        if initial_turn_prompt.is_some() {
+            tracing::info!(
+                mob_id = %self.definition.id,
+                agent_identity = %agent_identity,
+                first_turn = "started",
+                "resume adopts a session whose first turn already started; its initial message is not delivered"
+            );
+        }
+        (true, None)
+    }
+
     async fn ensure_autonomous_runtime_ready(
         &self,
         agent_identity: &AgentIdentity,
@@ -16789,6 +17550,10 @@ impl MobActor {
         }
         let report = std::mem::take(&mut self.shutdown_report);
         self.shutdown_deadline = None;
+        #[cfg(feature = "runtime-adapter")]
+        {
+            self.shutdown_queued_inputs = super::QueuedInputsOnShutdown::Stop;
+        }
         let outstanding = report
             .members
             .values()
@@ -16838,6 +17603,16 @@ impl MobActor {
     ) -> Result<(), MobError> {
         let outcome = match outcome {
             Ok(outcome) => outcome,
+            // A Shutdown that keeps the member's durable run suspended the
+            // kickoff's run for the next start: the kickoff stays in flight
+            // under its objective, and that start re-attaches its waiter.
+            Err(error) if error.is_requeued_across_stop() => {
+                tracing::debug!(
+                    agent_identity = %agent_identity,
+                    "the kickoff run was kept across the stop; its kickoff stays in flight"
+                );
+                return Ok(());
+            }
             Err(error) => {
                 return self
                     .apply_kickoff_input(
@@ -18549,10 +19324,14 @@ impl MobActor {
         Ok(())
     }
 
-    async fn autonomous_shutdown_member_should_interrupt(
+    /// MobMachine's action for one autonomous member of a stop.
+    /// `keeps_durable_run` says this stop keeps the member's durable run for
+    /// the next start ([`Self::stop_keeps_durable_run`]).
+    async fn autonomous_shutdown_member_action(
         &mut self,
         entry: &RosterEntry,
-    ) -> Result<bool, MobError> {
+        keeps_durable_run: bool,
+    ) -> Result<AutonomousStopMemberAction, MobError> {
         let session_id = entry.member_ref.bridge_session_id().cloned();
         #[cfg(feature = "runtime-adapter")]
         if let (Some(adapter), Some(session_id), Some(stopped_registration)) = (
@@ -18572,14 +19351,14 @@ impl MobActor {
                     // A is absent after its exact unregister. Retain the
                     // terminal observer as the member-stop stage witness until
                     // this actor exits successfully.
-                    return Ok(false);
+                    return Ok(AutonomousStopMemberAction::Skip);
                 }
                 Some(current) if current == &stopped_registration => {
                     // This exact registration reached the completed
                     // member-stop stage before its unregister observer was
                     // installed. Re-run the global stop scan on every
                     // Shutdown retry, but suppress only this one exact A.
-                    return Ok(false);
+                    return Ok(AutonomousStopMemberAction::Skip);
                 }
                 Some(_) => {
                     // A same-SessionId replacement B is fresh shutdown work.
@@ -18693,6 +19472,7 @@ impl MobActor {
                 runtime_residue_present,
                 archive_authority_known,
                 placed_release_confirmed,
+                keeps_durable_run,
             },
             "resolve_autonomous_shutdown_member_action",
         )?;
@@ -18729,10 +19509,62 @@ impl MobActor {
                 entry.agent_identity
             )));
         }
-        Ok(matches!(
-            action,
-            mob_dsl::AutonomousShutdownMemberActionKind::Interrupt
-        ))
+        Ok(match action {
+            mob_dsl::AutonomousShutdownMemberActionKind::Interrupt => {
+                AutonomousStopMemberAction::Interrupt
+            }
+            mob_dsl::AutonomousShutdownMemberActionKind::SkipTerminalRetirementAnchor => {
+                AutonomousStopMemberAction::Skip
+            }
+            mob_dsl::AutonomousShutdownMemberActionKind::KeepForResume => {
+                AutonomousStopMemberAction::KeepForResume
+            }
+        })
+    }
+
+    /// Whether this mob's member sessions commit each round: its session
+    /// service keeps persistent sessions, which give each session a
+    /// checkpointer so its runs commit each round, and its runtime has a
+    /// persistence store that keeps their inputs and resume points. Every
+    /// local member session lives on that one service and runtime.
+    #[cfg(feature = "runtime-adapter")]
+    pub(super) fn member_sessions_commit_each_round(&self) -> bool {
+        self.session_service.supports_persistent_sessions()
+            && self
+                .runtime_adapter
+                .as_ref()
+                .is_some_and(|adapter| adapter.has_runtime_persistence())
+    }
+
+    /// Whether a stop that keeps `keep` keeps `entry`'s durable run for the
+    /// next start. The member's session must be local to this mob's runtime.
+    /// A Stop that leaves runs running keeps it when the session commits each
+    /// round; a Shutdown keeps it when its choice resolves to a requeue for
+    /// the session, which a session that commits each round gets by default.
+    fn stop_keeps_durable_run(&self, entry: &RosterEntry, keep: AutonomousStopKeep) -> bool {
+        #[cfg(feature = "runtime-adapter")]
+        {
+            let local_session = entry.member_ref.bridge_session_id().is_some()
+                && !super::member_runtime_is_host_owned(
+                    self.dsl_authority.state(),
+                    &entry.agent_identity,
+                );
+            local_session
+                && match keep {
+                    AutonomousStopKeep::Nothing => false,
+                    AutonomousStopKeep::DurableMembers => self.member_sessions_commit_each_round(),
+                    AutonomousStopKeep::ShutdownChoice => matches!(
+                        self.shutdown_queued_inputs
+                            .unregister_queued_inputs(self.member_sessions_commit_each_round()),
+                        meerkat_runtime::UnregisterQueuedInputs::Requeue { .. }
+                    ),
+                }
+        }
+        #[cfg(not(feature = "runtime-adapter"))]
+        {
+            let _ = (entry, keep);
+            false
+        }
     }
 
     /// The current Stop's per-member report (#1500).
@@ -18987,7 +19819,11 @@ impl MobActor {
         &mut self,
         kind: PendingAutonomousStopKind,
     ) -> Result<Vec<(AgentIdentity, AutonomousStopInterrupted)>, MobError> {
-        let entries = self.close_all_autonomous_kickoff_origins().await?;
+        let keep = match kind {
+            PendingAutonomousStopKind::Stop => AutonomousStopKeep::Nothing,
+            PendingAutonomousStopKind::Shutdown => AutonomousStopKeep::ShutdownChoice,
+        };
+        let entries = self.close_all_autonomous_kickoff_origins(keep).await?;
         if entries.is_empty() {
             return Ok(Vec::new());
         }
@@ -19016,8 +19852,15 @@ impl MobActor {
     /// Phase 1 of every autonomous stop, for each autonomous member MobMachine
     /// says to interrupt: durably close its kickoff origin, then refuse while
     /// placed kickoff cleanup is pending. Returns those members; a Stop that
-    /// leaves runs running interrupts none of them.
-    async fn close_all_autonomous_kickoff_origins(&mut self) -> Result<Vec<RosterEntry>, MobError> {
+    /// leaves runs running interrupts none of them. A member whose durable
+    /// run the stop keeps (`keep`) is left out: its kickoff origin stays open
+    /// and its running turn is left running, to the Shutdown that follows a
+    /// Stop that leaves runs running, or to the runtime stop of a Shutdown,
+    /// which suspends it.
+    async fn close_all_autonomous_kickoff_origins(
+        &mut self,
+        keep: AutonomousStopKeep,
+    ) -> Result<Vec<RosterEntry>, MobError> {
         let entries = {
             let roster = self.roster.read().await;
             roster
@@ -19032,16 +19875,18 @@ impl MobActor {
         // not infer whether a row is live or a publication-only retry anchor.
         let mut interruptible_entries = Vec::with_capacity(entries.len());
         for entry in entries {
-            if self
-                .autonomous_shutdown_member_should_interrupt(&entry)
+            let keeps_durable_run = self.stop_keeps_durable_run(&entry, keep);
+            match self
+                .autonomous_shutdown_member_action(&entry, keeps_durable_run)
                 .await?
             {
-                interruptible_entries.push(entry);
-            } else {
-                self.autonomous_stop_interrupts
-                    .remove(&entry.agent_identity);
-                self.autonomous_stop_interrupted
-                    .remove(&entry.agent_identity);
+                AutonomousStopMemberAction::Interrupt => interruptible_entries.push(entry),
+                AutonomousStopMemberAction::Skip | AutonomousStopMemberAction::KeepForResume => {
+                    self.autonomous_stop_interrupts
+                        .remove(&entry.agent_identity);
+                    self.autonomous_stop_interrupted
+                        .remove(&entry.agent_identity);
+                }
             }
         }
         let entries = interruptible_entries;
@@ -20720,6 +21565,20 @@ impl MobActor {
                 first_error.get_or_insert(error);
                 continue;
             }
+            // A kickoff a Shutdown kept in flight: its run resumes on this
+            // start (once a Stopped mob resumes, its held run starts release),
+            // and its waiter is re-attached at the first readiness pass that
+            // observes the member's runtime.
+            #[cfg(feature = "runtime-adapter")]
+            if stage == super::state::LifecycleProgressStage::AutonomousRuntimeReadiness
+                && self
+                    .dsl_authority
+                    .state()
+                    .member_kickoff_starting
+                    .contains(&mob_dsl::AgentIdentity::from_domain(&entry.agent_identity))
+            {
+                self.rearm_kept_kickoff(&entry).await;
+            }
             if stage != super::state::LifecycleProgressStage::AutonomousRuntimeReadiness
                 || self.state() != MobState::Running
             {
@@ -20748,6 +21607,74 @@ impl MobActor {
             }
         }
         first_error.map_or(Ok(()), Err)
+    }
+
+    /// Re-attach the kickoff waiter of a local autonomous member whose
+    /// kickoff a Shutdown kept in flight, so the kickoff resolves under its
+    /// objective once the resumed run ends. The kept kickoff input is found
+    /// by its incarnation key and never admitted anew; one already terminal
+    /// answers from its receipt. A member with no such input (its kickoff
+    /// never reached the runtime, or an earlier version admitted it without a
+    /// key) keeps its kickoff as it is.
+    #[cfg(feature = "runtime-adapter")]
+    async fn rearm_kept_kickoff(&mut self, entry: &RosterEntry) {
+        use meerkat_runtime::SessionServiceRuntimeExt as _;
+
+        let (Some(adapter), Some(session_id)) = (
+            self.runtime_adapter.clone(),
+            entry.member_ref.bridge_session_id().cloned(),
+        ) else {
+            return;
+        };
+        if super::member_runtime_is_host_owned(self.dsl_authority.state(), &entry.agent_identity)
+            || self
+                .autonomous_initial_turns
+                .lock()
+                .await
+                .contains_key(&entry.agent_identity)
+        {
+            return;
+        }
+        let agent_identity = entry.agent_identity.clone();
+        let completion = match adapter
+            .accept_existing_input_with_completion(
+                &session_id,
+                kept_kickoff_reattach_input(&entry.agent_runtime_id),
+            )
+            .await
+        {
+            Ok((outcome, handle)) => {
+                KickoffCompletion::of_admission(&adapter, &session_id, &outcome, handle)
+            }
+            Err(error) => {
+                tracing::debug!(
+                    agent_identity = %agent_identity,
+                    error = %error,
+                    "no kept kickoff input to re-attach"
+                );
+                return;
+            }
+        };
+        let Some(completion) = completion else {
+            tracing::warn!(
+                agent_identity = %agent_identity,
+                "the kept kickoff's re-attach found no earlier input"
+            );
+            return;
+        };
+        let waiter = spawn_kickoff_outcome_waiter(
+            self.command_tx.clone(),
+            agent_identity.clone(),
+            Some(completion),
+        );
+        self.autonomous_initial_turns
+            .lock()
+            .await
+            .insert(agent_identity.clone(), waiter);
+        tracing::info!(
+            agent_identity = %agent_identity,
+            "re-attached the kept kickoff's waiter"
+        );
     }
 
     // ------------------------------------------------------------------
@@ -24574,6 +25501,41 @@ impl MobActor {
         }
     }
 
+    /// The `AcquireLease` execution for a lease classified
+    /// `HeldByEndedIncarnation`: release exactly the claim that was read, so
+    /// the ordinary claim that follows takes the lease over. False when the
+    /// stored claim is no longer the one read (renewed, released or taken in
+    /// between); nothing is released then.
+    async fn release_ended_incarnation_lease(
+        &self,
+        identity: &AgentIdentity,
+        observation: &crate::identity::IdentityStoredObservation<
+            crate::identity::IdentityLeaseRecord,
+        >,
+    ) -> Result<bool, MobError> {
+        let crate::identity::IdentityStoredObservation::Valid(record) = observation else {
+            return Ok(false);
+        };
+        let Some(ended) = record.active.as_ref() else {
+            return Ok(false);
+        };
+        let released = self
+            .identity
+            .release_identity_lease(&self.definition.id, identity, ended)
+            .await
+            .map_err(MobError::from)?;
+        if released {
+            tracing::info!(
+                mob_id = %self.definition.id,
+                identity = %identity,
+                ended_incarnation = %ended.incarnation_id,
+                lease_epoch = ended.epoch,
+                "taking over the identity lease of an incarnation whose process has ended"
+            );
+        }
+        Ok(released)
+    }
+
     fn identity_lease_condition(
         &self,
         observation: &crate::identity::IdentityStoredObservation<
@@ -24597,6 +25559,19 @@ impl MobActor {
                 }
                 Some(active) if now_ms >= active.expires_at_ms => {
                     IdentityLeaseCondition::HeldByExpiredIncarnation
+                }
+                // An earlier incarnation of this mob whose process has ended
+                // (this process holds the store's incarnation custody, and
+                // that incarnation was minted under it elsewhere): nothing of
+                // it runs, so the machine takes its lease over at once.
+                Some(active)
+                    if active.holder_id == self.identity_reconcile_holder_id
+                        && super::identity_incarnation_custody::incarnation_process_ended(
+                            &self.identity_reconcile_incarnation_id,
+                            &active.incarnation_id,
+                        ) =>
+                {
+                    IdentityLeaseCondition::HeldByEndedIncarnation
                 }
                 Some(_) => IdentityLeaseCondition::HeldByOtherLiveIncarnation,
             },
@@ -25558,6 +26533,20 @@ impl MobActor {
                 None,
             )
             .await;
+            if lease_condition == IdentityLeaseCondition::HeldByEndedIncarnation
+                && !self
+                    .release_ended_incarnation_lease(identity, &lease_observation)
+                    .await?
+            {
+                // The claim changed after it was read: read and classify it
+                // again on the next pass rather than claim over it.
+                self.schedule_identity_reconcile_wait(
+                    identity,
+                    IdentityReconcileAuthorityKey::from_observation(&intent_observation),
+                    IDENTITY_RECONCILE_LEASE_RECHECK,
+                );
+                return Ok(IdentityReconcilePassDisposition::Outcome(false));
+            }
             let outcome = self
                 .identity
                 .claim_or_renew_identity_lease(
@@ -25622,9 +26611,12 @@ impl MobActor {
                 )
                 .await;
                 if preliminary == IdentityReconcileDecision::AwaitLease {
-                    // Another incarnation holds the lease. A holder that
-                    // crashed never releases it, nor does a Shutdown that
-                    // kept it (a member still unregistering, or whose
+                    // Another incarnation holds the lease, and this process
+                    // cannot prove that incarnation's process has ended
+                    // (a proven one is HeldByEndedIncarnation, taken over
+                    // above). A holder that crashed in a process this one
+                    // cannot prove ended never releases it, nor does a
+                    // Shutdown that kept it (a member still unregistering, or whose
                     // session actor had not exited, at its deadline; a
                     // retiring member). Neither that expiry nor a release
                     // wakes this identity (only the slow safety scan
@@ -26007,6 +26999,10 @@ impl MobActor {
                     Ok(false)
                 }
                 IdentityReconcileDecision::CancelActiveMember => {
+                    // Cancelling acts on the member's runtime inputs: a
+                    // deferred custody restore is re-attempted first, and
+                    // backs the reconcile off while it stays deferred.
+                    self.reattempt_deferred_member_custody(identity).await?;
                     let entry = self
                         .roster
                         .read()
@@ -26088,6 +27084,10 @@ impl MobActor {
                     }
                 }
                 IdentityReconcileDecision::EnsureRuntimeRegistration => {
+                    // A member whose startup custody restore was deferred is
+                    // acted on only once that restore succeeds; still deferred,
+                    // the reconcile backs off.
+                    self.reattempt_deferred_member_custody(identity).await?;
                     let Some(write_lease) = self.renew_identity_actuation_lease(identity).await?
                     else {
                         return Ok(true);
@@ -26215,6 +27215,10 @@ impl MobActor {
                     }
                 }
                 IdentityReconcileDecision::EnsureMemberMaterialization => {
+                    // As for the runtime registration: a deferred custody
+                    // restore is re-attempted first, and backs off the
+                    // reconcile while it stays deferred.
+                    self.reattempt_deferred_member_custody(identity).await?;
                     let Some(write_lease) = self.renew_identity_actuation_lease(identity).await?
                     else {
                         return Ok(true);
@@ -26246,6 +27250,7 @@ impl MobActor {
                         session,
                         member,
                     )?;
+                    self.mount_definition_tool_bundles(&mut spec).await?;
                     let key = super::IdentityLocalMaterializationKey::new(
                         self.definition.id.clone(),
                         identity.clone(),
@@ -27552,6 +28557,7 @@ impl MobActor {
                     external_delivery_intent,
                     scoped_event_tx,
                     exact_operation,
+                    role_targets,
                     reply_tx,
                 } => {
                     let result = self
@@ -27562,6 +28568,7 @@ impl MobActor {
                             external_delivery_intent,
                             scoped_event_tx,
                             exact_operation,
+                            role_targets,
                         )
                         .await;
                     let _ = reply_tx.send(result);
@@ -28755,8 +29762,12 @@ impl MobActor {
                                     // for any turn.
                                     self.inline_step_watchdog
                                         .set_stop_stage(StopInlineStage::AutonomousStops);
-                                    if let Err(error) =
-                                        Box::pin(self.close_all_autonomous_kickoff_origins()).await
+                                    if let Err(error) = Box::pin(
+                                        self.close_all_autonomous_kickoff_origins(
+                                            AutonomousStopKeep::DurableMembers,
+                                        ),
+                                    )
+                                    .await
                                     {
                                         tracing::warn!(
                                             mob_id = %self.definition.id,
@@ -29314,7 +30325,11 @@ impl MobActor {
                     return Box::pin(self.resolve_shutdown_teardown(ticket, outcomes, command_rx))
                         .await;
                 }
-                MobCommand::Shutdown { deadline, reply_tx } => {
+                MobCommand::Shutdown {
+                    deadline,
+                    queued_inputs,
+                    reply_tx,
+                } => {
                     // A Shutdown arriving while one is parked on its runtime
                     // teardown receives that Shutdown's result.
                     if let Some(pending) = self.pending_shutdown_teardown.as_mut() {
@@ -29322,6 +30337,12 @@ impl MobActor {
                         return ActorLoopControl::SkipBoundary;
                     }
                     self.shutdown_deadline = deadline;
+                    #[cfg(feature = "runtime-adapter")]
+                    {
+                        self.shutdown_queued_inputs = queued_inputs;
+                    }
+                    #[cfg(not(feature = "runtime-adapter"))]
+                    let _ = queued_inputs;
                     // Probe only: Shutdown commits at its end. The probed
                     // transition owns the run-start hold obligation.
                     let admission = self
@@ -29583,7 +30604,14 @@ impl MobActor {
         // leases from there: no reconcile pass claims one again meanwhile.
         let identity_reconcile_pending =
             identity_reconcile_pending && self.pending_shutdown_teardown.is_none();
-        let identity_reconcile_backoff_wait = self.identity_reconcile_next_backoff_wait();
+        // Deferred member custody re-attempts share this backoff deadline wake.
+        let identity_reconcile_backoff_wait = match (
+            self.identity_reconcile_next_backoff_wait(),
+            self.deferred_member_custody_next_wait(),
+        ) {
+            (Some(identity), Some(custody)) => Some(identity.min(custody)),
+            (identity, custody) => identity.or(custody),
+        };
         let ready_deferred = deferred_commands
             .iter()
             .position(|routed| !self.resume_member_control_is_pending(&routed.cmd));
@@ -29713,6 +30741,7 @@ impl MobActor {
                     }
                     RegularActorWake::IdentityBackoffDeadline => {
                         self.enqueue_due_identity_reconcile_backoffs();
+                        boxed_arm_future(|| self.reattempt_due_deferred_member_custody()).await;
                         return ActorLoopWakeSelection::Continue;
                     }
                     RegularActorWake::IdentitySafetyScan => {
@@ -30894,11 +31923,16 @@ impl MobActor {
                 .await
         })
         .await
-        .map_err(|error| {
-            MobError::Internal(format!(
+        .map_err(|error| match error {
+            // Another runtime owner hosts the session, or its claim cannot be
+            // taken: the typed hosting refusal, never an internal error.
+            meerkat_runtime::RuntimeBindingsError::Hosting(_, cause) => {
+                MobError::SessionError(cause)
+            }
+            error => MobError::Internal(format!(
                 "restore operation owner binding failed for member '{}': {error}",
                 entry.agent_identity
-            ))
+            )),
         })?;
         if bindings.session_id() != &generated_owner_session_id {
             return Err(MobError::Internal(format!(
@@ -30936,7 +31970,8 @@ impl MobActor {
                 .await?;
         } else {
             match seam {
-                RestoredOperationBindingSeam::ActorStartup => {
+                RestoredOperationBindingSeam::ActorStartup
+                | RestoredOperationBindingSeam::DeferredReattempt => {
                     io.provisioner
                         .bind_member_owner_context(
                             &entry.member_ref,
@@ -31018,8 +32053,18 @@ impl MobActor {
     /// local members whose stopped/completed phase permits later cleanup.
     /// This realizes existing generated tuples without recreating serving
     /// bindings or resuming the mob.
+    ///
+    /// A retiring member whose restore fails for a cause that can clear
+    /// without this owner acting ([`MobError::is_deferrable_custody_cause`]:
+    /// another runtime owner hosts its session, the session's hosting claim
+    /// is unavailable, or its durable tail is kept unprovable) does not fail
+    /// the start. Its restore is deferred ([`Self::defer_member_custody`]):
+    /// the member stays Retiring with its tail untouched, every operation
+    /// that acts on it re-attempts the restore first, and the identity
+    /// reconcile's backoff wake re-attempts it too. Every other failure, and
+    /// any failure of a member that is not retiring, still fails the start.
     #[cfg(feature = "runtime-adapter")]
-    async fn restore_local_cleanup_composition_delivery(&self) -> Result<(), MobError> {
+    async fn restore_local_cleanup_composition_delivery(&mut self) -> Result<(), MobError> {
         let Some(io) = self.resume_operation_binding_io() else {
             return Ok(());
         };
@@ -31031,21 +32076,29 @@ impl MobActor {
             .cloned()
             .collect::<Vec<_>>();
         for entry in entries {
+            #[cfg(any(test, feature = "test-support"))]
+            let entry = {
+                let mut entry = entry;
+                super::apply_restore_tuple_fault_for_test(
+                    &self.definition.id,
+                    crate::MemberCustodyRestore::CleanupDelivery,
+                    &mut entry,
+                );
+                entry
+            };
             let identity = mob_dsl::AgentIdentity::from_domain(&entry.agent_identity);
             let runtime = mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id);
             let state = self.dsl_authority.state();
             if state.member_placement.contains_key(&identity) {
                 continue;
             }
-            let cleanup_session =
-                state
-                    .runtime_retire_pending_sessions
-                    .get(&runtime)
-                    .or_else(|| {
-                        matches!(self.dsl_state(), MobState::Stopped | MobState::Completed)
-                            .then(|| state.member_session_bindings.get(&identity))
-                            .flatten()
-                    });
+            let retiring_session = state.runtime_retire_pending_sessions.get(&runtime);
+            let retiring = retiring_session.is_some();
+            let cleanup_session = retiring_session.or_else(|| {
+                matches!(self.dsl_state(), MobState::Stopped | MobState::Completed)
+                    .then(|| state.member_session_bindings.get(&identity))
+                    .flatten()
+            });
             let Some(cleanup_session) = cleanup_session else {
                 continue;
             };
@@ -31075,16 +32128,32 @@ impl MobActor {
                     "local cleanup delivery tuple diverges from generated authority".into(),
                 ));
             }
-            // The start fails before admission on the first member that
-            // fails, in roster (identity) order; name that member and its
-            // session for the caller.
-            self.restore_member_local_cleanup_delivery(&io, &entry, session)
+            match self
+                .restore_member_local_cleanup_delivery(&io, &entry, session)
                 .await
-                .map_err(|cause| MobError::MemberStartupRecoveryFailed {
-                    member_id: entry.agent_identity.clone(),
-                    session_id: session.clone(),
-                    cause: Arc::new(cause),
-                })?;
+            {
+                Ok(()) => {}
+                // A retiring member's restore that can succeed later defers
+                // that member only; the start goes on.
+                Err(cause) if retiring && cause.is_deferrable_custody_cause() => {
+                    self.defer_member_custody(
+                        entry.agent_identity.clone(),
+                        session.clone(),
+                        crate::MemberCustodyRestore::CleanupDelivery,
+                        cause,
+                    );
+                }
+                // Otherwise the start fails before admission on the first
+                // member that fails, in roster (identity) order; name that
+                // member and its session for the caller.
+                Err(cause) => {
+                    return Err(MobError::MemberStartupRecoveryFailed {
+                        member_id: entry.agent_identity.clone(),
+                        session_id: session.clone(),
+                        cause: Arc::new(cause),
+                    });
+                }
+            }
         }
         Ok(())
     }
@@ -31114,8 +32183,13 @@ impl MobActor {
             .adapter
             .prepare_local_session_bindings(session.clone())
             .await
-            .map_err(|error| {
-                MobError::Internal(format!("prepare local cleanup delivery: {error}"))
+            .map_err(|error| match error {
+                // Another runtime owner hosts the session, or its claim cannot
+                // be taken: the typed hosting refusal, never an internal error.
+                meerkat_runtime::RuntimeBindingsError::Hosting(_, cause) => {
+                    MobError::SessionError(cause)
+                }
+                error => MobError::Internal(format!("prepare local cleanup delivery: {error}")),
             })?;
         // A cold start can re-register a session whose runtime already
         // stopped, which clears its member binding; the unbound endpoint
@@ -31148,8 +32222,212 @@ impl MobActor {
     }
 
     #[cfg(not(feature = "runtime-adapter"))]
-    async fn restore_local_cleanup_composition_delivery(&self) -> Result<(), MobError> {
+    async fn restore_local_cleanup_composition_delivery(&mut self) -> Result<(), MobError> {
         Ok(())
+    }
+
+    /// Defer `identity`'s startup `restore` of its custody for `session`
+    /// instead of failing the whole start: the member keeps its durable state
+    /// (Broken, or Retiring), the mob starts, and every operation that acts on
+    /// the member's session re-attempts the restore first
+    /// ([`Self::reattempt_deferred_member_custody`]), as does the identity
+    /// reconcile's backoff wake. `cause` is the typed failure the start met.
+    pub(super) fn defer_member_custody(
+        &mut self,
+        identity: AgentIdentity,
+        session: SessionId,
+        restore: crate::MemberCustodyRestore,
+        cause: MobError,
+    ) {
+        tracing::warn!(
+            mob_id = %self.definition.id,
+            member = %identity,
+            session_id = %session,
+            restore = restore.as_str(),
+            cause = %cause,
+            "member custody restore deferred: the mob starts, and an operation on the member \
+             re-attempts the restore first; it succeeds once the cause clears, for a session \
+             another runtime owner hosts once that owner stops or releases the session"
+        );
+        self.deferred_member_custody
+            .defer(identity, session, restore, cause, Instant::now());
+    }
+
+    /// Re-attempt the custody restore deferred for `identity` before an
+    /// operation acts on the member's session.
+    ///
+    /// Without an entry this answers Ok at once. When the restore succeeds,
+    /// the entry is removed and the caller proceeds. When it fails with a
+    /// cause the start may defer
+    /// ([`MobError::is_deferrable_custody_cause`]), the entry stays with its
+    /// next attempt backed off, and the caller gets
+    /// [`MobError::MemberCustodyDeferred`]: typed, scoped to this operation,
+    /// with nothing done to the member's session. Any other failure is
+    /// returned as it is, its next attempt backed off as well.
+    pub(super) async fn reattempt_deferred_member_custody(
+        &mut self,
+        identity: &AgentIdentity,
+    ) -> Result<(), MobError> {
+        let Some((session, restore)) = self.deferred_member_custody.pending(identity) else {
+            return Ok(());
+        };
+        let outcome = self
+            .attempt_deferred_member_custody_restore(identity, &session, restore)
+            .await;
+        let restored = outcome.is_ok();
+        let settled = self
+            .deferred_member_custody
+            .settle(identity, outcome, Instant::now());
+        if restored {
+            tracing::info!(
+                mob_id = %self.definition.id,
+                member = %identity,
+                session_id = %session,
+                restore = restore.as_str(),
+                "deferred member custody restore succeeded"
+            );
+        }
+        settled
+    }
+
+    /// One attempt at `identity`'s deferred `restore` for `session`: the
+    /// restore the start ran, the member's operation binding or a retiring
+    /// member's local cleanup delivery. A member no longer in the roster has
+    /// nothing left to restore.
+    async fn attempt_deferred_member_custody_restore(
+        &mut self,
+        identity: &AgentIdentity,
+        session: &SessionId,
+        restore: crate::MemberCustodyRestore,
+    ) -> Result<(), MobError> {
+        #[cfg(feature = "runtime-adapter")]
+        {
+            let Some(io) = self.resume_operation_binding_io() else {
+                return Ok(());
+            };
+            let Some(entry) = self.roster.read().await.get(identity).cloned() else {
+                return Ok(());
+            };
+            match restore {
+                crate::MemberCustodyRestore::StartupBinding => {
+                    match self.prepare_restored_member_operation_binding(entry)? {
+                        Some(plan) => {
+                            Self::realize_restored_member_operation_binding(
+                                io,
+                                plan,
+                                RestoredOperationBindingSeam::DeferredReattempt,
+                            )
+                            .await
+                        }
+                        None => Ok(()),
+                    }
+                }
+                crate::MemberCustodyRestore::CleanupDelivery => {
+                    self.restore_member_local_cleanup_delivery(&io, &entry, session)
+                        .await
+                }
+            }
+        }
+        #[cfg(not(feature = "runtime-adapter"))]
+        {
+            let _ = (session, restore);
+            Ok(())
+        }
+    }
+
+    /// Re-attempt every deferred custody restore before a destroy; the first
+    /// that stays deferred (or fails) refuses the destroy.
+    async fn reattempt_deferred_member_custody_for_destroy(
+        &mut self,
+    ) -> Result<(), super::handle::MobDestroyError> {
+        for identity in self.deferred_member_custody.identities() {
+            self.reattempt_deferred_member_custody(&identity)
+                .await
+                .map_err(super::handle::MobDestroyError::from)?;
+        }
+        Ok(())
+    }
+
+    /// Re-attempt `identity`'s deferred custody restore where no operation
+    /// acting on the member asked for it: the backoff wake, and an explicit
+    /// resume. Answers as [`Self::reattempt_deferred_member_custody`]. When a
+    /// retiring member's cleanup delivery is restored this way, its durably
+    /// started retirement, which nothing re-drives after a start, is handed
+    /// to the stuck re-drive queue, which completes it.
+    pub(super) async fn reattempt_deferred_member_custody_unprompted(
+        &mut self,
+        identity: &AgentIdentity,
+    ) -> Result<(), MobError> {
+        let Some(deferred) = self.deferred_member_custody.get(identity) else {
+            return Ok(());
+        };
+        let restore = deferred.restore;
+        let cause = Arc::clone(&deferred.cause);
+        self.reattempt_deferred_member_custody(identity).await?;
+        if restore == crate::MemberCustodyRestore::CleanupDelivery {
+            self.redrive_custody_restored_retirement(identity, cause)
+                .await;
+        }
+        Ok(())
+    }
+
+    /// The deferred custody re-attempts share the identity reconcile's backoff
+    /// deadline wake: the time until the earliest due entry, or `None` with no
+    /// entry, or while a Shutdown's runtime teardown or a resume's topology
+    /// mutation is in progress.
+    fn deferred_member_custody_next_wait(&self) -> Option<Duration> {
+        if self.pending_shutdown_teardown.is_some() {
+            return None;
+        }
+        #[cfg(feature = "runtime-adapter")]
+        if self.resume_topology_mutation_pending() {
+            return None;
+        }
+        self.deferred_member_custody.next_wait(Instant::now())
+    }
+
+    /// Re-attempt every deferred custody restore whose backoff elapsed. A
+    /// failure keeps its entry with the next attempt backed off; the
+    /// operation that next acts on the member re-attempts as well.
+    async fn reattempt_due_deferred_member_custody(&mut self) {
+        if self.deferred_member_custody_next_wait().is_none() {
+            return;
+        }
+        let due = self.deferred_member_custody.due(Instant::now());
+        for identity in due {
+            match self
+                .reattempt_deferred_member_custody_unprompted(&identity)
+                .await
+            {
+                Ok(()) => {}
+                // Still deferred: reported at the identity reconcile's
+                // power-of-two checkpoints, so a long deferral stays visible
+                // without a line per attempt.
+                Err(MobError::MemberCustodyDeferred { .. }) => {
+                    if let Some(entry) = self.deferred_member_custody.get(&identity)
+                        && identity_reconcile_failure_should_log(entry.attempts)
+                    {
+                        tracing::warn!(
+                            mob_id = %self.definition.id,
+                            member = %identity,
+                            session_id = %entry.session,
+                            restore = entry.restore.as_str(),
+                            attempts = entry.attempts,
+                            cause = %entry.cause,
+                            "member custody restore still deferred"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        mob_id = %self.definition.id,
+                        member = %identity,
+                        error = %error,
+                        "deferred member custody re-attempt failed; it is retried after its backoff"
+                    );
+                }
+            }
+        }
     }
 
     /// The persisted session of a member the start restores without a live
@@ -31166,7 +32444,19 @@ impl MobActor {
     /// every start. The tail is settled first, through the store-owned
     /// recovery the resume path runs (a proven continuation is adopted, an
     /// unprovable one is kept intact), and the session is read once more; a
-    /// tail the recovery keeps still refuses, typed, as before.
+    /// tail the recovery keeps still refuses, typed:
+    /// [`MobError::MemberDurableTailUnprovable`].
+    ///
+    /// A tail the recovery keeps because it CONTINUES the member's open run
+    /// (a run a requeueing stop suspended at its last round commit, as a
+    /// host's graceful shutdown leaves it) is not unprovable: the run resumes
+    /// from that commit when the member's actor is next materialized, and the
+    /// start must not fail over it. The settle reports that disposition
+    /// ([`ColdStartTailSettlement::ContinuesOpenRun`]) with the session's
+    /// committed snapshot under the tail, which this read returns; the tail
+    /// stays for the run. Whether the run continues is the recovery's own
+    /// disposition, never derived from that snapshot. A held or refused tail
+    /// still refuses as above.
     ///
     /// The settle runs under this runtime owner's hosting claim for the
     /// session (#1813), taken for the settle alone; the second read takes
@@ -31189,29 +32479,59 @@ impl MobActor {
                     "settling a durable tail ahead of its runtime boundary before the mob start \
                      restores the member"
                 );
-                if let Err(error) = io
+                let settlement = match io
                     .session_service
-                    .settle_durable_tail_before_cold_start(session)
+                    .settle_durable_tail_before_cold_start_reporting(session)
                     .await
                 {
-                    if matches!(
-                        error,
-                        meerkat_core::service::SessionError::ServedElsewhere { .. }
-                            | meerkat_core::service::SessionError::HostingUnavailable { .. }
-                    ) {
-                        tracing::error!(
-                            %member,
-                            session_id = %session,
-                            %error,
-                            "a member's session has a durable tail and this runtime owner cannot \
-                             host it; the mob start refuses rather than settle another owner's \
-                             tail. Stop the runtime owner that hosts the session, or wait until it \
-                             releases it, then start the mob again"
-                        );
+                    Ok(settlement) => settlement,
+                    Err(error) => {
+                        if matches!(
+                            error,
+                            meerkat_core::service::SessionError::ServedElsewhere { .. }
+                                | meerkat_core::service::SessionError::HostingUnavailable { .. }
+                        ) {
+                            tracing::error!(
+                                %member,
+                                session_id = %session,
+                                %error,
+                                "a member's session has a durable tail and this runtime owner \
+                                 cannot host it; the mob start refuses rather than settle another \
+                                 owner's tail. Stop the runtime owner that hosts the session, or \
+                                 wait until it releases it, then start the mob again"
+                            );
+                        }
+                        return Err(error.into());
                     }
-                    return Err(error.into());
+                };
+                // The recovery continues the member's open run: its tail
+                // stays for the run, which resumes when the member's actor is
+                // next materialized. The start reads the committed snapshot
+                // under it.
+                if let ColdStartTailSettlement::ContinuesOpenRun { run_id, committed } = settlement
+                {
+                    tracing::info!(
+                        %member,
+                        session_id = %session,
+                        %run_id,
+                        "the member's open run continues from its last round commit; the mob \
+                         start restores the member over it"
+                    );
+                    return Ok(Some(*committed));
                 }
-                Ok(io.session_service.load_persisted_session(session).await?)
+                // A tail the recovery kept still reads as a revision conflict
+                // at the boundary: that is the typed unprovable-tail outcome.
+                // Only this read after the settle yields it; a conflict from
+                // any other read keeps its own error.
+                match io.session_service.load_persisted_session(session).await {
+                    Err(error) if is_transcript_revision_conflict(&error) => {
+                        Err(MobError::MemberDurableTailUnprovable {
+                            member_id: member.clone(),
+                            session_id: session.clone(),
+                        })
+                    }
+                    loaded => Ok(loaded?),
+                }
             }
             loaded => Ok(loaded?),
         }
@@ -31224,6 +32544,16 @@ impl MobActor {
         };
         let entries = self.roster.read().await.list().cloned().collect::<Vec<_>>();
         for entry in entries {
+            #[cfg(any(test, feature = "test-support"))]
+            let entry = {
+                let mut entry = entry;
+                super::apply_restore_tuple_fault_for_test(
+                    &self.definition.id,
+                    crate::MemberCustodyRestore::StartupBinding,
+                    &mut entry,
+                );
+                entry
+            };
             // A member whose host refused its registration at this boot keeps
             // no registration and no owner context until a host-approved
             // materialization: the refusal removed the registration it was
@@ -31232,16 +32562,49 @@ impl MobActor {
             if self.member_registration_refused(&entry.agent_identity) {
                 continue;
             }
-            if let Some(plan) = self.prepare_restored_member_operation_binding(entry)? {
-                Self::realize_restored_member_operation_binding(
-                    io.clone(),
-                    plan,
-                    RestoredOperationBindingSeam::ActorStartup,
-                )
-                .await?;
+            let Some(plan) = self.prepare_restored_member_operation_binding(entry)? else {
+                continue;
+            };
+            let identity = plan.entry.agent_identity.clone();
+            let session = plan.owner_session_id.clone();
+            let deferrable = plan.placed_operation.is_none() && self.member_is_broken(&identity);
+            match Self::realize_restored_member_operation_binding(
+                io.clone(),
+                plan,
+                RestoredOperationBindingSeam::ActorStartup,
+            )
+            .await
+            {
+                Ok(()) => {}
+                // A local member whose restore already failed at this start
+                // (it is Broken) does not stop the whole mob when its session
+                // is hosted by another runtime owner, its hosting claim
+                // cannot be taken, or its durable tail could not be proven:
+                // its custody restore is deferred, and every operation on the
+                // member re-attempts it first. Any other failure still stops
+                // the start.
+                Err(cause) if deferrable && cause.is_deferrable_custody_cause() => {
+                    self.defer_member_custody(
+                        identity,
+                        session,
+                        crate::MemberCustodyRestore::StartupBinding,
+                        cause,
+                    );
+                }
+                Err(error) => return Err(error),
             }
         }
         Ok(())
+    }
+
+    /// Whether MobMachine records `agent_identity` Broken: its restore failed.
+    #[cfg(feature = "runtime-adapter")]
+    fn member_is_broken(&self, agent_identity: &AgentIdentity) -> bool {
+        self.dsl_authority
+            .state()
+            .member_lifecycle_for_identity(&mob_dsl::AgentIdentity::from_domain(agent_identity))
+            .status
+            == mob_dsl::MobMemberLifecycleStatus::Broken
     }
 
     #[cfg(not(feature = "runtime-adapter"))]
@@ -31652,6 +33015,27 @@ impl MobActor {
         {
             reject_spawn_before_custody!("customize_spawn_spec", error);
         }
+        // A member-initiated spawn is bounded by the authority recorded for the
+        // member that asked for it. The customizer has run: its ceiling, or
+        // the request's, can narrow that bound and never widen it.
+        if let Some(bound) = spec.inherited_operator_authority_bound.take() {
+            spec.operator_authority_ceiling = Some(match spec.operator_authority_ceiling.take() {
+                Some(ceiling) => ceiling.intersect(&bound),
+                None => bound,
+            });
+        }
+        // A ceiling bounds the authority the controlling host records for a
+        // placed member. A local member's operator authority is set by its
+        // own session build, so a ceiling there would be ignored: refuse it.
+        if spec.placement.is_none() && spec.operator_authority_ceiling.is_some() {
+            reject_spawn_before_custody!(
+                "operator_authority_ceiling_placement",
+                MobError::OperatorAuthorityCeilingRefused {
+                    agent_identity: requested_identity.clone(),
+                    reason: crate::error::OperatorAuthorityCeilingRefusal::UnplacedMember,
+                }
+            );
+        }
         // A local preparation for this identity is still running off the
         // actor loop; it owns the identity exactly like a staged pending
         // spawn, on either lane (#1249).
@@ -31769,6 +33153,7 @@ impl MobActor {
                     ops_registry,
                     None,
                     None,
+                    matches!(spawn_source, super::handle::SpawnSource::Resume),
                     reply_tx,
                 )
             })
@@ -31835,6 +33220,10 @@ impl MobActor {
             // Refused above: fork seating consumes its inheritance first.
             fork_build_inheritance: _,
             resume_provider_params,
+            // Refused above: a ceiling binds only a placed member.
+            operator_authority_ceiling: _,
+            // Folded into the ceiling above.
+            inherited_operator_authority_bound: _,
         } = spec;
         let agent_identity = AgentIdentity::from(identity.as_str());
         self.inline_step_watchdog
@@ -31988,6 +33377,20 @@ impl MobActor {
                 reject_spawn_before_custody!("prepare", error);
             }
         };
+        // A durable profile spawns its member with a durable identity, which
+        // a host reads back to re-attach the worker after a restart. That
+        // needs a session service whose member sessions outlive the process,
+        // so a mob without one refuses the spawn before anything exists.
+        if profile.durable && !self.session_service.keeps_durable_member_sessions() {
+            reject_spawn_before_custody!(
+                "durable_profile",
+                MobError::NonDurableService {
+                    member_id: agent_identity.clone(),
+                    profile: profile_name.clone(),
+                }
+            );
+        }
+        let continuity_intent = continuity_intent.for_profile(&profile, &agent_identity);
 
         // ---------- Off-loop preparation (#1249) ----------
         // Everything below reads durable/session state or builds agent config
@@ -32270,6 +33673,7 @@ impl MobActor {
                             ops_registry: ops_registry.clone(),
                             generated_self_owned_operation_owner: None,
                             direct_member_incarnation: None,
+                            continuity_intent: continuity_intent.clone(),
                         };
                         return Ok((
                             profile_name,
@@ -32368,6 +33772,7 @@ impl MobActor {
                             super::provisioner::RuntimeRevivalIntent::None,
                         direct_member_incarnation: None,
                         held_bound: None,
+                        continuity_intent: continuity_intent.clone(),
                     };
                     let resolved_labels = labels.unwrap_or_default();
                     return Ok((
@@ -32396,21 +33801,6 @@ impl MobActor {
                     "resumed session '{resume_id}' not found or inactive for '{agent_identity}'"
                 )));
             }
-
-            // ---------- Fork path ----------
-            // When fork_spec is set, read source member's session and render
-            // conversation history as context in the initial prompt. §19.L2:
-            // a PLACED source routes through the same placement switch as
-            // `member_history` (the `ReadMemberHistory` proxy) — the phase-3
-            // `RemoteReadUnavailable` shape now means "tried and failed".
-            let fork_context_text = if let Some(read) = fork_source_read {
-                let rows = read
-                    .read_rows(preparation_context.session_service.as_ref())
-                    .await?;
-                Some(render_fork_context(read.source_member_id(), &rows))
-            } else {
-                None
-            };
 
             let external_tools =
                 precomputed_external_tools?;
@@ -32464,18 +33854,40 @@ impl MobActor {
                 config.auth_binding = Some(cref.clone());
             }
 
-            let base_prompt = initial_message.clone().unwrap_or_else(|| {
+            // ---------- Fork path ----------
+            // When fork_spec is set, read source member's session and render
+            // conversation history as context in the initial prompt, after
+            // the host's fork instruction policy decided what the child is
+            // given and within the budget for the child's model
+            // (`super::fork_context`). §19.L2: a PLACED source routes
+            // through the same placement switch as `member_history` (the
+            // `ReadMemberHistory` proxy) - the phase-3
+            // `RemoteReadUnavailable` shape now means "tried and failed".
+            // The child is not handed the context as a prompt prefix: its
+            // create build records the planned context as a typed fork seed,
+            // which Core delivers once, before the child's first input, as an
+            // injected-context row and a typed fork notice, whoever authors
+            // that first turn.
+            let (fork_seed, prompt_context_source) = if let Some(read) = fork_source_read {
+                let session_service = preparation_context.session_service.as_ref();
+                let budget = super::fork_context::fork_context_budget(&config.model);
+                let plan = read.read_plan(session_service, budget).await?;
+                let source_tools = read.source_tools(session_service).await;
+                let source = meerkat_core::fork_notice::ForkNoticeSource {
+                    member: Some(read.prompt_context_source.source_member.clone()),
+                    session_id: read.prompt_context_source.source_session_id.clone(),
+                };
+                (
+                    Some(plan.seed(source, source_tools)),
+                    Some(read.prompt_context_source.clone()),
+                )
+            } else {
+                (None, None)
+            };
+
+            let prompt = initial_message.clone().unwrap_or_else(|| {
                 ContentInput::from(fallback_prompt.clone())
             });
-            let prompt = if let Some(fork_text) = fork_context_text {
-                let mut blocks = vec![meerkat_core::types::ContentBlock::Text {
-                    text: format!("{fork_text}\n\n"),
-                }];
-                blocks.extend(base_prompt.into_blocks());
-                ContentInput::Blocks(blocks)
-            } else {
-                base_prompt
-            };
             let initial_turn_prompt = initial_message.as_ref().map(|_| prompt.clone());
             let req = build::to_create_session_request(&config, prompt.clone());
             let req = with_spawn_budget_limits(req, budget_limits);
@@ -32488,6 +33900,31 @@ impl MobActor {
             )?;
             let selected_runtime_mode =
                 normalize_runtime_mode_for_binding(selected_runtime_mode, &selected_binding);
+            let mut req = req;
+            if prompt_context_source.is_some() || fork_seed.is_some() {
+                // A fork child's create request always carries a build; a
+                // seed with nowhere to go is an error, never a silent drop.
+                let build = req.build.as_mut().ok_or_else(|| {
+                    MobError::Internal(format!(
+                        "the create request of fork child '{agent_identity}' has no \
+                         build to record its fork seed on"
+                    ))
+                })?;
+                if let Some(source) = prompt_context_source {
+                    build.prompt_context_fork_source = Some(source);
+                }
+                if let Some(seed) = fork_seed {
+                    let seed = serde_json::to_value(&seed).map_err(|error| {
+                        MobError::Internal(format!(
+                            "failed to record the fork seed of member '{agent_identity}': {error}"
+                        ))
+                    })?;
+                    build.initial_metadata_entries.insert(
+                        meerkat_core::fork_notice::SESSION_FORK_SEED_KEY.to_string(),
+                        seed,
+                    );
+                }
+            }
             let peer_name = render_member_comms_name(
                 preparation_context.definition.id.as_str(),
                 profile_name.as_str(),
@@ -32505,6 +33942,7 @@ impl MobActor {
                 runtime_revival_intent: super::provisioner::RuntimeRevivalIntent::None,
                 direct_member_incarnation: None,
                 held_bound: None,
+                continuity_intent: continuity_intent.clone(),
             };
             let resolved_labels = labels.unwrap_or_default();
             Ok((
@@ -32725,6 +34163,16 @@ impl MobActor {
                 Some(rollback_authority),
                 super::provisioner::RollbackOrigin::SpawnRollback,
             );
+            // This lane adopts a session whose turn is active, so its first
+            // turn has started and a plain resume owes none.
+            let (suppress_autonomous_initial_prompt, initial_turn_prompt) = self
+                .adopted_session_first_turn_delivery(
+                    &agent_identity,
+                    matches!(spawn_source, super::handle::SpawnSource::Resume)
+                        .then_some(super::handle::AdoptedFirstTurn::Started),
+                    suppress_autonomous_initial_prompt,
+                    initial_turn_prompt,
+                );
             // Resume fast-path: admission still commits inline, but the
             // activation stages are routed. The caller's reply rides the
             // typed continuation, so a slow member runtime start cannot hold
@@ -33071,7 +34519,18 @@ impl MobActor {
                         )
                         .await?;
                         drop(preparation_permit);
-                        let spawn_receipt = match held {
+                        // A plain resume adopts an existing transcript: read
+                        // whether it still owes the member's first turn from
+                        // the session the resume already loaded.
+                        let adopted_first_turn =
+                            if matches!(spawn_source, super::handle::SpawnSource::Resume) {
+                                provision_request.authorized_resume.as_ref().map(|resume| {
+                                    super::handle::AdoptedFirstTurn::of(&resume.session)
+                                })
+                            } else {
+                                None
+                            };
+                        let mut spawn_receipt = match held {
                             #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
                             Some(held) => {
                                 meerkat_runtime::stack_relief::box_in_own_frame(|| {
@@ -33101,6 +34560,7 @@ impl MobActor {
                                 .await?
                             }
                         };
+                        spawn_receipt.adopted_first_turn = adopted_first_turn;
                         if let Some(bridge_session_id) =
                             spawn_receipt.member_ref.bridge_session_id().cloned()
                         {
@@ -33386,6 +34846,10 @@ impl MobActor {
                 member_session_id: ack.session_id.clone(),
                 member_peer_endpoint: mob_dsl::MemberPeerEndpoint::from(&ack.member_peer),
                 ack_engine_version: ack.engine_version.clone(),
+                adopted_first_turn_started: pending.spec.profile.runtime_mode
+                    == meerkat_contracts::wire::WireMobRuntimeMode::AutonomousHost
+                    && ack.adopted_first_turn
+                        == Some(super::bridge_protocol::BridgeAdoptedFirstTurn::Started),
             },
         );
         let authority = crate::store::MobPlacedSpawnCommitPersistenceAuthority::from_transition(
@@ -33819,6 +35283,7 @@ impl MobActor {
     /// authority → `RequestMemberMaterialization` realization as a bridge
     /// `MaterializeMember` dispatch in the pending-spawn task.
     #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
+    #[allow(clippy::too_many_arguments)]
     async fn enqueue_spawn_remote(
         &mut self,
         spec: super::handle::SpawnMemberSpec,
@@ -33826,6 +35291,7 @@ impl MobActor {
         ops_registry: Option<Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>>,
         respawn_origin: Option<RespawnOrigin>,
         restore_wiring: Option<RestoreWiringPlan>,
+        plain_resume: bool,
         reply_tx: oneshot::Sender<Result<super::handle::MemberSpawnReceipt, MobError>>,
     ) {
         let requested_identity = AgentIdentity::from(spec.identity.as_str());
@@ -33837,6 +35303,7 @@ impl MobActor {
                 ops_registry,
                 respawn_origin,
                 restore_wiring,
+                plain_resume,
                 reply_tx,
             )
         })
@@ -33876,7 +35343,11 @@ impl MobActor {
     }
 
     #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
-    #[allow(clippy::type_complexity, clippy::too_many_lines)]
+    #[allow(
+        clippy::type_complexity,
+        clippy::too_many_lines,
+        clippy::too_many_arguments
+    )]
     async fn enqueue_spawn_remote_inner(
         &mut self,
         spec: super::handle::SpawnMemberSpec,
@@ -33884,6 +35355,7 @@ impl MobActor {
         ops_registry: Option<Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry>>,
         respawn_origin: Option<RespawnOrigin>,
         restore_wiring: Option<RestoreWiringPlan>,
+        plain_resume: bool,
         reply_tx: oneshot::Sender<Result<super::handle::MemberSpawnReceipt, MobError>>,
     ) -> Result<
         (),
@@ -33944,6 +35416,9 @@ impl MobActor {
             fork_overlay: _,
             fork_build_inheritance: _,
             resume_provider_params: _,
+            operator_authority_ceiling,
+            // Folded into the ceiling before the placed lane.
+            inherited_operator_authority_bound: _,
         } = spec;
         let Some(host) = placement else {
             fail!(MobError::Internal(
@@ -34037,6 +35512,11 @@ impl MobActor {
             build::open_profile_tool_categories_for_inherited_filter(&mut profile);
         }
         let selected_runtime_mode = runtime_mode.unwrap_or(profile.runtime_mode);
+        // A durable profile's placed member carries a durable identity too.
+        // Its member host keeps the sessions, so that host's materialize
+        // preflight, not this mob, refuses one without persistent sessions
+        // (a durable identity requires durable sessions there).
+        let continuity_intent = continuity_intent.for_profile(&profile, &agent_identity);
 
         // §4.1(a) resume/fork normalization: the LOCAL resume fast-path is
         // skipped — member-side validation is authoritative (§19.L1). Fork
@@ -34053,19 +35533,89 @@ impl MobActor {
             } => Some((source_member_id, fork_context)),
             _ => None,
         };
-        let fork_context_text = if let Some((source_member_id, fork_context)) = fork_spec {
-            // §19.L2 placement switch: local and remote SOURCE reads share
-            // one proxy + one renderer (DEC-P6E-20).
-            let rows = match self
-                .fork_source_history_rows(&source_member_id, &fork_context)
+        let (fork_context_text, prompt_context_fork) =
+            if let Some((source_member_id, fork_context)) = fork_spec {
+                // §19.L2 placement switch: local and remote SOURCE reads share
+                // one proxy + one renderer (DEC-P6E-20).
+                let read = match self
+                    .plan_fork_source_history_read(&source_member_id, fork_context.clone())
+                    .await
+                {
+                    Ok(read) => read,
+                    Err(error) => fail!(error),
+                };
+                // The host's fork instruction policy decides what the child is
+                // given, on the controller, before any placed effect exists.
+                let plan = match read
+                    .read_plan(
+                        self.session_service.as_ref(),
+                        super::fork_context::fork_context_budget(&profile.model),
+                    )
+                    .await
+                {
+                    Ok(plan) => plan,
+                    Err(error) => fail!(error),
+                };
+                // A member host that serves prompt-context fork children (V7)
+                // records the planned context as the child's fork seed, which
+                // the child's first run delivers as typed rows; toward an older
+                // host the context rides the child's first prompt. Asked once
+                // per fork, before anything is recorded.
+                let typed_rows = match self
+                    .host_serves_feature(
+                        &host,
+                        super::bridge_protocol::HOST_FEATURE_PROMPT_CONTEXT_FORK,
+                    )
+                    .await
+                {
+                    Ok(typed_rows) => typed_rows,
+                    Err(error) => fail!(error),
+                };
+                if typed_rows {
+                    let source_tools = read.source_tools(self.session_service.as_ref()).await;
+                    let source = meerkat_core::fork_notice::ForkNoticeSource {
+                        member: Some(read.prompt_context_source.source_member.clone()),
+                        session_id: read.prompt_context_source.source_session_id.clone(),
+                    };
+                    let seed = match serde_json::to_value(plan.seed(source, source_tools)) {
+                        Ok(seed) => seed,
+                        Err(error) => fail!(MobError::Internal(format!(
+                            "failed to record the fork seed of member '{agent_identity}': {error}"
+                        ))),
+                    };
+                    (
+                        None,
+                        Some(super::bridge_protocol::BridgePromptContextFork::from_seed(
+                            seed,
+                            read.prompt_context_source.clone(),
+                        )),
+                    )
+                } else {
+                    (Some(plan.render()), None)
+                }
+            } else {
+                (None, None)
+            };
+        // A plain resume adopts an existing session, and only its member host
+        // can read whether that session's first turn already started. A host
+        // that reports it (V7) is asked to put it on the ack; an older host
+        // reports nothing and the resume keeps the kickoff it always ran. Fork
+        // seatings and respawns also launch as Resume, so the predicate is the
+        // spawn source, not the launch. Asked once, before anything is
+        // recorded.
+        let report_adopted_first_turn = if plain_resume && resume_session_id.is_some() {
+            match self
+                .host_serves_feature(
+                    &host,
+                    super::bridge_protocol::HOST_FEATURE_ADOPTED_FIRST_TURN,
+                )
                 .await
             {
-                Ok(rows) => rows,
+                Ok(serves) => serves,
                 Err(error) => fail!(error),
-            };
-            Some(render_fork_context(&source_member_id, &rows))
+            }
         } else {
-            None
+            false
         };
 
         // Compose and persist the exact first-turn material BEFORE the
@@ -34134,6 +35684,7 @@ impl MobActor {
                 continuity_intent: &continuity_intent,
                 base_prompt: base_prompt.as_deref(),
                 non_portable_disabled: Vec::new(),
+                operator_authority_ceiling: operator_authority_ceiling.as_ref(),
             },
         )
         .await
@@ -34568,7 +36119,12 @@ impl MobActor {
         // keeps its V4 shape, so a pre-V6 host is unaffected; a capability
         // seating declares the version whose shape it actually uses, and the
         // receiving host's minimum-version gate is what proves it.
-        let protocol_version = if forked_participant_attachment.is_some() {
+        // The same for the V7 prompt-context fork, which rides only a Fresh
+        // launch and so never meets the Resume-only V6 attachment, and for
+        // the V7 request to report a plain resume's adopted first turn.
+        let protocol_version = if prompt_context_fork.is_some() || report_adopted_first_turn {
+            super::bridge_protocol::BridgeProtocolVersion::V7
+        } else if forked_participant_attachment.is_some() {
             super::forked_participant_routing::FORKED_PARTICIPANT_PROTOCOL_VERSION
         } else {
             super::bridge_protocol::BridgeProtocolVersion::V4
@@ -34584,6 +36140,8 @@ impl MobActor {
             spec_digest: effect_digest,
             launch,
             forked_participant_attachment,
+            prompt_context_fork,
+            report_adopted_first_turn,
         });
 
         // Callers that don't carry an owner ops context (the embedder
@@ -35193,6 +36751,18 @@ impl MobActor {
                         };
                         let generation = remote_exec.generation;
                         let fence = remote_exec.fence_token;
+                        // A plain resume's member host reported the adopted
+                        // session's first turn (only when asked): the same
+                        // rule as the local lane. An absent report keeps the
+                        // first turn.
+                        let (suppress_autonomous_initial_prompt, initial_turn_prompt) = self
+                            .adopted_session_first_turn_delivery(
+                                &agent_identity,
+                                ack.adopted_first_turn
+                                    .map(super::handle::AdoptedFirstTurn::from),
+                                suppress_autonomous_initial_prompt,
+                                initial_turn_prompt,
+                            );
                         let remote_finalize = Some(Box::new(RemoteSpawnFinalize {
                             placed_spawn_id: remote_exec.placed_spawn_id.clone(),
                             placement: remote_exec.placement.clone(),
@@ -35275,6 +36845,13 @@ impl MobActor {
                                 }
                             },
                         };
+                        let (suppress_autonomous_initial_prompt, initial_turn_prompt) = self
+                            .adopted_session_first_turn_delivery(
+                                &agent_identity,
+                                spawn_receipt.adopted_first_turn,
+                                suppress_autonomous_initial_prompt,
+                                initial_turn_prompt,
+                            );
                         Ok((
                             Box::new(SpawnFinalizeCtx {
                                 profile_name: profile_name.clone(),
@@ -35436,6 +37013,9 @@ impl MobActor {
             fork_overlay: _,
             fork_build_inheritance: _,
             resume_provider_params: _,
+            // Nor a ceiling: customizers never run on a policy auto-spawn.
+            operator_authority_ceiling: _,
+            inherited_operator_authority_bound: _,
         } = member_spec;
 
         if agent_identity.is_system_reserved() {
@@ -35461,6 +37041,17 @@ impl MobActor {
         if let Some(model) = model_override.as_ref() {
             profile.model.clone_from(model);
         }
+        // A policy auto-spawn of a durable profile is a durable worker like
+        // any other spawn of it (see `enqueue_spawn_with_origin`): refused
+        // before anything exists on a mob whose member sessions do not
+        // outlive the process.
+        if profile.durable && !self.session_service.keeps_durable_member_sessions() {
+            return Err(MobError::NonDurableService {
+                member_id: agent_identity.clone(),
+                profile: profile_name.clone(),
+            });
+        }
+        let continuity_intent = continuity_intent.for_profile(&profile, agent_identity);
         super::spec_compiler::apply_tool_category_overrides(&mut profile, tool_category_overrides);
         // ADJ-6: explicit fact captured before the inherited-open mutation.
         let explicit_workgraph = profile.tools.workgraph;
@@ -35557,6 +37148,7 @@ impl MobActor {
             runtime_revival_intent: super::provisioner::RuntimeRevivalIntent::None,
             direct_member_incarnation: None,
             held_bound: None,
+            continuity_intent: continuity_intent.clone(),
         };
         let admitted_bridge_session_id =
             admit_bridge_session_for_spawn(&mut provision_request.create_session);
@@ -40380,6 +41972,12 @@ impl MobActor {
             let _ = reply_tx.send(Err(error));
             return;
         }
+        // A Broken member's session is restored only through its custody
+        // restore; a live open would recover it outside that restore.
+        if let Err(error) = self.ensure_member_not_broken(&agent_identity).await {
+            let _ = reply_tx.send(Err(error));
+            return;
+        }
         let lane = match self.member_live_lane(&agent_identity).await {
             Ok(lane) => lane,
             Err(error) => {
@@ -41156,22 +42754,6 @@ impl MobActor {
         })
     }
 
-    /// §19.L2 fork-context read: ONE placement switch, ONE row vocabulary.
-    /// Placed sources proxy `ReadMemberHistory` (`LastMessages` = a single
-    /// tail-addressed round trip); local sources read the session and
-    /// project through the SAME wire page projection. Runs under spawn
-    /// admission — no `ReadHistory` scope check on this internal path.
-    async fn fork_source_history_rows(
-        &self,
-        source_member_id: &AgentIdentity,
-        fork_context: &crate::launch::ForkContext,
-    ) -> Result<Vec<meerkat_contracts::wire::WireHistoryRow>, MobError> {
-        self.plan_fork_source_history_read(source_member_id, fork_context.clone())
-            .await?
-            .read_rows(self.session_service.as_ref())
-            .await
-    }
-
     /// Resolve WHERE a fork source's history lives from actor-owned state
     /// (machine placement and roster), without reading it. The returned plan
     /// performs the history I/O and can run off the actor loop (#1249).
@@ -41191,7 +42773,7 @@ impl MobActor {
             .member_placement
             .get(&source_dsl)
             .cloned();
-        let location = if let Some(placement) = placement {
+        let (location, source_role, source_session_id) = if let Some(placement) = placement {
             let roster = self.roster.read().await;
             let entry = roster
                 .get(source_member_id)
@@ -41203,12 +42785,19 @@ impl MobActor {
             let expected_member = self
                 .placed_member_incarnation(entry)
                 .map_err(|_| remote_unavailable())?;
-            ForkSourceHistoryLocation::Remote {
-                supervisor_bridge: Arc::clone(&self.supervisor_bridge),
-                peer,
-                placement,
-                expected_member,
-            }
+            // A placed source's session lives on its host: the incarnation
+            // the history is read from names it.
+            let source_session_id = SessionId::parse(&expected_member.member_session_id).ok();
+            (
+                ForkSourceHistoryLocation::Remote {
+                    supervisor_bridge: Arc::clone(&self.supervisor_bridge),
+                    peer,
+                    placement,
+                    expected_member,
+                },
+                entry.role.clone(),
+                source_session_id,
+            )
         } else {
             let roster = self.roster.read().await;
             let source_entry = roster
@@ -41222,12 +42811,28 @@ impl MobActor {
                     source_member_id: source_member_id.to_string(),
                     cause: crate::error::ForkSourceUnavailableCause::NoSession,
                 })?;
-            ForkSourceHistoryLocation::Local { source_session_id }
+            (
+                ForkSourceHistoryLocation::Local {
+                    source_session_id: source_session_id.clone(),
+                },
+                source_entry.role.clone(),
+                Some(source_session_id),
+            )
         };
+        let prompt_context_source = meerkat_core::PromptContextForkSource::new(
+            meerkat_core::MobMemberBinding {
+                mob_id: self.definition.id.to_string(),
+                role: source_role.to_string(),
+                member: source_member_id.to_string(),
+            },
+            source_session_id,
+        );
         Ok(ForkSourceHistoryRead {
             source_member_id: source_member_id.clone(),
             fork_context,
             location,
+            fork_instruction_policy: self.fork_instruction_policy,
+            prompt_context_source,
         })
     }
 
@@ -45112,13 +46717,7 @@ impl MobActor {
         &mut self,
         session_id: &SessionId,
     ) -> Result<bool, MobError> {
-        if self.session_service.has_live_session(session_id).await?
-            || self
-                .session_service
-                .load_persisted_session(session_id)
-                .await?
-                .is_some()
-        {
+        if member_session_present(self.session_service.as_ref(), session_id).await? {
             return Ok(false);
         }
         #[cfg(feature = "runtime-adapter")]
@@ -45676,6 +47275,13 @@ impl MobActor {
     ) -> Result<RespawnProgress, super::handle::MobRespawnError> {
         use super::handle::MobRespawnError;
 
+        // As in `handle_respawn`, which re-attempts first for every member
+        // (a placed member has no local session to defer): a member whose
+        // startup custody restore was deferred gets it re-attempted before
+        // the respawn acts on it.
+        self.reattempt_deferred_member_custody(&agent_identity)
+            .await
+            .map_err(MobRespawnError::from)?;
         if !snapshot.cleanup_retry {
             self.preview_dsl_input(
                 mob_dsl::MobMachineInput::Respawn {
@@ -45837,6 +47443,60 @@ impl MobActor {
         Ok(Some(restrictions))
     }
 
+    /// The operator authority ceiling a placed member being respawned keeps:
+    /// what its exact committed placed-spawn carrier records, read before
+    /// anything is retired. `None` when the member holds the default
+    /// authority, or no operator authority at all. A carrier that cannot be
+    /// read, is not committed, or belongs to another incarnation refuses the
+    /// respawn and keeps the member, since the successor could otherwise gain
+    /// authority its predecessor was denied.
+    async fn recorded_placed_operator_authority_ceiling(
+        &self,
+        agent_identity: &AgentIdentity,
+        snapshot: &RespawnSnapshot,
+    ) -> Result<Option<super::MemberOperatorAuthorityCeiling>, MobError> {
+        let refuse = |reason: String| MobError::RespawnPredecessorRestrictionsUnavailable {
+            agent_identity: agent_identity.to_string(),
+            reason,
+        };
+        let carrier = self
+            .runtime_metadata
+            .load_placed_spawn(&self.definition.id, agent_identity.as_str())
+            .await
+            .map_err(|error| {
+                refuse(format!(
+                    "the placed member's recorded operator authority cannot be read: {error}"
+                ))
+            })?
+            .filter(|carrier| {
+                carrier.generation == snapshot.old_runtime_id.generation.get()
+                    && carrier.fence_token == snapshot.old_fence_token.get()
+                    && matches!(
+                        &carrier.phase,
+                        crate::store::PlacedSpawnCarrierPhase::Committed(_)
+                    )
+            })
+            .ok_or_else(|| {
+                refuse(
+                    "the placed member has no committed placed-spawn record for its current \
+                     incarnation to read its operator authority from; respawn it with an \
+                     operator authority ceiling of its own"
+                        .to_string(),
+                )
+            })?;
+        Ok(carrier
+            .spec
+            .overlay
+            .mob_tool_authority_context
+            .as_ref()
+            .and_then(|facts| {
+                super::MemberOperatorAuthorityCeiling::recorded_in(
+                    facts,
+                    self.definition.id.as_str(),
+                )
+            }))
+    }
+
     async fn handle_respawn(
         &mut self,
         agent_identity: AgentIdentity,
@@ -45845,6 +47505,12 @@ impl MobActor {
     ) -> Result<RespawnProgress, super::handle::MobRespawnError> {
         use super::handle::MobRespawnError;
 
+        // A member whose startup custody restore was deferred gets it
+        // re-attempted before the respawn reads the member's session (its
+        // retained tool restrictions) or retires it.
+        self.reattempt_deferred_member_custody(&agent_identity)
+            .await
+            .map_err(MobRespawnError::from)?;
         let explicit_successor = successor_spec.is_some();
         let (placed_host, snapshot, replacement_spec, original_identity) =
             boxed_arm_future(|| async {
@@ -45998,6 +47664,16 @@ impl MobActor {
                 // A successor starts fresh and carries none, so a later
                 // re-link can never apply the old job's limit to it.
                 replacement_spec.fork_job = None;
+                // A placed member's successor keeps the operator authority
+                // its predecessor recorded, unless the request sets a ceiling
+                // of its own. It is read before the customizer, which sees it
+                // and may replace it.
+                if placed_host.is_some() && replacement_spec.operator_authority_ceiling.is_none() {
+                    replacement_spec.operator_authority_ceiling = self
+                        .recorded_placed_operator_authority_ceiling(&agent_identity, &snapshot)
+                        .await
+                        .map_err(MobRespawnError::from)?;
+                }
         self.customize_spawn_spec(
             super::handle::SpawnSource::Respawn,
             None,
@@ -46054,6 +47730,24 @@ impl MobActor {
                 "spawn customizer cannot bind respawn of placed member '{original_identity}' \
                  to an explicit runtime binding"
             ))));
+        }
+        // The successor's ceiling is checked here, before anything is
+        // retired: the replacement compiles only after the predecessor is
+        // gone, too late to keep the member.
+        if let Some(ceiling) = replacement_spec.operator_authority_ceiling.as_ref() {
+            let refusal = if placed_host.is_none() {
+                Some(crate::error::OperatorAuthorityCeilingRefusal::UnplacedMember)
+            } else {
+                ceiling.check().err()
+            };
+            if let Some(reason) = refusal {
+                return Err(MobRespawnError::from(
+                    MobError::OperatorAuthorityCeilingRefused {
+                        agent_identity: original_identity.clone(),
+                        reason,
+                    },
+                ));
+            }
         }
                 if replacement_spec.placement != placed_host {
             // Placement is the machine `member_placement` fact; a customizer
@@ -46829,6 +48523,29 @@ impl MobActor {
                     .map(|()| None)
             }
             _ => boxed_arm_future(|| self.execute_step(step, ctx)).await,
+        }
+    }
+
+    /// The typed refusal of the member reload that aborted the destroy's
+    /// disposal of a member: the runtime refused as repair-blocked the reload
+    /// the disposal asked for while archiving the member's session (the
+    /// member degraded after the destroy's own reload passes). The report
+    /// lists it as those passes list theirs. Any other disposal failure is
+    /// text only.
+    fn destroy_disposal_reload_refusal(
+        report: &DisposalReport,
+    ) -> Option<super::handle::MemberReloadRefusal> {
+        let (_, error) = report.aborted_at.as_ref()?;
+        match error.retirement_root_cause() {
+            MobError::MemberReloadRepairBlocked {
+                reason,
+                evidence_digest,
+                ..
+            } => Some(super::handle::MemberReloadRefusal::RepairBlocked {
+                reason: reason.clone(),
+                evidence_digest: evidence_digest.clone(),
+            }),
+            _ => None,
         }
     }
 
@@ -49477,6 +51194,14 @@ impl MobActor {
             let disposal_report = boxed_arm_future(|| self.dispose_member_for_destroy(&ctx)).await;
             if let Some(error) = Self::destroy_disposal_failure(&disposal_report) {
                 report.push_error(format!("{}: {error}", entry.agent_identity));
+                if let Some(refusal) = Self::destroy_disposal_reload_refusal(&disposal_report) {
+                    report
+                        .member_reload_refusals
+                        .push(super::handle::MobDestroyMemberRefusal {
+                            member: entry.agent_identity.clone(),
+                            refusal,
+                        });
+                }
                 return Err(super::handle::MobDestroyError::Incomplete {
                     report: report.clone(),
                 });
@@ -49545,6 +51270,13 @@ impl MobActor {
     async fn handle_destroy(
         &mut self,
     ) -> Result<super::handle::MobDestroyReport, super::handle::MobDestroyError> {
+        // A destroy acts on every member, so each member whose startup custody
+        // restore was deferred gets it re-attempted first. One that stays
+        // deferred refuses the whole destroy before it reloads, writes or
+        // retires anything; it names the member, its session and the cause
+        // (for a session another runtime owner hosts: stop that owner, or wait
+        // for it to release the session), and the destroy can be retried.
+        boxed_arm_future(|| self.reattempt_deferred_member_custody_for_destroy()).await?;
         // A member whose runtime requires a durability reload would hold the
         // destroy in its ingress detach forever. Reload each such member
         // before any destroy write, so a reload that fails leaves nothing to
@@ -49567,6 +51299,7 @@ impl MobActor {
     /// Report the members the destroy reloaded before it started (`reloaded`,
     /// first) together with any it reloaded later, before their ingress
     /// detach, on the report `result` carries.
+    #[allow(clippy::result_large_err)] // the destroy's typed report, incomplete or not, is its answer
     fn with_destroy_reloaded_members(
         result: Result<super::handle::MobDestroyReport, super::handle::MobDestroyError>,
         reloaded: Vec<AgentIdentity>,
@@ -49609,12 +51342,12 @@ impl MobActor {
             match boxed_arm_future(|| self.reload_member_if_durability_degraded(entry)).await {
                 Ok(true) => reloaded.push(entry.agent_identity.clone()),
                 Ok(false) => {}
-                Err(error) => {
+                Err(failure) => {
                     let mut report = super::handle::MobDestroyReport {
                         reloaded_members: reloaded,
                         ..Default::default()
                     };
-                    report.push_error(error);
+                    report.push_member_reload_failure(&entry.agent_identity, failure);
                     return Err(super::handle::MobDestroyError::Incomplete { report });
                 }
             }
@@ -49641,12 +51374,13 @@ impl MobActor {
     /// member's retirement then records what became of it. Bounded by the
     /// member retire budget. Returns whether the member was reloaded; `Err`
     /// is the destroy report's entry for a reload that failed, or for a
-    /// member still degraded after it.
+    /// member still degraded after it, typed when the runtime refused the
+    /// reload as repair-blocked.
     #[cfg(feature = "runtime-adapter")]
     async fn reload_member_if_durability_degraded(
         &self,
         entry: &RosterEntry,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, super::handle::MemberReloadFailure> {
         let Some(adapter) = self.runtime_adapter.as_ref() else {
             return Ok(false);
         };
@@ -49668,10 +51402,13 @@ impl MobActor {
             .current_session_registration_witness(session_id)
             .await
         else {
-            return Err(format!(
-                "{}: {required}; the runtime has no current registration the destroy can reload",
-                entry.agent_identity
-            ));
+            return Err(super::handle::MemberReloadFailure {
+                message: format!(
+                    "{}: {required}; the runtime has no current registration the destroy can reload",
+                    entry.agent_identity
+                ),
+                refusal: None,
+            });
         };
         tracing::warn!(
             mob_id = %self.definition.id,
@@ -49689,11 +51426,18 @@ impl MobActor {
                 Instant::now() + super::provisioner::MEMBER_RETIRE_TOTAL_TIMEOUT,
             )
             .await
-            .map_err(|error| {
-                format!(
-                    "{}: {required}; reloading it before the destroy failed: {error}",
-                    entry.agent_identity
-                )
+            .map_err(|failure| {
+                let refusal = failure
+                    .runtime_refusal()
+                    .and_then(super::handle::MemberReloadRefusal::from_runtime_refusal);
+                super::handle::MemberReloadFailure {
+                    message: format!(
+                        "{}: {required}; reloading it before the destroy failed: {}",
+                        entry.agent_identity,
+                        failure.into_session_error(session_id)
+                    ),
+                    refusal,
+                }
             })?;
         if matches!(
             disposition,
@@ -49703,10 +51447,13 @@ impl MobActor {
         }
         match adapter.durability_reload_required(session_id).await {
             None => Ok(false),
-            Some(still) => Err(format!(
-                "{}: {still}; the runtime still requires a durability reload after the destroy's reload attempt",
-                entry.agent_identity
-            )),
+            Some(still) => Err(super::handle::MemberReloadFailure {
+                message: format!(
+                    "{}: {still}; the runtime still requires a durability reload after the destroy's reload attempt",
+                    entry.agent_identity
+                ),
+                refusal: None,
+            }),
         }
     }
 
@@ -49976,8 +51723,8 @@ impl MobActor {
                 match boxed_arm_future(|| self.reload_member_if_durability_degraded(entry)).await {
                     Ok(true) => report.reloaded_members.push(entry.agent_identity.clone()),
                     Ok(false) => {}
-                    Err(error) => {
-                        report.push_error(error);
+                    Err(failure) => {
+                        report.push_member_reload_failure(&entry.agent_identity, failure);
                         return Err(MobDestroyError::Incomplete { report });
                     }
                 }
@@ -50011,12 +51758,13 @@ impl MobActor {
                             continue;
                         }
                         Ok(false) => {}
-                        Err(reload_error) => {
+                        Err(reload_failure) => {
                             report.push_error(format!(
                                 "{}: destroy retire admission failed: {error}",
                                 entry.agent_identity
                             ));
-                            report.push_error(reload_error);
+                            report
+                                .push_member_reload_failure(&entry.agent_identity, reload_failure);
                             return Err(MobDestroyError::Incomplete { report });
                         }
                     }
@@ -51720,6 +53468,96 @@ impl MobActor {
             return Err(Self::bridge_rejection_error(rejection));
         }
         super::bridge_protocol::decode_bridge_payload(&command, value, "periodic host status")
+    }
+
+    /// Whether member host `host` serves `feature` (protocol V7: a
+    /// prompt-context fork child, or a plain resume's adopted first turn),
+    /// asked with the effect-free `HostFeatures` probe within
+    /// [`HOST_FEATURES_BRIDGE_TIMEOUT`]. Like the periodic `HostStatus`
+    /// poll it rides the trust edge bind installed and changes no state. A
+    /// host before V7 refuses the probe typed before reading it
+    /// (`UnsupportedProtocolVersion`, or `Unsupported`) and serves no
+    /// feature: a fork child gets the prompt prefix, a resume keeps its
+    /// kickoff. Any other failure fails the spawn
+    /// ([`MobError::HostFeaturesProbeFailed`]). A host without recorded
+    /// binding facts is not asked: the spawn's own admission refuses it.
+    async fn host_serves_feature(
+        &self,
+        host: &mob_dsl::HostId,
+        feature: &str,
+    ) -> Result<bool, MobError> {
+        let (endpoint, pubkey) = {
+            let state = self.dsl_authority.state();
+            (
+                state.host_endpoints.get(host).cloned(),
+                state.host_public_keys.get(host).copied(),
+            )
+        };
+        let (Some(endpoint), Some(pubkey)) = (endpoint, pubkey) else {
+            return Ok(false);
+        };
+        let Ok(binding_generation) = self.current_host_binding_generation(host) else {
+            return Ok(false);
+        };
+        let probe_failed = |cause: MobError| MobError::HostFeaturesProbeFailed {
+            host_id: host.as_str().to_string(),
+            cause: Arc::new(cause),
+        };
+        let peer = TrustedPeerDescriptor::unsigned_with_pubkey(
+            host.as_str(),
+            host.as_str(),
+            pubkey.0,
+            endpoint.0.as_str(),
+        )
+        .map_err(|error| {
+            probe_failed(MobError::Internal(format!(
+                "bound host '{}' facts do not form a canonical peer descriptor: {error}",
+                host.as_str()
+            )))
+        })?;
+        let authority = self.supervisor_bridge.authority().await;
+        let probe = async {
+            let supervisor_spec = self
+                .supervisor_bridge
+                .supervisor_spec_for_authority_and_recipient(&authority, &peer)
+                .await?;
+            let command = super::bridge_protocol::BridgeCommand::HostFeatures(
+                super::bridge_protocol::BridgeHostFeaturesPayload {
+                    supervisor: supervisor_spec.into(),
+                    epoch: authority.epoch,
+                    binding_generation,
+                    protocol_version: super::bridge_protocol::BridgeProtocolVersion::V7,
+                    mob_id: self.definition.id.to_string(),
+                },
+            );
+            let value = self
+                .supervisor_bridge
+                .send_bridge_command_as_authority(
+                    &authority,
+                    &peer,
+                    &command,
+                    HOST_FEATURES_BRIDGE_TIMEOUT,
+                )
+                .await?;
+            if let Some(rejection) =
+                Self::bridge_rejection_reply(command.protocol_version(), &value)
+            {
+                return Err(Self::bridge_rejection_error(rejection));
+            }
+            super::bridge_protocol::decode_bridge_payload::<
+                super::bridge_protocol::BridgeHostFeaturesResponse,
+            >(&command, value, "host features")
+        };
+        match probe.await {
+            Ok(features) => Ok(features.serves(feature)),
+            Err(MobError::BridgeCommandRejected {
+                cause:
+                    super::bridge_protocol::BridgeRejectionCause::UnsupportedProtocolVersion
+                    | super::bridge_protocol::BridgeRejectionCause::Unsupported,
+                ..
+            }) => Ok(false),
+            Err(error) => Err(probe_failed(error)),
+        }
     }
 
     /// W-E orphan reconciliation sweep: read the host's `HostStatus`
@@ -56521,6 +58359,52 @@ impl MobActor {
         }
     }
 
+    /// Admit one machine-admitted turn of a placed member through the placed
+    /// ingress-accepted delivery lane (`DeliverMemberInput` to its host).
+    /// The host's transport receipt must be this delivery's own input id.
+    /// Tracked completion is not supported for remotely hosted members.
+    async fn admit_placed_ingress_turn(
+        provisioner: &Arc<dyn MobProvisioner>,
+        member_ref: MemberRef,
+        req: Box<meerkat_core::service::StartTurnRequest>,
+        tracked: bool,
+        expected_member: super::bridge_protocol::BridgeMemberIncarnation,
+        input_id: String,
+    ) -> Result<(), MobError> {
+        if tracked {
+            return Err(MobError::UnsupportedForMode {
+                mode: crate::MobRuntimeMode::TurnDriven,
+                reason: "tracked completion is not supported for remotely hosted members"
+                    .to_string(),
+            });
+        }
+        let transcript_interaction_id = placed_turn_supplied_interaction_id(&req)?;
+        let expected_receipt = input_id.clone();
+        match provisioner
+            .start_turn_with_correlation(
+                &member_ref,
+                *req,
+                Some(super::provisioner::PlacedTurnDeliveryContext {
+                    input_id,
+                    transcript_interaction_id: transcript_interaction_id
+                        .map(|interaction_id| interaction_id.0.to_string()),
+                    expected_member,
+                    // IngressAccepted carries no retained terminal-publication
+                    // custody.
+                    outcome_tracking: None,
+                    bounded_result_spec: None,
+                }),
+            )
+            .await
+        {
+            Ok(receipt) if receipt.as_deref() == Some(expected_receipt.as_str()) => Ok(()),
+            Ok(receipt) => Err(MobError::Internal(format!(
+                "placed admission returned transport receipt {receipt:?}, expected '{expected_receipt}'"
+            ))),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Detached admission-task version of the former inline
     /// `spawn_turn_admission_reply` body: the runtime (or placed transport)
     /// admission for one already machine-admitted turn.
@@ -56538,47 +58422,15 @@ impl MobActor {
         debug_assert_eq!(revival.is_some(), placed_incarnation.is_some());
         let result = match (placed_incarnation, placed_input_id) {
             (Some(expected_member), Some(input_id)) => {
-                if completion_tx.is_some() || llm_identity_applied_tx.is_some() {
-                    Err(MobError::UnsupportedForMode {
-                        mode: crate::MobRuntimeMode::TurnDriven,
-                        reason: "tracked completion is not supported for remotely hosted members"
-                            .to_string(),
-                    })
-                } else {
-                    match placed_turn_supplied_interaction_id(&req) {
-                        Ok(transcript_interaction_id) => {
-                            let expected_receipt = input_id.clone();
-                            match provisioner
-                                .start_turn_with_correlation(
-                                    &member_ref,
-                                    *req,
-                                    Some(super::provisioner::PlacedTurnDeliveryContext {
-                                        input_id,
-                                        transcript_interaction_id: transcript_interaction_id
-                                            .map(|interaction_id| interaction_id.0.to_string()),
-                                        expected_member,
-                                        // IngressAccepted carries no retained
-                                        // terminal-publication custody.
-                                        outcome_tracking: None,
-                                        bounded_result_spec: None,
-                                    }),
-                                )
-                                .await
-                            {
-                                Ok(receipt)
-                                    if receipt.as_deref() == Some(expected_receipt.as_str()) =>
-                                {
-                                    Ok(())
-                                }
-                                Ok(receipt) => Err(MobError::Internal(format!(
-                                    "placed admission returned transport receipt {receipt:?}, expected '{expected_receipt}'"
-                                ))),
-                                Err(error) => Err(error),
-                            }
-                        }
-                        Err(error) => Err(error),
-                    }
-                }
+                Self::admit_placed_ingress_turn(
+                    provisioner,
+                    member_ref,
+                    req,
+                    completion_tx.is_some() || llm_identity_applied_tx.is_some(),
+                    expected_member,
+                    input_id,
+                )
+                .await
             }
             (None, None) => {
                 if let Some(completion_tx) = completion_tx {
@@ -57020,6 +58872,7 @@ impl MobActor {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_run_flow(
         &mut self,
         requested_run_id: Option<RunId>,
@@ -57028,6 +58881,7 @@ impl MobActor {
         external_delivery_intent: Option<crate::store::MobExternalDeliveryIntent>,
         scoped_event_tx: Option<mpsc::Sender<meerkat_core::ScopedAgentEvent>>,
         exact_operation: Option<super::handle::FlowOperationCustody>,
+        role_targets: Option<Arc<crate::run::FlowRoleTargets>>,
     ) -> Result<RunId, MobError> {
         self.ensure_pending_spawn_alignment("handle_run_flow preflight")?;
         self.ensure_flow_tracker_alignment("handle_run_flow preflight")
@@ -57045,13 +58899,19 @@ impl MobActor {
             }
         }
         if let Some(existing) = self.run_store.get_run(&run_id).await? {
-            if existing.mob_id != self.definition.id
-                || existing.flow_id != flow_id
-                || existing.activation_params != activation_params
-            {
+            // A stable run id is derived from the mob and the flow, so a
+            // different mob or flow under it is an integrity failure.
+            if existing.mob_id != self.definition.id || existing.flow_id != flow_id {
                 return Err(MobError::Internal(format!(
-                    "stable external flow run '{run_id}' was reused for different mob, flow, or activation parameters"
+                    "stable external flow run '{run_id}' was reused for a different mob or flow"
                 )));
+            }
+            // The same key with other activation params or other role targets
+            // is the caller's conflict: the first run stands, typed.
+            if existing.activation_params != activation_params
+                || existing.role_targets.as_ref() != role_targets.as_deref()
+            {
+                return Err(MobError::FlowRunIdempotencyConflict { run_id, flow_id });
             }
             let terminal =
                 crate::run::mob_machine_run_status_is_terminal(&existing.run_id, &existing.status)?;
@@ -57176,6 +59036,11 @@ impl MobActor {
         }
         self.preview_run_flow_command_admission(&run_id)?;
         let config = FlowRunConfig::from_definition(flow_id.clone(), &self.definition)?;
+        // The one admission point for role targets: inside this actor command,
+        // before any durable write, provisioning, FlowStarted or dispatch.
+        if let Some(role_targets) = role_targets.as_deref() {
+            self.admit_flow_role_targets(&config, role_targets)?;
+        }
         let run_flow = MobRun::run_flow_input(&run_id, &config)?;
         debug_assert!(matches!(run_flow, mob_dsl::MobMachineInput::RunFlow { .. }));
         let prepared_run_flow = self
@@ -57186,6 +59051,7 @@ impl MobActor {
             &config,
             prepared_run_flow.authority.state(),
             activation_params.clone(),
+            role_targets.as_deref().cloned(),
             vec![run_flow],
         )
         .await
@@ -57370,6 +59236,7 @@ impl MobActor {
                 .execute_flow(
                     run_id_for_execute,
                     config,
+                    role_targets,
                     activation_params,
                     execution_cancel,
                 )
@@ -57580,6 +59447,7 @@ impl MobActor {
         config: &FlowRunConfig,
         machine_state: &mob_dsl::MobMachineState,
         activation_params: serde_json::Value,
+        role_targets: Option<crate::run::FlowRoleTargets>,
         authority_inputs: Vec<mob_dsl::MobMachineInput>,
     ) -> Result<RunId, MobError> {
         let flow_state =
@@ -57592,6 +59460,9 @@ impl MobActor {
             activation_params,
         );
         run.flow_definition_digest = Some(config.definition_digest()?);
+        // Written once, here, in the same create_run as the run and its
+        // activation params; no store operation rewrites it.
+        run.role_targets = role_targets;
         run.append_flow_authority_inputs(authority_inputs)?;
         self.run_store.create_run(run).await?;
         Ok(run_id)
@@ -62836,6 +64707,28 @@ mod kickoff_tests {
         assert_eq!(
             metadata.transcript_identity.objective_id,
             Some(objective_id)
+        );
+    }
+
+    /// The producer half of the requeue rule's objective binding: the turn
+    /// metadata that delegation, fork and helper work carry on a turn-driven
+    /// member holds their objective in its transcript identity, on the
+    /// input's own turn metadata, where the runtime's stop classifier reads
+    /// it. Work without an objective carries none.
+    #[test]
+    fn submit_work_turn_metadata_carries_the_objective_the_stop_classifier_reads() {
+        let objective_id = meerkat_core::interaction::ObjectiveId::new();
+        let metadata = submit_work_turn_metadata(None, None, Some(objective_id))
+            .expect("an objective alone never conflicts")
+            .expect("an objective produces turn metadata");
+        assert_eq!(
+            metadata.transcript_identity.objective_id,
+            Some(objective_id)
+        );
+        assert!(
+            submit_work_turn_metadata(None, None, None)
+                .expect("empty metadata never conflicts")
+                .is_none()
         );
     }
 

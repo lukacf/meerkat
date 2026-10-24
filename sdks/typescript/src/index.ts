@@ -28,6 +28,10 @@ export { DeferredSession, Session } from "./session.js";
 export type { DeferredTurnOptions } from "./session.js";
 export { Mob } from "./mob.js";
 export type {
+  MemberDeliveryReceipt,
+  MemberSendContinuation,
+  MemberSendContinuationStatus,
+  MemberSendOptions,
   MobBoundedHelperResult,
   MobBoundedHelperResultStatus,
   MobForkHelperOptions,
@@ -35,6 +39,8 @@ export type {
   MobHelperOptions,
   MobKickoffMemberSnapshot,
   MobKickoffWaitOptions,
+  MobMemberCustodyDeferral,
+  MobMemberCustodyUnknown,
   MobMemberSnapshot,
   MobPeerConnectivity,
   MobPeerConnectivitySnapshot,
@@ -70,7 +76,7 @@ export type {
 export { CONSENT_NOTICE_NOTIFICATION, parseConsentNotice } from "./consent.js";
 export type { ConsentNotice, ConsentNoticeListener } from "./consent.js";
 export { EventStream } from "./streaming.js";
-export { EventSubscription } from "./subscription.js";
+export { EventSubscription, EventSubscriptionError } from "./subscription.js";
 export type {
   AgentEventEnvelope,
   AttributedEvent,
@@ -255,6 +261,7 @@ export type {
   TranscriptRewriteSelection,
   TranscriptToolResultContentBlockReplacement,
   TranscriptUserContentBlockReplacement,
+  ToolCallDedupeKey,
   TurnAuthBindingOverride,
   TurnOptions,
   TurnToolOverlay,
@@ -362,6 +369,7 @@ export type {
   CommsSendRequiredAction,
 } from "./generated/types.js";
 export { COMMS_SEND_ERROR_CODES, commsSendError } from "./comms-errors.js";
+export { mobDestroyIncompleteReport } from "./mob-destroy-report.js";
 export { BinaryIntegrityError } from "./binary-errors.js";
 export type { BinaryIntegrityFailure } from "./binary-errors.js";
 
@@ -508,6 +516,9 @@ export type {
   WireLiveContinuityModeTranscriptOnly,
   WireLiveContinuityModeDegraded,
   WireLiveContinuityModeProviderNativeResume,
+  // The advisories on `LiveOpenResult`: an open vocabulary, so an unknown
+  // advisory is kept as the string the server sent.
+  WireLiveOpenAdvisory,
   // FIX-SDK-OBS: typed live-adapter observation discriminated union and
   // its supporting wire mirrors (status / degradation reason / error
   // code). Closes the verifier gap that left the R5-4 audio identity
@@ -601,7 +612,16 @@ export type {
   WireMemberPreviewUnavailable,
   WireMemberRef,
   WireMemberRegistrationHookCall,
+  WireMemberReloadRefusal,
+  WireMemberReloadRefusalRepairBlocked,
+  WireMemberReloadRefusalUnknown,
+  WireMemberCustodyDeferral,
+  WireMemberCustodyDeferralCause,
+  WireMemberCustodyRestore,
   WireMobBackendKind,
+  WireMobDestroyIncompleteData,
+  WireMobDestroyMemberRefusal,
+  WireMobDestroyReport,
   WireMobMemberStatus,
   WireMobProfile,
   WireMobRuntimeMode,

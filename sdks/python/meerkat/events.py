@@ -349,7 +349,12 @@ class ToolCallRequested(Event):
 
 @dataclass(frozen=True, slots=True)
 class ToolResultReceived(Event):
-    """A tool result was fed back to the LLM."""
+    """A tool result was fed back to the LLM.
+
+    The only event that carries the result body (``content``).
+    :class:`ToolExecutionCompleted` for the same ``id`` carries the
+    execution facts.
+    """
 
     id: str = ""
     name: str = ""
@@ -395,11 +400,15 @@ class ToolExecutionStarted(Event):
 
 @dataclass(frozen=True, slots=True)
 class ToolExecutionCompleted(Event):
-    """A tool finished executing."""
+    """A tool finished executing: whether it failed, and how long it took.
+
+    It carries no result body. The body is on :class:`ToolResultReceived`
+    for the same ``id``. An event from an older server that still carries
+    ``content`` parses, and the field is ignored.
+    """
 
     id: str = ""
     name: str = ""
-    content: list[ContentBlock] = field(default_factory=list)
     is_error: bool | None = None
     duration_ms: int | None = None
 
@@ -1669,7 +1678,7 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
         # provider accounting is a valid, typed outcome.
         "turn_completed": ("stop_reason",),
         "tool_execution_started": ("id", "name"),
-        "tool_execution_completed": ("id", "name", "content"),
+        "tool_execution_completed": ("id", "name"),
         "tool_execution_timed_out": ("id", "name", "timeout_ms"),
         "compaction_started": ("input_tokens", "estimated_history_tokens", "message_count"),
         "compaction_completed": ("summary_tokens", "messages_before", "messages_after"),
@@ -1770,9 +1779,11 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
         elif field_name in {"patch", "envelope"}:
             if not isinstance(raw.get(field_name), dict):
                 raise ValueError(f"{field_name} must be object")
-        elif field_name == "content" and event_type == "tool_execution_completed":
-            if not isinstance(raw.get("content"), list):
-                raise ValueError("content must be an array of content blocks")
+        elif field_name == "reason" and event_type == "compaction_failed":
+            reason = raw.get("reason")
+            if not isinstance(reason, dict):
+                raise ValueError("reason must be object")
+            _require_str(reason, "kind")
         elif field_name in _STRING_FIELDS:
             _require_str(raw, field_name)
         elif field_name in _NUMBER_FIELDS:
@@ -1850,7 +1861,7 @@ def parse_event(raw: dict[str, Any]) -> Event:
                     kwargs["usage"] = None
                 else:
                     kwargs["usage"] = _parse_usage(raw.get("usage"))
-            elif f == "content" and cls in {ToolResultReceived, ToolExecutionCompleted}:
+            elif f == "content" and cls is ToolResultReceived:
                 kwargs["content"] = _parse_content_blocks(
                     raw.get("content"),
                     None,

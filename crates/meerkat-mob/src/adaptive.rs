@@ -371,6 +371,14 @@ pub fn layer_decision_schema() -> Result<serde_json::Value, serde_json::Error> {
     {
         properties.remove("cwd");
     }
+    // Nor a profile's durable worker flag, which the released schema does
+    // not carry.
+    if let Some(properties) = schema
+        .pointer_mut("/$defs/Profile/properties")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        properties.remove("durable");
+    }
     Ok(schema)
 }
 
@@ -3774,6 +3782,30 @@ mod tests {
         assert!(derived.iter().any(|name| name == "cwd"), "{derived:?}");
     }
 
+    /// A profile's durable worker flag is left out of the pinned schema,
+    /// which the released schema does not carry. (Fails-old: the derived
+    /// property reached the schema and changed the pin.)
+    #[cfg(feature = "schema")]
+    #[test]
+    fn layer_decision_schema_leaves_the_durable_worker_flag_out() {
+        let properties = |schema: &serde_json::Value| {
+            schema
+                .pointer("/$defs/Profile/properties")
+                .and_then(serde_json::Value::as_object)
+                .expect("Profile properties")
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let pinned = properties(&layer_decision_schema().expect("canonical schema serializes"));
+        assert!(pinned.iter().any(|name| name == "model"), "{pinned:?}");
+        assert!(!pinned.iter().any(|name| name == "durable"), "{pinned:?}");
+        let derived = properties(
+            &serde_json::to_value(schemars::schema_for!(LayerDecision)).expect("derived schema"),
+        );
+        assert!(derived.iter().any(|name| name == "durable"), "{derived:?}");
+    }
+
     #[cfg(feature = "schema")]
     #[test]
     fn layer_decision_schema_admits_only_the_released_anthropic_thinking_types() {
@@ -4004,6 +4036,7 @@ mod tests {
             max_inline_peer_notifications: None,
             output_schema: None,
             provider_params: None,
+            durable: false,
         }
     }
 
@@ -4113,6 +4146,7 @@ mod tests {
             )]),
             loop_iteration_outputs: BTreeMap::new(),
             flow_authority_inputs: Vec::new(),
+            role_targets: None,
         }
     }
 

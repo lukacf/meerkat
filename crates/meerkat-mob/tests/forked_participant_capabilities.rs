@@ -1371,6 +1371,7 @@ async fn retry_verifies_inherited_execution_metadata_against_source_evidence() {
                     prefix_message_count: request.prefix_message_count,
                     inherited_instructions: meerkat_core::ForkInstructionPolicy::default()
                         .effective(meerkat_core::ActivationWindow::None),
+                    declared_instructions: meerkat_core::ForkInstructionPolicy::default(),
                 })
                 .await
                 .expect_err("the source process dies after saving the child");

@@ -19,14 +19,16 @@ pub enum FactoryError {
     UnsupportedProvider(String),
 
     /// Provider auth/binding resolution failed, carrying the typed
-    /// [`ProviderAuthError`] cause so callers branch on the auth/binding/
-    /// resolution kind rather than re-parsing a flattened string.
+    /// [`ProviderAuthError`](crate::provider_runtime::ProviderAuthError) cause
+    /// so callers branch on the auth/binding/resolution kind rather than
+    /// re-parsing a flattened string.
     #[error("provider auth resolution failed: {0}")]
     ProviderAuth(#[from] crate::provider_runtime::errors::ProviderAuthError),
 
     /// Building the concrete LLM client from a resolved connection failed,
-    /// carrying the typed [`ProviderClientError`] cause rather than a flattened
-    /// string.
+    /// carrying the typed
+    /// [`ProviderClientError`](crate::provider_runtime::ProviderClientError)
+    /// cause rather than a flattened string.
     #[error("provider client build failed: {0}")]
     ClientBuild(#[from] crate::provider_runtime::errors::ProviderClientError),
 

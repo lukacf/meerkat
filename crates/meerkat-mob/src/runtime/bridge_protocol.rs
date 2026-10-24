@@ -9,7 +9,7 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
 pub use meerkat_contracts::wire::supervisor_bridge::{
-    BridgeAck, BridgeBindPayload, BridgeBindResponse, BridgeBootstrapToken,
+    BridgeAck, BridgeAdoptedFirstTurn, BridgeBindPayload, BridgeBindResponse, BridgeBootstrapToken,
     BridgeBoundedResultSpec, BridgeBoundedTurnResult, BridgeCapabilities, BridgeCommand,
     BridgeCommandDecodeError, BridgeCreateForkedParticipantPayload, BridgeDeliveryOutcome,
     BridgeDeliveryPayload, BridgeDeliveryRejectionCause, BridgeDeliveryResponse,
@@ -20,19 +20,21 @@ pub use meerkat_contracts::wire::supervisor_bridge::{
     BridgeForkedParticipantRevocationOutcome, BridgeForkedParticipantRevokedResponse,
     BridgeForkedParticipantScope, BridgeHardCancelPayload, BridgeHeldRun, BridgeHostBindPayload,
     BridgeHostBindResponse, BridgeHostBindingDescriptorIssuedResponse, BridgeHostBootstrapProof,
-    BridgeHostCapabilityRequirements, BridgeHostMemberRecord, BridgeHostRebindPayload,
-    BridgeHostReboundResponse, BridgeHostRevokePayload, BridgeHostRevokedResponse,
-    BridgeHostRuntimeIncarnation, BridgeHostStatusPayload, BridgeHostStatusResponse,
-    BridgeInterruptPayload, BridgeIssueHostBindingDescriptorPayload, BridgeLiveChannelPayload,
-    BridgeLiveControlOutcome, BridgeLiveControlPayload, BridgeLiveControlVerb,
-    BridgeLiveControlledResponse, BridgeLiveOpenPayload, BridgeLiveOpenedResponse,
-    BridgeLiveStatusPayload, BridgeMaterializePayload, BridgeMaterializedResponse,
-    BridgeMemberEventsPage, BridgeMemberHistoryPage, BridgeMemberIncarnation,
-    BridgeMemberOperatorPayload, BridgeMemberReleasedResponse, BridgeMemberRunStopResponse,
-    BridgeMemberRuntimeState, BridgeMobPeerOverlayHandoff, BridgeObservationResponse,
+    BridgeHostCapabilityRequirements, BridgeHostFeaturesPayload, BridgeHostFeaturesResponse,
+    BridgeHostMemberRecord, BridgeHostRebindPayload, BridgeHostReboundResponse,
+    BridgeHostRevokePayload, BridgeHostRevokedResponse, BridgeHostRuntimeIncarnation,
+    BridgeHostStatusPayload, BridgeHostStatusResponse, BridgeInterruptPayload,
+    BridgeIssueHostBindingDescriptorPayload, BridgeLiveChannelPayload, BridgeLiveControlOutcome,
+    BridgeLiveControlPayload, BridgeLiveControlVerb, BridgeLiveControlledResponse,
+    BridgeLiveOpenPayload, BridgeLiveOpenedResponse, BridgeLiveStatusPayload,
+    BridgeMaterializePayload, BridgeMaterializedResponse, BridgeMemberEventsPage,
+    BridgeMemberHistoryPage, BridgeMemberIncarnation, BridgeMemberOperatorPayload,
+    BridgeMemberReleasedResponse, BridgeMemberRunStopResponse, BridgeMemberRuntimeState,
+    BridgeMemberVisibleToolsResponse, BridgeMobPeerOverlayHandoff, BridgeObservationResponse,
     BridgeOutboundTaintPayload, BridgeOutboundTaintTarget, BridgeOutcomeTracking,
     BridgePeerConnectivity, BridgePeerSpec, BridgePeerTrustPayload, BridgePeerWiringPayload,
-    BridgePollEventsPayload, BridgeProtocolVersion, BridgeReadHistoryPayload, BridgeRejectionCause,
+    BridgePollEventsPayload, BridgePromptContextFork, BridgeProtocolVersion,
+    BridgeReadHistoryPayload, BridgeReadVisibleToolsPayload, BridgeRejectionCause,
     BridgeRejectionReply, BridgeReleasePayload, BridgeReply, BridgeRetireOutcome,
     BridgeRetirePayload, BridgeRetireResponse, BridgeRevokeForkedParticipantPayload,
     BridgeRunStartHoldPayload, BridgeRunStartHoldResponse, BridgeRunStartReleasePayload,
@@ -43,7 +45,8 @@ pub use meerkat_contracts::wire::supervisor_bridge::{
     BridgeSupervisorRotationState, BridgeSupervisorRotationSubmit,
     BridgeSupervisorRotationTargetReceipt, BridgeTrackedInputCancelOutcome,
     BridgeTrackedInputCancelPayload, BridgeTrackedInputCancelResponse, BridgeTurnCorrelation,
-    BridgeTurnDirective, BridgeTurnOutcomeAck, BridgeTurnOutcomeRecord, MaterializeLaunchMode,
+    BridgeTurnDirective, BridgeTurnOutcomeAck, BridgeTurnOutcomeRecord,
+    HOST_FEATURE_ADOPTED_FIRST_TURN, HOST_FEATURE_PROMPT_CONTEXT_FORK, MaterializeLaunchMode,
     MaterializeLaunchOutcome, MemberEventCursor, MemberOperatorOp, MemberOperatorOutcome,
     MemberOperatorReply, MemberOperatorSpawnSpec, MemberSessionDisposal, RuntimeReleaseCause,
     SUPERVISOR_BRIDGE_BOOTSTRAP_TOKEN_PARAM, SUPERVISOR_BRIDGE_CURRENT_PROTOCOL_VERSION,
@@ -51,10 +54,10 @@ pub use meerkat_contracts::wire::supervisor_bridge::{
     SUPERVISOR_BRIDGE_PROTOCOL_VERSION, SUPERVISOR_BRIDGE_SUPPORTED_PROTOCOL_VERSIONS,
     SupervisorRotationOperationId, UnsupportedBridgeProtocolVersion, WireEventRow,
     WireFlowTurnOutcome, WireHostBindingDescriptor, WireHostBindingDescriptorKind, WireOpaqueJson,
-    canonicalize_bridge_address, decode_bridge_command, decode_bridge_rejection_reply,
-    decode_legacy_v1_raw_string_rejection, supervisor_bridge_current_protocol_version,
-    supervisor_bridge_default_protocol_version, supervisor_bridge_protocol_version_supported,
-    supervisor_bridge_supported_protocol_versions,
+    canonicalize_bridge_address, decode_bridge_command, decode_bridge_command_accepting,
+    decode_bridge_rejection_reply, decode_legacy_v1_raw_string_rejection,
+    supervisor_bridge_current_protocol_version, supervisor_bridge_default_protocol_version,
+    supervisor_bridge_protocol_version_supported, supervisor_bridge_supported_protocol_versions,
 };
 
 // Live-family wire vocabulary (phase 6b): the mob's identity-addressed live
@@ -307,6 +310,12 @@ impl_from_bridge_reply!(
     "member_released"
 );
 impl_from_bridge_reply!(BridgeHostStatusResponse, HostStatus, "host_status");
+impl_from_bridge_reply!(BridgeHostFeaturesResponse, HostFeatures, "host_features");
+impl_from_bridge_reply!(
+    BridgeMemberVisibleToolsResponse,
+    MemberVisibleTools,
+    "member_visible_tools"
+);
 impl_from_bridge_reply!(
     BridgeHostBindingDescriptorIssuedResponse,
     HostBindingDescriptorIssued,
@@ -420,6 +429,8 @@ enum ExpectedBridgeReply {
     SupervisorRotation,
     ForkedParticipantCreated,
     ForkedParticipantRevoked,
+    HostFeatures,
+    MemberVisibleTools,
     Rejected,
     Unknown,
 }
@@ -453,6 +464,8 @@ impl ExpectedBridgeReply {
             Self::SupervisorRotation => "supervisor_rotation",
             Self::ForkedParticipantCreated => "forked_participant_created",
             Self::ForkedParticipantRevoked => "forked_participant_revoked",
+            Self::HostFeatures => "host_features",
+            Self::MemberVisibleTools => "member_visible_tools",
             Self::Rejected => "rejected",
             Self::Unknown => "unknown",
         }
@@ -510,6 +523,8 @@ fn expected_reply_kind(command: &BridgeCommand) -> ExpectedBridgeReply {
         BridgeCommand::ObserveSupervisorRotation(_) => ExpectedBridgeReply::SupervisorRotation,
         BridgeCommand::CreateForkedParticipant(_) => ExpectedBridgeReply::ForkedParticipantCreated,
         BridgeCommand::RevokeForkedParticipant(_) => ExpectedBridgeReply::ForkedParticipantRevoked,
+        BridgeCommand::HostFeatures(_) => ExpectedBridgeReply::HostFeatures,
+        BridgeCommand::ReadMemberVisibleTools(_) => ExpectedBridgeReply::MemberVisibleTools,
         _ => ExpectedBridgeReply::Unknown,
     }
 }
@@ -548,6 +563,8 @@ fn reply_kind(reply: &BridgeReply) -> ExpectedBridgeReply {
         BridgeReply::SupervisorRotation(_) => ExpectedBridgeReply::SupervisorRotation,
         BridgeReply::ForkedParticipantCreated(_) => ExpectedBridgeReply::ForkedParticipantCreated,
         BridgeReply::ForkedParticipantRevoked(_) => ExpectedBridgeReply::ForkedParticipantRevoked,
+        BridgeReply::HostFeatures(_) => ExpectedBridgeReply::HostFeatures,
+        BridgeReply::MemberVisibleTools(_) => ExpectedBridgeReply::MemberVisibleTools,
         BridgeReply::Rejected { .. } => ExpectedBridgeReply::Rejected,
         _ => ExpectedBridgeReply::Unknown,
     }
@@ -1049,6 +1066,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
+                durable: false,
             },
             definition_extract: PortableDefinitionExtract::default(),
             overlay: PortableSpawnOverlay {
@@ -1081,6 +1099,8 @@ mod tests {
             spec_digest: "d".repeat(64),
             launch: MaterializeLaunchMode::Fresh {},
             forked_participant_attachment: None,
+            prompt_context_fork: None,
+            report_adopted_first_turn: false,
         }))
     }
 
@@ -1095,6 +1115,7 @@ mod tests {
             engine_version: "0.7.22".to_string(),
             launch_outcome: MaterializeLaunchOutcome::Fresh,
             resolved_auth_binding: None,
+            adopted_first_turn: None,
         });
         let value = serde_json::to_value(&reply).expect("serialize materialized reply");
         let ack: BridgeMaterializedResponse =

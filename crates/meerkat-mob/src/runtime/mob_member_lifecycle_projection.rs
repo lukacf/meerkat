@@ -67,6 +67,9 @@ impl CanonicalMemberSnapshotMaterial {
             non_portable_disabled: None,
             preview_unavailable: None,
             registration_refusal: self.registration_refusal,
+            // Volatile actor custody, not machine lifecycle: the status read
+            // adds the member's deferral from the published view.
+            custody_deferred: None,
         }
         .with_current_bridge_session_id(self.current_bridge_session_id.clone())
     }

@@ -1,9 +1,9 @@
 // Generated wire types for Meerkat SDK
-// Contract version: 0.9.4
+// Contract version: 0.9.5
 
 import { MeerkatError } from "./errors.js";
 
-export const CONTRACT_VERSION = "0.9.4";
+export const CONTRACT_VERSION = "0.9.5";
 
 export type Value = unknown;
 
@@ -617,6 +617,7 @@ export interface SessionExternalEventEnvelopePeerResponseTerminal {
 export type SessionExternalEventEnvelope = SessionExternalEventEnvelopeGenericJson | SessionExternalEventEnvelopePeerResponseTerminal;
 
 export interface SessionExternalEventParamsGenericJson {
+  idempotency_key?: string | null;
   session_id: string;
   blocks?: WireContentBlock[] | null;
   event_type: string;
@@ -625,6 +626,7 @@ export interface SessionExternalEventParamsGenericJson {
 }
 
 export interface SessionExternalEventParamsPeerResponseTerminal {
+  idempotency_key?: string | null;
   session_id: string;
   display_name?: PeerName | null;
   kind: "peer_response_terminal";
@@ -1738,9 +1740,32 @@ export interface MobLifecycleParams {
   mob_id: string;
 }
 
+export interface WireMobDestroyMemberRefusal {
+  member: string;
+  refusal: WireMemberReloadRefusal;
+}
+
+export interface WireMobDestroyReport {
+  errors?: string[];
+  events_cleared?: boolean;
+  force_destroyed_members?: string[];
+  member_reload_refusals?: WireMobDestroyMemberRefusal[];
+  metadata_scrubbed?: boolean;
+  namespace_cleaned?: boolean;
+  orphaned_remote_members?: string[];
+  reloaded_members?: string[];
+  remote_cleanup_deadline_exceeded?: boolean;
+}
+
+export interface WireMobDestroyIncompleteData {
+  code: string;
+  destroy_report: WireMobDestroyReport;
+  retryable: boolean;
+}
+
 export interface MobLifecycleResult {
   action: "stop" | "resume" | "complete" | "reset" | "destroy";
-  destroy_report?: unknown;
+  destroy_report?: WireMobDestroyReport | null;
   mob_id: string;
   ok: boolean;
   stop_report?: unknown;
@@ -1839,6 +1864,11 @@ export interface WireMemberProgressSnapshot {
   run_state: "idle" | "run_open" | "unknown";
 }
 
+export interface WireMemberCustodyDeferral {
+  cause: WireMemberCustodyDeferralCause;
+  restore: WireMemberCustodyRestore;
+}
+
 export interface WireMobToolConfig {
   builtins?: boolean;
   comms?: boolean;
@@ -1856,6 +1886,7 @@ export interface WireMobToolConfig {
 export interface WireMobProfile {
   auto_compact_threshold?: number | null;
   backend?: WireMobBackendKind | null;
+  durable?: boolean;
   external_addressable?: boolean;
   image_generation_provider?: Provider | null;
   max_inline_peer_notifications?: number | null;
@@ -2093,12 +2124,20 @@ export interface MobMemberSendParams {
   agent_identity: string;
   content: WireContentInput;
   handling_mode?: WireHandlingMode;
+  idempotency_key?: string | null;
   mob_id: string;
   render_metadata?: Record<string, unknown> | null;
 }
 
+export interface WireContinuationReceipt {
+  committed_at_ms: number;
+  delivery_id: string;
+  status: WireContinuationStatus;
+}
+
 export interface MobMemberSendResult {
   agent_identity: string;
+  continuation?: WireContinuationReceipt | null;
   handling_mode: WireHandlingMode;
   member_ref: WireMemberRef;
   mob_id: string;
@@ -2245,6 +2284,7 @@ export interface MobTurnStartParams {
   provider?: string | null;
   provider_params?: Record<string, unknown> | null;
   self_hosted_server_id?: string | null;
+  session_events?: boolean | null;
   skill_refs?: SkillKey[] | null;
   structured_output_retries?: number | null;
   system_prompt?: string | null;
@@ -2257,6 +2297,7 @@ export interface MobMemberStatusResult {
   comms_reachability?: WireReachability | null;
   control_reachability?: WireReachability | null;
   current_session_id?: string | null;
+  custody_deferred?: WireMemberCustodyDeferral | null;
   detached_jobs?: Record<string, unknown> | null;
   error?: string | null;
   external_member?: unknown;
@@ -2285,7 +2326,7 @@ export interface MobSnapshotResult {
 }
 
 export interface MobDestroyResult {
-  destroy_report: unknown;
+  destroy_report: WireMobDestroyReport;
   mob_id: string;
   ok: boolean;
 }
@@ -2709,6 +2750,7 @@ export interface MobOrchestratorInput {
 export interface MobProfileInput {
   auto_compact_threshold?: number | null;
   backend?: WireMobBackendKind | null;
+  durable?: boolean;
   external_addressable?: boolean;
   image_generation_provider?: Provider | null;
   max_inline_peer_notifications?: number | null;
@@ -2917,6 +2959,7 @@ export interface OutputSchema {
 
 export interface PortableProfile {
   auto_compact_threshold?: number | null;
+  durable?: boolean;
   external_addressable?: boolean;
   image_generation_provider?: Provider | null;
   max_inline_peer_notifications?: number | null;
@@ -3538,6 +3581,8 @@ export type ForkInstructionRefusalCause = ForkInstructionRefusalCausePolicyRefus
 export interface ForkInstructionRefusal {
   cause: ForkInstructionRefusalCause;
   keys: unknown[][];
+  skills?: SkillKey[];
+  unreadable_skill_loads?: number;
 }
 
 export type ToolConfigChangeDomain = "tool_scope" | "deferred_catalog";
@@ -3754,6 +3799,18 @@ export type WireMemberState = unknown;
 
 export type WireMobMemberStatus = "active" | "retiring" | "broken" | "completed" | "unknown";
 
+export interface WireMemberReloadRefusalRepairBlocked {
+  evidence_digest?: string | null;
+  kind: "repair_blocked";
+  reason: string;
+}
+
+export interface WireMemberReloadRefusalUnknown {
+  kind: "unknown";
+}
+
+export type WireMemberReloadRefusal = WireMemberReloadRefusalRepairBlocked | WireMemberReloadRefusalUnknown;
+
 export type WireMobRuntimeMode = "autonomous_host" | "turn_driven";
 
 export type MobSpawnManyFailureCause = "profile_not_found" | "member_not_found" | "member_already_exists" | "not_externally_addressable" | "invalid_transition" | "wiring_error" | "bridge_command_rejected" | "member_restore_failed" | "kickoff_wait_timed_out" | "ready_wait_timed_out" | "definition_error" | "flow_not_found" | "flow_failed" | "run_not_found" | "run_canceled" | "flow_turn_timed_out" | "frame_depth_limit_exceeded" | "frame_atomic_persistence_unavailable" | "spec_revision_conflict" | "schema_validation" | "insufficient_targets" | "topology_violation" | "bridge_delivery_rejected" | "supervisor_escalation" | "unsupported_for_mode" | "missing_member_capability" | "reset_barrier" | "storage_error" | "session_error" | "comms_error" | "callback_pending" | "stale_fence_token" | "stale_event_cursor" | "work_not_found" | "internal";
@@ -3890,6 +3947,31 @@ export type WireNonPortableResourceKind = "rust_bundles" | "per_spawn_external_t
 export type WireMemberPreviewUnavailable = "observation_deadline" | "read_failed" | "session_absent" | "not_observed_while_retiring";
 
 export type WireMemberRegistrationHookCall = "select_destination" | "select_agent_mandate" | "prepare_member_surface" | "verify_member_surface";
+
+export interface WireContinuationStatusPending {
+  state: "pending";
+}
+
+export interface WireContinuationStatusAdmitted {
+  input_id: string;
+  session_id: string;
+  state: "admitted";
+}
+
+export interface WireContinuationStatusStranded {
+  state: "stranded";
+}
+
+export interface WireContinuationStatusRefused {
+  reason: string;
+  state: "refused";
+}
+
+export type WireContinuationStatus = WireContinuationStatusPending | WireContinuationStatusAdmitted | WireContinuationStatusStranded | WireContinuationStatusRefused;
+
+export type WireMemberCustodyRestore = "startup_binding" | "cleanup_delivery";
+
+export type WireMemberCustodyDeferralCause = "served_elsewhere" | "hosting_unavailable" | "durable_tail_unprovable";
 
 export type WireMobRunStatus = "pending" | "running" | "completed" | "failed" | "canceled";
 
@@ -4808,7 +4890,9 @@ export interface BridgeCommandMaterializeMember {
   forked_participant_attachment?: Record<string, unknown> | null;
   generation: number;
   launch: { mode: "fresh" } | Record<string, unknown>;
+  prompt_context_fork?: Record<string, unknown> | null;
   protocol_version: BridgeProtocolVersion;
+  report_adopted_first_turn?: boolean;
   spec: Record<string, unknown>;
   spec_digest: string;
   supervisor: BridgePeerSpec;
@@ -4915,7 +4999,24 @@ export interface BridgeCommandRevokeForkedParticipant {
   supervisor: BridgePeerSpec;
 }
 
-export type BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandCancelTrackedMemberInput | BridgeCommandStopMemberRun | BridgeCommandHoldRunStarts | BridgeCommandReleaseRunStarts | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandReadMemberHistory | BridgeCommandPollMemberEvents | BridgeCommandOpenMemberLiveChannel | BridgeCommandCloseMemberLiveChannel | BridgeCommandMemberLiveChannelStatus | BridgeCommandControlMemberLiveChannel | BridgeCommandBindHost | BridgeCommandRebindHost | BridgeCommandRevokeHost | BridgeCommandMaterializeMember | BridgeCommandReleaseMember | BridgeCommandInstallPeerTrust | BridgeCommandRemovePeerTrust | BridgeCommandHostStatus | BridgeCommandIssueHostBindingDescriptor | BridgeCommandMemberOperatorRequest | BridgeCommandObserveSupervisorRotation | BridgeCommandCreateForkedParticipant | BridgeCommandRevokeForkedParticipant;
+export interface BridgeCommandHostFeatures {
+  binding_generation: number;
+  command: "host_features";
+  epoch: number;
+  mob_id: string;
+  protocol_version: BridgeProtocolVersion;
+  supervisor: BridgePeerSpec;
+}
+
+export interface BridgeCommandReadMemberVisibleTools {
+  command: "read_member_visible_tools";
+  epoch: number;
+  expected_member: BridgeMemberIncarnation;
+  protocol_version: BridgeProtocolVersion;
+  supervisor: BridgePeerSpec;
+}
+
+export type BridgeCommand = BridgeCommandBindMember | BridgeCommandAuthorizeSupervisor | BridgeCommandRevokeSupervisor | BridgeCommandDeliverMemberInput | BridgeCommandObserveMember | BridgeCommandInterruptMember | BridgeCommandHardCancelMember | BridgeCommandCancelTrackedMemberInput | BridgeCommandStopMemberRun | BridgeCommandHoldRunStarts | BridgeCommandReleaseRunStarts | BridgeCommandRetireMember | BridgeCommandDestroyMember | BridgeCommandWireMember | BridgeCommandUnwireMember | BridgeCommandDeclareMemberOutboundTaint | BridgeCommandReadMemberHistory | BridgeCommandPollMemberEvents | BridgeCommandOpenMemberLiveChannel | BridgeCommandCloseMemberLiveChannel | BridgeCommandMemberLiveChannelStatus | BridgeCommandControlMemberLiveChannel | BridgeCommandBindHost | BridgeCommandRebindHost | BridgeCommandRevokeHost | BridgeCommandMaterializeMember | BridgeCommandReleaseMember | BridgeCommandInstallPeerTrust | BridgeCommandRemovePeerTrust | BridgeCommandHostStatus | BridgeCommandIssueHostBindingDescriptor | BridgeCommandMemberOperatorRequest | BridgeCommandObserveSupervisorRotation | BridgeCommandCreateForkedParticipant | BridgeCommandRevokeForkedParticipant | BridgeCommandHostFeatures | BridgeCommandReadMemberVisibleTools;
 
 export interface BridgeDeliveryOutcomeAccepted {
   outcome: "accepted";
@@ -5256,6 +5357,7 @@ export interface BridgeReplyMemberEventsPage {
 }
 
 export interface BridgeReplyMemberMaterialized {
+  adopted_first_turn?: "owed" | "started" | null;
   advertised_address: string;
   engine_version: string;
   launch_outcome: "fresh" | "resumed_live" | "resumed_from_snapshot";
@@ -5323,7 +5425,17 @@ export interface BridgeReplyForkedParticipantRevoked {
   result: "forked_participant_revoked";
 }
 
-export type BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyTrackedInputCancelled | BridgeReplyMemberRunStopped | BridgeReplyRunStartsHeld | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotationFound | BridgeReplySupervisorRotationNotFound | BridgeReplyRejected | BridgeReplyBindHost | BridgeReplyHostRebound | BridgeReplyHostRevoked | BridgeReplyMemberHistoryPage | BridgeReplyMemberEventsPage | BridgeReplyMemberMaterialized | BridgeReplyMemberReleased | BridgeReplyHostStatus | BridgeReplyHostBindingDescriptorIssued | BridgeReplyMemberLiveChannelOpened | BridgeReplyMemberLiveChannelClosed | BridgeReplyMemberLiveChannelStatusReport | BridgeReplyMemberLiveChannelControlled | BridgeReplyMemberOperatorReply | BridgeReplyForkedParticipantCreated | BridgeReplyForkedParticipantRevoked;
+export interface BridgeReplyHostFeatures {
+  features?: string[];
+  result: "host_features";
+}
+
+export interface BridgeReplyMemberVisibleTools {
+  names?: string[] | null;
+  result: "member_visible_tools";
+}
+
+export type BridgeReply = BridgeReplyBindMember | BridgeReplyAck | BridgeReplyObservation | BridgeReplyDelivery | BridgeReplyTrackedInputCancelled | BridgeReplyMemberRunStopped | BridgeReplyRunStartsHeld | BridgeReplyRetire | BridgeReplyDestroy | BridgeReplySupervisorRotationFound | BridgeReplySupervisorRotationNotFound | BridgeReplyRejected | BridgeReplyBindHost | BridgeReplyHostRebound | BridgeReplyHostRevoked | BridgeReplyMemberHistoryPage | BridgeReplyMemberEventsPage | BridgeReplyMemberMaterialized | BridgeReplyMemberReleased | BridgeReplyHostStatus | BridgeReplyHostBindingDescriptorIssued | BridgeReplyMemberLiveChannelOpened | BridgeReplyMemberLiveChannelClosed | BridgeReplyMemberLiveChannelStatusReport | BridgeReplyMemberLiveChannelControlled | BridgeReplyMemberOperatorReply | BridgeReplyForkedParticipantCreated | BridgeReplyForkedParticipantRevoked | BridgeReplyHostFeatures | BridgeReplyMemberVisibleTools;
 
 export interface ContentBlockText {
   text: string;
@@ -5682,7 +5794,10 @@ export interface WireLiveTransportBootstrapUnknown {
 
 export type WireLiveTransportBootstrap = WireLiveTransportBootstrapWebsocket | WireLiveTransportBootstrapWebrtc | WireLiveTransportBootstrapUnknown;
 
+export type WireLiveOpenAdvisory = "staged_prompt_refused" | string;
+
 export interface LiveOpenResult {
+  advisories?: WireLiveOpenAdvisory[];
   capabilities: WireLiveChannelCapabilities;
   channel_id: string;
   continuity: WireLiveContinuityMode;
@@ -6780,6 +6895,12 @@ export interface WireProviderMetaGemini {
   thoughtSignature: string;
 }
 
+export interface WireProviderMetaGeminiFunctionCall {
+  provider: "gemini_function_call";
+  provider_id: string;
+  thoughtSignature?: string | null;
+}
+
 export interface WireProviderMetaOpenAi {
   encrypted_content?: string | null;
   id: string;
@@ -6804,7 +6925,7 @@ export interface WireProviderMetaUnknown {
   provider: "unknown";
 }
 
-export type WireProviderMeta = WireProviderMetaAnthropic | WireProviderMetaAnthropicRedacted | WireProviderMetaAnthropicCompaction | WireProviderMetaGemini | WireProviderMetaOpenAi | WireProviderMetaOpenAiResponse | WireProviderMetaOpenAiAssistantMessage | WireProviderMetaUnknown;
+export type WireProviderMeta = WireProviderMetaAnthropic | WireProviderMetaAnthropicRedacted | WireProviderMetaAnthropicCompaction | WireProviderMetaGemini | WireProviderMetaGeminiFunctionCall | WireProviderMetaOpenAi | WireProviderMetaOpenAiResponse | WireProviderMetaOpenAiAssistantMessage | WireProviderMetaUnknown;
 
 export interface WireTranscriptSourceSpoken {
   kind: "spoken";
@@ -6893,6 +7014,59 @@ export type TranscriptRewriteSelection = TranscriptRewriteSelectionMessageRange 
 export type BackgroundJobTerminalStatus = "completed" | "failed" | "aborted" | "cancelled" | "retired" | "terminated";
 
 export type CommsNoticeKind = string;
+
+export type ForkNoticeKind = "transcript" | "prompt_context";
+
+export interface MobMemberBinding {
+  member: string;
+  mob_id: string;
+  role: string;
+}
+
+export interface ForkNoticeSource {
+  member?: MobMemberBinding | null;
+  session_id?: string | null;
+}
+
+export type ForkNoticeSystemPrompt = "not_carried" | "not_applicable";
+
+export type ForkToolsNotComparedReason = "source_not_live" | "placed_source" | "member_host_unsupported" | "seed_unreadable";
+
+export interface ForkNoticeToolsCompared {
+  added?: ToolName[];
+  comparison: "compared";
+  omitted?: number;
+  removed?: ToolName[];
+}
+
+export interface ForkNoticeToolsNotCompared {
+  comparison: "not_compared";
+  reason: ForkToolsNotComparedReason;
+}
+
+export type ForkNoticeTools = ForkNoticeToolsCompared | ForkNoticeToolsNotCompared;
+
+export interface InstructionKeyRef {
+  key: string;
+  namespace: string;
+}
+
+export interface ForkBoundaryNotice {
+  child_session_id: string;
+  earlier_rows_omitted?: number;
+  fork: ForkNoticeKind;
+  injected_rows_carried?: number;
+  injected_rows_removed?: number;
+  instructions_added?: InstructionKeyRef[];
+  instructions_carried?: InstructionKeyRef[];
+  instructions_removed?: InstructionKeyRef[];
+  skills_carried?: SkillKey[];
+  skills_removed?: SkillKey[];
+  source: ForkNoticeSource;
+  source_system_prompt: ForkNoticeSystemPrompt;
+  summary: string;
+  tools: ForkNoticeTools;
+}
 
 export type InteractionId = string;
 
@@ -7052,13 +7226,31 @@ export interface SystemNoticeBlockToolProcessInterrupted {
   type: "tool_process_interrupted";
 }
 
+export interface SystemNoticeBlockForkBoundary {
+  child_session_id: string;
+  earlier_rows_omitted?: number;
+  fork: ForkNoticeKind;
+  injected_rows_carried?: number;
+  injected_rows_removed?: number;
+  instructions_added?: InstructionKeyRef[];
+  instructions_carried?: InstructionKeyRef[];
+  instructions_removed?: InstructionKeyRef[];
+  skills_carried?: SkillKey[];
+  skills_removed?: SkillKey[];
+  source: ForkNoticeSource;
+  source_system_prompt: ForkNoticeSystemPrompt;
+  summary: string;
+  tools: ForkNoticeTools;
+  type: "fork_boundary";
+}
+
 export interface SystemNoticeBlockUnknown {
   payload?: unknown;
   summary?: string | null;
   type: "unknown";
 }
 
-export type SystemNoticeBlock = SystemNoticeBlockComms | SystemNoticeBlockExternalEvent | SystemNoticeBlockToolConfig | SystemNoticeBlockMcp | SystemNoticeBlockBackgroundJob | SystemNoticeBlockAuth | SystemNoticeBlockRuntimeNotice | SystemNoticeBlockToolProcessInterrupted | SystemNoticeBlockUnknown;
+export type SystemNoticeBlock = SystemNoticeBlockComms | SystemNoticeBlockExternalEvent | SystemNoticeBlockToolConfig | SystemNoticeBlockMcp | SystemNoticeBlockBackgroundJob | SystemNoticeBlockAuth | SystemNoticeBlockRuntimeNotice | SystemNoticeBlockToolProcessInterrupted | SystemNoticeBlockForkBoundary | SystemNoticeBlockUnknown;
 
 export type SystemNoticeKind = "generic" | "comms" | "external_event" | "mcp_pending" | "mcp" | "background_job" | "tool_scope" | "tool_scope_warning" | "auth_reauth_required" | "tool_process_recovery";
 

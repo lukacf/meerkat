@@ -34,10 +34,13 @@ use meerkat_mob::AgentIdentity;
 use meerkat_mob::MobError;
 use meerkat_mob::machines::mob_machine::MobSpawnMemberAdmissionKind;
 use meerkat_mob::runtime::bridge_protocol::{
-    BridgeRejectionCause, MaterializeLaunchMode, PortableSystemPrompt, portable_member_spec_digest,
+    BridgeAdoptedFirstTurn, BridgeDeliveryRejectionCause, BridgeProtocolVersion,
+    BridgeRejectionCause, HOST_FEATURE_ADOPTED_FIRST_TURN, MaterializeLaunchMode,
+    PortableSystemPrompt, portable_member_spec_digest,
 };
 use support::{
-    REAL_COMMS_TEST_LOCK, create_controlling_mob, placed_spawn_spec, spawn_scripted_host_peer,
+    REAL_COMMS_TEST_LOCK, create_controlling_mob, member_identity_of, placed_spawn_spec,
+    spawn_peer_comms_endpoint, spawn_scripted_host_peer, spawn_scripted_member_turn_responder,
 };
 
 const SETTLE: Duration = Duration::from_secs(10);
@@ -786,6 +789,632 @@ async fn budget_rides_the_digest_covered_overlay_and_nowhere_else() {
     assert!(
         decode.is_err(),
         "BridgeMaterializePayload must deny_unknown_fields-reject the deleted budget_seed"
+    );
+
+    scripted.shutdown();
+}
+
+// ===========================================================================
+// A turn-driven placed spawn with an initial message delivers that message
+// through the placed delivery lane an ordinary member send uses.
+// ===========================================================================
+
+/// A scripted member endpoint for `identity`: the scripted host's acks name
+/// it, and its responder records and answers member-addressed deliveries.
+async fn scripted_member(
+    scripted: &support::ScriptedHostPeer,
+    identity: &str,
+    endpoint_name: &str,
+) -> support::ScriptedMemberTurnResponder {
+    let member_endpoint =
+        std::sync::Arc::new(spawn_peer_comms_endpoint(endpoint_name, true, None).await);
+    let responder = spawn_scripted_member_turn_responder(std::sync::Arc::clone(&member_endpoint));
+    scripted.script_member_identity(identity, member_identity_of(&member_endpoint));
+    scripted.bind_member_endpoint(identity, member_endpoint);
+    responder
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_driven_placed_spawn_delivers_its_initial_message_once() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let scripted = spawn_scripted_host_peer("turn-driven-initial-host").await;
+    let member = scripted_member(&scripted, "td-initial", "turn-driven-initial-member").await;
+    let controlling = create_controlling_mob("turn-driven-initial-message").await;
+    let report = controlling.bind_scripted(&scripted).await;
+    let message = "PLACED_INITIAL_MESSAGE token-sigma";
+
+    let spec = placed_spawn_spec("worker", "td-initial", &report.host_id)
+        .with_runtime_mode(meerkat_mob::MobRuntimeMode::TurnDriven)
+        .with_initial_message(message.to_string());
+    let spawned = tokio::time::timeout(SETTLE, controlling.handle.spawn_spec(spec))
+        .await
+        .expect("the placed spawn settles")
+        .expect("a turn-driven placed spawn with an initial message commits");
+    assert_eq!(spawned.agent_identity, AgentIdentity::from("td-initial"));
+
+    let deliveries = member.received_deliveries();
+    assert_eq!(
+        deliveries.len(),
+        1,
+        "the initial message is delivered to the member exactly once"
+    );
+    let delivery = &deliveries[0];
+    assert!(
+        delivery.content.text_content().contains(message),
+        "the delivery carries the initial message: {:?}",
+        delivery.content
+    );
+    let materialized = scripted.received_materialize_payloads();
+    let expected_member = delivery
+        .expected_member
+        .as_ref()
+        .expect("a placed delivery names the exact member incarnation");
+    assert_eq!(expected_member.generation, materialized[0].generation);
+    assert_eq!(expected_member.fence_token, materialized[0].fence_token);
+    assert_eq!(member.admitted_delivery_count(), 1);
+
+    member.shutdown();
+    scripted.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_initial_message_fails_the_turn_driven_placed_spawn_and_settles() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let scripted = spawn_scripted_host_peer("turn-driven-refused-host").await;
+    let member = scripted_member(&scripted, "td-refused", "turn-driven-refused-member").await;
+    member.refuse_next_delivery("scripted delivery refusal");
+    let controlling = create_controlling_mob("turn-driven-refused-message").await;
+    let report = controlling.bind_scripted(&scripted).await;
+    let message = "PLACED_INITIAL_MESSAGE token-rho";
+
+    let spec = placed_spawn_spec("worker", "td-refused", &report.host_id)
+        .with_runtime_mode(meerkat_mob::MobRuntimeMode::TurnDriven)
+        .with_initial_message(message.to_string());
+    let error = tokio::time::timeout(SETTLE, controlling.handle.spawn_spec(spec))
+        .await
+        .expect("the placed spawn settles")
+        .expect_err("a refused initial message fails the spawn");
+    assert!(
+        matches!(
+            &error,
+            MobError::BridgeDeliveryRejected { cause, .. }
+                if matches!(
+                    cause.as_ref(),
+                    BridgeDeliveryRejectionCause::Internal { detail }
+                        if detail == "scripted delivery refusal"
+                )
+        ),
+        "the spawn fails with the member's typed delivery refusal, got {error:?}"
+    );
+    let deliveries = member.received_deliveries();
+    assert_eq!(
+        deliveries.len(),
+        1,
+        "the refused initial message was delivered once and not resent"
+    );
+    assert!(deliveries[0].content.text_content().contains(message));
+
+    // The spawn's compensation settles: the member leaves the roster and its
+    // host releases the materialized member exactly once.
+    tokio::time::timeout(SETTLE, async {
+        loop {
+            if scripted.scripted_member_rows().is_empty()
+                && !scripted.received_release_payloads().is_empty()
+                && controlling.handle.list_members().await.is_empty()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the failed spawn's compensation settles");
+    let releases = scripted.received_release_payloads();
+    assert_eq!(releases.len(), 1, "the member is released exactly once");
+    assert_eq!(releases[0].agent_identity, "td-refused");
+
+    // A graph-scoped lifecycle control proceeds after that settlement.
+    tokio::time::timeout(SETTLE, controlling.handle.stop())
+        .await
+        .expect("stop proceeds after the compensation settled")
+        .expect("stop succeeds");
+    tokio::time::timeout(SETTLE, controlling.handle.resume())
+        .await
+        .expect("resume proceeds after the compensation settled")
+        .expect("resume succeeds");
+
+    // The identity can be spawned again, and its initial message is delivered.
+    let again = "PLACED_INITIAL_MESSAGE token-rho-again";
+    let spec = placed_spawn_spec("worker", "td-refused", &report.host_id)
+        .with_runtime_mode(meerkat_mob::MobRuntimeMode::TurnDriven)
+        .with_initial_message(again.to_string());
+    tokio::time::timeout(SETTLE, controlling.handle.spawn_spec(spec))
+        .await
+        .expect("the second placed spawn settles")
+        .expect("the identity can be spawned again");
+    let deliveries = member.received_deliveries();
+    assert_eq!(deliveries.len(), 2);
+    assert!(deliveries[1].content.text_content().contains(again));
+    assert_eq!(member.admitted_delivery_count(), 1);
+
+    member.shutdown();
+    scripted.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_driven_placed_spawn_without_a_message_sends_no_delivery() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let scripted = spawn_scripted_host_peer("turn-driven-idle-host").await;
+    let member = scripted_member(&scripted, "td-idle", "turn-driven-idle-member").await;
+    let controlling = create_controlling_mob("turn-driven-idle").await;
+    let report = controlling.bind_scripted(&scripted).await;
+
+    let spec = placed_spawn_spec("worker", "td-idle", &report.host_id)
+        .with_runtime_mode(meerkat_mob::MobRuntimeMode::TurnDriven);
+    tokio::time::timeout(SETTLE, controlling.handle.spawn_spec(spec))
+        .await
+        .expect("the placed spawn settles")
+        .expect("a turn-driven placed spawn without a message commits");
+    assert!(
+        member.received_deliveries().is_empty(),
+        "no initial turn runs without an initial message"
+    );
+
+    member.shutdown();
+    scripted.shutdown();
+}
+
+// ===========================================================================
+// A placed plain resume delivers the member's first turn only while the
+// adopted session owes it. Only the member host can read the session, so a
+// host that serves the report (protocol 7) puts it on the materialize ack.
+// ===========================================================================
+
+/// A placed spawn of `identity` on `host_id` that resumes an existing
+/// session on its member host.
+fn placed_resume_spec(
+    identity: &str,
+    host_id: &str,
+    runtime_mode: meerkat_mob::MobRuntimeMode,
+    initial_message: Option<&str>,
+) -> meerkat_mob::SpawnMemberSpec {
+    let mut spec = placed_spawn_spec("worker", identity, host_id).with_runtime_mode(runtime_mode);
+    spec.launch_mode = meerkat_mob::launch::MemberLaunchMode::Resume {
+        bridge_session_id: meerkat_core::SessionId::new(),
+        resume_from_role: None,
+    };
+    match initial_message {
+        Some(message) => spec.with_initial_message(message.to_string()),
+        None => spec,
+    }
+}
+
+/// The placed kickoff obligations the controller recorded for `identity`.
+async fn kickoff_obligations(controlling: &support::ControllingMob, identity: &str) -> usize {
+    controlling
+        .storage_events
+        .replay_all()
+        .await
+        .expect("replay mob events")
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.kind,
+                meerkat_mob::event::MobEventKind::PlacedKickoffObligationRecorded { obligation }
+                    if obligation.agent_identity.as_str() == identity
+            )
+        })
+        .count()
+}
+
+/// Whether the committed carrier of `identity` waives its kickoff.
+async fn carrier_waives_first_turn(controlling: &support::ControllingMob, identity: &str) -> bool {
+    controlling
+        .storage_metadata
+        .list_placed_spawns(&controlling.mob_id)
+        .await
+        .expect("list placed carriers")
+        .iter()
+        .find(|carrier| carrier.agent_identity == identity)
+        .is_some_and(|carrier| {
+            matches!(
+                &carrier.phase,
+                meerkat_mob::store::PlacedSpawnCarrierPhase::Committed(commit)
+                    if commit.adopted_first_turn_started
+            )
+        })
+}
+
+/// The materialize payload the scripted host received for `identity`, last
+/// first.
+fn last_materialize(
+    scripted: &support::ScriptedHostPeer,
+    identity: &str,
+) -> meerkat_mob::runtime::bridge_protocol::BridgeMaterializePayload {
+    scripted
+        .received_materialize_payloads()
+        .into_iter()
+        .rev()
+        .find(|payload| payload.spec.agent_identity == identity)
+        .expect("a materialize payload for the identity")
+}
+
+/// Wait until `member` received `count` deliveries, then a short quiet
+/// period, and return what it received.
+async fn settled_deliveries(
+    member: &support::ScriptedMemberTurnResponder,
+    count: usize,
+) -> Vec<meerkat_mob::runtime::bridge_protocol::BridgeDeliveryPayload> {
+    tokio::time::timeout(SETTLE, async {
+        while member.received_deliveries().len() < count {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("the expected deliveries arrive");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    member.received_deliveries()
+}
+
+fn serve_adopted_first_turn(scripted: &support::ScriptedHostPeer) {
+    scripted.serve_v7(support::ScriptedV7Mode::Features(vec![
+        HOST_FEATURE_ADOPTED_FIRST_TURN.to_string(),
+    ]));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_placed_resume_of_a_started_session_runs_no_kickoff() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let scripted = spawn_scripted_host_peer("resume-started-host").await;
+    serve_adopted_first_turn(&scripted);
+    let with_message = scripted_member(&scripted, "resumed-with", "resume-started-with").await;
+    let without_message =
+        scripted_member(&scripted, "resumed-without", "resume-started-without").await;
+    scripted.script_adopted_first_turn("resumed-with", BridgeAdoptedFirstTurn::Started);
+    scripted.script_adopted_first_turn("resumed-without", BridgeAdoptedFirstTurn::Started);
+    let controlling = create_controlling_mob("resume-started").await;
+    let report = controlling.bind_scripted(&scripted).await;
+
+    for (identity, member, message) in [
+        (
+            "resumed-with",
+            &with_message,
+            Some("PLACED_RESUME_MESSAGE token-psi"),
+        ),
+        ("resumed-without", &without_message, None),
+    ] {
+        tokio::time::timeout(
+            SETTLE,
+            controlling.handle.spawn_spec(placed_resume_spec(
+                identity,
+                &report.host_id,
+                meerkat_mob::MobRuntimeMode::AutonomousHost,
+                message,
+            )),
+        )
+        .await
+        .expect("the placed resume settles")
+        .expect("a placed resume of a started session commits");
+        let payload = last_materialize(&scripted, identity);
+        assert!(
+            payload.report_adopted_first_turn,
+            "a plain resume asks its member host for the adopted first turn"
+        );
+        assert_eq!(payload.protocol_version, BridgeProtocolVersion::V7);
+        assert_eq!(
+            kickoff_obligations(&controlling, identity).await,
+            0,
+            "no kickoff obligation is recorded for {identity}"
+        );
+        assert!(
+            carrier_waives_first_turn(&controlling, identity).await,
+            "the committed carrier of {identity} records the waiver"
+        );
+        assert!(
+            settled_deliveries(member, 0).await.is_empty(),
+            "no kickoff reaches {identity}"
+        );
+    }
+    let kinds = scripted.received_command_kinds();
+    let probe = kinds.iter().position(|kind| kind == "host_features");
+    let materialize = kinds.iter().position(|kind| kind == "materialize_member");
+    assert!(
+        probe.is_some() && probe < materialize,
+        "the host is asked before anything is materialized: {kinds:?}"
+    );
+
+    with_message.shutdown();
+    without_message.shutdown();
+    scripted.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_placed_resume_of_an_owed_session_kicks_off_once() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let scripted = spawn_scripted_host_peer("resume-owed-host").await;
+    serve_adopted_first_turn(&scripted);
+    let member = scripted_member(&scripted, "resumed-owed", "resume-owed-member").await;
+    scripted.script_adopted_first_turn("resumed-owed", BridgeAdoptedFirstTurn::Owed);
+    let controlling = create_controlling_mob("resume-owed").await;
+    let report = controlling.bind_scripted(&scripted).await;
+
+    tokio::time::timeout(
+        SETTLE,
+        controlling.handle.spawn_spec(placed_resume_spec(
+            "resumed-owed",
+            &report.host_id,
+            meerkat_mob::MobRuntimeMode::AutonomousHost,
+            Some("PLACED_OWED_MESSAGE token-omega"),
+        )),
+    )
+    .await
+    .expect("the placed resume settles")
+    .expect("a placed resume of an owed session commits");
+    assert!(
+        last_materialize(&scripted, "resumed-owed").report_adopted_first_turn,
+        "the resume asked its host"
+    );
+    assert_eq!(kickoff_obligations(&controlling, "resumed-owed").await, 1);
+    assert!(!carrier_waives_first_turn(&controlling, "resumed-owed").await);
+    let deliveries = settled_deliveries(&member, 1).await;
+    assert_eq!(deliveries.len(), 1, "the owed first turn runs once");
+    assert!(
+        deliveries[0]
+            .content
+            .text_content()
+            .contains("PLACED_OWED_MESSAGE token-omega")
+    );
+
+    member.shutdown();
+    scripted.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_driven_placed_resume_delivers_its_initial_message_only_while_owed() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let scripted = spawn_scripted_host_peer("resume-turn-driven-host").await;
+    serve_adopted_first_turn(&scripted);
+    let started = scripted_member(&scripted, "td-started", "resume-td-started").await;
+    let owed = scripted_member(&scripted, "td-owed", "resume-td-owed").await;
+    scripted.script_adopted_first_turn("td-started", BridgeAdoptedFirstTurn::Started);
+    scripted.script_adopted_first_turn("td-owed", BridgeAdoptedFirstTurn::Owed);
+    let controlling = create_controlling_mob("resume-turn-driven").await;
+    let report = controlling.bind_scripted(&scripted).await;
+
+    for identity in ["td-started", "td-owed"] {
+        tokio::time::timeout(
+            SETTLE,
+            controlling.handle.spawn_spec(placed_resume_spec(
+                identity,
+                &report.host_id,
+                meerkat_mob::MobRuntimeMode::TurnDriven,
+                Some("PLACED_TD_RESUME_MESSAGE token-chi"),
+            )),
+        )
+        .await
+        .expect("the placed resume settles")
+        .expect("a turn-driven placed resume commits");
+        assert!(last_materialize(&scripted, identity).report_adopted_first_turn);
+        assert!(
+            !carrier_waives_first_turn(&controlling, identity).await,
+            "a turn-driven waiver is never recorded"
+        );
+    }
+    assert!(
+        settled_deliveries(&started, 0).await.is_empty(),
+        "a started session's resume does not deliver the initial message"
+    );
+    let deliveries = settled_deliveries(&owed, 1).await;
+    assert_eq!(
+        deliveries.len(),
+        1,
+        "an owed session's resume delivers it once"
+    );
+    assert!(
+        deliveries[0]
+            .content
+            .text_content()
+            .contains("PLACED_TD_RESUME_MESSAGE token-chi")
+    );
+
+    started.shutdown();
+    owed.shutdown();
+    scripted.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_placed_resume_on_a_host_that_does_not_report_keeps_its_kickoff() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    // A host before protocol 7, and a protocol 7 host that does not list
+    // the report: the resume does not ask, and it kicks off as it always did.
+    for (label, mode) in [
+        ("resume-before-v7", support::ScriptedV7Mode::BeforeV7),
+        (
+            "resume-no-report",
+            support::ScriptedV7Mode::Features(vec![
+                meerkat_mob::runtime::bridge_protocol::HOST_FEATURE_PROMPT_CONTEXT_FORK.to_string(),
+            ]),
+        ),
+    ] {
+        let scripted = spawn_scripted_host_peer(&format!("{label}-host")).await;
+        scripted.serve_v7(mode);
+        let member = scripted_member(&scripted, "resumer", &format!("{label}-member")).await;
+        scripted.script_adopted_first_turn("resumer", BridgeAdoptedFirstTurn::Started);
+        let controlling = create_controlling_mob(label).await;
+        let report = controlling.bind_scripted(&scripted).await;
+        tokio::time::timeout(
+            SETTLE,
+            controlling.handle.spawn_spec(placed_resume_spec(
+                "resumer",
+                &report.host_id,
+                meerkat_mob::MobRuntimeMode::AutonomousHost,
+                None,
+            )),
+        )
+        .await
+        .expect("the placed resume settles")
+        .expect("a placed resume commits");
+        let payload = last_materialize(&scripted, "resumer");
+        assert!(
+            !payload.report_adopted_first_turn,
+            "{label}: nothing is asked"
+        );
+        assert_ne!(payload.protocol_version, BridgeProtocolVersion::V7);
+        assert_eq!(kickoff_obligations(&controlling, "resumer").await, 1);
+        assert!(!carrier_waives_first_turn(&controlling, "resumer").await);
+        assert_eq!(
+            settled_deliveries(&member, 1).await.len(),
+            1,
+            "{label}: the kickoff runs once, as before"
+        );
+        member.shutdown();
+        scripted.shutdown();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_placed_resume_refuses_an_ack_that_contradicts_its_request() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let scripted = spawn_scripted_host_peer("resume-contradiction-host").await;
+    serve_adopted_first_turn(&scripted);
+    let controlling = create_controlling_mob("resume-contradiction").await;
+    let report = controlling.bind_scripted(&scripted).await;
+
+    // Asked, but the ack omits the report.
+    scripted.tamper_next_adopted_first_turn(None);
+    let error = tokio::time::timeout(
+        SETTLE,
+        controlling.handle.spawn_spec(placed_resume_spec(
+            "omits",
+            &report.host_id,
+            meerkat_mob::MobRuntimeMode::AutonomousHost,
+            None,
+        )),
+    )
+    .await
+    .expect("the placed resume settles")
+    .expect_err("an ack that omits the asked report fails the spawn");
+    assert!(
+        matches!(&error, MobError::WiringError(detail) if detail.contains("omits the adopted first turn")),
+        "got {error:?}"
+    );
+
+    // A Fresh launch never asks, so an ack that reports is refused.
+    scripted.tamper_next_adopted_first_turn(Some(BridgeAdoptedFirstTurn::Started));
+    let spec = placed_spawn_spec("worker", "unasked", &report.host_id)
+        .with_runtime_mode(meerkat_mob::MobRuntimeMode::AutonomousHost);
+    let error = tokio::time::timeout(SETTLE, controlling.handle.spawn_spec(spec))
+        .await
+        .expect("the placed spawn settles")
+        .expect_err("an ack that reports an unasked first turn fails the spawn");
+    assert!(
+        matches!(&error, MobError::WiringError(detail) if detail.contains("did not ask for")),
+        "got {error:?}"
+    );
+
+    // A Resume launch acked as Fresh.
+    scripted.ack_next_launch_as_fresh();
+    let error = tokio::time::timeout(
+        SETTLE,
+        controlling.handle.spawn_spec(placed_resume_spec(
+            "contradicted",
+            &report.host_id,
+            meerkat_mob::MobRuntimeMode::AutonomousHost,
+            None,
+        )),
+    )
+    .await
+    .expect("the placed resume settles")
+    .expect_err("a Resume acked as Fresh fails the spawn");
+    assert!(
+        matches!(&error, MobError::WiringError(detail) if detail.contains("launch outcome")),
+        "got {error:?}"
+    );
+    tokio::time::timeout(SETTLE, async {
+        while !controlling.handle.list_members().await.is_empty() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("no refused member stays in the roster");
+
+    scripted.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retried_placed_resume_keeps_the_reported_first_turn() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let scripted = spawn_scripted_host_peer("resume-retry-host").await;
+    serve_adopted_first_turn(&scripted);
+    let member = scripted_member(&scripted, "retried", "resume-retry-member").await;
+    scripted.script_adopted_first_turn("retried", BridgeAdoptedFirstTurn::Started);
+    let controlling = create_controlling_mob("resume-retry").await;
+    let report = controlling.bind_scripted(&scripted).await;
+
+    // The first reply is lost; the one resend is answered by the host's
+    // replay of the recorded build.
+    scripted.drop_next_materialize_replies(1);
+    tokio::time::timeout(
+        Duration::from_secs(150),
+        controlling.handle.spawn_spec(placed_resume_spec(
+            "retried",
+            &report.host_id,
+            meerkat_mob::MobRuntimeMode::AutonomousHost,
+            None,
+        )),
+    )
+    .await
+    .expect("the placed resume settles")
+    .expect("the resend converges through the replay");
+    let payloads = scripted
+        .received_materialize_payloads()
+        .into_iter()
+        .filter(|payload| payload.spec.agent_identity == "retried")
+        .collect::<Vec<_>>();
+    assert_eq!(payloads.len(), 2, "the original send and one resend");
+    assert_eq!(payloads[0], payloads[1]);
+    assert!(payloads[0].report_adopted_first_turn);
+    assert_eq!(kickoff_obligations(&controlling, "retried").await, 0);
+    assert!(carrier_waives_first_turn(&controlling, "retried").await);
+    assert!(settled_deliveries(&member, 0).await.is_empty());
+
+    member.shutdown();
+    scripted.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_placed_resume_whose_host_feature_probe_fails_records_nothing() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let scripted = spawn_scripted_host_peer("resume-probe-host").await;
+    scripted.serve_v7(support::ScriptedV7Mode::HoldFeatures);
+    let controlling = create_controlling_mob("resume-probe").await;
+    let report = controlling.bind_scripted(&scripted).await;
+
+    let error = tokio::time::timeout(
+        Duration::from_secs(30),
+        controlling.handle.spawn_spec(placed_resume_spec(
+            "unprobed",
+            &report.host_id,
+            meerkat_mob::MobRuntimeMode::AutonomousHost,
+            None,
+        )),
+    )
+    .await
+    .expect("the placed resume settles")
+    .expect_err("a probe that does not answer fails the resume");
+    assert!(
+        matches!(&error, MobError::HostFeaturesProbeFailed { .. }),
+        "got {error:?}"
+    );
+    assert_eq!(scripted.materialize_count(), 0, "nothing was materialized");
+    assert!(
+        controlling
+            .storage_metadata
+            .list_placed_spawns(&controlling.mob_id)
+            .await
+            .expect("list placed carriers")
+            .is_empty(),
+        "nothing was recorded"
     );
 
     scripted.shutdown();

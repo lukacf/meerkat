@@ -816,11 +816,16 @@ fn err_bounded_member_run(error: meerkat_mob::BoundedMemberRunError) -> JsValue 
 
 fn mob_destroy_error_value(e: MobMcpDestroyError) -> serde_json::Value {
     match e {
+        // The typed incomplete data rides under `data`, exactly as RPC sends
+        // it in `error.data`: the Web SDK's `MeerkatError.fromWasm` keeps an
+        // envelope's `data`. The top-level report and flag stay for callers
+        // that read the raw envelope.
         MobMcpDestroyError::Incomplete { report } => serde_json::json!({
             "code": "mob_destroy_incomplete",
             "message": MobMcpDestroyError::incomplete_message(&report),
-            "destroy_report": report,
+            "destroy_report": meerkat_contracts::WireMobDestroyReport::from(&report),
             "retryable": true,
+            "data": MobMcpDestroyError::incomplete_error_data(&report),
         }),
         MobMcpDestroyError::Mob(error) => mob_error_value(&error),
     }
@@ -1165,6 +1170,10 @@ struct JsToolEntry {
 /// Requires initialized runtime state.
 /// The `callback` receives a JSON string of tool arguments and must return
 /// a `Promise<string>` resolving to JSON `{"content": "...", "is_error": false}`.
+/// A call that an agent-loop round dispatched also passes a second argument:
+/// the call's dedupe key as a JSON string
+/// `{"run_id": "...", "round": 0, "call_id": "...", "call_digest": "..."}`.
+/// Other calls pass `undefined`, and a one-argument callback ignores it.
 ///
 /// Example (JS):
 /// ```js
@@ -1370,6 +1379,15 @@ impl meerkat_core::AgentToolDispatcher for JsToolDispatcher {
         &self,
         call: meerkat_core::ToolCallView<'_>,
     ) -> Result<meerkat_core::ops::ToolDispatchOutcome, meerkat_core::error::ToolError> {
+        self.dispatch_with_context(call, &meerkat_core::ToolDispatchContext::default())
+            .await
+    }
+
+    async fn dispatch_with_context(
+        &self,
+        call: meerkat_core::ToolCallView<'_>,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<meerkat_core::ops::ToolDispatchOutcome, meerkat_core::error::ToolError> {
         // Fire-and-forget tools defer the real work to the host: the host
         // watches ToolCallRequested events in the stream and acts on the call
         // asynchronously. Rule 8: do NOT fabricate an `is_error:false`
@@ -1400,9 +1418,23 @@ impl meerkat_core::AgentToolDispatcher for JsToolDispatcher {
 
         let args_str = call.args.get();
         let js_args = JsValue::from_str(args_str);
-        let promise_val = callback.call1(&JsValue::NULL, &js_args).map_err(|e| {
-            meerkat_core::error::ToolError::execution_failed(format!("JS callback threw: {e:?}"))
-        })?;
+        // The call's dedupe key, as a JSON string second argument, when an
+        // agent-loop round dispatched the call; `undefined` otherwise.
+        let js_dedupe_key = match context.tool_call_dedupe_key(call) {
+            Some(key) => JsValue::from_str(&serde_json::to_string(&key).map_err(|e| {
+                meerkat_core::error::ToolError::execution_failed(format!(
+                    "invalid tool call dedupe key: {e}"
+                ))
+            })?),
+            None => JsValue::UNDEFINED,
+        };
+        let promise_val = callback
+            .call2(&JsValue::NULL, &js_args, &js_dedupe_key)
+            .map_err(|e| {
+                meerkat_core::error::ToolError::execution_failed(format!(
+                    "JS callback threw: {e:?}"
+                ))
+            })?;
         let promise = js_sys::Promise::from(promise_val);
         let result_val = wasm_bindgen_futures::JsFuture::from(promise)
             .await
@@ -1500,7 +1532,8 @@ fn build_wasm_tool_dispatcher() -> Result<Arc<dyn meerkat_core::AgentToolDispatc
 ///
 /// `mobpack_bytes`: tar.gz mobpack archive. Verified via the canonical
 /// [`meerkat_mob_pack::trust`] authority under the host-supplied
-/// `mobpack_trust` configuration ([`TrustPolicy::Strict`] + empty trust store
+/// `mobpack_trust` configuration
+/// ([`TrustPolicy::Strict`](meerkat_mob_pack::trust::TrustPolicy::Strict) + empty trust store
 /// when omitted) — an unsigned or unknown-signer pack fails closed with a
 /// typed error unless the host registered the signer (or explicitly opted in
 /// to `permissive`).
@@ -2281,8 +2314,8 @@ pub async fn mob_lifecycle(mob_id: &str, action: &str) -> Result<JsValue, JsValu
         .map_err(err_mob_destroy)?;
     let destroy_report = reports
         .destroy_report
-        .map(|report| serde_json::to_value(&report).map_err(|e| err_str("serialize_error", e)))
-        .transpose()?;
+        .as_ref()
+        .map(meerkat_contracts::WireMobDestroyReport::from);
     let stop_report = reports
         .stop_report
         .map(|report| serde_json::to_value(&report).map_err(|e| err_str("serialize_error", e)))
@@ -2670,7 +2703,11 @@ pub async fn mob_append_system_context(
     ))
 }
 
+/// Member-send options of the browser runtime. Unknown fields are refused,
+/// never dropped: in particular a caller idempotency key, which this runtime
+/// cannot keep (it binds no continuation service).
 #[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MobMemberSendOptions {
     content: meerkat_core::types::ContentInput,
     #[serde(default)]
@@ -3109,7 +3146,7 @@ fn register_subscription(inner: SubscriptionInner) -> String {
 
 /// Subscribe to a mob member's session event stream.
 ///
-/// Returns a canonical `stream_id` string ([`StreamRef`] wire form). Use
+/// Returns a canonical `stream_id` string (`StreamRef` wire form). Use
 /// `poll_subscription(stream_id)` to drain buffered events. Each call returns
 /// all events since the last poll.
 ///
@@ -3149,12 +3186,13 @@ pub async fn mob_member_subscribe(mob_id: &str, agent_identity: &str) -> Result<
 
 /// Subscribe to mob-wide events (all members, continuously updated).
 ///
-/// Returns a canonical `stream_id` string ([`StreamRef`] wire form). Use
+/// Returns a canonical `stream_id` string (`StreamRef` wire form). Use
 /// `poll_subscription(stream_id)` to drain buffered events. Each call returns
 /// all events since the last poll.
 ///
 /// Unlike `mob_member_subscribe` which streams a single member's agent events,
-/// this streams [`AttributedEvent`]s tagged with source runtime identity and role
+/// this streams [`AttributedEvent`](meerkat_mob::AttributedEvent)s tagged with source
+/// runtime identity and role
 /// for every member in the mob, automatically tracking roster changes.
 #[wasm_bindgen]
 pub async fn mob_subscribe_events(mob_id: &str) -> Result<String, JsValue> {
@@ -3307,8 +3345,8 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     use super::{Credentials, build_bootstrap_config, extract_verify_and_parse_mobpack};
     use super::{
-        MobForkHelperOptions, MobSpawnHelperOptions, StreamRef, SubscriptionInner,
-        close_subscription, parse_js_tool_result, parse_mob_event_cursor,
+        MobForkHelperOptions, MobMemberSendOptions, MobSpawnHelperOptions, StreamRef,
+        SubscriptionInner, close_subscription, parse_js_tool_result, parse_mob_event_cursor,
         parse_mob_lifecycle_action_arg, parse_mobpack, parse_prompt_content_input,
         parse_session_config, poll_subscription, serialize_subscription_item,
         session_error_envelope, stream_lagged_envelope,
@@ -3518,6 +3556,7 @@ capabilities = [{capability_values}]
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
+                durable: false,
             })),
         );
         let owner_session_id = meerkat_core::types::SessionId::parse(owner_session_id)
@@ -4002,6 +4041,27 @@ capabilities = [{capability_values}]
                 .is_some_and(|errors| !errors.is_empty()),
             "web destroy error projection must carry the destroy report: {value}"
         );
+    }
+
+    /// The Web SDK's `MeerkatError.fromWasm` keeps an envelope's `data` and
+    /// nothing else beside its code and message, so an incomplete destroy's
+    /// envelope carries its typed data there: exactly the `error.data` RPC
+    /// sends, report included.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn mob_destroy_incomplete_envelope_carries_the_rpc_error_data() {
+        let mut report = meerkat_mob::MobDestroyReport::default();
+        report.errors.push("worker-1: reload refused".to_string());
+        report
+            .reloaded_members
+            .push(meerkat_mob::AgentIdentity::from("worker-2"));
+        let rpc_data = meerkat_mob_mcp::MobMcpDestroyError::incomplete_error_data(&report);
+
+        let value =
+            mob_destroy_error_value(meerkat_mob_mcp::MobMcpDestroyError::Incomplete { report });
+
+        assert_eq!(value["data"], rpc_data, "{value}");
+        assert_eq!(value["data"]["code"], "mob_destroy_incomplete", "{value}");
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -5342,5 +5402,22 @@ capabilities = [{capability_values}]
         );
 
         clear_tool_callbacks();
+    }
+
+    /// the in-browser runtime binds no continuation service, so a
+    /// caller idempotency key on member send is refused at parse, never
+    /// silently dropped.
+    #[test]
+    fn wasm_member_send_refuses_a_key() {
+        let keyed = serde_json::from_value::<MobMemberSendOptions>(json!({
+            "content": "keyed",
+            "idempotency_key": "item-1",
+        }));
+        assert!(
+            keyed.is_err(),
+            "a key the browser runtime cannot honour is refused, never dropped"
+        );
+        let plain = serde_json::from_value::<MobMemberSendOptions>(json!({ "content": "plain" }));
+        assert!(plain.is_ok(), "an unkeyed send still parses: {plain:?}");
     }
 }

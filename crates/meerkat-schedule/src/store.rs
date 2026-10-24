@@ -931,6 +931,114 @@ fn memory_note_pending_departure(
     }
 }
 
+/// A machine refusal on one row of the in-memory claim scan: that row's typed
+/// `DueClassification` fault, as the SQLite backend reports it.
+fn memory_due_classification_fault(
+    occurrence: &Occurrence,
+    stage: &str,
+    error: &OccurrenceLifecycleError,
+) -> ScheduleStoreRowFault {
+    ScheduleStoreRowFault {
+        schedule_id: Some(occurrence.schedule_id.to_string()),
+        occurrence_id: Some(occurrence.occurrence_id.to_string()),
+        kind: ScheduleStoreRowFaultKind::DueClassification,
+        detail: format!("{stage}: {error}"),
+    }
+}
+
+/// Resolve a row the claim scan classified as ended: a misfire
+/// (`MisfireRequired`), or a recorded dispatch that used up its reclaims
+/// (`ReclaimExhausted`). Both take the same terminal resolution and canonical
+/// receipt. A machine refusal is the row's typed fault (`Ok(Err(fault))`) and
+/// nothing is written for the row.
+fn memory_resolve_due_terminal(
+    state: &mut MemoryScheduleState,
+    existing: &Occurrence,
+    action: OccurrenceDueAction,
+    admission_evidence: AdmissionEvidence,
+    store_now_utc: DateTime<Utc>,
+) -> Result<Result<OccurrenceTransitionCommit, ScheduleStoreRowFault>, ScheduleStoreError> {
+    let (stage, resolution) = if action == OccurrenceDueAction::MisfireRequired {
+        (
+            "misfire",
+            OccurrenceLifecycleInput::ResolveDueMisfire {
+                detail: Some(existing.due_misfire_detail_at(store_now_utc)),
+                at_utc: store_now_utc,
+            },
+        )
+    } else {
+        (
+            "reclaim exhausted",
+            OccurrenceLifecycleInput::ResolveReclaimExhausted {
+                admission_evidence,
+                detail: Some(existing.reclaim_exhausted_detail(admission_evidence)),
+                at_utc: store_now_utc,
+            },
+        )
+    };
+    let mut mutator = match existing.clone().apply(resolution) {
+        Ok(mutator) => mutator,
+        Err(error) => {
+            return Ok(Err(memory_due_classification_fault(
+                existing,
+                &format!("{stage} resolution"),
+                &error,
+            )));
+        }
+    };
+    let receipt = match mutator.occurrence().delivery_receipt_from_authority(None) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            return Ok(Err(memory_due_classification_fault(
+                existing,
+                &format!("{stage} receipt"),
+                &error,
+            )));
+        }
+    };
+    let receipt_mutator =
+        match mutator
+            .occurrence()
+            .clone()
+            .apply(OccurrenceLifecycleInput::RecordReceipt {
+                runtime_outcome: receipt.runtime_outcome.clone(),
+                receipt,
+            }) {
+            Ok(mutator) => mutator,
+            Err(error) => {
+                return Ok(Err(memory_due_classification_fault(
+                    existing,
+                    &format!("{stage} receipt record"),
+                    &error,
+                )));
+            }
+        };
+    if let Err(error) = mutator.absorb_followup(receipt_mutator) {
+        return Ok(Err(memory_due_classification_fault(
+            existing,
+            &format!("{stage} receipt record"),
+            &error,
+        )));
+    }
+    let write = mutator.into_authorized_write();
+    let updated = write.occurrence().clone();
+    let canonical_receipt = updated.last_receipt.clone().ok_or_else(|| {
+        ScheduleStoreError::Concurrency(
+            "generated occurrence authority did not produce a receipt".to_string(),
+        )
+    })?;
+    state
+        .receipts
+        .entry(updated.occurrence_id.clone())
+        .or_default()
+        .push(canonical_receipt);
+    memory_note_pending_departure(state, existing, Some(&updated), store_now_utc);
+    state
+        .occurrences
+        .insert(updated.occurrence_id.clone(), updated);
+    Ok(Ok(write.into_transition_commit_after_store_commit()))
+}
+
 impl MemoryScheduleStore {
     pub fn new() -> Self {
         Self::default()
@@ -1576,15 +1684,6 @@ impl ScheduleStore for MemoryScheduleStore {
         // occurrence and its neighbors still claim. In-memory rows are typed
         // values already, so there is no durable-format parse boundary to
         // fault on — only `DueClassification` faults can occur here.
-        let due_classification_fault =
-            |occurrence: &Occurrence, stage: &str, error: &OccurrenceLifecycleError| {
-                ScheduleStoreRowFault {
-                    schedule_id: Some(occurrence.schedule_id.to_string()),
-                    occurrence_id: Some(occurrence.occurrence_id.to_string()),
-                    kind: ScheduleStoreRowFaultKind::DueClassification,
-                    detail: format!("{stage}: {error}"),
-                }
-            };
         for (_, occurrence_id) in occurrence_order {
             let Some(existing) = state.occurrences.get(&occurrence_id).cloned() else {
                 continue;
@@ -1593,7 +1692,7 @@ impl ScheduleStore for MemoryScheduleStore {
             let action = match existing.classify_due_action(store_now_utc, admission_evidence) {
                 Ok(action) => action,
                 Err(error) => {
-                    row_faults.push(due_classification_fault(
+                    row_faults.push(memory_due_classification_fault(
                         &existing,
                         "due classification",
                         &error,
@@ -1608,92 +1707,16 @@ impl ScheduleStore for MemoryScheduleStore {
                 ) => {
                     // A misfire, or a recorded dispatch that used up its
                     // reclaims: the same terminal resolution and receipt.
-                    let (stage, resolution) = if action == OccurrenceDueAction::MisfireRequired {
-                        (
-                            "misfire",
-                            OccurrenceLifecycleInput::ResolveDueMisfire {
-                                detail: Some(existing.due_misfire_detail_at(store_now_utc)),
-                                at_utc: store_now_utc,
-                            },
-                        )
-                    } else {
-                        (
-                            "reclaim exhausted",
-                            OccurrenceLifecycleInput::ResolveReclaimExhausted {
-                                admission_evidence,
-                                detail: Some(existing.reclaim_exhausted_detail(admission_evidence)),
-                                at_utc: store_now_utc,
-                            },
-                        )
-                    };
-                    let mut mutator = match existing.clone().apply(resolution) {
-                        Ok(mutator) => mutator,
-                        Err(error) => {
-                            row_faults.push(due_classification_fault(
-                                &existing,
-                                &format!("{stage} resolution"),
-                                &error,
-                            ));
-                            continue;
-                        }
-                    };
-                    let receipt = match mutator.occurrence().delivery_receipt_from_authority(None) {
-                        Ok(receipt) => receipt,
-                        Err(error) => {
-                            row_faults.push(due_classification_fault(
-                                &existing,
-                                &format!("{stage} receipt"),
-                                &error,
-                            ));
-                            continue;
-                        }
-                    };
-                    let receipt_mutator = match mutator.occurrence().clone().apply(
-                        OccurrenceLifecycleInput::RecordReceipt {
-                            runtime_outcome: receipt.runtime_outcome.clone(),
-                            receipt,
-                        },
-                    ) {
-                        Ok(mutator) => mutator,
-                        Err(error) => {
-                            row_faults.push(due_classification_fault(
-                                &existing,
-                                &format!("{stage} receipt record"),
-                                &error,
-                            ));
-                            continue;
-                        }
-                    };
-                    if let Err(error) = mutator.absorb_followup(receipt_mutator) {
-                        row_faults.push(due_classification_fault(
-                            &existing,
-                            &format!("{stage} receipt record"),
-                            &error,
-                        ));
-                        continue;
-                    }
-                    let write = mutator.into_authorized_write();
-                    let updated = write.occurrence().clone();
-                    let canonical_receipt = updated.last_receipt.clone().ok_or_else(|| {
-                        ScheduleStoreError::Concurrency(
-                            "generated occurrence authority did not produce a receipt".to_string(),
-                        )
-                    })?;
-                    state
-                        .receipts
-                        .entry(updated.occurrence_id.clone())
-                        .or_default()
-                        .push(canonical_receipt);
-                    memory_note_pending_departure(
+                    match memory_resolve_due_terminal(
                         &mut state,
                         &existing,
-                        Some(&updated),
+                        action,
+                        admission_evidence,
                         store_now_utc,
-                    );
-                    state
-                        .occurrences
-                        .insert(updated.occurrence_id.clone(), updated);
-                    transitions.push(write.into_transition_commit_after_store_commit());
+                    )? {
+                        Ok(commit) => transitions.push(commit),
+                        Err(fault) => row_faults.push(fault),
+                    }
                 }
                 Some(OccurrenceDueAction::ClaimEligible) => {
                     if claimed_count >= request.limit {
@@ -1728,7 +1751,7 @@ impl ScheduleStore for MemoryScheduleStore {
                         match expire_occurrence_lease(existing.clone(), store_now_utc) {
                             Ok(lease_expired) => lease_expired,
                             Err(error) => {
-                                row_faults.push(due_classification_fault(
+                                row_faults.push(memory_due_classification_fault(
                                     &existing,
                                     "lease expiry",
                                     &error,
@@ -1743,10 +1766,14 @@ impl ScheduleStore for MemoryScheduleStore {
                         .push(lease_expired.receipt.clone());
                     let mut mutator = lease_expired.mutator;
                     let expired = mutator.occurrence().clone();
-                    // A machine refusal of the follow-up claim is this row's
-                    // typed fault, never a silent skip: the expiry above
-                    // stays applied and the row re-enters the scan on the
-                    // next tick.
+                    // The machine refuses the follow-up claim at the reclaim
+                    // cap past the misfire deadline by design: the expired
+                    // row then classifies as exhausted, and this scan
+                    // resolves it with no fault. The evidence read above
+                    // still holds, since the expiry's receipt is no dispatch
+                    // evidence. Any other refusal is this row's typed fault,
+                    // never a silent skip: the expiry stays applied and the
+                    // row re-enters the scan on the next tick.
                     let claim_mutator = match claim_occurrence(
                         expired,
                         &request,
@@ -1759,13 +1786,27 @@ impl ScheduleStore for MemoryScheduleStore {
                             let updated = write.occurrence().clone();
                             state
                                 .occurrences
-                                .insert(updated.occurrence_id.clone(), updated);
+                                .insert(updated.occurrence_id.clone(), updated.clone());
                             transitions.push(write.into_transition_commit_after_store_commit());
-                            row_faults.push(due_classification_fault(
-                                &existing,
-                                "lease-expiry reclaim",
-                                &error,
-                            ));
+                            match updated.classify_due_action(store_now_utc, admission_evidence) {
+                                Ok(Some(OccurrenceDueAction::ReclaimExhausted)) => {
+                                    match memory_resolve_due_terminal(
+                                        &mut state,
+                                        &updated,
+                                        OccurrenceDueAction::ReclaimExhausted,
+                                        admission_evidence,
+                                        store_now_utc,
+                                    )? {
+                                        Ok(commit) => transitions.push(commit),
+                                        Err(fault) => row_faults.push(fault),
+                                    }
+                                }
+                                _ => row_faults.push(memory_due_classification_fault(
+                                    &existing,
+                                    "lease-expiry reclaim",
+                                    &error,
+                                )),
+                            }
                             continue;
                         }
                     };

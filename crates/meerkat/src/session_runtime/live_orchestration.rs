@@ -459,6 +459,16 @@ pub struct RealtimeSessionOpenProjection {
         not(target_arch = "wasm32")
     ))]
     owner_session_id: SessionId,
+    /// A `RunStarted` hook refused the staged create-time prompt this
+    /// projection's open found, so the open goes ahead without it. Written by
+    /// the open projections, read at the open result (`staged_prompt_refused`
+    /// advisory).
+    #[cfg(all(
+        feature = "session-store",
+        feature = "live",
+        not(target_arch = "wasm32")
+    ))]
+    staged_prompt_refused: bool,
     #[cfg(feature = "openai-live")]
     summary: Option<super::live_summary::LiveContextSummary>,
     /// The reasoning-effort preference the open authority seals for the
@@ -500,6 +510,20 @@ impl RealtimeSessionOpenProjection {
     #[cfg(feature = "openai-live")]
     pub(crate) fn context_summary(&self) -> Option<&super::live_summary::LiveContextSummary> {
         self.summary.as_ref()
+    }
+
+    /// Whether a `RunStarted` hook refused the session's staged create-time
+    /// prompt when this projection's open found it, so the open goes ahead
+    /// without it and the prompt stays staged. The open result reports it as
+    /// the `staged_prompt_refused` advisory.
+    #[cfg(all(
+        feature = "session-store",
+        feature = "live",
+        not(target_arch = "wasm32")
+    ))]
+    #[must_use]
+    pub fn staged_prompt_refused(&self) -> bool {
+        self.staged_prompt_refused
     }
 
     /// Apply a legacy per-open System overlay while retaining the durable
@@ -655,7 +679,9 @@ impl ExperimentalLivePendingChannel {
 }
 
 fn realtime_projection_messages_full(session: &Session) -> Result<Vec<Message>, SessionError> {
-    Ok(session.messages_for_model_boundary())
+    session
+        .messages_for_model_boundary()
+        .map_err(|error| SessionError::Agent(error.into()))
 }
 
 /// Project replayable dialogue/tool history for realtime delivery.
@@ -870,10 +896,11 @@ pub(crate) use orchestrator::unrecorded_live_row_identity;
     not(target_arch = "wasm32")
 ))]
 pub use orchestrator::{
-    LiveOrchestrator, LiveSessionIngressReconciler, LiveTransportContext, LiveTruncateCursor,
-    build_live_projection_snapshot, continuity_from_snapshot, live_audio_config_from_capabilities,
-    live_close_result_from_machine_authority, live_refresh_result_from_machine_authority,
-    live_ws_audio_format_param, wire_live_status_from_machine_authority,
+    LiveOrchestrator, LiveSessionAddressing, LiveSessionIngressReconciler, LiveTransportContext,
+    LiveTruncateCursor, build_live_projection_snapshot, continuity_from_snapshot,
+    live_audio_config_from_capabilities, live_close_result_from_machine_authority,
+    live_refresh_result_from_machine_authority, live_ws_audio_format_param,
+    wire_live_status_from_machine_authority,
 };
 
 #[cfg(all(
@@ -948,6 +975,24 @@ mod orchestrator {
         ResultRecovery,
     }
 
+    /// How the surface that owns a [`LiveOrchestrator`] addresses the
+    /// sessions it opens and recovers.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub enum LiveSessionAddressing {
+        /// Sessions addressed by their id alone (a session-scoped
+        /// `live/open` and the reads behind it). Such a surface neither
+        /// restores a mob member's session from storage nor opens a live
+        /// channel on one: the member's mob restores it and opens its
+        /// channels after checking the member (eligible, not retiring or in
+        /// cleanup or revoke, not Broken). Both are refused with
+        /// [`SessionError::mob_member_session_addressed_by_id`].
+        SessionScoped,
+        /// Mob member sessions addressed through their mob, which checked
+        /// the member before it asked (the member live host).
+        MobMember,
+    }
+
     /// Surface-agnostic live-channel orchestrator.
     ///
     /// Borrows the resolved infrastructure from a calling surface
@@ -1000,6 +1045,10 @@ mod orchestrator {
         /// ingress reconciliation can attach its runtime executor.
         pub actor_witness_capture:
             crate::session_runtime::staged_promotion::ActorWitnessSlotCaptureFn,
+        /// How this surface addresses sessions: a session-scoped one never
+        /// restores a mob member's session from storage
+        /// ([`Self::recover_live_session_for_realtime_open`]).
+        pub session_addressing: LiveSessionAddressing,
     }
 
     /// Per-call transport-stage inputs for the open/verb pipeline methods
@@ -1860,6 +1909,18 @@ mod orchestrator {
         forgotten
     }
 
+    /// Whether an open projection may wait behind a running turn to deliver
+    /// the session's staged create-time prompt.
+    #[derive(Clone, Copy)]
+    enum StagedPromptDeliveryWait {
+        /// The ordinary open and the summary open, which wait for the turn
+        /// boundary anyway.
+        BehindRunningTurn,
+        /// The mirrored-channel open and the concurrent summary open, which
+        /// never wait behind a running turn: the boundary is only tried.
+        NeverBehindRunningTurn,
+    }
+
     impl<B: SessionAgentBuilder + 'static> LiveOrchestrator<'_, B> {
         fn recovery_context(&self) -> RecoveryContext<'_, B> {
             RecoveryContext {
@@ -2032,6 +2093,78 @@ mod orchestrator {
             }
         }
 
+        /// Refuse, on a [`LiveSessionAddressing::SessionScoped`] surface, to
+        /// open a live channel on a mob member's session, live or not. A
+        /// session-scoped open checks nothing of the member, while the mob's
+        /// member live surface opens only an eligible member that is not
+        /// retiring, in cleanup or revoke, or Broken. The read is the
+        /// authoritative durable metadata view (no transcript rows); a
+        /// session without durable metadata is no member's and is left to
+        /// the open's own lookups.
+        pub async fn refuse_mob_member_session_by_id(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<(), SessionError> {
+            if self.session_addressing != LiveSessionAddressing::SessionScoped {
+                return Ok(());
+            }
+            let Some(metadata) = self
+                .service
+                .load_authoritative_session_metadata(session_id)
+                .await?
+            else {
+                return Ok(());
+            };
+            match metadata.mob_member_binding() {
+                Some(binding) => Err(SessionError::mob_member_session_addressed_by_id(
+                    session_id,
+                    &binding.mob_id,
+                    &binding.member,
+                )),
+                None => Ok(()),
+            }
+        }
+
+        /// A live open that finds the session's create-time prompt still
+        /// staged (a deferred session whose first interaction is this open)
+        /// delivers it now: the `RunStarted` hooks a turn carrying it would
+        /// run admit it, and it is committed as the session's newest user row
+        /// before the realtime seed is read, so the realtime model receives
+        /// it once. A hook that refuses it keeps it staged for the first text
+        /// turn, and the open goes ahead without it: the answer is `true`,
+        /// which the open result reports as the `staged_prompt_refused`
+        /// advisory. An open that never waits behind a running turn only
+        /// tries the turn boundary; a held one delivers nothing (a turn in
+        /// flight has consumed the prompt already). Only the open projections
+        /// call this; refresh never does.
+        async fn deliver_staged_prompt_for_open(
+            &self,
+            session_id: &SessionId,
+            wait: StagedPromptDeliveryWait,
+        ) -> Result<bool, SessionError> {
+            let delivery = match wait {
+                StagedPromptDeliveryWait::BehindRunningTurn => {
+                    self.service
+                        .deliver_staged_prompt_for_live_open(session_id)
+                        .await?
+                }
+                StagedPromptDeliveryWait::NeverBehindRunningTurn => {
+                    self.service
+                        .try_deliver_staged_prompt_for_live_open(session_id)
+                        .await?
+                }
+            };
+            if let meerkat_session::StagedPromptLiveOpenDelivery::Refused(refusal) = delivery {
+                tracing::warn!(
+                    %session_id,
+                    %refusal,
+                    "a run-start hook refused the staged create-time prompt at live open; it stays staged for the first text turn"
+                );
+                return Ok(true);
+            }
+            Ok(false)
+        }
+
         /// Recover a persisted-only session into the live service map so
         /// realtime-open paths can resolve it. Materializes a deferred
         /// staged session in place; falls back to durable-snapshot
@@ -2041,6 +2174,15 @@ mod orchestrator {
         /// mid-turn answers none until the turn ends, and the channel mint
         /// only needs the registration to exist and the store's lifecycle
         /// authority to still be live.
+        ///
+        /// A [`LiveSessionAddressing::SessionScoped`] surface never restores
+        /// a mob member's session from storage: that would register and
+        /// materialize the member's session outside its mob's custody,
+        /// whose restore may have deferred it. It refuses with
+        /// [`SessionError::mob_member_session_addressed_by_id`] before
+        /// anything is created. A member session that is live already is
+        /// found above and is not restored here; opening a channel on it is
+        /// refused at the open ([`Self::refuse_mob_member_session_by_id`]).
         pub async fn recover_live_session_for_realtime_open(
             &self,
             session_id: &SessionId,
@@ -2065,6 +2207,17 @@ mod orchestrator {
                 .ok_or_else(|| SessionError::NotFound {
                     id: session_id.clone(),
                 })?;
+            if self.session_addressing == LiveSessionAddressing::SessionScoped
+                && let Some(binding) = session
+                    .session_metadata()
+                    .and_then(|metadata| metadata.mob_member_binding)
+            {
+                return Err(SessionError::mob_member_session_addressed_by_id(
+                    session_id,
+                    &binding.mob_id,
+                    &binding.member,
+                ));
+            }
             let keep_alive = session
                 .session_metadata()
                 .ok_or_else(|| {
@@ -2122,6 +2275,11 @@ mod orchestrator {
             // seed acknowledgement; no payload-bearing waiter is queued.
             let open_projection_lease = admit_open_projection(self.service)?;
             Box::pin(self.recover_live_session_for_realtime_open(session_id)).await?;
+            let staged_prompt_refused = Box::pin(self.deliver_staged_prompt_for_open(
+                session_id,
+                StagedPromptDeliveryWait::BehindRunningTurn,
+            ))
+            .await?;
             let (session, canonical_user_image_decoded_bytes) = match self
                 .service
                 .export_realtime_open_session_snapshot_with_image_usage(session_id)
@@ -2145,6 +2303,7 @@ mod orchestrator {
                 session,
                 canonical_user_image_decoded_bytes,
                 visible_tools,
+                staged_prompt_refused,
             )
             .await
         }
@@ -2153,7 +2312,8 @@ mod orchestrator {
         /// provider receives committed rows after its seed through the
         /// live-context mirror (experimental strict channels). It never waits
         /// behind a member's running turn: with no turn in flight it projects
-        /// exactly what the ordinary open projects; with a turn in flight it
+        /// exactly what the ordinary open projects, a staged create-time
+        /// prompt delivered first; with a turn in flight it delivers nothing,
         /// seeds from the committed boundary and the published tool
         /// definitions, and the turn's rows reach the channel through the
         /// mirror once its boundary commits.
@@ -2181,6 +2341,11 @@ mod orchestrator {
         ) -> Result<RealtimeSessionOpenProjection, RealtimeSessionOpenProjectionError> {
             let open_projection_lease = admit_open_projection(self.service)?;
             Box::pin(self.recover_live_session_for_realtime_open(session_id)).await?;
+            let staged_prompt_refused = Box::pin(self.deliver_staged_prompt_for_open(
+                session_id,
+                StagedPromptDeliveryWait::NeverBehindRunningTurn,
+            ))
+            .await?;
             let snapshot = match self
                 .service
                 .export_realtime_open_session_snapshot_without_waiting_for_turn(session_id)
@@ -2222,6 +2387,7 @@ mod orchestrator {
                 session,
                 canonical_user_image_decoded_bytes,
                 visible_tools,
+                staged_prompt_refused,
             )
             .await
         }
@@ -2233,7 +2399,7 @@ mod orchestrator {
         /// media hydration and no replay seed. With a turn in flight it is
         /// built from the committed boundary and the published tool
         /// definitions, and the durable resync is deferred to the turn
-        /// boundary ([`Self::release_live_resync_at_turn_boundary`]).
+        /// boundary (`Self::release_live_resync_at_turn_boundary`).
         ///
         /// `llm_identity` is the identity the channel is bound to
         /// ([`MeerkatMachine::live_channel_binding`]); the session's text
@@ -2344,6 +2510,7 @@ mod orchestrator {
             session: meerkat_core::Session,
             canonical_user_image_decoded_bytes: usize,
             visible_tools: Vec<meerkat_core::ToolDef>,
+            staged_prompt_refused: bool,
         ) -> Result<RealtimeSessionOpenProjection, RealtimeSessionOpenProjectionError> {
             let llm_identity = self.service.live_session_llm_identity(session_id).await?;
             let transcript_rewrite_generation = session
@@ -2372,6 +2539,7 @@ mod orchestrator {
                 open_config,
                 seed_status: seed_projection.status,
                 owner_session_id: session_id.clone(),
+                staged_prompt_refused,
                 #[cfg(feature = "openai-live")]
                 summary: None,
                 #[cfg(feature = "openai-live")]
@@ -2391,6 +2559,11 @@ mod orchestrator {
         ) -> Result<RealtimeSessionOpenProjection, RealtimeSessionOpenProjectionError> {
             let lease = admit_open_projection(self.service)?;
             Box::pin(self.recover_live_session_for_realtime_open(session_id)).await?;
+            let staged_prompt_refused = Box::pin(self.deliver_staged_prompt_for_open(
+                session_id,
+                StagedPromptDeliveryWait::BehindRunningTurn,
+            ))
+            .await?;
             let session = self
                 .service
                 .export_realtime_refresh_session_snapshot(session_id)
@@ -2404,7 +2577,9 @@ mod orchestrator {
                 turning_mode,
                 identity,
                 tools,
-                session.messages_for_model_boundary(),
+                session
+                    .messages_for_model_boundary()
+                    .map_err(|error| SessionError::Agent(error.into()))?,
                 session.messages(),
             )?
             .with_open_projection_lease(lease)
@@ -2426,6 +2601,7 @@ mod orchestrator {
                 open_config: config,
                 seed_status: LiveSeedProjectionStatus::Summarized,
                 owner_session_id: session_id.clone(),
+                staged_prompt_refused,
                 summary: Some(summary),
                 member_turn_reasoning: None,
             })
@@ -2434,8 +2610,10 @@ mod orchestrator {
         /// Admit a concurrent (open-media-first) summary bootstrap.
         ///
         /// Only the live session recovery the channel mint needs (stale live
-        /// discard, staged or durable rematerialization) and a body-free read
-        /// of the committed boundary happen here. The transcript body is read,
+        /// discard, staged or durable rematerialization), the delivery of a
+        /// staged create-time prompt when no turn holds the session's turn
+        /// boundary (only tried, never waited for), and a body-free read of
+        /// the committed boundary happen here. The transcript body is read,
         /// proved against that boundary, and summarized inside the preparation
         /// job after the pending channel has been handed back, so an open on a
         /// large or busy session never waits on session materialization.
@@ -2453,6 +2631,11 @@ mod orchestrator {
             RealtimeSessionOpenProjectionError,
         > {
             Box::pin(self.recover_live_session_for_realtime_open(session_id)).await?;
+            let staged_prompt_refused = Box::pin(self.deliver_staged_prompt_for_open(
+                session_id,
+                StagedPromptDeliveryWait::NeverBehindRunningTurn,
+            ))
+            .await?;
             let committed = self
                 .service
                 .observe_live_context_committed_boundary(session_id)
@@ -2476,6 +2659,7 @@ mod orchestrator {
                     open_config: config,
                     seed_status: LiveSeedProjectionStatus::ContextPending,
                     owner_session_id: session_id.clone(),
+                    staged_prompt_refused,
                     summary: None,
                     member_turn_reasoning: None,
                 },
@@ -3341,6 +3525,13 @@ mod orchestrator {
             if requested_transport != Some(LiveOpenTransport::Webrtc) {
                 return Err(super::ExperimentalLiveChannelOpenError::InvalidTransport);
             }
+            self.refuse_mob_member_session_by_id(session_id)
+                .await
+                .map_err(|refusal| {
+                    super::ExperimentalLiveChannelOpenError::Open(LiveOpenError::SessionStateFault(
+                        refusal,
+                    ))
+                })?;
             let mut pending = authority
                 .prepare_open(session_id, execution_identity)
                 .await
@@ -3808,7 +3999,9 @@ mod orchestrator {
                 turning_mode,
                 identity,
                 tools,
-                current.messages_for_model_boundary(),
+                current
+                    .messages_for_model_boundary()
+                    .map_err(|error| SessionError::Agent(error.into()))?,
                 current.messages(),
             )?
             .with_user_content_identities(current.realtime_user_content_identities())
@@ -4130,6 +4323,11 @@ mod orchestrator {
                 }
                 Err(error) => return Err(LiveOpenError::SessionStateFault(error)),
             }
+            // A session-scoped surface opens no mob member's session; the
+            // refusal comes before the projection takes the open admission.
+            self.refuse_mob_member_session_by_id(session_id)
+                .await
+                .map_err(LiveOpenError::SessionStateFault)?;
 
             // S2 — #302: refuse up front when no realtime session factory
             // is wired, BEFORE any admission or host registration.
@@ -4316,6 +4514,11 @@ mod orchestrator {
                     },
                 ));
             }
+            // Every open from a projection, recovery reopens included, passes
+            // here: a session-scoped surface opens no mob member's session.
+            self.refuse_mob_member_session_by_id(session_id)
+                .await
+                .map_err(LiveOpenError::SessionStateFault)?;
             #[cfg(feature = "openai-live")]
             if let Some(summary) = prepared_projection.summary.as_ref() {
                 summary
@@ -4340,6 +4543,7 @@ mod orchestrator {
                 }
             }
             let seed_status = prepared_projection.seed_status;
+            let staged_prompt_refused = prepared_projection.staged_prompt_refused;
             let member_turn_reasoning = prepared_projection.member_turn_reasoning();
             let prepared_open_config = prepared_projection.open_config;
             let live_open_identity = prepared_open_config.llm_identity.clone();
@@ -4676,11 +4880,19 @@ mod orchestrator {
             // S12 — wire projection: core typed shapes project into the
             // wire mirrors at the boundary (byte-compatible `From` impls).
             let transport: meerkat_contracts::WireLiveTransportBootstrap = transport.into();
+            // The open went ahead without a staged create-time prompt that a
+            // run-start hook refused: an advisory, not a failure.
+            let advisories = if staged_prompt_refused {
+                vec![meerkat_contracts::WireLiveOpenAdvisory::StagedPromptRefused]
+            } else {
+                Vec::new()
+            };
             Ok(LiveOpenResult {
                 channel_id: channel_id.to_string(),
                 transport,
                 capabilities: capabilities.into(),
                 continuity: continuity.into(),
+                advisories,
             })
         }
 

@@ -23,6 +23,37 @@ use crate::terminal_status::{
 };
 
 impl MeerkatMachine {
+    /// Observe this session's input-state witnesses through its actual runtime
+    /// owner. Registered sessions combine the live snapshot with durable rows
+    /// no longer held in memory; unregistered sessions read the durable store
+    /// without restoring a registration. Every durable row must decode, or the
+    /// whole observation fails. No input is filtered by phase, run or workflow.
+    ///
+    /// This read does not close ingress or prove that work has settled. A
+    /// caller requiring a complete closed cohort must separately establish
+    /// that the selected registration is Draining or its teardown has joined,
+    /// then check each input's canonical terminal receipt. Reused sessions
+    /// also require the caller's exact start baseline to scope its workflow.
+    /// Input ids are stable across the boundary: a requeue across a graceful
+    /// stop, a replay of a failed run and a retry keep an input's id. A
+    /// requeued input, or one bound to a run a graceful stop suspended, is not
+    /// finalized at shutdown: it finalizes at the next start, or as
+    /// `RequeueExpired` past the stop's max age. A coalesced or superseded
+    /// input names the newer admitted input of the same session that carries
+    /// its outcome.
+    /// The returned source identifies the read path, not a close receipt.
+    ///
+    /// A known empty session returns an empty observation. An unregistered
+    /// session on a store-less machine fails `NotReady`; a persistent session
+    /// with neither lifecycle nor input records fails `NotFound`.
+    pub async fn session_input_states(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Sourced<Vec<StoredInputState>>, RuntimeDriverError> {
+        let (source, report) = self.session_input_witnesses(session_id).await?;
+        Ok(Sourced { source, report })
+    }
+
     /// Read the terminal receipt of one input: its finalized receipt (the
     /// scope, recipients and finalized outcome of the terminal batch the
     /// runtime committed it in), a receipt-less terminal, or its current

@@ -3,7 +3,7 @@
 //! The outcome is recorded once as a durable `BackgroundJob` system notice
 //! (`SystemNoticeBlock::BackgroundJob { persisted: true, .. }`) in the owner's
 //! transcript. It is submitted as a continuation
-//! ([`crate::detached_completion_sink`]) whose applied input is a runtime
+//! (`crate::detached_completion_sink`) whose applied input is a runtime
 //! prompt input with that notice as its only content, a typed append with no
 //! user text:
 //!

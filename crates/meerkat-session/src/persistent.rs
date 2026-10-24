@@ -79,9 +79,10 @@ use meerkat_runtime::{
     ArchivedSessionActorMaterializationAuthorization, HeadCanonicalProvisionalTailAuthority,
     HeadCanonicalStoreAuthority, MachineSessionControlAuthority, MeerkatMachine,
     PreparedArchivedResumeCommitLease, PreparedHeadCanonicalProvisionalTail,
-    PreparedSessionMaterialization, PreparedWholeBlobRewriteBoundary, RuntimeSessionAuthority,
-    RuntimeSessionPersistenceProfile, RuntimeState, RuntimeStore, RuntimeStoreError,
-    RuntimeStoreWriteFence, VerifiedCommittedWholeBlobPayload, WholeBlobStoreAuthority,
+    PreparedSessionMaterialization, PreparedWholeBlobRewriteBoundary, PreparedWholeBlobRunRebase,
+    RuntimeSessionAuthority, RuntimeSessionPersistenceProfile, RuntimeState, RuntimeStore,
+    RuntimeStoreError, RuntimeStoreWriteFence, VerifiedCommittedWholeBlobPayload,
+    WholeBlobRunRebaseOutcome, WholeBlobStoreAuthority,
 };
 use meerkat_store::{SessionFilter, SessionStore, SessionStoreError};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -93,7 +94,8 @@ use crate::SESSION_LABELS_KEY;
 use crate::ephemeral::SessionTranscriptAuthoritySnapshot;
 use crate::ephemeral::{
     EphemeralSessionService, HeadCanonicalRuntimeBoundaryAuthority, LiveSessionActorWitness,
-    LiveSessionActorWitnessSlot, LiveSessionTranscriptAuthoritySnapshot, SessionAgentBuilder,
+    LiveSessionActorWitnessSlot, LiveSessionTranscriptAuthoritySnapshot, RuntimeTurnRunContext,
+    SessionAgentBuilder,
 };
 use crate::event_store::{
     EventStore, TranscriptRewriteAuditExpectation, TranscriptRewriteAuditRead,
@@ -319,6 +321,7 @@ fn durable_session_restore_error(
 fn session_id_from_event(event: &meerkat_core::event::AgentEvent) -> Option<SessionId> {
     match event {
         meerkat_core::event::AgentEvent::RunStarted { session_id, .. }
+        | meerkat_core::event::AgentEvent::RunResumed { session_id, .. }
         | meerkat_core::event::AgentEvent::RunCompleted { session_id, .. }
         | meerkat_core::event::AgentEvent::ExtractionSucceeded { session_id, .. }
         | meerkat_core::event::AgentEvent::ExtractionFailed { session_id, .. }
@@ -1024,6 +1027,13 @@ struct CheckpointerGate {
     cancelled: Mutex<bool>,
 }
 
+/// Where a run re-base publishes the transcript-rewrite audit receipt its
+/// rewrites owe, as a rewrite boundary of the session service does.
+struct RewriteAuditSink {
+    event_store: Arc<dyn EventStore>,
+    projector: Option<Arc<SessionProjector>>,
+}
+
 /// Checkpointer that saves sessions to a [`SessionStore`].
 ///
 /// Used by keep-alive agents to persist the session after each interaction
@@ -1055,6 +1065,120 @@ struct StoreCheckpointer {
     /// its successor. An intra-run checkpoint prunes no store rows (the
     /// committed boundary must stay rebuildable); the promotion applies it.
     latest_run_transcript_retirement: std::sync::Mutex<Option<(RunId, u64)>>,
+    /// The live deferred-turn state of this actor's session, attached once the
+    /// actor exists and before it can run a turn. A checkpoint of a session
+    /// that carries deferred-turn state persists this live value.
+    live_deferred_turn_state: std::sync::OnceLock<Arc<std::sync::Mutex<SessionDeferredTurnState>>>,
+    /// Set once a checkpoint of a session carrying deferred-turn state ran
+    /// before the live state was attached, so that warning is logged once.
+    unattached_deferred_checkpoint_warned: std::sync::atomic::AtomicBool,
+    /// Where a WholeBlob run re-base publishes its rewrite audit receipt;
+    /// `None` when the service keeps no event store.
+    rewrite_audit: Option<RewriteAuditSink>,
+    /// The run whose re-base committed its rewritten session as the
+    /// session's base, until that run's boundary is promoted or another run
+    /// checkpoints. Its inputs cannot be replayed from the base the run
+    /// started on: the re-base replaced it.
+    rebased_run: std::sync::Mutex<Option<RunId>>,
+    /// The run cursor the held receipt's checkpoint carried when it was
+    /// written, for the run it names: whether the run's last committed round
+    /// still owes its staged calls. Kept beside `latest_run_checkpoint_receipt`
+    /// and cleared with it.
+    latest_run_checkpoint_cursor: std::sync::Mutex<Option<(RunId, HeldCheckpointCursor)>>,
+    /// The run whose re-base store call failed with its outcome unknown: the
+    /// store may have applied the re-base before it failed. A failure of the
+    /// run is resolved from the store before any route is taken, so its
+    /// inputs are never requeued over a base that may hold them.
+    rebase_outcome_unknown: std::sync::Mutex<Option<RunId>>,
+}
+
+/// What a run's failure must respect about its re-base, decided before any
+/// build of its output.
+enum RebaseFailureGuard {
+    /// The run never re-based (or its re-base definitely did not apply).
+    None,
+    /// The run's re-base committed: its inputs are committed history.
+    Rebased(Arc<StoreCheckpointer>),
+    /// The re-base's outcome is unknown and the store could not settle it:
+    /// the failure stops the executor, holding the run for the next start's
+    /// recovery, and nothing is requeued or discarded.
+    Hold,
+}
+
+/// What the store says about a re-base whose store call failed with its
+/// outcome unknown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RebaseReread {
+    /// The run's tail starts the run over a moved committed base: the re-base
+    /// applied.
+    Landed,
+    /// The committed base is the one the run started on: the re-base did not
+    /// apply.
+    NotLanded,
+    /// The store could not be read, or it shows neither.
+    Unknown,
+}
+
+/// How a re-based run's failure that the runtime would replay ends.
+enum RebasedRunFailure {
+    /// Through the failed-but-applied route, its inputs consumed.
+    Consume(meerkat_core::TurnErrorMetadata),
+    /// With a fail-closed executor stop, its tail and bound inputs kept.
+    Stop(SessionError),
+}
+
+/// What the failed-turn path did with the provisional tail of a run whose
+/// turn failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplayedRunTail {
+    /// The failure does not replay the run's inputs: any tail is left for
+    /// recovery to judge.
+    NotReplayed,
+    /// The run's tail was discarded by its exact authority.
+    Discarded,
+    /// The store holds no provisional tail of the run.
+    NoTail,
+    /// A tail stands that the discard did not remove: the session's runtime
+    /// reloads before anything of the failure is realized.
+    ReloadRequired,
+    /// The run's tail records that the run re-based, or cannot be read, so
+    /// its inputs may already be committed history: the tail is kept, and the
+    /// failure stops the executor instead of replaying them.
+    RebasedKept,
+}
+
+/// The run cursor a held provisional checkpoint carried when it was written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeldCheckpointCursor {
+    /// No cursor: a closing save, or a checkpoint of a session with no open
+    /// run cursor.
+    Absent,
+    /// The round's first commit: its staged calls may have run and are owed
+    /// their results.
+    ToolsPending,
+    /// The round's second commit: the run continues with its next model call.
+    AwaitingModel,
+    /// The cursor could not be read; treated as owing its calls.
+    Unreadable,
+}
+
+impl HeldCheckpointCursor {
+    fn of(session: &Session) -> Self {
+        match session.try_run_cursor() {
+            Ok(None) => Self::Absent,
+            Ok(Some(cursor)) => match cursor.resume_point {
+                meerkat_core::RunResumePoint::ToolsPending { .. } => Self::ToolsPending,
+                meerkat_core::RunResumePoint::AwaitingModel => Self::AwaitingModel,
+            },
+            Err(_) => Self::Unreadable,
+        }
+    }
+
+    /// Whether a checkpoint with this cursor still owes its round's staged
+    /// calls, so promoting it would commit a body without calls that ran.
+    fn owes_staged_calls(self) -> bool {
+        matches!(self, Self::ToolsPending | Self::Unreadable)
+    }
 }
 
 struct HeadCanonicalProvisionalIntent<'a> {
@@ -1176,6 +1300,55 @@ pub enum CommittedBoundaryRecovery {
     },
 }
 
+/// What a cold attach's durable-tail settle left for the session
+/// ([`PersistentSessionService::prepare_cold_attach_reporting`]).
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum ColdAttachSettlement {
+    /// No open run's provisional tail stands ahead of the committed boundary
+    /// for the settle to report: there was none, the store-owned recovery
+    /// committed it, or it held, refused or failed to prove it (the tail then
+    /// stays, and a committed read still refuses). The caller's next committed
+    /// read decides.
+    Settled,
+    /// The store-owned recovery continues the session's open run from its
+    /// last round commit (a run a requeueing stop suspended): the tail is
+    /// kept for that run, which resumes when the session's actor is next
+    /// materialized, and nothing was written. `committed` is the session's
+    /// committed snapshot under that tail
+    /// (`meerkat_runtime::recovery::load_committed_snapshot_under_provisional_tail`),
+    /// for readers only: it is never the input to a decision about the tail.
+    ContinuesOpenRun {
+        /// The open run the recovery continues.
+        run_id: RunId,
+        /// The session's last committed snapshot.
+        committed: Box<Session>,
+    },
+}
+
+/// A durable session's open run that durable-tail recovery continues: the
+/// provisional tail the actor is seeded from, the run it resumes and the
+/// receipt that run's next checkpoint chains from.
+#[derive(Debug, Clone)]
+struct ContinuedRunSeed {
+    candidate: Box<Session>,
+    run_id: RunId,
+    receipt: RunCheckpointReceipt,
+}
+
+/// What durable-tail recovery left an actor's materialization: the public
+/// outcome with the committed body when the recovery proved it aligned, a
+/// tail the recovery held or refused (kept, typed by its hold), or an open
+/// run to continue.
+enum ResumeBoundaryRecovery {
+    Settled(CommittedBoundaryRecovery, Option<Session>),
+    Withheld {
+        hold: meerkat_core::service::DurableResumeHold,
+        reason: String,
+    },
+    Continue(ContinuedRunSeed),
+}
+
 /// Session-owner classification of one already-bracketed persistent resume.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreparedCommittedBoundaryResumeMaterialization {
@@ -1222,6 +1395,10 @@ pub struct CommittedBoundaryResumePreparationReceipt {
     /// copy from the request, so no second reference survives to force a
     /// copy-on-write of the transcript at the actor's first append.
     committed_body: Option<Box<Session>>,
+    /// The open run the preparation's recovery continues: the actor is
+    /// seeded from its provisional tail instead of the committed body, and
+    /// the run resumes. `None` for every settled recovery.
+    continued_run: Option<ContinuedRunSeed>,
 }
 
 impl std::fmt::Debug for CommittedBoundaryResumePreparationReceipt {
@@ -1302,6 +1479,8 @@ impl CommittedBoundaryResumePreparationReceipt {
 struct ConsumedCommittedBoundaryResumePreparation {
     observation: meerkat_runtime::store::RuntimeSessionResumeObservation,
     committed_body: Option<Box<Session>>,
+    /// The open run the preparation's recovery continues, if any.
+    continued_run: Option<ContinuedRunSeed>,
 }
 
 /// Complete result of the persistent owner's one resume-preparation pipeline.
@@ -1357,6 +1536,41 @@ pub struct DurableSessionForkWithProvenance {
     pub prefix_message_count: usize,
     pub prefix_digest: String,
     pub prefix_revision: String,
+}
+
+/// The fork instruction policies a durable fork applies.
+///
+/// The activation rows the child copies follow `inherited`, the host's
+/// policy already resolved for the fork's activation window
+/// ([`meerkat_core::ForkInstructionPolicy::effective`]). The skills the
+/// copied rows loaded follow `declared`, the policy as the host declared it:
+/// a child runs without activating them, so a fork without an activation
+/// window strips them under the default instead of refusing. A
+/// [`meerkat_core::DurableSessionForkTarget`] carries its own pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForkInstructionPolicies {
+    pub inherited: meerkat_core::ForkInstructionPolicy,
+    pub declared: meerkat_core::ForkInstructionPolicy,
+}
+
+impl ForkInstructionPolicies {
+    /// The policies of a fork that leaves no activation window: the child is
+    /// committed but not materialized, and activation admits only
+    /// materialized sessions.
+    fn without_activation_window(declared: meerkat_core::ForkInstructionPolicy) -> Self {
+        Self {
+            inherited: declared.effective(meerkat_core::ActivationWindow::None),
+            declared,
+        }
+    }
+
+    /// The policies a durable fork target carries.
+    fn of_target(target: &meerkat_core::DurableSessionForkTarget) -> Self {
+        Self {
+            inherited: target.inherited_instructions,
+            declared: target.declared_instructions,
+        }
+    }
 }
 
 /// Whether rewrite-persistence tracing is armed.
@@ -1562,6 +1776,54 @@ async fn append_transcript_rewrite_receipt_for_commits(
     .await
 }
 
+/// The rewrite commits `live` holds beyond its committed base `base`, in
+/// order: the suffix a run re-base proves and publishes.
+fn rewrite_commits_since_base(
+    base: &Session,
+    live: &Session,
+) -> Result<Vec<meerkat_core::TranscriptRewriteCommit>, AgentError> {
+    let base_count = base
+        .validated_transcript_history_state()
+        .map_err(|error| {
+            AgentError::InternalError(format!(
+                "the committed base of session {} has an invalid transcript graph: {error}",
+                base.id()
+            ))
+        })?
+        .map_or(0, |history| history.state().commit_count());
+    let history = live
+        .validated_transcript_history_state()
+        .map_err(|error| {
+            AgentError::InternalError(format!(
+                "the live transcript graph of session {} is invalid: {error}",
+                live.id()
+            ))
+        })?
+        .ok_or_else(|| {
+            AgentError::InternalError(format!(
+                "session {} has no transcript rewrite to re-base on",
+                live.id()
+            ))
+        })?;
+    let state = history.state();
+    if state.commit_count() <= base_count {
+        return Err(AgentError::InternalError(format!(
+            "session {} has no transcript rewrite beyond its committed base to re-base on",
+            live.id()
+        )));
+    }
+    (base_count..state.commit_count())
+        .map(|index| {
+            state.commit(index).cloned().ok_or_else(|| {
+                AgentError::InternalError(format!(
+                    "the transcript graph of session {} lacks rewrite occurrence {index}",
+                    live.id()
+                ))
+            })
+        })
+        .collect()
+}
+
 impl StoreCheckpointer {
     /// The live graph's retention cut the run's last checkpoint recorded,
     /// for the promotion of that run's provisional chain.
@@ -1572,6 +1834,114 @@ impl StoreCheckpointer {
             .and_then(|slot| slot.clone())
             .filter(|(recorded_run, _)| recorded_run == run_id)
             .map(|(_, retired)| retired)
+    }
+
+    /// The deferred-turn state a checkpoint of `session` persists.
+    ///
+    /// The session's live handle owns the deferred first turn. The agent's
+    /// Session carries the deferred-turn state it was resumed from, which goes
+    /// stale when the first turn starts, so a checkpoint persists the live
+    /// state instead (the value an export stamps). A session that carries no
+    /// deferred-turn state persists none, as before.
+    fn deferred_turn_state_for_checkpoint(
+        &self,
+        session: &Session,
+    ) -> Option<SessionDeferredTurnState> {
+        let carried = session.deferred_turn_state()?;
+        match self.live_deferred_turn_state.get() {
+            Some(live) => Some(crate::ephemeral::live_deferred_turn_state_for_durable_write(live)),
+            None => {
+                if !self
+                    .unattached_deferred_checkpoint_warned
+                    .swap(true, std::sync::atomic::Ordering::Relaxed)
+                {
+                    tracing::warn!(
+                        session_id = %session.id(),
+                        "checkpoint of a session with deferred-turn state ran before its live state was attached; persisting the carried state"
+                    );
+                }
+                Some(carried)
+            }
+        }
+    }
+
+    /// Whether `run_id`'s re-base committed its rewritten session as this
+    /// session's base ([`meerkat_core::SessionCheckpointer::rebase_run`]):
+    /// the run's inputs cannot be replayed from the base it started on, so a
+    /// failure of the run consumes them instead of releasing its tail and
+    /// requeueing them. Read beside [`Self::run_checkpoint_receipt`] when the
+    /// run's failure picks its disposition.
+    fn run_rebased(&self, run_id: &RunId) -> bool {
+        self.rebased_run
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            == Some(run_id)
+    }
+
+    /// Record the run cursor the receipt this checkpointer now holds was
+    /// written with (`None` when it holds no receipt).
+    fn record_held_checkpoint_cursor(&self, held: Option<(RunId, HeldCheckpointCursor)>) {
+        *self
+            .latest_run_checkpoint_cursor
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = held;
+    }
+
+    /// Whether the checkpoint held for `run_id` still owes its round's staged
+    /// calls: its cursor is `ToolsPending` or unreadable, or no checkpoint of
+    /// the run is held, so nothing proves the calls' results are committed.
+    fn held_checkpoint_owes_staged_calls(&self, run_id: &RunId) -> bool {
+        match *self
+            .latest_run_checkpoint_cursor
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            Some((ref held_run, cursor)) if held_run == run_id => cursor.owes_staged_calls(),
+            _ => true,
+        }
+    }
+
+    /// Whether `run_id`'s boundary would promote a held checkpoint that still
+    /// owes its round's staged calls. The boundary promotes the receipt this
+    /// checkpointer holds for the run (`Self::run_checkpoint_receipt`); with
+    /// none it commits the live session, which owes nothing. A receipt that
+    /// cannot be read for the session counts as owing.
+    async fn promotion_owes_staged_calls(&self, session_id: &SessionId, run_id: &RunId) -> bool {
+        match self.run_checkpoint_receipt(session_id, run_id).await {
+            Ok(Some(_)) => self.held_checkpoint_owes_staged_calls(run_id),
+            Ok(None) => false,
+            Err(_) => true,
+        }
+    }
+
+    /// Forget a re-based run once another run checkpoints or the run's
+    /// boundary is promoted (`None`).
+    fn clear_rebased_run_unless(&self, run_id: Option<&RunId>) {
+        let mut rebased = self
+            .rebased_run
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if rebased.as_ref() != run_id {
+            *rebased = None;
+        }
+        drop(rebased);
+        let mut unknown = self
+            .rebase_outcome_unknown
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if unknown.as_ref() != run_id {
+            *unknown = None;
+        }
+    }
+
+    /// Whether `run_id`'s re-base store call failed with its outcome unknown.
+    fn rebase_outcome_unknown(&self, run_id: &RunId) -> bool {
+        self.rebase_outcome_unknown
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            == Some(run_id)
     }
 
     async fn run_checkpoint_receipt(
@@ -1637,6 +2007,8 @@ impl StoreCheckpointer {
             )));
         }
         *receipt_slot = None;
+        self.record_held_checkpoint_cursor(None);
+        self.clear_rebased_run_unless(None);
         Ok(())
     }
 
@@ -1754,7 +2126,7 @@ impl StoreCheckpointer {
                     session.id()
                 ))
             })?;
-        if let Some(mut state) = session.deferred_turn_state() {
+        if let Some(mut state) = self.deferred_turn_state_for_checkpoint(session) {
             externalize_deferred_turn_state(self.blob_store.as_ref(), &mut state)
                 .await
                 .map_err(|error| {
@@ -1910,6 +2282,201 @@ impl StoreCheckpointer {
             )));
         }
         Ok(())
+    }
+
+    /// Re-base a WholeBlob run on its rewritten session, in one store call
+    /// (`RuntimeStore::commit_prepared_whole_blob_run_rebase`): the session,
+    /// without its run cursor, becomes the committed base, and the run's tail
+    /// restarts on it as the same document (with the cursor of a round
+    /// commit, or none for an end-of-run or closing save), at candidate
+    /// sequence 1. Then the rewrites' audit receipt is published, as a
+    /// rewrite boundary publishes it; a crash before it is repaired by the
+    /// receipt-only replay of the rewrite proof.
+    ///
+    /// The committed base must still be this actor's: a store that moved
+    /// (`Stale`) or any error of the store call or after it fails the round
+    /// commit with the teardown-required class, so the live actor reloads.
+    async fn rebase_whole_blob_run(
+        &self,
+        session: &mut Session,
+        run_id: &RunId,
+        previous: Option<&RunCheckpointReceipt>,
+    ) -> Result<RunCheckpointReceipt, AgentError> {
+        let id = session.id().clone();
+        let reload = |detail: String| {
+            AgentError::session_durable_projection_authority_unknown(format!(
+                "{detail}; live actor reload required"
+            ))
+        };
+        let expected_tail = previous
+            .map(|receipt| {
+                receipt.whole_blob().cloned().ok_or_else(|| {
+                    AgentError::InternalError(format!(
+                        "WholeBlob re-base for session {id} received a HeadCanonical provisional receipt"
+                    ))
+                })
+            })
+            .transpose()?;
+        if let Some(previous) = expected_tail.as_ref()
+            && (previous.session_id() != &id || previous.run_id() != run_id)
+        {
+            return Err(AgentError::InternalError(format!(
+                "WholeBlob re-base for session {id} received a provisional receipt for another session/run"
+            )));
+        }
+        let committed_authority = self
+            .whole_blob_base_authority
+            .lock()
+            .map_err(|_| {
+                AgentError::InternalError(format!(
+                    "WholeBlob actor base authority lock is poisoned for session {id}"
+                ))
+            })?
+            .clone()
+            .ok_or_else(|| {
+                reload(format!(
+                    "WholeBlob actor for session {id} has no exact materialization authority to re-base from"
+                ))
+            })?;
+        let runtime_id = LogicalRuntimeId::for_session(&id);
+        let committed_snapshot = self
+            .runtime_store
+            .load_committed_whole_blob_snapshot(&runtime_id)
+            .await
+            .map_err(|error| {
+                reload(format!(
+                    "failed to load the committed WholeBlob base to re-base session {id}: {error}"
+                ))
+            })?
+            .ok_or_else(|| {
+                reload(format!(
+                    "committed WholeBlob authority disappeared before the re-base of session {id}"
+                ))
+            })?;
+        if committed_snapshot.authority() != &committed_authority {
+            return Err(reload(format!(
+                "WholeBlob committed authority differs from the live actor base for session {id}"
+            )));
+        }
+        let expected_runtime =
+            VerifiedCommittedWholeBlobPayload::from_committed(&id, committed_snapshot).map_err(
+                |error| {
+                    reload(format!(
+                        "failed to verify the committed WholeBlob base of session {id}: {error}"
+                    ))
+                },
+            )?;
+        let commits = rewrite_commits_since_base(expected_runtime.session(), session)?;
+        session
+            .externalize_media(self.blob_store.as_ref(), 0)
+            .await
+            .map_err(|error| {
+                AgentError::InternalError(format!(
+                    "WholeBlob re-base media externalization failed for session {id}: {error}"
+                ))
+            })?;
+        if let Some(mut state) = self.deferred_turn_state_for_checkpoint(session) {
+            externalize_deferred_turn_state(self.blob_store.as_ref(), &mut state)
+                .await
+                .map_err(|error| {
+                    AgentError::InternalError(format!(
+                        "WholeBlob re-base deferred-turn externalization failed for session {id}: {error}"
+                    ))
+                })?;
+            session.set_deferred_turn_state(state).map_err(|error| {
+                AgentError::InternalError(format!(
+                    "WholeBlob re-base deferred-turn projection failed for session {id}: {error}"
+                ))
+            })?;
+        }
+        let rebase = PreparedWholeBlobRunRebase::prepare(
+            expected_runtime,
+            expected_tail,
+            run_id.clone(),
+            session.clone(),
+            &commits,
+        )
+        .map_err(|error| {
+            AgentError::InternalError(format!(
+                "failed to prepare the WholeBlob re-base of session {id}: {error}"
+            ))
+        })?;
+        let outcome = match self
+            .runtime_store
+            .commit_prepared_whole_blob_run_rebase(&runtime_id, rebase.store_parts())
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                // The store may have applied the re-base before it failed: the
+                // outcome is unknown, so a failure of this run is resolved from
+                // the store and never requeues its inputs.
+                *self
+                    .rebase_outcome_unknown
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(run_id.clone());
+                return Err(reload(format!(
+                    "the WholeBlob re-base of session {id} failed: {error}"
+                )));
+            }
+        };
+        let (committed, tail) = match outcome {
+            WholeBlobRunRebaseOutcome::Applied { committed, tail } => (committed, tail),
+            WholeBlobRunRebaseOutcome::Stale => {
+                return Err(reload(format!(
+                    "another writer moved session {id} before its run re-based"
+                )));
+            }
+        };
+        // The store replaced the base the run started on, whatever follows.
+        *self
+            .rebased_run
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(run_id.clone());
+        if tail.session_id() != &id
+            || tail.run_id() != run_id
+            || tail.candidate_sequence() != 1
+            || tail.base_store_revision() != committed.store_revision()
+            || tail.base_blob_sha256() != committed.blob_sha256()
+        {
+            return Err(reload(format!(
+                "the WholeBlob store acknowledged a re-base other than the prepared one for session {id}"
+            )));
+        }
+        // From here on the store holds the re-based base: every failure is
+        // the reload class, so the live actor never continues on the old one.
+        let receipt = RunCheckpointReceipt::issued(
+            RunCheckpointAuthority::WholeBlob(tail),
+            rebase.conversation_digest().to_string(),
+            rebase.message_count(),
+        )
+        .map_err(|error| {
+            reload(format!(
+                "session {id} re-based, but the re-based tail's receipt facts did not bind: {error}"
+            ))
+        })?;
+        *self.whole_blob_base_authority.lock().map_err(|_| {
+            reload(format!(
+                "session {id} re-based, but its actor base authority lock is poisoned"
+            ))
+        })? = Some(committed);
+        if let Some(audit) = self.rewrite_audit.as_ref() {
+            let final_assistant_text = rebase.rewrite().successor().last_assistant_text();
+            append_prepared_transcript_rewrite_receipt(
+                Some(&audit.event_store),
+                audit.projector.as_ref(),
+                &id,
+                rebase.rewrite().audit_receipt(),
+                final_assistant_text.as_deref(),
+            )
+            .await
+            .map_err(|error| {
+                reload(format!(
+                    "session {id} re-based, but its rewrite audit receipt was not published: {error}"
+                ))
+            })?;
+        }
+        Ok(receipt)
     }
 
     async fn checkpoint_head_canonical(
@@ -2091,7 +2658,7 @@ impl StoreCheckpointer {
                 None
             }
         };
-        if let Some(mut state) = session.deferred_turn_state() {
+        if let Some(mut state) = self.deferred_turn_state_for_checkpoint(session) {
             externalize_deferred_turn_state(self.blob_store.as_ref(), &mut state)
                 .await
                 .map_err(|error| {
@@ -2404,6 +2971,8 @@ impl meerkat_core::SessionCheckpointer for StoreCheckpointer {
                 )),
             };
         }
+        // Another run's checkpoint ends what a re-based run's record says.
+        self.clear_rebased_run_unless(Some(run_id));
         let result = match self.runtime_store.session_persistence_profile() {
             RuntimeSessionPersistenceProfile::WholeBlobV1 => {
                 self.checkpoint_whole_blob(session, run_id, previous).await
@@ -2419,6 +2988,11 @@ impl meerkat_core::SessionCheckpointer for StoreCheckpointer {
         };
         if let Ok(receipt) = result.as_ref() {
             *self.latest_run_checkpoint_receipt.lock().await = receipt.clone();
+            self.record_held_checkpoint_cursor(
+                receipt
+                    .as_ref()
+                    .map(|_| (run_id.clone(), HeldCheckpointCursor::of(session))),
+            );
             let retired = receipt.as_ref().map(|_| {
                 let retired = session
                     .validated_transcript_history_state()
@@ -2439,6 +3013,83 @@ impl meerkat_core::SessionCheckpointer for StoreCheckpointer {
         if let Ok(mut slot) = self.latest_run_transcript_retirement.lock() {
             *slot = Some((run_id.clone(), retired_occurrences));
         }
+    }
+
+    fn rebases_runs(&self) -> bool {
+        self.runtime_store.session_persistence_profile()
+            == RuntimeSessionPersistenceProfile::WholeBlobV1
+            && self.runtime_store.supports_whole_blob_run_rebase()
+    }
+
+    async fn rebase_run(
+        &self,
+        session: &mut Session,
+        run_id: &RunId,
+        previous: Option<&RunCheckpointReceipt>,
+    ) -> Result<RunCheckpointReceipt, AgentError> {
+        let guard = self.gate.cancelled.lock().await;
+        if *guard {
+            return Err(AgentError::session_durable_projection_authority_unknown(
+                format!(
+                    "checkpoint gate is cancelled for session {}; the run re-base was not attempted; live actor reload required",
+                    session.id()
+                ),
+            ));
+        }
+        if !self.rebases_runs() {
+            return Err(AgentError::InternalError(format!(
+                "the runtime store of session {} does not re-base runs: a run re-base is a WholeBlob operation of a store that supports it",
+                session.id()
+            )));
+        }
+        self.clear_rebased_run_unless(Some(run_id));
+        let result = self.rebase_whole_blob_run(session, run_id, previous).await;
+        if let Ok(receipt) = result.as_ref() {
+            *self.latest_run_checkpoint_receipt.lock().await = Some(receipt.clone());
+            self.record_held_checkpoint_cursor(Some((
+                run_id.clone(),
+                HeldCheckpointCursor::of(session),
+            )));
+            if let Ok(mut slot) = self.latest_run_transcript_retirement.lock() {
+                *slot = None;
+            }
+        }
+        drop(guard);
+        result
+    }
+
+    /// The host store's self-fence: over a runtime store whose writer holds a
+    /// fence lease ([`RuntimeStore::self_fence`]), the run makes no model
+    /// call and dispatches nothing once the writer's window has closed, since
+    /// another process may already own the session. The window is read
+    /// afresh on every call. A store without a lease always allows. A clock
+    /// read and an atomic load: no I/O, and it never waits.
+    fn dispatch_fence_check(&self) -> Result<(), AgentError> {
+        let Some(fence) = self.runtime_store.self_fence() else {
+            return Ok(());
+        };
+        let window = fence.window();
+        if window.is_open() {
+            return Ok(());
+        }
+        // Names the session when its base is at hand without waiting.
+        let session = self
+            .whole_blob_base_authority
+            .try_lock()
+            .ok()
+            .and_then(|base| {
+                base.as_ref()
+                    .map(|authority| format!("session {}", authority.session_id()))
+            })
+            .unwrap_or_else(|| "this session".to_string());
+        Err(AgentError::session_durable_projection_authority_unknown(
+            format!(
+                "{session}: this writer's self-fence window closed ({:?} since its last acquire \
+                 or renew started, window {:?}, renew failed: {}); another process may own the \
+                 session, so nothing more is dispatched; live actor reload required",
+                window.elapsed, window.window, window.renew_failed
+            ),
+        ))
     }
 }
 
@@ -3038,8 +3689,12 @@ enum LiveSessionAuthority {
     LiveAuthoritative {
         snapshot: LiveSessionTranscriptAuthoritySnapshot,
     },
+    /// Durable authority outranks the live actor, for `reason`. The verdict
+    /// carries no body: it is classified from bounded facts, so a provisional
+    /// tail standing ahead of the committed boundary never fails it. A
+    /// consumer that synchronizes the live actor reads the committed body
+    /// itself, strictly; a reader serves the committed snapshot.
     DurableAuthoritative {
-        session: Box<Session>,
         reason: LiveSessionAuthorityReason,
     },
 }
@@ -3523,6 +4178,32 @@ impl<'a> MachineSessionArchiveProtocol<'a> {
             .map_err(|error| archive_runtime_control_error(id, error))
     }
 
+    /// End, under the archive's runtime lease, the work the session's
+    /// runtime kept for a later start (the inputs of the run it keeps
+    /// resumable, and every queued input), once the archive's recovery held
+    /// the durable tail beside it: the session ends with the archive, so no
+    /// start comes. Returns whether any input ended.
+    async fn end_unresumed_work_before_tail_settle(
+        &self,
+        id: &SessionId,
+        lease: &meerkat_runtime::MachineSessionArchiveLease,
+        deadline: meerkat_core::time_compat::Instant,
+    ) -> Result<bool, SessionError> {
+        let ended = self
+            .runtime_adapter
+            .end_unresumed_work_with_archive_lease_before(lease, "session archived", deadline)
+            .await
+            .map_err(|error| archive_runtime_control_error(id, error))?;
+        if !ended.is_empty() {
+            tracing::info!(
+                session_id = %id,
+                inputs = ended.len(),
+                "ended the work an archived session's runtime kept for a later start beside its held durable tail"
+            );
+        }
+        Ok(!ended.is_empty())
+    }
+
     fn require_shared_runtime_store(
         &self,
         id: &SessionId,
@@ -3824,6 +4505,16 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.inner.live_session_actor_registered(id).await
     }
 
+    /// The visible tool names of the live session `id` at a fork boundary,
+    /// read without waiting on a running turn. See
+    /// [`EphemeralSessionService::fork_source_tools`].
+    pub async fn fork_source_tools(
+        &self,
+        id: &SessionId,
+    ) -> meerkat_core::fork_notice::ForkSeedSourceTools {
+        self.inner.fork_source_tools(id).await
+    }
+
     /// Subscribe to the live inner session actor's turn activity, or `None`
     /// when no live actor is registered (no turn can be active). See
     /// [`EphemeralSessionService::session_activity_watch`].
@@ -3992,25 +4683,42 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// into an error; after the last attempt the typed conflict surfaces
     /// unchanged (issue #1104). Every re-read holds the runtime turn
     /// finalization guard so it cannot interleave with a finalizer's write.
+    ///
+    /// These loads serve public readers only, so each attempt tolerates the
+    /// session's own provisional tail
+    /// ([`Self::load_authoritative_session_base_tolerating_tail`]): while a
+    /// durable run holds a round commit ahead of the committed snapshot, the
+    /// reader is served that snapshot instead of the conflict.
     async fn load_authoritative_session_base_for_observation(
         &self,
         id: &SessionId,
     ) -> Result<Option<Session>, SessionError> {
-        let mut result = self.load_authoritative_session_base(id).await;
+        let mut result = self
+            .load_authoritative_session_base_tolerating_tail(id)
+            .await;
         for _ in 1..OBSERVATION_LOAD_ATTEMPTS {
             if !Self::is_transcript_revision_conflict(&result) {
                 break;
             }
             let _turn_finalization_guard = self.acquire_runtime_turn_finalization_guard(id).await;
-            result = self.load_authoritative_session_base(id).await;
+            result = self
+                .load_authoritative_session_base_tolerating_tail(id)
+                .await;
         }
         result
     }
 
     fn is_transcript_revision_conflict<T>(result: &Result<T, SessionError>) -> bool {
+        result
+            .as_ref()
+            .err()
+            .is_some_and(Self::is_transcript_revision_conflict_error)
+    }
+
+    fn is_transcript_revision_conflict_error(error: &SessionError) -> bool {
         matches!(
-            result,
-            Err(SessionError::Store(error))
+            error,
+            SessionError::Store(error)
                 if error
                     .downcast_ref::<SessionStoreError>()
                     .is_some_and(|error| {
@@ -4027,6 +4735,74 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .load_committed_runtime_session_for_body(id, "authoritative session read")
             .await?;
         self.apply_transcript_rewrite_replay(id, session).await
+    }
+
+    /// [`Self::load_authoritative_session_base_with_replay_info`] for a
+    /// reader that tolerates the session's own HeadCanonical provisional
+    /// tail.
+    ///
+    /// A durable run's round commits apply its provisional tail to the
+    /// physical head, so from the run's first tool round until its boundary
+    /// commit the committed read refuses the boundary with
+    /// `TranscriptRevisionConflict`. On that conflict alone this reads the
+    /// committed snapshot the tail sits on through the store-owned
+    /// durable-tail source
+    /// (`meerkat_runtime::recovery::load_committed_snapshot_under_provisional_tail`)
+    /// and replays its transcript rewrites as the strict read does. Without
+    /// a provisional tail applied on the boundary (another profile, no tail,
+    /// or an intent written but not yet applied) the conflict stands.
+    ///
+    /// The snapshot serves the reader only: it proves nothing about the tail
+    /// (an unproven rewrite still reads one), so no decision about a tail
+    /// (a settle, a discard, an archive, a resume or a persist) reads through
+    /// this layer. Those keep the strict read.
+    async fn load_authoritative_session_base_with_replay_info_tolerating_tail(
+        &self,
+        id: &SessionId,
+    ) -> Result<TranscriptRewriteReplay, SessionError> {
+        match self
+            .load_authoritative_session_base_with_replay_info(id)
+            .await
+        {
+            Ok(replay) => Ok(replay),
+            Err(conflict) if Self::is_transcript_revision_conflict_error(&conflict) => {
+                let committed =
+                    meerkat_runtime::recovery::load_committed_snapshot_under_provisional_tail(
+                        self.runtime_store.as_ref(),
+                        id,
+                    )
+                    .await
+                    .map_err(|error| {
+                        SessionError::Agent(AgentError::InternalError(format!(
+                            "failed to read the committed snapshot of session {id} under its \
+                             provisional tail: {error}"
+                        )))
+                    })?;
+                let Some(committed) = committed else {
+                    return Err(conflict);
+                };
+                self.apply_transcript_rewrite_replay(id, Some(committed))
+                    .await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// [`Self::load_authoritative_session_base`] over the tolerant layer: the
+    /// same rewrite replay and audit verification, on the committed snapshot
+    /// while the session's own provisional tail stands on it.
+    async fn load_authoritative_session_base_tolerating_tail(
+        &self,
+        id: &SessionId,
+    ) -> Result<Option<Session>, SessionError> {
+        let replay = self
+            .load_authoritative_session_base_with_replay_info_tolerating_tail(id)
+            .await?;
+        if let Some(session) = replay.session.as_ref() {
+            self.verify_transcript_rewrite_audit_events(session, &replay)
+                .await?;
+        }
+        Ok(replay.session)
     }
 
     /// Materialize the safe full-read fallback for EventStore implementations
@@ -5233,16 +6009,16 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     Some(RuntimeState::Idle | RuntimeState::Attached | RuntimeState::Running)
                 );
                 let store_authority = self.observe_persisted_session_authority(id).await?;
-                if active_lifecycle
-                    && let Some(RuntimeSessionAuthority::HeadCanonical(store_authority)) =
-                        store_authority
+                if let Some(RuntimeSessionAuthority::HeadCanonical(store_authority)) =
+                    store_authority
                     && store_authority.session_id() == id
                 {
                     let head = store_authority.boundary_head();
                     let stored_message_count = usize::try_from(head.message_count).ok();
                     let revisions_match =
                         head.head_revision.as_str() == live_authority.transcript_revision();
-                    if stored_message_count == Some(live_authority.message_count())
+                    if active_lifecycle
+                        && stored_message_count == Some(live_authority.message_count())
                         && revisions_match
                     {
                         let (kind, _) = Self::classify_live_session_authority_observations(
@@ -5262,13 +6038,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                         };
                     }
                     // Unequal boundaries (typically an actor one committed turn
-                    // ahead of the store) classify from the same bounded facts
-                    // the full-body compare derived: the head row's digest and
-                    // row count against the actor's, plus the store-owned
-                    // archive terminal. Neither document is materialized or
-                    // exported; only a DurableAuthoritative verdict loads the
-                    // committed body, because only its consumers synchronize
-                    // the live actor from it.
+                    // ahead of the store), or a lifecycle that is not active (a
+                    // stopped runtime keeps its actor), classify from the same
+                    // bounded facts the full-body compare derived: the head
+                    // row's digest and row count against the actor's, plus the
+                    // store-owned archive terminal. Neither document is
+                    // materialized or exported, so a provisional tail standing
+                    // ahead of the boundary never fails the verdict.
                     let stored_is_archived =
                         self.session_archived_by_runtime_store_authority(id).await?;
                     let live_has_uncommitted_transcript = stored_message_count
@@ -5286,29 +6062,16 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                             });
                         }
                         LiveSessionAuthorityKind::DurableAuthoritative => {
-                            let Some(stored) = self
-                                .load_committed_runtime_session_for_body(
-                                    id,
-                                    "live session authority classification",
-                                )
-                                .await?
-                            else {
-                                return Ok(LiveSessionAuthority::LiveAuthoritative {
-                                    snapshot: live_authority,
-                                });
-                            };
                             tracing::debug!(
                                 session_id = %id,
                                 ?reason,
                                 live_message_count = live_authority.message_count(),
                                 stored_message_count = head.message_count,
                                 revisions_match,
+                                active_lifecycle,
                                 "live session authority classified durable from bounded head-canonical facts"
                             );
-                            return Ok(LiveSessionAuthority::DurableAuthoritative {
-                                session: Box::new(stored),
-                                reason,
-                            });
+                            return Ok(LiveSessionAuthority::DurableAuthoritative { reason });
                         }
                     }
                 }
@@ -5320,8 +6083,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             // current authority, or when this service holds the verified body
             // for exactly that authority. They are then the same inputs the
             // full-body comparison below derives, so the verdict is identical,
-            // and neither document is exported or decoded. Only a
-            // DurableAuthoritative verdict loads the committed body.
+            // and neither document is exported or decoded.
             if self.runtime_store.session_persistence_profile()
                 == RuntimeSessionPersistenceProfile::WholeBlobV1
                 && let Some((stored_revision, stored_message_count)) =
@@ -5346,17 +6108,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                         });
                     }
                     LiveSessionAuthorityKind::DurableAuthoritative => {
-                        let Some(stored) = self
-                            .load_committed_runtime_session_for_body(
-                                id,
-                                "live session authority classification",
-                            )
-                            .await?
-                        else {
-                            return Ok(LiveSessionAuthority::LiveAuthoritative {
-                                snapshot: live_authority,
-                            });
-                        };
                         tracing::debug!(
                             session_id = %id,
                             ?reason,
@@ -5365,17 +6116,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                             stored_transcript_diverged,
                             "live session authority classified durable from bounded WholeBlob facts"
                         );
-                        return Ok(LiveSessionAuthority::DurableAuthoritative {
-                            session: Box::new(stored),
-                            reason,
-                        });
+                        return Ok(LiveSessionAuthority::DurableAuthoritative { reason });
                     }
                 }
             }
 
-            // Exceptional mismatch/non-active classification still compares
-            // full bodies, but the live export must be the exact generation
-            // observed above. A concurrent mutation retries from a fresh
+            // A WholeBlob session without bounded facts, or a session the store
+            // holds no HeadCanonical authority for, still compares full bodies,
+            // but the live export must be the exact generation observed above. A concurrent mutation retries from a fresh
             // authority observation rather than exporting unchecked state.
             let live = match self
                 .export_session_with_labels_if_transcript_authority(id, live_authority.clone())
@@ -5442,10 +6190,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                         stored_transcript_diverged,
                         "live session authority classified durable from full-body comparison"
                     );
-                    Ok(LiveSessionAuthority::DurableAuthoritative {
-                        session: Box::new(stored),
-                        reason,
-                    })
+                    Ok(LiveSessionAuthority::DurableAuthoritative { reason })
                 }
             };
         }
@@ -5471,7 +6216,16 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .live_session_authority_with(id, LiveAuthorityObservation::Published)
                 .await;
         }
-        if Self::is_transcript_revision_conflict(&result)
+        // A hosted live session whose turn ended without its boundary commit
+        // leaves its provisional tail standing, and nothing in this process
+        // commits it any more. The verdict reads no committed body, so that
+        // tail no longer shows as a conflict: the settle is keyed on the
+        // facts themselves (see `settle_ended_live_turn_durable_tail`).
+        if (Self::is_transcript_revision_conflict(&result)
+            || matches!(
+                result,
+                Ok(LiveSessionAuthority::DurableAuthoritative { .. })
+            ))
             && self.settle_ended_live_turn_durable_tail(id).await
         {
             result = self
@@ -5492,13 +6246,16 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// that tail any more: every committed read of the session fails closed
     /// with the typed `TranscriptRevisionConflict`, and resume recovery
     /// answers `Busy` for the live actor, so only a restart would settle it.
-    /// An observation that still conflicts after its retries runs the same
-    /// store-owned, machine-authorized durable-tail recovery a restart runs,
-    /// and only when all of these hold:
+    /// An observation whose durable authority outranks the live actor (or
+    /// that still conflicts after its retries) runs the same store-owned,
+    /// machine-authorized durable-tail recovery a restart runs, and only when
+    /// all of these hold:
     /// - the profile is HeadCanonical;
     /// - this service hosts the session's live actor, so no other process
     ///   commits it;
-    /// - the store records a provisional tail for the session;
+    /// - the store records a provisional tail for the session, of a run the
+    ///   runtime holds open neither as its current run nor as the run its
+    ///   registration keeps resumable (an open run commits its own tail);
     /// - the per-session recovery gate is free (a holder owns the tail).
     ///
     /// The recovery machine refuses a runtime that is not quiescent, and a
@@ -5518,7 +6275,11 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .load_head_canonical_provisional_tail(&Self::runtime_id_for_session(id))
             .await
         {
-            Ok(Some(_)) => {}
+            Ok(Some(tail)) => {
+                if self.runtime_holds_run_open(id, tail.run_id()).await {
+                    return false;
+                }
+            }
             Ok(None) => return false,
             Err(error) => {
                 tracing::warn!(
@@ -5560,6 +6321,15 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 );
                 false
             }
+            // An open run continues; nothing was committed, so the store still
+            // names no settled boundary for this live session.
+            Ok((meerkat_runtime::recovery::DurableTailRecoveryOutcome::Continue { .. }, _)) => {
+                tracing::info!(
+                    session_id = %id,
+                    "durable-tail recovery found an open run to continue on a live session whose turn ended without its boundary commit"
+                );
+                false
+            }
             Err(error) => {
                 tracing::warn!(
                     session_id = %id,
@@ -5567,6 +6337,232 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     "durable-tail recovery failed for a live session whose turn ended without its boundary commit"
                 );
                 false
+            }
+        }
+    }
+
+    /// Settle the durable tail a run of this live session left when it ended
+    /// without its boundary commit, before a native tool application settles
+    /// its returned effects into the live actor.
+    ///
+    /// Per-round commits keep a run's rounds in a provisional tail. A run
+    /// that ends without its boundary commit (the hard interrupt of a
+    /// shutdown's application drain, a stop, another failure) leaves that
+    /// tail for recovery, which closes the run as interrupted with its
+    /// content kept. While the tail stands, the store refuses the ordinary
+    /// whole-session save that makes the application's settled effects
+    /// durable. Those effects come from IO that already ran, and the
+    /// application's custody is what kept this actor past the ended turn, so
+    /// a refused save would lose them with the actor.
+    ///
+    /// The caller holds the turn-finalization boundary (no boundary commit is
+    /// pending) and the recovery gate, and this service hosts the live actor
+    /// the application entered. The same store-owned, machine-authorized
+    /// durable-tail recovery a restart runs settles the tail here: a run that
+    /// ended is committed as interrupted, and the live actor is brought to
+    /// that committed boundary in place before the effects are applied, so
+    /// the save keeps the run's rounds and adds the effects after them. A
+    /// recovery that holds or refuses the tail, or would continue its run,
+    /// leaves it intact, and the save is refused as before.
+    async fn settle_ended_run_tail_before_tool_application_settlement(
+        &self,
+        id: &SessionId,
+    ) -> Result<(), SessionError> {
+        let runtime_id = Self::runtime_id_for_session(id);
+        let tail_stands = match self.runtime_store.session_persistence_profile() {
+            RuntimeSessionPersistenceProfile::WholeBlobV1 => self
+                .runtime_store
+                .load_whole_blob_provisional_tail(&runtime_id)
+                .await
+                .map(|tail| tail.is_some()),
+            RuntimeSessionPersistenceProfile::HeadCanonicalV1 => self
+                .runtime_store
+                .load_head_canonical_provisional_tail(&runtime_id)
+                .await
+                .map(|tail| tail.is_some()),
+            _ => Ok(false),
+        };
+        match tail_stands {
+            Ok(true) => {}
+            Ok(false) => return Ok(()),
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %id,
+                    %error,
+                    "could not observe the provisional tail before a tool application settles"
+                );
+                return Ok(());
+            }
+        }
+        match self.store_owned_durable_tail_recovery_outcome(id).await {
+            Ok((meerkat_runtime::recovery::DurableTailRecoveryOutcome::Committed { .. }, _)) => {
+                tracing::info!(
+                    session_id = %id,
+                    "settled the durable tail of an ended run before a tool application settles"
+                );
+                self.note_live_authority_advanced(id);
+                self.discard_stale_live_session_if_needed(
+                    id,
+                    LiveStalenessPosition::TurnBoundaryHeld,
+                )
+                .await?;
+            }
+            Ok((
+                meerkat_runtime::recovery::DurableTailRecoveryOutcome::AlreadyAligned { .. },
+                _,
+            )) => {}
+            Ok((meerkat_runtime::recovery::DurableTailRecoveryOutcome::Held, _)) => {
+                tracing::warn!(
+                    session_id = %id,
+                    "durable-tail recovery held the tail a tool application's settlement meets"
+                );
+            }
+            Ok((meerkat_runtime::recovery::DurableTailRecoveryOutcome::Refused, _)) => {
+                tracing::warn!(
+                    session_id = %id,
+                    "durable-tail recovery refused the tail a tool application's settlement meets"
+                );
+            }
+            Ok((meerkat_runtime::recovery::DurableTailRecoveryOutcome::Continue { .. }, _)) => {
+                tracing::info!(
+                    session_id = %id,
+                    "the tail a tool application's settlement meets is an open run to continue; it is left intact"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %id,
+                    %error,
+                    "durable-tail recovery failed before a tool application settles"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Settle, inside an archive that holds the session's quiescent runtime
+    /// turn boundary and its recovery gate, the durable tail a turn left ahead
+    /// of the runtime boundary, so the archive can read the session again.
+    ///
+    /// A turn that ends after its end-of-run checkpoint applied the
+    /// HeadCanonical provisional tail, but without the boundary commit (a
+    /// retirement's boundary cancel lands between the two), leaves every
+    /// committed read of the session failing closed with the typed
+    /// `TranscriptRevisionConflict`, whether or not this service still hosts
+    /// the live actor. An observation settles it only while the actor is
+    /// hosted and the recovery gate is free; an archive holds that gate, so it
+    /// runs the same store-owned, machine-authorized recovery here instead
+    /// (the recovery machine refuses a runtime that is not quiescent). The
+    /// session ends with this archive, so a runtime whose executor stopped
+    /// (persisted `Stopped`, for example after its loop failed closed on a
+    /// read of this very tail) counts as quiescent here, as a retired one
+    /// does; a persisted current run still refuses. A
+    /// committed or already aligned tail returns `Ok`, and the archive reads
+    /// once more. A held tail ends the archive with
+    /// [`SessionError::DurableTailHeldForRecovery`] and a refused one with
+    /// [`SessionError::DurableTailRecoveryRefused`]; both keep the tail
+    /// intact. Without a recorded provisional tail, or outside HeadCanonical,
+    /// nothing here settles the conflict, which is returned unchanged.
+    ///
+    /// The archive never continues a run: its recovery judges a quiescent
+    /// runtime retired, so a continuable tail (an open run at a committed
+    /// round) is repaired and committed as interrupted. The recovery runs
+    /// first: a tail it commits keeps every input for that commit, so a run
+    /// whose answer landed before its boundary has its inputs consumed,
+    /// never cancelled, and a tail it refuses ends nothing. Only when it
+    /// holds the tail, the archive ends, under its runtime lease, the work
+    /// the session's runtime kept for a later start, as the runtime ends
+    /// work nothing resumes: the inputs of the run it keeps resumable, and
+    /// every queued input, are abandoned as cancelled through the lease's
+    /// driver. The recovery then runs once more, and commits the tail as
+    /// interrupted instead of holding it beside a queued input, with nothing
+    /// left to terminalize that the driver still holds. A nonterminal content
+    /// input that is neither (bound to another run) still holds the tail,
+    /// typed; a tail that holds for another reason leaves that work
+    /// cancelled, as a live retire's quiesce would.
+    async fn settle_durable_tail_under_archive_gates(
+        &self,
+        id: &SessionId,
+        conflict: SessionError,
+        machine_archive: &MachineSessionArchiveProtocol<'_>,
+        archive_lease: Option<&meerkat_runtime::MachineSessionArchiveLease>,
+        deadline: meerkat_core::time_compat::Instant,
+    ) -> Result<(), SessionError> {
+        if self.runtime_store.session_persistence_profile()
+            != RuntimeSessionPersistenceProfile::HeadCanonicalV1
+        {
+            return Err(conflict);
+        }
+        match self
+            .runtime_store
+            .load_head_canonical_provisional_tail(&Self::runtime_id_for_session(id))
+            .await
+        {
+            Ok(Some(_)) => {}
+            Ok(None) => return Err(conflict),
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %id,
+                    %error,
+                    "could not observe the provisional tail of a session whose archive read conflicts"
+                );
+                return Err(conflict);
+            }
+        }
+        let mut outcome = self
+            .store_owned_durable_tail_recovery_outcome_for_archive(id)
+            .await?;
+        if let Some(lease) = archive_lease
+            && matches!(
+                outcome.0,
+                meerkat_runtime::recovery::DurableTailRecoveryOutcome::Held
+            )
+            && machine_archive
+                .end_unresumed_work_before_tail_settle(id, lease, deadline)
+                .await?
+        {
+            outcome = self
+                .store_owned_durable_tail_recovery_outcome_for_archive(id)
+                .await?;
+        }
+        match outcome {
+            (meerkat_runtime::recovery::DurableTailRecoveryOutcome::Committed { .. }, _) => {
+                tracing::info!(
+                    session_id = %id,
+                    "settled the durable tail an ended turn left ahead of its runtime boundary before archiving the session"
+                );
+                self.note_live_authority_advanced(id);
+                Ok(())
+            }
+            (meerkat_runtime::recovery::DurableTailRecoveryOutcome::AlreadyAligned { .. }, _) => {
+                Ok(())
+            }
+            (meerkat_runtime::recovery::DurableTailRecoveryOutcome::Held, _) => {
+                tracing::warn!(
+                    session_id = %id,
+                    "durable-tail recovery held the tail of a session being archived"
+                );
+                Err(SessionError::DurableTailHeldForRecovery { id: id.clone() })
+            }
+            (meerkat_runtime::recovery::DurableTailRecoveryOutcome::Refused, _) => {
+                tracing::warn!(
+                    session_id = %id,
+                    "durable-tail recovery refused the tail of a session being archived"
+                );
+                Err(SessionError::DurableTailRecoveryRefused { id: id.clone() })
+            }
+            // Unreachable: the archive's recovery judges the runtime retired,
+            // and the machine never continues a run of a retired runtime.
+            // Nothing was written, so the tail is intact.
+            (meerkat_runtime::recovery::DurableTailRecoveryOutcome::Continue { .. }, _) => {
+                tracing::error!(
+                    session_id = %id,
+                    "durable-tail recovery answered a run continuation inside the archive of a session that is ending"
+                );
+                Err(SessionError::Agent(AgentError::InternalError(format!(
+                    "durable-tail recovery for session {id} answered a run continuation \
+                     inside its archive, which judges the runtime retired"
+                ))))
             }
         }
     }
@@ -5629,7 +6625,37 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             id,
         )
         .await
-        .map_err(|error| match error {
+        .map_err(|error| Self::store_owned_durable_tail_recovery_error(id, error))
+    }
+
+    /// [`Self::store_owned_durable_tail_recovery_outcome`] for an archive of
+    /// a session that is ending, which holds the session's turn boundary,
+    /// recovery gate and runtime archive lease: a persisted `Stopped`
+    /// lifecycle is quiescent there (the executor exited, and no later start
+    /// resumes the run).
+    async fn store_owned_durable_tail_recovery_outcome_for_archive(
+        &self,
+        id: &SessionId,
+    ) -> Result<
+        (
+            meerkat_runtime::recovery::DurableTailRecoveryOutcome,
+            Option<CommittedWholeBlobSnapshot>,
+        ),
+        SessionError,
+    > {
+        meerkat_runtime::recovery::recover_durable_tail_for_session_archive(
+            self.runtime_store.as_ref(),
+            id,
+        )
+        .await
+        .map_err(|error| Self::store_owned_durable_tail_recovery_error(id, error))
+    }
+
+    fn store_owned_durable_tail_recovery_error(
+        id: &SessionId,
+        error: meerkat_runtime::recovery::DurableTailRecoveryError,
+    ) -> SessionError {
+        match error {
             // Recovery reads the committed WholeBlob document before it
             // can judge the tail. A document the current decoder refuses
             // is the typed "session needs the sanctioned repair" fact,
@@ -5642,7 +6668,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             error => SessionError::Agent(AgentError::InternalError(format!(
                 "durable-tail recovery for session {id}: {error}"
             ))),
-        })
+        }
     }
 
     async fn discard_stale_live_session_if_needed(
@@ -5650,11 +6676,22 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
         position: LiveStalenessPosition,
     ) -> Result<bool, SessionError> {
-        let LiveSessionAuthority::DurableAuthoritative { session, reason } =
+        let LiveSessionAuthority::DurableAuthoritative { reason } =
             self.live_session_authority(id).await?
         else {
             return Ok(false);
         };
+        // A live actor that continues the store's standing provisional tail
+        // of a run the runtime holds open is ahead of the committed boundary
+        // by construction, never behind it, wherever the caller stands: kept.
+        // An actor whose run compacted can trail the boundary's row count and
+        // classify as diverged rather than uncommitted, so the proof is asked
+        // for either; an archived session is never kept.
+        if reason != LiveSessionAuthorityReason::StoredArchived
+            && self.live_actor_continues_open_run_tail(id).await?
+        {
+            return Ok(false);
+        }
         match reason {
             // A run may be between its apply and its boundary commit: its
             // actor and checkpoint receipt are what that commit promotes.
@@ -5669,7 +6706,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         }
 
         if self
-            .synchronize_runtime_backed_live_from_durable_authority(id, session.as_ref(), reason)
+            .synchronize_runtime_backed_live_from_durable_authority(id, reason)
             .await?
         {
             return Ok(false);
@@ -5684,9 +6721,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         tracing::debug!(
             session_id = %id,
             live_updated_at = ?live.updated_at(),
-            stored_updated_at = ?session.updated_at(),
             live_message_count = live.messages().len(),
-            stored_message_count = session.messages().len(),
             reason = ?reason,
             "discarding stale live session in favor of newer RuntimeStore authority"
         );
@@ -5733,6 +6768,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             // receipt descended from it would make the next turn reject the
             // durable state it just synchronized.
             *checkpointer.latest_run_checkpoint_receipt.lock().await = None;
+            checkpointer.record_held_checkpoint_cursor(None);
             self.forget_whole_blob_body_unless_current(id, &authority);
             *checkpointer.whole_blob_base_authority.lock().map_err(|_| {
                 SessionError::Agent(AgentError::InternalError(format!(
@@ -5749,20 +6785,44 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Ok(())
     }
 
+    /// Synchronize the live actor to the committed body after a durable
+    /// verdict. Returns whether it was synchronized.
+    ///
+    /// The committed body is read strictly. A revision conflict there means
+    /// a provisional tail stands that this actor does not continue (the
+    /// staleness callers ask for that proof first), and the snapshot under a
+    /// tail is never a synchronization source: the actor is left as it is,
+    /// for its caller to discard, and the next materialization's recovery
+    /// decides the tail.
     async fn synchronize_runtime_backed_live_from_durable_authority(
         &self,
         id: &SessionId,
-        durable: &Session,
         reason: LiveSessionAuthorityReason,
     ) -> Result<bool, SessionError> {
-        if self.session_archived_by_authority(id, durable).await? {
+        if self.session_archived_by_runtime_store_authority(id).await? {
             return Ok(false);
         }
+        let durable = match self
+            .load_committed_runtime_session_for_body(id, "live session synchronization")
+            .await
+        {
+            Ok(Some(durable)) => durable,
+            Ok(None) => return Ok(false),
+            Err(error) if Self::is_transcript_revision_conflict_error(&error) => {
+                tracing::info!(
+                    session_id = %id,
+                    ?reason,
+                    "a provisional tail the live actor does not continue stands ahead of the committed body; the actor is not synchronized"
+                );
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        };
 
         match self
             .synchronize_live_session_from_durable(
                 id,
-                durable,
+                &durable,
                 LiveSessionSyncCause::Authority(reason),
             )
             .await
@@ -5821,13 +6881,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 );
                 Ok(false)
             }
-            LiveSessionAuthority::DurableAuthoritative { session, reason } => {
-                self.synchronize_runtime_backed_live_from_durable_authority(
-                    id,
-                    session.as_ref(),
-                    reason,
-                )
-                .await
+            LiveSessionAuthority::DurableAuthoritative { reason } => {
+                self.synchronize_runtime_backed_live_from_durable_authority(id, reason)
+                    .await
             }
             LiveSessionAuthority::NoLive | LiveSessionAuthority::LiveAuthoritative { .. } => {
                 Ok(false)
@@ -5937,12 +6993,21 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// active source (its turn is the caller) and never persists a replayed
     /// projection back onto the running session: a fork is read-only on the
     /// source, and the running turn owns the next durable write.
+    ///
+    /// Once the running turn has committed a round, its HeadCanonical
+    /// provisional tail sits ahead of the committed snapshot and the
+    /// committed read refuses the boundary with `TranscriptRevisionConflict`.
+    /// The branch is cut at that snapshot, so it is then read whole through
+    /// the tail ([`Self::load_authoritative_session_base_with_replay_info_tolerating_tail`]):
+    /// the boundary's exact rows and metadata, never the running turn's.
+    /// Without an applied provisional tail on the boundary the conflict
+    /// stands.
     async fn source_session_for_caller_turn_fork_locked(
         &self,
         id: &SessionId,
     ) -> Result<Session, SessionError> {
         let mut replay = self
-            .load_authoritative_session_base_with_replay_info(id)
+            .load_authoritative_session_base_with_replay_info_tolerating_tail(id)
             .await?;
         let session = match replay.session.take() {
             Some(session) => {
@@ -6410,14 +7475,22 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
         target: Option<meerkat_core::DurableSessionForkTarget>,
     ) -> Result<DurableSessionForkWithProvenance, SessionError> {
-        let inherited_instructions = Self::target_fork_instruction_policy(target.as_ref());
+        // Without a target the default leaves the fork no activation window.
+        let instructions = target.as_ref().map_or_else(
+            || {
+                ForkInstructionPolicies::without_activation_window(
+                    meerkat_core::ForkInstructionPolicy::default(),
+                )
+            },
+            ForkInstructionPolicies::of_target,
+        );
         self.fork_durable_session_with_optional_planned_identity(
             source_session_id,
             message_count,
             None,
             tool_access_policy,
             target,
-            inherited_instructions,
+            instructions,
         )
         .await
     }
@@ -6430,9 +7503,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// the exact same child instead of minting a second branch. Behaviour is
     /// otherwise identical to [`Self::fork_durable_session_with_provenance`].
     ///
-    /// `inherited_instructions` is the fork instruction policy, already
-    /// resolved for the caller's activation window, for a fork without a
-    /// `target`; a target carries its own.
+    /// `instructions` are the fork instruction policies of a fork without a
+    /// `target`, `inherited` already resolved for the caller's activation
+    /// window; a target carries its own.
     pub async fn fork_durable_session_with_planned_identity(
         &self,
         source_session_id: &SessionId,
@@ -6440,18 +7513,18 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         planned_child_session_id: SessionId,
         tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
         target: Option<meerkat_core::DurableSessionForkTarget>,
-        inherited_instructions: meerkat_core::ForkInstructionPolicy,
+        instructions: ForkInstructionPolicies,
     ) -> Result<DurableSessionForkWithProvenance, SessionError> {
-        let inherited_instructions = target.as_ref().map_or(inherited_instructions, |target| {
-            target.inherited_instructions
-        });
+        let instructions = target
+            .as_ref()
+            .map_or(instructions, ForkInstructionPolicies::of_target);
         self.fork_durable_session_with_optional_planned_identity(
             source_session_id,
             message_count,
             Some(planned_child_session_id),
             tool_access_policy,
             target,
-            inherited_instructions,
+            instructions,
         )
         .await
     }
@@ -6466,8 +7539,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// turn finalizes. The fork then observes the committed transcript under
     /// that same guard, so a runtime lap queued behind the caller cannot take
     /// the gate between the wait and the branch. A source still running when
-    /// `bound` elapses yields [`DurableForkAtTurnBoundary::SourceBusy`] and
-    /// nothing is forked. `target.source_admission` must be `Quiescent`: the
+    /// `bound` elapses yields
+    /// [`DurableForkAtTurnBoundary::SourceBusy`](meerkat_core::service::DurableForkAtTurnBoundary::SourceBusy)
+    /// and nothing is forked. `target.source_admission` must be `Quiescent`: the
     /// caller does not own the running turn.
     ///
     /// `bound` covers the two waits this path can block on, the turn boundary
@@ -6505,7 +7579,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let recovery_gate_bound = bound
             .saturating_sub(started.elapsed())
             .max(Self::TURN_BOUNDARY_FORK_MIN_RECOVERY_GATE_BOUND);
-        let inherited_instructions = target.inherited_instructions;
+        let instructions = ForkInstructionPolicies::of_target(&target);
         match self
             .fork_durable_session_with_optional_planned_identity_under(
                 source_session_id,
@@ -6513,7 +7587,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 None,
                 tool_access_policy,
                 Some(target),
-                inherited_instructions,
+                instructions,
                 ForkSourceBoundary::HeldTurnBoundary {
                     turn_finalization_guard,
                     recovery_gate_bound,
@@ -6648,13 +7722,16 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// the exact planned child is already durable and exposes its committed
     /// body so the caller can verify selected-prefix provenance and inherited
     /// execution metadata before recording activation. It never mutates,
-    /// persists, or revives anything.
+    /// persists, or revives anything. While the session's own durable run
+    /// holds a provisional tail ahead of the committed snapshot it reads that
+    /// snapshot through the tail
+    /// (`Self::load_authoritative_session_base_with_replay_info_tolerating_tail`).
     pub async fn load_durable_session_body(
         &self,
         id: &SessionId,
     ) -> Result<Option<Session>, SessionError> {
         let mut replay = match self
-            .load_authoritative_session_base_with_replay_info(id)
+            .load_authoritative_session_base_with_replay_info_tolerating_tail(id)
             .await
         {
             Ok(replay) => replay,
@@ -6664,20 +7741,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Ok(replay.session.take())
     }
 
-    /// The fork instruction policy a durable fork applies: the target's, or,
-    /// without a target, the default resolved for a fork that leaves no
-    /// activation window (the child is committed but not materialized, and
-    /// activation admits only materialized sessions).
-    fn target_fork_instruction_policy(
-        target: Option<&meerkat_core::DurableSessionForkTarget>,
-    ) -> meerkat_core::ForkInstructionPolicy {
-        target.map_or(
-            meerkat_core::ForkInstructionPolicy::default()
-                .effective(meerkat_core::ActivationWindow::None),
-            |target| target.inherited_instructions,
-        )
-    }
-
     async fn fork_durable_session_with_optional_planned_identity(
         &self,
         source_session_id: &SessionId,
@@ -6685,7 +7748,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         planned_child_session_id: Option<SessionId>,
         tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
         target: Option<meerkat_core::DurableSessionForkTarget>,
-        inherited_instructions: meerkat_core::ForkInstructionPolicy,
+        instructions: ForkInstructionPolicies,
     ) -> Result<DurableSessionForkWithProvenance, SessionError> {
         let source_admission = target
             .as_ref()
@@ -6697,7 +7760,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             planned_child_session_id,
             tool_access_policy,
             target,
-            inherited_instructions,
+            instructions,
             ForkSourceBoundary::Admission(source_admission),
         )
         .await
@@ -6711,7 +7774,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         planned_child_session_id: Option<SessionId>,
         tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
         target: Option<meerkat_core::DurableSessionForkTarget>,
-        inherited_instructions: meerkat_core::ForkInstructionPolicy,
+        instructions: ForkInstructionPolicies,
         boundary: ForkSourceBoundary,
     ) -> Result<DurableSessionForkWithProvenance, SessionError> {
         let caller_turn = matches!(
@@ -6795,7 +7858,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 tool_access_policy,
                 cache_inheritance,
                 target,
-                inherited_instructions,
+                instructions,
             )
             .await?;
         Ok(DurableSessionForkWithProvenance {
@@ -6816,15 +7879,32 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         requested_tool_access_policy: Option<meerkat_core::ops::ToolAccessPolicy>,
         cache_inheritance: ForkCacheInheritance,
         target: Option<meerkat_core::DurableSessionForkTarget>,
-        inherited_instructions: meerkat_core::ForkInstructionPolicy,
+        instructions: ForkInstructionPolicies,
     ) -> Result<SessionForkResult, SessionError> {
         // The fork instruction policy decides, before anything is committed,
         // what the child does with the activation rows it copied: refuse the
         // fork, or append the child's own re-activation rows so the single
         // save below commits them with the child.
         let reactivated_instruction_count = forked
-            .apply_fork_instruction_policy(&source_session_id, inherited_instructions)
+            .apply_fork_instruction_policies(
+                &source_session_id,
+                instructions.inherited,
+                instructions.declared,
+            )
             .map_err(SessionError::ForkInstructionRefused)?;
+        // What the child holds of its source: its effective instruction keys
+        // and, read without waiting on a running turn, its visible tools. The
+        // child's first run turns them into its fork notice.
+        // Only the rows the source activated itself are effective there;
+        // rows it copied from its own source are history.
+        let source_instructions =
+            meerkat_core::fork_notice::effective_instruction_keys(forked.messages(), |origin| {
+                origin == &source_session_id
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
+        let source_tools = self.fork_source_tools(&source_session_id).await;
+        let mut source_member = None;
         // Core transcript forks deliberately strip session authority metadata.
         // Rebuild sanitized execution configuration whenever canonical source
         // metadata exists: the metadata, and the build state derived for a
@@ -6850,6 +7930,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 // the same materialization target before either is committed.
                 metadata.apply_llm_identity(cache_identity);
             }
+            source_member = metadata.mob_member_binding.clone();
             let target_binding = target.as_ref().map(|target| target.member_binding.clone());
             metadata.comms_name = target_binding
                 .as_ref()
@@ -6936,6 +8017,50 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 ))));
             }
         }
+        // The skills the copied rows loaded follow the host's declared
+        // policy (a `refuse` fork that copied one was refused above):
+        // carried under `reactivate_inherited` when they were effective in
+        // the source, otherwise named by the notice and read without their
+        // bodies.
+        let source_skills =
+            meerkat_core::fork_notice::skills_effective_in(forked.messages(), &source_session_id);
+        let (skills_carried, skills_removed): (Vec<_>, Vec<_>) =
+            meerkat_core::fork_notice::skill_loads(forked.messages())
+                .skills
+                .into_iter()
+                .partition(|skill| {
+                    instructions.declared
+                        == meerkat_core::ForkInstructionPolicy::ReactivateInherited
+                        && source_skills.contains(skill)
+                });
+        let seed = meerkat_core::fork_notice::ForkSeed {
+            fork: meerkat_core::fork_notice::ForkNoticeKind::Transcript,
+            source: meerkat_core::fork_notice::ForkNoticeSource {
+                member: source_member,
+                session_id: Some(source_session_id.clone()),
+            },
+            planned_context: None,
+            source_instructions,
+            instructions_carried: Vec::new(),
+            skills_removed,
+            skills_carried,
+            injected_rows_removed: 0,
+            injected_rows_carried: 0,
+            earlier_rows_omitted: 0,
+            source_tools,
+        };
+        let seed = serde_json::to_value(&seed).map_err(|error| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "failed to record the fork seed of session {source_session_id}: {error}"
+            )))
+        })?;
+        forked
+            .try_set_metadata(meerkat_core::fork_notice::SESSION_FORK_SEED_KEY, seed)
+            .map_err(|error| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "failed to record the fork seed of session {source_session_id}: {error}"
+                )))
+            })?;
         let saved = match self.runtime_store.session_persistence_profile() {
             RuntimeSessionPersistenceProfile::WholeBlobV1 => {
                 self.save_normalized_session(forked).await?
@@ -7646,16 +8771,19 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     ) -> Result<Session, SessionError> {
         loop {
             match self.live_session_authority(id).await? {
-                LiveSessionAuthority::DurableAuthoritative { session, reason } => {
-                    if self
-                        .session_archived_by_authority(id, session.as_ref())
-                        .await?
-                    {
+                LiveSessionAuthority::DurableAuthoritative { reason } => {
+                    if self.session_archived_by_runtime_store_authority(id).await? {
                         return Err(SessionError::NotFound { id: id.clone() });
                     }
+                    let Some(session) = self
+                        .load_committed_runtime_session_for_body(id, "realtime open snapshot")
+                        .await?
+                    else {
+                        return Err(SessionError::NotFound { id: id.clone() });
+                    };
                     self.synchronize_live_session_from_durable(
                         id,
-                        session.as_ref(),
+                        &session,
                         LiveSessionSyncCause::Authority(reason),
                     )
                     .await?;
@@ -7664,7 +8792,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                         reason = ?reason,
                         "using durable session authority for realtime open snapshot"
                     );
-                    return Ok(*session);
+                    return Ok(session);
                 }
                 LiveSessionAuthority::NoLive => {
                     return Err(SessionError::NotFound { id: id.clone() });
@@ -7893,11 +9021,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         match self.live_session_authority(id).await? {
             LiveSessionAuthority::NoLive => Ok(false),
             LiveSessionAuthority::LiveAuthoritative { .. } => Ok(true),
-            LiveSessionAuthority::DurableAuthoritative { session, .. } => {
-                if self
-                    .session_archived_by_authority(id, session.as_ref())
-                    .await?
-                {
+            LiveSessionAuthority::DurableAuthoritative { .. } => {
+                if self.session_archived_by_runtime_store_authority(id).await? {
                     self.discard_live_session_under_runtime_turn_boundary(id)
                         .await?;
                     Ok(false)
@@ -8361,6 +9486,88 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             return Err(error);
         }
         Ok(outcome)
+    }
+
+    /// Deliver the session's staged create-time prompt for a live open (see
+    /// [`crate::EphemeralSessionService::deliver_staged_prompt_for_live_open`])
+    /// and persist the session before the realtime seed is read. The prompt
+    /// is committed and its consumption made durable in one write; a failed
+    /// write discards the live session, so the durable session keeps the
+    /// prompt staged and nothing is delivered twice. A live session with
+    /// nothing staged answers
+    /// [`crate::StagedPromptLiveOpenDelivery::NothingStaged`] at once, with no
+    /// guard, actor command or store read.
+    pub async fn deliver_staged_prompt_for_live_open(
+        &self,
+        id: &SessionId,
+    ) -> Result<crate::StagedPromptLiveOpenDelivery, SessionError> {
+        if !self.live_session_has_staged_prompt(id).await {
+            return Ok(crate::StagedPromptLiveOpenDelivery::NothingStaged);
+        }
+        let mutation_guard = self.live_persist_mutation_guard(id).await?;
+        self.deliver_staged_prompt_for_live_open_under_guard(id, &mutation_guard)
+            .await
+    }
+
+    /// [`Self::deliver_staged_prompt_for_live_open`] for an open that never
+    /// waits behind a running turn (the mirrored channel and the concurrent
+    /// summary open): the session's turn boundary is only tried, never waited
+    /// for. A held boundary answers
+    /// [`crate::StagedPromptLiveOpenDelivery::TurnBoundaryHeld`] at once and
+    /// asks nothing of the actor: a turn in flight has already consumed a
+    /// staged prompt, and any other holder leaves it staged for the next open
+    /// or the first turn. As there, a live session with nothing staged answers
+    /// [`crate::StagedPromptLiveOpenDelivery::NothingStaged`] before anything
+    /// else, so such an open reads no session body.
+    pub async fn try_deliver_staged_prompt_for_live_open(
+        &self,
+        id: &SessionId,
+    ) -> Result<crate::StagedPromptLiveOpenDelivery, SessionError> {
+        if !self.live_session_has_staged_prompt(id).await {
+            return Ok(crate::StagedPromptLiveOpenDelivery::NothingStaged);
+        }
+        let gate = self.turn_finalization_gate_for_session(id).await;
+        let Ok(turn_finalization_guard) = Arc::clone(&gate).try_lock_owned() else {
+            return Ok(crate::StagedPromptLiveOpenDelivery::TurnBoundaryHeld);
+        };
+        let mutation_guard = self
+            .live_persist_mutation_guard_with_turn_boundary(id, turn_finalization_guard)
+            .await?;
+        self.deliver_staged_prompt_for_live_open_under_guard(id, &mutation_guard)
+            .await
+    }
+
+    /// Whether the live session holds a staged create-time prompt, read from
+    /// its shared deferred-turn state: no actor command and no store read. A
+    /// prompt staged after this read (a refused turn restoring it) is
+    /// delivered by the next open or the first text turn; the delivery
+    /// itself consumes it only under the guard.
+    async fn live_session_has_staged_prompt(&self, id: &SessionId) -> bool {
+        self.inner
+            .deferred_turn_state(id)
+            .await
+            .is_some_and(|state| {
+                state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .pending_initial_prompt()
+                    .is_some()
+            })
+    }
+
+    async fn deliver_staged_prompt_for_live_open_under_guard(
+        &self,
+        id: &SessionId,
+        _mutation_guard: &SessionMutationGuard,
+    ) -> Result<crate::StagedPromptLiveOpenDelivery, SessionError> {
+        let delivery = self.inner.deliver_staged_prompt_for_live_open(id).await?;
+        if matches!(delivery, crate::StagedPromptLiveOpenDelivery::Delivered)
+            && let Err(error) = self.persist_full_session(id).await
+        {
+            let _ = self.discard_live_session_unfenced(id).await;
+            return Err(error);
+        }
+        Ok(delivery)
     }
 
     pub async fn append_external_user_content(
@@ -10453,17 +11660,22 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .recover_live_session_from_store_if_needed_locked(id)
             .await
             .map_err(|error| (error, admission.take()))?;
+        // A machine-service turn is not dispatched by the runtime loop: it
+        // has no runtime batch and is never a resumed run.
         let execution = match admission.take() {
             Some(admission) => {
                 self.inner
                     .start_runtime_turn_execution_with_admission_recovering_not_found(
-                        id, req, admission,
+                        id,
+                        req,
+                        admission,
+                        RuntimeTurnRunContext::default(),
                     )
                     .await
             }
             None => self
                 .inner
-                .start_runtime_turn_execution(id, req)
+                .start_runtime_turn_execution(id, req, RuntimeTurnRunContext::default())
                 .await
                 .map_err(|error| (error, None)),
         }?;
@@ -11826,6 +13038,63 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         }))
     }
 
+    /// [`acquire_live_session_actor_turn_boundary_lease_exact`](Self::acquire_live_session_actor_turn_boundary_lease_exact)
+    /// for a caller that must not wait behind a turn: the turn boundary is
+    /// only tried, never waited for, exactly as
+    /// [`try_attach_live_mcp_server`](Self::try_attach_live_mcp_server) does.
+    /// A held boundary answers [`crate::TurnBoundaryHeld`] at once: it proves
+    /// a held boundary, not necessarily an active turn, and it grants nothing.
+    /// `Ok(None)` means `witness` no longer names the current actor.
+    pub async fn try_acquire_live_session_actor_turn_boundary_lease_exact(
+        &self,
+        witness: &LiveSessionActorWitness,
+    ) -> Result<Option<LiveSessionActorTurnBoundaryLease>, crate::TurnBoundaryHeld> {
+        let Ok(turn_finalization_guard) = self
+            .turn_finalization_gate_for_session(witness.session_id())
+            .await
+            .try_lock_owned()
+        else {
+            return Err(crate::TurnBoundaryHeld);
+        };
+        let Some(current) = self
+            .inner
+            .live_session_actor_witness(witness.session_id())
+            .await
+        else {
+            return Ok(None);
+        };
+        if &current != witness {
+            return Ok(None);
+        }
+        Ok(Some(LiveSessionActorTurnBoundaryLease {
+            witness: current,
+            _turn_finalization_guard: turn_finalization_guard,
+        }))
+    }
+
+    /// Pin the exact live actor's selected controller client without waiting
+    /// behind a turn: the turn boundary is only tried
+    /// ([`Self::try_acquire_live_session_actor_turn_boundary_lease_exact`]),
+    /// and under it the actor answers the pin command at once. The boundary is
+    /// released before this returns; the caller retains the returned pin.
+    pub async fn try_pin_controller_client_for_actor(
+        &self,
+        witness: &LiveSessionActorWitness,
+    ) -> Result<meerkat_core::ControllerModelClient, crate::TryPinControllerError> {
+        let lease = self
+            .try_acquire_live_session_actor_turn_boundary_lease_exact(witness)
+            .await
+            .map_err(|_| crate::TryPinControllerError::TurnBoundaryHeld)?
+            .ok_or_else(|| {
+                crate::TryPinControllerError::Session(SessionError::NotFound {
+                    id: witness.session_id().clone(),
+                })
+            })?;
+        self.pin_controller_client_for_actor(&lease)
+            .await
+            .map_err(crate::TryPinControllerError::Session)
+    }
+
     /// Reserve runtime-turn capacity for the actor protected by `lease`.
     ///
     /// There is deliberately no durable-session recovery or global capacity
@@ -11876,15 +13145,31 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
     ) -> Result<SessionMutationGuard, SessionError> {
         let turn_finalization_guard = self.acquire_runtime_turn_finalization_guard(id).await;
+        self.live_persist_mutation_guard_with_turn_boundary(id, turn_finalization_guard)
+            .await
+    }
+
+    /// [`Self::live_persist_mutation_guard`] under a turn boundary the caller
+    /// already holds (taken or only tried).
+    async fn live_persist_mutation_guard_with_turn_boundary(
+        &self,
+        id: &SessionId,
+        turn_finalization_guard: tokio::sync::OwnedMutexGuard<()>,
+    ) -> Result<SessionMutationGuard, SessionError> {
         let recovery_gate = self.recovery_gate_for_session(id).await;
         let recovery_guard = recovery_gate.lock_owned().await;
         let _ = self
             .discard_stale_live_session_if_needed(id, LiveStalenessPosition::TurnBoundaryHeld)
             .await?;
-        if let Some(session) = self.load_authoritative_session_base(id).await? {
-            self.reject_if_archived_session(id, &session)
-                .await
-                .map_err(crate::control_error_into_session_error)?;
+        // The archive verdict is the RuntimeStore's own terminal projection;
+        // the body is never read for it.
+        if matches!(
+            self.observe_live_durable_source(id).await?,
+            crate::LiveDurableSourceObservation::Archived
+        ) {
+            return Err(crate::control_error_into_session_error(
+                Self::archived_not_found(id),
+            ));
         }
         Ok(SessionMutationGuard {
             _turn_finalization_guard: Some(turn_finalization_guard.into()),
@@ -11971,6 +13256,90 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains(id)
+    }
+
+    /// Whether this service's live actor of `id` continues the store's
+    /// standing provisional tail of a run the runtime holds open.
+    ///
+    /// Every fact is exact and read body-free:
+    /// - the store's tail authority (the HeadCanonical provisional tail, or
+    ///   the WholeBlob tail's authority);
+    /// - the actor's latest run checkpoint receipt, compared by its exact
+    ///   [`RunCheckpointAuthority`] (run, revisions and head tokens), never by
+    ///   run id alone: the slot can still hold an earlier run's receipt;
+    /// - the tail's run is the runtime's current run, or the run its
+    ///   registration keeps resumable.
+    ///
+    /// Such an actor is not stale, wherever the caller stands relative to the
+    /// turn-finalization boundary. While that tail stands the committed
+    /// boundary cannot move: the session has one provisional-tail slot, round
+    /// commits compare-and-swap on the committed base, ordinary writes are
+    /// refused or queued under a tail, and only recovery or the run's own
+    /// boundary commit consume it. So the actor cannot be behind durable
+    /// truth. A resumed dispatch skips the staleness judgement for the same
+    /// reason. The verdict is advisory: the next turn entry judges again.
+    pub async fn live_actor_continues_open_run_tail(
+        &self,
+        id: &SessionId,
+    ) -> Result<bool, SessionError> {
+        let runtime_id = Self::runtime_id_for_session(id);
+        let tail = match self.runtime_store.session_persistence_profile() {
+            RuntimeSessionPersistenceProfile::HeadCanonicalV1 => self
+                .runtime_store
+                .load_head_canonical_provisional_tail(&runtime_id)
+                .await
+                .map(|tail| tail.map(RunCheckpointAuthority::HeadCanonical)),
+            RuntimeSessionPersistenceProfile::WholeBlobV1 => self
+                .runtime_store
+                .load_whole_blob_provisional_tail(&runtime_id)
+                .await
+                .map(|tail| {
+                    tail.map(|tail| RunCheckpointAuthority::WholeBlob(tail.authority().clone()))
+                }),
+            _ => Ok(None),
+        }
+        .map_err(|error| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "failed to observe the provisional tail of session {id}: {error}"
+            )))
+        })?;
+        let Some(tail) = tail else {
+            return Ok(false);
+        };
+        let checkpointer = self
+            .live_checkpointers
+            .lock()
+            .await
+            .get(id)
+            .cloned()
+            .and_then(|checkpointer| checkpointer.upgrade());
+        let Some(checkpointer) = checkpointer else {
+            return Ok(false);
+        };
+        let continues = checkpointer
+            .latest_run_checkpoint_receipt
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|receipt| receipt.authority() == &tail);
+        Ok(continues && self.runtime_holds_run_open(id, tail.run_id()).await)
+    }
+
+    /// Whether `run_id` is the runtime's current run of `id`, or the run its
+    /// registration keeps resumable.
+    async fn runtime_holds_run_open(&self, id: &SessionId, run_id: &RunId) -> bool {
+        let adapter = self
+            .runtime_adapter
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(adapter) = adapter else {
+            return false;
+        };
+        if adapter.current_run(id).await.as_ref() == Some(run_id) {
+            return true;
+        }
+        adapter.resumable_run_id(id).await.as_ref() == Some(run_id)
     }
 
     /// Whether a live transcript held ahead of the store is stale to a
@@ -12194,11 +13563,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let recovery_gate = self.recovery_gate_for_session(id).await;
         let recovery_guard = recovery_gate.lock_owned().await;
         match self.live_session_authority(id).await? {
-            LiveSessionAuthority::DurableAuthoritative { session, reason } => {
-                if self
-                    .session_archived_by_authority(id, session.as_ref())
-                    .await?
-                {
+            LiveSessionAuthority::DurableAuthoritative { reason } => {
+                if self.session_archived_by_runtime_store_authority(id).await? {
                     return Err(SessionError::NotFound { id: id.clone() });
                 }
                 if sync_policy == LiveDurableSyncPolicy::RefuseUncommittedTranscript
@@ -12210,9 +13576,15 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     );
                     return Err(SessionError::Busy { id: id.clone() });
                 }
+                let Some(durable) = self
+                    .load_committed_runtime_session_for_body(id, "realtime transcript mutation")
+                    .await?
+                else {
+                    return Err(SessionError::NotFound { id: id.clone() });
+                };
                 self.synchronize_live_session_from_durable(
                     id,
-                    session.as_ref(),
+                    &durable,
                     LiveSessionSyncCause::Authority(reason),
                 )
                 .await?;
@@ -12579,10 +13951,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 tool_use_id,
                 tool_name,
                 args,
+                dedupe_key,
             }) => Some(CoreApplyTerminal::CallbackPending {
                 tool_use_id: tool_use_id.clone(),
                 tool_name: tool_name.clone(),
                 args: args.clone(),
+                dedupe_key: dedupe_key.as_deref().cloned(),
             }),
             SessionError::Agent(AgentError::CallbackBatchPending { pending_tool_calls }) => {
                 Some(CoreApplyTerminal::CallbackBatchPending {
@@ -12905,11 +14279,455 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 admission,
             )
             .await;
-        if result.is_err() {
-            self.report_uncommitted_runtime_turn_image(id, &discarded_run_id)
-                .await;
+        match result {
+            Err((error, admission)) => {
+                let tail = self
+                    .discard_replayed_run_provisional_tail(id, &discarded_run_id, &error)
+                    .await;
+                self.report_uncommitted_runtime_turn_image(id, &discarded_run_id)
+                    .await;
+                // A run whose tail records its re-base never replays: its
+                // inputs are committed history, so the executor stops.
+                let error = if tail == ReplayedRunTail::RebasedKept {
+                    Self::rebased_run_stop(&discarded_run_id, &error)
+                } else {
+                    error
+                };
+                Err((error, admission))
+            }
+            ok => ok,
         }
-        result
+    }
+
+    /// What `run_id`'s failure must respect about its re-base, read from the
+    /// live checkpointer before any build of the run's output: a failed build
+    /// drops the live actor, and the checkpointer that holds the record with
+    /// it. A re-base whose store call failed with its outcome unknown is
+    /// settled from the store first (`Self::reread_rebase_outcome`): applied,
+    /// the run is re-based; not applied, it is not; unknown, the failure
+    /// holds. Never requeued over a base that may hold the run's inputs.
+    async fn rebase_failure_guard(&self, id: &SessionId, run_id: &RunId) -> RebaseFailureGuard {
+        let Some(checkpointer) = self
+            .live_checkpointers
+            .lock()
+            .await
+            .get(id)
+            .cloned()
+            .and_then(|checkpointer| checkpointer.upgrade())
+        else {
+            return RebaseFailureGuard::None;
+        };
+        if checkpointer.run_rebased(run_id) {
+            return RebaseFailureGuard::Rebased(checkpointer);
+        }
+        if !checkpointer.rebase_outcome_unknown(run_id) {
+            return RebaseFailureGuard::None;
+        }
+        let reread = self.reread_rebase_outcome(id, run_id, &checkpointer).await;
+        tracing::warn!(
+            session_id = %id,
+            %run_id,
+            ?reread,
+            "a run's re-base outcome was unknown; the store settles its failure's route"
+        );
+        match reread {
+            RebaseReread::Landed => RebaseFailureGuard::Rebased(checkpointer),
+            RebaseReread::NotLanded => RebaseFailureGuard::None,
+            RebaseReread::Unknown => RebaseFailureGuard::Hold,
+        }
+    }
+
+    /// Settle from the store whether `run_id`'s re-base applied, after its
+    /// store call failed with an unknown outcome, with the reads recovery
+    /// uses: the committed WholeBlob authority and the provisional tail. A
+    /// re-base that applied left the run's tail at candidate one over a
+    /// committed base other than the one the run started on (the actor's
+    /// base authority); a committed base still equal to the run's start
+    /// means it did not apply. Anything else, or a failed read, is unknown.
+    async fn reread_rebase_outcome(
+        &self,
+        id: &SessionId,
+        run_id: &RunId,
+        checkpointer: &StoreCheckpointer,
+    ) -> RebaseReread {
+        let runtime_id = Self::runtime_id_for_session(id);
+        let Some(started_on) = checkpointer
+            .whole_blob_base_authority
+            .lock()
+            .ok()
+            .and_then(|base| base.clone())
+        else {
+            return RebaseReread::Unknown;
+        };
+        let Ok(Some(committed)) = self
+            .runtime_store
+            .load_whole_blob_store_authority(&runtime_id)
+            .await
+        else {
+            return RebaseReread::Unknown;
+        };
+        let Ok(tail) = self
+            .runtime_store
+            .load_whole_blob_provisional_tail(&runtime_id)
+            .await
+        else {
+            return RebaseReread::Unknown;
+        };
+        let base_moved = committed.store_revision() != started_on.store_revision()
+            || committed.blob_sha256() != started_on.blob_sha256();
+        if !base_moved {
+            return RebaseReread::NotLanded;
+        }
+        match tail {
+            Some(tail)
+                if tail.authority().run_id() == run_id
+                    && tail.authority().candidate_sequence() == 1
+                    && tail.authority().base_store_revision() == committed.store_revision()
+                    && tail.authority().base_blob_sha256() == committed.blob_sha256() =>
+            {
+                RebaseReread::Landed
+            }
+            _ => RebaseReread::Unknown,
+        }
+    }
+
+    /// How a failure the runtime would replay ends a run whose re-base
+    /// committed: its inputs are in the session's committed history since the
+    /// re-base, so they never run again.
+    ///
+    /// - Consumed through the failed-but-applied route when the failure leaves
+    ///   the session serving (it requires no teardown) and the held checkpoint
+    ///   owes no staged calls (it carries no cursor, or an `AwaitingModel`
+    ///   one): the boundary promotes that checkpoint, and nothing that ran is
+    ///   lost.
+    /// - Otherwise stopped: a teardown-class failure writes nothing more, and
+    ///   a checkpoint whose round still owes its staged calls (the round's
+    ///   first commit, its second refused) would commit a body without calls
+    ///   that ran. The executor stops fail-closed instead; the run's tail keeps
+    ///   its cursor and its inputs stay bound, and the next start resumes the
+    ///   run (the staged calls dispatched again under their dedupe keys) or
+    ///   repairs it.
+    ///
+    /// A consumed failure can promote an `AwaitingModel` round commit (a run
+    /// that compacted again and failed before its next write takes no closing
+    /// save), so that committed boundary keeps the run's cursor until the
+    /// session's next run commits over it. Nothing resumes from a committed
+    /// boundary's cursor: a resume reads only a provisional tail's.
+    fn rebased_run_failure(
+        checkpointer: &StoreCheckpointer,
+        run_id: &RunId,
+        error: &SessionError,
+    ) -> RebasedRunFailure {
+        let requires_teardown = Self::failure_requires_teardown(error);
+        if !requires_teardown && !checkpointer.held_checkpoint_owes_staged_calls(run_id) {
+            tracing::warn!(
+                %run_id,
+                %error,
+                "a re-based run failed: its inputs are committed history, so the run ends failed with them consumed"
+            );
+            RebasedRunFailure::Consume(meerkat_core::TurnErrorMetadata::runtime_apply_failure(
+                format!("re-based run {run_id} failed after its inputs were committed: {error}"),
+            ))
+        } else {
+            tracing::warn!(
+                %run_id,
+                %error,
+                requires_teardown,
+                "a re-based run failed with its last committed round owing its calls, or with a failure that requires a reload: the executor stops"
+            );
+            RebasedRunFailure::Stop(Self::rebased_run_stop(run_id, error))
+        }
+    }
+
+    /// The fail-closed stop of a re-based run's failure: no boundary, no
+    /// discard and no replay.
+    fn rebased_run_stop(run_id: &RunId, error: &SessionError) -> SessionError {
+        SessionError::runtime_executor_stopped(format!(
+            "re-based run {run_id} failed after its inputs were committed: {error}; the run resumes or is repaired at the next start"
+        ))
+    }
+
+    /// Whether a run's failure requires the session's teardown: the run then
+    /// writes nothing more, and no boundary may commit from it.
+    fn failure_requires_teardown(error: &SessionError) -> bool {
+        match error.primary_error() {
+            SessionError::Agent(agent) => agent.primary_error().requires_session_teardown(),
+            _ => false,
+        }
+    }
+
+    /// Whether a run that ended in a machine-owned hard-failure terminal must
+    /// stop the executor instead of committing its failed boundary, by the
+    /// rule a re-based run's failure follows (`Self::rebased_run_failure`).
+    ///
+    /// That boundary promotes the run's latest checkpoint. A hard-failure
+    /// exit takes a closing save first, without the cursor; when that save
+    /// fails, the latest checkpoint is still the run's last round commit. If
+    /// that is a round's first commit, its staged calls may have run and are
+    /// owed their results, and promoting it would commit a body without calls
+    /// that ran while the run's inputs are consumed. And a failure that
+    /// requires the session's teardown writes nothing more. Either way the
+    /// executor stops fail-closed: the tail keeps its cursor, the inputs stay
+    /// bound, and the next start resumes the run (the staged calls dispatched
+    /// again under their dedupe keys) or repairs it. `None`: the boundary
+    /// commits as before.
+    async fn machine_terminal_failure_stop(
+        &self,
+        id: &SessionId,
+        run_id: &RunId,
+        error: &SessionError,
+    ) -> Option<SessionError> {
+        let requires_teardown = Self::failure_requires_teardown(error);
+        let checkpointer = self
+            .live_checkpointers
+            .lock()
+            .await
+            .get(id)
+            .cloned()
+            .and_then(|checkpointer| checkpointer.upgrade());
+        let owes_staged_calls = match checkpointer {
+            Some(checkpointer) => checkpointer.promotion_owes_staged_calls(id, run_id).await,
+            None => false,
+        };
+        if !requires_teardown && !owes_staged_calls {
+            return None;
+        }
+        tracing::warn!(
+            session_id = %id,
+            %run_id,
+            %error,
+            requires_teardown,
+            owes_staged_calls,
+            "a run's hard-failure terminal cannot commit its latest checkpoint: the executor stops"
+        );
+        Some(SessionError::runtime_executor_stopped(format!(
+            "run {run_id} ended in a hard-failure terminal ({error}) whose latest checkpoint owes its round's staged calls, or whose failure requires a reload; the run resumes or is repaired at the next start"
+        )))
+    }
+
+    /// Discard the provisional tail of a failed runtime turn whose inputs the
+    /// runtime replays, before the runtime realizes the failure.
+    ///
+    /// Per-round commits leave the run's rounds in a provisional tail, and
+    /// that tail holds the content of the very inputs the runtime puts back in
+    /// their lanes. Left in the store, a later recovery could commit it as an
+    /// interrupted run while the replay appends the same inputs again. So the
+    /// tail goes first, and only then does the runtime requeue: a crash in
+    /// between leaves no tail and the inputs bound, which recovery normalizes
+    /// as before.
+    ///
+    /// The tail is the store's own: the provisional tail it holds for this
+    /// runtime, discarded by its exact authority when it names this run. That
+    /// covers a run whose live actor, and with it the checkpointer's receipt,
+    /// is already gone (a resumed run dispatched before its actor was seeded,
+    /// for one).
+    ///
+    /// A run whose WholeBlob tail records that it re-based keeps its tail
+    /// (`ReplayedRunTail::RebasedKept`): its inputs are in the committed body
+    /// since the re-base, so they must not run again, and the caller stops the
+    /// executor instead. The store's tail is read for this, not the live
+    /// checkpointer: a resumed run refused before it runs (no seeded receipt,
+    /// a diverged image) has no in-memory mark, or none read yet. A tail whose
+    /// document or cursor cannot be decoded, or whose cursor names another
+    /// run, is kept too: nothing proves its inputs are not committed.
+    ///
+    /// A failure the runtime ends without replaying (a stop, a cancellation,
+    /// a machine-owned terminal) keeps its tail for recovery to judge. A
+    /// discard that fails, or loses its exact-authority race, requires a cold
+    /// reload of the session's runtime: nothing the runtime realizes for this
+    /// failure is committed then, so the inputs stay bound and the next
+    /// recovery resumes or repairs the run.
+    async fn discard_replayed_run_provisional_tail(
+        &self,
+        id: &SessionId,
+        run_id: &RunId,
+        error: &SessionError,
+    ) -> ReplayedRunTail {
+        if !Self::runtime_turn_failure_replays_inputs(error) {
+            return ReplayedRunTail::NotReplayed;
+        }
+        let runtime_id = Self::runtime_id_for_session(id);
+        // `Ok(None)`: the store holds no provisional tail. `Err`: the reason a
+        // tail stands that this discard did not remove.
+        let discarded: Result<Option<bool>, String> = match self
+            .runtime_store
+            .session_persistence_profile()
+        {
+            RuntimeSessionPersistenceProfile::WholeBlobV1 => {
+                match self
+                    .runtime_store
+                    .load_whole_blob_provisional_tail(&runtime_id)
+                    .await
+                {
+                    Ok(Some(tail)) if tail.authority().run_id() == run_id => {
+                        if Self::replayed_tail_keeps_its_inputs(run_id, tail.candidate_bytes()) {
+                            tracing::warn!(
+                                session_id = %id,
+                                %run_id,
+                                %error,
+                                "a failed run's tail records its re-base, or cannot be read: it is kept, and its inputs are not replayed"
+                            );
+                            return ReplayedRunTail::RebasedKept;
+                        }
+                        self.runtime_store
+                            .discard_whole_blob_provisional_tail(&runtime_id, tail.authority())
+                            .await
+                            .map(Some)
+                            .map_err(|error| format!("the store refused to discard it: {error}"))
+                    }
+                    Ok(Some(tail)) => Err(format!(
+                        "the provisional tail of another run, {}, stands in its place",
+                        tail.authority().run_id()
+                    )),
+                    Ok(None) => Ok(None),
+                    Err(error) => Err(format!("the store refused to read it: {error}")),
+                }
+            }
+            RuntimeSessionPersistenceProfile::HeadCanonicalV1 => {
+                match self
+                    .runtime_store
+                    .load_head_canonical_provisional_tail(&runtime_id)
+                    .await
+                {
+                    Ok(Some(authority)) if authority.run_id() == run_id => self
+                        .runtime_store
+                        .discard_head_canonical_provisional_tail(&runtime_id, &authority)
+                        .await
+                        .map(Some)
+                        .map_err(|error| format!("the store refused to discard it: {error}")),
+                    Ok(Some(authority)) => Err(format!(
+                        "the provisional tail of another run, {}, stands in its place",
+                        authority.run_id()
+                    )),
+                    Ok(None) => Ok(None),
+                    Err(error) => Err(format!("the store refused to read it: {error}")),
+                }
+            }
+            _ => Ok(None),
+        };
+        match discarded {
+            // No tail of this run is left in the store.
+            Ok(discarded @ (Some(true) | None)) => {
+                // Bound first, so the checkpointer map is not held across the
+                // receipt's lock.
+                let checkpointer = self
+                    .live_checkpointers
+                    .lock()
+                    .await
+                    .get(id)
+                    .cloned()
+                    .and_then(|checkpointer| checkpointer.upgrade());
+                if let Some(checkpointer) = checkpointer {
+                    let mut receipt = checkpointer.latest_run_checkpoint_receipt.lock().await;
+                    if receipt
+                        .as_ref()
+                        .is_some_and(|receipt| receipt.run_id() == run_id)
+                    {
+                        *receipt = None;
+                        checkpointer.record_held_checkpoint_cursor(None);
+                    }
+                }
+                if discarded.is_some() {
+                    ReplayedRunTail::Discarded
+                } else {
+                    ReplayedRunTail::NoTail
+                }
+            }
+            Ok(Some(false)) => {
+                self.require_runtime_reload_after_tail_discard(
+                    id,
+                    run_id,
+                    "the run's provisional tail changed before its exact discard".to_string(),
+                )
+                .await;
+                ReplayedRunTail::ReloadRequired
+            }
+            // A tail stands: replaying the inputs now would only meet the
+            // store's refusal at the replay's first round commit.
+            Err(reason) => {
+                self.require_runtime_reload_after_tail_discard(id, run_id, reason)
+                    .await;
+                ReplayedRunTail::ReloadRequired
+            }
+        }
+    }
+
+    /// Whether a replaying failure must keep `run_id`'s WholeBlob provisional
+    /// tail, given the tail document `candidate`: its run cursor names the run
+    /// and records that the run re-based, so the run's inputs are in the
+    /// committed body. A document or cursor that does not decode, or a cursor
+    /// of another run, is kept as well (fail closed). A tail without a cursor
+    /// (a run's closing save) or one whose cursor records no re-base is not.
+    fn replayed_tail_keeps_its_inputs(run_id: &RunId, candidate: &[u8]) -> bool {
+        let Ok(document) = Session::decode_whole_blob_document(candidate) else {
+            return true;
+        };
+        match document.session().try_run_cursor() {
+            Ok(None) => false,
+            Ok(Some(cursor)) => cursor.run_id != *run_id || cursor.rebased,
+            Err(_) => true,
+        }
+    }
+
+    /// Whether the runtime replays the inputs of a run whose turn failed with
+    /// `error`, mirroring `CoreExecutorError::apply_failed_from_session_error`
+    /// and the runtime loop's failed-run dispositions: a stop request, a
+    /// cancellation and a machine-owned terminal end the run without a
+    /// replay; every other failure replays its contributors.
+    fn runtime_turn_failure_replays_inputs(error: &SessionError) -> bool {
+        if error.requests_runtime_executor_stop() {
+            return false;
+        }
+        match error.primary_error() {
+            SessionError::Agent(agent) => match agent.primary_error() {
+                // A suspended run keeps its inputs bound and its tail: the
+                // runtime marks it resumable and the next start resumes it.
+                AgentError::Cancelled | AgentError::RunSuspended { .. } => false,
+                AgentError::TerminalFailure { cause_kind, .. } => {
+                    !cause_kind.is_specific_failure_cause()
+                }
+                _ => true,
+            },
+            _ => true,
+        }
+    }
+
+    async fn require_runtime_reload_after_tail_discard(
+        &self,
+        id: &SessionId,
+        run_id: &RunId,
+        reason: String,
+    ) {
+        tracing::error!(
+            session_id = %id,
+            %run_id,
+            %reason,
+            "a failed run's provisional tail could not be discarded; its runtime must reload before the inputs replay"
+        );
+        match self.canonical_runtime_adapter() {
+            Ok(adapter) => {
+                if !adapter
+                    .require_session_durability_reload(
+                        id,
+                        "failed_run_provisional_tail_discard",
+                        format!("the provisional tail of failed run {run_id} remains: {reason}"),
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        session_id = %id,
+                        %run_id,
+                        "no persistent runtime registration to degrade for the undiscarded tail"
+                    );
+                }
+            }
+            Err(error) => tracing::error!(
+                session_id = %id,
+                %run_id,
+                %error,
+                "the session's runtime is unavailable to degrade for the undiscarded tail"
+            ),
+        }
     }
 
     /// A runtime turn that returns an error commits no session boundary. The
@@ -12949,32 +14767,55 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Self::bind_runtime_turn_identity(&mut req, &run_id).map_err(|error| (error, None))?;
         let recovery_gate = self.recovery_gate_for_session(id).await;
         let _turn_guard = recovery_gate.lock().await;
-        let _ = self
-            .discard_stale_live_session_if_needed(id, LiveStalenessPosition::TurnBoundaryHeld)
+        let run_context = self
+            .runtime_turn_run_context(id, &run_id, &req, &contributing_input_ids)
             .await
             .map_err(|error| (error, None))?;
+        let resumed_interrupted_calls = run_context.resume_interrupted_calls.clone();
+        if run_context.resume_receipt.is_none() {
+            let _ = self
+                .discard_stale_live_session_if_needed(id, LiveStalenessPosition::TurnBoundaryHeld)
+                .await
+                .map_err(|error| (error, None))?;
+        }
         // A new runtime turn owns the live image from here; its boundary
         // commit may be coming again.
         self.clear_live_uncommitted_terminal(id);
         let execution = self
             .inner
-            .start_runtime_turn_execution_with_admission_recovering_not_found(id, req, admission)
+            .start_runtime_turn_execution_with_admission_recovering_not_found(
+                id,
+                req,
+                admission,
+                run_context,
+            )
             .await?;
         let (result, machine_terminal_failure) = self
             .validated_runtime_execution_after_live_mutation(id, execution)
             .await
             .map_err(|error| (error, None))?;
-        match result.map_err(SessionError::Agent) {
-            Ok(run_result) => self
-                .build_runtime_output_after_live_mutation(
-                    id,
-                    run_id,
-                    boundary,
-                    contributing_input_ids,
-                    Some(CoreApplyTerminal::RunResult(Box::new(run_result))),
-                )
-                .await
-                .map_err(|error| (error, None)),
+        // A run whose re-base committed is decided once, before any build: a
+        // failed build drops the live actor, and with it the checkpointer that
+        // holds the run's record.
+        let guard = self.rebase_failure_guard(id, &run_id).await;
+        let failed_run_id = run_id.clone();
+        let outcome = match result.map_err(SessionError::Agent) {
+            Ok(run_result) => {
+                let output = self
+                    .build_runtime_output_after_live_mutation(
+                        id,
+                        run_id,
+                        boundary,
+                        contributing_input_ids,
+                        Some(CoreApplyTerminal::RunResult(Box::new(run_result))),
+                    )
+                    .await;
+                if output.is_ok() {
+                    self.acknowledge_resumed_run_interrupted_calls(id, &resumed_interrupted_calls)
+                        .await;
+                }
+                output.map_err(|error| (error, None))
+            }
             Err(SessionError::Agent(meerkat_core::error::AgentError::NoPendingBoundary)) => self
                 .build_runtime_output_after_live_mutation(
                     id,
@@ -12986,16 +14827,26 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .await
                 .map_err(|error| (error, None)),
             Err(error) => {
-                if let Some(error) = machine_terminal_failure {
-                    self.build_runtime_output_after_live_mutation(
-                        id,
-                        run_id,
-                        boundary,
-                        contributing_input_ids,
-                        Some(CoreApplyTerminal::MachineTerminalFailure { error }),
-                    )
-                    .await
-                    .map_err(|error| (error, None))
+                if let Some(witness) = machine_terminal_failure {
+                    // A hard-failure terminal commits the run's latest
+                    // checkpoint, unless that checkpoint still owes its
+                    // round's staged calls or the failure requires a reload.
+                    let stop = self
+                        .machine_terminal_failure_stop(id, &run_id, &error)
+                        .await;
+                    match stop {
+                        Some(stop) => Err((stop, None)),
+                        None => self
+                            .build_runtime_output_after_live_mutation(
+                                id,
+                                run_id,
+                                boundary,
+                                contributing_input_ids,
+                                Some(CoreApplyTerminal::MachineTerminalFailure { error: witness }),
+                            )
+                            .await
+                            .map_err(|error| (error, None)),
+                    }
                 } else if let Some(terminal) = Self::callback_pending_terminal(&error) {
                     self.build_runtime_output_after_live_mutation(
                         id,
@@ -13006,6 +14857,28 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     )
                     .await
                     .map_err(|error| (error, None))
+                } else if !matches!(guard, RebaseFailureGuard::None)
+                    && Self::runtime_turn_failure_replays_inputs(&error)
+                {
+                    let route = match &guard {
+                        RebaseFailureGuard::Rebased(checkpointer) => {
+                            Self::rebased_run_failure(checkpointer, &run_id, &error)
+                        }
+                        _ => RebasedRunFailure::Stop(Self::rebased_run_stop(&run_id, &error)),
+                    };
+                    match route {
+                        RebasedRunFailure::Consume(error) => self
+                            .build_runtime_output_after_live_mutation(
+                                id,
+                                run_id,
+                                boundary,
+                                contributing_input_ids,
+                                Some(CoreApplyTerminal::MachineTerminalFailure { error }),
+                            )
+                            .await
+                            .map_err(|error| (error, None)),
+                        RebasedRunFailure::Stop(error) => Err((error, None)),
+                    }
                 } else if matches!(
                     error,
                     SessionError::Agent(meerkat_core::error::AgentError::Cancelled)
@@ -13023,6 +14896,18 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     Err((error, None))
                 }
             }
+        };
+        // Whatever else fails a re-based run, a failed build included, stops
+        // the executor: the run's inputs are committed history, so neither the
+        // failed-turn discard nor a replay may see them.
+        match outcome {
+            Err((error, admission))
+                if !matches!(guard, RebaseFailureGuard::None)
+                    && Self::runtime_turn_failure_replays_inputs(&error) =>
+            {
+                Err((Self::rebased_run_stop(&failed_run_id, &error), admission))
+            }
+            outcome => outcome,
         }
     }
 
@@ -13046,11 +14931,23 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 admission,
             )
             .await;
-        if result.is_err() {
-            self.report_uncommitted_runtime_turn_image(id, &discarded_run_id)
-                .await;
+        match result {
+            Err(error) => {
+                let tail = self
+                    .discard_replayed_run_provisional_tail(id, &discarded_run_id, &error)
+                    .await;
+                self.report_uncommitted_runtime_turn_image(id, &discarded_run_id)
+                    .await;
+                // As in the recoverable apply: a tail that records its run's
+                // re-base stops the executor instead of replaying the inputs.
+                if tail == ReplayedRunTail::RebasedKept {
+                    Err(Self::rebased_run_stop(&discarded_run_id, &error))
+                } else {
+                    Err(error)
+                }
+            }
+            ok => ok,
         }
-        result
     }
 
     async fn apply_runtime_turn_outcome_with_admission_inner(
@@ -13065,9 +14962,15 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Self::bind_runtime_turn_identity(&mut req, &run_id)?;
         let recovery_gate = self.recovery_gate_for_session(id).await;
         let _turn_guard = recovery_gate.lock().await;
-        let _ = self
-            .discard_stale_live_session_if_needed(id, LiveStalenessPosition::TurnBoundaryHeld)
+        let run_context = self
+            .runtime_turn_run_context(id, &run_id, &req, &contributing_input_ids)
             .await?;
+        let resumed_interrupted_calls = run_context.resume_interrupted_calls.clone();
+        if run_context.resume_receipt.is_none() {
+            let _ = self
+                .discard_stale_live_session_if_needed(id, LiveStalenessPosition::TurnBoundaryHeld)
+                .await?;
+        }
         // A new runtime turn owns the live image from here; its boundary
         // commit may be coming again.
         self.clear_live_uncommitted_terminal(id);
@@ -13075,25 +14978,42 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             Some(admission) => self
                 .inner
                 .start_runtime_turn_execution_with_admission_recovering_not_found(
-                    id, req, admission,
+                    id,
+                    req,
+                    admission,
+                    run_context,
                 )
                 .await
                 .map_err(|(error, _admission)| error),
-            None => self.inner.start_runtime_turn_execution(id, req).await,
+            None => {
+                self.inner
+                    .start_runtime_turn_execution(id, req, run_context)
+                    .await
+            }
         }?;
         let (result, machine_terminal_failure) = self
             .validated_runtime_execution_after_live_mutation(id, execution)
             .await?;
-        match result.map_err(SessionError::Agent) {
+        // As in the recoverable apply: a re-based run is decided before any
+        // build.
+        let guard = self.rebase_failure_guard(id, &run_id).await;
+        let failed_run_id = run_id.clone();
+        let outcome = match result.map_err(SessionError::Agent) {
             Ok(run_result) => {
-                self.build_runtime_output_after_live_mutation(
-                    id,
-                    run_id,
-                    boundary,
-                    contributing_input_ids,
-                    Some(CoreApplyTerminal::RunResult(Box::new(run_result))),
-                )
-                .await
+                let output = self
+                    .build_runtime_output_after_live_mutation(
+                        id,
+                        run_id,
+                        boundary,
+                        contributing_input_ids,
+                        Some(CoreApplyTerminal::RunResult(Box::new(run_result))),
+                    )
+                    .await;
+                if output.is_ok() {
+                    self.acknowledge_resumed_run_interrupted_calls(id, &resumed_interrupted_calls)
+                        .await;
+                }
+                output
             }
             Err(SessionError::Agent(meerkat_core::error::AgentError::NoPendingBoundary)) => {
                 self.build_runtime_output_after_live_mutation(
@@ -13106,15 +15026,26 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .await
             }
             Err(error) => {
-                if let Some(error) = machine_terminal_failure {
-                    self.build_runtime_output_after_live_mutation(
-                        id,
-                        run_id,
-                        boundary,
-                        contributing_input_ids,
-                        Some(CoreApplyTerminal::MachineTerminalFailure { error }),
-                    )
-                    .await
+                if let Some(witness) = machine_terminal_failure {
+                    // As in the recoverable apply: the latest checkpoint is
+                    // committed only when it owes no staged calls and the
+                    // failure requires no reload.
+                    let stop = self
+                        .machine_terminal_failure_stop(id, &run_id, &error)
+                        .await;
+                    match stop {
+                        Some(stop) => Err(stop),
+                        None => {
+                            self.build_runtime_output_after_live_mutation(
+                                id,
+                                run_id,
+                                boundary,
+                                contributing_input_ids,
+                                Some(CoreApplyTerminal::MachineTerminalFailure { error: witness }),
+                            )
+                            .await
+                        }
+                    }
                 } else if let Some(terminal) = Self::callback_pending_terminal(&error) {
                     self.build_runtime_output_after_live_mutation(
                         id,
@@ -13124,6 +15055,28 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                         Some(terminal),
                     )
                     .await
+                } else if !matches!(guard, RebaseFailureGuard::None)
+                    && Self::runtime_turn_failure_replays_inputs(&error)
+                {
+                    let route = match &guard {
+                        RebaseFailureGuard::Rebased(checkpointer) => {
+                            Self::rebased_run_failure(checkpointer, &run_id, &error)
+                        }
+                        _ => RebasedRunFailure::Stop(Self::rebased_run_stop(&run_id, &error)),
+                    };
+                    match route {
+                        RebasedRunFailure::Consume(error) => {
+                            self.build_runtime_output_after_live_mutation(
+                                id,
+                                run_id,
+                                boundary,
+                                contributing_input_ids,
+                                Some(CoreApplyTerminal::MachineTerminalFailure { error }),
+                            )
+                            .await
+                        }
+                        RebasedRunFailure::Stop(error) => Err(error),
+                    }
                 } else if matches!(
                     error,
                     SessionError::Agent(meerkat_core::error::AgentError::Cancelled)
@@ -13140,7 +15093,188 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     Err(error)
                 }
             }
+        };
+        match outcome {
+            Err(error)
+                if !matches!(guard, RebaseFailureGuard::None)
+                    && Self::runtime_turn_failure_replays_inputs(&error) =>
+            {
+                Err(Self::rebased_run_stop(&failed_run_id, &error))
+            }
+            outcome => outcome,
         }
+    }
+
+    /// The runtime facts the session task hands to the agent with one
+    /// runtime-dispatched turn: the run, the inputs the runtime bound to it,
+    /// and, for a resumed run, the provisional checkpoint receipt its actor
+    /// was seeded with.
+    async fn runtime_turn_run_context(
+        &self,
+        id: &SessionId,
+        run_id: &RunId,
+        req: &StartTurnRequest,
+        contributing_input_ids: &[InputId],
+    ) -> Result<RuntimeTurnRunContext, SessionError> {
+        let (resume_receipt, resume_interrupted_calls) = if Self::is_resumed_run_dispatch(req) {
+            let receipt = self.resumed_run_checkpoint_receipt(id, run_id).await?;
+            let adapter = self
+                .runtime_adapter
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            // Only this run's calls, from the session's process-custody
+            // evidence: an earlier run's interrupted calls were never this
+            // run's to answer. Evidence that cannot be read holds the run: the
+            // executor stops with the run's provisional tail kept, and nothing
+            // requeues or replays the run's inputs, so the round whose calls
+            // may have run is not planned again. The stop ends those inputs,
+            // so the next start repairs the run from its tail as interrupted.
+            let interrupted_calls = match adapter {
+                Some(adapter) => adapter
+                    .resumed_run_interrupted_tool_calls(id, run_id)
+                    .await
+                    .map_err(|error| {
+                        SessionError::runtime_executor_stopped(format!(
+                            "resumed run {run_id} of session {id} is held: its tool-process custody evidence cannot be read: {error}; the run is repaired at the next start"
+                        ))
+                    })?,
+                None => Vec::new(),
+            };
+            (Some(receipt), interrupted_calls)
+        } else {
+            (None, Vec::new())
+        };
+        Ok(RuntimeTurnRunContext {
+            run_id: Some(run_id.clone()),
+            run_start_input_ids: contributing_input_ids.to_vec(),
+            resume_receipt,
+            resume_interrupted_calls,
+        })
+    }
+
+    /// Acknowledge the process-custody evidence of the interrupted calls a
+    /// resumed run's round answered, once the run has ended with that round's
+    /// results committed and its output built: they told the model, so the
+    /// evidence owes it no notice of its own.
+    async fn acknowledge_resumed_run_interrupted_calls(
+        &self,
+        id: &SessionId,
+        calls: &[meerkat_core::tool_process::InterruptedToolCall],
+    ) {
+        if calls.is_empty() {
+            return;
+        }
+        let adapter = self
+            .runtime_adapter
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(adapter) = adapter {
+            adapter
+                .acknowledge_resumed_run_interrupted_tool_calls(id, calls)
+                .await;
+        }
+    }
+
+    fn is_resumed_run_dispatch(req: &StartTurnRequest) -> bool {
+        req.runtime
+            .turn_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.execution_kind)
+            == Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumeRun)
+    }
+
+    /// The receipt a resumed run's next checkpoint chains from: the one its
+    /// actor's checkpointer was preloaded with when the actor was seeded from
+    /// the run's provisional tail. That receipt is always the store-derived
+    /// one the durable-tail recovery returned: its digest is the tail's
+    /// transcript content digest. (A receipt this checkpointer minted in
+    /// process for a HeadCanonical rewrite carries the head revision instead,
+    /// and never seeds a resume.)
+    ///
+    /// The receipt is also the proof that the live transcript continues that
+    /// tail, ahead of the committed body by construction: a resumed dispatch
+    /// does not resynchronize it from durable authority as a stale image. So
+    /// the live image must still begin with exactly the tail the receipt names
+    /// before anything runs: a resumed round re-dispatches its tool calls
+    /// before its next checkpoint could notice a diverged image. Messages the
+    /// actor's construction appended after the tail (an explicit system prompt
+    /// given on resume) are an ordinary ordered append and do not diverge it.
+    ///
+    /// An actor without the receipt was not seeded for this run, and one whose
+    /// image does not begin with the tail can no longer be proved to continue
+    /// it. Either refusal fails the resumed run as an ordinary run failure
+    /// before anything runs: the runtime replays the run's inputs, after the
+    /// failed-turn path has discarded the run's provisional tail, so they run
+    /// again from the committed body exactly once. Unless the run re-based
+    /// before its restart (its tail's cursor says so): its inputs are then
+    /// already in the committed body, so the failed-turn path keeps the tail,
+    /// the executor stops, and the next start resumes or repairs the run.
+    async fn resumed_run_checkpoint_receipt(
+        &self,
+        id: &SessionId,
+        run_id: &RunId,
+    ) -> Result<RunCheckpointReceipt, SessionError> {
+        self.resumed_run_seeded_receipt(id, run_id)
+            .await
+            .map_err(|reason| SessionError::Agent(AgentError::InternalError(reason)))
+    }
+
+    /// The seeded receipt of `run_id`, or why the live actor cannot resume it.
+    async fn resumed_run_seeded_receipt(
+        &self,
+        id: &SessionId,
+        run_id: &RunId,
+    ) -> Result<RunCheckpointReceipt, String> {
+        let checkpointer = self
+            .live_checkpointers
+            .lock()
+            .await
+            .get(id)
+            .cloned()
+            .and_then(|checkpointer| checkpointer.upgrade())
+            .ok_or_else(|| {
+                format!("resumed run {run_id} of session {id} has no live actor checkpointer")
+            })?;
+        let receipt = checkpointer
+            .run_checkpoint_receipt(id, run_id)
+            .await
+            .map_err(|error| {
+                format!(
+                    "resumed run {run_id} of session {id} cannot read its checkpoint receipt: {error}"
+                )
+            })?
+            .ok_or_else(|| {
+                format!(
+                    "resumed run {run_id} of session {id} has no provisional checkpoint receipt: \
+                     its actor was not seeded from the run's provisional tail"
+                )
+            })?;
+        let live = self.inner.export_session(id).await.map_err(|error| {
+            format!("resumed run {run_id} of session {id} cannot export its live image: {error}")
+        })?;
+        let tail_len = usize::try_from(receipt.message_count()).unwrap_or(usize::MAX);
+        let live_prefix_digest = if live.messages().len() >= tail_len {
+            live.transcript_prefix_digest(tail_len).ok()
+        } else {
+            None
+        };
+        if live_prefix_digest.as_deref() != Some(receipt.conversation_digest()) {
+            return Err(format!(
+                "resumed run {run_id} of session {id}: the live image ({} messages, {}) does not \
+                 begin with the provisional tail its receipt names ({} messages, digest {}); the \
+                 resume is refused before any call runs again",
+                live.messages().len(),
+                live_prefix_digest.as_deref().map_or_else(
+                    || "no matching prefix".to_string(),
+                    |digest| { format!("prefix digest {digest}") }
+                ),
+                receipt.message_count(),
+                receipt.conversation_digest()
+            ));
+        }
+        Ok(receipt)
     }
 
     fn bind_runtime_turn_identity(
@@ -13307,6 +15441,96 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Ok(())
     }
 
+    /// Adopt the runtime's store-owned HeadCanonical compaction-outbox
+    /// finalization on the live actor.
+    ///
+    /// After a compacting run's boundary the runtime removes the finalized
+    /// compaction projection intents from the committed head in a
+    /// metadata-only mutation; `authority` names that committed head. The live
+    /// agent already removed the same intents from its own session
+    /// ([`Self::reconcile_runtime_compaction_projections`]), so its
+    /// HeadCanonical metadata baseline adopts the committed identity over
+    /// exactly that key (`Session::acknowledge_head_canonical_compaction_finalization`).
+    /// Without it, the actor's next boundary preparation names a predecessor
+    /// the store no longer holds and is refused. With no live actor there is
+    /// nothing to adopt: a later materialization reads the finalized head.
+    ///
+    /// The committed head is re-read and must still be the one `authority`
+    /// names. Any divergence is an error, which the runtime logs: the store
+    /// refuses the unadopted actor's next boundary preparation, and the turn
+    /// resyncs from durable state.
+    pub async fn acknowledge_runtime_compaction_finalization(
+        &self,
+        id: &SessionId,
+        authority: &meerkat_core::CommittedSessionBoundaryAuthority,
+    ) -> Result<(), SessionError> {
+        let meerkat_core::CommittedSessionBoundaryAuthority::HeadCanonical {
+            session_id,
+            committed_head_token,
+        } = authority
+        else {
+            return Err(SessionError::Agent(AgentError::InternalError(format!(
+                "compaction finalization of session {id} named a non-HeadCanonical authority"
+            ))));
+        };
+        if session_id != id {
+            return Err(SessionError::Agent(AgentError::InternalError(format!(
+                "compaction finalization authority names session {session_id}, not {id}"
+            ))));
+        }
+        if self.runtime_store.session_persistence_profile()
+            != RuntimeSessionPersistenceProfile::HeadCanonicalV1
+        {
+            return Err(SessionError::Agent(AgentError::InternalError(format!(
+                "compaction finalization adoption for session {id} requires a HeadCanonical runtime store"
+            ))));
+        }
+        let loaded = self
+            .runtime_store
+            .load_session_boundary_authority(&Self::runtime_id_for_session(id))
+            .await
+            .map_err(|error| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "failed to load the finalized compaction authority of session {id}: {error}"
+                )))
+            })?
+            .ok_or_else(|| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "the finalized compaction authority of session {id} disappeared"
+                )))
+            })?;
+        let committed = loaded.head_canonical().ok_or_else(|| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "compaction finalization of session {id} loaded a WholeBlob authority"
+            )))
+        })?;
+        if committed.session_id() != id || committed.committed_head_token() != committed_head_token
+        {
+            return Err(SessionError::Agent(AgentError::InternalError(format!(
+                "the committed head of session {id} moved after its compaction finalization"
+            ))));
+        }
+        let committed_metadata_identity = committed
+            .boundary_head()
+            .metadata_identity()
+            .cloned()
+            .ok_or_else(|| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "the compaction-finalized head of session {id} carries no metadata identity"
+                )))
+            })?;
+        match self
+            .inner
+            .acknowledge_head_canonical_compaction_finalization(id, committed_metadata_identity)
+            .await
+        {
+            Ok(()) | Err(SessionError::NotFound { .. }) => Ok(()),
+            Err(error) => Err(SessionError::Agent(AgentError::InternalError(format!(
+                "the live actor of session {id} could not adopt its compaction finalization: {error}; live actor reload required"
+            )))),
+        }
+    }
+
     /// Abort the live invisible compaction stage after a rejected runtime
     /// atomic boundary with an authoritatively empty outbox.
     pub async fn abort_uncommitted_compaction_projections(
@@ -13380,6 +15604,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         Ok(ConsumedCommittedBoundaryResumePreparation {
             observation: preparation.observation,
             committed_body: preparation.committed_body,
+            continued_run: preparation.continued_run,
         })
     }
 
@@ -13434,10 +15659,18 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// unchanged resume observation proves the committed head that
     /// preparation audited is still current, so only the body-free verdict is
     /// read; a changed observation falls back to the authoritative read.
+    ///
+    /// `continued_tail` is the receipt of the run the actor was seeded to
+    /// continue, which recovery's own `Continue` handed over. That run's
+    /// HeadCanonical provisional tail stands ahead of the committed head
+    /// until the run commits its boundary, so on every branch the physical
+    /// head is checked against the tail the receipt names, never against the
+    /// committed head.
     async fn reject_archived_resume_under_recovery_gate(
         &self,
         resume_session_id: &SessionId,
         prepared_observation: Option<&meerkat_runtime::store::RuntimeSessionResumeObservation>,
+        continued_tail: Option<&RunCheckpointReceipt>,
         archived_resume_allowed: bool,
     ) -> Result<(), SessionError> {
         if let Some(expected) = prepared_observation {
@@ -13453,8 +15686,19 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     )))
                 })?;
             if &current == expected && current.session_authority().is_some() {
-                self.verify_prepared_physical_head_current(resume_session_id, &current)
-                    .await?;
+                match continued_tail {
+                    Some(receipt) => {
+                        self.verify_continued_tail_physical_head_current(
+                            resume_session_id,
+                            receipt,
+                        )
+                        .await?;
+                    }
+                    None => {
+                        self.verify_prepared_physical_head_current(resume_session_id, &current)
+                            .await?;
+                    }
+                }
                 if !archived_resume_allowed
                     && self
                         .session_archived_by_runtime_store_authority(resume_session_id)
@@ -13467,17 +15711,72 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 return Ok(());
             }
         }
-        if let Some(session) = self
-            .load_authoritative_session_base(resume_session_id)
-            .await?
+        // Unprepared, the archive question is answered body-free, by the same
+        // RuntimeStore terminal projections the prepared branch reads above:
+        // the archive rule never reads the body.
+        if !archived_resume_allowed
             && self
-                .session_archived_by_authority(resume_session_id, &session)
+                .session_archived_by_runtime_store_authority(resume_session_id)
                 .await?
-            && !archived_resume_allowed
         {
-            self.reject_if_archived_session(resume_session_id, &session)
-                .await
-                .map_err(crate::control_error_into_session_error)?;
+            return Err(SessionError::NotFound {
+                id: resume_session_id.clone(),
+            });
+        }
+        // The actor continues the run whose tail it was seeded from: the
+        // physical head must still be that tail, unprepared or not.
+        if let Some(receipt) = continued_tail {
+            self.verify_continued_tail_physical_head_current(resume_session_id, receipt)
+                .await?;
+        }
+        // The rewrite-audit replay a preparation otherwise owns runs on the
+        // committed snapshot. A run this registration resumes holds its
+        // HeadCanonical provisional tail ahead of that snapshot until it
+        // commits its boundary, where the strict read refuses the boundary,
+        // so the snapshot is read through the tail. The read decides nothing
+        // about the tail: recovery's own `Continue` already did.
+        self.load_authoritative_session_base_tolerating_tail(resume_session_id)
+            .await?;
+        Ok(())
+    }
+
+    /// The physical head is still the HeadCanonical provisional tail the
+    /// receipt of a continued run names: the tail its actor was seeded from.
+    /// A WholeBlob receipt names no physical head, and is not checked here.
+    async fn verify_continued_tail_physical_head_current(
+        &self,
+        id: &SessionId,
+        receipt: &RunCheckpointReceipt,
+    ) -> Result<(), SessionError> {
+        let Some(tail) = receipt.head_canonical() else {
+            return Ok(());
+        };
+        let incremental = self.incremental.as_ref().ok_or_else(|| {
+            SessionError::Agent(AgentError::InternalError(format!(
+                "cannot compare the HeadCanonical physical head of session {id} without incremental store capability"
+            )))
+        })?;
+        if tail.session_id() != id {
+            return Err(SessionError::Agent(AgentError::InternalError(format!(
+                "the continued run's receipt for session {id} names a tail of session {}",
+                tail.session_id()
+            ))));
+        }
+        let current = incremental
+            .load_head(id)
+            .await
+            .map_err(|error| SessionError::Store(Box::new(error)))?
+            .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+        let current_token = meerkat_core::session_store::session_head_cas_token(&current)
+            .map_err(|error| SessionError::Store(Box::new(error)))?;
+        if current_token != tail.physical_head_token() {
+            return Err(SessionError::Store(Box::new(
+                SessionStoreError::TranscriptRevisionConflict {
+                    id: id.clone(),
+                    expected: tail.physical_head_token().to_string(),
+                    actual: current_token,
+                },
+            )));
         }
         Ok(())
     }
@@ -13584,6 +15883,18 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             whole_blob_base_authority: std::sync::Mutex::new(None),
             latest_run_checkpoint_receipt: Mutex::new(None),
             latest_run_transcript_retirement: std::sync::Mutex::new(None),
+            live_deferred_turn_state: std::sync::OnceLock::new(),
+            unattached_deferred_checkpoint_warned: std::sync::atomic::AtomicBool::new(false),
+            rebased_run: std::sync::Mutex::new(None),
+            latest_run_checkpoint_cursor: std::sync::Mutex::new(None),
+            rebase_outcome_unknown: std::sync::Mutex::new(None),
+            rewrite_audit: self
+                .event_store
+                .clone()
+                .map(|event_store| RewriteAuditSink {
+                    event_store,
+                    projector: self.projector.clone(),
+                }),
         });
         let requested_resume_session_id = req
             .build
@@ -13606,10 +15917,28 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 None
             }
         };
-        let (prepared_observation, mut prepared_committed_body) = match prepared {
-            Some(prepared) => (Some(prepared.observation), prepared.committed_body),
-            None => (None, None),
+        let (prepared_observation, mut prepared_committed_body, mut continued_run) = match prepared
+        {
+            Some(prepared) => (
+                Some(prepared.observation),
+                prepared.committed_body,
+                prepared.continued_run,
+            ),
+            None => (None, None, None),
         };
+        // The run this session's runtime registration marked resumable, if the
+        // actor is built for a runtime. Only a marked run resumes: the runtime
+        // loop dispatches it, and nothing else would.
+        let (runtime_hosted, runtime_marked_run) =
+            match req.build.as_ref().map(|build| &build.runtime_build_mode) {
+                Some(meerkat_core::RuntimeBuildMode::SessionOwned(bindings)) => (
+                    true,
+                    self.runtime_resumable_run_id(bindings.session_id()).await,
+                ),
+                _ => (false, None),
+            };
+        let mut resumed_from_continued_run = false;
+        let mut continued_tail_receipt: Option<RunCheckpointReceipt> = None;
         if let Some(resume_session_id) = requested_resume_session_id.as_ref() {
             // Receipt-backed mob materialization has already completed the
             // recovery transition. The profile branches below still perform
@@ -13632,43 +15961,86 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 // create below are built in their own frames: at opt-level 0
                 // each awaited future reserved twice its size in this poll
                 // frame.
-                match meerkat_runtime::stack_relief::box_in_own_frame(|| {
-                    self.recover_committed_boundary(resume_session_id)
+                let recovery = meerkat_runtime::stack_relief::box_in_own_frame(|| {
+                    self.recover_committed_boundary_for_actor(resume_session_id)
                 })
-                .await?
-                {
-                    CommittedBoundaryRecovery::AlreadyCommitted
-                    | CommittedBoundaryRecovery::Recovered { .. } => {}
-                    CommittedBoundaryRecovery::Unprovable { reason } => {
-                        return Err(SessionError::Agent(AgentError::InternalError(reason)));
-                    }
+                .await;
+                continued_run = self
+                    .resolve_marked_run_after_recovery(
+                        resume_session_id,
+                        runtime_hosted,
+                        runtime_marked_run.as_ref(),
+                        recovery,
+                    )
+                    .await?;
+            } else if let Some(seed) = continued_run.as_ref()
+                && runtime_marked_run.as_ref() != Some(&seed.run_id)
+            {
+                // A prepared continuation whose run the registration does not
+                // mark would never be dispatched, and the session's ordinary
+                // writes are refused while the run's provisional tail stands:
+                // refused as held, as an unprepared one is.
+                let reason = format!(
+                    "the prepared continuation of run {} is not the run the registration marks",
+                    seed.run_id
+                );
+                tracing::warn!(
+                    session_id = %resume_session_id,
+                    %reason,
+                    "refusing to materialize a session over an open run nothing resumes"
+                );
+                if runtime_hosted {
+                    self.require_runtime_reload_for_stale_mark(resume_session_id, &reason)
+                        .await;
                 }
+                return Err(SessionError::DurableTailHeldForRecovery {
+                    id: resume_session_id.clone(),
+                });
             }
-            match (
-                self.runtime_store.session_persistence_profile(),
-                actor_seed_authority,
-            ) {
-                (
-                    RuntimeSessionPersistenceProfile::WholeBlobV1,
-                    ActorSessionSeedAuthority::DurableCommitted,
-                ) => {
-                    let (exact_session, exact_authority) = self
-                        .load_committed_whole_blob_session(
-                            resume_session_id,
-                            "live actor materialization",
-                        )
-                        .await?
-                        .ok_or_else(|| SessionError::NotFound {
-                            id: resume_session_id.clone(),
-                        })?;
-                    // The actor now materializes from this body and shares its
-                    // transcript buffer. The entry stays only for the create-time
-                    // save's rewrite planning read that follows; that save
-                    // advances the authority and drops it before any append.
-                    req.build
-                        .get_or_insert_with(Default::default)
-                        .resume_session = Some(exact_session);
-                    *checkpointer
+            if let Some(seed) = continued_run.take() {
+                resumed_from_continued_run = true;
+                continued_tail_receipt = Some(seed.receipt.clone());
+                if let Err(error) = self
+                    .seed_actor_from_continued_run(resume_session_id, seed, &mut req, &checkpointer)
+                    .await
+                {
+                    // The marked run's tail no longer descends from the
+                    // committed base, or its seed is malformed: the durable
+                    // rows moved since registration marked the run, so the
+                    // registration is stale.
+                    self.require_runtime_reload_for_stale_mark(
+                        resume_session_id,
+                        &format!("the marked run's seed was refused: {error}"),
+                    )
+                    .await;
+                    return Err(error);
+                }
+            } else {
+                match (
+                    self.runtime_store.session_persistence_profile(),
+                    actor_seed_authority,
+                ) {
+                    (
+                        RuntimeSessionPersistenceProfile::WholeBlobV1,
+                        ActorSessionSeedAuthority::DurableCommitted,
+                    ) => {
+                        let (exact_session, exact_authority) = self
+                            .load_committed_whole_blob_session(
+                                resume_session_id,
+                                "live actor materialization",
+                            )
+                            .await?
+                            .ok_or_else(|| SessionError::NotFound {
+                                id: resume_session_id.clone(),
+                            })?;
+                        // The actor now materializes from this body and shares its
+                        // transcript buffer. The entry stays only for the create-time
+                        // save's rewrite planning read that follows; that save
+                        // advances the authority and drops it before any append.
+                        req.build
+                            .get_or_insert_with(Default::default)
+                            .resume_session = Some(exact_session);
+                        *checkpointer
                         .whole_blob_base_authority
                         .lock()
                         .map_err(|_| {
@@ -13676,13 +16048,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                                 "WholeBlob actor base authority lock is poisoned for session {resume_session_id}"
                             )))
                         })? = Some(exact_authority);
-                }
-                (
-                    RuntimeSessionPersistenceProfile::WholeBlobV1,
-                    ActorSessionSeedAuthority::FreshGenerationZero,
-                ) => {
-                    let runtime_id = Self::runtime_id_for_session(resume_session_id);
-                    if self
+                    }
+                    (
+                        RuntimeSessionPersistenceProfile::WholeBlobV1,
+                        ActorSessionSeedAuthority::FreshGenerationZero,
+                    ) => {
+                        let runtime_id = Self::runtime_id_for_session(resume_session_id);
+                        if self
                         .runtime_store
                         .load_whole_blob_store_authority(&runtime_id)
                         .await
@@ -13697,23 +16069,23 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                             "fresh WholeBlob materialization conflicts with existing durable authority for session {resume_session_id}"
                         ))));
                     }
-                }
-                (
-                    RuntimeSessionPersistenceProfile::HeadCanonicalV1,
-                    ActorSessionSeedAuthority::DurableCommitted,
-                ) => {
-                    // A consumed preparation already carries the exact body
-                    // its bracket verified. When a fresh observation equals
-                    // the prepared one and the physical head has not moved,
-                    // that body is still the committed head, so it is not
-                    // materialized and verified a second time. A changed
-                    // observation falls back to the authoritative read.
-                    let prepared_body = match (
-                        prepared_committed_body.take(),
-                        prepared_observation.as_ref(),
-                    ) {
-                        (Some(committed_body), Some(observation)) => {
-                            let current = self
+                    }
+                    (
+                        RuntimeSessionPersistenceProfile::HeadCanonicalV1,
+                        ActorSessionSeedAuthority::DurableCommitted,
+                    ) => {
+                        // A consumed preparation already carries the exact body
+                        // its bracket verified. When a fresh observation equals
+                        // the prepared one and the physical head has not moved,
+                        // that body is still the committed head, so it is not
+                        // materialized and verified a second time. A changed
+                        // observation falls back to the authoritative read.
+                        let prepared_body = match (
+                            prepared_committed_body.take(),
+                            prepared_observation.as_ref(),
+                        ) {
+                            (Some(committed_body), Some(observation)) => {
+                                let current = self
                                 .runtime_store
                                 .load_session_resume_observation(&Self::runtime_id_for_session(
                                     resume_session_id,
@@ -13724,48 +16096,48 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                                         "failed to re-observe resume authority for session {resume_session_id}: {error}"
                                     )))
                                 })?;
-                            // A committed read finds no body once the
-                            // authority is gone; keep that typed outcome.
-                            if current.session_authority().is_none() {
-                                return Err(SessionError::NotFound {
-                                    id: resume_session_id.clone(),
-                                });
+                                // A committed read finds no body once the
+                                // authority is gone; keep that typed outcome.
+                                if current.session_authority().is_none() {
+                                    return Err(SessionError::NotFound {
+                                        id: resume_session_id.clone(),
+                                    });
+                                }
+                                if &current == observation {
+                                    self.verify_prepared_physical_head_current(
+                                        resume_session_id,
+                                        observation,
+                                    )
+                                    .await?;
+                                    Some(*committed_body)
+                                } else {
+                                    None
+                                }
                             }
-                            if &current == observation {
-                                self.verify_prepared_physical_head_current(
+                            _ => None,
+                        };
+                        let exact_session = match prepared_body {
+                            Some(session) => session,
+                            None => self
+                                .load_committed_runtime_session_for_body(
                                     resume_session_id,
-                                    observation,
+                                    "live actor materialization",
                                 )
-                                .await?;
-                                Some(*committed_body)
-                            } else {
-                                None
-                            }
-                        }
-                        _ => None,
-                    };
-                    let exact_session = match prepared_body {
-                        Some(session) => session,
-                        None => self
-                            .load_committed_runtime_session_for_body(
-                                resume_session_id,
-                                "live actor materialization",
-                            )
-                            .await?
-                            .ok_or_else(|| SessionError::NotFound {
-                                id: resume_session_id.clone(),
-                            })?,
-                    };
-                    req.build
-                        .get_or_insert_with(Default::default)
-                        .resume_session = Some(exact_session);
-                }
-                (
-                    RuntimeSessionPersistenceProfile::HeadCanonicalV1,
-                    ActorSessionSeedAuthority::FreshGenerationZero,
-                ) => {
-                    let runtime_id = Self::runtime_id_for_session(resume_session_id);
-                    if self
+                                .await?
+                                .ok_or_else(|| SessionError::NotFound {
+                                    id: resume_session_id.clone(),
+                                })?,
+                        };
+                        req.build
+                            .get_or_insert_with(Default::default)
+                            .resume_session = Some(exact_session);
+                    }
+                    (
+                        RuntimeSessionPersistenceProfile::HeadCanonicalV1,
+                        ActorSessionSeedAuthority::FreshGenerationZero,
+                    ) => {
+                        let runtime_id = Self::runtime_id_for_session(resume_session_id);
+                        if self
                         .runtime_store
                         .load_session_boundary_authority(&runtime_id)
                         .await
@@ -13780,11 +16152,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                             "fresh HeadCanonical materialization conflicts with existing durable authority for session {resume_session_id}"
                         ))));
                     }
-                }
-                (profile, _) => {
-                    return Err(SessionError::Agent(AgentError::InternalError(format!(
-                        "unsupported runtime session persistence profile {profile} while materializing actor for session {resume_session_id}"
-                    ))));
+                    }
+                    (profile, _) => {
+                        return Err(SessionError::Agent(AgentError::InternalError(format!(
+                            "unsupported runtime session persistence profile {profile} while materializing actor for session {resume_session_id}"
+                        ))));
+                    }
                 }
             }
             if let Some(expected) = prepared_observation.as_ref() {
@@ -13987,6 +16360,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                         self.reject_archived_resume_under_recovery_gate(
                             resume_session_id,
                             prepared_observation.as_ref(),
+                            continued_tail_receipt.as_ref(),
                             archived_resume_allowed,
                         )
                     })
@@ -14027,6 +16401,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 return Err(error);
             }
         };
+        // The actor's run checkpoints persist its live deferred-turn state. A
+        // runtime-backed create runs no turn inside the inner create (an eager
+        // create is refused above), so this attaches before the actor can run
+        // a turn.
+        if let Some(live) = self.inner.deferred_turn_state(&result.session_id).await {
+            let _ = checkpointer.live_deferred_turn_state.set(live);
+        }
         if let Some(permit) = actor_materialization_permit.take()
             && let Err(error) = permit.commit()
         {
@@ -14067,6 +16448,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             return Err(error);
         }
 
+        // A resumed actor continues an open run from its provisional tail: its
+        // boundary is that run's eventual commit, and its checkpointer already
+        // holds the committed base and the tail's receipt.
+        if resumed_from_continued_run {
+            return Ok(result);
+        }
         // Persist the generation-zero boundary before returning the actor.
         // WholeBlob then seeds the checkpointer from the exact store-issued
         // committed authority, never from a digest recomputed over the live
@@ -14341,9 +16728,35 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 continue;
             }
 
-            let _ = self
+            // A turn stopped between its end-of-run checkpoint and its
+            // boundary commit left a durable tail every committed read
+            // refuses. This archive holds the quiescent boundary and the
+            // recovery gate, so it settles that tail and observes once more;
+            // a held or refused tail ends the archive typed.
+            match self
                 .discard_stale_live_session_if_needed(id, LiveStalenessPosition::TurnBoundaryHeld)
-                .await?;
+                .await
+            {
+                Err(conflict) if Self::is_transcript_revision_conflict_error(&conflict) => {
+                    self.settle_durable_tail_under_archive_gates(
+                        id,
+                        conflict,
+                        &machine_archive,
+                        candidate_lease.as_ref(),
+                        deadline,
+                    )
+                    .await?;
+                    let _ = self
+                        .discard_stale_live_session_if_needed(
+                            id,
+                            LiveStalenessPosition::TurnBoundaryHeld,
+                        )
+                        .await?;
+                }
+                observed => {
+                    let _ = observed?;
+                }
+            }
             let stored_only_publication_handle: Option<Arc<dyn CoreExecutorPublicationHandle>> =
                 if self.inner.has_live_session(id).await? {
                     None
@@ -14414,7 +16827,22 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             let archived_snapshot = match self.export_session_with_labels(id).await {
                 Ok(session) => Some(session),
                 Err(SessionError::NotFound { .. }) => {
-                    self.load_persisted_session_for_archive(id).await?
+                    // The same durable tail, met with no live actor: settle
+                    // it under the held gates and read once more.
+                    match self.load_persisted_session_for_archive(id).await {
+                        Err(conflict) if Self::is_transcript_revision_conflict_error(&conflict) => {
+                            self.settle_durable_tail_under_archive_gates(
+                                id,
+                                conflict,
+                                &machine_archive,
+                                archive_lease.as_ref(),
+                                deadline,
+                            )
+                            .await?;
+                            self.load_persisted_session_for_archive(id).await?
+                        }
+                        loaded => loaded?,
+                    }
                 }
                 Err(err) => return Err(err),
             };
@@ -14745,6 +17173,19 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .await
     }
 
+    /// Suspend one exact run for a graceful requeue stop, from a
+    /// `MeerkatMachine` executor interrupt handle: the turn is dropped as a
+    /// hard interrupt drops it, and the run ends suspended, its provisional
+    /// tail and cursor kept for the next start.
+    pub async fn suspend_run_with_machine_authority(
+        &self,
+        id: &SessionId,
+        expected_run_id: &RunId,
+        _authority: MachineSessionControlAuthority,
+    ) -> Result<bool, SessionError> {
+        self.inner.suspend_run_if_current(id, expected_run_id).await
+    }
+
     /// Apply a cooperative boundary cancel from a `MeerkatMachine` executor handle.
     pub async fn cancel_after_boundary_with_machine_authority(
         &self,
@@ -14830,8 +17271,12 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
                 Err(error) => return Err(error),
             }
             // No running actor: resolve retained views from the runtime's
-            // committed body, never from the physical latest checkpoint.
-            let loaded = self.load_authoritative_session_base(id).await;
+            // committed body, never from the physical latest checkpoint. A
+            // run hosted elsewhere may hold a provisional tail ahead of that
+            // body: read the committed snapshot through it.
+            let loaded = self
+                .load_authoritative_session_base_tolerating_tail(id)
+                .await;
             if Self::is_transcript_revision_conflict(&loaded) {
                 continue;
             }
@@ -14894,6 +17339,13 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
                 let failures = outcome.settlement_failures();
                 let _mutation_guard = self
                     .live_persist_mutation_guard(&id)
+                    .await
+                    .map_err(|error| error.with_settlement_failures(failures.clone()))?;
+                // A run that ended without its boundary commit (the model
+                // turn this application's custody outlived) may have left a
+                // provisional tail, which refuses the save below. Settle it
+                // first, under the guards just taken.
+                self.settle_ended_run_tail_before_tool_application_settlement(&id)
                     .await
                     .map_err(|error| error.with_settlement_failures(failures.clone()))?;
                 if self.inner.live_session_actor_witness(&id).await.as_ref()
@@ -14985,6 +17437,15 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         intents: Vec<meerkat_core::CompactionProjectionIntent>,
     ) -> Result<(), SessionError> {
         PersistentSessionService::reconcile_runtime_compaction_projections(self, id, intents).await
+    }
+
+    async fn acknowledge_runtime_compaction_finalization(
+        &self,
+        id: &SessionId,
+        authority: &meerkat_core::CommittedSessionBoundaryAuthority,
+    ) -> Result<(), SessionError> {
+        PersistentSessionService::acknowledge_runtime_compaction_finalization(self, id, authority)
+            .await
     }
 
     async fn abort_uncommitted_compaction_projections(
@@ -15099,7 +17560,14 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
             // the authority read and the head materialization re-reads within
             // the counted budget instead of failing (issue #1104).
             match self.live_session_authority_for_observation(id).await? {
-                LiveSessionAuthority::DurableAuthoritative { session, .. } => {
+                LiveSessionAuthority::DurableAuthoritative { .. } => {
+                    // The committed view outranks the live actor. A public
+                    // read serves the committed snapshot while a run's
+                    // provisional tail stands.
+                    let Some(session) = self.load_committed_session_tolerating_tail(id).await?
+                    else {
+                        return Err(SessionError::NotFound { id: id.clone() });
+                    };
                     self.reject_if_archived_session(id, &session)
                         .await
                         .map_err(crate::control_error_into_session_error)?;
@@ -15221,11 +17689,8 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         match self.live_session_authority_for_observation(id).await? {
             LiveSessionAuthority::NoLive => Ok(false),
             LiveSessionAuthority::LiveAuthoritative { .. } => Ok(true),
-            LiveSessionAuthority::DurableAuthoritative { session, .. } => {
-                if self
-                    .session_archived_by_authority(id, session.as_ref())
-                    .await?
-                {
+            LiveSessionAuthority::DurableAuthoritative { .. } => {
+                if self.session_archived_by_runtime_store_authority(id).await? {
                     self.discard_live_session(id).await?;
                     Ok(false)
                 } else {
@@ -15496,10 +17961,9 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceTranscriptEditExt
         let _ = req.running_behavior;
         // A generic fork commits a child that is not materialized, and
         // activation admits only materialized sessions: no activation window.
-        let inherited_instructions = req
-            .inherited_instructions
-            .unwrap_or_default()
-            .effective(meerkat_core::ActivationWindow::None);
+        let instructions = ForkInstructionPolicies::without_activation_window(
+            req.inherited_instructions.unwrap_or_default(),
+        );
         Ok(self
             .fork_durable_session_with_optional_planned_identity(
                 id,
@@ -15507,7 +17971,7 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceTranscriptEditExt
                 None,
                 req.tool_access_policy,
                 None,
-                inherited_instructions,
+                instructions,
             )
             .await?
             .fork)
@@ -15537,10 +18001,9 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceTranscriptEditExt
         );
         self.authorize_transcript_edit(id, TranscriptEditKind::Fork)?;
         // Same activation window as `fork_session_at`: none.
-        let inherited_instructions = req
-            .inherited_instructions
-            .unwrap_or_default()
-            .effective(meerkat_core::ActivationWindow::None);
+        let instructions = ForkInstructionPolicies::without_activation_window(
+            req.inherited_instructions.unwrap_or_default(),
+        );
         self.persist_transcript_fork(
             id.clone(),
             forked,
@@ -15548,7 +18011,7 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceTranscriptEditExt
             req.tool_access_policy,
             cache_inheritance,
             None,
-            inherited_instructions,
+            instructions,
         )
         .await
     }
@@ -16441,6 +18904,44 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         result
     }
 
+    /// The committed session as a public reader serves it:
+    /// [`Self::load_authoritative_session`], except while the session's own
+    /// durable run holds a HeadCanonical provisional tail ahead of the
+    /// committed snapshot. The strict read refuses the boundary then (with
+    /// `TranscriptRevisionConflict`); this read serves the committed
+    /// snapshot, read through the tail, which is what every reader saw
+    /// before runs committed their rounds.
+    ///
+    /// It keeps the strict read's contract: the same transcript rewrite
+    /// replay, the same audit verification and the same counted attempt
+    /// budget. On a conflict an attempt reads the snapshot through the tail;
+    /// an attempt that finds no provisional tail applied on the boundary (a
+    /// writer committed between the reads, or a round's intent is written but
+    /// not yet applied) observes again, and a conflict on every attempt
+    /// surfaces unchanged. A WholeBlob store never conflicts here: its
+    /// committed read is the committed document.
+    ///
+    /// For readers only. The snapshot proves nothing about the tail, so every
+    /// decision about one (a settle, a discard, an archive, a resume or a
+    /// persist) keeps [`Self::load_authoritative_session`].
+    pub async fn load_committed_session_tolerating_tail(
+        &self,
+        id: &SessionId,
+    ) -> Result<Option<Session>, SessionError> {
+        let mut result = self
+            .load_authoritative_session_base_tolerating_tail(id)
+            .await;
+        for _ in 1..OBSERVATION_LOAD_ATTEMPTS {
+            if !Self::is_transcript_revision_conflict(&result) {
+                break;
+            }
+            result = self
+                .load_authoritative_session_base_tolerating_tail(id)
+                .await;
+        }
+        result
+    }
+
     /// Resolve a crash-window HeadCanonical provisional tail before a host
     /// starts or attaches a session that has no live actor.
     ///
@@ -16489,6 +18990,23 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
         claim: meerkat_core::session_hosting::HostingClaim,
     ) -> Result<(), SessionError> {
+        self.prepare_cold_attach_reporting(id, claim)
+            .await
+            .map(|_settlement| ())
+    }
+
+    /// [`Self::prepare_cold_attach`], reporting what the settle left: a
+    /// session whose durable-tail recovery continues its open run keeps that
+    /// run's provisional tail, so its committed body reads only through the
+    /// committed snapshot under the tail, which the report carries
+    /// ([`ColdAttachSettlement::ContinuesOpenRun`]). Whether the run
+    /// continues is the store-owned recovery's own disposition; the snapshot
+    /// only serves the caller's reads.
+    pub async fn prepare_cold_attach_reporting(
+        &self,
+        id: &SessionId,
+        claim: meerkat_core::session_hosting::HostingClaim,
+    ) -> Result<ColdAttachSettlement, SessionError> {
         if claim.session_id() != id {
             return Err(SessionError::Agent(AgentError::InternalError(format!(
                 "cold attach of session {id} was offered the hosting claim of session {}",
@@ -16507,14 +19025,17 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         .await
     }
 
-    async fn prepare_cold_attach_hosted(&self, id: &SessionId) -> Result<(), SessionError> {
+    async fn prepare_cold_attach_hosted(
+        &self,
+        id: &SessionId,
+    ) -> Result<ColdAttachSettlement, SessionError> {
         if self.inner.has_live_session(id).await? {
-            return Ok(());
+            return Ok(ColdAttachSettlement::Settled);
         }
         if self.runtime_store.session_persistence_profile()
             != RuntimeSessionPersistenceProfile::HeadCanonicalV1
         {
-            return Ok(());
+            return Ok(ColdAttachSettlement::Settled);
         }
         match self
             .runtime_store
@@ -16522,26 +19043,35 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             .await
         {
             Ok(Some(_)) => {}
-            Ok(None) => return Ok(()),
+            Ok(None) => return Ok(ColdAttachSettlement::Settled),
             Err(error) => {
                 tracing::warn!(
                     session_id = %id,
                     %error,
                     "could not observe the provisional tail before a cold attach"
                 );
-                return Ok(());
+                return Ok(ColdAttachSettlement::Settled);
             }
         }
-        match self
-            .recover_committed_boundary_retaining_aligned_body(id)
-            .await
-        {
-            Ok((
+        match self.recover_committed_boundary_for_resume(id).await {
+            Ok(ResumeBoundaryRecovery::Settled(
                 CommittedBoundaryRecovery::Recovered { .. }
                 | CommittedBoundaryRecovery::AlreadyCommitted,
                 _,
             )) => {}
-            Ok((CommittedBoundaryRecovery::Unprovable { reason }, _)) => {
+            // The recovery's own disposition: the open run continues from its
+            // last round commit, so its provisional tail stays (nothing was
+            // written) and a committed read of the session still meets it.
+            Ok(ResumeBoundaryRecovery::Continue(seed)) => {
+                return Ok(self.continued_run_cold_attach(id, seed.run_id).await);
+            }
+            Ok(
+                ResumeBoundaryRecovery::Settled(
+                    CommittedBoundaryRecovery::Unprovable { reason },
+                    _,
+                )
+                | ResumeBoundaryRecovery::Withheld { reason, .. },
+            ) => {
                 tracing::warn!(
                     session_id = %id,
                     reason,
@@ -16559,7 +19089,55 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 );
             }
         }
-        Ok(())
+        Ok(ColdAttachSettlement::Settled)
+    }
+
+    /// The cold attach's report for a session whose durable-tail recovery
+    /// continues `run_id`: the committed snapshot under the run's provisional
+    /// tail, for the caller's reads. Without one (no applied provisional tail
+    /// on exactly the committed boundary, or a read that failed) the settle
+    /// reports [`ColdAttachSettlement::Settled`], and the caller's committed
+    /// read refuses as before.
+    async fn continued_run_cold_attach(
+        &self,
+        id: &SessionId,
+        run_id: RunId,
+    ) -> ColdAttachSettlement {
+        match meerkat_runtime::recovery::load_committed_snapshot_under_provisional_tail(
+            self.runtime_store.as_ref(),
+            id,
+        )
+        .await
+        {
+            Ok(Some(committed)) => {
+                tracing::info!(
+                    session_id = %id,
+                    %run_id,
+                    "the session's open run continues from its last round commit; its tail stays for the run"
+                );
+                ColdAttachSettlement::ContinuesOpenRun {
+                    run_id,
+                    committed: Box::new(committed),
+                }
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    session_id = %id,
+                    %run_id,
+                    "durable-tail recovery continues the open run, but no applied provisional tail stands on the committed boundary to read under"
+                );
+                ColdAttachSettlement::Settled
+            }
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %id,
+                    %run_id,
+                    %error,
+                    "could not read the committed snapshot under the continued run's provisional tail"
+                );
+                ColdAttachSettlement::Settled
+            }
+        }
     }
 
     /// Observe the exact committed RuntimeStore body without reconciling the
@@ -16625,6 +19203,283 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
     ) -> Result<(CommittedBoundaryRecovery, Option<Session>), SessionError> {
+        // A durable session's open run is continued without a write, so the
+        // committed boundary stands as it was: callers that do not seed an
+        // actor from the continued tail see the committed body.
+        Ok(
+            match self.recover_committed_boundary_for_resume(id).await? {
+                ResumeBoundaryRecovery::Settled(recovery, aligned_body) => (recovery, aligned_body),
+                ResumeBoundaryRecovery::Withheld { reason, .. } => {
+                    (CommittedBoundaryRecovery::Unprovable { reason }, None)
+                }
+                ResumeBoundaryRecovery::Continue(_) => {
+                    (CommittedBoundaryRecovery::AlreadyCommitted, None)
+                }
+            },
+        )
+    }
+
+    /// [`Self::recover_committed_boundary_for_resume`] under this runtime
+    /// owner's hosting claim, as [`Self::recover_committed_boundary`] runs it,
+    /// for an actor's materialization.
+    async fn recover_committed_boundary_for_actor(
+        &self,
+        id: &SessionId,
+    ) -> Result<ResumeBoundaryRecovery, SessionError> {
+        let hosting = self.grant_session_hosting(id)?;
+        meerkat_core::session_hosting::with_write_hosting(
+            hosting,
+            self.recover_committed_boundary_for_resume(id),
+        )
+        .await
+    }
+
+    /// The run `id`'s runtime registration on this service's machine marks
+    /// resumable, if a machine hosts the session. Never creates a machine.
+    async fn runtime_resumable_run_id(&self, id: &SessionId) -> Option<RunId> {
+        let adapter = self
+            .runtime_adapter
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()?;
+        adapter.resumable_run_id(id).await
+    }
+
+    /// Settle what an actor's durable-tail recovery means for the run the
+    /// session's registration marked resumable, and return the open run the
+    /// actor resumes, if any. `hosted` is whether a runtime registration
+    /// hosts the actor (a `SessionOwned` build), and `marked` the run it
+    /// marks.
+    ///
+    /// - The recovery continues the marked run: the actor is seeded from it.
+    /// - It continues a run nothing marked, or another run than the marked
+    ///   one: no runtime dispatches that continuation, and the session's
+    ///   ordinary writes are refused while the run's provisional tail stands.
+    ///   The materialization is refused as held for recovery
+    ///   ([`SessionError::DurableTailHeldForRecovery`]), and a hosting
+    ///   runtime reloads, so its registration observes the tail again.
+    /// - It held or refused the tail: the tail stays for reconciliation, and
+    ///   so does the mark; the materialization is refused, and the run's
+    ///   inputs do not run.
+    /// - It committed the tail, or found it already committed, after the
+    ///   mark: the registration's live ledger is stale, so the runtime
+    ///   reloads.
+    /// - It failed: a busy or unknown session, a hosting refusal and a typed
+    ///   durable hold are returned untouched, and the mark stays for a
+    ///   retry. Any other failure may come from the recovery's own commit,
+    ///   whose outcome is then unknown, so a marked session's runtime
+    ///   reloads.
+    async fn resolve_marked_run_after_recovery(
+        &self,
+        id: &SessionId,
+        hosted: bool,
+        marked: Option<&RunId>,
+        recovery: Result<ResumeBoundaryRecovery, SessionError>,
+    ) -> Result<Option<ContinuedRunSeed>, SessionError> {
+        match recovery {
+            Ok(ResumeBoundaryRecovery::Continue(seed)) => {
+                if marked == Some(&seed.run_id) {
+                    return Ok(Some(seed));
+                }
+                let reason = match marked {
+                    Some(run_id) => format!(
+                        "the durable tail continues run {} while the registration marked run {run_id}",
+                        seed.run_id
+                    ),
+                    None => format!(
+                        "the durable tail continues run {}, which no runtime registration marks",
+                        seed.run_id
+                    ),
+                };
+                tracing::warn!(
+                    session_id = %id,
+                    %reason,
+                    "refusing to materialize a session over an open run nothing resumes"
+                );
+                if hosted {
+                    self.require_runtime_reload_for_stale_mark(id, &reason)
+                        .await;
+                }
+                Err(SessionError::DurableTailHeldForRecovery { id: id.clone() })
+            }
+            // A held or refused tail answers its typed hold, so a caller can
+            // tell a session withheld for reconciliation from a fault.
+            Ok(ResumeBoundaryRecovery::Withheld { hold, reason }) => {
+                tracing::warn!(session_id = %id, ?hold, %reason, "the session's durable tail is withheld");
+                Err(match hold {
+                    meerkat_core::service::DurableResumeHold::TailHeldForRecovery => {
+                        SessionError::DurableTailHeldForRecovery { id: id.clone() }
+                    }
+                    meerkat_core::service::DurableResumeHold::RecoveryRefused => {
+                        SessionError::DurableTailRecoveryRefused { id: id.clone() }
+                    }
+                    _ => SessionError::Agent(AgentError::InternalError(reason)),
+                })
+            }
+            Ok(ResumeBoundaryRecovery::Settled(
+                CommittedBoundaryRecovery::Unprovable { reason },
+                _,
+            )) => Err(SessionError::Agent(AgentError::InternalError(reason))),
+            Ok(ResumeBoundaryRecovery::Settled(_, _)) => {
+                if let Some(run_id) = marked {
+                    let reason = format!(
+                        "the durable tail of marked run {run_id} was committed after registration marked it"
+                    );
+                    self.require_runtime_reload_for_stale_mark(id, &reason)
+                        .await;
+                    return Err(SessionError::Agent(AgentError::InternalError(format!(
+                        "session {id}: {reason}; its runtime must reload"
+                    ))));
+                }
+                Ok(None)
+            }
+            Err(error) => {
+                if marked.is_some() && !Self::recovery_failure_keeps_the_mark(&error) {
+                    self.require_runtime_reload_for_stale_mark(
+                        id,
+                        &format!(
+                            "the actor's durable-tail recovery failed, possibly after its commit: {error}"
+                        ),
+                    )
+                    .await;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Whether a failed actor recovery leaves the durable rows as the
+    /// registration saw them: it never reached the recovery's own commit (a
+    /// busy or unknown session, or a hosting refusal), or it stopped at a
+    /// typed durable hold. The mark then stays for a retry.
+    fn recovery_failure_keeps_the_mark(error: &SessionError) -> bool {
+        matches!(
+            error.primary_error(),
+            SessionError::Busy { .. }
+                | SessionError::NotFound { .. }
+                | SessionError::ServedElsewhere { .. }
+                | SessionError::HostingUnavailable { .. }
+        ) || error.durable_resume_hold().is_some()
+    }
+
+    /// Require the session's runtime to reload: its registration marked a run
+    /// resumable from durable state that has moved since.
+    async fn require_runtime_reload_for_stale_mark(&self, id: &SessionId, reason: &str) {
+        let adapter = self
+            .runtime_adapter
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(adapter) = adapter {
+            adapter
+                .require_session_durability_reload(id, "resumable_run_mark_stale", reason)
+                .await;
+        }
+    }
+
+    /// Seed a resumed run's actor from the run's provisional tail: the actor
+    /// materializes from the tail instead of the committed body, and its
+    /// checkpointer holds the tail's receipt, so the run's next checkpoint
+    /// chains from it. WholeBlob also needs the committed base the receipt
+    /// descends from, which the checkpointer fences every provisional write
+    /// on.
+    async fn seed_actor_from_continued_run(
+        &self,
+        id: &SessionId,
+        seed: ContinuedRunSeed,
+        req: &mut CreateSessionRequest,
+        checkpointer: &StoreCheckpointer,
+    ) -> Result<(), SessionError> {
+        let ContinuedRunSeed {
+            candidate,
+            run_id,
+            receipt,
+        } = seed;
+        if candidate.id() != id || receipt.session_id() != id || receipt.run_id() != &run_id {
+            return Err(SessionError::Agent(AgentError::InternalError(format!(
+                "the continued run {run_id} of session {id} carries a tail or receipt of another session or run"
+            ))));
+        }
+        match self.runtime_store.session_persistence_profile() {
+            RuntimeSessionPersistenceProfile::WholeBlobV1 => {
+                let provisional = receipt.whole_blob().ok_or_else(|| {
+                    SessionError::Agent(AgentError::InternalError(format!(
+                        "the continued WholeBlob run {run_id} of session {id} carries a HeadCanonical receipt"
+                    )))
+                })?;
+                let committed = self
+                    .runtime_store
+                    .load_whole_blob_store_authority(&Self::runtime_id_for_session(id))
+                    .await
+                    .map_err(|error| {
+                        SessionError::Agent(AgentError::InternalError(format!(
+                            "failed to load the committed base of continued run {run_id} of session {id}: {error}"
+                        )))
+                    })?
+                    .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
+                if provisional.base_store_revision() != committed.store_revision()
+                    || provisional.base_blob_sha256() != committed.blob_sha256()
+                {
+                    return Err(SessionError::Agent(AgentError::InternalError(format!(
+                        "the provisional tail of continued run {run_id} does not descend from the committed base of session {id}"
+                    ))));
+                }
+                *checkpointer.whole_blob_base_authority.lock().map_err(|_| {
+                    SessionError::Agent(AgentError::InternalError(format!(
+                        "WholeBlob actor base authority lock is poisoned for session {id}"
+                    )))
+                })? = Some(committed);
+            }
+            RuntimeSessionPersistenceProfile::HeadCanonicalV1 => {
+                if receipt.head_canonical().is_none() {
+                    return Err(SessionError::Agent(AgentError::InternalError(format!(
+                        "the continued HeadCanonical run {run_id} of session {id} carries a WholeBlob receipt"
+                    ))));
+                }
+            }
+            profile => {
+                return Err(SessionError::Agent(AgentError::InternalError(format!(
+                    "unsupported runtime session persistence profile {profile} while seeding continued run {run_id} of session {id}"
+                ))));
+            }
+        }
+        *checkpointer.latest_run_checkpoint_receipt.lock().await = Some(receipt);
+        checkpointer.record_held_checkpoint_cursor(Some((
+            run_id.clone(),
+            HeldCheckpointCursor::of(&candidate),
+        )));
+        // A run whose re-base committed before the restart keeps that fact in
+        // its cursor: its inputs are in the committed history, so a later
+        // failure of the resumed run must consume them, never replay them.
+        if candidate
+            .try_run_cursor()
+            .ok()
+            .flatten()
+            .is_some_and(|cursor| cursor.run_id == run_id && cursor.rebased)
+        {
+            *checkpointer
+                .rebased_run
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(run_id.clone());
+        }
+        req.build
+            .get_or_insert_with(Default::default)
+            .resume_session = Some(*candidate);
+        tracing::info!(
+            session_id = %id,
+            %run_id,
+            "seeded the actor from the provisional tail of the run it resumes"
+        );
+        Ok(())
+    }
+
+    /// [`Self::recover_committed_boundary_retaining_aligned_body`], keeping
+    /// an open run the recovery continues: the provisional tail an actor is
+    /// seeded from, its run and the receipt its next checkpoint chains from.
+    async fn recover_committed_boundary_for_resume(
+        &self,
+        id: &SessionId,
+    ) -> Result<ResumeBoundaryRecovery, SessionError> {
         if self.inner.has_live_session(id).await? {
             return Err(SessionError::Busy { id: id.clone() });
         }
@@ -16642,7 +19497,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         match outcome {
             meerkat_runtime::recovery::DurableTailRecoveryOutcome::Committed {
                 recovered, ..
-            } => Ok((
+            } => Ok(ResumeBoundaryRecovery::Settled(
                 CommittedBoundaryRecovery::Recovered {
                     message_count: recovered.messages().len(),
                 },
@@ -16667,24 +19522,39 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                         }),
                     _ => None,
                 };
-                Ok((CommittedBoundaryRecovery::AlreadyCommitted, aligned_body))
+                Ok(ResumeBoundaryRecovery::Settled(
+                    CommittedBoundaryRecovery::AlreadyCommitted,
+                    aligned_body,
+                ))
             }
-            meerkat_runtime::recovery::DurableTailRecoveryOutcome::Held => Ok((
-                CommittedBoundaryRecovery::Unprovable {
+            meerkat_runtime::recovery::DurableTailRecoveryOutcome::Held => {
+                Ok(ResumeBoundaryRecovery::Withheld {
+                    hold: meerkat_core::service::DurableResumeHold::TailHeldForRecovery,
                     reason: format!(
                         "the durable tail for session {id} was held intact: the RuntimeStore could not produce and atomically consume exact recovery evidence; every durable copy is retained for reconciliation"
                     ),
-                },
-                None,
-            )),
-            meerkat_runtime::recovery::DurableTailRecoveryOutcome::Refused => Ok((
-                CommittedBoundaryRecovery::Unprovable {
+                })
+            }
+            meerkat_runtime::recovery::DurableTailRecoveryOutcome::Refused => {
+                Ok(ResumeBoundaryRecovery::Withheld {
+                    hold: meerkat_core::service::DurableResumeHold::RecoveryRefused,
                     reason: format!(
                         "the durable tail for session {id} was refused by machine authority because persisted runtime facts contradict or already supersede the candidate; every durable copy is retained for operator reconciliation"
                     ),
-                },
-                None,
-            )),
+                })
+            }
+            // The tail is a durable session's open run at a committed round.
+            // Nothing was written: the actor is seeded from the candidate and
+            // the run resumes from it.
+            meerkat_runtime::recovery::DurableTailRecoveryOutcome::Continue {
+                candidate,
+                run_id,
+                receipt,
+            } => Ok(ResumeBoundaryRecovery::Continue(ContinuedRunSeed {
+                candidate,
+                run_id,
+                receipt,
+            })),
         }
     }
 
@@ -16750,16 +19620,24 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         } else {
             None
         };
-        let (recovery, aligned_body) = match self
-            .recover_committed_boundary_retaining_aligned_body(id)
-            .await
-        {
-            Ok((
+        let (recovery, aligned_body) = match self.recover_committed_boundary_for_resume(id).await {
+            Ok(ResumeBoundaryRecovery::Continue(seed)) => {
+                return self
+                    .prepare_continued_run_resume(id, pre_recovery_observation, seed)
+                    .await;
+            }
+            Ok(ResumeBoundaryRecovery::Settled(
                 recovery @ (CommittedBoundaryRecovery::AlreadyCommitted
                 | CommittedBoundaryRecovery::Recovered { .. }),
                 aligned_body,
             )) => (Some(recovery), aligned_body),
-            Ok((CommittedBoundaryRecovery::Unprovable { reason }, _)) => {
+            Ok(
+                ResumeBoundaryRecovery::Settled(
+                    CommittedBoundaryRecovery::Unprovable { reason },
+                    _,
+                )
+                | ResumeBoundaryRecovery::Withheld { reason, .. },
+            ) => {
                 let observation = self
                     .runtime_store
                     .load_session_resume_observation(&runtime_id)
@@ -16902,10 +19780,78 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             committed_body: (self.runtime_store.session_persistence_profile()
                 == RuntimeSessionPersistenceProfile::HeadCanonicalV1)
                 .then(|| Box::new(session.clone())),
+            continued_run: None,
         };
         Ok(PreparedCommittedBoundaryResume::Materializable {
             session: Box::new(session),
             materialization,
+            observation,
+            preparation,
+        })
+    }
+
+    /// A resume preparation whose recovery continues the session's open run.
+    ///
+    /// The body to materialize is the run's provisional tail, and the receipt
+    /// carries the run, so actor creation seeds the actor from the tail and
+    /// the run resumes. Continuing writes nothing: equal resume observations
+    /// around the recovery prove the committed authority the tail descends
+    /// from still stands. An archived session never has an open run to
+    /// continue (recovery commits a retired runtime's tail as interrupted), so
+    /// one that claims both is refused as unprovable.
+    async fn prepare_continued_run_resume(
+        &self,
+        id: &SessionId,
+        before: Option<meerkat_runtime::store::RuntimeSessionResumeObservation>,
+        seed: ContinuedRunSeed,
+    ) -> Result<PreparedCommittedBoundaryResume, SessionError> {
+        let observation = self
+            .runtime_store
+            .load_session_resume_observation(&Self::runtime_id_for_session(id))
+            .await
+            .map_err(|error| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "failed to observe resume authority after continuing the open run of session {id}: {error}"
+                )))
+            })?;
+        if before.as_ref() != Some(&observation) {
+            return Ok(
+                PreparedCommittedBoundaryResume::AuthorityChangedDuringMaterialization {
+                    observation,
+                },
+            );
+        }
+        let archived = observation
+            .catalog_entry()
+            .and_then(|entry| entry.lifecycle_terminal())
+            .is_some_and(SessionLifecycleTerminal::is_archived)
+            || seed
+                .candidate
+                .lifecycle_terminal()
+                .is_some_and(SessionLifecycleTerminal::is_archived);
+        if archived {
+            return Ok(
+                PreparedCommittedBoundaryResume::CommittedBoundaryUnprovable {
+                    observation,
+                    reason: format!(
+                        "session {id} is archived yet its durable tail is the open run {}; every durable copy is retained",
+                        seed.run_id
+                    ),
+                },
+            );
+        }
+        let session = seed.candidate.clone();
+        let preparation = CommittedBoundaryResumePreparationReceipt {
+            session_id: id.clone(),
+            observation: observation.clone(),
+            runtime_store: Arc::clone(&self.runtime_store),
+            recovery: CommittedBoundaryRecovery::AlreadyCommitted,
+            committed_body: None,
+            continued_run: Some(seed),
+        };
+        Ok(PreparedCommittedBoundaryResume::Materializable {
+            session,
+            materialization: PreparedCommittedBoundaryResumeMaterialization::Active,
             observation,
             preparation,
         })
@@ -17989,6 +20935,12 @@ mod tests {
             whole_blob_base_authority: std::sync::Mutex::new(Some(authority)),
             latest_run_checkpoint_receipt: Mutex::new(None),
             latest_run_transcript_retirement: std::sync::Mutex::new(None),
+            live_deferred_turn_state: std::sync::OnceLock::new(),
+            unattached_deferred_checkpoint_warned: std::sync::atomic::AtomicBool::new(false),
+            rebased_run: std::sync::Mutex::new(None),
+            latest_run_checkpoint_cursor: std::sync::Mutex::new(None),
+            rebase_outcome_unknown: std::sync::Mutex::new(None),
+            rewrite_audit: None,
         };
         (runtime_store, session, checkpointer)
     }
@@ -18015,6 +20967,191 @@ mod tests {
             ),
             other => panic!("expected a typed durable-projection teardown, got {other:?}"),
         }
+    }
+
+    /// A stored deferred-turn state with a pending first turn, a staged prompt
+    /// and a staged callback result (what a resumed agent's copy carries), and
+    /// the live state after that first turn started and consumed them.
+    fn stale_and_live_deferred_turn_states() -> (SessionDeferredTurnState, SessionDeferredTurnState)
+    {
+        let mut stale = SessionDeferredTurnState::default();
+        stale.mark_initial_turn_pending();
+        stale.stage_initial_prompt(
+            "staged first prompt".to_string().into(),
+            meerkat_core::time_compat::SystemTime::now(),
+        );
+        assert_eq!(
+            stale.stage_tool_results(
+                vec![ToolResult::new(
+                    "callback-1".to_string(),
+                    "staged callback result".to_string(),
+                    false,
+                )],
+                meerkat_core::time_compat::SystemTime::now(),
+            ),
+            1,
+            "fixture stages one callback result"
+        );
+        let mut live = stale.clone();
+        let consumed = live.consume_for_started_turn();
+        assert!(
+            consumed.pending_initial_prompt().is_some()
+                && !consumed.pending_tool_results().is_empty(),
+            "the first turn consumed the staged inputs"
+        );
+        (stale, live)
+    }
+
+    fn assert_persisted_live_deferred_turn_state(
+        session: &Session,
+        live: &SessionDeferredTurnState,
+    ) {
+        let persisted = session
+            .try_deferred_turn_state()
+            .expect("persisted deferred-turn state")
+            .expect("a session that carried the state still carries it");
+        assert_eq!(&persisted, live, "the checkpoint persisted the live state");
+        assert_eq!(
+            persisted.first_turn_phase(),
+            meerkat_core::DeferredFirstTurnPhase::Consumed
+        );
+        assert!(persisted.pending_initial_prompt().is_none());
+        assert_eq!(persisted.pending_tool_results_len(), 0);
+    }
+
+    /// A run checkpoint persists the session's live deferred-turn state, not
+    /// the copy the resumed agent carried: once the first turn starts, its
+    /// staged prompt and callback results are consumed and the phase is
+    /// consumed, and none of the stale copy is stored again.
+    #[tokio::test]
+    async fn run_checkpoint_persists_the_live_deferred_turn_state_over_a_stale_copy() {
+        let (_runtime_store, mut session, checkpointer) = whole_blob_checkpointer_fixture().await;
+        let (stale, live) = stale_and_live_deferred_turn_states();
+        session
+            .set_deferred_turn_state(stale)
+            .expect("the agent copy carries the stored state");
+        assert!(
+            checkpointer
+                .live_deferred_turn_state
+                .set(Arc::new(std::sync::Mutex::new(live.clone())))
+                .is_ok(),
+            "attach the live state once"
+        );
+
+        meerkat_core::SessionCheckpointer::checkpoint_run(
+            &checkpointer,
+            &mut session,
+            &RunId::new(),
+            None,
+        )
+        .await
+        .expect("the run checkpoint succeeds");
+
+        assert_persisted_live_deferred_turn_state(&session, &live);
+    }
+
+    /// The HeadCanonical twin: its intra-run checkpoint persists the live
+    /// deferred-turn state too.
+    #[tokio::test]
+    async fn head_canonical_run_checkpoint_persists_the_live_deferred_turn_state_over_a_stale_copy()
+    {
+        let directory = tempfile::Builder::new()
+            .prefix(".deferred-turn-checkpoint-")
+            .tempdir_in(".")
+            .unwrap();
+        let database_path = directory.path().join("runtime.sqlite3");
+        let runtime_store = Arc::new(
+            meerkat_runtime::SqliteRuntimeStore::new_head_canonical(&database_path).unwrap(),
+        );
+        let store = Arc::new(meerkat_store::SqliteSessionStore::open(&database_path).unwrap());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            store,
+            runtime_store.clone(),
+            memory_blob_store(),
+        );
+        let (stale, live) = stale_and_live_deferred_turn_states();
+        let mut source = live_context_summary_source();
+        source
+            .set_deferred_turn_state(stale)
+            .expect("the stored session carries the pending state");
+        let committed = service
+            .persist_detached_head_canonical_session(source, "deferred-turn checkpoint fixture")
+            .await
+            .unwrap();
+        let checkpointer = StoreCheckpointer {
+            runtime_store,
+            incremental: service.incremental.clone(),
+            blob_store: memory_blob_store(),
+            gate: Arc::new(CheckpointerGate {
+                cancelled: Mutex::new(false),
+            }),
+            whole_blob_base_authority: std::sync::Mutex::new(None),
+            latest_run_checkpoint_receipt: Mutex::new(None),
+            latest_run_transcript_retirement: std::sync::Mutex::new(None),
+            live_deferred_turn_state: std::sync::OnceLock::new(),
+            unattached_deferred_checkpoint_warned: std::sync::atomic::AtomicBool::new(false),
+            rebased_run: std::sync::Mutex::new(None),
+            latest_run_checkpoint_cursor: std::sync::Mutex::new(None),
+            rebase_outcome_unknown: std::sync::Mutex::new(None),
+            rewrite_audit: None,
+        };
+        assert!(
+            checkpointer
+                .live_deferred_turn_state
+                .set(Arc::new(std::sync::Mutex::new(live.clone())))
+                .is_ok(),
+            "attach the live state once"
+        );
+        let mut provisional = committed;
+        provisional.push(user_message("the first turn's input"));
+
+        meerkat_core::SessionCheckpointer::checkpoint_run(
+            &checkpointer,
+            &mut provisional,
+            &RunId::new(),
+            None,
+        )
+        .await
+        .unwrap()
+        .expect("physical provisional head receipt");
+
+        assert_persisted_live_deferred_turn_state(&provisional, &live);
+    }
+
+    /// A session that carries no deferred-turn state is checkpointed exactly
+    /// as before: the live state attached to its checkpointer adds nothing.
+    #[tokio::test]
+    async fn run_checkpoint_of_a_session_without_deferred_turn_state_adds_none() {
+        let (_runtime_store, mut session, checkpointer) = whole_blob_checkpointer_fixture().await;
+        let mut live = SessionDeferredTurnState::default();
+        live.mark_initial_turn_pending();
+        let _ = live.consume_for_started_turn();
+        assert!(
+            checkpointer
+                .live_deferred_turn_state
+                .set(Arc::new(std::sync::Mutex::new(live)))
+                .is_ok(),
+            "attach the live state once"
+        );
+
+        meerkat_core::SessionCheckpointer::checkpoint_run(
+            &checkpointer,
+            &mut session,
+            &RunId::new(),
+            None,
+        )
+        .await
+        .expect("the run checkpoint succeeds");
+
+        assert!(
+            session
+                .try_deferred_turn_state()
+                .expect("deferred-turn state reads")
+                .is_none(),
+            "a session without deferred-turn state gains none"
+        );
     }
 
     #[tokio::test]
@@ -18132,6 +21269,12 @@ mod tests {
             whole_blob_base_authority: std::sync::Mutex::new(Some(initial_authority.clone())),
             latest_run_checkpoint_receipt: Mutex::new(None),
             latest_run_transcript_retirement: std::sync::Mutex::new(None),
+            live_deferred_turn_state: std::sync::OnceLock::new(),
+            unattached_deferred_checkpoint_warned: std::sync::atomic::AtomicBool::new(false),
+            rebased_run: std::sync::Mutex::new(None),
+            latest_run_checkpoint_cursor: std::sync::Mutex::new(None),
+            rebase_outcome_unknown: std::sync::Mutex::new(None),
+            rewrite_audit: None,
         };
 
         let mut successor = session;
@@ -21458,6 +24601,39 @@ mod tests {
         probe
     }
 
+    /// What the dummy agents of one session were asked to resume, and the
+    /// run inputs the runtime named before each of their turns.
+    #[derive(Default)]
+    struct ResumeProbe {
+        resumed: std::sync::Mutex<Vec<(RunId, RunCheckpointReceipt)>>,
+        run_start_input_ids: std::sync::Mutex<Vec<Vec<InputId>>>,
+    }
+
+    fn resume_probes()
+    -> &'static std::sync::Mutex<std::collections::HashMap<SessionId, Arc<ResumeProbe>>> {
+        static PROBES: std::sync::OnceLock<
+            std::sync::Mutex<std::collections::HashMap<SessionId, Arc<ResumeProbe>>>,
+        > = std::sync::OnceLock::new();
+        PROBES.get_or_init(Default::default)
+    }
+
+    fn probe_resume(session_id: &SessionId) -> Arc<ResumeProbe> {
+        let probe = Arc::new(ResumeProbe::default());
+        resume_probes()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session_id.clone(), Arc::clone(&probe));
+        probe
+    }
+
+    fn resume_probe_for(session_id: &SessionId) -> Option<Arc<ResumeProbe>> {
+        resume_probes()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_id)
+            .cloned()
+    }
+
     /// The dummy agent stages an attachment without connecting anything, so
     /// the attempt in its receipt never leaves `Pending`.
     struct DummyAttachAttemptObserver;
@@ -21517,6 +24693,48 @@ mod tests {
                     Arc::new(DummyAttachAttemptObserver),
                 ),
             })
+        }
+
+        async fn resume_run_with_events(
+            &mut self,
+            input: crate::ephemeral::SessionAgentResumeInput,
+            _event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
+        ) -> Result<RunResult, meerkat_core::error::AgentError> {
+            let session_id = self.session_id();
+            let Some(probe) = resume_probe_for(&session_id) else {
+                return Err(meerkat_core::error::AgentError::ConfigError(
+                    "this dummy agent has no resume probe".to_string(),
+                ));
+            };
+            probe
+                .resumed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((input.run_id, input.receipt));
+            Ok(RunResult {
+                text: "resumed".to_string(),
+                session_id,
+                usage: meerkat_core::types::Usage::default(),
+                turns: 1,
+                tool_calls: 0,
+                terminal_cause_kind: None,
+                structured_output: None,
+                extraction_error: None,
+                schema_warnings: None,
+                skill_diagnostics: None,
+                run_usage: None,
+                request_usage: Vec::new(),
+            })
+        }
+
+        fn set_run_start_input_ids(&mut self, input_ids: Vec<InputId>) {
+            if let Some(probe) = resume_probe_for(&self.session_id()) {
+                probe
+                    .run_start_input_ids
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(input_ids);
+            }
         }
 
         async fn run_with_events(
@@ -21581,6 +24799,7 @@ mod tests {
                     tool_use_id: "test-call".to_string(),
                     tool_name: "test_callback".to_string(),
                     args: serde_json::json!({}),
+                    dedupe_key: None,
                 });
             }
             Ok(result)
@@ -22600,6 +25819,81 @@ mod tests {
                 export_failure_after_activation: None,
                 pending_head_canonical_boundary: None,
             })
+        }
+    }
+
+    /// A test builder whose agents keep the checkpointer the service installs
+    /// in them, as a production agent does: the factory hands
+    /// `build.checkpointer` to `AgentBuilder::with_checkpointer`. The service
+    /// keeps only a weak reference (`live_checkpointers`), and the dummy
+    /// agents drop theirs, so a dummy actor has no live checkpointer: a
+    /// resumed dispatch finds none, and a row cannot reach the checkpointer
+    /// its actor was built with. This builder holds each checkpointer it is
+    /// handed for its own life, which outlasts each actor; rows still reach
+    /// the live one through the service's registry.
+    struct CheckpointerHoldingBuilder<B> {
+        inner: B,
+        held: std::sync::Mutex<Vec<Arc<dyn meerkat_core::SessionCheckpointer>>>,
+    }
+
+    impl<B> CheckpointerHoldingBuilder<B> {
+        fn new(inner: B) -> Self {
+            Self {
+                inner,
+                held: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn hold(&self, req: &CreateSessionRequest) {
+            if let Some(checkpointer) = req
+                .build
+                .as_ref()
+                .and_then(|build| build.checkpointer.clone())
+            {
+                self.held
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(checkpointer);
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl<B: SessionAgentBuilder> SessionAgentBuilder for CheckpointerHoldingBuilder<B> {
+        type Agent = B::Agent;
+
+        async fn model_supports_inline_video(
+            &self,
+            identity: &meerkat_core::SessionLlmIdentity,
+        ) -> Option<bool> {
+            self.inner.model_supports_inline_video(identity).await
+        }
+
+        async fn build_agent(
+            &self,
+            req: &CreateSessionRequest,
+            event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
+        ) -> Result<Self::Agent, SessionError> {
+            self.hold(req);
+            self.inner.build_agent(req, event_tx).await
+        }
+
+        async fn build_agent_taking_tools(
+            &self,
+            req: &mut CreateSessionRequest,
+            event_tx: tokio::sync::mpsc::Sender<meerkat_core::event::AgentEvent>,
+        ) -> Result<Self::Agent, SessionError> {
+            self.hold(req);
+            self.inner.build_agent_taking_tools(req, event_tx).await
+        }
+
+        async fn abort_absent_session_compaction_stages(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<(), SessionError> {
+            self.inner
+                .abort_absent_session_compaction_stages(session_id)
+                .await
         }
     }
 
@@ -24529,6 +27823,135 @@ mod tests {
         );
     }
 
+    /// A WholeBlob run whose final boundary compacts saves its end as a
+    /// cursor-less re-base, so the committed base and the tail are one
+    /// document. The process crashes before the boundary commit. The
+    /// restarted session service recovers that tail as an interrupted run's
+    /// closing save: the committed document is the compacted one with every
+    /// row the run wrote, exactly once, plus one interruption notice, and the
+    /// tail is consumed. Unrun until the candidate's validation.
+    #[tokio::test]
+    async fn a_closing_rebase_after_a_final_compaction_recovers_after_a_restart() {
+        use meerkat_core::lifecycle::core_executor::BoundSessionCommit;
+        use meerkat_core::types::{AssistantBlock, BlockAssistantMessage};
+        use meerkat_runtime::store::{
+            PreparedRuntimeSessionCommit, PreparedWholeBlobRunRebase,
+            VerifiedCommittedWholeBlobPayload, WholeBlobRunRebaseOutcome,
+        };
+
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        // The session's committed base, as the crashed process left it.
+        let mut committed = Session::new();
+        committed.push(Message::User(UserMessage::text(
+            "earlier context".to_string(),
+        )));
+        committed.push(Message::User(UserMessage::text(
+            "more earlier context".to_string(),
+        )));
+        let session_id = committed.id().clone();
+        let runtime_id =
+            PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&session_id);
+        runtime_store
+            .commit_prepared_session_boundary(
+                &runtime_id,
+                PreparedRuntimeSessionCommit::snapshot_only(
+                    BoundSessionCommit::sealed(Arc::new(committed.clone())).unwrap(),
+                ),
+            )
+            .await
+            .unwrap();
+
+        // Its run answered, then compacted at its final boundary, and saved
+        // its end as a cursor-less re-base with no earlier tail.
+        let run_id = RunId::new();
+        let mut live = committed;
+        live.push(Message::User(UserMessage::text("the question".to_string())));
+        live.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "the answer".to_string(),
+                meta: None,
+            }],
+            stop_reason: Some(StopReason::EndTurn),
+            identity: meerkat_core::types::TranscriptMessageIdentity::default()
+                .with_run_id(run_id.clone()),
+            created_at: meerkat_core::types::message_timestamp_now(),
+            assistant_message_id: None,
+        }));
+        let parent = live.transcript_revision().unwrap();
+        let commit = live
+            .commit_transcript_rewrite(
+                meerkat_core::TranscriptRewriteSelection::MessageRange { start: 0, end: 2 },
+                vec![Message::User(UserMessage::compaction_summary(
+                    "earlier context, compacted",
+                ))],
+                meerkat_core::TranscriptRewriteReason::new("compaction"),
+                Some("closing-rebase".to_string()),
+                Some(parent),
+            )
+            .unwrap();
+        let compacted_messages = live.messages().to_vec();
+        let base = runtime_store
+            .load_committed_whole_blob_snapshot(&runtime_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let rebase = PreparedWholeBlobRunRebase::prepare(
+            VerifiedCommittedWholeBlobPayload::from_committed(&session_id, base).unwrap(),
+            None,
+            run_id,
+            live,
+            std::slice::from_ref(&commit),
+        )
+        .unwrap();
+        assert!(matches!(
+            runtime_store
+                .commit_prepared_whole_blob_run_rebase(&runtime_id, rebase.store_parts())
+                .await
+                .unwrap(),
+            WholeBlobRunRebaseOutcome::Applied { .. }
+        ));
+
+        // The restart: a new session service over the same stores.
+        let restarted = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store),
+            memory_blob_store(),
+        );
+        let recovery = restarted
+            .recover_committed_boundary(&session_id)
+            .await
+            .expect("the closing save recovers");
+        assert_eq!(
+            recovery,
+            CommittedBoundaryRecovery::Recovered {
+                message_count: compacted_messages.len() + 1,
+            }
+        );
+        let recovered = runtime_store
+            .load_committed_whole_blob_snapshot(&runtime_id)
+            .await
+            .unwrap()
+            .expect("the recovered boundary");
+        let messages = recovered.session().messages();
+        assert_eq!(
+            &messages[..compacted_messages.len()],
+            compacted_messages.as_slice(),
+            "nothing the run wrote is lost or duplicated"
+        );
+        assert!(matches!(messages.last(), Some(Message::SystemNotice(_))));
+        assert!(
+            runtime_store
+                .load_whole_blob_provisional_tail(&runtime_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "the recovery consumes the tail"
+        );
+    }
+
     fn recovered_input_persistence_record(
         runtime_id: &LogicalRuntimeId,
         mut bundle: StoredInputState,
@@ -24766,6 +28189,334 @@ mod tests {
             self.boundary_apply_bytes.store(0, Ordering::Release);
             self.boundary_apply_snapshots.store(0, Ordering::Release);
         }
+    }
+
+    /// The store checkpointer re-bases WholeBlob runs only over a runtime
+    /// store that says it implements the run re-base. A decorator that
+    /// forwards the store's other operations but not that one leaves its runs
+    /// on the fallback (no round commit after a rewrite) instead of failing
+    /// their next round commit.
+    #[test]
+    fn the_checkpointer_rebases_runs_only_over_a_store_that_supports_it() {
+        let checkpointer = |runtime_store: Arc<dyn RuntimeStore>| StoreCheckpointer {
+            runtime_store,
+            incremental: None,
+            blob_store: memory_blob_store(),
+            gate: Arc::new(CheckpointerGate {
+                cancelled: Mutex::new(false),
+            }),
+            whole_blob_base_authority: std::sync::Mutex::new(None),
+            latest_run_checkpoint_receipt: Mutex::new(None),
+            latest_run_transcript_retirement: std::sync::Mutex::new(None),
+            live_deferred_turn_state: std::sync::OnceLock::new(),
+            unattached_deferred_checkpoint_warned: std::sync::atomic::AtomicBool::new(false),
+            rebased_run: std::sync::Mutex::new(None),
+            latest_run_checkpoint_cursor: std::sync::Mutex::new(None),
+            rebase_outcome_unknown: std::sync::Mutex::new(None),
+            rewrite_audit: None,
+        };
+
+        let memory: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        assert_eq!(
+            memory.session_persistence_profile(),
+            RuntimeSessionPersistenceProfile::WholeBlobV1
+        );
+        assert!(memory.supports_whole_blob_run_rebase());
+        assert!(meerkat_core::SessionCheckpointer::rebases_runs(
+            &checkpointer(memory)
+        ));
+
+        let decorated: Arc<dyn RuntimeStore> = Arc::new(CountingRuntimeStore::new());
+        assert_eq!(
+            decorated.session_persistence_profile(),
+            RuntimeSessionPersistenceProfile::WholeBlobV1
+        );
+        assert!(!decorated.supports_whole_blob_run_rebase());
+        assert!(!meerkat_core::SessionCheckpointer::rebases_runs(
+            &checkpointer(decorated)
+        ));
+    }
+
+    /// The store checkpointer's run re-base through the real seam: a
+    /// single-turn WholeBlob run whose one boundary compacts saves its end
+    /// with no cursor and no earlier tail (`rebase_run` with no previous
+    /// receipt). The receipt names the new tail at candidate sequence 1 on
+    /// the new base. The process crashes before the boundary commit, and a
+    /// restarted session service recovers the session's committed boundary
+    /// as an interrupted run's closing save. Unrun until the candidate's
+    /// validation.
+    #[tokio::test]
+    async fn a_checkpointer_closing_rebase_recovers_after_a_restart() {
+        use meerkat_core::lifecycle::core_executor::BoundSessionCommit;
+        use meerkat_core::types::{AssistantBlock, BlockAssistantMessage};
+        use meerkat_runtime::store::PreparedRuntimeSessionCommit;
+
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let mut committed = Session::new();
+        committed.push(Message::User(UserMessage::text(
+            "earlier context".to_string(),
+        )));
+        committed.push(Message::User(UserMessage::text(
+            "more earlier context".to_string(),
+        )));
+        let session_id = committed.id().clone();
+        let runtime_id =
+            PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&session_id);
+        let base_authority = runtime_store
+            .commit_prepared_session_boundary(
+                &runtime_id,
+                PreparedRuntimeSessionCommit::snapshot_only(
+                    BoundSessionCommit::sealed(Arc::new(committed.clone())).unwrap(),
+                ),
+            )
+            .await
+            .unwrap()
+            .authority()
+            .and_then(RuntimeSessionAuthority::whole_blob)
+            .cloned()
+            .expect("a WholeBlob base");
+        // The live actor's checkpointer over that base.
+        let checkpointer = StoreCheckpointer {
+            runtime_store: Arc::clone(&runtime_store),
+            incremental: None,
+            blob_store: memory_blob_store(),
+            gate: Arc::new(CheckpointerGate {
+                cancelled: Mutex::new(false),
+            }),
+            whole_blob_base_authority: std::sync::Mutex::new(Some(base_authority.clone())),
+            latest_run_checkpoint_receipt: Mutex::new(None),
+            latest_run_transcript_retirement: std::sync::Mutex::new(None),
+            live_deferred_turn_state: std::sync::OnceLock::new(),
+            unattached_deferred_checkpoint_warned: std::sync::atomic::AtomicBool::new(false),
+            rebased_run: std::sync::Mutex::new(None),
+            latest_run_checkpoint_cursor: std::sync::Mutex::new(None),
+            rebase_outcome_unknown: std::sync::Mutex::new(None),
+            rewrite_audit: None,
+        };
+        assert!(meerkat_core::SessionCheckpointer::rebases_runs(
+            &checkpointer
+        ));
+
+        // The run answered, then compacted at its final boundary: its
+        // end-of-run save carries no cursor.
+        let run_id = RunId::new();
+        let mut session = committed;
+        session.push(Message::User(UserMessage::text("the question".to_string())));
+        session.push(Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::Text {
+                text: "the answer".to_string(),
+                meta: None,
+            }],
+            stop_reason: Some(StopReason::EndTurn),
+            identity: meerkat_core::types::TranscriptMessageIdentity::default()
+                .with_run_id(run_id.clone()),
+            created_at: meerkat_core::types::message_timestamp_now(),
+            assistant_message_id: None,
+        }));
+        let parent = session.transcript_revision().unwrap();
+        session
+            .commit_transcript_rewrite(
+                meerkat_core::TranscriptRewriteSelection::MessageRange { start: 0, end: 2 },
+                vec![Message::User(UserMessage::compaction_summary(
+                    "earlier context, compacted",
+                ))],
+                meerkat_core::TranscriptRewriteReason::new("compaction"),
+                Some("checkpointer-closing-rebase".to_string()),
+                Some(parent),
+            )
+            .unwrap();
+        assert!(session.try_run_cursor().unwrap().is_none());
+        let compacted_messages = session.messages().to_vec();
+        let receipt = meerkat_core::SessionCheckpointer::rebase_run(
+            &checkpointer,
+            &mut session,
+            &run_id,
+            None,
+        )
+        .await
+        .expect("the closing save re-bases");
+        let tail = receipt
+            .whole_blob()
+            .cloned()
+            .expect("a WholeBlob provisional receipt");
+        assert_eq!(tail.run_id(), &run_id);
+        assert_eq!(tail.candidate_sequence(), 1);
+        assert_eq!(
+            tail.base_store_revision(),
+            base_authority.store_revision() + 1
+        );
+        assert_eq!(tail.candidate_blob_sha256(), tail.base_blob_sha256());
+
+        // The process crashes before the boundary commit; a new session
+        // service over the same stores recovers.
+        drop(checkpointer);
+        let restarted = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            Arc::clone(&runtime_store),
+            memory_blob_store(),
+        );
+        let recovery = restarted
+            .recover_committed_boundary(&session_id)
+            .await
+            .expect("the closing save recovers");
+        assert_eq!(
+            recovery,
+            CommittedBoundaryRecovery::Recovered {
+                message_count: compacted_messages.len() + 1,
+            }
+        );
+        let recovered = runtime_store
+            .load_committed_whole_blob_snapshot(&runtime_id)
+            .await
+            .unwrap()
+            .expect("the recovered boundary");
+        let messages = recovered.session().messages();
+        assert_eq!(
+            &messages[..compacted_messages.len()],
+            compacted_messages.as_slice(),
+            "nothing the run wrote is lost or duplicated"
+        );
+        assert!(matches!(messages.last(), Some(Message::SystemNotice(_))));
+        assert!(
+            runtime_store
+                .load_whole_blob_provisional_tail(&runtime_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "the recovery consumes the tail"
+        );
+    }
+
+    /// A host store whose renews always fail: the realm's first renew
+    /// stops its writer, and its self-fence window closes.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[derive(Debug)]
+    struct RenewFailingHost;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[async_trait::async_trait]
+    impl meerkat_core::host_store::HostStore for RenewFailingHost {
+        async fn acquire_fence(
+            &self,
+            _mode: meerkat_core::host_store::AcquireMode,
+        ) -> Result<meerkat_core::host_store::FenceGrant, meerkat_core::host_store::HostStoreError>
+        {
+            Ok(meerkat_core::host_store::FenceGrant {
+                token: meerkat_core::host_store::FenceToken::new(1),
+                superseded_lease: std::time::Duration::ZERO,
+            })
+        }
+
+        async fn renew_fence(
+            &self,
+            _token: meerkat_core::host_store::FenceToken,
+        ) -> Result<(), meerkat_core::host_store::HostStoreError> {
+            Err(meerkat_core::host_store::HostStoreError::Unavailable(
+                "every renew fails in this row".to_string(),
+            ))
+        }
+
+        fn fence_timing(&self) -> meerkat_core::host_store::FenceTiming {
+            meerkat_core::host_store::FenceTiming::try_new(
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(3),
+            )
+            .expect("a 1 s renew interval on a 3 s lease")
+        }
+
+        async fn load_head(
+            &self,
+            _scope: &meerkat_core::host_store::ScopeRef,
+        ) -> Result<
+            Option<meerkat_core::host_store::VersionedHead>,
+            meerkat_core::host_store::HostStoreError,
+        > {
+            Ok(None)
+        }
+
+        async fn list_heads(
+            &self,
+            _kind: meerkat_core::host_store::ScopeKind,
+            _after: Option<&meerkat_core::host_store::ScopeName>,
+            _limit: usize,
+        ) -> Result<meerkat_core::host_store::HeadPage, meerkat_core::host_store::HostStoreError>
+        {
+            Ok(meerkat_core::host_store::HeadPage {
+                heads: Vec::new(),
+                next: None,
+            })
+        }
+
+        async fn read_rows(
+            &self,
+            _scope: &meerkat_core::host_store::ScopeRef,
+            _from: meerkat_core::host_store::RowIndex,
+            _limit: usize,
+        ) -> Result<Vec<meerkat_core::host_store::Row>, meerkat_core::host_store::HostStoreError>
+        {
+            Ok(Vec::new())
+        }
+
+        async fn commit(
+            &self,
+            _batch: &meerkat_core::host_store::CommitBatch,
+        ) -> Result<(), meerkat_core::host_store::HostStoreError> {
+            Ok(())
+        }
+    }
+
+    /// The store checkpointer reads the host store's self-fence: over a host
+    /// store realm whose writer's window has closed (its renew failed),
+    /// `dispatch_fence_check` refuses with the teardown class, so the run
+    /// makes no model call and dispatches no tool. An open window, and a
+    /// store without a lease, allow. Unrun until the candidate's validation.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test(start_paused = true)]
+    async fn a_closed_host_store_fence_window_refuses_dispatch() {
+        use meerkat_runtime::store::spi::{SpiRealm, SpiRealmConfig, SpiRuntimeStore};
+        let checkpointer = |runtime_store: Arc<dyn RuntimeStore>| StoreCheckpointer {
+            runtime_store,
+            incremental: None,
+            blob_store: memory_blob_store(),
+            gate: Arc::new(CheckpointerGate {
+                cancelled: Mutex::new(false),
+            }),
+            whole_blob_base_authority: std::sync::Mutex::new(None),
+            latest_run_checkpoint_receipt: Mutex::new(None),
+            latest_run_transcript_retirement: std::sync::Mutex::new(None),
+            live_deferred_turn_state: std::sync::OnceLock::new(),
+            unattached_deferred_checkpoint_warned: std::sync::atomic::AtomicBool::new(false),
+            rebased_run: std::sync::Mutex::new(None),
+            latest_run_checkpoint_cursor: std::sync::Mutex::new(None),
+            rebase_outcome_unknown: std::sync::Mutex::new(None),
+            rewrite_audit: None,
+        };
+        let realm = SpiRealm::open(Arc::new(RenewFailingHost), SpiRealmConfig::default())
+            .await
+            .expect("the realm opens");
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(
+            SpiRuntimeStore::open(realm)
+                .await
+                .expect("the runtime store opens"),
+        );
+        let fenced = checkpointer(runtime_store);
+        // Right after the acquire, the window is open.
+        meerkat_core::SessionCheckpointer::dispatch_fence_check(&fenced)
+            .expect("an open window allows");
+        // The first renew, at 1 s, fails: the writer stops and its window
+        // closes until a fresh acquire and renew succeed, which this host
+        // never allows.
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        let refused = meerkat_core::SessionCheckpointer::dispatch_fence_check(&fenced)
+            .expect_err("a closed window refuses");
+        assert_teardown_required_projection_authority(refused, "self-fence window closed");
+        // A store without a lease always allows.
+        let unfenced = checkpointer(Arc::new(InMemoryRuntimeStore::new()));
+        meerkat_core::SessionCheckpointer::dispatch_fence_check(&unfenced)
+            .expect("a store without a lease allows");
     }
 
     struct WholeBlobAuthorityReadProbe {
@@ -26741,7 +30492,10 @@ mod tests {
                     SessionId::new(),
                     None,
                     None,
-                    meerkat_core::ForkInstructionPolicy::default(),
+                    ForkInstructionPolicies {
+                        inherited: meerkat_core::ForkInstructionPolicy::default(),
+                        declared: meerkat_core::ForkInstructionPolicy::default(),
+                    },
                 )
                 .await
                 .map(|forked| forked.fork.session_id),
@@ -26904,6 +30658,80 @@ mod tests {
                 .expect("decode child build state")
                 .is_none()
         );
+    }
+
+    /// A durable fork whose copied rows hold a skill's per-turn context
+    /// names the skill in its fork seed by policy: removed under the
+    /// default, carried under `reactivate_inherited`; `refuse` refuses
+    /// the fork and names the skill.
+    #[tokio::test]
+    async fn a_durable_fork_seed_names_a_copied_skill_by_policy() {
+        let (service, _store, _runtime_store, parent_id) = transcript_edit_fixture().await;
+        let key = meerkat_core::skills::SkillKey::new(
+            meerkat_core::skills::SourceUuid::parse("6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b")
+                .expect("source uuid"),
+            meerkat_core::skills::SkillName::parse("pdf-processing").expect("skill name"),
+        );
+        let mut with_context = UserMessage::text("follow up with skill context");
+        with_context
+            .content
+            .push(meerkat_core::types::ContentBlock::SkillContext {
+                skill_key: key.clone(),
+                text: "SKILL-CONTEXT-BODY".to_string(),
+            });
+        let request = |policy| SessionForkReplaceRequest {
+            message_index: 2,
+            replacement: meerkat_core::TranscriptReplacement::Message {
+                message: Message::User(with_context.clone()),
+            },
+            running_behavior: TranscriptEditRunningBehavior::Reject,
+            tool_access_policy: None,
+            inherited_instructions: policy,
+        };
+        let seed_of = |child: &Session| -> meerkat_core::fork_notice::ForkSeed {
+            serde_json::from_value(
+                child
+                    .metadata()
+                    .get(meerkat_core::fork_notice::SESSION_FORK_SEED_KEY)
+                    .cloned()
+                    .expect("the child holds a fork seed"),
+            )
+            .expect("the seed decodes")
+        };
+
+        for (policy, removed, carried) in [
+            (None, vec![key.clone()], Vec::new()),
+            (
+                Some(meerkat_core::ForkInstructionPolicy::ReactivateInherited),
+                Vec::new(),
+                vec![key.clone()],
+            ),
+        ] {
+            let forked = service
+                .fork_session_replace(&parent_id, request(policy))
+                .await
+                .unwrap_or_else(|error| panic!("{policy:?}: the fork commits: {error}"));
+            let child = service
+                .load_authoritative_session_base(&forked.session_id)
+                .await
+                .expect("load the child")
+                .expect("the child is committed");
+            let seed = seed_of(&child);
+            assert_eq!(seed.skills_removed, removed, "{policy:?}");
+            assert_eq!(seed.skills_carried, carried, "{policy:?}");
+        }
+
+        let refused = service
+            .fork_session_replace(
+                &parent_id,
+                request(Some(meerkat_core::ForkInstructionPolicy::Refuse)),
+            )
+            .await
+            .expect_err("refuse refuses a fork that copied a skill");
+        let SessionError::ForkInstructionRefused(refusal) = refused else {
+            panic!("the typed refusal: {refused:?}");
+        };
+        assert_eq!(refusal.skills.as_ref(), [key].as_slice());
     }
 
     #[tokio::test]
@@ -29467,6 +33295,12 @@ mod tests {
             ),
             latest_run_checkpoint_receipt: Mutex::new(None),
             latest_run_transcript_retirement: std::sync::Mutex::new(None),
+            live_deferred_turn_state: std::sync::OnceLock::new(),
+            unattached_deferred_checkpoint_warned: std::sync::atomic::AtomicBool::new(false),
+            rebased_run: std::sync::Mutex::new(None),
+            latest_run_checkpoint_cursor: std::sync::Mutex::new(None),
+            rebase_outcome_unknown: std::sync::Mutex::new(None),
+            rewrite_audit: None,
         };
         let mut provisional = committed.clone();
         provisional.push(user_message("provisional context is not committed"));
@@ -29732,6 +33566,12 @@ mod tests {
             whole_blob_base_authority: std::sync::Mutex::new(None),
             latest_run_checkpoint_receipt: Mutex::new(None),
             latest_run_transcript_retirement: std::sync::Mutex::new(None),
+            live_deferred_turn_state: std::sync::OnceLock::new(),
+            unattached_deferred_checkpoint_warned: std::sync::atomic::AtomicBool::new(false),
+            rebased_run: std::sync::Mutex::new(None),
+            latest_run_checkpoint_cursor: std::sync::Mutex::new(None),
+            rebase_outcome_unknown: std::sync::Mutex::new(None),
+            rewrite_audit: None,
         };
         let mut provisional = committed;
         provisional.push(user_message("physical provisional successor"));
@@ -29810,6 +33650,12 @@ mod tests {
             whole_blob_base_authority: std::sync::Mutex::new(None),
             latest_run_checkpoint_receipt: Mutex::new(None),
             latest_run_transcript_retirement: std::sync::Mutex::new(None),
+            live_deferred_turn_state: std::sync::OnceLock::new(),
+            unattached_deferred_checkpoint_warned: std::sync::atomic::AtomicBool::new(false),
+            rebased_run: std::sync::Mutex::new(None),
+            latest_run_checkpoint_cursor: std::sync::Mutex::new(None),
+            rebase_outcome_unknown: std::sync::Mutex::new(None),
+            rewrite_audit: None,
         };
         (directory, service, checkpointer, committed)
     }
@@ -30443,6 +34289,12 @@ mod tests {
             whole_blob_base_authority: std::sync::Mutex::new(None),
             latest_run_checkpoint_receipt: Mutex::new(None),
             latest_run_transcript_retirement: std::sync::Mutex::new(None),
+            live_deferred_turn_state: std::sync::OnceLock::new(),
+            unattached_deferred_checkpoint_warned: std::sync::atomic::AtomicBool::new(false),
+            rebased_run: std::sync::Mutex::new(None),
+            latest_run_checkpoint_cursor: std::sync::Mutex::new(None),
+            rebase_outcome_unknown: std::sync::Mutex::new(None),
+            rewrite_audit: None,
         };
         let mut session = recovered;
         let run_id = RunId::new();
@@ -30842,6 +34694,702 @@ mod tests {
             ),
             "{recovery:?}"
         );
+    }
+
+    /// A HeadCanonical durable fork source as a turn start leaves it: a
+    /// committed snapshot (the previous turn's end) with the canonical
+    /// metadata and build state a targeted fork copies, and the actor
+    /// checkpointer that writes the running turn's round commits over it.
+    /// With `rewrite_audit` the service projects events into a file event
+    /// store and the checkpointer carries the rewrite audit sink, as a
+    /// service with event projection builds it.
+    async fn caller_turn_fork_source_fixture(
+        rewrite_audit: bool,
+    ) -> (
+        tempfile::TempDir,
+        PersistentSessionService<DummyBuilder>,
+        StoreCheckpointer,
+        Session,
+    ) {
+        let directory = tempfile::Builder::new()
+            .prefix(".caller-turn-fork-")
+            .tempdir_in(".")
+            .unwrap();
+        let database_path = directory.path().join("runtime.sqlite3");
+        let runtime_store = Arc::new(
+            meerkat_runtime::SqliteRuntimeStore::new_head_canonical(&database_path).unwrap(),
+        );
+        let store = Arc::new(meerkat_store::SqliteSessionStore::open(&database_path).unwrap());
+        let audit = rewrite_audit.then(|| {
+            let event_store: Arc<dyn EventStore> = Arc::new(
+                crate::event_store::FileEventStore::new(directory.path().join("events")),
+            );
+            let projector = Arc::new(SessionProjector::new(directory.path().join(".rkat")));
+            (event_store, projector)
+        });
+        let mut service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            store,
+            runtime_store.clone(),
+            memory_blob_store(),
+        );
+        if let Some((event_store, projector)) = audit.clone() {
+            service = service.with_event_projection(event_store, projector);
+        }
+        let mut source = recoverable_store_row();
+        source
+            .set_build_state(meerkat_core::SessionBuildState {
+                app_context: Some(serde_json::json!({"domain": "fork-source"})),
+                ..meerkat_core::SessionBuildState::default()
+            })
+            .expect("seed the source build state");
+        source.push(user_message("the previous turn's question"));
+        source.push(Message::BlockAssistant(
+            meerkat_core::BlockAssistantMessage::new(
+                vec![meerkat_core::AssistantBlock::Text {
+                    text: "the previous turn's answer".to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+            ),
+        ));
+        let committed = service
+            .persist_detached_head_canonical_session(source, "previous turn end")
+            .await
+            .unwrap();
+        let checkpointer = StoreCheckpointer {
+            runtime_store,
+            incremental: service.incremental.clone(),
+            blob_store: memory_blob_store(),
+            gate: Arc::new(CheckpointerGate {
+                cancelled: Mutex::new(false),
+            }),
+            whole_blob_base_authority: std::sync::Mutex::new(None),
+            latest_run_checkpoint_receipt: Mutex::new(None),
+            latest_run_transcript_retirement: std::sync::Mutex::new(None),
+            live_deferred_turn_state: std::sync::OnceLock::new(),
+            unattached_deferred_checkpoint_warned: std::sync::atomic::AtomicBool::new(false),
+            rebased_run: std::sync::Mutex::new(None),
+            latest_run_checkpoint_cursor: std::sync::Mutex::new(None),
+            rebase_outcome_unknown: std::sync::Mutex::new(None),
+            rewrite_audit: audit.map(|(event_store, projector)| RewriteAuditSink {
+                event_store,
+                projector: Some(projector),
+            }),
+        };
+        (directory, service, checkpointer, committed)
+    }
+
+    fn caller_turn_fork_target() -> meerkat_core::DurableSessionForkTarget {
+        meerkat_core::DurableSessionForkTarget {
+            member_binding: meerkat_core::MobMemberBinding {
+                mob_id: "mob".to_string(),
+                role: "role".to_string(),
+                member: "child".to_string(),
+            },
+            cache_identity: None,
+            source_admission: meerkat_core::DurableForkSourceAdmission::CallerTurn,
+            inherited_instructions: meerkat_core::ForkInstructionPolicy::default(),
+            declared_instructions: meerkat_core::ForkInstructionPolicy::default(),
+        }
+    }
+
+    /// The running turn's input and its first tool round, and the round
+    /// commit that writes them as the run's provisional tail.
+    async fn commit_running_turn_round(
+        checkpointer: &StoreCheckpointer,
+        running: &mut Session,
+        run_id: &RunId,
+    ) {
+        running.push(user_message("the running turn's input"));
+        running.push(run_stamped_assistant(
+            run_id,
+            vec![meerkat_core::AssistantBlock::ToolUse {
+                id: "call-in-turn".to_string(),
+                name: "probe".into(),
+                args: serde_json::value::RawValue::from_string("{}".to_string()).unwrap(),
+                meta: None,
+            }],
+            StopReason::ToolUse,
+        ));
+        running.push(Message::ToolResults {
+            results: vec![ToolResult::new(
+                "call-in-turn".to_string(),
+                "ok".to_string(),
+                false,
+            )],
+            created_at: std::time::SystemTime::now().into(),
+        });
+        meerkat_core::SessionCheckpointer::checkpoint_run(checkpointer, running, run_id, None)
+            .await
+            .expect("the running turn's round commit")
+            .expect("a provisional successor");
+    }
+
+    /// The child of a caller-turn fork holds exactly the committed snapshot:
+    /// its rows and its build state, and nothing of the running turn.
+    async fn assert_fork_child_is_the_committed_snapshot(
+        service: &PersistentSessionService<DummyBuilder>,
+        forked: &SessionForkResult,
+        committed: &Session,
+    ) {
+        assert_eq!(
+            forked.message_count,
+            committed.messages().len(),
+            "the branch ends at the committed snapshot, not inside the running turn"
+        );
+        let child = service
+            .load_committed_runtime_session_for_body(&forked.session_id, "fork child")
+            .await
+            .unwrap()
+            .expect("the committed child");
+        assert_eq!(
+            meerkat_core::transcript_messages_digest(child.messages()).unwrap(),
+            meerkat_core::transcript_messages_digest(committed.messages()).unwrap(),
+            "the child holds exactly the committed snapshot's rows"
+        );
+        assert!(
+            child.try_run_cursor().unwrap().is_none(),
+            "no run cursor of the running turn reaches the child"
+        );
+        assert_eq!(
+            child
+                .try_build_state()
+                .unwrap()
+                .and_then(|state| state.app_context),
+            Some(serde_json::json!({"domain": "fork-source"})),
+            "the child carries the snapshot's build state"
+        );
+    }
+
+    /// `fork_off` runs inside the source's own turn. Once that turn has
+    /// committed a round, the round's HeadCanonical provisional tail sits
+    /// ahead of the committed snapshot and the committed read refuses the
+    /// boundary with `TranscriptRevisionConflict`. The caller-turn fork reads
+    /// the snapshot whole through the tail and branches there; it writes
+    /// nothing to the source, and an explicit count past the committed end
+    /// is still refused.
+    #[tokio::test]
+    async fn a_caller_turn_fork_branches_at_the_committed_snapshot_under_a_round_commit() {
+        let (_directory, service, checkpointer, committed) =
+            caller_turn_fork_source_fixture(false).await;
+        let id = committed.id().clone();
+        let run_id = RunId::new();
+        let mut running = committed.clone();
+        commit_running_turn_round(&checkpointer, &mut running, &run_id).await;
+        assert!(
+            PersistentSessionService::<DummyBuilder>::is_transcript_revision_conflict(
+                &service.load_authoritative_session_base(&id).await
+            ),
+            "the committed read refuses the boundary while the round's tail is ahead of it"
+        );
+
+        let forked = service
+            .fork_durable_session(&id, None, None, Some(caller_turn_fork_target()))
+            .await
+            .expect("a caller-turn fork branches at the committed snapshot under the round's tail");
+        assert_fork_child_is_the_committed_snapshot(&service, &forked, &committed).await;
+        assert!(
+            PersistentSessionService::<DummyBuilder>::is_transcript_revision_conflict(
+                &service.load_authoritative_session_base(&id).await
+            ),
+            "the fork wrote nothing to the source: the round's tail is still ahead"
+        );
+
+        let past = service
+            .fork_durable_session(
+                &id,
+                Some(committed.messages().len() + 1),
+                None,
+                Some(caller_turn_fork_target()),
+            )
+            .await;
+        assert!(
+            matches!(
+                past,
+                Err(SessionError::Agent(AgentError::ConfigError(ref message)))
+                    if message.contains("out of bounds")
+            ),
+            "a count past the committed end reaches into the running turn: {past:?}"
+        );
+    }
+
+    /// A round that compacts rewrites rows the committed snapshot holds, so
+    /// the round's tail keeps no prefix of the snapshot. The caller-turn fork
+    /// still branches at the snapshot's own rows, read whole from the store,
+    /// never at a prefix of the rewritten tail.
+    #[tokio::test]
+    async fn a_caller_turn_fork_after_a_compacting_round_branches_at_the_committed_snapshot() {
+        let (_directory, service, checkpointer, committed) =
+            caller_turn_fork_source_fixture(false).await;
+        let id = committed.id().clone();
+        let run_id = RunId::new();
+        let mut running = committed.clone();
+        compact_and_retire(
+            &mut running,
+            0,
+            meerkat_core::TranscriptHistoryRetention::from_count(4).unwrap(),
+        );
+        commit_running_turn_round(&checkpointer, &mut running, &run_id).await;
+        assert_eq!(
+            physical_rewrite_count(&service, &id).await,
+            1,
+            "the round's tail carries the compaction"
+        );
+        assert_ne!(
+            meerkat_core::transcript_messages_digest(
+                &running.messages()[..committed.messages().len()]
+            )
+            .unwrap(),
+            meerkat_core::transcript_messages_digest(committed.messages()).unwrap(),
+            "the tail's leading rows are not the committed snapshot's"
+        );
+
+        let forked = service
+            .fork_durable_session(&id, None, None, Some(caller_turn_fork_target()))
+            .await
+            .expect(
+                "a caller-turn fork branches at the committed snapshot under a compacting round",
+            );
+        assert_fork_child_is_the_committed_snapshot(&service, &forked, &committed).await;
+    }
+
+    /// The compacting round again, on a service that projects events with
+    /// the checkpointer's rewrite audit sink. A HeadCanonical round commit
+    /// appends no rewrite audit receipt, so the replay the fork runs on the
+    /// committed snapshot finds no newer rewrite to graft: the child is
+    /// still exactly the snapshot.
+    #[tokio::test]
+    async fn a_caller_turn_fork_after_a_compacting_round_under_the_rewrite_audit_is_exact() {
+        let (_directory, service, checkpointer, committed) =
+            caller_turn_fork_source_fixture(true).await;
+        let id = committed.id().clone();
+        let run_id = RunId::new();
+        let mut running = committed.clone();
+        compact_and_retire(
+            &mut running,
+            0,
+            meerkat_core::TranscriptHistoryRetention::from_count(4).unwrap(),
+        );
+        commit_running_turn_round(&checkpointer, &mut running, &run_id).await;
+        assert_eq!(
+            physical_rewrite_count(&service, &id).await,
+            1,
+            "the round's tail carries the compaction"
+        );
+        let rewrite_receipts = service
+            .event_log_read_from(&id, 1)
+            .await
+            .unwrap()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|stored| {
+                matches!(
+                    stored.event,
+                    meerkat_core::event::AgentEvent::TranscriptRewriteAuditReceiptCommitted { .. }
+                        | meerkat_core::event::AgentEvent::TranscriptRewriteCommitted { .. }
+                )
+            })
+            .count();
+        assert_eq!(
+            rewrite_receipts, 0,
+            "a HeadCanonical round commit appends no rewrite audit receipt"
+        );
+
+        let forked = service
+            .fork_durable_session(&id, None, None, Some(caller_turn_fork_target()))
+            .await
+            .expect("a caller-turn fork branches at the committed snapshot under the audit");
+        assert_fork_child_is_the_committed_snapshot(&service, &forked, &committed).await;
+    }
+
+    /// The committed snapshot the tolerant read serves: the snapshot's rows
+    /// and build state, and nothing of the running turn.
+    fn assert_served_the_committed_snapshot(served: &Session, committed: &Session) {
+        assert_eq!(
+            meerkat_core::transcript_messages_digest(served.messages()).unwrap(),
+            meerkat_core::transcript_messages_digest(committed.messages()).unwrap(),
+            "the read serves the committed snapshot's rows, nothing of the running turn"
+        );
+        assert!(
+            served.try_run_cursor().unwrap().is_none(),
+            "no run cursor of the running turn reaches the reader"
+        );
+        assert_eq!(
+            served
+                .try_build_state()
+                .unwrap()
+                .and_then(|state| state.app_context),
+            Some(serde_json::json!({"domain": "fork-source"})),
+            "the read carries the snapshot's build state"
+        );
+    }
+
+    /// While the session's own run holds a round commit's provisional tail
+    /// ahead of the committed snapshot, the strict read refuses the boundary
+    /// and the tolerant read serves the snapshot, read through the tail. The
+    /// read writes nothing: the strict read still refuses afterwards.
+    #[tokio::test]
+    async fn the_tolerant_read_serves_the_committed_snapshot_under_a_round_commit() {
+        let (_directory, service, checkpointer, committed) =
+            caller_turn_fork_source_fixture(false).await;
+        let id = committed.id().clone();
+        let run_id = RunId::new();
+        let mut running = committed.clone();
+        commit_running_turn_round(&checkpointer, &mut running, &run_id).await;
+        assert!(
+            PersistentSessionService::<DummyBuilder>::is_transcript_revision_conflict(
+                &service.load_authoritative_session(&id).await
+            ),
+            "the strict read refuses the boundary while the round's tail is ahead of it"
+        );
+
+        let served = service
+            .load_committed_session_tolerating_tail(&id)
+            .await
+            .expect("the tolerant read serves the committed snapshot under the round's tail")
+            .expect("the session is committed");
+        assert_served_the_committed_snapshot(&served, &committed);
+        assert!(
+            PersistentSessionService::<DummyBuilder>::is_transcript_revision_conflict(
+                &service.load_authoritative_session(&id).await
+            ),
+            "the read wrote nothing: the round's tail still stands"
+        );
+    }
+
+    /// A physical head moved past the boundary with no provisional tail the
+    /// store issued is not the session's own run: the tolerant read serves
+    /// nothing. It fails closed with the store's own refusal, which names the
+    /// inconsistency, where the strict read answers the revision conflict.
+    #[tokio::test]
+    async fn the_tolerant_read_keeps_the_refusal_without_a_bound_tail() {
+        let (_directory, service, _checkpointer, committed) =
+            caller_turn_fork_source_fixture(false).await;
+        let id = committed.id().clone();
+        let incremental = service.incremental.as_ref().expect("an incremental store");
+        let physical = incremental
+            .load_head(&id)
+            .await
+            .expect("load the physical head")
+            .expect("the physical head exists");
+        let mut advanced = committed.clone();
+        advanced.push(user_message("written past the boundary"));
+        let mutation = meerkat_core::session_store::PreparedHeadCanonicalMutation::prepare(
+            &advanced,
+            Some(physical),
+        )
+        .expect("prepare a physical-only successor");
+        incremental
+            .apply_prepared_head_canonical_mutation(&mutation)
+            .await
+            .expect("advance the physical head past the boundary");
+        assert!(
+            PersistentSessionService::<DummyBuilder>::is_transcript_revision_conflict(
+                &service.load_authoritative_session(&id).await
+            ),
+            "the strict read refuses the boundary"
+        );
+
+        let tolerant = service.load_committed_session_tolerating_tail(&id).await;
+        assert!(
+            matches!(
+                &tolerant,
+                Err(SessionError::Agent(AgentError::InternalError(message)))
+                    if message.contains("no store-issued provisional authority")
+            ),
+            "the tolerant read fails closed with the store's refusal: {tolerant:?}"
+        );
+    }
+
+    /// A round that compacts rewrites rows the committed snapshot holds. The
+    /// tolerant read still serves the snapshot's own rows, read whole from the
+    /// store, and verifies its rewrite audit as the strict read does.
+    #[tokio::test]
+    async fn the_tolerant_read_replays_the_rewrite_audit_after_a_compacting_round() {
+        let (_directory, service, checkpointer, committed) =
+            caller_turn_fork_source_fixture(false).await;
+        let id = committed.id().clone();
+        let run_id = RunId::new();
+        let mut running = committed.clone();
+        compact_and_retire(
+            &mut running,
+            0,
+            meerkat_core::TranscriptHistoryRetention::from_count(4).unwrap(),
+        );
+        commit_running_turn_round(&checkpointer, &mut running, &run_id).await;
+        assert_eq!(
+            physical_rewrite_count(&service, &id).await,
+            1,
+            "the round's tail carries the compaction"
+        );
+
+        let served = service
+            .load_committed_session_tolerating_tail(&id)
+            .await
+            .expect("the tolerant read serves the committed snapshot under a compacting round")
+            .expect("the session is committed");
+        assert_served_the_committed_snapshot(&served, &committed);
+        assert!(
+            served
+                .validated_transcript_history_state()
+                .unwrap()
+                .is_none_or(|history| history.commits().next().is_none()),
+            "the snapshot carries none of the round's rewrites"
+        );
+    }
+
+    /// The fork-source snapshot committed on either profile, and the actor
+    /// checkpointer that writes a running turn's round commits over it, with
+    /// no actor hosted. On HeadCanonical the round's provisional tail moves
+    /// the physical head past the committed snapshot, and the strict read
+    /// refuses the boundary; on WholeBlob the tail is a separate row and the
+    /// committed document stays the snapshot (the control).
+    async fn committed_snapshot_with_a_round_checkpointer(
+        head_canonical: bool,
+    ) -> (
+        Option<tempfile::TempDir>,
+        PersistentSessionService<DummyBuilder>,
+        StoreCheckpointer,
+        Session,
+    ) {
+        if head_canonical {
+            let (directory, service, checkpointer, committed) =
+                caller_turn_fork_source_fixture(false).await;
+            return (Some(directory), service, checkpointer, committed);
+        }
+        let runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::new(MemoryStore::new()),
+            Arc::clone(&runtime_store),
+            memory_blob_store(),
+        );
+        let mut source = recoverable_store_row();
+        source
+            .set_build_state(meerkat_core::SessionBuildState {
+                app_context: Some(serde_json::json!({"domain": "fork-source"})),
+                ..meerkat_core::SessionBuildState::default()
+            })
+            .expect("seed the source build state");
+        source.push(user_message("the previous turn's question"));
+        source.push(Message::BlockAssistant(
+            meerkat_core::BlockAssistantMessage::new(
+                vec![meerkat_core::AssistantBlock::Text {
+                    text: "the previous turn's answer".to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+            ),
+        ));
+        let committed = service
+            .save_normalized_session(source)
+            .await
+            .expect("commit the snapshot");
+        let authority = runtime_store
+            .load_whole_blob_store_authority(&LogicalRuntimeId::for_session(committed.id()))
+            .await
+            .expect("load the committed authority")
+            .expect("the committed authority exists");
+        let checkpointer = StoreCheckpointer {
+            runtime_store,
+            incremental: None,
+            blob_store: memory_blob_store(),
+            gate: Arc::new(CheckpointerGate {
+                cancelled: Mutex::new(false),
+            }),
+            whole_blob_base_authority: std::sync::Mutex::new(Some(authority)),
+            latest_run_checkpoint_receipt: Mutex::new(None),
+            latest_run_transcript_retirement: std::sync::Mutex::new(None),
+            live_deferred_turn_state: std::sync::OnceLock::new(),
+            unattached_deferred_checkpoint_warned: std::sync::atomic::AtomicBool::new(false),
+            rebased_run: std::sync::Mutex::new(None),
+            latest_run_checkpoint_cursor: std::sync::Mutex::new(None),
+            rebase_outcome_unknown: std::sync::Mutex::new(None),
+            rewrite_audit: None,
+        };
+        (None, service, checkpointer, committed)
+    }
+
+    /// The committed snapshot with a running turn's round committed over it.
+    async fn committed_snapshot_under_a_round_commit(
+        head_canonical: bool,
+    ) -> (
+        Option<tempfile::TempDir>,
+        PersistentSessionService<DummyBuilder>,
+        Session,
+    ) {
+        let (directory, service, checkpointer, committed) =
+            committed_snapshot_with_a_round_checkpointer(head_canonical).await;
+        let mut running = committed.clone();
+        commit_running_turn_round(&checkpointer, &mut running, &RunId::new()).await;
+        assert_eq!(
+            PersistentSessionService::<DummyBuilder>::is_transcript_revision_conflict(
+                &service.load_authoritative_session(committed.id()).await
+            ),
+            head_canonical,
+            "the strict read refuses the boundary on HeadCanonical only"
+        );
+        (directory, service, committed)
+    }
+
+    fn messages_digest(messages: &[Message]) -> String {
+        meerkat_core::transcript_messages_digest(messages).unwrap()
+    }
+
+    /// Session history, the current transcript revision, the revision list
+    /// and the activation records of a session whose own run holds a round
+    /// commit serve the committed snapshot, on both profiles.
+    async fn history_reads_serve_the_committed_snapshot_under_a_round_commit(head_canonical: bool) {
+        let (_directory, service, committed) =
+            committed_snapshot_under_a_round_commit(head_canonical).await;
+        let id = committed.id().clone();
+
+        let history = service
+            .read_history(&id, SessionHistoryQuery::default())
+            .await
+            .expect("the history reads the committed snapshot");
+        assert_eq!(history.message_count, committed.messages().len());
+        assert_eq!(
+            messages_digest(&history.messages),
+            messages_digest(committed.messages())
+        );
+
+        let head_revision = committed.transcript_revision().unwrap();
+        let revision = service
+            .read_transcript_revision(
+                &id,
+                SessionTranscriptRevisionQuery {
+                    revision: "current".to_string(),
+                    offset: 0,
+                    limit: None,
+                },
+            )
+            .await
+            .expect("the current revision reads the committed snapshot");
+        assert_eq!(revision.head_revision, head_revision);
+        assert_eq!(
+            messages_digest(&revision.messages),
+            messages_digest(committed.messages())
+        );
+
+        let revisions = service
+            .list_transcript_revisions(&id, SessionTranscriptRevisionListQuery::default())
+            .await
+            .expect("the revision list reads the committed snapshot");
+        assert_eq!(revisions.head_revision, head_revision);
+        assert!(revisions.entries.is_empty(), "the snapshot has no rewrites");
+
+        let activations = service
+            .read_instruction_activation_records(
+                &id,
+                meerkat_core::InstructionActivationReadQuery::default(),
+            )
+            .await
+            .expect("the activation records read the committed snapshot");
+        assert!(activations.records.is_empty());
+    }
+
+    #[tokio::test]
+    async fn history_reads_serve_the_committed_snapshot_under_a_round_commit_head_canonical() {
+        history_reads_serve_the_committed_snapshot_under_a_round_commit(true).await;
+    }
+
+    #[tokio::test]
+    async fn history_reads_serve_the_committed_snapshot_under_a_round_commit_whole_blob() {
+        history_reads_serve_the_committed_snapshot_under_a_round_commit(false).await;
+    }
+
+    /// `read` with no live actor serves the committed snapshot's view of a
+    /// session whose own run holds a round commit, on both profiles.
+    async fn read_without_a_live_actor_serves_the_committed_snapshot_under_a_round_commit(
+        head_canonical: bool,
+    ) {
+        let (_directory, service, committed) =
+            committed_snapshot_under_a_round_commit(head_canonical).await;
+        let view = service
+            .read(committed.id())
+            .await
+            .expect("the read serves the committed snapshot's view");
+        assert_eq!(view.state.message_count, committed.messages().len());
+        assert_eq!(
+            view.state.last_assistant_text.as_deref(),
+            Some("the previous turn's answer")
+        );
+    }
+
+    #[tokio::test]
+    async fn read_without_a_live_actor_serves_the_committed_snapshot_under_a_round_commit_head_canonical()
+     {
+        read_without_a_live_actor_serves_the_committed_snapshot_under_a_round_commit(true).await;
+    }
+
+    #[tokio::test]
+    async fn read_without_a_live_actor_serves_the_committed_snapshot_under_a_round_commit_whole_blob()
+     {
+        read_without_a_live_actor_serves_the_committed_snapshot_under_a_round_commit(false).await;
+    }
+
+    /// The durable body a planned fork verifies is the committed snapshot of
+    /// a session whose own run holds a round commit, on both profiles.
+    async fn durable_session_body_serves_the_committed_snapshot_under_a_round_commit(
+        head_canonical: bool,
+    ) {
+        let (_directory, service, committed) =
+            committed_snapshot_under_a_round_commit(head_canonical).await;
+        let body = service
+            .load_durable_session_body(committed.id())
+            .await
+            .expect("the durable body reads the committed snapshot")
+            .expect("the session is committed");
+        assert_served_the_committed_snapshot(&body, &committed);
+    }
+
+    #[tokio::test]
+    async fn durable_session_body_serves_the_committed_snapshot_under_a_round_commit_head_canonical()
+     {
+        durable_session_body_serves_the_committed_snapshot_under_a_round_commit(true).await;
+    }
+
+    #[tokio::test]
+    async fn durable_session_body_serves_the_committed_snapshot_under_a_round_commit_whole_blob() {
+        durable_session_body_serves_the_committed_snapshot_under_a_round_commit(false).await;
+    }
+
+    /// Tool application observations with no actor hosted resolve from the
+    /// committed snapshot, never from the running turn's round, on both
+    /// profiles: the round's tool call is not observed.
+    async fn tool_application_observations_without_an_actor_serve_the_committed_snapshot(
+        head_canonical: bool,
+    ) {
+        let (_directory, service, committed) =
+            committed_snapshot_under_a_round_commit(head_canonical).await;
+        let observations = service
+            .read_tool_application_observations(committed.id())
+            .await
+            .expect("the observations read the committed snapshot");
+        assert_eq!(
+            observations.len(),
+            meerkat_core::ToolApplicationObservation::from_messages(committed.messages()).len()
+        );
+        assert!(
+            observations.is_empty(),
+            "the round's tool call is not committed yet: {observations:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_application_observations_without_an_actor_serve_the_committed_snapshot_head_canonical()
+     {
+        tool_application_observations_without_an_actor_serve_the_committed_snapshot(true).await;
+    }
+
+    #[tokio::test]
+    async fn tool_application_observations_without_an_actor_serve_the_committed_snapshot_whole_blob()
+     {
+        tool_application_observations_without_an_actor_serve_the_committed_snapshot(false).await;
     }
 
     /// A session whose committed boundary already carries a compaction, and
@@ -31729,6 +36277,7 @@ mod tests {
             cache_identity: None,
             source_admission,
             inherited_instructions: meerkat_core::ForkInstructionPolicy::default(),
+            declared_instructions: meerkat_core::ForkInstructionPolicy::default(),
         };
 
         // An external fork of the running source is still refused.
@@ -31856,6 +36405,7 @@ mod tests {
             cache_identity: None,
             source_admission,
             inherited_instructions: meerkat_core::ForkInstructionPolicy::default(),
+            declared_instructions: meerkat_core::ForkInstructionPolicy::default(),
         }
     }
 
@@ -32088,6 +36638,7 @@ mod tests {
             cache_identity: None,
             source_admission: meerkat_core::DurableForkSourceAdmission::Quiescent,
             inherited_instructions: meerkat_core::ForkInstructionPolicy::default(),
+            declared_instructions: meerkat_core::ForkInstructionPolicy::default(),
         };
 
         // Turn 1 runs exactly as the runtime loop runs it: the lap holds the
@@ -33772,6 +38323,1384 @@ mod tests {
             output.terminal,
             Some(CoreApplyTerminal::NoPendingBoundary)
         ));
+    }
+
+    fn synthetic_resume_receipt(
+        session_id: &SessionId,
+        run_id: &RunId,
+        conversation_digest: String,
+        message_count: u64,
+    ) -> RunCheckpointReceipt {
+        RunCheckpointReceipt::issued(
+            RunCheckpointAuthority::WholeBlob(
+                meerkat_core::WholeBlobProvisionalTailAuthority::issued(
+                    session_id.clone(),
+                    1,
+                    "base-blob".to_string(),
+                    run_id.clone(),
+                    "candidate-blob".to_string(),
+                    1,
+                )
+                .expect("a well-formed provisional authority"),
+            ),
+            conversation_digest,
+            message_count,
+        )
+        .expect("a well-formed receipt")
+    }
+
+    fn resume_run_request() -> StartTurnRequest {
+        let mut req = start_turn_request("");
+        req.runtime.turn_metadata = Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                execution_kind: Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumeRun),
+                ..Default::default()
+            },
+        );
+        req
+    }
+
+    /// A resumed dispatch reaches only an actor seeded from the run's
+    /// provisional tail: an actor whose checkpointer holds no receipt for the
+    /// run is refused before the session task runs anything, as an ordinary
+    /// run failure that replays the run's inputs.
+    #[tokio::test]
+    async fn test_apply_runtime_turn_resume_run_without_a_seeded_receipt_is_refused() {
+        let service = PersistentSessionService::new(
+            CheckpointerHoldingBuilder::new(DummyBuilder),
+            4,
+            Arc::new(MemoryStore::new()),
+            Arc::new(InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let probe = probe_resume(&created.session_id);
+
+        let error = service
+            .apply_runtime_turn(
+                &created.session_id,
+                RunId::new(),
+                resume_run_request(),
+                RunApplyBoundary::RunStart,
+                vec![meerkat_core::lifecycle::InputId::new()],
+            )
+            .await
+            .expect_err("a resumed dispatch without its seeded receipt must be refused");
+        assert!(
+            !matches!(&error, SessionError::Agent(agent) if agent.requires_session_teardown()),
+            "a resume the actor cannot prove fails as an ordinary run failure: {error}"
+        );
+        assert!(
+            PersistentSessionService::<DummyBuilder>::runtime_turn_failure_replays_inputs(&error),
+            "the refused resume replays its inputs: {error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("has no provisional checkpoint receipt"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            probe
+                .resumed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "the refused dispatch must not reach the agent"
+        );
+    }
+
+    /// A resumed dispatch hands the agent the receipt its actor was seeded
+    /// with, under the resumed run's id, and names the run's inputs, as every
+    /// runtime dispatch does.
+    #[tokio::test]
+    async fn test_apply_runtime_turn_resume_run_passes_the_seeded_receipt_and_run_inputs() {
+        let service = PersistentSessionService::new(
+            CheckpointerHoldingBuilder::new(DummyBuilder),
+            4,
+            Arc::new(MemoryStore::new()),
+            Arc::new(InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let probe = probe_resume(&created.session_id);
+        let run_id = RunId::new();
+        // The receipt names exactly the live image, as the Continue seeding's
+        // receipt names the tail the actor was seeded from.
+        let live = service
+            .inner
+            .export_session(&created.session_id)
+            .await
+            .expect("the created actor exports its session");
+        let receipt = synthetic_resume_receipt(
+            &created.session_id,
+            &run_id,
+            live.transcript_content_digest()
+                .expect("the live transcript digests"),
+            u64::try_from(live.messages().len()).expect("message count fits"),
+        );
+        let checkpointer = service
+            .live_checkpointers
+            .lock()
+            .await
+            .get(&created.session_id)
+            .cloned()
+            .and_then(|checkpointer| checkpointer.upgrade())
+            .expect("the created actor registers its checkpointer");
+        *checkpointer.latest_run_checkpoint_receipt.lock().await = Some(receipt.clone());
+        let run_inputs = vec![meerkat_core::lifecycle::InputId::new()];
+
+        // Committing the resumed run's boundary needs the provisional tail
+        // this test does not write; only the dispatch is under test here.
+        let _ = service
+            .apply_runtime_turn(
+                &created.session_id,
+                run_id.clone(),
+                resume_run_request(),
+                RunApplyBoundary::RunStart,
+                run_inputs.clone(),
+            )
+            .await;
+
+        assert_eq!(
+            *probe
+                .resumed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![(run_id, receipt)]
+        );
+        assert_eq!(
+            *probe
+                .run_start_input_ids
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![run_inputs]
+        );
+    }
+
+    /// RED before the image check: a resumed dispatch whose live image does
+    /// not begin with the tail its receipt names (here one message short of
+    /// it) fails as an ordinary run failure before the agent re-enters the
+    /// run, so a resumed round never re-dispatches its calls on a diverged
+    /// image; the runtime replays the run's inputs instead.
+    #[tokio::test]
+    async fn test_apply_runtime_turn_resume_run_on_a_diverged_image_is_refused_before_the_agent_runs()
+     {
+        let service = PersistentSessionService::new(
+            CheckpointerHoldingBuilder::new(DummyBuilder),
+            4,
+            Arc::new(MemoryStore::new()),
+            Arc::new(InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let probe = probe_resume(&created.session_id);
+        let run_id = RunId::new();
+        let live = service
+            .inner
+            .export_session(&created.session_id)
+            .await
+            .expect("the created actor exports its session");
+        let diverged = synthetic_resume_receipt(
+            &created.session_id,
+            &run_id,
+            live.transcript_content_digest()
+                .expect("the live transcript digests"),
+            u64::try_from(live.messages().len() + 1).expect("message count fits"),
+        );
+        let checkpointer = service
+            .live_checkpointers
+            .lock()
+            .await
+            .get(&created.session_id)
+            .cloned()
+            .and_then(|checkpointer| checkpointer.upgrade())
+            .expect("the created actor registers its checkpointer");
+        *checkpointer.latest_run_checkpoint_receipt.lock().await = Some(diverged);
+
+        let error = service
+            .apply_runtime_turn(
+                &created.session_id,
+                run_id,
+                resume_run_request(),
+                RunApplyBoundary::RunStart,
+                vec![meerkat_core::lifecycle::InputId::new()],
+            )
+            .await
+            .expect_err("a resumed dispatch on a diverged image must be refused");
+        assert!(
+            !matches!(&error, SessionError::Agent(agent) if agent.requires_session_teardown())
+                && PersistentSessionService::<DummyBuilder>::runtime_turn_failure_replays_inputs(
+                    &error
+                ),
+            "a diverged resume fails as an ordinary run failure that replays its inputs: {error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("does not begin with the provisional tail its receipt names"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            probe
+                .resumed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "the agent must not re-enter a run on a diverged image"
+        );
+    }
+
+    /// The image check proves the base the receipt names, the transcript's
+    /// first messages. A message the actor's construction appended after the
+    /// tail (an explicit system prompt given on resume) is an ordinary ordered
+    /// append: the resumed run still re-enters.
+    #[tokio::test]
+    async fn test_apply_runtime_turn_resume_run_tolerates_a_message_appended_after_the_tail() {
+        let service = PersistentSessionService::new(
+            CheckpointerHoldingBuilder::new(DummyBuilder),
+            4,
+            Arc::new(MemoryStore::new()),
+            Arc::new(InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        );
+        let mut seeded = Session::new();
+        seeded.push(Message::User(UserMessage::text(
+            "the run's prompt".to_string(),
+        )));
+        seeded.append_system_message("appended when the actor was built".to_string());
+        let created = service
+            .create_session(resume_request(seeded))
+            .await
+            .expect("create_session should succeed");
+        let probe = probe_resume(&created.session_id);
+        let run_id = RunId::new();
+        let live = service
+            .inner
+            .export_session(&created.session_id)
+            .await
+            .expect("the created actor exports its session");
+        let tail_len = live.messages().len() - 1;
+        let receipt = synthetic_resume_receipt(
+            &created.session_id,
+            &run_id,
+            live.transcript_prefix_digest(tail_len)
+                .expect("the tail digests"),
+            u64::try_from(tail_len).expect("message count fits"),
+        );
+        let checkpointer = service
+            .live_checkpointers
+            .lock()
+            .await
+            .get(&created.session_id)
+            .cloned()
+            .and_then(|checkpointer| checkpointer.upgrade())
+            .expect("the created actor registers its checkpointer");
+        *checkpointer.latest_run_checkpoint_receipt.lock().await = Some(receipt.clone());
+
+        let _ = service
+            .apply_runtime_turn(
+                &created.session_id,
+                run_id.clone(),
+                resume_run_request(),
+                RunApplyBoundary::RunStart,
+                vec![meerkat_core::lifecycle::InputId::new()],
+            )
+            .await;
+
+        assert_eq!(
+            *probe
+                .resumed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![(run_id, receipt)]
+        );
+    }
+
+    /// RED before the discard: a failed runtime turn whose inputs replay
+    /// leaves no provisional tail. The session layer discards the run's tail
+    /// by its receipt before the runtime requeues, so a later recovery cannot
+    /// commit the inputs' content while the replay appends it again.
+    #[tokio::test]
+    async fn test_failed_runtime_turn_discards_its_provisional_tail_before_the_inputs_replay() {
+        use meerkat_core::SessionCheckpointer as _;
+
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            CheckpointerHoldingBuilder::new(FailingRunBuilder),
+            4,
+            Arc::new(MemoryStore::new()),
+            runtime_store.clone(),
+            memory_blob_store(),
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let run_id = RunId::new();
+        let runtime_id = PersistentSessionService::<FailingRunBuilder>::runtime_id_for_session(
+            &created.session_id,
+        );
+        let checkpointer = service
+            .live_checkpointers
+            .lock()
+            .await
+            .get(&created.session_id)
+            .cloned()
+            .and_then(|checkpointer| checkpointer.upgrade())
+            .expect("the created actor registers its checkpointer");
+        // The run's first round, committed as a provisional tail.
+        let mut round = service
+            .inner
+            .export_session(&created.session_id)
+            .await
+            .expect("the created actor exports its session");
+        round.push(Message::User(UserMessage::text(
+            "the run's prompt".to_string(),
+        )));
+        checkpointer
+            .checkpoint_run(&mut round, &run_id, None)
+            .await
+            .expect("the round checkpoints")
+            .expect("a durable session writes a provisional tail");
+        assert!(
+            runtime_store
+                .load_whole_blob_provisional_tail(&runtime_id)
+                .await
+                .expect("the tail reads")
+                .is_some(),
+            "the round's provisional tail is in the store"
+        );
+
+        service
+            .apply_runtime_turn(
+                &created.session_id,
+                run_id.clone(),
+                runtime_content_turn_request("the run's prompt"),
+                RunApplyBoundary::RunStart,
+                vec![meerkat_core::lifecycle::InputId::new()],
+            )
+            .await
+            .expect_err("the run fails, and the runtime replays its inputs");
+
+        assert!(
+            runtime_store
+                .load_whole_blob_provisional_tail(&runtime_id)
+                .await
+                .expect("the tail reads")
+                .is_none(),
+            "the failed run's provisional tail is discarded before its inputs replay"
+        );
+        assert!(
+            checkpointer
+                .run_checkpoint_receipt(&created.session_id, &run_id)
+                .await
+                .expect("the receipt reads")
+                .is_none(),
+            "the discarded tail's receipt no longer names store state"
+        );
+    }
+
+    fn fresh_store_checkpointer<B: SessionAgentBuilder + 'static>(
+        service: &PersistentSessionService<B>,
+    ) -> StoreCheckpointer {
+        StoreCheckpointer {
+            runtime_store: Arc::clone(&service.runtime_store),
+            incremental: service.incremental.clone(),
+            blob_store: Arc::clone(&service.blob_store),
+            gate: Arc::new(CheckpointerGate {
+                cancelled: Mutex::new(false),
+            }),
+            whole_blob_base_authority: std::sync::Mutex::new(None),
+            latest_run_checkpoint_receipt: Mutex::new(None),
+            latest_run_transcript_retirement: std::sync::Mutex::new(None),
+            live_deferred_turn_state: std::sync::OnceLock::new(),
+            unattached_deferred_checkpoint_warned: std::sync::atomic::AtomicBool::new(false),
+            rebased_run: std::sync::Mutex::new(None),
+            latest_run_checkpoint_cursor: std::sync::Mutex::new(None),
+            rebase_outcome_unknown: std::sync::Mutex::new(None),
+            rewrite_audit: None,
+        }
+    }
+
+    /// A continued WholeBlob run whose receipt and base, and the base the
+    /// committed authority names.
+    async fn continued_whole_blob_run(
+        service: &PersistentSessionService<DummyBuilder>,
+        session_id: &SessionId,
+        base_matches: bool,
+    ) -> ContinuedRunSeed {
+        let committed = service
+            .runtime_store
+            .load_whole_blob_store_authority(
+                &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(session_id),
+            )
+            .await
+            .expect("the committed authority reads")
+            .expect("a created session has a committed WholeBlob authority");
+        let run_id = RunId::new();
+        let mut candidate = service
+            .inner
+            .export_session(session_id)
+            .await
+            .expect("the created actor exports its session");
+        candidate.push(Message::User(UserMessage::text(
+            "the open run's prompt".to_string(),
+        )));
+        let receipt = RunCheckpointReceipt::issued(
+            RunCheckpointAuthority::WholeBlob(
+                meerkat_core::WholeBlobProvisionalTailAuthority::issued(
+                    session_id.clone(),
+                    if base_matches {
+                        committed.store_revision()
+                    } else {
+                        committed.store_revision() + 1
+                    },
+                    committed.blob_sha256().to_string(),
+                    run_id.clone(),
+                    "candidate-blob".to_string(),
+                    1,
+                )
+                .expect("a well-formed provisional authority"),
+            ),
+            candidate
+                .transcript_content_digest()
+                .expect("the candidate digests"),
+            u64::try_from(candidate.messages().len()).expect("message count fits"),
+        )
+        .expect("a well-formed receipt");
+        ContinuedRunSeed {
+            candidate: Box::new(candidate),
+            run_id,
+            receipt,
+        }
+    }
+
+    /// The actor of a resumed run is seeded from the run's provisional tail,
+    /// with the tail's receipt preloaded so the run's next checkpoint chains
+    /// from it, and the committed base its WholeBlob checkpoints fence on.
+    #[tokio::test]
+    async fn a_continued_run_seeds_the_actor_from_its_tail_with_its_receipt_and_base() {
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::new(MemoryStore::new()),
+            Arc::new(InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let seed = continued_whole_blob_run(&service, &created.session_id, true).await;
+        let expected_receipt = seed.receipt.clone();
+        let expected_candidate = seed.candidate.clone();
+        let checkpointer = fresh_store_checkpointer(&service);
+        let mut req = create_request("", InitialTurnPolicy::Defer);
+
+        service
+            .seed_actor_from_continued_run(&created.session_id, seed, &mut req, &checkpointer)
+            .await
+            .expect("a tail that descends from the committed base seeds the actor");
+
+        assert_eq!(
+            *checkpointer.latest_run_checkpoint_receipt.lock().await,
+            Some(expected_receipt)
+        );
+        assert!(
+            checkpointer
+                .whole_blob_base_authority
+                .lock()
+                .unwrap()
+                .is_some(),
+            "the committed base the receipt descends from fences the next checkpoint"
+        );
+        assert_eq!(
+            req.build
+                .as_ref()
+                .and_then(|build| build.resume_session.as_ref())
+                .map(|session| session.messages().len()),
+            Some(expected_candidate.messages().len()),
+            "the actor materializes from the tail, not the committed body"
+        );
+    }
+
+    /// A tail whose receipt does not descend from the committed base cannot
+    /// be continued: its next checkpoint could never chain.
+    #[tokio::test]
+    async fn a_continued_run_from_another_base_is_refused() {
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::new(MemoryStore::new()),
+            Arc::new(InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let seed = continued_whole_blob_run(&service, &created.session_id, false).await;
+        let checkpointer = fresh_store_checkpointer(&service);
+        let mut req = create_request("", InitialTurnPolicy::Defer);
+
+        let error = service
+            .seed_actor_from_continued_run(&created.session_id, seed, &mut req, &checkpointer)
+            .await
+            .expect_err("a tail from another base is refused");
+        assert!(
+            error
+                .to_string()
+                .contains("does not descend from the committed base"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            checkpointer
+                .latest_run_checkpoint_receipt
+                .lock()
+                .await
+                .is_none()
+        );
+    }
+
+    /// What the actor's recovery means for the run the registration marked:
+    /// the marked run continues; a continuation nothing marks (hosted or
+    /// standalone) or of another run is refused as held for recovery; a
+    /// commit after the mark and a held or refused tail refuse the
+    /// materialization; a busy session's failure comes back untouched.
+    /// Unrun: written while Cargo is not run.
+    #[tokio::test]
+    async fn the_marked_run_resolves_against_the_actors_recovery() {
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::new(MemoryStore::new()),
+            Arc::new(InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let id = &created.session_id;
+        let seed = continued_whole_blob_run(&service, id, true).await;
+        let run_id = seed.run_id.clone();
+
+        let continued = service
+            .resolve_marked_run_after_recovery(
+                id,
+                true,
+                Some(&run_id),
+                Ok(ResumeBoundaryRecovery::Continue(seed.clone())),
+            )
+            .await
+            .expect("the marked run continues");
+        assert_eq!(continued.map(|seed| seed.run_id), Some(run_id.clone()));
+
+        for hosted in [true, false] {
+            let unmarked = service
+                .resolve_marked_run_after_recovery(
+                    id,
+                    hosted,
+                    None,
+                    Ok(ResumeBoundaryRecovery::Continue(seed.clone())),
+                )
+                .await
+                .expect_err("a continuation nothing marks is refused");
+            assert!(
+                matches!(unmarked, SessionError::DurableTailHeldForRecovery { .. }),
+                "hosted {hosted}: {unmarked}"
+            );
+        }
+
+        let other = RunId::new();
+        let foreign = service
+            .resolve_marked_run_after_recovery(
+                id,
+                true,
+                Some(&other),
+                Ok(ResumeBoundaryRecovery::Continue(seed)),
+            )
+            .await
+            .expect_err("a continuation of another run than the marked one is refused");
+        assert!(matches!(
+            foreign,
+            SessionError::DurableTailHeldForRecovery { .. }
+        ));
+        assert!(
+            service
+                .resolve_marked_run_after_recovery(
+                    id,
+                    true,
+                    Some(&run_id),
+                    Ok(ResumeBoundaryRecovery::Settled(
+                        CommittedBoundaryRecovery::Recovered { message_count: 1 },
+                        None,
+                    )),
+                )
+                .await
+                .is_err(),
+            "a tail committed after the mark leaves the registration stale"
+        );
+        let held = service
+            .resolve_marked_run_after_recovery(
+                id,
+                true,
+                Some(&run_id),
+                Ok(ResumeBoundaryRecovery::Settled(
+                    CommittedBoundaryRecovery::Unprovable {
+                        reason: "held for the test".to_string(),
+                    },
+                    None,
+                )),
+            )
+            .await
+            .expect_err("a held tail refuses the materialization");
+        assert!(held.to_string().contains("held for the test"));
+        for (hold, typed) in [
+            (
+                meerkat_core::service::DurableResumeHold::TailHeldForRecovery,
+                "SESSION_DURABLE_TAIL_HELD_FOR_RECOVERY",
+            ),
+            (
+                meerkat_core::service::DurableResumeHold::RecoveryRefused,
+                "SESSION_DURABLE_TAIL_RECOVERY_REFUSED",
+            ),
+        ] {
+            let withheld = service
+                .resolve_marked_run_after_recovery(
+                    id,
+                    true,
+                    Some(&run_id),
+                    Ok(ResumeBoundaryRecovery::Withheld {
+                        hold,
+                        reason: "withheld for the test".to_string(),
+                    }),
+                )
+                .await
+                .expect_err("a withheld tail refuses the materialization");
+            assert_eq!(withheld.code(), typed, "{withheld}");
+            assert_eq!(withheld.durable_resume_hold(), Some(hold));
+        }
+        let busy = service
+            .resolve_marked_run_after_recovery(
+                id,
+                true,
+                Some(&run_id),
+                Err(SessionError::Busy { id: id.clone() }),
+            )
+            .await
+            .expect_err("a busy session's failure comes back");
+        assert!(matches!(busy, SessionError::Busy { .. }));
+        assert!(
+            PersistentSessionService::<DummyBuilder>::recovery_failure_keeps_the_mark(
+                &SessionError::NotFound { id: id.clone() }
+            )
+        );
+        assert!(
+            !PersistentSessionService::<DummyBuilder>::recovery_failure_keeps_the_mark(
+                &SessionError::Agent(AgentError::InternalError(
+                    "the recovery's commit failed".to_string()
+                ))
+            )
+        );
+    }
+
+    /// A re-based run's failure the runtime would replay never replays:
+    /// - its held checkpoint carries no cursor: the failure is committed
+    ///   through the failed-but-applied route (a machine terminal failure),
+    ///   its inputs consumed (RED before the route: an error the runtime
+    ///   realized as an executor stop, the run resumed at every start);
+    /// - its held checkpoint still owes its staged calls (a round's first
+    ///   commit): the executor stops fail-closed, so the tail keeps its cursor
+    ///   and the inputs stay bound (RED before: that checkpoint was promoted,
+    ///   losing calls that ran);
+    /// - a run that never re-based still fails with an error the runtime
+    ///   replays.
+    /// Unrun: written while Cargo is not run.
+    #[tokio::test]
+    async fn a_rebased_runs_failure_is_consumed_or_stops_never_replayed() {
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            CheckpointerHoldingBuilder::new(FailingRunBuilder),
+            4,
+            Arc::new(MemoryStore::new()),
+            runtime_store,
+            memory_blob_store(),
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let checkpointer = service
+            .live_checkpointers
+            .lock()
+            .await
+            .get(&created.session_id)
+            .cloned()
+            .and_then(|checkpointer| checkpointer.upgrade())
+            .expect("the created actor registers its checkpointer");
+        let rebase = |run_id: &RunId, cursor: HeldCheckpointCursor| {
+            *checkpointer
+                .rebased_run
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(run_id.clone());
+            checkpointer.record_held_checkpoint_cursor(Some((run_id.clone(), cursor)));
+        };
+
+        let consumed_run = RunId::new();
+        rebase(&consumed_run, HeldCheckpointCursor::Absent);
+        let output = service
+            .apply_runtime_turn(
+                &created.session_id,
+                consumed_run,
+                runtime_content_turn_request("the re-based run's prompt"),
+                RunApplyBoundary::RunStart,
+                vec![meerkat_core::lifecycle::InputId::new()],
+            )
+            .await
+            .expect("a re-based run's failure is applied, not answered as an error");
+        assert!(
+            matches!(
+                output.terminal,
+                Some(CoreApplyTerminal::MachineTerminalFailure { .. })
+            ),
+            "the failure rides the failed-but-applied route: {:?}",
+            output.terminal
+        );
+
+        let stopped_run = RunId::new();
+        rebase(&stopped_run, HeldCheckpointCursor::ToolsPending);
+        let stopped = service
+            .apply_runtime_turn(
+                &created.session_id,
+                stopped_run,
+                runtime_content_turn_request("the next re-based run's prompt"),
+                RunApplyBoundary::RunStart,
+                vec![meerkat_core::lifecycle::InputId::new()],
+            )
+            .await
+            .expect_err("a run whose last round still owes its calls is not applied");
+        assert!(
+            stopped.requests_runtime_executor_stop(),
+            "the executor stops fail-closed: {stopped}"
+        );
+
+        let ordinary = service
+            .apply_runtime_turn(
+                &created.session_id,
+                RunId::new(),
+                runtime_content_turn_request("an ordinary run's prompt"),
+                RunApplyBoundary::RunStart,
+                vec![meerkat_core::lifecycle::InputId::new()],
+            )
+            .await
+            .expect_err("a run that never re-based fails as an error the runtime replays");
+        assert!(!ordinary.requests_runtime_executor_stop(), "{ordinary}");
+    }
+
+    /// The checkpointer records, with the receipt it holds, the cursor the
+    /// checkpointed session carried: a round's first commit (ToolsPending)
+    /// written through `checkpoint_run` is held as owing its staged calls, so
+    /// a re-based run's replaying failure over it stops the executor instead
+    /// of promoting it. Unrun: written while Cargo is not run.
+    #[tokio::test]
+    async fn a_rebased_run_over_a_held_tools_pending_commit_stops() {
+        use meerkat_core::SessionCheckpointer as _;
+
+        let service = PersistentSessionService::new(
+            CheckpointerHoldingBuilder::new(FailingRunBuilder),
+            4,
+            Arc::new(MemoryStore::new()),
+            Arc::new(InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let checkpointer = service
+            .live_checkpointers
+            .lock()
+            .await
+            .get(&created.session_id)
+            .cloned()
+            .and_then(|checkpointer| checkpointer.upgrade())
+            .expect("the created actor registers its checkpointer");
+        let run_id = RunId::new();
+        let mut round = service
+            .inner
+            .export_session(&created.session_id)
+            .await
+            .expect("the created actor exports its session");
+        round.push(Message::User(UserMessage::text(
+            "the run's prompt".to_string(),
+        )));
+        let staged = meerkat_core::types::BlockAssistantMessage {
+            blocks: vec![meerkat_core::types::AssistantBlock::Text {
+                text: "calling a tool".to_string(),
+                meta: None,
+            }],
+            stop_reason: Some(meerkat_core::types::StopReason::ToolUse),
+            identity: meerkat_core::types::TranscriptMessageIdentity::default(),
+            created_at: meerkat_core::types::message_timestamp_now(),
+            assistant_message_id: None,
+        };
+        round
+            .set_run_cursor(&meerkat_core::SessionRunCursor::new(
+                run_id.clone(),
+                Vec::new(),
+                0,
+                meerkat_core::RunResumePoint::ToolsPending {
+                    assistant_message: staged,
+                },
+            ))
+            .expect("the round's first commit stages its message");
+        checkpointer
+            .checkpoint_run(&mut round, &run_id, None)
+            .await
+            .expect("the round checkpoints")
+            .expect("a durable session writes a provisional tail");
+        assert!(
+            checkpointer.held_checkpoint_owes_staged_calls(&run_id),
+            "the held checkpoint is the round's first commit"
+        );
+        *checkpointer
+            .rebased_run
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(run_id.clone());
+
+        let stopped = service
+            .apply_runtime_turn(
+                &created.session_id,
+                run_id,
+                runtime_content_turn_request("the run's prompt"),
+                RunApplyBoundary::RunStart,
+                vec![meerkat_core::lifecycle::InputId::new()],
+            )
+            .await
+            .expect_err("the held checkpoint owes its calls, so nothing is applied");
+        assert!(
+            stopped.requests_runtime_executor_stop(),
+            "the executor stops fail-closed: {stopped}"
+        );
+    }
+
+    /// A run that ends in a hard-failure terminal while the checkpoint held
+    /// for it is a round's first commit (its closing save failed, so the
+    /// round's staged calls, which may have run, are still owed their
+    /// results) stops the executor instead of committing that checkpoint as
+    /// its failed boundary: that boundary would consume the run's inputs over
+    /// a transcript without calls that ran. The round's commit stays in the
+    /// store for the next start. With no checkpoint of the run held, the same
+    /// terminal still commits its failed boundary
+    /// (`test_machine_terminal_runtime_apply_returns_failed_but_applied_snapshot`).
+    /// RED before: the machine-terminal branch promoted whatever checkpoint
+    /// the run held. Unrun: written while Cargo is not run.
+    #[tokio::test]
+    async fn a_hard_failure_over_a_held_tools_pending_commit_stops() {
+        use meerkat_core::SessionCheckpointer as _;
+
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            CheckpointerHoldingBuilder::new(MachineTerminalRunBuilder),
+            4,
+            Arc::new(MemoryStore::new()),
+            runtime_store.clone(),
+            memory_blob_store(),
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let id = created.session_id.clone();
+        let runtime_id =
+            PersistentSessionService::<MachineTerminalRunBuilder>::runtime_id_for_session(&id);
+        let checkpointer = service
+            .live_checkpointers
+            .lock()
+            .await
+            .get(&id)
+            .cloned()
+            .and_then(|checkpointer| checkpointer.upgrade())
+            .expect("the created actor registers its checkpointer");
+        let run_id = RunId::new();
+        let mut round = service
+            .inner
+            .export_session(&id)
+            .await
+            .expect("the created actor exports its session");
+        round.push(Message::User(UserMessage::text(
+            "denied runtime turn".to_string(),
+        )));
+        let staged = meerkat_core::types::BlockAssistantMessage {
+            blocks: vec![meerkat_core::types::AssistantBlock::Text {
+                text: "calling a tool".to_string(),
+                meta: None,
+            }],
+            stop_reason: Some(meerkat_core::types::StopReason::ToolUse),
+            identity: meerkat_core::types::TranscriptMessageIdentity::default(),
+            created_at: meerkat_core::types::message_timestamp_now(),
+            assistant_message_id: None,
+        };
+        round
+            .set_run_cursor(&meerkat_core::SessionRunCursor::new(
+                run_id.clone(),
+                Vec::new(),
+                0,
+                meerkat_core::RunResumePoint::ToolsPending {
+                    assistant_message: staged,
+                },
+            ))
+            .expect("the round's first commit stages its message");
+        checkpointer
+            .checkpoint_run(&mut round, &run_id, None)
+            .await
+            .expect("the round checkpoints")
+            .expect("a durable session writes a provisional tail");
+        assert!(
+            checkpointer.held_checkpoint_owes_staged_calls(&run_id),
+            "the held checkpoint is the round's first commit"
+        );
+
+        let stopped = service
+            .apply_runtime_turn(
+                &id,
+                run_id.clone(),
+                runtime_content_turn_request("denied runtime turn"),
+                RunApplyBoundary::RunStart,
+                vec![meerkat_core::lifecycle::InputId::new()],
+            )
+            .await
+            .expect_err("a hard failure over a round's first commit commits no boundary");
+        assert!(
+            stopped.requests_runtime_executor_stop(),
+            "the executor stops fail-closed: {stopped}"
+        );
+        let tail = runtime_store
+            .load_whole_blob_provisional_tail(&runtime_id)
+            .await
+            .expect("the tail read answers")
+            .expect("the round's first commit still stands");
+        assert_eq!(tail.authority().run_id(), &run_id);
+    }
+
+    /// A re-base whose store call failed with its outcome unknown is settled
+    /// from the store before any failure route, never requeued blind:
+    /// - the committed base is still the one the run started on: the re-base
+    ///   did not apply, and the failure takes the ordinary route;
+    /// - the base moved but no tail of the run stands on it: unknown, so the
+    ///   failure holds (the executor stops, nothing is requeued or discarded);
+    /// - the run's tail starts it over the moved base: the re-base applied,
+    ///   and the failure takes the re-based route.
+    /// RED before: the run was left unmarked, and its failure was discarded
+    /// and replayed whatever the store held. Unrun: written while Cargo is not
+    /// run.
+    #[tokio::test]
+    async fn an_unknown_rebase_outcome_is_settled_from_the_store() {
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            CheckpointerHoldingBuilder::new(DummyBuilder),
+            4,
+            Arc::new(MemoryStore::new()),
+            runtime_store.clone(),
+            memory_blob_store(),
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let id = created.session_id.clone();
+        let runtime_id = PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id);
+        let checkpointer = service
+            .live_checkpointers
+            .lock()
+            .await
+            .get(&id)
+            .cloned()
+            .and_then(|checkpointer| checkpointer.upgrade())
+            .expect("the created actor registers its checkpointer");
+        let run_id = RunId::new();
+        *checkpointer
+            .rebase_outcome_unknown
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(run_id.clone());
+
+        assert_eq!(
+            service
+                .reread_rebase_outcome(&id, &run_id, &checkpointer)
+                .await,
+            RebaseReread::NotLanded
+        );
+        assert!(matches!(
+            service.rebase_failure_guard(&id, &run_id).await,
+            RebaseFailureGuard::None
+        ));
+
+        let mut moved = service
+            .inner
+            .export_session(&id)
+            .await
+            .expect("the created actor exports its session");
+        moved.push(Message::User(UserMessage::text(
+            "the re-based run's rewritten rounds".to_string(),
+        )));
+        let moved_base = runtime_store
+            .inject_committed_whole_blob_bytes_for_test(
+                &runtime_id,
+                &id,
+                serde_json::to_vec(&moved).expect("the moved base serializes"),
+            )
+            .await
+            .expect("the committed base moves");
+        assert_eq!(
+            service
+                .reread_rebase_outcome(&id, &run_id, &checkpointer)
+                .await,
+            RebaseReread::Unknown,
+            "a moved base with no tail of the run is not proof of the re-base"
+        );
+        assert!(matches!(
+            service.rebase_failure_guard(&id, &run_id).await,
+            RebaseFailureGuard::Hold
+        ));
+
+        runtime_store
+            .write_prepared_whole_blob_provisional_tail(
+                &runtime_id,
+                meerkat_runtime::store::PreparedWholeBlobProvisionalTail::prepare_from_session(
+                    moved_base,
+                    run_id.clone(),
+                    1,
+                    &moved,
+                )
+                .expect("the run's re-based tail prepares"),
+            )
+            .await
+            .expect("the run's re-based tail is written");
+        assert_eq!(
+            service
+                .reread_rebase_outcome(&id, &run_id, &checkpointer)
+                .await,
+            RebaseReread::Landed
+        );
+        assert!(matches!(
+            service.rebase_failure_guard(&id, &run_id).await,
+            RebaseFailureGuard::Rebased(_)
+        ));
+    }
+
+    /// A run that re-based before a restart is still re-based after it: the
+    /// seeded tail's cursor carries the fact, and seeding restores it on the
+    /// restarted checkpointer, with the tail's cursor kind. A tail whose
+    /// cursor does not carry it seeds no re-base. RED before: the mark lived
+    /// only in the first process's checkpointer, so the resumed run's failure
+    /// was discarded and replayed. Unrun: written while Cargo is not run.
+    #[tokio::test]
+    async fn a_seeded_run_keeps_the_rebase_its_cursor_records() {
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::new(MemoryStore::new()),
+            Arc::new(InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let id = created.session_id.clone();
+        for rebased in [true, false] {
+            let mut seed = continued_whole_blob_run(&service, &id, true).await;
+            let run_id = seed.run_id.clone();
+            let mut cursor = meerkat_core::SessionRunCursor::new(
+                run_id.clone(),
+                Vec::new(),
+                0,
+                meerkat_core::RunResumePoint::AwaitingModel,
+            );
+            cursor.rebased = rebased;
+            seed.candidate
+                .set_run_cursor(&cursor)
+                .expect("the cursor is recorded");
+            let restarted = fresh_store_checkpointer(&service);
+            let mut req = create_request("resume", InitialTurnPolicy::Defer);
+            service
+                .seed_actor_from_continued_run(&id, seed, &mut req, &restarted)
+                .await
+                .expect("the tail seeds the restarted actor");
+            assert_eq!(restarted.run_rebased(&run_id), rebased, "rebased {rebased}");
+            assert!(
+                !restarted.held_checkpoint_owes_staged_calls(&run_id),
+                "an AwaitingModel tail owes no staged calls"
+            );
+        }
+    }
+
+    /// A resumed run that re-based before its restart, and whose dispatch the
+    /// session refuses before it runs (here its actor holds no seeded
+    /// receipt, so nothing in memory marks the re-base), keeps its
+    /// provisional tail: the tail's cursor records the re-base, so the run's
+    /// inputs are already in the committed body, and the failure stops the
+    /// executor instead of discarding the tail and replaying them. The same
+    /// refusal over a tail whose cursor records no re-base still discards the
+    /// tail and replays the inputs. RED before: the failed-turn path
+    /// discarded the tail of every failure it replayed. Unrun: written while
+    /// Cargo is not run.
+    #[tokio::test]
+    async fn a_refused_resume_of_a_rebased_run_keeps_its_tail_and_stops() {
+        for rebased in [true, false] {
+            let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+            let service = PersistentSessionService::new(
+                DummyBuilder,
+                4,
+                Arc::new(MemoryStore::new()),
+                runtime_store.clone(),
+                memory_blob_store(),
+            );
+            let created = service
+                .create_session(create_request("seed", InitialTurnPolicy::Defer))
+                .await
+                .expect("create_session should succeed");
+            let id = created.session_id.clone();
+            let runtime_id = PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id);
+            let run_id = RunId::new();
+            let mut committed = service
+                .inner
+                .export_session(&id)
+                .await
+                .expect("the created actor exports its session");
+            committed.push(Message::User(UserMessage::text(
+                "the run's prompt, committed by its re-base".to_string(),
+            )));
+            let base = runtime_store
+                .inject_committed_whole_blob_bytes_for_test(
+                    &runtime_id,
+                    &id,
+                    serde_json::to_vec(&committed).expect("the committed base serializes"),
+                )
+                .await
+                .expect("the re-base's committed base");
+            let mut tail = committed;
+            tail.push(Message::User(UserMessage::text(
+                "a round the run committed after its re-base".to_string(),
+            )));
+            let mut cursor = meerkat_core::SessionRunCursor::new(
+                run_id.clone(),
+                Vec::new(),
+                1,
+                meerkat_core::RunResumePoint::AwaitingModel,
+            );
+            cursor.rebased = rebased;
+            tail.set_run_cursor(&cursor)
+                .expect("the cursor is recorded");
+            runtime_store
+                .write_prepared_whole_blob_provisional_tail(
+                    &runtime_id,
+                    meerkat_runtime::store::PreparedWholeBlobProvisionalTail::prepare_from_session(
+                        base,
+                        run_id.clone(),
+                        1,
+                        &tail,
+                    )
+                    .expect("the run's tail prepares"),
+                )
+                .await
+                .expect("the run's tail is written");
+
+            let error = service
+                .apply_runtime_turn(
+                    &id,
+                    run_id,
+                    resume_run_request(),
+                    RunApplyBoundary::RunStart,
+                    vec![meerkat_core::lifecycle::InputId::new()],
+                )
+                .await
+                .expect_err("a resumed dispatch without its seeded receipt is refused");
+            let tail_stands = runtime_store
+                .load_whole_blob_provisional_tail(&runtime_id)
+                .await
+                .expect("the tail read answers")
+                .is_some();
+            if rebased {
+                assert!(
+                    error.requests_runtime_executor_stop(),
+                    "a re-based run's refused resume stops the executor: {error}"
+                );
+                assert!(
+                    tail_stands,
+                    "the re-based run's tail is kept for the next start"
+                );
+            } else {
+                assert!(
+                    PersistentSessionService::<DummyBuilder>::runtime_turn_failure_replays_inputs(
+                        &error
+                    ),
+                    "a refused resume of a run that never re-based replays: {error}"
+                );
+                assert!(!tail_stands, "its tail is discarded before the replay");
+            }
+        }
+    }
+
+    /// A resumed run's next round commit continues the candidate sequence of
+    /// the tail its actor was seeded from: a restarted checkpointer, seeded
+    /// with the tail's receipt and the committed base, writes the run's next
+    /// round as candidate 2 over the same base. Unrun: written while Cargo is
+    /// not run.
+    #[tokio::test]
+    async fn a_seeded_actor_continues_its_runs_candidate_sequence() {
+        use meerkat_core::SessionCheckpointer as _;
+
+        let service = PersistentSessionService::new(
+            CheckpointerHoldingBuilder::new(DummyBuilder),
+            4,
+            Arc::new(MemoryStore::new()),
+            Arc::new(InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let id = created.session_id.clone();
+        let run_id = RunId::new();
+        let live = service
+            .live_checkpointers
+            .lock()
+            .await
+            .get(&id)
+            .cloned()
+            .and_then(|checkpointer| checkpointer.upgrade())
+            .expect("the created actor registers its checkpointer");
+        let mut round = service
+            .inner
+            .export_session(&id)
+            .await
+            .expect("the created actor exports its session");
+        round.push(Message::User(UserMessage::text(
+            "the run's first round".to_string(),
+        )));
+        let receipt = live
+            .checkpoint_run(&mut round, &run_id, None)
+            .await
+            .expect("the round checkpoints")
+            .expect("a durable session writes a provisional tail");
+        assert_eq!(
+            receipt
+                .whole_blob()
+                .map(meerkat_core::WholeBlobProvisionalTailAuthority::candidate_sequence),
+            Some(1)
+        );
+
+        // A restart: a fresh checkpointer seeded from the tail.
+        let restarted = fresh_store_checkpointer(&service);
+        let mut req = create_request("resume", InitialTurnPolicy::Defer);
+        service
+            .seed_actor_from_continued_run(
+                &id,
+                ContinuedRunSeed {
+                    candidate: Box::new(round.clone()),
+                    run_id: run_id.clone(),
+                    receipt: receipt.clone(),
+                },
+                &mut req,
+                &restarted,
+            )
+            .await
+            .expect("the tail seeds the restarted actor");
+        let mut next = round;
+        next.push(Message::User(UserMessage::text(
+            "the run's next round".to_string(),
+        )));
+        let continued = restarted
+            .checkpoint_run(&mut next, &run_id, Some(&receipt))
+            .await
+            .expect("the next round checkpoints over the seeded base")
+            .expect("a durable session writes a provisional tail");
+        assert_eq!(
+            continued
+                .whole_blob()
+                .map(meerkat_core::WholeBlobProvisionalTailAuthority::candidate_sequence),
+            Some(2),
+            "the resumed run continues the tail's candidate sequence"
+        );
+    }
+
+    /// With the session's runtime machine bound, a continuation the
+    /// registration does not mark is refused as held for recovery and makes
+    /// the registration reload, while the marked run continues without one.
+    /// Unrun: written while Cargo is not run.
+    #[tokio::test]
+    async fn an_unmarked_continuation_reloads_the_bound_registration() {
+        let runtime_store = Arc::new(InMemoryRuntimeStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::new(MemoryStore::new()),
+            runtime_store,
+            memory_blob_store(),
+        );
+        let created = service
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
+            .await
+            .expect("create_session should succeed");
+        let id = &created.session_id;
+        let machine = service
+            .canonical_runtime_adapter()
+            .expect("the service binds its runtime machine");
+        machine
+            .register_session(id.clone())
+            .await
+            .expect("the session registers on the bound machine");
+        assert_eq!(machine.reload_required_session_count(), Some(0));
+        let seed = continued_whole_blob_run(&service, id, true).await;
+        let run_id = seed.run_id.clone();
+
+        let continued = service
+            .resolve_marked_run_after_recovery(
+                id,
+                true,
+                Some(&run_id),
+                Ok(ResumeBoundaryRecovery::Continue(seed.clone())),
+            )
+            .await
+            .expect("the marked run continues");
+        assert!(continued.is_some());
+        assert_eq!(
+            machine.reload_required_session_count(),
+            Some(0),
+            "the marked run continues without a reload"
+        );
+
+        let refused = service
+            .resolve_marked_run_after_recovery(
+                id,
+                true,
+                None,
+                Ok(ResumeBoundaryRecovery::Continue(seed)),
+            )
+            .await
+            .expect_err("a continuation nothing marks is refused");
+        assert!(matches!(
+            refused,
+            SessionError::DurableTailHeldForRecovery { .. }
+        ));
+        assert_eq!(
+            machine.reload_required_session_count(),
+            Some(1),
+            "the registration that did not mark the run reloads"
+        );
     }
 
     #[tokio::test]
@@ -40046,6 +45975,12 @@ mod tests {
             whole_blob_base_authority: std::sync::Mutex::new(None),
             latest_run_checkpoint_receipt: Mutex::new(None),
             latest_run_transcript_retirement: std::sync::Mutex::new(None),
+            live_deferred_turn_state: std::sync::OnceLock::new(),
+            unattached_deferred_checkpoint_warned: std::sync::atomic::AtomicBool::new(false),
+            rebased_run: std::sync::Mutex::new(None),
+            latest_run_checkpoint_cursor: std::sync::Mutex::new(None),
+            rebase_outcome_unknown: std::sync::Mutex::new(None),
+            rewrite_audit: None,
         });
         service
             .live_checkpointers
@@ -43911,6 +49846,97 @@ mod tests {
         );
     }
 
+    /// The non-waiting turn boundary lease and controller pin: while the
+    /// boundary is held (as a running turn holds it) both answer at once that
+    /// it is held and ask nothing of the actor; once it is free the lease is
+    /// taken for the exact actor and the pin reaches it; an actor that is no
+    /// longer current gets no lease.
+    #[tokio::test]
+    async fn try_lease_answers_busy_while_the_turn_boundary_is_held_and_leases_when_free() {
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::new(MemoryStore::new()),
+            Arc::new(InMemoryRuntimeStore::new()),
+            memory_blob_store(),
+        );
+        let actor_slot = LiveSessionActorWitnessSlot::default();
+        let admission = service
+            .reserve_create_session_admission()
+            .await
+            .expect("reserve admission");
+        let session_id = service
+            .create_session_with_reserved_admission_and_actor_witness(
+                create_request_with_metadata("member", InitialTurnPolicy::Defer),
+                admission,
+                &actor_slot,
+            )
+            .await
+            .expect("create member")
+            .session_id;
+        let actor = actor_slot.witness().expect("exact witness");
+
+        let held = service
+            .acquire_runtime_turn_finalization_guard(&session_id)
+            .await;
+        let busy = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            service.try_acquire_live_session_actor_turn_boundary_lease_exact(&actor),
+        )
+        .await
+        .expect("a held boundary is never waited for");
+        assert!(matches!(busy, Err(crate::TurnBoundaryHeld)));
+        let pin = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            service.try_pin_controller_client_for_actor(&actor),
+        )
+        .await
+        .expect("a held boundary is never waited for");
+        assert!(matches!(
+            pin,
+            Err(crate::TryPinControllerError::TurnBoundaryHeld)
+        ));
+        drop(held);
+
+        let lease = service
+            .try_acquire_live_session_actor_turn_boundary_lease_exact(&actor)
+            .await
+            .expect("a free boundary is taken")
+            .expect("the exact current actor");
+        assert!(lease.witness() == &actor);
+        drop(lease);
+        let pin = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            service.try_pin_controller_client_for_actor(&actor),
+        )
+        .await
+        .expect("a free boundary is never waited for");
+        assert!(
+            !matches!(pin, Err(crate::TryPinControllerError::TurnBoundaryHeld)),
+            "a free boundary reaches the actor"
+        );
+
+        let lease = service
+            .acquire_live_session_actor_turn_boundary_lease(&session_id)
+            .await
+            .expect("hold the boundary to discard");
+        assert!(
+            service
+                .discard_live_session_actor(&lease)
+                .await
+                .expect("discard the exact actor")
+        );
+        drop(lease);
+        assert!(
+            service
+                .try_acquire_live_session_actor_turn_boundary_lease_exact(&actor)
+                .await
+                .expect("a free boundary is taken")
+                .is_none(),
+            "an actor that is no longer current gets no lease"
+        );
+    }
+
     /// The live MCP attachment entry reaches only the exact current actor:
     /// the current actor's own agent answers (this dummy agent has no live
     /// attachment surface); a member whose turn boundary is held refuses a
@@ -46429,7 +52455,12 @@ mod tests {
             .await;
         assert!(is_conflict(&seed), "actor seeding must refuse: {seed:?}");
         let archive_check = service
-            .reject_archived_resume_under_recovery_gate(&session_id, Some(&observation), false)
+            .reject_archived_resume_under_recovery_gate(
+                &session_id,
+                Some(&observation),
+                None,
+                false,
+            )
             .await;
         assert!(
             is_conflict(&archive_check),
@@ -46842,30 +52873,42 @@ mod tests {
         );
     }
 
+    /// Live presence classifies live authority from bounded facts and reads
+    /// no committed body, so an authority read a writer's commit superseded
+    /// meets no head conflict: the presence answer needs no re-read.
     #[tokio::test]
-    async fn live_presence_observation_retries_a_head_advance_under_turn_boundary() {
+    async fn live_presence_observation_reads_no_body_under_a_head_advance() {
         let (runtime_store, service, session_id, superseded, _storage_dir) =
             stale_authority_observation_fixture().await;
         runtime_store.serve_stale_authority(superseded, 2);
         assert!(
-            service
-                .has_live_session(&session_id)
-                .await
-                .expect("live presence must re-observe a concurrently advanced head")
+            service.has_live_session(&session_id).await.expect(
+                "live presence reads no body, so a concurrently advanced head is no conflict"
+            )
         );
-        assert_eq!(runtime_store.stale_reads_served(), 2);
+        assert!(
+            runtime_store.stale_reads_served() >= 1,
+            "instrument honesty: the presence read met the superseded authority"
+        );
     }
 
+    /// However long a run of superseded authority reads lasts, live presence
+    /// answers without spending an observation budget on conflicts.
     #[tokio::test]
-    async fn live_presence_observation_preserves_the_finite_conflict_budget() {
+    async fn live_presence_observation_answers_through_superseded_authority_reads() {
         let (runtime_store, service, session_id, superseded, _storage_dir) =
             stale_authority_observation_fixture().await;
         runtime_store.serve_stale_authority(superseded, 2 * OBSERVATION_LOAD_ATTEMPTS + 4);
-        let result = service.has_live_session(&session_id).await;
-        assert!(PersistentSessionService::<DummyBuilder>::is_transcript_revision_conflict(&result));
-        assert_eq!(
-            runtime_store.stale_reads_served(),
-            2 * OBSERVATION_LOAD_ATTEMPTS
+        assert!(
+            service
+                .has_live_session(&session_id)
+                .await
+                .expect("live presence reads no body")
+        );
+        assert!(
+            runtime_store.stale_reads_served() < OBSERVATION_LOAD_ATTEMPTS,
+            "no conflict retries were spent: {}",
+            runtime_store.stale_reads_served()
         );
     }
 
@@ -46883,8 +52926,14 @@ mod tests {
         )
         .await
         .expect("the boundary-owned read must not wait on itself");
-        assert!(PersistentSessionService::<DummyBuilder>::is_transcript_revision_conflict(&result));
-        assert_eq!(runtime_store.stale_reads_served(), 2);
+        assert!(
+            result.expect("the boundary-owned presence read reads no body"),
+            "the live actor is present"
+        );
+        assert!(
+            runtime_store.stale_reads_served() >= 1,
+            "instrument honesty: the presence read met the superseded authority"
+        );
     }
 
     /// #1104: the budget is counted, not timed, and it is finite: once spent,

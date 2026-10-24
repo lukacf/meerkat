@@ -341,12 +341,78 @@ pub trait SessionCheckpointer: Send + Sync {
     /// The actor removes its retained copy before awaiting and installs only a
     /// successfully returned successor, so cancellation or error cannot promote
     /// stale physical state.
+    ///
+    /// The agent calls it twice in every tool round of a run (the round's
+    /// commits, which carry the session's run cursor), once more when the run
+    /// ends without an end-of-run save (a closing checkpoint without the
+    /// cursor), and for its end-of-run save. `Ok(None)` means nothing was
+    /// made durable: a round's first commit that gets it fails the round
+    /// before any of its tools runs. Only a session that never committed a
+    /// boundary has no base to chain a provisional tail from.
     async fn checkpoint_run(
         &self,
         session: &mut crate::Session,
         run_id: &RunId,
         previous: Option<&RunCheckpointReceipt>,
     ) -> Result<Option<RunCheckpointReceipt>, AgentError>;
+
+    /// Whether this checkpointer re-bases a run whose transcript a compaction
+    /// rewrote ([`Self::rebase_run`]).
+    ///
+    /// A session recovered only from strict continuations of its committed
+    /// transcript (WholeBlob) cannot take a plain round commit after a
+    /// rewrite: recovery would refuse the tail. A checkpointer that answers
+    /// `true` turns the run's first round commit after a rewrite into a
+    /// re-base. The default answers `false`: such a run then takes no round
+    /// commit after its first rewrite, and its last round commit before it
+    /// stays its resume point.
+    fn rebases_runs(&self) -> bool {
+        false
+    }
+
+    /// Write a run's checkpoint as a re-base, in one store call: the
+    /// session, without its run cursor, becomes the session's committed
+    /// base, and the run's provisional tail restarts on it as the same
+    /// document, with the cursor when the session carries one (a round
+    /// commit) and without it otherwise (an end-of-run or closing save).
+    ///
+    /// The agent asks, when [`Self::rebases_runs`] answers `true`, for the
+    /// run's first round commit or save after a rewrite of a session
+    /// recovered only from strict continuations. `previous` is the run's
+    /// latest receipt, if any; the returned receipt names the new tail, with
+    /// candidate sequence 1 on the new base, and the run's next checkpoints
+    /// chain from it. Any error fails the write: a round whose first commit
+    /// fails dispatches nothing.
+    async fn rebase_run(
+        &self,
+        session: &mut crate::Session,
+        _run_id: &RunId,
+        _previous: Option<&RunCheckpointReceipt>,
+    ) -> Result<RunCheckpointReceipt, AgentError> {
+        Err(AgentError::InternalError(format!(
+            "the session checkpointer of session {} does not re-base runs",
+            session.id()
+        )))
+    }
+
+    /// Whether this writer may still act on the session now.
+    ///
+    /// A checkpointer over a host store answers from its fence handle's
+    /// self-fence window: past it, another process may already own the
+    /// session, and nothing this process dispatches may run. The agent asks
+    /// right before each model request, right after a tool round's first
+    /// commit, before any tool of the round is admitted, and right before
+    /// each tool call starts, because a pause between a commit and a
+    /// dispatch writes nothing that would meet the write path's own fence
+    /// check. An error stops the run there, as a refused commit does: no
+    /// later call of the round starts and the round's results are not
+    /// committed. Return the teardown-required class
+    /// ([`AgentError::session_durable_projection_authority_unknown`]) so the
+    /// live actor reloads instead of continuing on stale authority. Called
+    /// synchronously, with no I/O. The default allows.
+    fn dispatch_fence_check(&self) -> Result<(), AgentError> {
+        Ok(())
+    }
 
     /// Record how far the live session retired its transcript history once
     /// this run's latest checkpoint moved the durable head over its rewrites.

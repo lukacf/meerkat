@@ -415,8 +415,9 @@ Use `schedule/occurrences` or `GET /schedules/{id}/occurrences` to inspect what 
 The store issues a fenced executor lease to one driver incarnation. Only that
 lease holder can plan or claim firing work. A standby driver reports a healthy
 non-authorized tick and can take over after release or expiry. The default
-occurrence claim lease is 60 seconds; a long delivery renews it around the
-half-lease point.
+occurrence claim lease is 60 seconds. A delivery renews it around the
+half-lease point while the target admits it and while it runs, so a slow
+admission keeps its claim too.
 
 Each dispatch also carries a stable occurrence-level delivery identity. If
 target admission succeeds but recording the receipt fails, a later reclaim
@@ -440,12 +441,16 @@ ends `misfired`. When an earlier attempt did record its dispatch:
   `skip_if_running`: a redelivery starts no new run. After five lost
   executors it ends `delivery_failed` with `lease_lost`. A target that no
   longer knows the admitted input (a row that recovery discarded) ends it
-  `delivery_failed`, with nothing admitted. A host runnable keeps no
-  admission record and runs again: for host runnables the guarantee is
-  at-least-once, and the runnable must deduplicate on its
-  `delivery_idempotency_key`. A custom target delivery that keeps the default
-  redelivery relies on its own durable deduplication of the delivery
-  identity.
+  `delivery_failed` with failure class `runtime_rejected`, though nothing
+  was rejected, and nothing is admitted. An identity target that no longer
+  resolves to a session ends it the same way. A target that answers that it
+  never admitted a delivery whose admission is recorded breaks the
+  redelivery contract: the occurrence ends `delivery_failed` with
+  `internal_error`. A host runnable keeps no admission record and runs
+  again: for host runnables the guarantee is at-least-once, and the
+  runnable must deduplicate on its `delivery_idempotency_key`. A custom
+  target delivery that keeps the default redelivery relies on its own
+  durable deduplication of the delivery identity.
 - With only a recorded dispatch start, a reclaim past the deadline asks the
   target, a busy one too, whether it admitted the delivery. If it did, the
   occurrence records that input's outcome; if not, it ends `misfired`, and
@@ -457,7 +462,16 @@ ends `misfired`. When an earlier attempt did record its dispatch:
 With a runtime that keeps no store, an input that completed and was archived
 looks the same as one that was never admitted: a late redelivery with only a
 recorded dispatch start then ends `misfired`, and one with a recorded
-admission ends `delivery_failed`.
+admission ends `delivery_failed` with `runtime_rejected`.
+
+A redelivery follows `missing_target_policy` like any claim. When the target
+probe finds the target missing, the occurrence ends `skipped` (`skip`) or
+`misfired` (`mark_misfired`) with failure class `target_missing`, before the
+target is asked about the earlier admission. For a redelivery with a
+recorded admission, neither ending means that the delivery never ran: its
+`attempt_count` shows the reclaim, and the occurrence's receipt history
+(`ScheduleStore::list_receipts`) keeps the earlier attempt's
+`dispatch_accepted` receipt.
 
 Poisoned schedule and occurrence rows are isolated as typed per-row faults so
 healthy rows can continue. Hosts should surface the driver fault report rather

@@ -1175,6 +1175,40 @@ impl Drop for OAuthDevicePollLease {
     }
 }
 
+/// What a browser-attempt start that failed left of the attempt it tried
+/// to admit. It speaks of this call's own attempt only: another attempt can
+/// be pending for the same target (one another start admitted, or one this
+/// start would have joined), and only a pending read or a logout answers for
+/// those.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OAuthStartAdmission {
+    /// This call admitted no attempt. It says nothing of another attempt
+    /// for the same target.
+    NotAdmitted,
+    /// This call admitted an attempt and retired it: its flow owner holds
+    /// nothing of it, durable state included.
+    Retired,
+    /// This call admitted an attempt its flow owner could not prove retired.
+    /// A cancel by this reference retires it.
+    RetirementUnconfirmed {
+        /// The attempt's non-secret reference.
+        attempt_ref: OAuthBrowserActionRef,
+    },
+    /// The flow owner cannot tell whether this call admitted an attempt, so
+    /// nothing is claimed either way.
+    Unknown,
+}
+
+/// A browser-attempt start that failed: the error it reports and what it
+/// left of the attempt it tried to admit ([`OAuthStartAdmission`]).
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error("{error}")]
+pub struct OAuthFlowStartFailure {
+    pub error: OAuthFlowError,
+    pub admission: OAuthStartAdmission,
+}
+
 pub trait OAuthFlowAuthority: Send + Sync {
     /// Matched credential publication capability of this flow owner. Payload-
     /// only registries cannot supply it. Hosts do not assemble unrelated pairs.
@@ -1212,6 +1246,39 @@ pub trait OAuthFlowAuthority: Send + Sync {
             operation: "admit_oauth_browser_flow",
             detail: "this flow owner does not retain OIDC nonces".to_owned(),
         })
+    }
+
+    /// [`start`](Self::start) that, when it fails, also says what it left of
+    /// the attempt it tried to admit. A flow owner that cannot tell answers
+    /// [`OAuthStartAdmission::Unknown`], never a claim it cannot prove.
+    fn start_with_admission(
+        &self,
+        target: AuthCredentialIdentity,
+        provider: OAuthBrowserFlowIdentity,
+        redirect_uri: String,
+        pkce_verifier: String,
+    ) -> Result<String, OAuthFlowStartFailure> {
+        self.start(target, provider, redirect_uri, pkce_verifier)
+            .map_err(|error| OAuthFlowStartFailure {
+                error,
+                admission: OAuthStartAdmission::Unknown,
+            })
+    }
+
+    /// Retire the browser attempts this owner holds for `target` without
+    /// their payload, for example one a start admitted and could not retire
+    /// after a later step failed. No callback can complete such an attempt,
+    /// yet it stays admitted, and a pending read does not report it. Each is
+    /// retired with any durable entry for it. `attempt_ref` narrows the
+    /// retirement to the attempt with that reference. Returns the references
+    /// of the attempts retired. An owner that holds no attempt apart from its
+    /// payload has none to retire.
+    fn retire_unpayloaded_browser_attempts(
+        &self,
+        _target: &AuthCredentialIdentity,
+        _attempt_ref: Option<&str>,
+    ) -> Result<Vec<OAuthBrowserActionRef>, OAuthFlowError> {
+        Ok(Vec::new())
     }
 
     fn verify(
@@ -1372,6 +1439,15 @@ impl OAuthFlowRegistry {
                     && matches!(record.provider, OAuthBrowserFlowIdentity::Connector { .. })
             })
             .cloned()
+    }
+
+    /// Whether this registry holds the browser payload admitted under
+    /// `state` for `target`, expired or not. It prunes nothing.
+    pub fn holds_browser_payload(&self, state: &str, target: &AuthCredentialIdentity) -> bool {
+        self.flows
+            .lock()
+            .get(state)
+            .is_some_and(|record| &record.target == target)
     }
 
     /// The newest unexpired connector browser attempt for `target`.
@@ -1733,6 +1809,22 @@ impl OAuthFlowAuthority for OAuthFlowRegistry {
     ) -> Result<String, OAuthFlowError> {
         self.start_with_pruned(target, provider, redirect_uri, pkce_verifier)
             .map(|(state, _)| state)
+    }
+
+    /// Exact for this registry: its start fails only before it inserts the
+    /// attempt's payload, and the payload is all it holds of an attempt.
+    fn start_with_admission(
+        &self,
+        target: AuthCredentialIdentity,
+        provider: OAuthBrowserFlowIdentity,
+        redirect_uri: String,
+        pkce_verifier: String,
+    ) -> Result<String, OAuthFlowStartFailure> {
+        <Self as OAuthFlowAuthority>::start(self, target, provider, redirect_uri, pkce_verifier)
+            .map_err(|error| OAuthFlowStartFailure {
+                error,
+                admission: OAuthStartAdmission::NotAdmitted,
+            })
     }
 
     fn start_with_nonce(
@@ -3130,6 +3222,173 @@ impl std::fmt::Debug for PersistedOAuthBrowserFlow {
 impl std::fmt::Debug for OAuthFlowRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OAuthFlowRegistry").finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod start_admission_tests {
+    use super::*;
+
+    const REDIRECT: &str = "http://127.0.0.1:12345/callback";
+
+    fn target() -> AuthCredentialIdentity {
+        AuthCredentialIdentity::Binding(meerkat_core::AuthBindingRef {
+            realm: meerkat_core::RealmId::parse("dev").expect("valid realm"),
+            binding: meerkat_core::BindingId::parse("start_admission").expect("valid binding"),
+            profile: None,
+            origin: meerkat_core::BindingOrigin::Configured,
+        })
+    }
+
+    fn connector() -> OAuthBrowserFlowIdentity {
+        crate::connector_oauth::ConnectorOAuthDescriptor::try_from(
+            crate::connector_oauth::ConnectorOAuthParameters {
+                issuer: "https://issuer.example".into(),
+                client: "client-id".into(),
+                resource: "https://mcp.example/mcp".into(),
+                scopes: ["mcp.read".into()].into(),
+                redirect_uri: REDIRECT.into(),
+                expected_account: "account-a".into(),
+                strategy_id: "authenticated-test-profile".into(),
+                client_auth_profile: None,
+                protocol: None,
+            },
+        )
+        .expect("valid descriptor")
+        .into()
+    }
+
+    fn failed_start() -> OAuthFlowError {
+        OAuthFlowError::PersistenceFailed {
+            operation: "admit_oauth_browser_flow",
+            detail: "a start that may have admitted".into(),
+        }
+    }
+
+    /// A flow owner that implements only the required methods, as one from
+    /// outside this crate does. Its start fails.
+    struct StartFailsOwner;
+
+    impl OAuthFlowAuthority for StartFailsOwner {
+        fn start(
+            &self,
+            _target: AuthCredentialIdentity,
+            _provider: OAuthBrowserFlowIdentity,
+            _redirect_uri: String,
+            _pkce_verifier: String,
+        ) -> Result<String, OAuthFlowError> {
+            Err(failed_start())
+        }
+
+        fn verify(
+            &self,
+            _state: &str,
+            _target: &AuthCredentialIdentity,
+            _provider: OAuthBrowserFlowIdentity,
+            _redirect_uri: &str,
+        ) -> Result<OAuthFlowRecord, OAuthFlowError> {
+            Err(OAuthFlowError::Missing)
+        }
+
+        fn consume(
+            &self,
+            _state: &str,
+            _target: &AuthCredentialIdentity,
+            _provider: OAuthBrowserFlowCompletion,
+            _redirect_uri: &str,
+        ) -> Result<OAuthFlowRecord, OAuthFlowError> {
+            Err(OAuthFlowError::Missing)
+        }
+
+        fn expire(
+            &self,
+            _state: &str,
+            _target: &AuthCredentialIdentity,
+            _provider: OAuthBrowserFlowIdentity,
+            _redirect_uri: &str,
+        ) -> Result<(), OAuthFlowError> {
+            Err(OAuthFlowError::Missing)
+        }
+
+        fn admit_device_code(
+            &self,
+            _target: AuthCredentialIdentity,
+            _provider: OAuthProviderIdentity,
+            _device_code: String,
+            _expires_in: Duration,
+        ) -> Result<(), OAuthFlowError> {
+            Err(OAuthFlowError::Missing)
+        }
+
+        fn verify_device_code(
+            &self,
+            _device_code: &str,
+            _target: &AuthCredentialIdentity,
+            _provider: OAuthProviderIdentity,
+        ) -> Result<OAuthDeviceFlowRecord, OAuthFlowError> {
+            Err(OAuthFlowError::Missing)
+        }
+
+        fn begin_device_code_poll(
+            &self,
+            _device_code: &str,
+            _target: &AuthCredentialIdentity,
+            _provider: OAuthProviderIdentity,
+        ) -> Result<OAuthDevicePollLease, OAuthFlowError> {
+            Err(OAuthFlowError::Missing)
+        }
+    }
+
+    /// A flow owner that does not answer for its start claims nothing: the
+    /// provided method reports the start's own error with `Unknown`, never
+    /// `NotAdmitted`, and it holds no attempt apart from a payload.
+    #[test]
+    fn a_flow_owner_without_its_own_answer_claims_nothing_about_a_failed_start() {
+        let failure = StartFailsOwner
+            .start_with_admission(target(), connector(), REDIRECT.into(), "verifier".into())
+            .expect_err("the start fails");
+        assert_eq!(
+            failure,
+            OAuthFlowStartFailure {
+                error: failed_start(),
+                admission: OAuthStartAdmission::Unknown,
+            }
+        );
+        assert_eq!(
+            StartFailsOwner.retire_unpayloaded_browser_attempts(&target(), None),
+            Ok(Vec::new())
+        );
+    }
+
+    /// The payload registry's start fails only before it holds anything of
+    /// the attempt: its failure admitted nothing.
+    #[test]
+    fn a_registry_start_that_fails_admitted_nothing() {
+        let registry = OAuthFlowRegistry::new(Duration::from_secs(60));
+        let failure = registry
+            .start_with_admission(
+                target(),
+                connector(),
+                "http://127.0.0.1:9/other".into(),
+                "verifier".into(),
+            )
+            .expect_err("another redirect than the descriptor's is refused");
+        assert_eq!(
+            failure,
+            OAuthFlowStartFailure {
+                error: OAuthFlowError::Connector(ConnectorOAuthRefusal::DescriptorMismatch),
+                admission: OAuthStartAdmission::NotAdmitted,
+            }
+        );
+        assert!(
+            registry.snapshot_for_persistence(0).browser.is_empty(),
+            "nothing of the refused attempt is held"
+        );
+        let state = registry
+            .start_with_admission(target(), connector(), REDIRECT.into(), "verifier".into())
+            .expect("the descriptor's own redirect is admitted");
+        assert!(registry.holds_browser_payload(&state, &target()));
     }
 }
 

@@ -49,8 +49,8 @@ use crate::session_runtime::live_orchestration::ExperimentalLiveChannelOpenError
 #[cfg(feature = "openai-live")]
 use crate::session_runtime::live_orchestration::ExperimentalLivePendingChannel;
 use crate::session_runtime::live_orchestration::{
-    LiveOrchestrator, LiveSeedWindow, LiveSessionIngressReconciler, LiveTransportContext,
-    RealtimeSessionOpenProjection, RealtimeSessionOpenProjectionError,
+    LiveOrchestrator, LiveSeedWindow, LiveSessionAddressing, LiveSessionIngressReconciler,
+    LiveTransportContext, RealtimeSessionOpenProjection, RealtimeSessionOpenProjectionError,
 };
 use crate::session_runtime::runtime_state::ArchiveRuntimeCleanup;
 use crate::{PersistentSessionService, SessionAgentBuilder, StagedSessionRegistry};
@@ -1641,6 +1641,9 @@ impl<B: SessionAgentBuilder + 'static> ServiceMemberLiveHost<B> {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .insert(session_id, actor_witness_slot);
             }),
+            // Bridge live commands are member-addressed: the member's mob
+            // checked the member before it asked this host.
+            session_addressing: LiveSessionAddressing::MobMember,
         }
     }
 

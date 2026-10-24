@@ -41,6 +41,11 @@ const RPC_OUTBOUND_MAX_ERROR_DATA_BYTES: usize = 1024 * 1024;
 const RPC_OUTBOUND_MAX_ERROR_MESSAGE_BYTES: usize = 4 * 1024;
 const RPC_OUTBOUND_MAX_METHOD_BYTES: usize = 256;
 const RPC_OUTBOUND_MAX_ID_BYTES: usize = 1024;
+const RPC_STREAM_TERMINAL_MAX_WIRE_BYTES: usize = 16 * 1024;
+const RPC_STREAM_TERMINAL_MAX_INFLIGHT: usize = 4096;
+// A control character can expand to six JSON bytes. Leave room for that
+// worst case as well as the fixed stream/session identifiers and envelope.
+const RPC_STREAM_TERMINAL_MAX_DETAIL_BYTES: usize = 1024;
 pub(crate) const RPC_CONTROL_ERROR_MAX_WIRE_BYTES: usize = 10 * 1024;
 pub(crate) const RPC_CONTROL_ERROR_MAX_INFLIGHT: usize = 512;
 pub(crate) const RPC_CONTROL_ERROR_WORST_CASE_BYTES: usize =
@@ -197,6 +202,92 @@ impl RpcOutboundAdmission {
     fn available_count(&self) -> usize {
         self.count_semaphore.available_permits()
     }
+
+    #[cfg(test)]
+    pub(crate) fn isolated_production() -> Self {
+        Self::new(
+            RPC_OUTBOUND_PROCESS_MEMORY_BUDGET_BYTES,
+            RPC_OUTBOUND_PROCESS_MAX_INFLIGHT,
+        )
+    }
+}
+
+/// Bounded terminal capacity, reserved before an event stream is opened.
+/// Data notifications cannot consume it. A reservation remains charged while
+/// the stream is active, while its terminal waits for queue capacity, and until
+/// the queued terminal is written or discarded by a closed transport.
+#[derive(Clone)]
+pub(crate) struct RpcStreamTerminalAdmission(RpcOutboundAdmission);
+
+pub(crate) struct RpcStreamTerminalReservation(Arc<RpcOutboundPermit>);
+
+impl RpcStreamTerminalAdmission {
+    pub(crate) fn production() -> Self {
+        static PROCESS_ADMISSION: OnceLock<RpcStreamTerminalAdmission> = OnceLock::new();
+        PROCESS_ADMISSION
+            .get_or_init(|| Self::new(RPC_STREAM_TERMINAL_MAX_INFLIGHT))
+            .clone()
+    }
+
+    pub(crate) fn new(max_inflight: usize) -> Self {
+        // At the 4096-stream production limit, the 64 KiB minimum charge and
+        // 4x multiplier yield a 1 GiB accounting ceiling. Semaphore permits
+        // represent admission units; they do not allocate payload buffers.
+        // Each serialized terminal is still bounded to 16 KiB.
+        Self(RpcOutboundAdmission::new(
+            max_inflight * RPC_OUTBOUND_MIN_CHARGE_BYTES * RPC_OUTBOUND_MEMORY_MULTIPLIER,
+            max_inflight,
+        ))
+    }
+
+    pub(crate) fn try_reserve(
+        &self,
+    ) -> Result<RpcStreamTerminalReservation, RpcOutboundAdmissionError> {
+        self.0
+            .try_admit(RPC_STREAM_TERMINAL_MAX_WIRE_BYTES)
+            .map(RpcStreamTerminalReservation)
+    }
+}
+
+impl RpcStreamTerminalReservation {
+    pub(crate) fn session_notification(
+        self,
+        params: &(impl Serialize + ?Sized),
+    ) -> Result<RpcNotification, RpcOutboundAdmissionError> {
+        self.notification("session/stream_end", params)
+    }
+
+    #[cfg(feature = "mob")]
+    pub(crate) fn mob_notification(
+        self,
+        params: &(impl Serialize + ?Sized),
+    ) -> Result<RpcNotification, RpcOutboundAdmissionError> {
+        self.notification("mob/stream_end", params)
+    }
+
+    fn notification(
+        self,
+        method: &str,
+        params: &(impl Serialize + ?Sized),
+    ) -> Result<RpcNotification, RpcOutboundAdmissionError> {
+        let envelope_bytes = RPC_OUTBOUND_ENVELOPE_SLACK_BYTES + method.len();
+        let payload_bytes =
+            bounded_json_size(params, RPC_STREAM_TERMINAL_MAX_WIRE_BYTES - envelope_bytes)?;
+        let params = serialize_raw_value_exact(params, payload_bytes)?;
+        Ok(RpcNotification {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            method: method.to_string(),
+            params,
+            outbound_permit: Some(self.0),
+        })
+    }
+}
+
+/// Terminal detail is diagnostic text, bounded before handing it to the
+/// stream machine. This keeps its authoritative effect within the reservation
+/// even when an event serializer returns an arbitrarily large error message.
+pub(crate) fn bounded_stream_terminal_detail(detail: Option<String>) -> Option<String> {
+    detail.map(|value| truncate_utf8(value, RPC_STREAM_TERMINAL_MAX_DETAIL_BYTES))
 }
 
 #[derive(Default)]
@@ -925,5 +1016,135 @@ mod tests {
         );
         assert!(response.id.is_none(), "oversized echo ids fail closed");
         assert!(serde_json::to_vec(&response).unwrap().len() <= RPC_CONTROL_ERROR_MAX_WIRE_BYTES);
+    }
+
+    #[test]
+    fn stream_terminal_production_limit_accepts_4096_and_reuses_released_slots() {
+        // Use the production constructor and limit on an isolated pool so this
+        // boundary test cannot exhaust other tests' process-wide admission.
+        let admission = RpcStreamTerminalAdmission::new(RPC_STREAM_TERMINAL_MAX_INFLIGHT);
+        let mut reservations = (0..4096)
+            .map(|_| {
+                admission
+                    .try_reserve()
+                    .expect("all 4096 streams must be admitted")
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            matches!(
+                admission.try_reserve(),
+                Err(RpcOutboundAdmissionError::Backpressured {
+                    max_inflight: 4096,
+                    ..
+                })
+            ),
+            "stream 4097 must be refused"
+        );
+        assert_eq!(admission.0.available_count(), 0);
+        assert_eq!(admission.0.available_memory_bytes(), 0);
+
+        let queued = reservations
+            .pop()
+            .unwrap()
+            .session_notification(&serde_json::json!({"ended": true, "outcome": "remote_end"}))
+            .expect("existing reservation can become a terminal while the pool is full");
+        assert!(
+            admission.try_reserve().is_err(),
+            "queued terminal still owns its slot"
+        );
+        drop(reservations.pop().unwrap());
+        assert_eq!(admission.0.available_count(), 1);
+        reservations.push(
+            admission
+                .try_reserve()
+                .expect("released active slot is reusable"),
+        );
+        assert!(admission.try_reserve().is_err());
+        drop(queued);
+        assert_eq!(admission.0.available_count(), 1);
+        reservations.push(
+            admission
+                .try_reserve()
+                .expect("written terminal slot is reusable"),
+        );
+        assert!(admission.try_reserve().is_err());
+
+        drop(reservations);
+        assert_eq!(admission.0.available_count(), 4096);
+        assert_eq!(
+            admission.0.available_memory_bytes(),
+            admission.0.capacity_bytes
+        );
+        let reused = (0..4096)
+            .map(|_| {
+                admission
+                    .try_reserve()
+                    .expect("every released slot is reusable")
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            admission.try_reserve(),
+            Err(RpcOutboundAdmissionError::Backpressured {
+                max_inflight: 4096,
+                ..
+            })
+        ));
+        drop(reused);
+        assert_eq!(admission.0.available_count(), 4096);
+        assert_eq!(
+            admission.0.available_memory_bytes(),
+            admission.0.capacity_bytes
+        );
+    }
+
+    #[test]
+    fn stream_terminal_reservations_cover_active_and_queued_obligations() {
+        let admission = RpcStreamTerminalAdmission::new(2);
+        let active = admission.try_reserve().expect("first stream reservation");
+        let queued = admission
+            .try_reserve()
+            .expect("second stream reservation")
+            .session_notification(&serde_json::json!({"ended": true, "outcome": "remote_end"}))
+            .expect("reserved terminal notification");
+        assert!(matches!(
+            admission.try_reserve(),
+            Err(RpcOutboundAdmissionError::Backpressured { .. })
+        ));
+        let queued_clone = queued.clone();
+        drop(queued);
+        assert!(
+            admission.try_reserve().is_err(),
+            "wire clones retain the reservation"
+        );
+        drop(queued_clone);
+        let next = admission
+            .try_reserve()
+            .expect("written terminal releases capacity");
+        drop(active);
+        drop(next);
+        assert_eq!(admission.0.available_count(), 2);
+    }
+
+    #[test]
+    fn stream_terminal_serialization_is_bounded_and_releases_rejected_reservations() {
+        let admission = RpcStreamTerminalAdmission::new(1);
+        let reservation = admission.try_reserve().expect("reservation");
+        assert!(matches!(
+            reservation.session_notification(&"x".repeat(RPC_STREAM_TERMINAL_MAX_WIRE_BYTES)),
+            Err(RpcOutboundAdmissionError::TooLarge { .. })
+        ));
+        let detail = bounded_stream_terminal_detail(Some("\u{1f600}".repeat(4096)))
+            .expect("bounded UTF-8 detail");
+        assert_eq!(detail.len(), RPC_STREAM_TERMINAL_MAX_DETAIL_BYTES);
+        let terminal = admission.try_reserve().expect("rejected serialization released capacity")
+            .session_notification(&serde_json::json!({
+                "stream_id": "00000000-0000-0000-0000-000000000001",
+                "session_id": "00000000-0000-0000-0000-000000000002",
+                "ended": true,
+                "outcome": "terminal_error",
+                "error": {"code": "stream_queue_overflow", "message": "\u{0000}".repeat(RPC_STREAM_TERMINAL_MAX_DETAIL_BYTES)}
+            }))
+            .expect("bounded diagnostic fits reservation");
+        assert!(serde_json::to_vec(&terminal).unwrap().len() <= RPC_STREAM_TERMINAL_MAX_WIRE_BYTES);
     }
 }

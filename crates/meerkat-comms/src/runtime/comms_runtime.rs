@@ -3237,7 +3237,7 @@ impl CommsRuntime {
     /// disposition for the late reply — the drain consumes and discards it
     /// instead of injecting bridge JSON into the session. Tombstones are
     /// removed on take or lazily evicted after
-    /// [`BRIDGE_REPLY_TOMBSTONE_TTL`] at the next registry write.
+    /// `BRIDGE_REPLY_TOMBSTONE_TTL` at the next registry write.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn tombstone_bridge_reply_waiter(&self, envelope_id: Uuid) {
         if let Some(entry) = self.bridge_reply_waiters.lock().get_mut(&envelope_id) {
@@ -3988,7 +3988,7 @@ impl CommsRuntime {
     }
 
     /// Release this runtime's published inproc route at a point the owner
-    /// chooses, instead of waiting for the last [`Arc`](std::sync::Arc) to drop.
+    /// chooses, instead of waiting for the last [`Arc`] to drop.
     ///
     /// A live participant name is never displaced, so a teardown that hands its
     /// name to a replacement in the same process has to *release* it. Route

@@ -18,21 +18,21 @@ use tokio_with_wasm::alias::sync::Mutex;
 
 use super::{
     AuthOAuthFlowSnapshotUpdate, CommittedWholeBlobProvisionalTail, CommittedWholeBlobSnapshot,
-    ContinuationAdmission, ContinuationAdmissionOutcome, ContinuationAdmissionTransition,
-    ContinuationKeyBinding, ExactInputStateObservation, FencedInputStateBatchCasOutcome,
-    FencedMachineLifecycleCasOutcome, InputStateBatchCasImplementationProfile,
-    InputStateBatchCasOutcome, InputStateRow, KeyedRuntimeDeliveryCasOutcome,
-    MachineLifecycleCasOutcome, MachineLifecycleCommit, MachineLifecycleExpectedVersion,
-    MachineLifecycleObservation, MachineLifecycleStoreRecord, PreparedRecoveryInputSnapshot,
-    PreparedRecoveryInputStateMutation, PreparedRuntimeSessionCommitResult,
-    PreparedWholeBlobProvisionalTail, PreparedWholeBlobRewriteStoreParts,
-    PreparedWholeBlobSnapshot, PreparedWholeBlobSnapshotCas, RecoveryInputSetRevision,
-    RecoveryInputStateMutation, RuntimeDeliveryAuthorityCasOutcome, RuntimeDeliveryAuthorityRecord,
-    RuntimeDeliveryStoreRecord, RuntimeSessionAuthority, RuntimeSessionAuthorityReadCost,
-    RuntimeSessionPersistenceProfile, RuntimeSessionResumeObservation, RuntimeStore,
-    RuntimeStoreError, RuntimeStoreWriteFence, RuntimeStoreWriteFenceOutcome,
-    SerializedSessionSnapshot, WholeBlobProvisionalTailAuthority, WholeBlobSnapshotCasOutcome,
-    WholeBlobStoreAuthority, classify_machine_lifecycle_record,
+    ContinuationAdmission, ContinuationAdmissionEntry, ContinuationAdmissionOutcome,
+    ContinuationAdmissionTransition, ContinuationKeyBinding, ExactInputStateObservation,
+    FencedInputStateBatchCasOutcome, FencedMachineLifecycleCasOutcome,
+    InputStateBatchCasImplementationProfile, InputStateBatchCasOutcome, InputStateRow,
+    KeyedRuntimeDeliveryCasOutcome, MachineLifecycleCasOutcome, MachineLifecycleCommit,
+    MachineLifecycleExpectedVersion, MachineLifecycleObservation, MachineLifecycleStoreRecord,
+    PreparedRecoveryInputSnapshot, PreparedRecoveryInputStateMutation,
+    PreparedRuntimeSessionCommitResult, PreparedWholeBlobProvisionalTail,
+    PreparedWholeBlobRewriteStoreParts, PreparedWholeBlobSnapshot, PreparedWholeBlobSnapshotCas,
+    RecoveryInputSetRevision, RecoveryInputStateMutation, RuntimeDeliveryAuthorityCasOutcome,
+    RuntimeDeliveryAuthorityRecord, RuntimeDeliveryStoreRecord, RuntimeSessionAuthority,
+    RuntimeSessionAuthorityReadCost, RuntimeSessionPersistenceProfile,
+    RuntimeSessionResumeObservation, RuntimeStore, RuntimeStoreError, RuntimeStoreWriteFence,
+    RuntimeStoreWriteFenceOutcome, SerializedSessionSnapshot, WholeBlobProvisionalTailAuthority,
+    WholeBlobSnapshotCasOutcome, WholeBlobStoreAuthority, classify_machine_lifecycle_record,
     complete_compaction_projection_intent, decoded_prepared_machine_lifecycle_replacement,
     execute_runtime_store_write_fence, parsed_whole_blob_snapshot, prepare_input_state_batch_cas,
     prepare_machine_lifecycle_replacement, prepare_recovery_input_state_mutations,
@@ -41,6 +41,12 @@ use super::{
 use crate::identifiers::{IdempotencyKey, LogicalRuntimeId};
 use crate::input_state::{InputStatePersistenceRecord, StoredInputState};
 use crate::ops_lifecycle::PersistedOpsSnapshot;
+
+pub(crate) mod journal;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod journal_image;
+
+use journal::{Group, Narrow, Tracked, TrackedSet, touch_runtime_entry};
 
 /// Receipt key: (runtime_id, run_id, sequence).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -73,56 +79,92 @@ type InputStateBatchCasTestBlock = (
 );
 
 /// Inner state protected by the mutex.
-#[derive(Debug, Default)]
+///
+/// Every map is [`Tracked`]: it reports the journal entries a mutation
+/// touches to the host store journal's change log (see [`journal`]); outside
+/// a capture it behaves as the plain map.
+#[derive(Debug)]
 struct Inner {
     /// runtime_id → (input_id → StoredInputState). IndexMap for deterministic iteration order.
-    input_states: HashMap<String, IndexMap<InputId, StoredInputState>>,
+    input_states: Tracked<String, IndexMap<InputId, StoredInputState>>,
     /// Runtime id → canonical owners of unfinished terminal work.
-    pending_terminal_owners: HashMap<String, BTreeSet<uuid::Uuid>>,
+    pending_terminal_owners: Tracked<String, BTreeSet<uuid::Uuid>>,
     /// Runtime id → canonical complete set of nonterminal input ids.
-    recovery_nonterminal_inputs: HashMap<String, BTreeSet<uuid::Uuid>>,
+    recovery_nonterminal_inputs: Tracked<String, BTreeSet<uuid::Uuid>>,
     /// Runtime id → store-owned revision bumped for every input-row mutation.
     ///
     /// Missing is canonical generation zero and remains a real absence fence.
-    recovery_input_set_revisions: HashMap<String, u64>,
+    recovery_input_set_revisions: Tracked<String, u64>,
     /// Runtime id → exact idempotency key → input id.
-    input_idempotency_index: HashMap<String, HashMap<String, InputId>>,
+    input_idempotency_index: Tracked<String, HashMap<String, InputId>>,
     /// Receipt storage.
-    receipts: HashMap<ReceiptKey, RunBoundaryReceipt>,
+    receipts: Tracked<ReceiptKey, RunBoundaryReceipt>,
     /// Exact machine-authorized recovery witness by runtime/candidate.
-    recovery_boundaries: HashMap<(String, String), super::CommittedRecoveryBoundary>,
+    recovery_boundaries: Tracked<(String, String), super::CommittedRecoveryBoundary>,
     /// Runtime session snapshots keyed by canonical runtime id.
-    sessions: HashMap<String, Arc<Vec<u8>>>,
+    sessions: Tracked<String, Arc<Vec<u8>>>,
     /// Fixed-size authority paired atomically with every WholeBlob snapshot.
-    session_authorities: HashMap<String, WholeBlobStoreAuthority>,
+    session_authorities: Tracked<String, WholeBlobStoreAuthority>,
     /// Body-free session listing/lifecycle projection.
-    session_catalog: HashMap<String, super::RuntimeSessionCatalogEntry>,
+    session_catalog: Tracked<String, super::RuntimeSessionCatalogEntry>,
     /// Store-owned provisional candidate body and exact base/run identity.
-    whole_blob_provisional_tails: HashMap<String, StoredWholeBlobProvisionalTail>,
+    whole_blob_provisional_tails: Tracked<String, StoredWholeBlobProvisionalTail>,
     /// Canonical runtime ids whose projection fallback is quarantined.
     ///
     /// Mirrors the durable SQLite `runtime_projection_quarantine` table: set
     /// when a rejected runtime snapshot is cleared via
     /// `clear_session_snapshot_if_current`, cleared whenever a live snapshot is
     /// written for the runtime.
-    projection_quarantine: HashSet<String>,
+    projection_quarantine: TrackedSet<String>,
     /// Exact persisted machine-lifecycle bytes. Raw storage is required so
     /// malformed and unsupported rows remain observable instead of being
     /// normalized by an eager typed decode.
-    runtime_lifecycle: HashMap<String, Vec<u8>>,
+    runtime_lifecycle: Tracked<String, Vec<u8>>,
     /// Durable semantic high-water for peer-only member sessions. Runtime
     /// bearer tokens are deliberately never persisted here.
     direct_member_incarnation_high_waters:
-        HashMap<String, meerkat_contracts::wire::supervisor_bridge::BridgeDirectMemberIncarnation>,
+        Tracked<String, meerkat_contracts::wire::supervisor_bridge::BridgeDirectMemberIncarnation>,
     /// Runtime id -> transcript-rewrite-keyed compaction projection outbox.
     compaction_projection_outbox:
-        HashMap<String, HashMap<meerkat_core::CompactionProjectionId, CompactionOutboxEntry>>,
+        Tracked<String, HashMap<meerkat_core::CompactionProjectionId, CompactionOutboxEntry>>,
     /// Exact generated runtime-delivery authority by logical runtime.
-    runtime_delivery_authority: HashMap<String, RuntimeDeliveryAuthorityRecord>,
+    runtime_delivery_authority: Tracked<String, RuntimeDeliveryAuthorityRecord>,
     /// Durable runtime-delivery rows ordered by generated sequence.
-    runtime_delivery_records: HashMap<String, BTreeMap<u64, RuntimeDeliveryStoreRecord>>,
-    continuation_key_bindings: HashMap<(String, String), ContinuationKeyBinding>,
-    continuation_admissions: HashMap<(String, String), ContinuationAdmission>,
+    runtime_delivery_records: Tracked<String, BTreeMap<u64, RuntimeDeliveryStoreRecord>>,
+    continuation_key_bindings: Tracked<(String, String), ContinuationKeyBinding>,
+    continuation_admissions: Tracked<(String, String), ContinuationAdmission>,
+}
+
+impl Default for Inner {
+    fn default() -> Self {
+        use journal::{
+            key_binding, member_high_water, receipt_entry, runtime_pair_entry, whole_runtime,
+        };
+        Self {
+            input_states: Tracked::new(Group::InputStates, whole_runtime),
+            pending_terminal_owners: Tracked::new(Group::PendingOwners, whole_runtime),
+            recovery_nonterminal_inputs: Tracked::new(Group::Nonterminal, whole_runtime),
+            recovery_input_set_revisions: Tracked::new(Group::InputSetRevision, whole_runtime),
+            input_idempotency_index: Tracked::new(Group::IdempotencyIndex, whole_runtime),
+            receipts: Tracked::new(Group::Receipts, receipt_entry),
+            recovery_boundaries: Tracked::new(Group::RecoveryBoundaries, runtime_pair_entry),
+            sessions: Tracked::new(Group::Sessions, whole_runtime),
+            session_authorities: Tracked::new(Group::SessionAuthorities, whole_runtime),
+            session_catalog: Tracked::new(Group::Catalog, whole_runtime),
+            whole_blob_provisional_tails: Tracked::new(Group::ProvisionalTails, whole_runtime),
+            projection_quarantine: TrackedSet::new(Group::Quarantine, whole_runtime),
+            runtime_lifecycle: Tracked::new(Group::Lifecycle, whole_runtime),
+            direct_member_incarnation_high_waters: Tracked::new(
+                Group::MemberHighWaters,
+                member_high_water,
+            ),
+            compaction_projection_outbox: Tracked::new(Group::CompactionOutbox, whole_runtime),
+            runtime_delivery_authority: Tracked::new(Group::DeliveryAuthority, whole_runtime),
+            runtime_delivery_records: Tracked::new(Group::DeliveryRecords, whole_runtime),
+            continuation_key_bindings: Tracked::new(Group::KeyBindings, key_binding),
+            continuation_admissions: Tracked::new(Group::Admissions, runtime_pair_entry),
+        }
+    }
 }
 
 struct MemoryControllerCustody<'a> {
@@ -216,7 +258,10 @@ fn store_input_state_prechecked(
     bundle: StoredInputState,
     next_revision: u64,
 ) {
+    // The journal records the exact input row and index keys this changes.
+    let _narrow = Narrow::begin(&[Group::InputStates, Group::IdempotencyIndex]);
     let input_id = bundle.state.input_id.clone();
+    touch_runtime_entry(runtime_id, Group::InputStates, || input_id.0.to_string());
     let new_idempotency_key = bundle
         .state
         .idempotency_key
@@ -269,6 +314,7 @@ fn store_input_state_prechecked(
         {
             if index.get(&old_key) == Some(&input_id) {
                 index.remove(&old_key);
+                touch_runtime_entry(runtime_id, Group::IdempotencyIndex, || old_key.clone());
             }
             index.is_empty()
         } else {
@@ -278,6 +324,7 @@ fn store_input_state_prechecked(
             inner.input_idempotency_index.remove(runtime_id);
         }
         if let Some(new_key) = new_idempotency_key {
+            touch_runtime_entry(runtime_id, Group::IdempotencyIndex, || new_key.clone());
             inner
                 .input_idempotency_index
                 .entry(runtime_id.to_string())
@@ -328,6 +375,9 @@ fn delete_input_state_prechecked(
     input_id: &InputId,
     next_revision: u64,
 ) {
+    // The journal records the exact input row and index key this removes.
+    let _narrow = Narrow::begin(&[Group::InputStates, Group::IdempotencyIndex]);
+    touch_runtime_entry(runtime_id, Group::InputStates, || input_id.0.to_string());
     let removed = inner
         .input_states
         .get_mut(runtime_id)
@@ -362,6 +412,7 @@ fn delete_input_state_prechecked(
     {
         if index.get(&key.0) == Some(input_id) {
             index.remove(&key.0);
+            touch_runtime_entry(runtime_id, Group::IdempotencyIndex, || key.0.clone());
         }
         index.is_empty()
     } else {
@@ -506,6 +557,9 @@ fn apply_prepared_memory_input_state_mutations(
     runtime_id: &str,
     prepared: Vec<PreparedMemoryInputStateMutation>,
 ) {
+    // The journal records the exact index keys this removes; the row
+    // helpers below record their own rows and keys.
+    let _narrow = Narrow::begin(&[Group::IdempotencyIndex]);
     let remove_empty_index = if let Some(index) = inner.input_idempotency_index.get_mut(runtime_id)
     {
         for mutation in &prepared {
@@ -521,6 +575,7 @@ fn apply_prepared_memory_input_state_mutations(
                 && index.get(old_key) == Some(input_id)
             {
                 index.remove(old_key);
+                touch_runtime_entry(runtime_id, Group::IdempotencyIndex, || old_key.to_string());
             }
         }
         index.is_empty()
@@ -552,13 +607,22 @@ fn apply_prepared_memory_input_state_mutations(
 /// would never wake. So this lock is a std mutex, held only for short sections
 /// that never await, and it never waits on `inner`. Lock order where both are
 /// needed (`commit_unregister_finalization`): `inner`, then this.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct OpsLifecycleState {
     /// Persisted ops lifecycle snapshots.
-    snapshots: HashMap<String, PersistedOpsSnapshot>,
+    snapshots: Tracked<String, PersistedOpsSnapshot>,
     /// Exact ops epochs retired by atomic unregister finalization. Tombstones
     /// outlive row deletion so detached callbacks cannot resurrect them.
-    retired_epochs: HashSet<(String, meerkat_core::RuntimeEpochId)>,
+    retired_epochs: TrackedSet<(String, meerkat_core::RuntimeEpochId)>,
+}
+
+impl Default for OpsLifecycleState {
+    fn default() -> Self {
+        Self {
+            snapshots: Tracked::new(Group::OpsSnapshots, journal::whole_runtime),
+            retired_epochs: TrackedSet::new(Group::OpsRetiredEpochs, journal::retired_epoch),
+        }
+    }
 }
 
 /// In-memory runtime store. Thread-safe via `tokio::sync::Mutex`, except the
@@ -1996,7 +2060,7 @@ impl super::RuntimeSessionAuthorityOps for InMemoryRuntimeStore {
                 // store lock released between attempts; the prepared
                 // snapshot stays here until an attempt commits it.
                 let mut pending = Some(prepared);
-                let mut retry = super::FenceBackoffRetry::default();
+                let mut retry = super::FenceBackoffRetry::for_fence(write_fence.as_deref());
                 loop {
                     let mut inner = self.inner.lock().await;
                     let session = pending
@@ -2606,28 +2670,29 @@ fn compare_and_swap_runtime_delivery_authority_locked(
             replacement.revision()
         )));
     }
-    if let Some(record) = inserted_delivery.as_ref() {
-        let records = inner
-            .runtime_delivery_records
-            .entry(runtime_id.0.clone())
-            .or_default();
-        if records.contains_key(&record.sequence())
+    if let Some(record) = inserted_delivery.as_ref()
+        && let Some(records) = inner.runtime_delivery_records.get(&runtime_id.0)
+        && (records.contains_key(&record.sequence())
             || records
                 .values()
-                .any(|existing| existing.delivery_id() == record.delivery_id())
-        {
-            return Err(RuntimeStoreError::WriteFailed(format!(
-                "runtime delivery row {} / sequence {} already exists",
-                record.delivery_id(),
-                record.sequence()
-            )));
-        }
+                .any(|existing| existing.delivery_id() == record.delivery_id()))
+    {
+        return Err(RuntimeStoreError::WriteFailed(format!(
+            "runtime delivery row {} / sequence {} already exists",
+            record.delivery_id(),
+            record.sequence()
+        )));
     }
 
     inner
         .runtime_delivery_authority
         .insert(runtime_id.0.clone(), replacement.clone());
     if let Some(record) = inserted_delivery {
+        // The journal records the one delivery row this adds.
+        let _narrow = Narrow::begin(&[Group::DeliveryRecords]);
+        touch_runtime_entry(&runtime_id.0, Group::DeliveryRecords, || {
+            record.sequence().to_string()
+        });
         inner
             .runtime_delivery_records
             .entry(runtime_id.0.clone())
@@ -2774,10 +2839,18 @@ impl RuntimeStore for InMemoryRuntimeStore {
         let Some(next) = transition.next(current.as_ref()) else {
             return Ok(ContinuationAdmissionOutcome::Rejected { current });
         };
-        inner
-            .continuation_admissions
-            .insert(entry_key, next.clone());
-        Ok(ContinuationAdmissionOutcome::Transitioned(next))
+        match next {
+            ContinuationAdmissionEntry::Holds(next) => {
+                inner
+                    .continuation_admissions
+                    .insert(entry_key, next.clone());
+                Ok(ContinuationAdmissionOutcome::Transitioned(next))
+            }
+            ContinuationAdmissionEntry::Released => {
+                inner.continuation_admissions.remove(&entry_key);
+                Ok(ContinuationAdmissionOutcome::Released)
+            }
+        }
     }
 
     async fn compare_and_swap_runtime_delivery_authority_with_key_binding(
@@ -2987,6 +3060,130 @@ impl RuntimeStore for InMemoryRuntimeStore {
             .insert(runtime_id.0.clone(), successor_catalog_entry);
         inner.projection_quarantine.remove(&runtime_id.0);
         Ok(successor)
+    }
+
+    fn supports_whole_blob_run_rebase(&self) -> bool {
+        true
+    }
+
+    async fn commit_prepared_whole_blob_run_rebase(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        rebase: super::PreparedWholeBlobRunRebaseStoreParts,
+    ) -> Result<super::WholeBlobRunRebaseOutcome, RuntimeStoreError> {
+        let (issued_committed, issued_tail) = rebase.issued_authorities()?;
+        let (
+            rewrite,
+            expected_tail,
+            _run_id,
+            _candidate_blob_sha256,
+            candidate_bytes,
+            conversation_digest,
+            message_count,
+            candidate_catalog_entry,
+            candidate_compaction_intents,
+        ) = rebase.into_parts();
+        let (
+            expected,
+            successor_session_id,
+            _successor_blob_sha256,
+            successor_bytes,
+            mut successor_catalog_entry,
+            compaction_projection_intents,
+        ) = rewrite.into_tuple();
+        if expected.session_id() != &successor_session_id
+            || &LogicalRuntimeId::for_session(&successor_session_id) != runtime_id
+            || candidate_catalog_entry.session_id() != &successor_session_id
+            || candidate_catalog_entry.persistence_profile()
+                != super::RuntimeSessionPersistenceProfile::WholeBlobV1
+            || u64::try_from(candidate_catalog_entry.message_count()).ok() != Some(message_count)
+        {
+            return Err(RuntimeStoreError::SessionPersistenceAuthorityConflict {
+                runtime_id: runtime_id.to_string(),
+                detail: "prepared WholeBlob re-base does not bind this runtime/session".to_string(),
+            });
+        }
+        let mut inner = self.inner.lock().await;
+        let current = inner.session_authorities.get(&runtime_id.0).cloned();
+        let current_tail = inner
+            .whole_blob_provisional_tails
+            .get(&runtime_id.0)
+            .map(|tail| tail.authority.clone());
+        if current.as_ref() == Some(&issued_committed)
+            && current_tail.as_ref() == Some(&issued_tail)
+        {
+            return Ok(super::WholeBlobRunRebaseOutcome::Applied {
+                committed: issued_committed,
+                tail: issued_tail,
+            });
+        }
+        if current.as_ref() != Some(&expected) || current_tail != expected_tail {
+            return Ok(super::WholeBlobRunRebaseOutcome::Stale);
+        }
+        // The re-base is the compaction's boundary: its intents enter the
+        // outbox here, unless the outbox already finalized one or holds it
+        // with other content.
+        if let Some(existing) = inner.compaction_projection_outbox.get(&runtime_id.0) {
+            for intent in &*compaction_projection_intents {
+                if let Some(entry) = existing.get(&intent.projection) {
+                    if entry.finalized {
+                        return Err(RuntimeStoreError::WriteFailed(format!(
+                            "WholeBlob re-base replays finalized compaction intent {}",
+                            intent.projection.revision()
+                        )));
+                    }
+                    if entry.intent != *intent {
+                        return Err(RuntimeStoreError::WriteFailed(format!(
+                            "conflicting compaction outbox intent for rewrite {}",
+                            intent.projection.revision()
+                        )));
+                    }
+                }
+            }
+        }
+        // Everything below is infallible under this lock: the successor, its
+        // outbox rows and the new tail land together or not at all.
+        successor_catalog_entry.set_runtime_state(
+            inner
+                .session_catalog
+                .get(&runtime_id.0)
+                .and_then(super::RuntimeSessionCatalogEntry::runtime_state),
+        );
+        inner.sessions.insert(runtime_id.0.clone(), successor_bytes);
+        inner
+            .session_authorities
+            .insert(runtime_id.0.clone(), issued_committed.clone());
+        inner
+            .session_catalog
+            .insert(runtime_id.0.clone(), successor_catalog_entry);
+        inner.projection_quarantine.remove(&runtime_id.0);
+        let outbox = inner
+            .compaction_projection_outbox
+            .entry(runtime_id.0.clone())
+            .or_default();
+        for intent in &*compaction_projection_intents {
+            outbox
+                .entry(intent.projection.clone())
+                .or_insert(CompactionOutboxEntry {
+                    intent: intent.clone(),
+                    finalized: false,
+                });
+        }
+        inner.whole_blob_provisional_tails.insert(
+            runtime_id.0.clone(),
+            StoredWholeBlobProvisionalTail {
+                authority: issued_tail.clone(),
+                candidate_bytes,
+                conversation_digest,
+                message_count,
+                catalog_entry: candidate_catalog_entry,
+                compaction_projection_intents: candidate_compaction_intents,
+            },
+        );
+        Ok(super::WholeBlobRunRebaseOutcome::Applied {
+            committed: issued_committed,
+            tail: issued_tail,
+        })
     }
 
     async fn atomic_apply(
@@ -3361,7 +3558,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
         }
 
         let mut inner = self.inner.lock().await;
-        let Some(states) = inner.input_states.get_mut(&runtime_id.0) else {
+        let Some(states) = inner.input_states.get(&runtime_id.0) else {
             return Ok(InputStateBatchCasOutcome::Stale);
         };
         let mut all_expected = true;
@@ -3423,7 +3620,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
     ) -> Result<FencedInputStateBatchCasOutcome, RuntimeStoreError> {
         // A fence that answers Backoff is tried again with the store lock
         // released between attempts; each attempt re-reads the rows.
-        let mut retry = super::FenceBackoffRetry::default();
+        let mut retry = super::FenceBackoffRetry::for_fence(Some(write_fence.as_ref()));
         loop {
             let prepared = prepare_input_state_batch_cas(expected, replacements)?;
             if prepared.is_empty() {
@@ -3431,7 +3628,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
             }
 
             let mut inner = self.inner.lock().await;
-            let Some(states) = inner.input_states.get_mut(&runtime_id.0) else {
+            let Some(states) = inner.input_states.get(&runtime_id.0) else {
                 return Ok(FencedInputStateBatchCasOutcome::Stale);
             };
             let mut all_expected = true;
@@ -3554,7 +3751,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
     ) -> Result<FencedInputStateBatchCasOutcome, RuntimeStoreError> {
         // A fence that answers Backoff is tried again with the store lock
         // released between attempts; each attempt re-reads the rows.
-        let mut retry = super::FenceBackoffRetry::default();
+        let mut retry = super::FenceBackoffRetry::for_fence(Some(write_fence.as_ref()));
         loop {
             let prepared = prepare_recovery_input_state_mutations(mutations)?;
             let mut inner = self.inner.lock().await;
@@ -3834,7 +4031,7 @@ impl RuntimeStore for InMemoryRuntimeStore {
             .fetch_add(1, Ordering::AcqRel);
         // A fence that answers Backoff is tried again with the store lock
         // released between attempts; each attempt re-reads the row.
-        let mut retry = super::FenceBackoffRetry::default();
+        let mut retry = super::FenceBackoffRetry::for_fence(Some(write_fence.as_ref()));
         loop {
             let replacement = prepare_machine_lifecycle_replacement(replacement.clone())?;
             let mut inner = self.inner.lock().await;
@@ -4616,6 +4813,82 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    /// Answers Backoff until `busy_for` has passed since its first call, as a
+    /// host store identity fence does while a slow host commit holds the
+    /// identity scope, and declares `bound` as its Backoff retry bound.
+    struct SlowCommitFence {
+        busy_until: std::sync::Mutex<Option<tokio::time::Instant>>,
+        busy_for: std::time::Duration,
+        bound: std::time::Duration,
+    }
+
+    impl RuntimeStoreWriteFence for SlowCommitFence {
+        fn execute_if_current(
+            &self,
+            operation: Box<dyn FnOnce() -> Result<(), RuntimeStoreError> + '_>,
+        ) -> Result<RuntimeStoreWriteFenceOutcome, RuntimeStoreError> {
+            let now = tokio::time::Instant::now();
+            let busy_until = *self
+                .busy_until
+                .lock()
+                .unwrap()
+                .get_or_insert(now + self.busy_for);
+            if now < busy_until {
+                return Ok(RuntimeStoreWriteFenceOutcome::Backoff {
+                    reason: "a host store commit is in flight".to_string(),
+                });
+            }
+            operation().map(|()| RuntimeStoreWriteFenceOutcome::Applied)
+        }
+
+        fn backoff_retry_bound(&self) -> std::time::Duration {
+            self.bound
+        }
+    }
+
+    // Unrun until the candidate's validation. A fenced write waits out a
+    // host commit slower than the default bound when the fence declares a
+    // longer one (a host store's declared longest commit), and backs off
+    // under the default.
+    #[tokio::test(start_paused = true)]
+    async fn a_fenced_write_waits_out_a_slow_commit_under_its_declared_bound() {
+        for (bound, admitted) in [
+            (std::time::Duration::from_secs(10), true),
+            (crate::store::FENCE_BACKOFF_RETRY_BOUND, false),
+        ] {
+            let store = InMemoryRuntimeStore::new();
+            let runtime_id = LogicalRuntimeId::new("fenced-slow-commit");
+            let fence = Arc::new(SlowCommitFence {
+                busy_until: std::sync::Mutex::new(None),
+                busy_for: std::time::Duration::from_secs(3),
+                bound,
+            });
+            let outcome = store
+                .compare_and_swap_machine_lifecycle_with_fence(
+                    &runtime_id,
+                    MachineLifecycleExpectedVersion::Missing,
+                    lifecycle_commit(&runtime_id, RuntimeState::Idle, 1, 1),
+                    fence,
+                )
+                .await
+                .unwrap();
+            if admitted {
+                assert!(
+                    matches!(outcome, FencedMachineLifecycleCasOutcome::Applied { .. }),
+                    "{outcome:?}"
+                );
+            } else {
+                assert!(
+                    matches!(
+                        outcome,
+                        FencedMachineLifecycleCasOutcome::FenceBackoff { .. }
+                    ),
+                    "{outcome:?}"
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -7364,6 +7637,478 @@ mod tests {
             store.load_session_snapshot(&rid).await.unwrap(),
             Some(Arc::new(second)),
             "length-equal but different content must mint a distinct store-owned authority"
+        );
+    }
+
+    // --- WholeBlob run re-base (unrun until the candidate's validation) -----
+
+    fn rebase_assistant(text: &str) -> meerkat_core::types::Message {
+        meerkat_core::types::Message::BlockAssistant(meerkat_core::types::BlockAssistantMessage {
+            blocks: vec![meerkat_core::types::AssistantBlock::Text {
+                text: text.to_string(),
+                meta: None,
+            }],
+            stop_reason: Some(meerkat_core::types::StopReason::EndTurn),
+            identity: meerkat_core::types::TranscriptMessageIdentity::default(),
+            created_at: meerkat_core::types::message_timestamp_now(),
+            assistant_message_id: None,
+        })
+    }
+
+    fn rebase_with_cursor(
+        mut session: meerkat_core::Session,
+        run_id: &RunId,
+        round: u64,
+    ) -> meerkat_core::Session {
+        session
+            .set_run_cursor(&meerkat_core::SessionRunCursor::new(
+                run_id.clone(),
+                Vec::new(),
+                round,
+                meerkat_core::RunResumePoint::AwaitingModel,
+            ))
+            .unwrap();
+        session
+    }
+
+    /// Compact the first two messages of `session` into one summary.
+    fn rebase_compact(
+        session: &meerkat_core::Session,
+    ) -> (meerkat_core::Session, meerkat_core::TranscriptRewriteCommit) {
+        let mut compacted = session.clone();
+        let parent = compacted.transcript_revision().unwrap();
+        let commit = compacted
+            .commit_transcript_rewrite(
+                meerkat_core::TranscriptRewriteSelection::MessageRange { start: 0, end: 2 },
+                vec![meerkat_core::types::Message::User(
+                    meerkat_core::types::UserMessage::compaction_summary("compacted context"),
+                )],
+                meerkat_core::TranscriptRewriteReason::new("compaction"),
+                Some("rebase-test".to_string()),
+                Some(parent),
+            )
+            .unwrap();
+        (compacted, commit)
+    }
+
+    async fn rebase_committed_payload(
+        store: &InMemoryRuntimeStore,
+        runtime_id: &LogicalRuntimeId,
+        session_id: &meerkat_core::types::SessionId,
+    ) -> super::super::VerifiedCommittedWholeBlobPayload {
+        let committed = store
+            .load_committed_whole_blob_snapshot(runtime_id)
+            .await
+            .unwrap()
+            .unwrap();
+        super::super::VerifiedCommittedWholeBlobPayload::from_committed(session_id, committed)
+            .unwrap()
+    }
+
+    /// A committed one-turn base, plus a run that appended a round after it
+    /// and wrote that round as its first provisional tail.
+    async fn rebase_run_with_tail(
+        store: &InMemoryRuntimeStore,
+    ) -> (
+        LogicalRuntimeId,
+        meerkat_core::Session,
+        RunId,
+        WholeBlobStoreAuthority,
+        WholeBlobProvisionalTailAuthority,
+    ) {
+        let mut original = meerkat_core::Session::new();
+        original.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage::text("hello".to_string()),
+        ));
+        original.push(rebase_assistant("verbose answer"));
+        let runtime_id = LogicalRuntimeId::for_session(original.id());
+        store
+            .commit_session_snapshot(
+                &runtime_id,
+                SerializedSessionSnapshot {
+                    session_snapshot: serde_json::to_vec(&original).unwrap().into(),
+                },
+            )
+            .await
+            .unwrap();
+        let base = rebase_committed_payload(store, &runtime_id, original.id())
+            .await
+            .store_authority()
+            .clone();
+        let run_id = RunId::new();
+        let mut live = original;
+        live.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage::text("next question".to_string()),
+        ));
+        live.push(rebase_assistant("another verbose answer"));
+        let live = rebase_with_cursor(live, &run_id, 0);
+        let first = super::super::PreparedWholeBlobProvisionalTail::prepare_from_session(
+            base.clone(),
+            run_id.clone(),
+            1,
+            &live,
+        )
+        .unwrap();
+        let tail = store
+            .write_prepared_whole_blob_provisional_tail(&runtime_id, first)
+            .await
+            .unwrap();
+        (runtime_id, live, run_id, base, tail)
+    }
+
+    #[tokio::test]
+    async fn a_run_rebase_commits_the_compacted_base_and_restarts_the_tail_together() {
+        let store = InMemoryRuntimeStore::new();
+        let (runtime_id, live, run_id, base, first_tail) = rebase_run_with_tail(&store).await;
+        // The compaction rewrites rows the run appended after the committed
+        // base: the rewrite proof binds rewrite occurrences only.
+        let (compacted, commit) = rebase_compact(&live);
+        let payload = rebase_committed_payload(&store, &runtime_id, live.id()).await;
+        let rebase = super::super::PreparedWholeBlobRunRebase::prepare(
+            payload,
+            Some(first_tail.clone()),
+            run_id.clone(),
+            compacted.clone(),
+            std::slice::from_ref(&commit),
+        )
+        .unwrap();
+        let outcome = store
+            .commit_prepared_whole_blob_run_rebase(&runtime_id, rebase.store_parts())
+            .await
+            .unwrap();
+        let super::super::WholeBlobRunRebaseOutcome::Applied { committed, tail } = outcome else {
+            unreachable!("the re-base applies");
+        };
+        assert_eq!(committed.store_revision(), base.store_revision() + 1);
+        assert_eq!(tail.base_store_revision(), committed.store_revision());
+        assert_eq!(tail.base_blob_sha256(), committed.blob_sha256());
+        assert_eq!(tail.run_id(), &run_id);
+        assert_eq!(tail.candidate_sequence(), 1);
+        // The committed body carries no cursor; the tail's candidate does.
+        let stored = store
+            .load_committed_whole_blob_snapshot(&runtime_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.authority(), &committed);
+        assert!(stored.session().try_run_cursor().unwrap().is_none());
+        assert_eq!(
+            stored.session().transcript_revision().unwrap(),
+            commit.revision
+        );
+        let loaded = store
+            .load_whole_blob_provisional_tail(&runtime_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.authority(), &tail);
+        let candidate =
+            meerkat_core::Session::from_persisted_bytes(loaded.candidate_bytes()).unwrap();
+        assert_eq!(
+            candidate
+                .try_run_cursor()
+                .unwrap()
+                .map(|cursor| cursor.run_id),
+            Some(run_id.clone())
+        );
+        // An exact replay answers the same pair and writes nothing.
+        let replay = store
+            .commit_prepared_whole_blob_run_rebase(&runtime_id, rebase.store_parts())
+            .await
+            .unwrap();
+        assert_eq!(
+            replay,
+            super::super::WholeBlobRunRebaseOutcome::Applied {
+                committed: committed.clone(),
+                tail: tail.clone(),
+            }
+        );
+        // The next round commit is a strict continuation of the new base.
+        let mut next = compacted;
+        next.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage::text("after the compaction".to_string()),
+        ));
+        let next = rebase_with_cursor(next, &run_id, 1);
+        let second = super::super::PreparedWholeBlobProvisionalTail::prepare_from_session(
+            committed.clone(),
+            run_id.clone(),
+            2,
+            &next,
+        )
+        .unwrap();
+        let second_tail = store
+            .write_prepared_whole_blob_provisional_tail(&runtime_id, second)
+            .await
+            .unwrap();
+        assert_eq!(
+            second_tail.base_store_revision(),
+            committed.store_revision()
+        );
+        assert_eq!(second_tail.candidate_sequence(), 2);
+        assert_ne!(
+            first_tail.base_store_revision(),
+            second_tail.base_store_revision()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_closing_save_rebases_one_cursorless_document_as_base_and_tail() {
+        let store = InMemoryRuntimeStore::new();
+        let (runtime_id, live, run_id, base, first_tail) = rebase_run_with_tail(&store).await;
+        // The run's last rewrite has no round commit after it: its closing
+        // save carries no cursor.
+        let (mut compacted, commit) = rebase_compact(&live);
+        compacted.clear_run_cursor();
+        // A cursor for another run is still refused.
+        let foreign = rebase_with_cursor(compacted.clone(), &RunId::new(), 0);
+        let payload = rebase_committed_payload(&store, &runtime_id, live.id()).await;
+        assert!(
+            super::super::PreparedWholeBlobRunRebase::prepare(
+                payload,
+                Some(first_tail.clone()),
+                run_id.clone(),
+                foreign,
+                std::slice::from_ref(&commit),
+            )
+            .is_err()
+        );
+        let payload = rebase_committed_payload(&store, &runtime_id, live.id()).await;
+        let rebase = super::super::PreparedWholeBlobRunRebase::prepare(
+            payload,
+            Some(first_tail),
+            run_id.clone(),
+            compacted,
+            std::slice::from_ref(&commit),
+        )
+        .unwrap();
+        let outcome = store
+            .commit_prepared_whole_blob_run_rebase(&runtime_id, rebase.store_parts())
+            .await
+            .unwrap();
+        let super::super::WholeBlobRunRebaseOutcome::Applied { committed, tail } = outcome else {
+            unreachable!("the closing save re-bases");
+        };
+        assert_eq!(committed.store_revision(), base.store_revision() + 1);
+        assert_eq!(tail.run_id(), &run_id);
+        assert_eq!(tail.candidate_sequence(), 1);
+        // One document: the tail's candidate is its base.
+        assert_eq!(tail.base_blob_sha256(), committed.blob_sha256());
+        assert_eq!(tail.candidate_blob_sha256(), committed.blob_sha256());
+        let loaded = store
+            .load_whole_blob_provisional_tail(&runtime_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let candidate =
+            meerkat_core::Session::from_persisted_bytes(loaded.candidate_bytes()).unwrap();
+        assert!(candidate.try_run_cursor().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_single_turn_closing_save_rebases_without_an_earlier_tail() {
+        let store = InMemoryRuntimeStore::new();
+        // A committed base and a single-turn run whose one boundary compacts:
+        // it wrote no round commit, so there is no tail before its closing
+        // save.
+        let mut original = meerkat_core::Session::new();
+        original.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage::text("hello".to_string()),
+        ));
+        original.push(rebase_assistant("verbose answer"));
+        let runtime_id = LogicalRuntimeId::for_session(original.id());
+        store
+            .commit_session_snapshot(
+                &runtime_id,
+                SerializedSessionSnapshot {
+                    session_snapshot: serde_json::to_vec(&original).unwrap().into(),
+                },
+            )
+            .await
+            .unwrap();
+        let base = rebase_committed_payload(&store, &runtime_id, original.id())
+            .await
+            .store_authority()
+            .clone();
+        let run_id = RunId::new();
+        let mut live = original;
+        live.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage::text("one long question".to_string()),
+        ));
+        live.push(rebase_assistant("the run's only answer"));
+        let (compacted, commit) = rebase_compact(&live);
+        assert!(compacted.try_run_cursor().unwrap().is_none());
+        let payload = rebase_committed_payload(&store, &runtime_id, live.id()).await;
+        let rebase = super::super::PreparedWholeBlobRunRebase::prepare(
+            payload,
+            None,
+            run_id.clone(),
+            compacted.clone(),
+            std::slice::from_ref(&commit),
+        )
+        .unwrap();
+        let outcome = store
+            .commit_prepared_whole_blob_run_rebase(&runtime_id, rebase.store_parts())
+            .await
+            .unwrap();
+        let super::super::WholeBlobRunRebaseOutcome::Applied { committed, tail } = outcome else {
+            unreachable!("the closing save re-bases on a fresh base");
+        };
+        assert_eq!(committed.store_revision(), base.store_revision() + 1);
+        assert_eq!(tail.run_id(), &run_id);
+        assert_eq!(tail.candidate_sequence(), 1);
+        assert_eq!(tail.base_blob_sha256(), committed.blob_sha256());
+        assert_eq!(tail.candidate_blob_sha256(), committed.blob_sha256());
+        let stored = store
+            .load_committed_whole_blob_snapshot(&runtime_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.session().messages(), compacted.messages());
+        let loaded = store
+            .load_whole_blob_provisional_tail(&runtime_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.authority(), &tail);
+        // An exact replay answers the same pair.
+        assert_eq!(
+            store
+                .commit_prepared_whole_blob_run_rebase(&runtime_id, rebase.store_parts())
+                .await
+                .unwrap(),
+            super::super::WholeBlobRunRebaseOutcome::Applied { committed, tail }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_rebase_is_stale_once_another_writer_moved_the_tail() {
+        let store = InMemoryRuntimeStore::new();
+        let (runtime_id, live, run_id, base, first_tail) = rebase_run_with_tail(&store).await;
+        let (compacted, commit) = rebase_compact(&live);
+        let payload = rebase_committed_payload(&store, &runtime_id, live.id()).await;
+        let rebase = super::super::PreparedWholeBlobRunRebase::prepare(
+            payload,
+            Some(first_tail),
+            run_id.clone(),
+            compacted.clone(),
+            std::slice::from_ref(&commit),
+        )
+        .unwrap();
+        // Another writer advances the tail before the re-base lands.
+        let mut moved = live.clone();
+        moved.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage::text("a racing round".to_string()),
+        ));
+        let moved = rebase_with_cursor(moved, &run_id, 1);
+        let racing = super::super::PreparedWholeBlobProvisionalTail::prepare_from_session(
+            base.clone(),
+            run_id.clone(),
+            2,
+            &moved,
+        )
+        .unwrap();
+        let racing_tail = store
+            .write_prepared_whole_blob_provisional_tail(&runtime_id, racing)
+            .await
+            .unwrap();
+        let outcome = store
+            .commit_prepared_whole_blob_run_rebase(&runtime_id, rebase.store_parts())
+            .await
+            .unwrap();
+        assert_eq!(outcome, super::super::WholeBlobRunRebaseOutcome::Stale);
+        // Nothing was written: the base and the racing tail stand.
+        let current = store
+            .load_whole_blob_store_authority(&runtime_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(current, base);
+        let loaded = store
+            .load_whole_blob_provisional_tail(&runtime_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.authority(), &racing_tail);
+        // A re-base that expects no tail while one exists is stale too.
+        let payload = rebase_committed_payload(&store, &runtime_id, live.id()).await;
+        let expects_none = super::super::PreparedWholeBlobRunRebase::prepare(
+            payload,
+            None,
+            run_id,
+            compacted,
+            std::slice::from_ref(&commit),
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .commit_prepared_whole_blob_run_rebase(&runtime_id, expects_none.store_parts())
+                .await
+                .unwrap(),
+            super::super::WholeBlobRunRebaseOutcome::Stale
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_run_rebase_leaves_the_base_and_the_tail_untouched() {
+        let store = InMemoryRuntimeStore::new();
+        // A session whose compaction intent already went through a boundary
+        // and was finalized.
+        let (session, intent) = session_with_compaction_intent();
+        let runtime_id = LogicalRuntimeId::for_session(session.id());
+        store
+            .atomic_apply(
+                &runtime_id,
+                Some(SerializedSessionSnapshot {
+                    session_snapshot: serde_json::to_vec(&session).unwrap().into(),
+                }),
+                make_receipt(RunId::new(), 0),
+                vec![],
+                Some(session.id().clone()),
+            )
+            .await
+            .unwrap();
+        store
+            .mark_compaction_projection_finalized(&runtime_id, &intent.projection)
+            .await
+            .unwrap();
+        let payload = rebase_committed_payload(&store, &runtime_id, session.id()).await;
+        let base = payload.store_authority().clone();
+        // A run whose live document still carries that finalized intent
+        // compacts again; its re-base must refuse after the CAS matched.
+        let run_id = RunId::new();
+        let mut live = session.clone();
+        live.push(rebase_assistant("a verbose answer"));
+        live.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage::text("one more".to_string()),
+        ));
+        let live = rebase_with_cursor(live, &run_id, 0);
+        let (compacted, commit) = rebase_compact(&live);
+        let rebase = super::super::PreparedWholeBlobRunRebase::prepare(
+            payload,
+            None,
+            run_id,
+            compacted,
+            std::slice::from_ref(&commit),
+        );
+        // The proof itself may refuse first; either way nothing may land.
+        if let Ok(rebase) = rebase {
+            let outcome = store
+                .commit_prepared_whole_blob_run_rebase(&runtime_id, rebase.store_parts())
+                .await;
+            assert!(outcome.is_err(), "a finalized intent refuses the re-base");
+        }
+        let current = store
+            .load_whole_blob_store_authority(&runtime_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(current, base, "never a committed re-base without its tail");
+        assert!(
+            store
+                .load_whole_blob_provisional_tail(&runtime_id)
+                .await
+                .unwrap()
+                .is_none()
         );
     }
 }

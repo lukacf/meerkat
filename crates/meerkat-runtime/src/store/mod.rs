@@ -12,6 +12,7 @@ pub use execution_custody::{
 };
 
 pub mod memory;
+pub mod spi;
 #[cfg(feature = "sqlite-store")]
 pub mod sqlite;
 #[cfg(any(test, feature = "test-support"))]
@@ -25,6 +26,7 @@ pub use test_faults::InputPersistAckLossFault;
 pub use meerkat_core::{HeadCanonicalProvisionalTailAuthority, WholeBlobProvisionalTailAuthority};
 pub use whole_blob_rewrite::{
     PreparedWholeBlobRewriteBoundary, PreparedWholeBlobRewriteStoreParts,
+    PreparedWholeBlobRunRebase, PreparedWholeBlobRunRebaseStoreParts,
     VerifiedCommittedWholeBlobPayload,
 };
 
@@ -44,6 +46,11 @@ const SUPERVISOR_MACHINE_LIFECYCLE_STORE_RECORD_VERSION: u16 = 2;
 const UNREGISTER_MACHINE_LIFECYCLE_STORE_RECORD_VERSION: u16 = 3;
 const RUN_MACHINE_LIFECYCLE_STORE_RECORD_VERSION: u16 = 4;
 pub(crate) const MACHINE_LIFECYCLE_STORE_RECORD_VERSION: u16 = 5;
+/// A record whose unregister progress keeps queued inputs for the next start.
+/// Only such records carry it, so a host that never requeues writes version
+/// 5 byte for byte, and an older reader refuses a requeue record as an
+/// unsupported version instead of stopping its kept inputs.
+pub(crate) const REQUEUE_MACHINE_LIFECYCLE_STORE_RECORD_VERSION: u16 = 6;
 
 /// Maximum number of exact input-state rows admitted by one compare-and-swap
 /// boundary. Directed-terminal outbox batches share the same 256-row bound as
@@ -2174,7 +2181,14 @@ pub struct PreparedDurableTailRecoverySource {
 
 /// How a recovery source's physical head relates to its committed runtime
 /// boundary, as the store proved it while loading the source.
+///
+/// Only the SQLite RuntimeStore adapter (`store/sqlite.rs`) loads a
+/// durable-tail source, through source constructors that exist only with
+/// `sqlite-store`; every other backend refuses the load. Without the
+/// feature the recovery code that reads a relation still compiles, but no
+/// relation is ever constructed, which is expected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(feature = "sqlite-store"), allow(dead_code))]
 pub(crate) enum DurableTailSourceRelation {
     /// The physical transcript keeps the boundary's exact rows as a prefix.
     StrictContinuation,
@@ -2988,10 +3002,13 @@ fn recovery_class_name(
             "interrupted_repairable_candidate"
         }
         DurableTailRecoveryClass::Ambiguous => "ambiguous",
+        // A retired runtime commits a continuable tail as interrupted, so a
+        // committed recovery can carry this class.
+        DurableTailRecoveryClass::ContinuableCandidate => "continuable_candidate",
     }
 }
 
-#[cfg(feature = "sqlite-store")]
+#[cfg(any(feature = "sqlite-store", not(target_arch = "wasm32")))]
 fn recovery_class_from_name(
     name: &str,
 ) -> Result<crate::meerkat_machine::dsl::DurableTailRecoveryClass, RuntimeStoreError> {
@@ -3002,6 +3019,7 @@ fn recovery_class_from_name(
             Ok(DurableTailRecoveryClass::InterruptedRepairableCandidate)
         }
         "ambiguous" => Ok(DurableTailRecoveryClass::Ambiguous),
+        "continuable_candidate" => Ok(DurableTailRecoveryClass::ContinuableCandidate),
         other => Err(RuntimeStoreError::ReadFailed(format!(
             "unknown committed recovery class '{other}'"
         ))),
@@ -3022,10 +3040,16 @@ fn recovery_disposition_name(
             "commit_completed_retain_inputs"
         }
         DurableTailRecoveryDisposition::HoldIntact => "hold_intact",
+        // Never committed: continuing a run writes nothing, so no committed
+        // recovery names it and `recovery_disposition_from_name` refuses it.
+        DurableTailRecoveryDisposition::ContinueRun => "continue_run",
+        DurableTailRecoveryDisposition::OperatorRepairAndCommitInterrupted => {
+            "operator_repair_and_commit_interrupted"
+        }
     }
 }
 
-#[cfg(feature = "sqlite-store")]
+#[cfg(any(feature = "sqlite-store", not(target_arch = "wasm32")))]
 fn recovery_disposition_from_name(
     name: &str,
 ) -> Result<crate::meerkat_machine::dsl::DurableTailRecoveryDisposition, RuntimeStoreError> {
@@ -3040,10 +3064,39 @@ fn recovery_disposition_from_name(
             Ok(DurableTailRecoveryDisposition::CommitCompletedRetainInputs)
         }
         "hold_intact" => Ok(DurableTailRecoveryDisposition::HoldIntact),
+        "operator_repair_and_commit_interrupted" => {
+            Ok(DurableTailRecoveryDisposition::OperatorRepairAndCommitInterrupted)
+        }
         other => Err(RuntimeStoreError::ReadFailed(format!(
             "unknown committed recovery disposition '{other}'"
         ))),
     }
+}
+
+/// Whether a committed recovery of `class` may realize `disposition`, as the
+/// generated authorization arms pair them. A retired runtime repairs a
+/// continuable candidate as interrupted, and an operator repairs an ambiguous
+/// one; nothing else commits those classes.
+fn recovery_class_realizes_disposition(
+    class: crate::meerkat_machine::dsl::DurableTailRecoveryClass,
+    disposition: crate::meerkat_machine::dsl::DurableTailRecoveryDisposition,
+) -> bool {
+    use crate::meerkat_machine::dsl::{DurableTailRecoveryClass, DurableTailRecoveryDisposition};
+    matches!(
+        (class, disposition),
+        (
+            DurableTailRecoveryClass::CompletedCandidate,
+            DurableTailRecoveryDisposition::CommitCompleted
+                | DurableTailRecoveryDisposition::CommitCompletedRetainInputs
+        ) | (
+            DurableTailRecoveryClass::InterruptedRepairableCandidate
+                | DurableTailRecoveryClass::ContinuableCandidate,
+            DurableTailRecoveryDisposition::RepairAndCommitInterrupted
+        ) | (
+            DurableTailRecoveryClass::Ambiguous,
+            DurableTailRecoveryDisposition::OperatorRepairAndCommitInterrupted
+        )
+    )
 }
 
 fn recovery_hash_part(hasher: &mut Sha256, label: &str, bytes: &[u8]) {
@@ -3393,7 +3446,7 @@ impl PreparedRecoveryInputUpdate {
         })
     }
 
-    #[cfg(feature = "sqlite-store")]
+    #[cfg(any(feature = "sqlite-store", not(target_arch = "wasm32")))]
     fn decode(
         input_id: InputId,
         expected_row_digest: String,
@@ -3622,17 +3675,7 @@ impl PreparedRecoveryEvidence {
                     .to_string(),
             ));
         }
-        let valid_disposition = matches!(
-            (class, disposition),
-            (
-                crate::meerkat_machine::dsl::DurableTailRecoveryClass::CompletedCandidate,
-                crate::meerkat_machine::dsl::DurableTailRecoveryDisposition::CommitCompleted
-                    | crate::meerkat_machine::dsl::DurableTailRecoveryDisposition::CommitCompletedRetainInputs
-            ) | (
-                crate::meerkat_machine::dsl::DurableTailRecoveryClass::InterruptedRepairableCandidate,
-                crate::meerkat_machine::dsl::DurableTailRecoveryDisposition::RepairAndCommitInterrupted
-            )
-        );
+        let valid_disposition = recovery_class_realizes_disposition(class, disposition);
         if !valid_disposition {
             return Err(conflict(format!(
                 "recovery class {} cannot realize disposition {}",
@@ -3824,17 +3867,7 @@ impl PreparedRecoveryEvidence {
                 recovered.id()
             )));
         }
-        let valid_disposition = matches!(
-            (class, disposition),
-            (
-                crate::meerkat_machine::dsl::DurableTailRecoveryClass::CompletedCandidate,
-                crate::meerkat_machine::dsl::DurableTailRecoveryDisposition::CommitCompleted
-                    | crate::meerkat_machine::dsl::DurableTailRecoveryDisposition::CommitCompletedRetainInputs
-            ) | (
-                crate::meerkat_machine::dsl::DurableTailRecoveryClass::InterruptedRepairableCandidate,
-                crate::meerkat_machine::dsl::DurableTailRecoveryDisposition::RepairAndCommitInterrupted
-            )
-        );
+        let valid_disposition = recovery_class_realizes_disposition(class, disposition);
         if !valid_disposition {
             return Err(conflict(format!(
                 "recovery class {} cannot realize disposition {}",
@@ -3842,8 +3875,11 @@ impl PreparedRecoveryEvidence {
                 recovery_disposition_name(disposition)
             )));
         }
-        match class {
-            crate::meerkat_machine::dsl::DurableTailRecoveryClass::CompletedCandidate => {
+        // The pairing above admits exactly the committing dispositions; each
+        // either promotes the exact candidate or installs a repaired artifact.
+        match disposition {
+            crate::meerkat_machine::dsl::DurableTailRecoveryDisposition::CommitCompleted
+            | crate::meerkat_machine::dsl::DurableTailRecoveryDisposition::CommitCompletedRetainInputs => {
                 if recovered_blob_sha256 != provisional_candidate_blob_sha256
                     || repaired_document.is_some()
                 {
@@ -3853,7 +3889,8 @@ impl PreparedRecoveryEvidence {
                     ));
                 }
             }
-            crate::meerkat_machine::dsl::DurableTailRecoveryClass::InterruptedRepairableCandidate => {
+            crate::meerkat_machine::dsl::DurableTailRecoveryDisposition::RepairAndCommitInterrupted
+            | crate::meerkat_machine::dsl::DurableTailRecoveryDisposition::OperatorRepairAndCommitInterrupted => {
                 if recovered_blob_sha256 == provisional_candidate_blob_sha256 {
                     return Err(conflict(
                         "interrupted WholeBlob recovery must install a distinct repaired artifact"
@@ -3884,10 +3921,13 @@ impl PreparedRecoveryEvidence {
                     ));
                 }
             }
-            crate::meerkat_machine::dsl::DurableTailRecoveryClass::Ambiguous => {
-                return Err(conflict(
-                    "ambiguous WholeBlob recovery cannot be sealed".to_string(),
-                ));
+            crate::meerkat_machine::dsl::DurableTailRecoveryDisposition::RefuseRecovery
+            | crate::meerkat_machine::dsl::DurableTailRecoveryDisposition::HoldIntact
+            | crate::meerkat_machine::dsl::DurableTailRecoveryDisposition::ContinueRun => {
+                return Err(conflict(format!(
+                    "WholeBlob recovery cannot seal the non-committing disposition {}",
+                    recovery_disposition_name(disposition)
+                )));
             }
         }
         if receipt.run_id != candidate_run_id || receipt.message_count != recovered.messages().len()
@@ -4335,7 +4375,7 @@ impl PreparedRecoveryEvidence {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-#[cfg(feature = "sqlite-store")]
+#[cfg(any(feature = "sqlite-store", not(target_arch = "wasm32")))]
 struct CommittedRecoveryReceiptDigestEnrichmentWire {
     original_receipt: RunBoundaryReceipt,
     original_exact_row_token: String,
@@ -4344,7 +4384,7 @@ struct CommittedRecoveryReceiptDigestEnrichmentWire {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-#[cfg(feature = "sqlite-store")]
+#[cfg(any(feature = "sqlite-store", not(target_arch = "wasm32")))]
 struct CommittedRecoveryInputUpdateWire {
     input_id: InputId,
     expected_row_digest: String,
@@ -4353,7 +4393,7 @@ struct CommittedRecoveryInputUpdateWire {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(tag = "profile", rename_all = "snake_case", deny_unknown_fields)]
-#[cfg(feature = "sqlite-store")]
+#[cfg(any(feature = "sqlite-store", not(target_arch = "wasm32")))]
 enum CommittedRecoverySessionAuthorityWire {
     WholeBlobV1 {
         base_store_revision: u64,
@@ -4373,7 +4413,7 @@ enum CommittedRecoverySessionAuthorityWire {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-#[cfg(feature = "sqlite-store")]
+#[cfg(any(feature = "sqlite-store", not(target_arch = "wasm32")))]
 struct CommittedRecoveryBoundaryWire {
     version: u16,
     session_id: meerkat_core::types::SessionId,
@@ -4400,7 +4440,7 @@ pub struct CommittedRecoveryBoundary {
 }
 
 impl CommittedRecoveryBoundary {
-    #[cfg(feature = "sqlite-store")]
+    #[cfg(any(feature = "sqlite-store", not(target_arch = "wasm32")))]
     const VERSION: u16 = 6;
 
     pub(crate) fn from_prepared(
@@ -4421,7 +4461,7 @@ impl CommittedRecoveryBoundary {
         &self.receipt
     }
 
-    #[cfg(feature = "sqlite-store")]
+    #[cfg(any(feature = "sqlite-store", not(target_arch = "wasm32")))]
     pub(crate) fn encode(&self) -> Result<Vec<u8>, RuntimeStoreError> {
         serde_json::to_vec(&CommittedRecoveryBoundaryWire {
             version: Self::VERSION,
@@ -4498,7 +4538,7 @@ impl CommittedRecoveryBoundary {
         })
     }
 
-    #[cfg(feature = "sqlite-store")]
+    #[cfg(any(feature = "sqlite-store", not(target_arch = "wasm32")))]
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, RuntimeStoreError> {
         let wire: CommittedRecoveryBoundaryWire =
             serde_json::from_slice(bytes).map_err(|error| {
@@ -5667,13 +5707,60 @@ pub enum ContinuationAdmissionTransition {
         session_id: meerkat_core::types::SessionId,
         input_id: InputId,
     },
+    /// The reservation of `session_id` under `input_id` admitted nothing and
+    /// never will: its delivery address retired, and that session's input
+    /// ledger holds no admission under the key, read under the session's
+    /// custody or by the drain that made the reservation. Remove it, so the
+    /// delivery reads as never admitted. Only that exact reservation is
+    /// removed; an applied entry, another session's or another input's
+    /// reservation, and no entry are refused.
+    Release {
+        session_id: meerkat_core::types::SessionId,
+        input_id: InputId,
+    },
+}
+
+/// The admission index entry after a legal
+/// [`ContinuationAdmissionTransition`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContinuationAdmissionEntry {
+    /// The entry holds this state.
+    Holds(ContinuationAdmission),
+    /// The entry is removed: a released reservation.
+    Released,
 }
 
 impl ContinuationAdmissionTransition {
     /// The entry after this transition, or `None` when it is rejected from
     /// `current`. Re-applying the transition that produced `current` is a
-    /// no-op that answers `current`.
-    pub fn next(&self, current: Option<&ContinuationAdmission>) -> Option<ContinuationAdmission> {
+    /// no-op that answers `current`. A release is not repeatable: no entry
+    /// is no reservation.
+    pub fn next(
+        &self,
+        current: Option<&ContinuationAdmission>,
+    ) -> Option<ContinuationAdmissionEntry> {
+        if let Self::Release {
+            session_id,
+            input_id,
+        } = self
+        {
+            return match current {
+                Some(ContinuationAdmission::Reserved {
+                    session_id: reserved,
+                    input_id: reserved_input,
+                }) if reserved == session_id && reserved_input == input_id => {
+                    Some(ContinuationAdmissionEntry::Released)
+                }
+                _ => None,
+            };
+        }
+        self.next_held(current)
+            .map(ContinuationAdmissionEntry::Holds)
+    }
+
+    /// The entry a reserve, repoint or apply leaves, or `None` when it is
+    /// rejected from `current`.
+    fn next_held(&self, current: Option<&ContinuationAdmission>) -> Option<ContinuationAdmission> {
         match (self, current) {
             (
                 Self::Reserve {
@@ -5740,6 +5827,9 @@ impl ContinuationAdmissionTransition {
 pub enum ContinuationAdmissionOutcome {
     /// The entry now holds this state.
     Transitioned(ContinuationAdmission),
+    /// The reservation was removed
+    /// ([`ContinuationAdmissionTransition::Release`]).
+    Released,
     /// The transition is not legal from `current`; nothing was written.
     Rejected {
         current: Option<ContinuationAdmission>,
@@ -6308,6 +6398,16 @@ pub trait RuntimeStoreWriteFence: Send + Sync {
     ) -> Result<RuntimeStoreWriteFenceOutcome, RuntimeStoreError> {
         self.execute_if_current(operation)
     }
+
+    /// How long a caller that holds an async lock retries this fence while
+    /// it answers [`RuntimeStoreWriteFenceOutcome::Backoff`], releasing the
+    /// lock between attempts, before it reports the Backoff. The default is
+    /// two seconds. A fence whose authority guard waits for a host store
+    /// commit answers the host's declared longest commit
+    /// ([`meerkat_core::host_store::FenceTiming::max_commit_latency`]).
+    fn backoff_retry_bound(&self) -> std::time::Duration {
+        FENCE_BACKOFF_RETRY_BOUND
+    }
 }
 
 /// Which entry of a [`RuntimeStoreWriteFence`] a fenced write goes through.
@@ -6451,7 +6551,8 @@ fn execute_optional_target_write_through<T>(
 }
 
 /// How long a fenced write whose caller holds an async lock retries a fence
-/// that answers [`RuntimeStoreWriteFenceOutcome::Backoff`].
+/// that answers [`RuntimeStoreWriteFenceOutcome::Backoff`], unless the fence
+/// declares another bound ([`RuntimeStoreWriteFence::backoff_retry_bound`]).
 ///
 /// Such a caller cannot wait inside the fence: the wait would block its
 /// thread while it holds a lock other tasks need. Between attempts it
@@ -6472,8 +6573,10 @@ const FENCE_BACKOFF_MAX_PAUSE: std::time::Duration = std::time::Duration::from_m
 /// Each attempt takes the caller's lock, re-observes what it writes and
 /// runs one fence attempt. After an attempt the fence answered with
 /// Backoff, the caller releases the lock and calls [`Self::pause`].
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct FenceBackoffRetry {
+    /// How long the retries last: the fence's declared bound.
+    bound: std::time::Duration,
     /// Set at the first pause, so a write the fence admits at once reads no
     /// clock.
     deadline: Option<crate::tokio::time::Instant>,
@@ -6481,13 +6584,24 @@ pub(crate) struct FenceBackoffRetry {
 }
 
 impl FenceBackoffRetry {
+    /// The retry policy for writes through `fence`, bounded by
+    /// [`RuntimeStoreWriteFence::backoff_retry_bound`] (the default bound
+    /// when there is no fence, which never answers Backoff).
+    pub(crate) fn for_fence(fence: Option<&dyn RuntimeStoreWriteFence>) -> Self {
+        Self {
+            bound: fence.map_or(FENCE_BACKOFF_RETRY_BOUND, |fence| {
+                fence.backoff_retry_bound()
+            }),
+            deadline: None,
+            pause: std::time::Duration::ZERO,
+        }
+    }
+
     /// Wait before the next attempt and return `true`, or return `false`
     /// once the bound has passed: the caller then reports the Backoff.
     pub(crate) async fn pause(&mut self) -> bool {
         let now = crate::tokio::time::Instant::now();
-        let deadline = *self
-            .deadline
-            .get_or_insert_with(|| now + FENCE_BACKOFF_RETRY_BOUND);
+        let deadline = *self.deadline.get_or_insert_with(|| now + self.bound);
         if now >= deadline {
             return false;
         }
@@ -6559,6 +6673,9 @@ pub struct MachineUnregisterProgressSnapshot {
     completion_waiter_drain_pending: bool,
     runtime_loop_forced_abort: bool,
     comms_drain_forced_abort: bool,
+    /// The max age, in milliseconds, of the queued inputs this unregister
+    /// keeps for the next start; `None` when it stops them.
+    requeue_max_age_ms: Option<u64>,
 }
 
 impl MachineUnregisterProgressSnapshot {
@@ -6575,7 +6692,21 @@ impl MachineUnregisterProgressSnapshot {
             completion_waiter_drain_pending,
             runtime_loop_forced_abort,
             comms_drain_forced_abort,
+            requeue_max_age_ms: None,
         }
+    }
+
+    /// This progress with the unregister's requeue max age: `Some` when it
+    /// began with the requeue disposition.
+    #[must_use]
+    pub(crate) fn with_requeue_max_age_ms(mut self, requeue_max_age_ms: Option<u64>) -> Self {
+        self.requeue_max_age_ms = requeue_max_age_ms;
+        self
+    }
+
+    /// The requeue max age the unregister began with, `None` for a stop.
+    pub(crate) fn requeue_max_age_ms(&self) -> Option<u64> {
+        self.requeue_max_age_ms
     }
 
     pub(crate) fn runtime_loop_drain_pending(&self) -> bool {
@@ -6896,6 +7027,23 @@ struct MachineUnregisterProgressSnapshotStoreWire {
     completion_waiter_drain_pending: bool,
     runtime_loop_forced_abort: bool,
     comms_drain_forced_abort: bool,
+    /// Present only when the unregister keeps queued inputs, so a stopping
+    /// unregister's progress is the version 5 shape byte for byte.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    queued_inputs: Option<UnregisterQueuedInputsStoreWire>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UnregisterQueuedInputsStoreWire {
+    disposition: UnregisterQueuedInputsDispositionStoreWire,
+    max_age_ms: u64,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum UnregisterQueuedInputsDispositionStoreWire {
+    Requeue,
 }
 
 impl From<&MachineUnregisterProgressSnapshot> for MachineUnregisterProgressSnapshotStoreWire {
@@ -6906,6 +7054,12 @@ impl From<&MachineUnregisterProgressSnapshot> for MachineUnregisterProgressSnaps
             completion_waiter_drain_pending: snapshot.completion_waiter_drain_pending(),
             runtime_loop_forced_abort: snapshot.runtime_loop_forced_abort(),
             comms_drain_forced_abort: snapshot.comms_drain_forced_abort(),
+            queued_inputs: snapshot.requeue_max_age_ms().map(|max_age_ms| {
+                UnregisterQueuedInputsStoreWire {
+                    disposition: UnregisterQueuedInputsDispositionStoreWire::Requeue,
+                    max_age_ms,
+                }
+            }),
         }
     }
 }
@@ -6919,6 +7073,11 @@ impl From<MachineUnregisterProgressSnapshotStoreWire> for MachineUnregisterProgr
             snapshot.runtime_loop_forced_abort,
             snapshot.comms_drain_forced_abort,
         )
+        .with_requeue_max_age_ms(snapshot.queued_inputs.map(|queued_inputs| {
+            match queued_inputs.disposition {
+                UnregisterQueuedInputsDispositionStoreWire::Requeue => queued_inputs.max_age_ms,
+            }
+        }))
     }
 }
 
@@ -7601,8 +7760,15 @@ impl TryFrom<SupervisorAuthoritySnapshotStoreWire> for SupervisorAuthoritySnapsh
 
 impl From<&MachineLifecycleSnapshot> for MachineLifecycleSnapshotStoreWire {
     fn from(snapshot: &MachineLifecycleSnapshot) -> Self {
+        let requeues = snapshot
+            .unregister_progress()
+            .is_some_and(|progress| progress.requeue_max_age_ms().is_some());
         Self {
-            record_version: MACHINE_LIFECYCLE_STORE_RECORD_VERSION,
+            record_version: if requeues {
+                REQUEUE_MACHINE_LIFECYCLE_STORE_RECORD_VERSION
+            } else {
+                MACHINE_LIFECYCLE_STORE_RECORD_VERSION
+            },
             runtime_state: snapshot.runtime_state(),
             binding: snapshot.binding().into(),
             current_run_id: snapshot.run().current_run_id().cloned(),
@@ -7630,8 +7796,34 @@ fn validate_unregister_progress_snapshot(
                     .into(),
             ));
         }
+        if progress.requeue_max_age_ms() == Some(0) {
+            return Err(RuntimeStoreError::ReadFailed(
+                "unregister requeue disposition requires a max age above zero".into(),
+            ));
+        }
     }
     Ok(())
+}
+
+/// The requeue disposition is a version 6 fact: an older record version
+/// cannot carry it, and a version 6 record must.
+fn validate_unregister_progress_requeue_version(
+    record_version: u16,
+    progress: Option<&MachineUnregisterProgressSnapshot>,
+) -> Result<(), RuntimeStoreError> {
+    let requeues = progress.is_some_and(|progress| progress.requeue_max_age_ms().is_some());
+    match (
+        record_version == REQUEUE_MACHINE_LIFECYCLE_STORE_RECORD_VERSION,
+        requeues,
+    ) {
+        (true, true) | (false, false) => Ok(()),
+        (false, true) => Err(RuntimeStoreError::ReadFailed(format!(
+            "machine lifecycle record version {record_version} cannot carry a requeue disposition"
+        ))),
+        (true, false) => Err(RuntimeStoreError::ReadFailed(format!(
+            "machine lifecycle record version {record_version} must carry a requeue disposition"
+        ))),
+    }
 }
 
 impl TryFrom<MachineLifecycleSnapshotStoreWireV3> for MachineLifecycleSnapshot {
@@ -7648,6 +7840,10 @@ impl TryFrom<MachineLifecycleSnapshotStoreWireV3> for MachineLifecycleSnapshot {
             require_present_nullable(record.unregister_progress, "unregister_progress")?
                 .map(Into::into);
         validate_unregister_progress_snapshot(unregister_progress.as_ref())?;
+        validate_unregister_progress_requeue_version(
+            record.record_version,
+            unregister_progress.as_ref(),
+        )?;
         Ok(Self::new_with_unregister_progress(
             record.runtime_state,
             record.binding.try_into()?,
@@ -7675,6 +7871,10 @@ fn decode_machine_lifecycle_observation_v4(
         require_present_nullable(record.unregister_progress, "unregister_progress")?
             .map(Into::into);
     validate_unregister_progress_snapshot(unregister_progress.as_ref())?;
+    validate_unregister_progress_requeue_version(
+        record.record_version,
+        unregister_progress.as_ref(),
+    )?;
     Ok(DecodedMachineLifecycleObservation {
         record_version: record.record_version,
         runtime_state,
@@ -7686,12 +7886,16 @@ fn decode_machine_lifecycle_observation_v4(
     })
 }
 
+/// Decode a version 5 record, or a version 6 one: the same shape, whose
+/// unregister progress keeps queued inputs for the next start.
 fn decode_machine_lifecycle_observation_v5(
     bytes: &[u8],
 ) -> Result<DecodedMachineLifecycleObservation, RuntimeStoreError> {
     let record = serde_json::from_slice::<MachineLifecycleObservationStoreWireV5>(bytes)
         .map_err(|err| RuntimeStoreError::ReadFailed(err.to_string()))?;
-    if record.record_version != MACHINE_LIFECYCLE_STORE_RECORD_VERSION {
+    if record.record_version != MACHINE_LIFECYCLE_STORE_RECORD_VERSION
+        && record.record_version != REQUEUE_MACHINE_LIFECYCLE_STORE_RECORD_VERSION
+    {
         return Err(RuntimeStoreError::ReadFailed(format!(
             "unsupported machine lifecycle store record version {}",
             record.record_version
@@ -7704,6 +7908,10 @@ fn decode_machine_lifecycle_observation_v5(
         require_present_nullable(record.unregister_progress, "unregister_progress")?
             .map(Into::into);
     validate_unregister_progress_snapshot(unregister_progress.as_ref())?;
+    validate_unregister_progress_requeue_version(
+        record.record_version,
+        unregister_progress.as_ref(),
+    )?;
     record
         .live_bridge_recovery
         .validate_bound()
@@ -7792,7 +8000,7 @@ fn decode_machine_lifecycle_store_record(
                 ),
             )
         }
-        MACHINE_LIFECYCLE_STORE_RECORD_VERSION => {
+        MACHINE_LIFECYCLE_STORE_RECORD_VERSION | REQUEUE_MACHINE_LIFECYCLE_STORE_RECORD_VERSION => {
             let record = decode_machine_lifecycle_observation_v5(bytes)?;
             let runtime_state = record.runtime_state.ok_or_else(|| {
                 RuntimeStoreError::ReadFailed(
@@ -7850,6 +8058,7 @@ fn classify_machine_lifecycle_record(bytes: &[u8]) -> MachineLifecycleObservatio
         u64::from(UNREGISTER_MACHINE_LIFECYCLE_STORE_RECORD_VERSION),
         u64::from(RUN_MACHINE_LIFECYCLE_STORE_RECORD_VERSION),
         u64::from(MACHINE_LIFECYCLE_STORE_RECORD_VERSION),
+        u64::from(REQUEUE_MACHINE_LIFECYCLE_STORE_RECORD_VERSION),
     ];
     if !supported.contains(&record_version) {
         return MachineLifecycleObservation::Unsupported {
@@ -7859,7 +8068,9 @@ fn classify_machine_lifecycle_record(bytes: &[u8]) -> MachineLifecycleObservatio
         };
     }
 
-    let decoded = if record_version == u64::from(MACHINE_LIFECYCLE_STORE_RECORD_VERSION) {
+    let decoded = if record_version == u64::from(MACHINE_LIFECYCLE_STORE_RECORD_VERSION)
+        || record_version == u64::from(REQUEUE_MACHINE_LIFECYCLE_STORE_RECORD_VERSION)
+    {
         decode_machine_lifecycle_observation_v5(bytes)
     } else if record_version == u64::from(RUN_MACHINE_LIFECYCLE_STORE_RECORD_VERSION) {
         decode_machine_lifecycle_observation_v4(bytes)
@@ -8881,6 +9092,19 @@ pub trait DeliveryGenerationReader: Send {
     fn release(&mut self);
 }
 
+/// What [`RuntimeStore::commit_prepared_whole_blob_run_rebase`] answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WholeBlobRunRebaseOutcome {
+    /// The re-base is durable (or was already): the committed successor's
+    /// authority and the run's new provisional tail on it.
+    Applied {
+        committed: WholeBlobStoreAuthority,
+        tail: WholeBlobProvisionalTailAuthority,
+    },
+    /// The committed authority or the tail moved: nothing was written.
+    Stale,
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait RuntimeStore: Send + Sync {
@@ -9282,6 +9506,15 @@ pub trait RuntimeStore: Send + Sync {
         crate::session_hosting::HostingCapability::None
     }
 
+    /// The self-fence of a store whose writes hold a host store fence
+    /// ([`meerkat_core::host_store::SelfFence`]), or `None`, the default. The
+    /// run loop's checkpointer reads its window right before each model call
+    /// and each tool dispatch. Decorators must forward their inner store's
+    /// fence.
+    fn self_fence(&self) -> Option<std::sync::Arc<dyn meerkat_core::host_store::SelfFence>> {
+        None
+    }
+
     /// Load the exact generated runtime-delivery authority record.
     async fn load_runtime_delivery_authority(
         &self,
@@ -9380,10 +9613,11 @@ pub trait RuntimeStore: Send + Sync {
     }
 
     /// Change the admission index entry of one continuation delivery by
-    /// [`ContinuationAdmissionTransition::next`], reading and writing it in
-    /// one store transaction. A reservation is written before the input is
-    /// admitted, so recovery can find an admission that reached the session
-    /// but not the inbox acknowledgement.
+    /// [`ContinuationAdmissionTransition::next`], reading and writing (or
+    /// removing, for a release) it in one store transaction. A reservation
+    /// is written before the input is admitted, so recovery can find an
+    /// admission that reached the session but not the inbox
+    /// acknowledgement.
     async fn transition_continuation_admission(
         &self,
         address: &LogicalRuntimeId,
@@ -9512,6 +9746,53 @@ pub trait RuntimeStore: Send + Sync {
         runtime_id: &LogicalRuntimeId,
         boundary: PreparedWholeBlobRewriteStoreParts,
     ) -> Result<WholeBlobStoreAuthority, RuntimeStoreError>;
+
+    /// Re-base a WholeBlob run at a compaction: commit the compacted
+    /// document as the session's committed base and restart the run's
+    /// provisional tail on it, atomically (one transaction, one lock, or one
+    /// host store batch).
+    ///
+    /// The call compares BOTH the current committed authority with
+    /// `rebase.rewrite().expected_authority()` AND the current provisional
+    /// tail with `rebase.expected_tail()` (`None`: no tail exists). When both
+    /// match, it writes the committed successor exactly as
+    /// [`Self::commit_prepared_whole_blob_rewrite_boundary`] does (bytes,
+    /// authority one revision on, catalog entry keeping the runtime state,
+    /// quarantine cleared), records the successor's compaction intents in the
+    /// outbox (the re-base is that compaction's boundary: an intent the outbox
+    /// already finalized, or holds with other content, refuses), drops the
+    /// old tail, and writes the candidate as the new tail: base = the
+    /// committed authority just issued, the same run, candidate sequence one.
+    /// It writes no run boundary receipt, no input row and no receipt row.
+    ///
+    /// When the current committed authority and tail already equal the
+    /// exact successor pair ([`PreparedWholeBlobRunRebaseStoreParts::issued_authorities`]),
+    /// the call answers `Applied` with them and writes nothing. Any other
+    /// current state answers [`WholeBlobRunRebaseOutcome::Stale`] and writes
+    /// nothing: another writer moved the session, and the run fails over.
+    async fn commit_prepared_whole_blob_run_rebase(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+        rebase: PreparedWholeBlobRunRebaseStoreParts,
+    ) -> Result<WholeBlobRunRebaseOutcome, RuntimeStoreError> {
+        let _ = (runtime_id, rebase);
+        Err(RuntimeStoreError::Unsupported(
+            "commit_prepared_whole_blob_run_rebase".into(),
+        ))
+    }
+
+    /// Whether this store implements
+    /// [`Self::commit_prepared_whole_blob_run_rebase`].
+    ///
+    /// The session service re-bases a WholeBlob run after a compaction only
+    /// over a store that answers `true`. Over any other store the run takes
+    /// no round commit after its first rewrite, and its last round commit
+    /// before that rewrite stays its resume point. Unknown and custom stores
+    /// answer `false` by default; a store that implements the operation
+    /// answers `true`, and a decorator forwards both together.
+    fn supports_whole_blob_run_rebase(&self) -> bool {
+        false
+    }
 
     /// Atomically persist session delta + receipt + input state updates.
     ///
@@ -11133,6 +11414,84 @@ mod lifecycle_record_compatibility_tests {
         }));
     }
 
+    /// A stopping unregister's progress keeps the version 5 record shape
+    /// exactly: the five progress fields 0.9.4 writes and nothing else. A
+    /// requeue's progress also carries its disposition and max age, is
+    /// written as version 6 and round-trips. Version 5 cannot carry a
+    /// requeue disposition and version 6 must; a higher version is refused
+    /// as unsupported, the typed refusal 0.9.4 gives a version 6 record.
+    #[test]
+    fn requeue_unregister_progress_is_a_version_6_record_and_a_stop_stays_version_5() {
+        let progress = MachineUnregisterProgressSnapshot::new(true, true, true, false, false);
+        let unbound = || MachineLifecycleBindingFacts::new(None, None, None, None);
+        let stopping = MachineLifecycleSnapshot::new_with_unregister_progress(
+            RuntimeState::Running,
+            unbound(),
+            SupervisorAuthoritySnapshot::UnboundNoReceipt,
+            Some(progress.clone()),
+        );
+        let stop_value = encoded_value(&stopping);
+        assert_eq!(
+            stop_value["record_version"],
+            serde_json::json!(MACHINE_LIFECYCLE_STORE_RECORD_VERSION)
+        );
+        assert_eq!(
+            stop_value["unregister_progress"],
+            serde_json::json!({
+                "runtime_loop_drain_pending": true,
+                "comms_drain_exit_pending": true,
+                "completion_waiter_drain_pending": true,
+                "runtime_loop_forced_abort": false,
+                "comms_drain_forced_abort": false
+            })
+        );
+
+        let requeue = MachineLifecycleSnapshot::new_with_unregister_progress(
+            RuntimeState::Running,
+            unbound(),
+            SupervisorAuthoritySnapshot::UnboundNoReceipt,
+            Some(progress.with_requeue_max_age_ms(Some(900_000))),
+        );
+        let requeue_bytes = encode_snapshot(&requeue);
+        let requeue_value: serde_json::Value =
+            serde_json::from_slice(&requeue_bytes).expect("requeue record is JSON");
+        assert_eq!(
+            requeue_value["record_version"],
+            serde_json::json!(REQUEUE_MACHINE_LIFECYCLE_STORE_RECORD_VERSION)
+        );
+        assert_eq!(
+            requeue_value["unregister_progress"]["queued_inputs"],
+            serde_json::json!({ "disposition": "requeue", "max_age_ms": 900_000 })
+        );
+        assert_eq!(
+            decode_machine_lifecycle_store_record(&requeue_bytes)
+                .expect("a version 6 requeue record decodes"),
+            requeue
+        );
+        assert!(matches!(
+            classify_machine_lifecycle_record(&requeue_bytes),
+            MachineLifecycleObservation::Decoded { .. }
+        ));
+
+        let mut version_5_with_requeue = requeue_value.clone();
+        version_5_with_requeue["record_version"] =
+            serde_json::json!(MACHINE_LIFECYCLE_STORE_RECORD_VERSION);
+        assert_decode_fails(version_5_with_requeue);
+        let mut version_6_without_requeue = stop_value;
+        version_6_without_requeue["record_version"] =
+            serde_json::json!(REQUEUE_MACHINE_LIFECYCLE_STORE_RECORD_VERSION);
+        assert_decode_fails(version_6_without_requeue);
+        let mut future = requeue_value;
+        future["record_version"] =
+            serde_json::json!(REQUEUE_MACHINE_LIFECYCLE_STORE_RECORD_VERSION + 1);
+        let future_bytes = serde_json::to_vec(&future).expect("serialize future record");
+        assert!(matches!(
+            classify_machine_lifecycle_record(&future_bytes),
+            MachineLifecycleObservation::Unsupported { record_version, .. }
+                if record_version == u64::from(REQUEUE_MACHINE_LIFECYCLE_STORE_RECORD_VERSION + 1)
+        ));
+    }
+
     #[test]
     fn current_nullable_fields_require_presence_but_accept_explicit_null() {
         let unbound = snapshot(SupervisorAuthoritySnapshot::UnboundNoReceipt);
@@ -12080,5 +12439,119 @@ mod committing_whole_blob_session_tests {
             .is_none(),
             "untyped compatibility bytes carry no typed session"
         );
+    }
+}
+
+#[cfg(test)]
+mod recovery_disposition_pairing_tests {
+    use std::collections::BTreeSet;
+
+    use super::recovery_class_realizes_disposition;
+    use crate::meerkat_machine::dsl as mm_dsl;
+
+    /// The store admits exactly the (class, disposition) commit pairs the
+    /// generated authorization arms emit, ordinary and operator: a pair the
+    /// machine authorizes is never refused at the seal, and the seal admits
+    /// nothing the machine never authorizes.
+    #[test]
+    fn store_pairing_matches_the_generated_commit_arms() {
+        use mm_dsl::{
+            DurableRecoveryInputEvidence as Evidence,
+            DurableRecoveryObservedLifecycle as Lifecycle, DurableRecoveryPriorCommit as Prior,
+            DurableTailRecoveryClass as Class, DurableTailRecoveryDisposition as Disposition,
+        };
+        let classes = [
+            Class::CompletedCandidate,
+            Class::InterruptedRepairableCandidate,
+            Class::Ambiguous,
+            Class::ContinuableCandidate,
+        ];
+        let mut emitted = BTreeSet::new();
+        for class in classes {
+            for lifecycle in [Lifecycle::MissingRow, Lifecycle::Idle, Lifecycle::Retired] {
+                for prior in [Prior::NoPriorCommit, Prior::PrecedesCandidate] {
+                    for evidence in [Evidence::AllBoundOrInert, Evidence::UnboundContentInput] {
+                        for operator in [false, true] {
+                            let mut authority =
+                                mm_dsl::MeerkatMachineAuthority::recover_from_state(
+                                    mm_dsl::MeerkatMachineState {
+                                        lifecycle_phase: mm_dsl::MeerkatPhase::Idle,
+                                        session_id: Some(mm_dsl::SessionId(
+                                            "session-pairing".to_string(),
+                                        )),
+                                        ..Default::default()
+                                    },
+                                )
+                                .expect("an idle quiescent state must be recoverable");
+                            let session_id = mm_dsl::SessionId("session-pairing".to_string());
+                            let candidate_id = "candidate-pairing".to_string();
+                            let candidate_run_id = mm_dsl::RunId("run-pairing".to_string());
+                            let input = if operator {
+                                mm_dsl::MeerkatMachineInput::AuthorizeOperatorDurableTailRepair {
+                                    session_id,
+                                    candidate_id,
+                                    candidate_run_id,
+                                    class,
+                                    observed_lifecycle: lifecycle,
+                                    observed_current_run: mm_dsl::DurableRecoveryObservedRun::NoRun,
+                                    last_committed_sequence: 0,
+                                    prior_commit: prior,
+                                    input_evidence: evidence,
+                                }
+                            } else {
+                                mm_dsl::MeerkatMachineInput::AuthorizeDurableTailRecovery {
+                                    session_id,
+                                    candidate_id,
+                                    candidate_run_id,
+                                    class,
+                                    observed_lifecycle: lifecycle,
+                                    observed_current_run: mm_dsl::DurableRecoveryObservedRun::NoRun,
+                                    last_committed_sequence: 0,
+                                    prior_commit: prior,
+                                    input_evidence: evidence,
+                                }
+                            };
+                            let transition =
+                                mm_dsl::MeerkatMachineMutator::apply(&mut authority, input)
+                                    .expect("recovery authorization is total over its phases");
+                            for effect in transition.into_effects() {
+                                if let mm_dsl::MeerkatMachineEffect::DurableTailRecoveryCommitAuthorized {
+                                    disposition,
+                                    ..
+                                } = effect
+                                {
+                                    emitted.insert((class, disposition));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for (class, disposition) in &emitted {
+            assert!(
+                recovery_class_realizes_disposition(*class, *disposition),
+                "the machine authorizes {class:?} with {disposition:?}, so the seal must admit it"
+            );
+        }
+        let dispositions = [
+            Disposition::RefuseRecovery,
+            Disposition::CommitCompleted,
+            Disposition::RepairAndCommitInterrupted,
+            Disposition::CommitCompletedRetainInputs,
+            Disposition::HoldIntact,
+            Disposition::ContinueRun,
+            Disposition::OperatorRepairAndCommitInterrupted,
+        ];
+        for class in classes {
+            for disposition in dispositions {
+                if recovery_class_realizes_disposition(class, disposition) {
+                    assert!(
+                        emitted.contains(&(class, disposition)),
+                        "the seal admits {class:?} with {disposition:?}, which no arm authorizes"
+                    );
+                }
+            }
+        }
     }
 }

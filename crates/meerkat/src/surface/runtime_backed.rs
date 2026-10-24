@@ -229,7 +229,7 @@ pub(crate) fn install_default_mcp_auth_resolver(
     )
 }
 
-/// [`install_default_mcp_auth_resolver`] for a host's builder whose sessions
+/// `install_default_mcp_auth_resolver` for a host's builder whose sessions
 /// run in `storage`'s realm but whose configuration is a snapshot, without
 /// the head config store and realm inheritance that let the builder name a
 /// server's defining realm (such a builder's own custody answers every
@@ -2446,6 +2446,16 @@ impl<B: SessionAgentBuilder + 'static> CoreExecutor for PersistentRuntimeExecuto
     ) -> Result<(), CoreExecutorError> {
         self.service
             .reconcile_runtime_compaction_projections(&self.session_id, intents.to_vec())
+            .await
+            .map_err(|error| CoreExecutorError::Internal(error.to_string()))
+    }
+
+    async fn acknowledge_compaction_finalization(
+        &mut self,
+        authority: &meerkat_core::CommittedSessionBoundaryAuthority,
+    ) -> Result<(), CoreExecutorError> {
+        self.service
+            .acknowledge_runtime_compaction_finalization(&self.session_id, authority)
             .await
             .map_err(|error| CoreExecutorError::Internal(error.to_string()))
     }
@@ -5597,6 +5607,14 @@ mod tests {
             ) -> Result<(), CoreExecutorError> {
                 self.inner
                     .reconcile_committed_compaction_projections(intents)
+                    .await
+            }
+            async fn acknowledge_compaction_finalization(
+                &mut self,
+                authority: &CommittedSessionBoundaryAuthority,
+            ) -> Result<(), CoreExecutorError> {
+                self.inner
+                    .acknowledge_compaction_finalization(authority)
                     .await
             }
             async fn abort_uncommitted_compaction_projections(

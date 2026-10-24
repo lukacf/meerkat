@@ -161,7 +161,7 @@ pub enum ProcessCustodyError {
     /// The entry was written in this boot but in another pid namespace (for
     /// example another container sharing the realm root), and its host
     /// incarnation's liveness lock does not prove the host ended (see
-    /// [`ForeignIncarnationLiveness`]). Its pids cannot be observed from
+    /// `ForeignIncarnationLiveness`). Its pids cannot be observed from
     /// here, so nothing was signalled or settled. Operator action: for
     /// `Running`, stop the other host (or let it settle its own session);
     /// for `Unverifiable`, confirm the container that wrote it has stopped,

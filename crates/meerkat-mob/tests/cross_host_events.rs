@@ -995,3 +995,805 @@ async fn remote_source_fork_context_via_read_member_history() {
     let fixture = partitioned.restore().await;
     fixture.shutdown().await;
 }
+
+// ==========================================================================
+// A placed prompt-context fork child is given its planned context and its
+// fork notice as typed rows on its member host; a host before protocol V7
+// keeps the prompt prefix; a feature probe that never answers fails the
+// spawn before anything is recorded.
+// ==========================================================================
+
+/// The fork notice blocks in `rows`, as wire JSON.
+fn b2_fork_notices(rows: &[meerkat_core::types::Message]) -> Vec<serde_json::Value> {
+    rows.iter()
+        .filter_map(|row| match row {
+            meerkat_core::types::Message::SystemNotice(notice) => Some(notice),
+            _ => None,
+        })
+        .flat_map(|notice| notice.blocks.iter())
+        .map(|block| serde_json::to_value(block).expect("notice block wire json"))
+        .filter(|block| block["type"] == "fork_boundary")
+        .collect()
+}
+
+/// The index of the first user row of `rows` whose text contains `needle`.
+fn b2_user_row(rows: &[meerkat_core::types::Message], needle: &str) -> Option<usize> {
+    rows.iter().position(|row| {
+        matches!(row, meerkat_core::types::Message::User(user) if user.text_content().contains(needle))
+    })
+}
+
+/// The index of the first input row of `rows` that contains `needle`: a
+/// user row, or the peer message a placed member's input arrives as.
+fn b2_input_row(rows: &[meerkat_core::types::Message], needle: &str) -> Option<usize> {
+    rows.iter().position(|row| {
+        matches!(
+            row,
+            meerkat_core::types::Message::User(_) | meerkat_core::types::Message::SystemNotice(_)
+        ) && serde_json::to_string(row).is_ok_and(|json| json.contains(needle))
+    })
+}
+
+/// The rows of `member`'s session on `fixture`, once an input row containing
+/// `needle` and an answer after it are there.
+async fn b2_placed_rows_after_turn(
+    fixture: &support::HostDaemonFixture,
+    controlling: &ControllingMob,
+    member: &str,
+    needle: &str,
+) -> Vec<meerkat_core::types::Message> {
+    let service = fixture.member_session_service();
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let session = fixture
+                .host_binding_record(controlling.mob_id.as_str())
+                .await
+                .materialized
+                .get(member)
+                .map(|row| row.session_id.clone());
+            if let Some(session) = session
+                && let Ok(id) = meerkat_core::SessionId::parse(&session)
+                && let Ok(Some(loaded)) = service.load_persisted_session(&id).await
+            {
+                let rows = loaded.messages().to_vec();
+                if let Some(task) = b2_input_row(&rows, needle)
+                    && rows[task..]
+                        .iter()
+                        .any(|row| matches!(row, meerkat_core::types::Message::BlockAssistant(_)))
+                {
+                    return rows;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{member} answers its first input on the member host"))
+}
+
+/// The local controlling session's rows of `member`, once a user row
+/// containing `needle` and an answer after it are there.
+async fn b2_local_rows_after_turn(
+    controlling: &ControllingMob,
+    member: &str,
+    needle: &str,
+) -> Vec<meerkat_core::types::Message> {
+    tokio::time::timeout(WAIT, async {
+        loop {
+            if let Ok(status) = controlling.handle.member_status(&identity(member)).await
+                && let Some(id) = status.current_session_id
+                && let Ok(history) = meerkat_core::service::SessionServiceHistoryExt::read_history(
+                    controlling.service.as_ref(),
+                    &id,
+                    meerkat_core::service::SessionHistoryQuery::default(),
+                )
+                .await
+            {
+                let rows = history.messages;
+                if let Some(task) = b2_user_row(&rows, needle)
+                    && rows[task..]
+                        .iter()
+                        .any(|row| matches!(row, meerkat_core::types::Message::BlockAssistant(_)))
+                {
+                    return rows;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{member} answers its first input"))
+}
+
+/// A placed source with one recorded turn on `host_id`.
+async fn b2_placed_source_with_a_turn(
+    controlling: &ControllingMob,
+    member: &str,
+    host_id: &str,
+    marker: &str,
+) {
+    controlling
+        .spawn_placed("worker", member, host_id)
+        .await
+        .expect("the placed source materializes");
+    b2_source_turn(controlling, member, marker).await;
+}
+
+/// A local source with one recorded turn.
+async fn b2_local_source_with_a_turn(controlling: &ControllingMob, member: &str, marker: &str) {
+    controlling
+        .handle
+        .spawn_spec(
+            meerkat_mob::SpawnMemberSpec::new("worker", member)
+                .with_backend(meerkat_mob::MobBackendKind::Session),
+        )
+        .await
+        .expect("the local source spawns");
+    b2_source_turn(controlling, member, marker).await;
+}
+
+async fn b2_source_turn(controlling: &ControllingMob, member: &str, marker: &str) {
+    controlling
+        .handle
+        .member(&identity(member))
+        .await
+        .expect("source member handle")
+        .send(marker, HandlingMode::Queue)
+        .await
+        .expect("the source turn admits");
+    wait_until("the source transcript is recorded", || async {
+        controlling
+            .handle
+            .member_history(MobControlPrincipal::Owner, identity(member), None, None)
+            .await
+            .map(|page| page.page.message_count >= 2)
+            .unwrap_or(false)
+    })
+    .await;
+}
+
+/// A prompt-context fork of `source` placed on `host_id`, with a first input.
+/// The child runs autonomously, so its first input rides the durable placed
+/// kickoff.
+fn b2_placed_fork_spec(
+    member: &str,
+    host_id: &str,
+    source: &str,
+    first_input: &str,
+) -> meerkat_mob::SpawnMemberSpec {
+    let mut spec = placed_spawn_spec("worker", member, host_id);
+    spec.runtime_mode = Some(meerkat_mob::MobRuntimeMode::AutonomousHost);
+    spec.launch_mode = meerkat_mob::MemberLaunchMode::Fork {
+        source_member_id: identity(source),
+        fork_context: meerkat_mob::ForkContext::LastMessages { count: 2 },
+    };
+    spec.initial_message = Some(meerkat_core::types::ContentInput::from(first_input));
+    spec
+}
+
+/// On a member host that serves protocol V7, a placed context-fork child
+/// holds its planned context as a typed injected-context row and one fork
+/// notice before its first input, and the first input carries neither.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_placed_context_fork_child_holds_its_typed_rows_before_its_first_input() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let mut opts = HostFixtureOptions::named("xhe-b2r1-host").with_member_build();
+    opts.member_llm_client = Some(scripted_member_client_completing("b2r1-reply"));
+    let fixture = spawn_host_daemon_fixture(opts)
+        .await
+        .expect("spawn member-build host fixture");
+    let controlling = create_controlling_mob("xhe-b2r1").await;
+    let report = controlling.bind_fixture(&fixture).await;
+    b2_placed_source_with_a_turn(
+        &controlling,
+        "source-b2r1",
+        &report.host_id,
+        "b2r1-tail-marker",
+    )
+    .await;
+
+    controlling
+        .handle
+        .spawn_spec(b2_placed_fork_spec(
+            "child-b2r1",
+            &report.host_id,
+            "source-b2r1",
+            "b2r1-first-input",
+        ))
+        .await
+        .expect("the placed fork child spawns");
+
+    let rows =
+        b2_placed_rows_after_turn(&fixture, &controlling, "child-b2r1", "b2r1-first-input").await;
+    let task = b2_input_row(&rows, "b2r1-first-input").expect("the first input row");
+    let first_input = serde_json::to_string(&rows[task]).expect("first input row json");
+    assert!(
+        !first_input.contains("[fork_notice]")
+            && !first_input.contains("Forked conversation context"),
+        "the first input is a row of its own, without a prompt prefix: {first_input}"
+    );
+    // The planned excerpt carries the source's answer.
+    let injected = rows[..task].iter().position(|row| {
+        matches!(
+            row,
+            meerkat_core::types::Message::User(user)
+                if user.transcript_role == meerkat_core::types::TranscriptUserRole::InjectedContext
+                    && user.text_content().contains("b2r1-reply")
+        )
+    });
+    assert!(
+        injected.is_some(),
+        "the planned context is a typed injected-context row before the first input: {rows:#?}"
+    );
+    assert_eq!(
+        b2_fork_notices(&rows[..task]).len(),
+        1,
+        "one fork notice before the first input: {rows:#?}"
+    );
+    fixture.shutdown().await;
+}
+
+/// The placed child's create build on its member host carries the typed
+/// source, naming the source member and the source's session there.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_placed_context_fork_child_build_carries_its_typed_source() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let mut opts = HostFixtureOptions::named("xhe-b2r3-host").with_member_build();
+    opts.member_llm_client = Some(scripted_member_client_completing("b2r3-reply"));
+    opts.record_member_creates = true;
+    let fixture = spawn_host_daemon_fixture(opts)
+        .await
+        .expect("spawn member-build host fixture");
+    let controlling = create_controlling_mob("xhe-b2r3").await;
+    let report = controlling.bind_fixture(&fixture).await;
+    b2_placed_source_with_a_turn(
+        &controlling,
+        "source-b2r3",
+        &report.host_id,
+        "b2r3-tail-marker",
+    )
+    .await;
+    controlling
+        .handle
+        .spawn_spec(b2_placed_fork_spec(
+            "child-b2r3",
+            &report.host_id,
+            "source-b2r3",
+            "b2r3-first-input",
+        ))
+        .await
+        .expect("the placed fork child spawns");
+
+    let creates = fixture
+        .failing_create
+        .as_ref()
+        .expect("the fixture records member creates")
+        .recorded_creates();
+    let create_of = |member: &str| {
+        creates
+            .iter()
+            .find(|create| {
+                create
+                    .mob_member_binding
+                    .as_ref()
+                    .is_some_and(|binding| binding.member == member)
+            })
+            .unwrap_or_else(|| panic!("the create of {member}: {creates:#?}"))
+    };
+    let source_binding = create_of("source-b2r3").mob_member_binding.clone();
+    let source_session = fixture
+        .host_binding_record(controlling.mob_id.as_str())
+        .await
+        .materialized
+        .get("source-b2r3")
+        .map(|row| row.session_id.clone())
+        .expect("the source's materialized row");
+    let child = create_of("child-b2r3");
+    let typed = child
+        .prompt_context_fork_source
+        .as_ref()
+        .unwrap_or_else(|| panic!("the placed child's build carries its typed source: {child:#?}"));
+    assert_eq!(Some(&typed.source_member), source_binding.as_ref());
+    assert_eq!(
+        typed.source_session_id.as_ref().map(ToString::to_string),
+        Some(source_session),
+        "the typed source names the placed source's session"
+    );
+    assert!(
+        child.fork_seed.is_some(),
+        "the placed child's build records its fork seed: {child:#?}"
+    );
+    fixture.shutdown().await;
+}
+
+/// A context fork of a PLACED source compares the source's visible tools
+/// with the child's, read from the source's member host, and the notice
+/// names the source's session there.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_context_fork_of_a_placed_source_compares_its_tools() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let mut opts = HostFixtureOptions::named("xhe-b2r4-host").with_member_build();
+    opts.member_llm_client = Some(scripted_member_client_completing("b2r4-reply"));
+    let fixture = spawn_host_daemon_fixture(opts)
+        .await
+        .expect("spawn member-build host fixture");
+    let controlling = create_controlling_mob("xhe-b2r4").await;
+    let report = controlling.bind_fixture(&fixture).await;
+    b2_placed_source_with_a_turn(
+        &controlling,
+        "source-b2r4",
+        &report.host_id,
+        "b2r4-tail-marker",
+    )
+    .await;
+    let mut spec = meerkat_mob::SpawnMemberSpec::new("worker", "child-b2r4")
+        .with_backend(meerkat_mob::MobBackendKind::Session);
+    spec.launch_mode = meerkat_mob::MemberLaunchMode::Fork {
+        source_member_id: identity("source-b2r4"),
+        fork_context: meerkat_mob::ForkContext::LastMessages { count: 2 },
+    };
+    spec.initial_message = Some(meerkat_core::types::ContentInput::from("b2r4-first-input"));
+    controlling
+        .handle
+        .spawn_spec(spec)
+        .await
+        .expect("the local fork child of a placed source spawns");
+
+    let rows = b2_local_rows_after_turn(&controlling, "child-b2r4", "b2r4-first-input").await;
+    let notices = b2_fork_notices(&rows);
+    let [notice] = notices.as_slice() else {
+        panic!("one fork notice: {rows:#?}");
+    };
+    assert_eq!(
+        notice["tools"]["comparison"], "compared",
+        "the placed source's tools are read and compared: {notice}"
+    );
+    let source_session = fixture
+        .host_binding_record(controlling.mob_id.as_str())
+        .await
+        .materialized
+        .get("source-b2r4")
+        .map(|row| row.session_id.clone())
+        .expect("the source's materialized row");
+    assert_eq!(
+        notice["source"]["session_id"], source_session,
+        "the notice names the placed source's session: {notice}"
+    );
+    fixture.shutdown().await;
+}
+
+/// A LOCAL context-fork child of a PLACED source: its create build on the
+/// controlling host carries the typed source, naming the source member and
+/// the source's session on its member host. The placed source itself is
+/// never built on the controlling host.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_local_context_fork_child_of_a_placed_source_carries_its_typed_source() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let mut opts = HostFixtureOptions::named("xhe-b2r5-host").with_member_build();
+    opts.member_llm_client = Some(scripted_member_client_completing("b2r5-reply"));
+    let fixture = spawn_host_daemon_fixture(opts)
+        .await
+        .expect("spawn member-build host fixture");
+    let controlling = create_controlling_mob("xhe-b2r5").await;
+    let report = controlling.bind_fixture(&fixture).await;
+    b2_placed_source_with_a_turn(
+        &controlling,
+        "source-b2r5",
+        &report.host_id,
+        "b2r5-tail-marker",
+    )
+    .await;
+    let mut spec = meerkat_mob::SpawnMemberSpec::new("worker", "child-b2r5")
+        .with_backend(meerkat_mob::MobBackendKind::Session);
+    spec.launch_mode = meerkat_mob::MemberLaunchMode::Fork {
+        source_member_id: identity("source-b2r5"),
+        fork_context: meerkat_mob::ForkContext::LastMessages { count: 2 },
+    };
+    controlling
+        .handle
+        .spawn_spec(spec)
+        .await
+        .expect("the local fork child of a placed source spawns");
+
+    let creates = controlling.recorded_member_creates();
+    let creates_of = |member: &str| {
+        creates
+            .iter()
+            .filter(|create| {
+                create
+                    .mob_member_binding
+                    .as_ref()
+                    .is_some_and(|binding| binding.member == member)
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        creates_of("source-b2r5").is_empty(),
+        "the placed source is built on its member host only: {creates:#?}"
+    );
+    let child_creates = creates_of("child-b2r5");
+    let [child] = child_creates.as_slice() else {
+        panic!("one build of the local child on the controlling host: {creates:#?}");
+    };
+    let typed = child
+        .prompt_context_fork_source
+        .as_ref()
+        .unwrap_or_else(|| panic!("the local child's build carries its typed source: {child:#?}"));
+    assert_eq!(
+        typed.source_member,
+        meerkat_core::MobMemberBinding {
+            mob_id: controlling.mob_id.to_string(),
+            role: "worker".to_string(),
+            member: "source-b2r5".to_string(),
+        },
+        "the typed source names the placed source member"
+    );
+    let source_session = fixture
+        .host_binding_record(controlling.mob_id.as_str())
+        .await
+        .materialized
+        .get("source-b2r5")
+        .map(|row| row.session_id.clone())
+        .expect("the source's materialized row");
+    assert_eq!(
+        typed.source_session_id.as_ref().map(ToString::to_string),
+        Some(source_session),
+        "the typed source names the placed source's session on its member host"
+    );
+    fixture.shutdown().await;
+}
+
+/// A scripted host plus a scripted member endpoint for `child`, so the
+/// child's first input is observable.
+async fn b2_scripted_host_with_child(
+    name: &str,
+    children: &[&str],
+) -> (
+    support::ScriptedHostPeer,
+    Vec<support::ScriptedMemberTurnResponder>,
+) {
+    let scripted = support::spawn_scripted_host_peer(&format!("{name}-host")).await;
+    let mut responders = Vec::new();
+    for child in children {
+        let endpoint = Arc::new(
+            spawn_peer_comms_endpoint(&format!("{name}-{child}-member"), true, None).await,
+        );
+        responders.push(support::spawn_scripted_member_turn_responder(Arc::clone(
+            &endpoint,
+        )));
+        scripted.script_member_identity(child, support::member_identity_of(&endpoint));
+        scripted.bind_member_endpoint(child, endpoint);
+    }
+    (scripted, responders)
+}
+
+/// The text of the first delivery `responder` received that contains
+/// `needle`.
+async fn b2_delivered_text(
+    responder: &support::ScriptedMemberTurnResponder,
+    needle: &str,
+) -> String {
+    let mut text = None;
+    wait_until("the child's first input is delivered", || {
+        text = responder
+            .received_deliveries()
+            .iter()
+            .map(|delivery| delivery.content.text_content())
+            .find(|content| content.contains(needle));
+        let found = text.is_some();
+        async move { found }
+    })
+    .await;
+    text.expect("the delivered first input")
+}
+
+fn b2_materialize_wire(scripted: &support::ScriptedHostPeer, member: &str) -> serde_json::Value {
+    let payloads = scripted.received_materialize_payloads();
+    let payload = payloads
+        .iter()
+        .find(|payload| payload.spec.agent_identity == member)
+        .unwrap_or_else(|| panic!("the materialize of {member}"));
+    serde_json::to_value(payload).expect("materialize payload wire json")
+}
+
+/// Toward a host before protocol V7, the controller's feature probe is
+/// refused before it is read, the child is materialized in the V4 shape,
+/// and its first input carries the planned context and the notice as a
+/// prompt prefix.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_placed_context_fork_on_a_host_before_v7_keeps_the_prompt_prefix() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let (scripted, responders) = b2_scripted_host_with_child("xhe-b2r2", &["child-b2r2"]).await;
+    let controlling = create_controlling_mob("xhe-b2r2").await;
+    let report = controlling.bind_scripted(&scripted).await;
+    b2_local_source_with_a_turn(&controlling, "source-b2r2", "b2r2-tail-marker").await;
+
+    controlling
+        .handle
+        .spawn_spec(b2_placed_fork_spec(
+            "child-b2r2",
+            &report.host_id,
+            "source-b2r2",
+            "b2r2-first-input",
+        ))
+        .await
+        .expect("the placed fork child spawns on a host before V7");
+
+    let kinds = scripted.received_command_kinds();
+    assert!(
+        kinds.iter().any(|kind| kind == "host_features"),
+        "the controller asked the host for its features: {kinds:?}"
+    );
+    let wire = b2_materialize_wire(&scripted, "child-b2r2");
+    assert!(
+        wire.get("prompt_context_fork").is_none(),
+        "no V7 field toward a host before V7: {wire}"
+    );
+    assert_eq!(wire["protocol_version"], 4, "the V4 shape: {wire}");
+    let first_input = b2_delivered_text(&responders[0], "b2r2-first-input").await;
+    assert!(
+        first_input.contains("[fork_notice]") && first_input.contains("b2r2-tail-marker"),
+        "the planned context and the notice ride the first input: {first_input}"
+    );
+    for responder in &responders {
+        responder.shutdown();
+    }
+    scripted.shutdown();
+}
+
+/// A host that listed the feature and then refuses the V7
+/// materialize before reading it (it was downgraded in between) fails the
+/// spawn with the typed version refusal and leaves no carrier; the next fork
+/// asks again and falls back to the prompt prefix.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_v7_materialize_refused_after_the_probe_fails_typed_and_the_next_fork_falls_back() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let (scripted, responders) =
+        b2_scripted_host_with_child("xhe-b2r7", &["child-b2r7a", "child-b2r7b"]).await;
+    let controlling = create_controlling_mob("xhe-b2r7").await;
+    let report = controlling.bind_scripted(&scripted).await;
+    b2_local_source_with_a_turn(&controlling, "source-b2r7", "b2r7-tail-marker").await;
+
+    scripted.serve_v7(support::ScriptedV7Mode::Features(vec![
+        "prompt_context_fork".to_string(),
+    ]));
+    scripted.refuse_next_v7_materialize();
+    let error = controlling
+        .handle
+        .spawn_spec(b2_placed_fork_spec(
+            "child-b2r7a",
+            &report.host_id,
+            "source-b2r7",
+            "b2r7a-first-input",
+        ))
+        .await
+        .expect_err("a refused V7 materialize fails the spawn");
+    let rendered = format!("{error:?} {error}");
+    assert!(
+        rendered.contains("UnsupportedProtocolVersion") && rendered.contains('7'),
+        "the typed refusal names the version: {rendered}"
+    );
+    assert!(
+        controlling
+            .storage_metadata
+            .load_placed_spawn(&controlling.mob_id, "child-b2r7a")
+            .await
+            .expect("load the refused child's carrier")
+            .is_none(),
+        "the refused spawn leaves no carrier"
+    );
+
+    scripted.serve_v7(support::ScriptedV7Mode::BeforeV7);
+    controlling
+        .handle
+        .spawn_spec(b2_placed_fork_spec(
+            "child-b2r7b",
+            &report.host_id,
+            "source-b2r7",
+            "b2r7b-first-input",
+        ))
+        .await
+        .expect("the next fork falls back to the prompt prefix");
+    let probes = scripted
+        .received_command_kinds()
+        .iter()
+        .filter(|kind| *kind == "host_features")
+        .count();
+    assert_eq!(probes, 2, "every placed context fork asks the host once");
+    let wire = b2_materialize_wire(&scripted, "child-b2r7b");
+    assert!(wire.get("prompt_context_fork").is_none(), "{wire}");
+    let first_input = b2_delivered_text(&responders[1], "b2r7b-first-input").await;
+    assert!(first_input.contains("[fork_notice]"), "{first_input}");
+    for responder in &responders {
+        responder.shutdown();
+    }
+    scripted.shutdown();
+}
+
+/// A feature probe that never answers fails the spawn, bounded, naming
+/// the probe, before any carrier or materialize exists.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_feature_probe_that_never_answers_fails_the_spawn_before_anything_is_recorded() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let (scripted, responders) = b2_scripted_host_with_child("xhe-b2c2", &["child-b2c2"]).await;
+    let controlling = create_controlling_mob("xhe-b2c2").await;
+    let report = controlling.bind_scripted(&scripted).await;
+    b2_local_source_with_a_turn(&controlling, "source-b2c2", "b2c2-tail-marker").await;
+
+    scripted.serve_v7(support::ScriptedV7Mode::HoldFeatures);
+    let started = std::time::Instant::now();
+    let error = controlling
+        .handle
+        .spawn_spec(b2_placed_fork_spec(
+            "child-b2c2",
+            &report.host_id,
+            "source-b2c2",
+            "b2c2-first-input",
+        ))
+        .await
+        .expect_err("an unanswered feature probe fails the spawn");
+    assert!(
+        error.to_string().contains("HostFeatures"),
+        "the failure names the probe: {error}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "the probe is bounded: {:?}",
+        started.elapsed()
+    );
+    assert!(
+        controlling
+            .storage_metadata
+            .load_placed_spawn(&controlling.mob_id, "child-b2c2")
+            .await
+            .expect("load the child's carrier")
+            .is_none(),
+        "no carrier exists"
+    );
+    assert!(
+        scripted
+            .received_materialize_payloads()
+            .iter()
+            .all(|payload| payload.spec.agent_identity != "child-b2c2"),
+        "nothing was materialized"
+    );
+    for responder in &responders {
+        responder.shutdown();
+    }
+    scripted.shutdown();
+}
+
+/// A placed context-fork child whose live runtime is gone is revived like
+/// any placed member: the controller re-issues its recorded tuple as a
+/// Resume without a fork, the member host answers it from the recorded row,
+/// and the child keeps the seed recorded at its first build. Nothing records
+/// a second seed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_placed_context_fork_child_is_revived_from_its_recorded_row() {
+    let _guard = REAL_COMMS_TEST_LOCK.lock().await;
+    let mut opts = HostFixtureOptions::named("xhe-b2m1-host").with_member_build();
+    opts.member_llm_client = Some(scripted_member_client_completing("b2m1-reply"));
+    opts.record_member_creates = true;
+    let fixture = spawn_host_daemon_fixture(opts)
+        .await
+        .expect("spawn member-build host fixture");
+    let controlling = create_controlling_mob("xhe-b2m1").await;
+    let report = controlling.bind_fixture(&fixture).await;
+    b2_placed_source_with_a_turn(
+        &controlling,
+        "source-b2m1",
+        &report.host_id,
+        "b2m1-tail-marker",
+    )
+    .await;
+
+    // A turn-driven fork child without a first input: its turns ride the
+    // controller's deliveries, and a failed delivery triggers the revival.
+    let mut spec = placed_spawn_spec("worker", "child-b2m1", &report.host_id);
+    spec.launch_mode = meerkat_mob::MemberLaunchMode::Fork {
+        source_member_id: identity("source-b2m1"),
+        fork_context: meerkat_mob::ForkContext::LastMessages { count: 2 },
+    };
+    controlling
+        .handle
+        .spawn_spec(spec)
+        .await
+        .expect("the placed fork child spawns");
+    let before = fixture
+        .host_binding_record(controlling.mob_id.as_str())
+        .await
+        .materialized
+        .get("child-b2m1")
+        .cloned()
+        .expect("the child's materialized row");
+    assert!(
+        before.prompt_context_fork_digest.is_some(),
+        "the child was materialized with its fork"
+    );
+    let seeds = || {
+        fixture
+            .failing_create
+            .as_ref()
+            .expect("the fixture records member creates")
+            .recorded_creates()
+            .into_iter()
+            .filter(|create| {
+                create
+                    .mob_member_binding
+                    .as_ref()
+                    .is_some_and(|binding| binding.member == "child-b2m1")
+            })
+            .filter_map(|create| create.fork_seed)
+            .collect::<Vec<_>>()
+    };
+    let seeded = seeds();
+    assert_eq!(
+        seeded.len(),
+        1,
+        "the first build records the seed: {seeded:?}"
+    );
+
+    // Kill the child's live runtime on its member host; its durable row
+    // stays.
+    let session_id = meerkat_core::SessionId::parse(&before.session_id).expect("session id");
+    fixture
+        .member_session_service()
+        .discard_live_session(&session_id)
+        .await
+        .expect("discard the child's live session");
+    let member = controlling
+        .handle
+        .member(&identity("child-b2m1"))
+        .await
+        .expect("child handle");
+    let _first = member.send("b2m1-are-you-there", HandlingMode::Queue).await;
+    wait_until("the fork child to revive on its member host", || async {
+        fixture
+            .member_session_service()
+            .has_live_session(&session_id)
+            .await
+            .unwrap_or(false)
+    })
+    .await;
+    member
+        .send("b2m1-task-after-revival", HandlingMode::Queue)
+        .await
+        .expect("the revived fork child serves a turn");
+
+    // The child holds the context recorded at its first build: one fork
+    // notice.
+    let rows = b2_placed_rows_after_turn(
+        &fixture,
+        &controlling,
+        "child-b2m1",
+        "b2m1-task-after-revival",
+    )
+    .await;
+    assert_eq!(b2_fork_notices(&rows).len(), 1, "one fork notice: {rows:?}");
+    // The revival was answered from the row: the same tuple and fork, and no
+    // second seed.
+    let after = fixture
+        .host_binding_record(controlling.mob_id.as_str())
+        .await
+        .materialized
+        .get("child-b2m1")
+        .cloned()
+        .expect("the child's row survives the revival");
+    assert_eq!(
+        (
+            after.generation,
+            after.fence_token,
+            &after.session_id,
+            &after.prompt_context_fork_digest
+        ),
+        (
+            before.generation,
+            before.fence_token,
+            &before.session_id,
+            &before.prompt_context_fork_digest
+        ),
+        "the revival keeps the recorded tuple and fork"
+    );
+    assert_eq!(seeds(), seeded, "a revival records no second seed");
+    fixture.shutdown().await;
+}

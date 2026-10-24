@@ -4,6 +4,8 @@ mod forked_participant;
 mod in_memory;
 mod realm_profile;
 #[cfg(not(target_arch = "wasm32"))]
+mod spi;
+#[cfg(not(target_arch = "wasm32"))]
 mod sqlite;
 mod temporary_council;
 
@@ -29,6 +31,15 @@ pub use sqlite::{
 };
 pub use temporary_council::{
     TemporaryCouncilRecord, TemporaryCouncilRecoveryVerdict, TemporaryCouncilStore,
+};
+
+// Mob storage over the host store SPI (native only).
+#[cfg(not(target_arch = "wasm32"))]
+pub use spi::{
+    MOB_FAMILY, MOB_IDENTITY_FAMILY, MOB_RUN_FAMILY, MOB_STATUS_FAMILY, SpiForkedParticipantStore,
+    SpiMobEventStore, SpiMobIdentityStatusStore, SpiMobIdentityStore, SpiMobRunStore,
+    SpiMobRuntimeMetadataStore, SpiMobSpecStore, SpiMobStoreHost, SpiMobStores,
+    SpiRealmProfileStore, SpiStoredMob,
 };
 
 use crate::definition::MobDefinition;
@@ -763,15 +774,12 @@ impl MobDeliveryIdentity {
             ("idempotency_key", self.idempotency_key.as_str()),
             ("correlation_id", self.correlation_id.as_str()),
         ] {
-            if value.is_empty()
-                || value.trim() != value
-                || value.len() > MOB_EXTERNAL_DELIVERY_KEY_MAX_BYTES
-                || value.chars().any(char::is_control)
-            {
-                return Err(MobStoreError::Serialization(format!(
-                    "mob delivery {field} must be canonical nonempty text no longer than {MOB_EXTERNAL_DELIVERY_KEY_MAX_BYTES} bytes"
-                )));
-            }
+            meerkat_runtime::validate_canonical_key_text(
+                &format!("mob delivery {field}"),
+                value,
+                MOB_EXTERNAL_DELIVERY_KEY_MAX_BYTES,
+            )
+            .map_err(|error| MobStoreError::Serialization(error.to_string()))?;
         }
         let correlation_id = uuid::Uuid::parse_str(&self.correlation_id).map_err(|_| {
             MobStoreError::Serialization(
@@ -2273,8 +2281,8 @@ pub struct MobHostCapabilityRecord {
 /// second-roster prohibition).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MobHostAuthorityRecord {
-    /// Identity-first host id: the host's canonical comms `PeerId` string
-    /// (D1 — never a display name).
+    /// Identity-first host id: the host's canonical comms `PeerId` string,
+    /// never a display name.
     pub host_id: String,
     /// Canonical comms peer id used to address the host. Identity and
     /// transport addressing are separate facts even though host ids ARE
@@ -3181,6 +3189,16 @@ impl MobPlacedSpawnCarrierRecord {
             .then(|| self.spec.profile.model.clone())
     }
 
+    /// Whether this committed carrier waived its kickoff: its member host
+    /// reported, on a plain resume's ack, that the adopted session's first
+    /// turn already started.
+    pub fn waives_first_turn(&self) -> bool {
+        matches!(
+            &self.phase,
+            PlacedSpawnCarrierPhase::Committed(commit) if commit.adopted_first_turn_started
+        )
+    }
+
     /// Project per-member operator facts only from an exact committed carrier.
     /// Mob-wide operator grants remain in their independent principal-keyed
     /// store and are never folded into this record.
@@ -3221,6 +3239,14 @@ pub struct PlacedSpawnCommitRecord {
     pub member_session_id: meerkat_core::SessionId,
     pub member_peer_endpoint: mob_dsl::MemberPeerEndpoint,
     pub ack_engine_version: String,
+    /// The member host reported, on a plain resume's ack, that the adopted
+    /// session's first turn already started: the kickoff the carrier's
+    /// intent describes is waived, and cold recovery repairs no kickoff for
+    /// it. Only an autonomous carrier carries it. Written only when true,
+    /// so every other record keeps its bytes; a binary that does not know
+    /// the key refuses a record that carries it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub adopted_first_turn_started: bool,
 }
 
 impl PlacedSpawnCommitRecord {
@@ -3231,6 +3257,16 @@ impl PlacedSpawnCommitRecord {
         if self.member_session_id.0.is_nil() || self.ack_engine_version.is_empty() {
             return Err(MobStoreError::Internal(
                 "committed placed-spawn carrier has incomplete host ACK facts".to_string(),
+            ));
+        }
+        if self.adopted_first_turn_started
+            && spec.profile.runtime_mode
+                != meerkat_contracts::wire::WireMobRuntimeMode::AutonomousHost
+        {
+            return Err(MobStoreError::Internal(
+                "committed placed-spawn carrier waives the kickoff of a member that is not \
+                 autonomous"
+                    .to_string(),
             ));
         }
 
@@ -6048,6 +6084,18 @@ pub const IDENTITY_INTENT_SCAN_PAGE_MAX: usize = 256;
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait MobIdentityStore: Send + Sync {
+    /// The database file a mob takes process custody of before it mints an
+    /// identity-lease incarnation over this store.
+    ///
+    /// While a process holds that custody, an unexpired lease of the same
+    /// mob's incarnation from a process that has exited is reclaimed at
+    /// once instead of waited out. `None`, the default, is a store without
+    /// such a file: a restarted mob waits for every earlier incarnation's
+    /// lease to expire.
+    fn incarnation_custody_store(&self) -> Option<&std::path::Path> {
+        None
+    }
+
     /// Prepare an observation-bound runtime write fence.
     ///
     /// Built-in stores retain their identity-authority serialization guard

@@ -297,3 +297,270 @@ async fn runtime_backed_external_events_stay_queued_without_waking_idle_sessions
         "queued external events should remain staged for a later boundary"
     );
 }
+
+/// one REST app over in-memory stores with one idle session, for the
+/// caller idempotency key rows on `/sessions/{id}/external-events`.
+async fn keyed_rest_fixture() -> (
+    axum::Router,
+    String,
+    Arc<meerkat_runtime::MeerkatMachine>,
+    TempDir,
+) {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let project_root = temp_dir.path().join("project");
+    std::fs::create_dir_all(project_root.join(".rkat")).expect("create .rkat");
+
+    let config = Config::default();
+    let config_store = MemoryConfigStore::new(config.clone(), meerkat_models::canonical());
+    let store_path = temp_dir.path().join("sessions");
+    let (event_tx, _) = tokio::sync::broadcast::channel(16);
+    let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+
+    let factory = AgentFactory::new(store_path.clone())
+        .builtins(true)
+        .shell(true)
+        .project_root(project_root.clone());
+    let provider_registry = factory.provider_runtime_registry();
+    let mut builder = FactoryAgentBuilder::new(factory, config.clone());
+    let llm = Arc::new(FirstTurnOnlyClient::new());
+    builder.default_llm_client = Some(llm.clone());
+    let persistence = PersistenceBundle::new(
+        store,
+        Arc::new(meerkat_runtime::InMemoryRuntimeStore::new()),
+        Arc::new(meerkat_store::MemoryBlobStore::new()),
+    )
+    .expect("construct runtime authority");
+    let runtime_adapter = persistence.runtime_adapter();
+    let workgraph_store = persistence.workgraph_store();
+    builder.default_session_store = Some(Arc::new(StoreAdapter::new(persistence.session_store())));
+    #[cfg(feature = "mob")]
+    let builder_mob_tools_slot = Arc::clone(&builder.default_mob_tools);
+    let (session_store, runtime_store, blob_store) = persistence.into_parts();
+    let session_service = Arc::new(PersistentSessionService::new(
+        builder,
+        100,
+        session_store,
+        runtime_store,
+        blob_store,
+    ));
+    #[cfg(feature = "mob")]
+    let mob_state = wire_mob_tools(
+        &builder_mob_tools_slot,
+        session_service.clone(),
+        Some(runtime_adapter.clone()),
+        None,
+        meerkat_mob::MobControlPrincipal::Owner,
+    )
+    .expect("wire runtime authority");
+    let config_store_arc: Arc<dyn meerkat_core::ConfigStore> = Arc::new(config_store);
+    let config_runtime = Arc::new(meerkat_core::ConfigRuntime::new(
+        Arc::clone(&config_store_arc),
+        store_path.join("config_state.json"),
+    ));
+    let state = AppState {
+        connector_client_auth_profiles: Vec::new(),
+        store_path: store_path.clone(),
+        max_tokens: config.agent.resolved_max_tokens_per_turn(),
+        rest_host: config.rest.host.clone().into(),
+        rest_port: config.rest.port,
+        enable_builtins: true,
+        enable_shell: true,
+        project_root: Some(project_root),
+        context_root: None,
+        user_config_root: None,
+        llm_client_override: Some(llm.clone()),
+        config_store: config_store_arc,
+        event_tx,
+        session_service,
+        schedule_service: meerkat::ScheduleService::new(Arc::new(
+            meerkat::MemoryScheduleStore::default(),
+        )),
+        workgraph_service: meerkat::WorkGraphService::with_scope(
+            workgraph_store,
+            "keyed-rest",
+            meerkat::WorkNamespace::default(),
+        ),
+        webhook_auth: meerkat_rest::webhook::WebhookAuth::None,
+        realm: meerkat_core::RealmId::parse("keyed-rest").expect("valid realm"),
+        realm_config_source: Arc::new(meerkat_store::FilesystemRealmConfigSource::new(
+            temp_dir.path().join("empty-realms"),
+            temp_dir.path().join("empty-realms").join("__no_global__"),
+            meerkat_models::canonical(),
+        )),
+        instance_id: None,
+        backend: "sqlite".to_string(),
+        resolved_paths: meerkat_core::ConfigResolvedPaths {
+            root: store_path.display().to_string(),
+            manifest_path: String::new(),
+            config_path: String::new(),
+            sessions_sqlite_path: None,
+            sessions_jsonl_dir: String::new(),
+        },
+        expose_paths: false,
+        config_runtime,
+        realm_lease: Arc::new(tokio::sync::Mutex::new(None)),
+        skill_runtime: None,
+        runtime_adapter: runtime_adapter.clone(),
+        runtime_pre_admissions: meerkat_rest::default_rest_runtime_pre_admissions(),
+        runtime_registration_locks: meerkat_rest::default_rest_runtime_registration_locks(),
+        schedule_host: Arc::default(),
+        request_executor: std::sync::Arc::new(meerkat::surface::SurfaceRequestExecutor::new(
+            std::time::Duration::from_secs(5),
+        )),
+        provider_auth_persistence: meerkat_providers::auth_store::ProviderAuthPersistence::new(
+            Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
+            Arc::new(meerkat_providers::auth_store::InMemoryCoordinator::new()),
+        ),
+        auth_lease: runtime_adapter.generated_auth_lease_handle(),
+        provider_registry,
+        host_confinement: meerkat::HostConfinement::trusted_host(),
+        #[cfg(feature = "mob")]
+        mob_state,
+        #[cfg(feature = "mcp")]
+        mcp_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        #[cfg(feature = "mcp")]
+        mcp_stdio_launch_profile: meerkat::McpStdioLaunchProfile::trusted_host(),
+    };
+
+    let app = router(state);
+    let (status, payload) = post_json(
+        &app,
+        "/sessions",
+        json!({
+            "prompt": "say ok",
+            "model": meerkat::resolve_create_session_default_model(&config),
+            "max_tokens": config.agent.resolved_max_tokens_per_turn()
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create-session failed: {payload}");
+    let session_id = payload["session_id"]
+        .as_str()
+        .expect("session_id")
+        .to_string();
+    (app, session_id, runtime_adapter, temp_dir)
+}
+
+async fn post_json(app: &axum::Router, uri: &str, body: Value) -> (StatusCode, Value) {
+    let request = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&body).expect("serialize body"),
+        ))
+        .expect("build request");
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        app.clone().oneshot(request),
+    )
+    .await
+    .expect("request returns within 10s")
+    .expect("run request");
+    let status = response.status();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("read body")
+        .to_bytes();
+    let value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes)
+            .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()))
+    };
+    (status, value)
+}
+
+fn keyed_event(key: &str, payload: Value) -> Value {
+    json!({
+        "kind": "generic_json",
+        "event_type": "inbox.item",
+        "payload": payload,
+        "idempotency_key": key,
+    })
+}
+
+/// the same key and payload twice is 202 both times, and one input
+/// is admitted.
+#[tokio::test]
+async fn rest_external_event_same_key_replays_202() {
+    let (app, session_id, runtime_adapter, _temp) = keyed_rest_fixture().await;
+    let parsed = meerkat::SessionId::parse(&session_id).expect("session id");
+    let uri = format!("/sessions/{session_id}/external-events");
+    let payload = json!({ "item": "rest-1", "body": "hello" });
+    for attempt in 0..2 {
+        let (status, body) =
+            post_json(&app, &uri, keyed_event("rest:item-1", payload.clone())).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "attempt {attempt}: {body}");
+        assert_eq!(body, json!({ "queued": true }), "attempt {attempt}");
+    }
+    let active = runtime_adapter
+        .list_active_inputs(&parsed)
+        .await
+        .expect("active inputs");
+    assert_eq!(
+        active.len(),
+        1,
+        "the retry under the same key admitted nothing new: {active:?}"
+    );
+}
+
+/// the same key with another payload is 409 with the typed code
+/// and the first admission's id (it was a 500 before).
+#[tokio::test]
+async fn rest_external_event_other_payload_is_409_typed() {
+    let (app, session_id, runtime_adapter, _temp) = keyed_rest_fixture().await;
+    let parsed = meerkat::SessionId::parse(&session_id).expect("session id");
+    let uri = format!("/sessions/{session_id}/external-events");
+    let (status, body) = post_json(
+        &app,
+        &uri,
+        keyed_event("rest:item-2", json!({ "body": "original" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let (status, body) = post_json(
+        &app,
+        &uri,
+        keyed_event("rest:item-2", json!({ "body": "changed" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "INPUT_IDEMPOTENCY_CONFLICT", "{body}");
+    let first = runtime_adapter
+        .input_state_by_idempotency_key(&parsed, "caller:rest:item-2")
+        .await
+        .expect("lookup")
+        .expect("the first admission holds the caller key");
+    assert_eq!(
+        body["existing_id"].as_str(),
+        Some(first.state.input_id.to_string().as_str()),
+        "{body}"
+    );
+}
+
+/// REST stores the caller key in the namespace the RPC surface
+/// uses ("caller:<key>"), so both surfaces share one key space per session.
+#[tokio::test]
+async fn rest_and_rpc_external_event_share_one_key_space() {
+    let (app, session_id, runtime_adapter, _temp) = keyed_rest_fixture().await;
+    let parsed = meerkat::SessionId::parse(&session_id).expect("session id");
+    let uri = format!("/sessions/{session_id}/external-events");
+    let (status, body) = post_json(
+        &app,
+        &uri,
+        keyed_event("shared:item-3", json!({ "body": "shared" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert!(
+        runtime_adapter
+            .input_state_by_idempotency_key(&parsed, "caller:shared:item-3")
+            .await
+            .expect("lookup")
+            .is_some(),
+        "REST indexes the caller key as caller:<key>, as the RPC surface does"
+    );
+}

@@ -608,6 +608,45 @@ impl SessionError {
         )
     }
 
+    /// Structured-data `kind` of [`Self::mob_member_session_addressed_by_id`].
+    pub const MOB_MEMBER_SESSION_ADDRESSED_BY_ID_KIND: &'static str =
+        "mob_member_session_addressed_by_id";
+
+    /// A session-scoped surface (a live channel opened by session id, and
+    /// the reads that recover a session for it) refused to restore a mob
+    /// member's session from storage. The member's mob restores that
+    /// session, and its live channel opens through the mob's member live
+    /// surface, which first checks the member. Nothing was restored.
+    /// Surfaces answer the invalid-params class.
+    pub fn mob_member_session_addressed_by_id(
+        session_id: &SessionId,
+        mob_id: &str,
+        member: &str,
+    ) -> Self {
+        Self::FailedWithData {
+            message: format!(
+                "session {session_id} belongs to member '{member}' of mob '{mob_id}' and is not \
+                 live; open its live channel through the mob's member live surface"
+            ),
+            data: serde_json::json!({
+                "kind": Self::MOB_MEMBER_SESSION_ADDRESSED_BY_ID_KIND,
+                "session_id": session_id.to_string(),
+                "mob_id": mob_id,
+                "member": member,
+            }),
+        }
+    }
+
+    /// Whether this error is a [`Self::mob_member_session_addressed_by_id`].
+    pub fn is_mob_member_session_addressed_by_id(&self) -> bool {
+        matches!(
+            self.primary_error(),
+            Self::FailedWithData { data, .. }
+                if data.get("kind").and_then(serde_json::Value::as_str)
+                    == Some(Self::MOB_MEMBER_SESSION_ADDRESSED_BY_ID_KIND)
+        )
+    }
+
     /// Structured-data `kind` of a [`Self::ServedElsewhere`] refusal on the
     /// wire, where it travels under the session-busy code.
     pub const SERVED_ELSEWHERE_KIND: &'static str = "session_served_elsewhere";
@@ -989,6 +1028,40 @@ impl ForkBuildSource {
     }
 }
 
+/// The source of a prompt-context fork child: the mob member whose history
+/// was rendered into the child's first prompt (`MemberLaunchMode::Fork` in
+/// the mob runtime).
+///
+/// Set only by the mob runtime, on that child's create build. No standard
+/// build behaviour reads it; a host's build hook may, for example to carry
+/// the source's content taint to the child. It is not
+/// [`ForkBuildSource`], which is durable-fork provenance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub struct PromptContextForkSource {
+    /// Durable mob-member identity of the source member.
+    pub source_member: crate::MobMemberBinding,
+    /// The source member's session the history was read from, when the
+    /// controller knows it (a placed source's session lives on its host).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
+    pub source_session_id: Option<SessionId>,
+}
+
+impl PromptContextForkSource {
+    pub fn new(
+        source_member: crate::MobMemberBinding,
+        source_session_id: Option<SessionId>,
+    ) -> Self {
+        Self {
+            source_member,
+            source_session_id,
+        }
+    }
+}
+
 /// What a build does with its session.
 ///
 /// [`SessionBuildOptions::resume_session`] carries two different things: the
@@ -1205,6 +1278,10 @@ pub struct SessionBuildOptions {
     /// }
     /// ```
     pub fork_source: Option<ForkBuildSource>,
+    /// Typed source of a prompt-context fork child (see
+    /// [`PromptContextForkSource`]); `None` for every other build. Not read by
+    /// the standard build pipeline.
+    pub prompt_context_fork_source: Option<PromptContextForkSource>,
     /// Additional instruction sections appended to the system prompt after skill
     /// assembly, before tool instructions. Order preserved.
     pub additional_instructions: Option<Vec<String>>,
@@ -2230,6 +2307,7 @@ impl Default for SessionBuildOptions {
             max_inline_peer_notifications: None,
             app_context: None,
             fork_source: None,
+            prompt_context_fork_source: None,
             additional_instructions: None,
             initial_metadata_entries: BTreeMap::new(),
             initial_tool_filter: None,
@@ -2314,6 +2392,10 @@ impl std::fmt::Debug for SessionBuildOptions {
             )
             .field("app_context", &self.app_context.is_some())
             .field("fork_source", &self.fork_source)
+            .field(
+                "prompt_context_fork_source",
+                &self.prompt_context_fork_source,
+            )
             .field("additional_instructions", &self.additional_instructions)
             .field("initial_metadata_entries", &self.initial_metadata_entries)
             .field("initial_tool_filter", &self.initial_tool_filter.is_some())
@@ -3222,6 +3304,11 @@ pub struct DurableSessionForkTarget {
     /// The fork instruction policy this fork applies, already resolved for
     /// the path's activation window ([`crate::ForkInstructionPolicy::effective`]).
     pub inherited_instructions: crate::ForkInstructionPolicy,
+    /// The host's fork instruction policy as declared, before that
+    /// resolution. The skills the copied rows loaded follow it: a child
+    /// runs without activating them, so a fork without an activation
+    /// window strips them under the default instead of refusing.
+    pub declared_instructions: crate::ForkInstructionPolicy,
 }
 
 /// Outcome of a durable fork that first waited, bounded, for the source
@@ -3438,6 +3525,20 @@ pub trait SessionService: Send + Sync {
                 "reconcile_runtime_compaction_projections".to_string(),
             ))
         }
+    }
+
+    /// Adopt the runtime's HeadCanonical compaction-outbox finalization (a
+    /// store-owned, metadata-only head commit named by `authority`) as the
+    /// live actor's metadata baseline. Runtime-backed durable services
+    /// override this; others refuse it, typed.
+    async fn acknowledge_runtime_compaction_finalization(
+        &self,
+        _id: &SessionId,
+        _authority: &crate::lifecycle::core_executor::CommittedSessionBoundaryAuthority,
+    ) -> Result<(), SessionError> {
+        Err(SessionError::Unsupported(
+            "acknowledge_runtime_compaction_finalization".to_string(),
+        ))
     }
 
     /// Abort a live compaction transaction after the runtime boundary was

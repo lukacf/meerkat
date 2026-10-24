@@ -1,0 +1,548 @@
+---
+title: "Durable Runs and Host Stores"
+description: "How a run in a durable session commits every tool round and continues after a crash, what a tool sees when its call runs again, durable mob workers, and keeping a realm in your own database."
+icon: "floppy-disk"
+---
+
+# Durable Runs and Host Stores
+
+Since 0.9.5, a run in a durable session commits its progress at every tool
+round. When a crash, a kill or a restart interrupts the run, Meerkat
+continues the same run, under the same run id, from its last committed
+round. Before 0.9.5 an interrupted run was either started again from its
+input or closed as interrupted, and the work of its earlier rounds was redone
+or lost.
+
+This page covers:
+
+- what a round commits and what that costs;
+- what happens after a crash, and after a graceful stop for a deploy;
+- what a tool sees when its call runs again;
+- durable workers in mobs;
+- keeping a realm in your own database through the host store SPI.
+
+The SPI contract itself is in the [Host Store SPI reference](/reference/host-store-spi).
+
+<Note>
+Per-round commits apply to every session that has a checkpointer: the
+persistent sessions of `sqlite`, `jsonl` and host-store realms. There is no
+setting to turn them off. Ephemeral sessions keep no checkpoints, so a crash
+ends their runs as before.
+</Note>
+
+## What A Round Commits
+
+A round is one model call and the tool calls its response asked for. Every
+round with tool calls, the run's first round included, commits twice:
+
+1. **After the model responds, before any tool runs.** The response, with its
+   tool calls, is saved in the session's run cursor. It does not enter the
+   transcript yet.
+2. **After the tools finish.** The response and its tool results enter the
+   transcript together, and the cursor moves on to the next model call.
+
+So a committed transcript never ends in a tool call without its result. The
+final round, in which the model answers without calling tools, ends the run
+with the usual end-of-run save, which also removes the cursor.
+Structured-output extraction takes no round commits.
+
+The one exception is a round whose model response contains an image: the run
+cursor cannot hold images, so that round takes only the second commit. If the
+process stops during its tools, the run asks the model again for that round,
+as it does when the process stops during a model call, and the new
+response's tool calls are dispatched as new calls.
+
+If a round commit fails, the run ends with the error. When the first commit
+fails, none of the round's tools has run.
+
+A run that crashes before its first commit, during its first model call, has
+nothing to continue from: its input runs again as a new run, as before 0.9.5.
+
+A compaction during the run keeps the commits going. On a `sqlite` realm the
+next round commits on top of the compacted transcript. On a WholeBlob realm
+the run's next round commit after a compaction makes the compacted session
+document the session's new committed base, and later round commits continue
+on top of it, after any number of compactions. If the process stops between
+the compaction and that commit, the run continues from its previous commit
+and compacts again.
+
+### Cost By Realm Backend
+
+Every commit goes through the session's checkpointer to the realm's runtime
+store, so its cost depends on the backend:
+
+| Realm | Store profile | What one commit writes |
+|-------|---------------|------------------------|
+| `sqlite` | HeadCanonical | The rows the round added |
+| `jsonl` | WholeBlob | The whole session document |
+| host store | WholeBlob | The whole session document |
+
+A WholeBlob realm writes the whole document twice per tool round, so over a
+run of N rounds the bytes it writes grow with N squared. Long, tool-heavy
+runs are cheapest on a `sqlite` realm. A round without tool calls adds no
+commit.
+
+## After A Crash
+
+The run continues as soon as Meerkat opens its session again: when any
+surface opens the session, or when a mob rebuilds its durable workers after
+a restart. Opening the session wakes the run, so no new input is needed.
+Meerkat does not look for open runs at start-up; a session nobody opens keeps
+its open run until its next open.
+
+- **The run keeps its identity.** It continues under the same run id, and
+  its event stream shows `run_resumed`, naming the run, the round and whether
+  the run continues at the round's tools (`tools_pending`) or at its next
+  model call (`awaiting_model`).
+- **Where it continues** depends on the last commit:
+  - After the first commit of a round, the saved response stands in for the
+    model call, and the same tool calls are dispatched again under the same
+    call ids. The saved response is not announced again: no new assistant,
+    tool-call request or turn-completed events are emitted for it.
+  - After the second commit, the run makes its next model call. If the
+    round's tools had started asynchronous work that the run waits for
+    before that call, the work ended with the process: a system notice
+    tells the model which tool calls started it and that their results
+    will not arrive.
+- **What is lost** is the round that was in progress. If its model call had
+  already run, that call's usage is not recorded, although the provider bills
+  it.
+- **Run state carries over.** Turn and tool-call counts, the run's usage and
+  the time it had used are restored. The resumed run continues its remaining
+  time budget, not a fresh one, and the time the process was down is not
+  charged.
+- **Tools come back first.** A resumed run waits for its tool surface, for
+  example its MCP servers connecting, for at most each server's connect
+  timeout. A tool that is still missing then answers its call with an error
+  result the model sees.
+
+### Inputs And Ordering
+
+- While a run waits to continue, no other run starts in that session. New
+  inputs still queue, and run after the resumed run.
+- The inputs bound to the run stay bound: the input that started it, and
+  every steer or peer input applied at one of its committed rounds. An input
+  applied only in the lost round is delivered again later, so it is neither
+  lost nor applied twice.
+- Stopping the run before it continues settles it like a stop: its inputs are
+  abandoned as cancelled, the run ends failed, and it is closed as
+  interrupted with the rounds it committed kept (see
+  [When A Run Does Not Continue](#when-a-run-does-not-continue)). Retiring,
+  destroying, resetting or unregistering the session abandons its inputs
+  too, and the run never continues. The exception is a graceful stop that
+  keeps queued work (see
+  [Graceful Stops And Deploys](#graceful-stops-and-deploys)): the run then
+  continues at the session's next start, unless an input bound to it is
+  older than the stop's max age by then.
+
+### Graceful Stops And Deploys
+
+A graceful stop that keeps queued work, the kind a deploy uses, does not end
+the run in flight of a session with per-round commits: the run continues
+afterwards, exactly as after a crash. Such a stop is an unregister with
+`UnregisterQueuedInputs::Requeue { max_age }`, or a mob Shutdown with
+`ShutdownOptions::with_queued_inputs(QueuedInputsOnShutdown::Requeue(max_age))`.
+
+It is the default. A graceful shutdown that does not choose what happens to
+queued work uses Requeue, with a 15 minute max age, for every session with
+per-round commits, and Stop for any other session:
+
+- `rkat-rpc`'s own shutdown, when its input ends (as when a client SDK
+  exits), on SIGTERM and on an interrupt;
+- the REST server's shutdown on SIGTERM or an interrupt, before it drains
+  its open requests: a run in flight when the signal arrives is suspended
+  even when an open request waits on it, and that request is answered `409`
+  `SESSION_NOT_RUNNING` with `details.kind` `requeued_across_stop`;
+- a mob Shutdown (`MobHandle::shutdown()`, or `ShutdownOptions` without
+  `with_queued_inputs`, whose default is
+  `QueuedInputsOnShutdown::RequeueDurable`), member by member: it suspends
+  the running turn of a member whose session commits every round instead of
+  cancelling it, an autonomous member's included (see
+  [Mobs](/guides/mobs)).
+
+A host that chooses explicitly keeps its choice: an unregister with
+`UnregisterQueuedInputs::Stop`, or a Shutdown with
+`with_queued_inputs(QueuedInputsOnShutdown::Stop)`, ends runs in flight as
+before. An embedding host's own unregister without a disposition still
+stops: `UnregisterQueuedInputs::default()` is `Stop`. The suspend does not
+wait for the round, so a long tool call does not hold up a shutdown, and a
+process killed during it leaves the run as a crash would.
+
+- **The stop does not wait for the round.** It stops the turn at once. The
+  run continues from its last committed round, and the work since that
+  commit is redone: an uncommitted model response is asked for again, and
+  committed tool calls are dispatched again with their dedupe keys, except
+  the calls [answered as interrupted](#calls-answered-as-interrupted).
+- **The inputs stay bound to the run.** Callers waiting on them get the
+  answer the stop gives the queued prompts it keeps,
+  `requeued_across_stop` (`RequeuedAcrossStop`).
+- **The run continues at the next start**, when its session is opened again
+  or its mob rebuilds the member, before the kept queued prompts run.
+  Meerkat does not look for such runs at start-up.
+- **The max age still applies.** If any input bound to the run is older
+  than `max_age`, counted from its admission, when the next start finds it,
+  the run's inputs end as `requeue_expired` and the run does not continue:
+  it is closed as interrupted, with the rounds it committed kept.
+  An explicit `max_age` lies between 1 millisecond and 24 hours; the default
+  shutdowns above use 15 minutes (`UnregisterQueuedInputs::DEFAULT_MAX_AGE`,
+  and `RequeueMaxAge::DEFAULT` for a mob Shutdown).
+
+Any other way of stopping still ends the run in flight: a graceful stop
+that chooses Stop, an explicit stop or cancel, retiring, destroying or
+resetting the session. So does a requeue stop that arrives while a steer is
+being written into the running turn. A run without per-round commits,
+such as one in an ephemeral session, is cancelled by every stop. A process
+that is killed leaves its runs as any crash does.
+
+### When A Run Does Not Continue
+
+| Situation | What recovery does |
+|-----------|--------------------|
+| A bound input was already settled, for example by a stop | Closes the run as interrupted, with its content kept |
+| The run failed and its inputs were queued for another attempt | Its round commits were discarded first, so its inputs run again as a new run; a tail left behind with requeued inputs is closed as interrupted, and the inputs its run cursor binds are consumed with it, so they do not run twice |
+| The runtime was retired | Closes the run as interrupted, with its content kept |
+| The run has no bound inputs (a direct or machine-service turn) | Closes the run as interrupted, with its content kept |
+| The saved transcript and the run cursor disagree | Holds the session for reconciliation; an operator can resolve the hold, unless the cursor cannot be read or its saved response has calls without a message id (see [Storage Operations](/guides/storage-operations#resolve-a-durable-tail-held-for-recovery)) |
+| A durable worker's resume gate refused the run | Settles the run like a stop (see [Resume Gate](#resume-gate)), then closes it as interrupted, with its content kept |
+| A graceful stop kept the run, and an input bound to it is older than the stop's max age at the next start | Ends the run's inputs as `requeue_expired`, then closes the run as interrupted, with its content kept |
+| On a `jsonl` or host-store realm, the process stopped after the run's closing save of a compacted transcript and before the run ended | Closes the run as interrupted: every message it wrote is kept and its inputs do not run again, but a run that had finished still shows the interrupted notice. Without the compaction, the same stop recovers a finished run as completed |
+
+Closing a run as interrupted keeps everything the run committed. Its rounds
+stay in the transcript. If its last commit was the first commit of a round,
+the model response that commit saved is written into the transcript too,
+with an `outcome_uncertain` tool error for each of its calls, as for
+[calls answered as interrupted](#calls-answered-as-interrupted), because
+those calls may have run. A notice then tells the model that the run was
+interrupted, and the run's inputs do not run again. Only a run whose inputs
+are queued for another attempt (a failed run's replay, or a run released to
+ordinary requeue) drops its round commits.
+
+The run's inputs are the inputs its run cursor binds: every input the run
+wrote into its turn, its first batch and each steer or peer input that joined
+it at a model boundary, from the round commit after the join on. Closing
+the run ends them with it, and none of them runs again. A steer that joined
+after the run's last round commit is not in what the run committed: it is
+put back in its queue and runs once after the run, and so does every input
+queued behind the run. A run that is interrupted or stopped is closed as
+interrupted as soon as its cancellation commits, so the session's next turn
+runs over it. A steer that a round commit of the cancelled run listed ends
+with the run although the cancel had put it back in its queue: its content
+is already in the transcript, and its waiter fails with
+`CompletionWaitError::ConsumedWithInterruptedRun`. An input beside the
+run that names another run keeps the run's tail held for reconciliation
+(see [Storage Operations](/guides/storage-operations#an-interrupted-tail-held-beside-a-stranded-input)).
+
+The rules for every kind of durable tail are in
+[Session contracts: durable-tail recovery](/reference/session-contracts#durable-tail-recovery).
+
+## Tools That Run Again
+
+Delivery is at least once. After a crash between the two commits of a round,
+the round's tool calls are dispatched again under the same call ids. Each one
+goes through authorization, approval review and pre- and post-tool hooks
+again; no approval given before the crash is reused. MCP tools and host callback tools
+are dispatched again the same way, and a callback request to a client is
+sent again.
+
+### The Dedupe Key
+
+Every tool call made in a run's tool round carries a dedupe key, whether or
+not the session commits per round:
+
+| Field | Meaning |
+|-------|---------|
+| `run_id` | The run the call belongs to |
+| `round` | The zero-based index of the round within the run |
+| `call_id` | The provider's tool call id |
+| `call_digest` | Lowercase hex SHA-256 of the tool name and the call's canonical arguments |
+
+A call dispatched again carries the same key as its first dispatch. A tool
+whose effect must not happen twice records the key with the effect, and
+skips a call whose key it has already seen, comparing all four fields.
+
+Core delivers the key to every kind of tool, unchanged:
+
+- A Rust tool reads it with `ToolDispatchContext::tool_call_dedupe_key`,
+  which answers `None` outside a run's tool round. `ToolCallDedupeKey::new`
+  derives the same key, digest included, from a call's run, round, id, tool
+  name and arguments.
+- An MCP tool receives it in the `tools/call` request's `_meta`, under
+  `io.meerkat/tool_call_dedupe_key`, as an object with the four fields.
+  Core adds it beside any metadata the host adds, and refuses a call whose
+  host metadata uses that name, so the server always gets Core's key.
+- A callback tool answered by a client receives it as `dedupe_key`, an
+  object with the four fields: in the JSON-RPC `tool/execute` request, and
+  in each pending call when a run suspends on callback tools (the MCP
+  server's `pending_tool_calls`, the `interaction_callback_pending` event,
+  the REST `CALLBACK_PENDING` details, the CLI's pending output, and the
+  data of the JSON-RPC error a turn answers then: `data.dedupe_key` for one
+  call, `data.pending_tool_calls[].dedupe_key` for several). The SDKs pass
+  it to your handler as a `ToolCallDedupeKey`: in Python to a handler that
+  declares a `dedupe_key` parameter, and in TypeScript and the Web SDK as
+  the handler's optional second argument. A callback registered directly
+  with the Web runtime's `register_tool_callback` gets it as a JSON string
+  in its second argument, which `parseToolCallDedupeKey` reads. A missing
+  or malformed key is no key; the call still runs.
+
+A call made outside a run's tool round carries no key, such as a call the
+host dispatches itself between rounds. Neither does a callback tool that
+runs as a detached job: the job deduplicates by its own submission key. For
+example, the parameters of an MCP `tools/call` request made in round 2, the
+run's third round:
+
+```json
+{
+  "name": "charge_card",
+  "arguments": {"amount_cents": 1200, "order_id": "ord_5521"},
+  "_meta": {
+    "io.meerkat/tool_call_dedupe_key": {
+      "run_id": "0199f3a2-5c1d-7e4b-9a10-3f6d2b8c4e71",
+      "round": 2,
+      "call_id": "toolu_01JX4PQ8V2",
+      "call_digest": "e979128b57a17e7b86ca9fb7cc3fef6e145fefecccb9cfdd01ff1de0736f8403"
+    }
+  }
+}
+```
+
+The digest keeps calls apart when a provider reuses call ids, as some
+providers number them per response: a call matches an earlier key only when
+its name and arguments match too.
+
+### Calls Answered As Interrupted
+
+Some calls are not dispatched again. The model gets an `outcome_uncertain`
+tool error instead, saying that a restart interrupted the call and that
+whether it took effect is unknown, and the model decides what to do next.
+This applies to:
+
+- a call whose process, by Core's process custody records, may have run
+  before the restart, such as a shell command;
+- a call to one of Core's comms tools that sends to another agent (every
+  comms tool except the roster read);
+- a call that would run as a detached job under a runner that declares it
+  cannot resume or repeat work.
+
+Process custody still stops the earlier process before the agent is rebuilt,
+and the transcript still gets its tool-process recovery notice, as in earlier
+releases.
+
+Meerkat does not provide exactly-once external effects. A tool whose effect
+must not happen twice deduplicates on the key above.
+
+## Durable Workers
+
+A mob profile with `durable = true` spawns durable workers: members recorded
+with a durable identity. The profile field, its spawn rules and the
+`NonDurableService` refusal are in
+[Mobs: durable workers](/guides/mobs#durable-workers).
+
+Continuing a run does not depend on `durable`: every durable session
+continues its open run when it is opened again, whether or not it belongs to
+a mob member. `durable = true` gives the worker the durable identity its mob
+re-attaches when it rebuilds after a restart, and makes the mob ask its
+resume gate before the worker's run continues.
+
+### Resume Gate
+
+A host that tracks work outside the session, such as a work item another
+worker may have claimed in the meantime, can stop a durable worker's run from
+continuing. Install a `DurableResumeGate` with
+`MobBuilder::with_durable_resume_gate`.
+
+Before a durable worker's run continues, after its session is attached again
+and before the run is authorized again, Meerkat calls the gate's `check` with
+a `DurableResumeRequest`:
+
+- the mob, the worker's identity and its profile;
+- the worker's session and the run id;
+- the run's bound inputs;
+- the run's WorkGraph attention projection, when it carries one;
+- when the run carries a projection that cannot be decoded,
+  `attention_projection_unreadable`, the decode error as text, with no
+  projection.
+
+A gate that decides from the projection must not treat a run whose
+projection is unreadable as one without attention: it answers `Unavailable`
+or `Superseded` then.
+
+The gate answers with a `DurableResumeVerdict`:
+
+| Verdict | Effect |
+|---------|--------|
+| `Continue` | The run continues |
+| `Superseded { reason }` | The run is settled at once, like a stop: its bound inputs are abandoned as refused resumes, the run ends failed, and it is closed as interrupted with its committed rounds kept |
+| `Unavailable { reason }` | Meerkat asks again, up to 3 attempts in about 30 seconds, then settles the run like `Superseded` |
+
+Each attempt has 8 seconds. An attempt that takes longer is cancelled and
+counts as `Unavailable`, so a gate must be safe to cancel and must answer the
+same way when asked again for the same run. It maps its own failures to
+`Unavailable`, never to `Continue`. A host that keys work by owner gets a
+worker's owner key with `lower_agent_identity_owner_key`.
+
+Without a gate, the run continues. Other members' runs continue without
+asking.
+
+The mob binds the gate on the durable workers it provisions itself, when it
+registers their sessions: at spawn, cold restore, explicit resume and warm
+revival. The gate is an in-process callback of the mob's own host, so a
+durable worker placed on and materialized by another host resumes its runs
+there without asking the gate. If another surface opens a worker's session
+before the mob has rebuilt the worker, the run continues without asking. A
+host that relies on the gate builds its mobs before it serves other
+surfaces.
+
+## Keeping A Realm In Your Own Database
+
+A host can keep a realm's durable state in its own database. Implement the
+`HostStore` trait (`meerkat_core::host_store`) for the realm, and Core builds
+the realm's stores over it. Your store keeps opaque bytes and meets the
+obligations in the [Host Store SPI reference](/reference/host-store-spi); it
+never interprets a payload.
+
+### One Writer, Fenced
+
+Core is a realm's only writer. The process that opens the realm holds its
+fence:
+
+- **Exclusive open.** Opening the realm acquires the fence. While another
+  process holds a live lease, the open fails with `Held`, naming how long
+  that lease still lasts. Open again after it, or take over.
+- **Takeover.** A takeover acquires the fence even from a live holder. The
+  new holder then waits out what remained of the old holder's lease before
+  the realm serves anything, and by then the old holder has stopped itself.
+- **Renewing.** Core renews the fence once per renew interval, in the
+  background. After a failed renew, or once its self-fence window has
+  closed, the holder writes nothing and dispatches nothing until it
+  acquires the fence again with a new token, which it does by itself before
+  its next write; if another process took the fence or committed meanwhile,
+  the realm stops until it is opened again. A later renew never restores
+  it. A renew answered `FencedOut` means another process holds the fence,
+  and the realm stops until it is opened again.
+- **Self-fencing.** The holder makes no model call, dispatches no tool and
+  commits nothing unless its last successful acquire or renew started less
+  than the self-fence window ago. The window is the lease minus the store's
+  self-fence margin, so a paused process stops itself before its lease ends.
+  In the steady state this is a clock read, with no store request added to a
+  round.
+
+The store sets the renew interval, the lease, the self-fence margin and
+its longest commit with `HostStore::fence_timing`:
+
+| Setting | Default | Bounds |
+|---------|---------|--------|
+| Renew interval | 10 s | At least 1 s |
+| Lease | 30 s | At least 3 renew intervals, at most 1 hour |
+| Self-fence margin | One renew interval | At least 1 renew interval, and the lease minus the margin at least 2 renew intervals |
+| Longest commit | 2 s | Longer than zero, at most the lease |
+
+A shorter lease shortens the wait for the next process after a holder died,
+and at a takeover. A longer renew interval renews less often. The margin must
+be at least one renew interval plus twice the time your store may take to
+make a write visible to other readers, so declare a larger one for a store
+whose writes can lag. A write that meets another commit still in flight
+waits up to the longest commit before it backs off, so declare a longer one
+for a store whose commits are slow.
+
+### Loading
+
+- **On open.** After acquiring the fence, and before its first commit, Core
+  lists every scope's head once.
+- **Only what recovery needs.** A session's body is loaded at open only when
+  recovery must act on it: it has unsettled inputs, an open run cursor or a
+  current run. Archived sessions are never loaded at open.
+- **The rest on first use.** Every other session loads the first time it is
+  used, and then stays in memory until it is archived.
+
+### Failures
+
+- **Unknown outcome.** A commit whose outcome is unknown is settled before
+  the scope's next version: Core retries the same batch, with the same commit
+  id, or reads the head's commit id.
+- **Failed batch.** A batch the store refuses, or whose outcome stays unknown
+  past the retry budget, poisons every scope it touched. Those scopes refuse
+  every later call until the realm is opened again, which reloads them from
+  your store.
+- **Lost fence.** Losing the fence poisons the whole realm.
+
+### Limits And Exceptions
+
+- **Size.** A batch carries at most 8 MiB of heads and rows, and a row at
+  most 1 MiB. Core writes large values first, as chunks in scopes of their
+  own and in as many batches as they need, then makes the change visible
+  with one commit batch that refers to them. A change that cannot be written
+  that way fails as a whole with a typed size error; nothing is truncated or
+  partly committed.
+- **Pending OAuth logins.** An interactive login that has started but not
+  finished stays in the process; it is not written to your store. After a
+  restart or a takeover, start the login again. Completed credentials are not
+  affected.
+- **Write volume.** A host-store realm's runtime store is WholeBlob (see
+  [Cost By Realm Backend](#cost-by-realm-backend)).
+
+Before you run a host store in production, run the host store chapter of the
+`meerkat-store-conformance` crate against it (see
+[Conformance](/reference/host-store-spi#conformance)).
+
+## Limitations
+
+- The usage of a model call in a lost round is not recorded, although the
+  provider bills it.
+- Exactly-once external effects are not provided; tools deduplicate on the
+  dedupe key.
+- A run that crashes before its first commit runs its input again as a new
+  run.
+- A round whose model response contains an image takes no first commit; a
+  crash during its tools asks the model again for that round.
+- Round commits serve crash recovery only. A run that fails and whose inputs
+  are queued for another attempt discards its round commits and starts again
+  from its inputs, as before 0.9.5. On a WholeBlob realm, once a round
+  commit after a compaction has made the compacted document the committed
+  base, the run's inputs are committed with it, so a later failure ends the
+  run without running its inputs again.
+- A WholeBlob realm writes the whole session document at every commit.
+- On a `jsonl` or host-store realm, a run whose final save follows a
+  compaction with no round commit since, and whose process stops before the
+  run ends, is closed as interrupted although its transcript is whole: it
+  shows the interrupted notice, and nothing is lost or run twice. Without
+  the compaction, recovery commits such a run as completed.
+- A client of `rkat-rpc` whose turn on a session with per-round commits is
+  in flight when the server shuts down gracefully gets a shutdown error, not
+  the typed `requeued_across_stop` answer a REST client gets: the server
+  stops answering before it suspends the run. The server keeps the run and
+  continues it at the session's next start. Read the run's status, for
+  example with `session/input_status`, before you retry: resubmitting the
+  input runs it again.
+- A request that `rkat-rpc`'s runtime (`SessionRuntime`, also when a host
+  embeds it) has not admitted yet when the runtime's shutdown begins is
+  refused `-32032` (`SESSION_RUNTIME_UNAVAILABLE`) with `data.kind`
+  `runtime_shutting_down`. Nothing of it runs or is kept for the next start,
+  so resubmit it after the restart. A second turn on a session whose turn is
+  running is such a request until the running turn's boundary frees, so the
+  stop keeps the running turn and refuses that one. The runtime registers
+  no session once its shutdown began: a session create or resume is refused
+  the same way. A mob of its mob state answers a new member with the mob's
+  own `AdmissionClosed` (reason `StandDown`) instead, and the mob session
+  service with a session error whose data carries `kind`
+  `runtime_shutting_down`.
+- The REST server keeps accepting requests until its shutdown has suspended
+  the runs in flight at the signal. A run that a request accepted in that
+  window starts is not suspended: the server's drain waits for it, so it
+  ends normally, or, if the process is killed first, continues at the next
+  open as after a crash.
+- A run that resumes after a crash during structured-output extraction asks
+  the model again from its last round commit, so it publishes `RunCompleted`
+  with `extraction_required` a second time under the same run id.
+- The tools of a resumed run see no content of the current turn, as with a
+  pending continuation.
+- Budget counters that span the agent's lifetime, rather than the run's,
+  start again with the agent after a restart, as for any session a host
+  rebuilds; the run's own time budget continues.
+
+## See Also
+
+- [Host Store SPI reference](/reference/host-store-spi)
+- [Session contracts: durability](/reference/session-contracts#durability)
+- [Mobs: durable workers](/guides/mobs#durable-workers)
+- [Durable Jobs and Monitors](/guides/durable-jobs)
+- [Storage Operations](/guides/storage-operations)

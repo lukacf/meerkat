@@ -35,7 +35,7 @@ type Service = meerkat_session::PersistentSessionService<meerkat::FactoryAgentBu
 
 /// A model that answers every request at once.
 #[derive(Clone)]
-struct AnswerClient;
+pub(super) struct AnswerClient;
 
 #[async_trait]
 impl meerkat_client::LlmClient for AnswerClient {
@@ -79,7 +79,9 @@ impl meerkat_client::LlmClient for AnswerClient {
 
 /// The realm's session service over the root's SQLite files, its runtime
 /// store hosting sessions with OS-locked claims beside the database.
-async fn open_service(root: &std::path::Path) -> (Arc<Service>, Arc<FaultInjectingRuntimeStore>) {
+pub(super) async fn open_service(
+    root: &std::path::Path,
+) -> (Arc<Service>, Arc<FaultInjectingRuntimeStore>) {
     let factory = meerkat::AgentFactory::new(root.join("factory-store"))
         .user_config_root(root.join("config"))
         .runtime_root(root.join("runtime"))
@@ -124,11 +126,11 @@ async fn open_service(root: &std::path::Path) -> (Arc<Service>, Arc<FaultInjecti
     (service, store)
 }
 
-fn mob_storage(root: &std::path::Path) -> MobStorage {
+pub(super) fn mob_storage(root: &std::path::Path) -> MobStorage {
     MobStorage::persistent(root.join("mob.db")).expect("persistent mob storage")
 }
 
-fn definition(mob_id: &str) -> MobDefinition {
+pub(super) fn definition(mob_id: &str) -> MobDefinition {
     let mut profiles = BTreeMap::new();
     profiles.insert(
         ProfileName::from("worker"),
@@ -152,6 +154,7 @@ fn definition(mob_id: &str) -> MobDefinition {
             max_inline_peer_notifications: None,
             output_schema: None,
             provider_params: None,
+            durable: false,
         })),
     );
     let mut definition = MobDefinition::explicit(MobId::from(mob_id.to_string()));

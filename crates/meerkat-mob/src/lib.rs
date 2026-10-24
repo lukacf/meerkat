@@ -121,11 +121,13 @@ pub use definition::{
     UnknownProfileKeys,
 };
 pub use error::{
-    FlowStepDispatchRejectKind, ForkSourceUnavailableCause, ForkedParticipantLeaseOperation,
-    ForkedParticipantOwnerHostRejection, ForkedParticipantSourceRejection,
-    IncarnationInconsistency, MemberProvisionFailureCause, MemberRegistrationHookCall,
-    MemberRuntimeDetachment, MobDefinitionProjectionMismatchKind, MobError, MobFailureClass,
-    RuntimeEffectKind,
+    FlowRoleTargetRefusal, FlowStepDispatchRejectKind, ForkSourceUnavailableCause,
+    ForkedParticipantLeaseOperation, ForkedParticipantOwnerHostRejection,
+    ForkedParticipantSourceRejection, IncarnationInconsistency, MemberCustodyDeferral,
+    MemberCustodyDeferralCause, MemberCustodyRestore, MemberProvisionFailureCause,
+    MemberRegistrationHookCall, MemberRuntimeDetachment, MemberSendIdempotencyRefusal,
+    MobDefinitionProjectionMismatchKind, MobError, MobFailureClass,
+    OperatorAuthorityCeilingRefusal, RuntimeEffectKind,
 };
 pub use event::{
     AttributedEvent, FlowCancelClass, ForkJobTerminalEvent, MemberWireEdge, MobEvent, MobEventKind,
@@ -237,10 +239,10 @@ pub use profile::{
 };
 pub use roster::{MobMemberKickoffPhase, MobMemberKickoffSnapshot};
 pub use run::{
-    CreateMobAdmission, FailureLedgerEntry, FlowContext, FlowRunConfig, FrameSnapshot,
-    LoopContextHistory, LoopIterationLedgerEntry, LoopSnapshot, MobFlowRunPublicResultClass,
-    MobRun, MobRunStatus, ProfileMutationAdmission, StepLedgerEntry, StepRunStatus,
-    mob_machine_create_mob_admission, mob_machine_profile_mutation_admission,
+    CreateMobAdmission, FailureLedgerEntry, FlowContext, FlowRoleTargets, FlowRoleTargetsError,
+    FlowRunConfig, FrameSnapshot, LoopContextHistory, LoopIterationLedgerEntry, LoopSnapshot,
+    MobFlowRunPublicResultClass, MobRun, MobRunStatus, ProfileMutationAdmission, StepLedgerEntry,
+    StepRunStatus, mob_machine_create_mob_admission, mob_machine_profile_mutation_admission,
     mob_machine_run_public_result_class, mob_machine_run_status_is_terminal,
     mob_machine_step_status_is_terminal,
 };
@@ -291,36 +293,39 @@ pub use runtime::{
     AdaptiveStopReasonView, AgentEventSubscription, AuthorizedSessionResume,
     BOUNDED_DELEGATION_REPORT_INSTRUCTION_V1, BoundedFlowResult, BoundedHelperResult,
     BoundedHelperResultStatus, BoundedHelperRunOutcome, BoundedMemberRunError, BoundedResultSpec,
-    BoundedTurnFailure, BoundedTurnResult, BoundedTurnWaitError, ControllingAcceptorConfig,
-    CurrentMobAdmission, DEFAULT_BOUNDED_HELPER_RESULT_BYTES, DelegationCancellationHandle,
-    DelegationExecutionError, DelegationExecutionHandle, DelegationExecutionOutcome,
-    DelegationExecutionRequest, DelegationExecutionService, DelegationExecutionSource,
-    DelegationMemberOptions, DelegationParentContext, DelegationTerminalizedExecution,
-    DelegationTurnTerminal, DurableBoundedMemberState, DurableBoundedWorkRecovery,
-    DurableBoundedWorkState, ExternalPeerBindingSpec, FlowRunHandle, FlowRunWaitError,
-    FlowTargetProvisioner, ForkBuildInheritance, ForkChildRun, ForkChildRunOutcome, ForkJobBinding,
-    ForkJobRecord, ForkJobTerminalError, ForkMemberAtTurnBoundary, ForkMemberBoundedRunOutcome,
-    ForkMemberResult, ForkOverlayOrigin, GovernedInputCustody, HELPER_RESULT_TRUNCATION_MARKER,
-    HelperOptions, HelperResult, HostBindReport, HostBindRequest, HostCapabilityReport,
-    HostRevokeReport, IdentityLocalExternalToolsError, IdentityLocalExternalToolsProvider,
+    BoundedTurnFailure, BoundedTurnResult, BoundedTurnWaitError, ColdStartTailSettlement,
+    ControllingAcceptorConfig, CurrentMobAdmission, DEFAULT_BOUNDED_HELPER_RESULT_BYTES,
+    DelegationCancellationHandle, DelegationExecutionError, DelegationExecutionHandle,
+    DelegationExecutionOutcome, DelegationExecutionRequest, DelegationExecutionService,
+    DelegationExecutionSource, DelegationMemberOptions, DelegationParentContext,
+    DelegationTerminalizedExecution, DelegationTurnTerminal, DurableBoundedMemberState,
+    DurableBoundedWorkRecovery, DurableBoundedWorkState, ExternalPeerBindingSpec, FlowRunHandle,
+    FlowRunWaitError, FlowTargetProvisioner, ForkBuildInheritance, ForkChildRun,
+    ForkChildRunOutcome, ForkJobBinding, ForkJobRecord, ForkJobTerminalError,
+    ForkMemberAtTurnBoundary, ForkMemberBoundedRunOutcome, ForkMemberResult, ForkOverlayOrigin,
+    GovernedInputCustody, HELPER_RESULT_TRUNCATION_MARKER, HelperOptions, HelperResult,
+    HostBindReport, HostBindRequest, HostCapabilityReport, HostRevokeReport,
+    IdentityLocalExternalToolsError, IdentityLocalExternalToolsProvider,
     IdentityLocalMaterializationKey, InitializeAdaptiveRunRequest, LiveDelegationTerminalEvidence,
     LiveDurableSourceObservation, MEMBER_ADMISSION_LANE_CAPACITY, MEMBER_RELOAD_TOTAL_TIMEOUT,
     MemberAdmissionBacklogGauge, MemberAdmissionBacklogSnapshot, MemberBoundedTurnResult,
     MemberDeliveryReceipt, MemberHandle, MemberHistoryPageDomain, MemberInputAdmission,
-    MemberLiveStatusDomain, MemberPreviewUnavailable, MemberReloadDisposition, MemberReloadOutcome,
-    MemberRespawnReceipt, MemberRunState, MemberSessionActivity, MemberShutdownOutcome,
-    MemberStatusSessionView, MemberStatusViewSource, MemberTargetAbsence, MemberTurnEventSender,
-    MemberTurnHandle, MemberTurnOptions, MemberUnregisterSettlement, MemberUnregisterState,
-    MobActorTaskWait, MobActorTaskWatch, MobBuilder, MobDestroyError, MobDestroyReport,
+    MemberLiveStatusDomain, MemberOperatorAuthorityCeiling, MemberPreviewUnavailable,
+    MemberReloadDisposition, MemberReloadOutcome, MemberReloadRefusal, MemberRespawnReceipt,
+    MemberRunState, MemberSessionActivity, MemberShutdownOutcome, MemberStatusSessionView,
+    MemberStatusViewSource, MemberTargetAbsence, MemberTurnEventSender, MemberTurnHandle,
+    MemberTurnOptions, MemberUnregisterSettlement, MemberUnregisterState, MobActorTaskWait,
+    MobActorTaskWatch, MobBuilder, MobDestroyError, MobDestroyMemberRefusal, MobDestroyReport,
     MobEventRouterConfig, MobEventRouterHandle, MobEventsSubscription, MobEventsSubscriptionConfig,
     MobHandle, MobMachineStateChanges, MobMemberEndpointOwner, MobMemberEndpointStatus,
     MobMemberPeerEndpoint, MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot,
     MobRespawnError, MobSessionService, MobShutdownReport, MobSpawnManyFailure, MobState,
     MobUnreachablePeer, MobWireMembersBatchReport, OwnedMemberTargetAdmission, PeerMessageReceipt,
-    PeerTarget, PreviousMemberCleanupReport, ResumeRejectionKind, ResumeSessionLoad,
-    ResumeVerdictTerminality, ResumedMemberView, RetirementSettlement, RetirementSettlementWatch,
-    RetirementStage, SessionResumeAuthority, SessionResumeLifecycle, SessionResumeMaterialization,
-    SessionResumePreparationReceipt, SessionResumeRejection, SessionResumeVerdict, ShutdownOptions,
+    PeerTarget, PreviousMemberCleanupReport, QueuedInputsOnShutdown, RequeueMaxAge,
+    ResumeRejectionKind, ResumeSessionLoad, ResumeVerdictTerminality, ResumedMemberView,
+    RetirementSettlement, RetirementSettlementWatch, RetirementStage, SessionResumeAuthority,
+    SessionResumeLifecycle, SessionResumeMaterialization, SessionResumePreparationReceipt,
+    SessionResumeRejection, SessionResumeVerdict, ShutdownOptions, ShutdownOptionsError,
     SpawnContinuityIntent, SpawnCustomizationContext, SpawnMemberAdmission,
     SpawnMemberAdmissionObservations, SpawnMemberCustomizer, SpawnMemberCustomizerChain,
     SpawnMemberSpec, SpawnPolicy, SpawnResult, SpawnSource, SpawnSpec, SpawnSystemPromptOverride,
@@ -351,6 +356,8 @@ pub use runtime::{
     MemberIdentityManagement, ScopeIncarnation, ScopedRecoveryUnresolved, ScopedWorkRecovery,
     ScopedWorkState, WorkAdmissionStage,
 };
+#[cfg(feature = "runtime-adapter")]
+pub use runtime::{DurableResumeGate, DurableResumeRequest, DurableResumeVerdict};
 pub use runtime::{FlowFrameKernel, FlowFrameMutator};
 pub use runtime::{
     FlowTurnExecutor, FlowTurnFailureDisposition, FlowTurnOutcome, FlowTurnTicket,
@@ -360,9 +367,9 @@ pub use runtime::{
 #[doc(hidden)]
 pub use runtime::{
     ForkSupervisorExitForTest, IdentityRecoveryFailStopPoint, MemberStatusDeadlineTestObservation,
-    MemberTurnAdmissionTestStage, arm_identity_recovery_fail_stop_for_test,
-    fail_stop_next_actor_start_for_test, member_operator_tool_defs_for_test,
-    member_status_deadline_after_snapshot_wait_for_test,
+    MemberTurnAdmissionTestStage, RestoreTupleFault, arm_identity_recovery_fail_stop_for_test,
+    fail_stop_next_actor_start_for_test, fault_next_restore_tuple_for_test,
+    member_operator_tool_defs_for_test, member_status_deadline_after_snapshot_wait_for_test,
 };
 #[cfg(all(feature = "runtime-adapter", not(target_arch = "wasm32")))]
 pub use runtime::{HeldSpawn, HeldSpawnSettlement, HeldSpawnStart, abort_all_held};

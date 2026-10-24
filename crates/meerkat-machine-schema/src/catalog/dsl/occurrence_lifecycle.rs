@@ -237,24 +237,6 @@ machine! {
                 at_utc_ms: u64
             },
             ResolveDueMisfire { detail: Option<String>, at_utc_ms: u64 },
-            // A Pending occurrence past its misfire deadline whose earlier
-            // attempts recorded their dispatch, and which used up its
-            // reclaims. It carries the evidence so a row without any fails
-            // closed.
-            ResolveReclaimExhausted {
-                admission_evidence: Enum<AdmissionEvidence>,
-                detail: Option<String>,
-                at_utc_ms: u64
-            },
-            // A reclaim past the misfire deadline of an occurrence whose
-            // earlier attempt recorded only its dispatch start found that the
-            // target never admitted the delivery. It carries the evidence so
-            // an admitted occurrence fails closed.
-            ResolveUnprovenLateNotAdmitted {
-                admission_evidence: Enum<AdmissionEvidence>,
-                detail: Option<String>,
-                at_utc_ms: u64
-            },
             Supersede { superseded_by_revision: u64, at_utc_ms: u64 },
             // Lease renewal (2026-07 P0: the firing host granted a fixed 60s
             // lease and NOTHING renewed it, while a session-target delivery
@@ -287,6 +269,27 @@ machine! {
             ClassifyStaleCompletionArrival {
                 trigger: Enum<OccurrenceLifecycleInputVariant>
             },
+            // Inputs added after the published ones are declared here, last,
+            // so the generated InputKind keeps every earlier discriminant.
+            //
+            // A Pending occurrence past its misfire deadline whose earlier
+            // attempts recorded their dispatch, and which used up its
+            // reclaims. It carries the evidence so a row without any fails
+            // closed.
+            ResolveReclaimExhausted {
+                admission_evidence: Enum<AdmissionEvidence>,
+                detail: Option<String>,
+                at_utc_ms: u64
+            },
+            // A reclaim past the misfire deadline of an occurrence whose
+            // earlier attempt recorded only its dispatch start found that the
+            // target never admitted the delivery. It carries the evidence so
+            // an admitted occurrence fails closed.
+            ResolveUnprovenLateNotAdmitted {
+                admission_evidence: Enum<AdmissionEvidence>,
+                detail: Option<String>,
+                at_utc_ms: u64
+            },
         }
 
         effect OccurrenceLifecycleEffect {
@@ -309,19 +312,6 @@ machine! {
             DueClaimEligible,
             DueMisfireRequired,
             DueLeaseExpired,
-            // A Pending occurrence past its misfire deadline whose recorded
-            // dispatch used up its reclaims: the store resolves it with
-            // ResolveReclaimExhausted.
-            DueReclaimExhausted,
-            // The claim reclaims an occurrence whose earlier attempt recorded
-            // its admission: the driver redelivers it without a fresh
-            // admission, and the occurrence waits for that input's outcome.
-            ReclaimedAfterAdmission,
-            // The claim reclaims, past its misfire deadline, an occurrence
-            // whose earlier attempt recorded only its dispatch start: the
-            // driver asks the target whether it admitted the delivery, and
-            // never delivers it fresh.
-            ReclaimedAfterUnprovenDispatch,
             // Terminality verdict over the machine-owned lifecycle_phase. The
             // shell mirrors `terminal`; it decides nothing.
             OccurrenceTerminalityClassified { terminal: bool },
@@ -371,6 +361,22 @@ machine! {
                 phase: Enum<OccurrenceLifecycleState>,
                 trigger: Enum<OccurrenceLifecycleInputVariant>,
             },
+            // Effects added after the published ones are declared here, last,
+            // so the generated EffectKind keeps every earlier discriminant.
+            //
+            // A Pending occurrence past its misfire deadline whose recorded
+            // dispatch used up its reclaims: the store resolves it with
+            // ResolveReclaimExhausted.
+            DueReclaimExhausted,
+            // The claim reclaims an occurrence whose earlier attempt recorded
+            // its admission: the driver redelivers it without a fresh
+            // admission, and the occurrence waits for that input's outcome.
+            ReclaimedAfterAdmission,
+            // The claim reclaims, past its misfire deadline, an occurrence
+            // whose earlier attempt recorded only its dispatch start: the
+            // driver asks the target whether it admitted the delivery, and
+            // never delivers it fresh.
+            ReclaimedAfterUnprovenDispatch,
         }
 
         helper is_live_claim_phase(phase: OccurrenceLifecycleState) -> bool {

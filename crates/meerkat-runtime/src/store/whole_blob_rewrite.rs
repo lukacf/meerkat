@@ -8,10 +8,11 @@
 
 use std::sync::Arc;
 
+use meerkat_core::lifecycle::RunId;
 use meerkat_core::lifecycle::core_executor::BoundSessionCommit;
 use meerkat_core::{
     CompactionProjectionIntent, Session, SessionId, TranscriptRewriteAuditReceiptBatch,
-    TranscriptRewriteCommit, TranscriptRewritePrefixAccumulator,
+    TranscriptRewriteCommit, TranscriptRewritePrefixAccumulator, WholeBlobProvisionalTailAuthority,
 };
 
 use super::{
@@ -451,6 +452,322 @@ impl PreparedWholeBlobRewriteStoreParts {
             self.successor_bytes,
             self.successor_catalog_entry,
             self.compaction_projection_intents,
+        )
+    }
+}
+
+/// A WholeBlob run's re-base at a compaction: the compacted document becomes
+/// the session's committed base, and the run's provisional tail restarts on
+/// top of it, in ONE store call
+/// ([`super::RuntimeStore::commit_prepared_whole_blob_run_rebase`]).
+///
+/// - The committed successor is the compacted document with its run cursor
+///   cleared: a cursor inside a committed body never makes a run resumable.
+///   Its descent from the committed base is proven by
+///   [`PreparedWholeBlobRewriteBoundary::prepare`] over the exact rewrite
+///   suffix. That proof binds rewrite occurrences only, so rounds the run
+///   appended after the committed base (its own uncommitted rows) need no
+///   other proof: they travel inside the successor document.
+/// - The provisional candidate is the same document with the run cursor, a
+///   metadata-only tail whose resume point is the one the run holds at the
+///   compaction. The store mints its authority on the just-issued committed
+///   authority, for the same run, at candidate sequence one.
+/// - A closing save re-bases too: a run whose last rewrite has no round
+///   commit after it (a compaction at its final boundary, a closing write
+///   after a turn cap or a hard failure) saves a document without a run
+///   cursor, as a committed boundary never carries one. The committed
+///   successor and the candidate are then the same document, and the tail
+///   (equal to its base, with no cursor) is the run's closing save.
+///
+/// Like the rewrite boundary, the typed documents never reach the backend:
+/// it receives only [`PreparedWholeBlobRunRebaseStoreParts`].
+#[derive(Debug)]
+pub struct PreparedWholeBlobRunRebase {
+    rewrite: PreparedWholeBlobRewriteBoundary,
+    expected_tail: Option<WholeBlobProvisionalTailAuthority>,
+    run_id: RunId,
+    candidate_bytes: Arc<Vec<u8>>,
+    candidate_blob_sha256: String,
+    conversation_digest: String,
+    message_count: u64,
+    candidate_catalog_entry: RuntimeSessionCatalogEntry,
+    candidate_compaction_intents: Vec<CompactionProjectionIntent>,
+}
+
+fn rebase_conflict(session_id: &SessionId, detail: impl Into<String>) -> RuntimeStoreError {
+    RuntimeStoreError::SessionPersistenceAuthorityConflict {
+        runtime_id: session_id.to_string(),
+        detail: detail.into(),
+    }
+}
+
+impl PreparedWholeBlobRunRebase {
+    /// Prove the re-base of run `run_id` onto its compacted document.
+    ///
+    /// `expected_runtime` is the committed base the run started from (or
+    /// its last re-base); `expected_tail` is the run's current provisional
+    /// tail on that base, or `None` when the run has written none yet;
+    /// `compacted` is the run's live session after the compaction, carrying
+    /// the run cursor of `run_id`, or no cursor for a closing save; `commits`
+    /// is the exact rewrite suffix since the committed base.
+    ///
+    /// # Errors
+    /// The compacted document's cursor is malformed or names another run,
+    /// the expected tail does not belong to this base and run, or the
+    /// rewrite proof refuses the committed successor.
+    pub fn prepare(
+        expected_runtime: VerifiedCommittedWholeBlobPayload,
+        expected_tail: Option<WholeBlobProvisionalTailAuthority>,
+        run_id: RunId,
+        compacted: Session,
+        commits: &[TranscriptRewriteCommit],
+    ) -> Result<Self, RuntimeStoreError> {
+        let base = expected_runtime.store_authority().clone();
+        let session_id = base.session_id().clone();
+        if compacted.id() != &session_id {
+            return Err(RuntimeStoreError::SessionKeyMismatch {
+                expected: session_id,
+                actual: compacted.id().clone(),
+            });
+        }
+        // A closing save carries no cursor; a cursor, when present, must
+        // name this run.
+        let cursor = compacted.try_run_cursor().map_err(|error| {
+            rebase_conflict(
+                &session_id,
+                format!("WholeBlob re-base candidate run cursor is malformed: {error}"),
+            )
+        })?;
+        if cursor.is_some_and(|cursor| cursor.run_id != run_id) {
+            return Err(rebase_conflict(
+                &session_id,
+                "WholeBlob re-base candidate cursor names another run",
+            ));
+        }
+        if let Some(tail) = expected_tail.as_ref()
+            && (tail.session_id() != &session_id
+                || tail.run_id() != &run_id
+                || tail.base_store_revision() != base.store_revision()
+                || tail.base_blob_sha256() != base.blob_sha256())
+        {
+            return Err(rebase_conflict(
+                &session_id,
+                "WholeBlob re-base expected tail does not belong to this base and run",
+            ));
+        }
+        let candidate_artifact = compacted.to_persisted_artifact().map_err(|error| {
+            RuntimeStoreError::WriteFailed(format!(
+                "failed to materialize WholeBlob re-base candidate: {error}"
+            ))
+        })?;
+        let candidate_catalog_entry = RuntimeSessionCatalogEntry::from_session(
+            &compacted,
+            RuntimeSessionPersistenceProfile::WholeBlobV1,
+            None,
+        )?;
+        let conversation_digest = compacted.transcript_content_digest().map_err(|error| {
+            rebase_conflict(
+                &session_id,
+                format!("failed to derive WholeBlob re-base conversation digest: {error}"),
+            )
+        })?;
+        let message_count = u64::try_from(compacted.messages().len()).map_err(|_| {
+            rebase_conflict(
+                &session_id,
+                "WholeBlob re-base message count exceeds the durable range",
+            )
+        })?;
+        let candidate_compaction_intents =
+            super::validated_compaction_projection_intents(&compacted)?;
+        let mut committed = compacted;
+        committed.clear_run_cursor();
+        let rewrite =
+            PreparedWholeBlobRewriteBoundary::prepare(expected_runtime, committed, commits)?;
+        Ok(Self {
+            rewrite,
+            expected_tail,
+            run_id,
+            candidate_bytes: candidate_artifact.bytes_arc(),
+            candidate_blob_sha256: candidate_artifact.row_sha256_token().to_string(),
+            conversation_digest,
+            message_count,
+            candidate_catalog_entry,
+            candidate_compaction_intents,
+        })
+    }
+
+    /// The proven committed side: its audit receipt, successor and digest,
+    /// for the caller's audit receipt write after the store call.
+    #[must_use]
+    pub fn rewrite(&self) -> &PreparedWholeBlobRewriteBoundary {
+        &self.rewrite
+    }
+
+    /// The run this re-base belongs to.
+    #[must_use]
+    pub fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+
+    /// The exact provisional candidate digest the store's new tail names.
+    #[must_use]
+    pub fn candidate_blob_sha256(&self) -> &str {
+        &self.candidate_blob_sha256
+    }
+
+    /// The candidate's transcript content digest.
+    #[must_use]
+    pub fn conversation_digest(&self) -> &str {
+        &self.conversation_digest
+    }
+
+    /// The candidate's message count.
+    #[must_use]
+    pub const fn message_count(&self) -> u64 {
+        self.message_count
+    }
+
+    /// Exact store-only inputs. Cloning them copies authority metadata and
+    /// `Arc`s to the already-materialized documents.
+    #[must_use]
+    pub fn store_parts(&self) -> PreparedWholeBlobRunRebaseStoreParts {
+        PreparedWholeBlobRunRebaseStoreParts {
+            rewrite: self.rewrite.store_parts(),
+            expected_tail: self.expected_tail.clone(),
+            run_id: self.run_id.clone(),
+            candidate_blob_sha256: self.candidate_blob_sha256.clone(),
+            candidate_bytes: Arc::clone(&self.candidate_bytes),
+            conversation_digest: self.conversation_digest.clone(),
+            message_count: self.message_count,
+            candidate_catalog_entry: self.candidate_catalog_entry.clone(),
+            candidate_compaction_intents: self.candidate_compaction_intents.clone(),
+        }
+    }
+}
+
+/// Store-facing inputs of a prepared WholeBlob run re-base.
+#[derive(Debug, Clone)]
+pub struct PreparedWholeBlobRunRebaseStoreParts {
+    rewrite: PreparedWholeBlobRewriteStoreParts,
+    expected_tail: Option<WholeBlobProvisionalTailAuthority>,
+    run_id: RunId,
+    candidate_blob_sha256: String,
+    candidate_bytes: Arc<Vec<u8>>,
+    conversation_digest: String,
+    message_count: u64,
+    candidate_catalog_entry: RuntimeSessionCatalogEntry,
+    candidate_compaction_intents: Vec<CompactionProjectionIntent>,
+}
+
+/// The parts of a WholeBlob run re-base a backend writes, in order: the
+/// committed side, the expected current tail, the run, and the candidate's
+/// digest, bytes, conversation digest, message count, catalog entry and
+/// compaction intents.
+pub(crate) type WholeBlobRunRebaseParts = (
+    PreparedWholeBlobRewriteStoreParts,
+    Option<WholeBlobProvisionalTailAuthority>,
+    RunId,
+    String,
+    Arc<Vec<u8>>,
+    String,
+    u64,
+    RuntimeSessionCatalogEntry,
+    Vec<CompactionProjectionIntent>,
+);
+
+impl PreparedWholeBlobRunRebaseStoreParts {
+    /// The committed side: exactly a rewrite boundary's store parts.
+    #[must_use]
+    pub fn rewrite(&self) -> &PreparedWholeBlobRewriteStoreParts {
+        &self.rewrite
+    }
+
+    /// The provisional tail the store must hold now (`None`: no tail).
+    #[must_use]
+    pub fn expected_tail(&self) -> Option<&WholeBlobProvisionalTailAuthority> {
+        self.expected_tail.as_ref()
+    }
+
+    #[must_use]
+    pub fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+
+    #[must_use]
+    pub fn candidate_blob_sha256(&self) -> &str {
+        &self.candidate_blob_sha256
+    }
+
+    #[must_use]
+    pub fn candidate_bytes(&self) -> &[u8] {
+        self.candidate_bytes.as_ref()
+    }
+
+    #[must_use]
+    pub fn conversation_digest(&self) -> &str {
+        &self.conversation_digest
+    }
+
+    #[must_use]
+    pub const fn message_count(&self) -> u64 {
+        self.message_count
+    }
+
+    #[must_use]
+    pub fn candidate_catalog_entry(&self) -> &RuntimeSessionCatalogEntry {
+        &self.candidate_catalog_entry
+    }
+
+    #[must_use]
+    pub fn candidate_compaction_intents(&self) -> &[CompactionProjectionIntent] {
+        &self.candidate_compaction_intents
+    }
+
+    /// The store authorities the re-base issues when it applies: the
+    /// committed successor (one revision after the expected base, with the
+    /// successor digest) and the new tail on it (same run, sequence one).
+    ///
+    /// # Errors
+    /// An exhausted revision, or parts that cannot mint an authority.
+    pub fn issued_authorities(
+        &self,
+    ) -> Result<(WholeBlobStoreAuthority, WholeBlobProvisionalTailAuthority), RuntimeStoreError>
+    {
+        let expected = self.rewrite.expected_authority();
+        let revision = expected.store_revision().checked_add(1).ok_or_else(|| {
+            RuntimeStoreError::WriteFailed(format!(
+                "WholeBlob store revision exhausted for session {}",
+                expected.session_id()
+            ))
+        })?;
+        let committed = WholeBlobStoreAuthority::issued(
+            self.rewrite.successor_session_id().clone(),
+            revision,
+            self.rewrite.successor_blob_sha256().to_string(),
+        )?;
+        let tail = WholeBlobProvisionalTailAuthority::issued(
+            self.rewrite.successor_session_id().clone(),
+            revision,
+            self.rewrite.successor_blob_sha256().to_string(),
+            self.run_id.clone(),
+            self.candidate_blob_sha256.clone(),
+            1,
+        )
+        .map_err(|error| rebase_conflict(self.rewrite.successor_session_id(), error.to_string()))?;
+        Ok((committed, tail))
+    }
+
+    pub(crate) fn into_parts(self) -> WholeBlobRunRebaseParts {
+        (
+            self.rewrite,
+            self.expected_tail,
+            self.run_id,
+            self.candidate_blob_sha256,
+            self.candidate_bytes,
+            self.conversation_digest,
+            self.message_count,
+            self.candidate_catalog_entry,
+            self.candidate_compaction_intents,
         )
     }
 }

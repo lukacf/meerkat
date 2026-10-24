@@ -12,11 +12,14 @@
 #
 # The safety run admits the late Steer input as a Prompt. That stands for every
 # content input kind: the admission writes the kind only into input_is_prompt,
-# and nothing in the generated model reads that flag's value, so every kind
-# reaches the Prompt run's states up to the flag. This script checks both
-# premises on the generated model before it runs TLC and fails if either stops
-# holding. DURABLE_STEER_AUDIT_ALL_KINDS=1 runs the safety run over every
-# content kind instead (by hand; about twice the cost).
+# and nothing in the generated model that changes state reads that flag's
+# value, so every kind reaches the Prompt run's states up to the flag. (A
+# generated verdict classifier, an action that changes no state but the step
+# count, may read it: this audit takes none, and the script fails if it names
+# one.) This script checks both premises on the generated model before it
+# runs TLC and fails if either stops holding. DURABLE_STEER_AUDIT_ALL_KINDS=1
+# runs the safety run over every content kind instead (by hand; about twice
+# the cost).
 #
 # It then runs TLC once per content kind with the late input narrowed to that
 # kind and AuditLateNeverJoins as an extra invariant, and requires TLC to report
@@ -89,9 +92,46 @@ fi
 #    (and the execution kind, which is "ContentTurn" for every content kind).
 # 2. The generated model never reads input_is_prompt's values: it appears only
 #    in its own updates, Init, the variable lists and the DOMAIN sizes of the
-#    state constraints.
+#    state constraints. Verdict classifiers are the one exception: an action
+#    whose only primed updates keep its phase and count the step (such as the
+#    ClassifyStopInputDisposition arms) changes no state, so a kind it reads
+#    cannot reach a state the Prompt run misses, and this audit takes none of
+#    them. Their bodies are left out of the scan; naming one fails the run.
 model="${spec_dir}/model.tla"
 if [[ "${DURABLE_STEER_AUDIT_ALL_KINDS:-0}" != "1" ]]; then
+  scan_model="${work_dir}/model-without-verdicts.tla"
+  MODEL="${model}" OUT="${scan_model}" AUDIT="${spec_dir}/durable_in_turn_steer_audit.tla" python3 - <<'PY'
+import os, re
+text = open(os.environ["MODEL"]).read()
+audit = open(os.environ["AUDIT"]).read()
+# Every top-level definition starts a block, one-line definitions included.
+blocks = re.split(r"(?m)^(?=[A-Za-z_][A-Za-z0-9_]*(?:\([^)\n]*\))? ==)", text)
+kept, verdicts = [], []
+for block in blocks:
+    lines = block.split("\n")
+    head = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)\([^)]*\) ==", lines[0])
+    guard = [m.group(1) for m in (re.fullmatch(r'    /\\ phase = "([A-Za-z]+)"', l) for l in lines) if m]
+    primed = [l for l in lines if "' = " in l]
+    verdict_only = (
+        head is not None
+        and "input_is_prompt" in block
+        and len(guard) == 1
+        and sorted(primed) == sorted([
+            f'    /\\ phase\' = "{guard[0]}"',
+            "    /\\ model_step_count' = model_step_count + 1",
+        ])
+        and re.search(r"(?m)^    /\\ UnchangedFrame_[0-9a-f]+$", block) is not None
+    )
+    if not verdict_only:
+        kept.append(block)
+        continue
+    name = head.group(1)
+    if re.search(r"\b" + re.escape(name) + r"\b", audit):
+        raise SystemExit(f"error: this audit takes {name}, which reads input_is_prompt")
+    verdicts.append(name)
+open(os.environ["OUT"], "w").write("".join(kept))
+print(f"input_is_prompt premise: {len(verdicts)} verdict-only actions read the flag, none taken by this audit")
+PY
   admission_kind_updates="$(
     awk '/^ResolveAdmissionPlanRequestedSteerRunning\(/ { body = 1 } body && /^$/ { exit } body' "${model}" \
       | grep -E "^ +/\\\\ [a-z_]+' = " | grep -F 'input_kind' || true
@@ -105,14 +145,14 @@ if [[ "${DURABLE_STEER_AUDIT_ALL_KINDS:-0}" != "1" ]]; then
     exit 1
   fi
   flag_reads="$(
-    grep -n -F 'input_is_prompt' "${model}" \
+    grep -n -F 'input_is_prompt' "${scan_model}" \
       | grep -v -E "^[0-9]+:(UnchangedFrame_|VARIABLES |vars == |[A-Za-z]+StateConstraint == )" \
       | grep -v -E "^[0-9]+: +/\\\\ input_is_prompt' = " \
-      | grep -v -F -x "$(grep -n -F -x '    /\ input_is_prompt = [x \in {} |-> None]' "${model}" || true)" \
+      | grep -v -F -x "$(grep -n -F -x '    /\ input_is_prompt = [x \in {} |-> None]' "${scan_model}" || true)" \
       || true
   )"
-  map_reads="$(grep -o -E 'Map[A-Za-z]*\(input_is_prompt,' "${model}" | grep -v -E '^Map(Set|Remove)\(' || true)"
-  if [[ -n "${flag_reads}" || -n "${map_reads}" ]] || grep -q -F 'input_is_prompt[' "${model}"; then
+  map_reads="$(grep -o -E 'Map[A-Za-z]*\(input_is_prompt,' "${scan_model}" | grep -v -E '^Map(Set|Remove)\(' || true)"
+  if [[ -n "${flag_reads}" || -n "${map_reads}" ]] || grep -q -F 'input_is_prompt[' "${scan_model}"; then
     printf '%s\n' "${flag_reads}" "${map_reads}" >&2
     echo "error: the generated model now reads input_is_prompt; the Prompt safety run no longer stands for every content kind (run with DURABLE_STEER_AUDIT_ALL_KINDS=1 and widen the default)" >&2
     exit 1

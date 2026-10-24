@@ -800,7 +800,7 @@ impl Router {
         })
     }
 
-    /// Canonical send: routing identity is a [`PeerId`], never a [`PeerName`].
+    /// Canonical send: routing identity is a [`PeerId`], never a `PeerName`.
     ///
     /// Wave-B V5: `PeerName` is display metadata; it is not safe as a routing
     /// key (duplicate names are legal). Callers that hold only a name must

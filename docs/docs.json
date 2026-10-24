@@ -81,6 +81,7 @@
                   "guides/skills",
                   "guides/scheduling",
                   "guides/durable-jobs",
+                  "guides/durable-runs",
                   "guides/workgraph",
                   "guides/realtime"
                 ]
@@ -186,6 +187,7 @@
                   "reference/comms-reference",
                   "reference/capability-matrix",
                   "reference/session-contracts",
+                  "reference/host-store-spi",
                   "reference/usage-accounting",
                   "reference/skills-governance-runbook"
                 ]

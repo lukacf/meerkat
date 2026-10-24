@@ -57,6 +57,13 @@ pub struct McpResourceTarget<'a> {
 /// `None` leaves an unselected call's wire payload unchanged. An error refuses
 /// the call before transport. Context is the current dispatch context; it is
 /// never captured from the agent that first constructed a shared connection.
+///
+/// Core owns some `_meta` names: `progressToken`,
+/// [`meerkat_core::CALL_ORIGIN_META_KEY`] and
+/// [`meerkat_core::TOOL_CALL_DEDUPE_KEY_META_KEY`], the call's dedupe key,
+/// which Core sends itself beside the prepared metadata on every call that
+/// has one. A preparation whose metadata names any of them is refused
+/// ([`McpCallContextError::Denied`]) before transport.
 #[async_trait]
 pub trait McpCallContextProvider: Send + Sync {
     /// Hosts that install call preparation must explicitly opt resource reads

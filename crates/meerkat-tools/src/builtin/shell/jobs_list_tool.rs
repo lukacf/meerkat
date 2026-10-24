@@ -15,7 +15,7 @@ use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 
 /// Tool for listing all background shell jobs
 ///
-/// Returns an array of [`JobSummary`] with basic info about each job.
+/// Returns an array of [`JobSummary`](super::JobSummary) with basic info about each job.
 #[derive(Debug)]
 pub struct ShellJobsListTool {
     /// Shared job manager instance

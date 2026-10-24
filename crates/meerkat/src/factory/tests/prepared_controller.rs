@@ -20,7 +20,7 @@ use meerkat_llm_core::provider_runtime::{
 
 const PRIMARY_MODEL: &str = "claude-sonnet-4-5";
 const BACKUP_MODEL: &str = "custom-text-only-backup";
-const REALM: &str = "fallback_test";
+const REALM: &str = "prepared_controller_fallback";
 
 /// Every resolution and client build of one provider, and the auth owner
 /// each resolution ran under.

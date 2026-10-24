@@ -1,0 +1,46 @@
+/// Why an input was abandoned.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum InputAbandonReason {
+    Retired,
+    Reset,
+    Stopped,
+    Destroyed,
+    Cancelled,
+    MaxAttemptsExhausted {
+        attempts: u32,
+    },
+    /// The input was staged onto a run that never began executing, and the
+    /// runtime refused the run rather than releasing the input back to a work
+    /// lane where an unobservable late execution could carry it out twice.
+    ///
+    /// Deliberately distinct from [`Self::Cancelled`]: nobody asked for this
+    /// work to stop. A host reading the reason is asking why its work did not
+    /// run, and "cancelled" would answer that question with something that
+    /// never happened.
+    NeverExecuted,
+    /// The input's run was in flight when its host stopped abruptly, and the
+    /// host's durable process custody proved that a tool process of that run
+    /// had already started (killed by recovery, or already exited). The input
+    /// is settled instead of replayed, so the tool's effects are never
+    /// repeated unknowingly; the model is told through a typed
+    /// tool-process-interrupted notice. Abandoned silently, without a receipt,
+    /// like a recovered predecessor input.
+    ToolProcessInterrupted,
+}
+
+/// Terminal outcome for an input.
+///
+/// The authoritative live copy is split across the DSL's typed terminal maps;
+/// persistence carries it on [`InputStateSeed`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "outcome_type", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum InputTerminalOutcome {
+    Consumed,
+    Superseded { superseded_by: InputId },
+    Coalesced { aggregate_id: InputId },
+    Abandoned { reason: InputAbandonReason },
+}
+

@@ -365,7 +365,7 @@ mod orchestrator_e2e {
 
     use meerkat::session_runtime::admission::StagedCapacityAdmissions;
     use meerkat::session_runtime::errors::LiveOpenPrecheckError;
-    use meerkat::session_runtime::live_orchestration::LiveOrchestrator;
+    use meerkat::session_runtime::live_orchestration::{LiveOrchestrator, LiveSessionAddressing};
     use meerkat::session_runtime::runtime_state::ArchiveRuntimeCleanup;
     use meerkat::surface::build_runtime_backed_service_with_capacities;
     use meerkat::{
@@ -445,6 +445,7 @@ mod orchestrator_e2e {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push(actor_witness_slot);
             }),
+            session_addressing: LiveSessionAddressing::SessionScoped,
         }
     }
 

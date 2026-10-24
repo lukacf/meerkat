@@ -229,7 +229,14 @@ Ownership splits three ways:
   inputs durably proven bound to the recovered run are terminalized, including
   under this disposition.
   Unbound content inputs still hold interrupted candidates; unfenceable
-  input evidence holds regardless of completed/interrupted shape. These holds
+  input evidence holds regardless of completed/interrupted shape. The
+  observation decides which rows are bound: beside a run cursor the
+  classifier judges to agree with the tail, the rows the cursor binds and
+  those a committed receipt names, and a content row the cursor does not
+  bind counts as unbound only when it names another run (one naming no run,
+  or the candidate's run, is not in the tail and stays queued); without an
+  agreeing cursor, every content row not bound to the candidate run
+  counts. These holds
   and the ambiguous-classification hold are machine-minted: no shell predicate
   may downgrade a commit authorization to a hold. Authorization never changes
   the lifecycle phase.

@@ -42,6 +42,7 @@ async fn shutdown_teardown_discards_a_degraded_registration_first() {
             mob.session(0),
             None,
             Instant::now() + Duration::from_secs(5),
+            meerkat_runtime::UnregisterQueuedInputs::Stop,
         ),
     )
     .await
@@ -513,6 +514,7 @@ async fn a_degraded_registration_without_a_teardown_handoff_settles_through_the_
             &teardown_target,
             None,
             Instant::now() + Duration::from_secs(5),
+            meerkat_runtime::UnregisterQueuedInputs::Stop,
         ),
     )
     .await
@@ -805,11 +807,15 @@ fn autonomous_isolation_definition() -> MobDefinition {
 /// healthy member 1 are both unregistered: member 0's run-start hold reports
 /// `ReloadRequired` instead of failing on the degraded registration, and the
 /// teardown discards that registration and unregisters the cold successor.
+/// The Shutdown is an explicit Stop, the path that interrupts an autonomous
+/// member: the default keeps a durable member's run instead.
 async fn whole_shutdown_settles_the_degraded_member(mob: &IsolationMob) -> MobShutdownReport {
     let report = tokio::time::timeout(
         STEP,
         mob.handle.shutdown_with_report(
-            ShutdownOptions::default().with_deadline(Instant::now() + Duration::from_secs(5)),
+            ShutdownOptions::default()
+                .with_deadline(Instant::now() + Duration::from_secs(5))
+                .with_queued_inputs(crate::runtime::QueuedInputsOnShutdown::Stop),
         ),
     )
     .await
@@ -1036,7 +1042,9 @@ async fn a_whole_shutdown_settles_a_member_degraded_between_its_hold_and_its_can
     let report = degrade_between_hold_and_cancel(&mob, false, async move {
         handle
             .shutdown_with_report(
-                ShutdownOptions::default().with_deadline(Instant::now() + Duration::from_secs(20)),
+                ShutdownOptions::default()
+                    .with_deadline(Instant::now() + Duration::from_secs(20))
+                    .with_queued_inputs(crate::runtime::QueuedInputsOnShutdown::Stop),
             )
             .await
     })

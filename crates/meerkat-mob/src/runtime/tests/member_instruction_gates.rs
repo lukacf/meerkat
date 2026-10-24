@@ -612,10 +612,25 @@ async fn a_self_starting_fork_reactivates_inherited_instructions_when_the_host_o
     let child_request = requests
         .get(requests_before)
         .expect("the child's first turn reached the model");
+    // The inherited row reaches the model as a header that names the key;
+    // the body comes once, from the child's own re-activation.
     assert_eq!(
         system_rows_with_body(child_request),
-        2,
-        "the child's request carries the inherited history row and its own activation"
+        1,
+        "the child's request carries the body once, from its own activation"
+    );
+    assert_eq!(
+        child_request
+            .messages
+            .iter()
+            .filter(|message| matches!(
+                message,
+                Message::System(system)
+                    if system.content.starts_with("[meerkat-inherited-instruction-v2]")
+            ))
+            .count(),
+        1,
+        "the inherited history row is a header without its body"
     );
     let child = fixture
         .durable(&outcome.fork.session_id)
@@ -1195,6 +1210,7 @@ async fn planned_child_evidence_measures_the_prefix_without_the_reactivation_row
             planned_child_session_id: planned.clone(),
             prefix_message_count: None,
             inherited_instructions: meerkat_core::ForkInstructionPolicy::ReactivateInherited,
+            declared_instructions: meerkat_core::ForkInstructionPolicy::ReactivateInherited,
         },
     )
     .await
@@ -1704,6 +1720,1224 @@ async fn an_unknown_member_is_refused_not_materialized() {
     assert_eq!(
         error.admission_code(),
         Some(InstructionActivationAdmissionErrorCode::TargetNotMaterialized)
+    );
+    fixture.finish().await;
+}
+
+// Prompt-context forks (`MemberLaunchMode::Fork`): the source's history is
+// rendered as text into the child's first prompt. Under the default policy
+// and under `refuse` the source's System rows (its system prompt and its
+// activated instruction rows) are not carried, and `refuse` refuses a fork
+// whose rows hold an activation; `reactivate_inherited` carries them. The
+// block ends with a notice line naming what happened.
+
+const FORK_HEADER: &str = "[Forked conversation context from member";
+const FORK_END: &str = "[End of forked context]";
+
+/// The rendered fork-context block in `request`'s user rows, if any.
+fn fork_block(request: &meerkat_client::LlmRequest) -> Option<String> {
+    request.messages.iter().find_map(|message| {
+        let Message::User(user) = message else {
+            return None;
+        };
+        let text = user.text_content();
+        let start = text.find(FORK_HEADER)?;
+        let block = &text[start..];
+        let end = block
+            .find(FORK_END)
+            .map_or(block.len(), |end| end + FORK_END.len());
+        Some(block[..end].to_string())
+    })
+}
+
+/// Whether any row of `request` carries the standing activation body.
+fn carries_body(request: &meerkat_client::LlmRequest) -> bool {
+    format!("{:?}", request.messages).contains(BODY)
+}
+
+/// The text of the typed fork notice `request` holds, as the model reads it.
+fn fork_notice_summary(request: &meerkat_client::LlmRequest) -> Option<String> {
+    request.messages.iter().find_map(|message| {
+        let Message::SystemNotice(notice) = message else {
+            return None;
+        };
+        notice.blocks.iter().find_map(|block| {
+            let block = serde_json::to_value(block).expect("notice block wire json");
+            (block["type"] == "fork_boundary")
+                .then(|| block["summary"].as_str().unwrap_or_default().to_string())
+        })
+    })
+}
+
+fn context_fork_spec(
+    identity: &str,
+    source: &AgentIdentity,
+    fork_context: crate::launch::ForkContext,
+) -> SpawnMemberSpec {
+    SpawnMemberSpec::new(ProfileName::from("lead"), AgentIdentity::from(identity)).with_launch_mode(
+        crate::launch::MemberLaunchMode::Fork {
+            source_member_id: source.clone(),
+            fork_context,
+        },
+    )
+}
+
+impl Fixture {
+    /// The standing activation and one completed turn, so the source's
+    /// transcript is its system prompt, the activation row, a user row and
+    /// an assistant row.
+    async fn activated_source_with_a_turn(&self) {
+        self.activate_standing().await;
+        self.run_turn("source turn after the activation").await;
+    }
+
+    /// The first model request started after `before` requests.
+    async fn first_request_after(&self, before: usize) -> meerkat_client::LlmRequest {
+        self.client.wait_started(before + 1).await;
+        self.client
+            .requests()
+            .get(before)
+            .cloned()
+            .expect("the child's first model request")
+    }
+}
+
+/// A context fork delivered with an initial message used to render the
+/// activation row, body included, and the source's system prompt into the
+/// child's first prompt. Under the default policy neither is carried, the
+/// conversation rows are, and the notice names the key that was not carried.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_context_fork_of_an_activated_member_carries_no_instruction_body_by_default() {
+    let fixture = Fixture::restored_member().await;
+    fixture.activated_source_with_a_turn().await;
+    let before = fixture.client.requests().len();
+    fixture
+        .handle
+        .spawn_spec(
+            context_fork_spec(
+                "context-child",
+                &fixture.identity,
+                crate::launch::ForkContext::FullHistory,
+            )
+            .with_initial_message("the forked task")
+            .with_runtime_mode(crate::MobRuntimeMode::TurnDriven),
+        )
+        .await
+        .expect("the context fork spawns");
+
+    let request = fixture.first_request_after(before).await;
+    assert!(
+        !carries_body(&request),
+        "no row of the child's first request carries the activation body"
+    );
+    let block = fork_block(&request).expect("the first request carries the fork context");
+    assert!(
+        block.contains("[user]: source turn after the activation"),
+        "the conversation rows are carried: {block}"
+    );
+    assert!(
+        !block.contains("[system]:"),
+        "no System row of the source is rendered: {block}"
+    );
+    let notice = fork_notice_summary(&request).expect("the child reads its typed fork notice");
+    assert!(
+        notice.contains("Instructions the source had that you do not: host.standing/member")
+            && notice.contains("system prompt and host system context were not carried"),
+        "the notice names what was not carried: {notice}"
+    );
+    fixture.finish().await;
+}
+
+/// An autonomous context fork delivers the rendered context in its kickoff.
+/// Under the default policy the kickoff carries no activation body either.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_autonomous_context_fork_carries_no_instruction_body_by_default() {
+    let fixture = Fixture::restored_member().await;
+    fixture.activated_source_with_a_turn().await;
+    let before = fixture.client.requests().len();
+    fixture
+        .handle
+        .spawn_spec(
+            context_fork_spec(
+                "autonomous-child",
+                &fixture.identity,
+                crate::launch::ForkContext::FullHistory,
+            )
+            .with_runtime_mode(crate::MobRuntimeMode::AutonomousHost),
+        )
+        .await
+        .expect("the autonomous context fork spawns");
+
+    let request = fixture.first_request_after(before).await;
+    assert!(
+        !carries_body(&request),
+        "the kickoff carries no activation body"
+    );
+    let block = fork_block(&request).expect("the kickoff carries the fork context");
+    let notice = fork_notice_summary(&request).expect("the kickoff reads its typed fork notice");
+    assert!(
+        !block.contains("[system]:") && notice.contains("host.standing/member"),
+        "no System row is rendered and the notice names the key: {block} / {notice}"
+    );
+    fixture.finish().await;
+}
+
+/// Under `refuse`, a context fork whose rows hold an activation row is
+/// refused, typed, before any spawn effect: no member, no session, no model
+/// request. fork_helper surfaces the same refusal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_refuse_policy_refuses_a_context_fork_of_an_activated_member_before_any_effect() {
+    let fixture =
+        Fixture::restored_member_with_policy(meerkat_core::ForkInstructionPolicy::Refuse).await;
+    fixture.activated_source_with_a_turn().await;
+    let sessions_before = fixture.session_count().await;
+    let requests_before = fixture.client.requests().len();
+
+    let refused = tokio::time::timeout(
+        WAIT,
+        fixture.handle.spawn_spec(
+            context_fork_spec(
+                "refused-child",
+                &fixture.identity,
+                crate::launch::ForkContext::FullHistory,
+            )
+            .with_initial_message("the forked task"),
+        ),
+    )
+    .await
+    .expect("the spawn answers");
+    match refused {
+        Err(MobError::ForkInstructionRefused {
+            source_member_id,
+            refusal,
+        }) => {
+            assert_eq!(source_member_id, fixture.identity);
+            assert_policy_refusal(&refusal);
+        }
+        other => panic!("expected a typed fork instruction refusal, got {other:?}"),
+    }
+
+    let helper = tokio::time::timeout(
+        WAIT,
+        fixture.handle.fork_helper(
+            &fixture.identity,
+            AgentIdentity::from("refused-helper"),
+            "helper task text",
+            crate::launch::ForkContext::FullHistory,
+            HelperOptions {
+                role_name: Some(ProfileName::from("lead")),
+                ..HelperOptions::default()
+            },
+            "refused-helper-result",
+            256,
+        ),
+    )
+    .await
+    .expect("fork_helper answers");
+    match helper {
+        Err(BoundedMemberRunError::Admission(MobError::ForkInstructionRefused {
+            refusal, ..
+        })) => assert_policy_refusal(&refusal),
+        other => panic!("expected fork_helper's typed refusal, got {other:?}"),
+    }
+
+    for child in ["refused-child", "refused-helper"] {
+        assert!(
+            fixture
+                .handle
+                .get_member(&AgentIdentity::from(child))
+                .await
+                .expect("roster read")
+                .is_none(),
+            "{child} is not seated"
+        );
+    }
+    assert_eq!(
+        fixture.session_count().await,
+        sessions_before,
+        "no child session is created"
+    );
+    assert_eq!(
+        fixture.client.requests().len(),
+        requests_before,
+        "no model request is made"
+    );
+    fixture.finish().await;
+}
+
+/// A `spawn_many` row whose prompt-context fork the policy refuses fails
+/// alone, before any effect: its error keeps the typed refusal, the wire code
+/// and the structured kind (the spawn-many cause is `internal`, since the mob
+/// machine models no spawn cause for a fork refusal), and the other row
+/// spawns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_spawn_many_row_whose_fork_is_refused_keeps_its_typed_refusal() {
+    let fixture =
+        Fixture::restored_member_with_policy(meerkat_core::ForkInstructionPolicy::Refuse).await;
+    fixture.activated_source_with_a_turn().await;
+
+    let rows = tokio::time::timeout(
+        WAIT,
+        fixture.handle.spawn_many(vec![
+            context_fork_spec(
+                "refused-row",
+                &fixture.identity,
+                crate::launch::ForkContext::FullHistory,
+            )
+            .with_initial_message("the forked task"),
+            SpawnMemberSpec::new(ProfileName::from("lead"), AgentIdentity::from("plain-row")),
+        ]),
+    )
+    .await
+    .expect("spawn_many answers")
+    .expect("the batch is admitted");
+    let [refused, plain] = rows.as_slice() else {
+        panic!("one result per row: {rows:?}");
+    };
+    let failure = refused.as_ref().expect_err("the fork row is refused");
+    match failure.error() {
+        MobError::ForkInstructionRefused {
+            source_member_id,
+            refusal,
+        } => {
+            assert_eq!(source_member_id, &fixture.identity);
+            assert_policy_refusal(refusal);
+        }
+        other => panic!("expected the typed fork instruction refusal, got {other:?}"),
+    }
+    assert_eq!(
+        failure.cause(),
+        meerkat_contracts::MobSpawnManyFailureCause::Internal
+    );
+    assert_eq!(
+        failure.error().wire_error_code(),
+        Some(meerkat_contracts::ErrorCode::ForkInstructionRefused)
+    );
+    assert_eq!(
+        failure
+            .error()
+            .structured_data()
+            .and_then(|data| data.get("kind").cloned()),
+        Some(serde_json::json!(
+            meerkat_core::service::SessionError::FORK_INSTRUCTION_REFUSED_KIND
+        ))
+    );
+    assert!(plain.is_ok(), "the other row spawns: {plain:?}");
+    assert!(
+        fixture
+            .handle
+            .get_member(&AgentIdentity::from("refused-row"))
+            .await
+            .expect("roster read")
+            .is_none(),
+        "the refused row is not seated"
+    );
+    fixture.finish().await;
+}
+
+/// The budget twin: a `spawn_many` row whose fork context does not fit the
+/// child's budget fails alone, before any effect. Its error keeps the
+/// typed `ForkContextTooLarge`, the wire code (`INVALID_PARAMS`) and the
+/// structured kind, the spawn-many cause is `internal`, and the other row
+/// spawns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_spawn_many_row_whose_fork_context_is_too_large_keeps_its_typed_refusal() {
+    let fixture = Fixture::restored_member_with_policy(
+        meerkat_core::ForkInstructionPolicy::ReactivateInherited,
+    )
+    .await;
+    // The source's newest row is an activation whose body alone fills the
+    // budget: `reactivate_inherited` carries it, so it cannot fit.
+    let body = "x".repeat(meerkat_core::MAX_INSTRUCTION_BODY_BYTES);
+    let mut large = request("large-1", InstructionActivationExpectation::Absent);
+    large.revision.content_sha256 = InstructionContentDigest::for_body(&body);
+    large.body = body;
+    fixture
+        .activate(large)
+        .await
+        .expect("the large activation applies");
+
+    let rows = tokio::time::timeout(
+        WAIT,
+        fixture.handle.spawn_many(vec![
+            context_fork_spec(
+                "too-large-row",
+                &fixture.identity,
+                crate::launch::ForkContext::FullHistory,
+            )
+            .with_initial_message("the forked task"),
+            SpawnMemberSpec::new(ProfileName::from("lead"), AgentIdentity::from("plain-row")),
+        ]),
+    )
+    .await
+    .expect("spawn_many answers")
+    .expect("the batch is admitted");
+    let [refused, plain] = rows.as_slice() else {
+        panic!("one result per row: {rows:?}");
+    };
+    let failure = refused.as_ref().expect_err("the fork row is refused");
+    match failure.error() {
+        MobError::ForkContextTooLarge {
+            source_member_id,
+            max_bytes,
+            required_bytes,
+        } => {
+            assert_eq!(source_member_id, &fixture.identity);
+            assert!(required_bytes > max_bytes, "{required_bytes} > {max_bytes}");
+        }
+        other => panic!("expected the typed budget refusal, got {other:?}"),
+    }
+    assert_eq!(
+        failure.cause(),
+        meerkat_contracts::MobSpawnManyFailureCause::Internal
+    );
+    assert_eq!(
+        failure.error().wire_error_code(),
+        Some(meerkat_contracts::ErrorCode::InvalidParams)
+    );
+    assert_eq!(
+        failure
+            .error()
+            .structured_data()
+            .and_then(|data| data.get("kind").cloned()),
+        Some(serde_json::json!("fork_context_too_large"))
+    );
+    assert!(plain.is_ok(), "the other row spawns: {plain:?}");
+    assert!(
+        fixture
+            .handle
+            .get_member(&AgentIdentity::from("too-large-row"))
+            .await
+            .expect("roster read")
+            .is_none(),
+        "the refused row is not seated"
+    );
+    fixture.finish().await;
+}
+
+/// `reactivate_inherited` carries the source's activated instructions, body
+/// included, and the notice says so. The source's system prompt is never
+/// carried, under any policy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reactivate_inherited_keeps_instruction_bodies_in_a_context_fork() {
+    let fixture = Fixture::restored_member_with_policy(
+        meerkat_core::ForkInstructionPolicy::ReactivateInherited,
+    )
+    .await;
+    fixture.activated_source_with_a_turn().await;
+    let before = fixture.client.requests().len();
+    fixture
+        .handle
+        .spawn_spec(
+            context_fork_spec(
+                "carrying-child",
+                &fixture.identity,
+                crate::launch::ForkContext::FullHistory,
+            )
+            .with_initial_message("the forked task")
+            .with_runtime_mode(crate::MobRuntimeMode::TurnDriven),
+        )
+        .await
+        .expect("the context fork spawns");
+
+    let request = fixture.first_request_after(before).await;
+    assert!(carries_body(&request), "the activation body is carried");
+    let block = fork_block(&request).expect("the first request carries the fork context");
+    assert!(
+        block.contains("[system]: [meerkat-instruction-activation-v1]"),
+        "the activation row is carried: {block}"
+    );
+    assert!(
+        !block.contains("[system]: You are"),
+        "the source's system prompt is not carried: {block}"
+    );
+    let notice = fork_notice_summary(&request).expect("the child reads its typed fork notice");
+    assert!(
+        notice.contains(
+            "Instructions of the source carried in the context above: host.standing/member"
+        ) && notice.contains("system prompt and host system context were not carried"),
+        "the notice says what was and was not carried: {notice}"
+    );
+    fixture.finish().await;
+}
+
+/// `refuse` decides on the rows the fork would render: a `LastMessages` tail
+/// without an activation row carries no body and forks; a tail that reaches
+/// the activation row is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_last_messages_context_fork_is_refused_only_when_its_tail_holds_an_activation_row() {
+    let fixture =
+        Fixture::restored_member_with_policy(meerkat_core::ForkInstructionPolicy::Refuse).await;
+    fixture.activated_source_with_a_turn().await;
+
+    fixture
+        .handle
+        .spawn_spec(
+            context_fork_spec(
+                "tail-of-two",
+                &fixture.identity,
+                crate::launch::ForkContext::LastMessages { count: 2 },
+            )
+            .with_initial_message("the forked task"),
+        )
+        .await
+        .expect("a tail of the user and assistant rows forks");
+
+    let refused = fixture
+        .handle
+        .spawn_spec(
+            context_fork_spec(
+                "tail-of-three",
+                &fixture.identity,
+                crate::launch::ForkContext::LastMessages { count: 3 },
+            )
+            .with_initial_message("the forked task"),
+        )
+        .await;
+    match refused {
+        Err(MobError::ForkInstructionRefused { refusal, .. }) => {
+            assert_policy_refusal(&refusal);
+        }
+        other => panic!("a tail holding the activation row is refused, got {other:?}"),
+    }
+    fixture.finish().await;
+}
+
+/// Host-injected context (here a per-turn injected row, the carrier of
+/// memory recall) is host-attached, not conversation: under the default
+/// policy a context fork does not carry it, and the notice counts it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_context_fork_does_not_carry_host_injected_context_by_default() {
+    let fixture = Fixture::restored_member().await;
+    fixture.activated_source_with_a_turn().await;
+    let delivery = crate::store::MobDeliveryIdentity::new(
+        "injected-context-probe",
+        "7d2c4f0e-5b1a-4c3e-9f2d-6a8b1c0e4d71",
+    )
+    .expect("canonical delivery identity");
+    let injected = fixture
+        .handle
+        .start_injected_context_work_for_identity_bounded(
+            fixture.identity.clone(),
+            WorkSpec::new("INJECTED-RECALL-MARKER", WorkOrigin::Internal),
+            delivery,
+            BoundedResultSpec::new("injected-result", 4_096).expect("result spec"),
+        )
+        .await
+        .expect("the injected work is admitted");
+    tokio::time::timeout(WAIT, injected.wait())
+        .await
+        .expect("the injected turn finishes")
+        .expect("the injected turn succeeds");
+
+    let before = fixture.client.requests().len();
+    fixture
+        .handle
+        .spawn_spec(
+            context_fork_spec(
+                "injected-child",
+                &fixture.identity,
+                crate::launch::ForkContext::FullHistory,
+            )
+            .with_initial_message("the forked task")
+            .with_runtime_mode(crate::MobRuntimeMode::TurnDriven),
+        )
+        .await
+        .expect("the context fork spawns");
+
+    let request = fixture.first_request_after(before).await;
+    let block = fork_block(&request).expect("the first request carries the fork context");
+    assert!(
+        !block.contains("INJECTED-RECALL-MARKER"),
+        "the injected row is not carried: {block}"
+    );
+    let notice = fork_notice_summary(&request).expect("the child reads its typed fork notice");
+    assert!(
+        notice.contains("Host-injected context rows of the source not carried: 1"),
+        "the notice counts it: {notice}"
+    );
+    fixture.finish().await;
+}
+
+/// A turn-driven fork_helper is created with no initial message. Its fork
+/// context used to go into a create request that discards its prompt, so the
+/// helper saw only its task. The planned context now reaches the helper's
+/// task turn, without the activation body.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_turn_driven_fork_helper_sees_its_planned_context() {
+    let fixture = Fixture::restored_member().await;
+    fixture.activated_source_with_a_turn().await;
+    let before = fixture.client.requests().len();
+    tokio::time::timeout(
+        WAIT,
+        fixture.handle.fork_helper(
+            &fixture.identity,
+            AgentIdentity::from("context-helper"),
+            "helper task text",
+            crate::launch::ForkContext::FullHistory,
+            HelperOptions {
+                role_name: Some(ProfileName::from("lead")),
+                runtime_mode: Some(crate::MobRuntimeMode::TurnDriven),
+                ..HelperOptions::default()
+            },
+            "context-helper-result",
+            256,
+        ),
+    )
+    .await
+    .expect("fork_helper answers")
+    .expect("fork_helper succeeds");
+
+    let request = fixture
+        .client
+        .requests()
+        .get(before)
+        .cloned()
+        .expect("the helper's model request");
+    let block = fork_block(&request).expect("the helper's task turn carries the fork context");
+    assert!(
+        format!("{:?}", request.messages).contains("helper task text"),
+        "the task follows the context"
+    );
+    assert!(
+        !carries_body(&request) && !block.contains("[system]:"),
+        "the context carries no System row of the source: {block}"
+    );
+    let notice = fork_notice_summary(&request).expect("the helper reads its typed fork notice");
+    assert!(
+        notice.contains("host.standing/member"),
+        "the notice names the key: {notice}"
+    );
+    fixture.finish().await;
+}
+
+// Slice B: a fork child holds what it was given as typed rows of its own
+// transcript, delivered once by Core before its first input: the planned
+// context as an injected-context row (prompt-context forks) and a typed
+// fork notice naming its source and what it lost or gained.
+
+impl Fixture {
+    /// The child's durable transcript once its first turn committed: a user
+    /// row containing `needle` and an answer after it. A read that races the
+    /// child's own commit is retried.
+    async fn transcript_after_first_turn(
+        &self,
+        child: &AgentIdentity,
+        needle: &str,
+    ) -> (SessionId, Vec<Message>) {
+        tokio::time::timeout(WAIT, async {
+            loop {
+                if let Some(id) = self.member_session(child).await
+                    && let Ok(Some(session)) = self.service.load_durable_session_body(&id).await
+                {
+                    let rows = session.messages().to_vec();
+                    let task = rows.iter().position(
+                        |row| matches!(row, Message::User(user) if user.text_content().contains(needle)),
+                    );
+                    if let Some(task) = task
+                        && rows[task..]
+                            .iter()
+                            .any(|row| matches!(row, Message::BlockAssistant(_)))
+                    {
+                        return (id, rows);
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the child's first turn commits")
+    }
+}
+
+/// The typed fork notice blocks in `rows`, as wire JSON, with their row index.
+fn fork_notices(rows: &[Message]) -> Vec<(usize, serde_json::Value)> {
+    rows.iter()
+        .enumerate()
+        .filter_map(|(index, row)| {
+            let Message::SystemNotice(notice) = row else {
+                return None;
+            };
+            notice
+                .blocks
+                .iter()
+                .map(|block| serde_json::to_value(block).expect("notice block wire json"))
+                .find(|block| block["type"] == "fork_boundary")
+                .map(|block| (index, block))
+        })
+        .collect()
+}
+
+/// The index of the first user row containing `needle`.
+fn user_row(rows: &[Message], needle: &str) -> Option<usize> {
+    rows.iter()
+        .position(|row| matches!(row, Message::User(user) if user.text_content().contains(needle)))
+}
+
+async fn spawn_context_child_with_task(
+    fixture: &Fixture,
+    child: &str,
+    source: &AgentIdentity,
+    task: &str,
+) {
+    fixture
+        .handle
+        .spawn_spec(
+            context_fork_spec(child, source, crate::launch::ForkContext::FullHistory)
+                .with_initial_message(task)
+                .with_runtime_mode(crate::MobRuntimeMode::TurnDriven),
+        )
+        .await
+        .expect("the context fork spawns");
+}
+
+/// The planned context is the child's own typed injected-context row, before
+/// its first input, and the first input is a row of its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_context_fork_child_holds_its_context_as_an_injected_row_before_its_first_input() {
+    let fixture = Fixture::restored_member().await;
+    fixture.activated_source_with_a_turn().await;
+    let child = AgentIdentity::from("context-child");
+    spawn_context_child_with_task(
+        &fixture,
+        "context-child",
+        &fixture.identity,
+        "the forked task",
+    )
+    .await;
+
+    let (_, rows) = fixture
+        .transcript_after_first_turn(&child, "the forked task")
+        .await;
+    let injected = rows.iter().position(|row| {
+        matches!(
+            row,
+            Message::User(user)
+                if user.transcript_role == meerkat_core::types::TranscriptUserRole::InjectedContext
+                    && user.text_content().contains(FORK_HEADER)
+        )
+    });
+    let task = user_row(&rows, "the forked task");
+    let (Some(injected), Some(task)) = (injected, task) else {
+        panic!("the context is a typed injected row and the task a row of its own: {rows:#?}");
+    };
+    assert!(
+        injected < task,
+        "the context precedes the first input: {rows:#?}"
+    );
+    let Message::User(task_row) = &rows[task] else {
+        unreachable!("user_row found a user row");
+    };
+    assert!(
+        !task_row.text_content().contains(FORK_HEADER),
+        "the first input carries no context: {rows:#?}"
+    );
+    fixture.finish().await;
+}
+
+/// The child holds exactly one typed fork notice, after its context and
+/// before its first input, naming its source, itself and the key it did not
+/// get; the model reads it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_context_fork_child_holds_one_typed_fork_notice_naming_its_source() {
+    let fixture = Fixture::restored_member().await;
+    fixture.activated_source_with_a_turn().await;
+    let child = AgentIdentity::from("context-child");
+    spawn_context_child_with_task(
+        &fixture,
+        "context-child",
+        &fixture.identity,
+        "the forked task",
+    )
+    .await;
+
+    let (child_session, rows) = fixture
+        .transcript_after_first_turn(&child, "the forked task")
+        .await;
+    let notices = fork_notices(&rows);
+    assert_eq!(notices.len(), 1, "exactly one fork notice row: {rows:#?}");
+    let (at, block) = &notices[0];
+    assert_eq!(block["fork"], "prompt_context", "{block}");
+    assert_eq!(
+        block["child_session_id"],
+        child_session.to_string(),
+        "{block}"
+    );
+    assert_eq!(
+        block["source"]["member"]["member"], "restored-member",
+        "{block}"
+    );
+    assert_eq!(
+        block["instructions_removed"][0]["namespace"], "host.standing",
+        "{block}"
+    );
+    assert_eq!(block["instructions_removed"][0]["key"], "member", "{block}");
+    let task = user_row(&rows, "the forked task").expect("the task row");
+    assert!(*at < task, "the notice precedes the first input: {rows:#?}");
+
+    let request = fixture
+        .client
+        .requests()
+        .into_iter()
+        .find(|request| format!("{:?}", request.messages).contains("the forked task"))
+        .expect("the child's first request");
+    assert!(
+        fork_notices(&request.messages).len() == 1,
+        "the model reads the notice row: {:?}",
+        request.messages
+    );
+    fixture.finish().await;
+}
+
+/// A durable member fork's child holds one typed fork notice of kind
+/// transcript at its first turn: after the copied prefix, before its input.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_durable_fork_child_holds_a_fork_notice_from_its_first_turn() {
+    let fixture = Fixture::restored_member().await;
+    fixture.run_turn("source turn before the fork").await;
+    let child = AgentIdentity::from("fork-child");
+    tokio::time::timeout(
+        WAIT,
+        fixture.handle.fork_member(
+            &fixture.identity,
+            SpawnMemberSpec::new(ProfileName::from("lead"), child.clone()),
+            None,
+        ),
+    )
+    .await
+    .expect("the fork answers")
+    .expect("the fork commits and seats the child");
+    let turn = fixture.start_turn_for(&child, "the child's task").await;
+    tokio::time::timeout(WAIT, turn.wait())
+        .await
+        .expect("the child's turn finishes")
+        .expect("the child's turn runs");
+
+    let (child_session, rows) = fixture
+        .transcript_after_first_turn(&child, "the child's task")
+        .await;
+    let notices = fork_notices(&rows);
+    assert_eq!(notices.len(), 1, "exactly one fork notice row: {rows:#?}");
+    let (at, block) = &notices[0];
+    assert_eq!(block["fork"], "transcript", "{block}");
+    assert_eq!(
+        block["child_session_id"],
+        child_session.to_string(),
+        "{block}"
+    );
+    assert_eq!(
+        block["source"]["member"]["member"], "restored-member",
+        "{block}"
+    );
+    let copied = user_row(&rows, "source turn before the fork").expect("the copied prefix");
+    let task = user_row(&rows, "the child's task").expect("the task row");
+    assert!(
+        copied < *at && *at < task,
+        "the notice follows the copied prefix and precedes the first input: {rows:#?}"
+    );
+    fixture.finish().await;
+}
+
+/// The fork notice names, by name only, a tool the source could call and the
+/// child cannot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fork_notice_names_a_tool_the_child_cannot_call() {
+    let fixture = Fixture::restored_member().await;
+    fixture.run_turn("source turn before the fork").await;
+    let denied = fixture
+        .client
+        .requests()
+        .last()
+        .and_then(|request| request.tools.iter().map(|tool| tool.name.to_string()).min())
+        .expect("the source can call a tool");
+    let before = fixture.client.requests().len();
+    tokio::time::timeout(
+        WAIT,
+        fixture.handle.fork_helper(
+            &fixture.identity,
+            AgentIdentity::from("narrow-helper"),
+            "helper task text",
+            crate::launch::ForkContext::FullHistory,
+            HelperOptions {
+                role_name: Some(ProfileName::from("lead")),
+                runtime_mode: Some(crate::MobRuntimeMode::TurnDriven),
+                tool_access_policy: Some(meerkat_core::ops::ToolAccessPolicy::DenyList(
+                    [denied.as_str()].into_iter().collect(),
+                )),
+                ..HelperOptions::default()
+            },
+            "narrow-helper-result",
+            256,
+        ),
+    )
+    .await
+    .expect("fork_helper answers")
+    .expect("fork_helper succeeds");
+
+    let request = fixture
+        .client
+        .requests()
+        .get(before)
+        .cloned()
+        .expect("the helper's first request");
+    assert!(
+        request.tools.iter().all(|tool| tool.name != denied),
+        "the helper cannot call {denied}"
+    );
+    let notices = fork_notices(&request.messages);
+    assert_eq!(notices.len(), 1, "one fork notice: {:?}", request.messages);
+    let removed = notices[0].1["tools"]["removed"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        removed.iter().any(|name| name == denied.as_str()),
+        "the notice names {denied} as removed: {}",
+        notices[0].1
+    );
+    fixture.finish().await;
+}
+
+/// A fork of a fork reads one current notice, naming its own source: the
+/// grandparent's context and notice in its source's transcript are not
+/// carried as text.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fork_of_a_fork_reads_one_current_notice() {
+    let fixture = Fixture::restored_member().await;
+    fixture.activated_source_with_a_turn().await;
+    let child = AgentIdentity::from("context-child");
+    spawn_context_child_with_task(
+        &fixture,
+        "context-child",
+        &fixture.identity,
+        "the forked task",
+    )
+    .await;
+    fixture
+        .transcript_after_first_turn(&child, "the forked task")
+        .await;
+
+    let before = fixture.client.requests().len();
+    spawn_context_child_with_task(
+        &fixture,
+        "context-grandchild",
+        &child,
+        "the grandchild task",
+    )
+    .await;
+    let request = fixture.first_request_after(before).await;
+    let text = format!("{:?}", request.messages);
+    assert_eq!(
+        text.matches("You are a fork of member").count(),
+        1,
+        "one notice reaches the grandchild: {text}"
+    );
+    assert!(
+        text.contains("You are a fork of member 'context-child'"),
+        "the notice names the grandchild's own source: {text}"
+    );
+    fixture.finish().await;
+}
+
+/// Under `reactivate_inherited` a durable fork child's model reads the
+/// activation body once, from the child's own re-activation row: the
+/// inherited row it copied is a header that names the key, without the body.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_durable_fork_child_request_carries_inherited_rows_without_bodies() {
+    let fixture = Fixture::restored_member_with_policy(
+        meerkat_core::ForkInstructionPolicy::ReactivateInherited,
+    )
+    .await;
+    fixture.activated_source_with_a_turn().await;
+    let child = AgentIdentity::from("fork-child");
+    tokio::time::timeout(
+        WAIT,
+        fixture.handle.fork_member(
+            &fixture.identity,
+            SpawnMemberSpec::new(ProfileName::from("lead"), child.clone()),
+            None,
+        ),
+    )
+    .await
+    .expect("the fork answers")
+    .expect("the fork commits and seats the child");
+    let before = fixture.client.requests().len();
+    let turn = fixture.start_turn_for(&child, "the child's task").await;
+    tokio::time::timeout(WAIT, turn.wait())
+        .await
+        .expect("the child's turn finishes")
+        .expect("the child's turn runs");
+
+    let request = fixture.first_request_after(before).await;
+    assert_eq!(
+        system_rows_with_body(&request),
+        1,
+        "the body reaches the child's model once: {:?}",
+        request.messages
+    );
+    let headers = request
+        .messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::System(system)
+                if system
+                    .content
+                    .starts_with("[meerkat-inherited-instruction-v2]") =>
+            {
+                Some(system.content.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(headers.len(), 1, "one inherited header: {headers:?}");
+    assert!(
+        headers[0].contains("status=not_active_in_child")
+            && headers[0].contains("\"member\"")
+            && !headers[0].contains(BODY),
+        "the header names the key, not the body: {}",
+        headers[0]
+    );
+    fixture.finish().await;
+}
+
+/// A durable fork of a durable fork child reads one current notice, naming
+/// its own source: the notice its source was given is history there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_durable_fork_of_a_fork_reads_one_current_notice() {
+    let fixture = Fixture::restored_member().await;
+    fixture.run_turn("source turn before the forks").await;
+    let child = AgentIdentity::from("durable-child");
+    let grandchild = AgentIdentity::from("durable-grandchild");
+    tokio::time::timeout(
+        WAIT,
+        fixture.handle.fork_member(
+            &fixture.identity,
+            SpawnMemberSpec::new(ProfileName::from("lead"), child.clone()),
+            None,
+        ),
+    )
+    .await
+    .expect("the fork answers")
+    .expect("the fork commits");
+    let turn = fixture.start_turn_for(&child, "the child's task").await;
+    tokio::time::timeout(WAIT, turn.wait())
+        .await
+        .expect("the child's turn finishes")
+        .expect("the child's turn runs");
+    tokio::time::timeout(
+        WAIT,
+        fixture.handle.fork_member(
+            &child,
+            SpawnMemberSpec::new(ProfileName::from("lead"), grandchild.clone()),
+            None,
+        ),
+    )
+    .await
+    .expect("the second fork answers")
+    .expect("the second fork commits");
+    let before = fixture.client.requests().len();
+    let turn = fixture
+        .start_turn_for(&grandchild, "the grandchild's task")
+        .await;
+    tokio::time::timeout(WAIT, turn.wait())
+        .await
+        .expect("the grandchild's turn finishes")
+        .expect("the grandchild's turn runs");
+
+    let request = fixture.first_request_after(before).await;
+    let text = format!("{:?}", request.messages);
+    assert_eq!(
+        text.matches("You are a fork of").count(),
+        1,
+        "one current notice reaches the grandchild: {text}"
+    );
+    assert!(
+        text.contains("You are a fork of member 'durable-child'"),
+        "the notice names the grandchild's own source: {text}"
+    );
+    fixture.finish().await;
+}
+
+/// A durable fork of a durable fork child names, as its source's
+/// instructions, only the keys that child activated itself: the rows it
+/// copied from its own source are history there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_durable_fork_of_a_fork_names_only_its_sources_own_keys() {
+    let fixture = Fixture::restored_member().await;
+    fixture.activated_source_with_a_turn().await;
+    let child = AgentIdentity::from("durable-child");
+    let grandchild = AgentIdentity::from("durable-grandchild");
+    for (source, fork) in [(&fixture.identity, &child), (&child, &grandchild)] {
+        tokio::time::timeout(
+            WAIT,
+            fixture.handle.fork_member(
+                source,
+                SpawnMemberSpec::new(ProfileName::from("lead"), fork.clone()),
+                None,
+            ),
+        )
+        .await
+        .expect("the fork answers")
+        .expect("the fork commits");
+    }
+    let session = fixture
+        .member_session(&grandchild)
+        .await
+        .expect("the grandchild's session");
+    let body = fixture
+        .service
+        .load_durable_session_body(&session)
+        .await
+        .expect("the grandchild loads")
+        .expect("the grandchild is durable");
+    let seed: meerkat_core::fork_notice::ForkSeed = serde_json::from_value(
+        body.metadata()
+            .get(meerkat_core::fork_notice::SESSION_FORK_SEED_KEY)
+            .cloned()
+            .expect("the grandchild holds a fork seed"),
+    )
+    .expect("the seed decodes");
+    assert!(
+        seed.source_instructions.is_empty(),
+        "the child never activated the key it copied: {:?}",
+        seed.source_instructions
+    );
+    fixture.finish().await;
+}
+
+/// A prompt-context fork of a durable fork child names, as its source's
+/// instructions, only the keys that child activated itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_context_fork_of_a_fork_names_only_its_sources_own_keys() {
+    let fixture = Fixture::restored_member().await;
+    fixture.activated_source_with_a_turn().await;
+    let child = AgentIdentity::from("durable-child");
+    tokio::time::timeout(
+        WAIT,
+        fixture.handle.fork_member(
+            &fixture.identity,
+            SpawnMemberSpec::new(ProfileName::from("lead"), child.clone()),
+            None,
+        ),
+    )
+    .await
+    .expect("the fork answers")
+    .expect("the fork commits");
+    let before = fixture.client.requests().len();
+    tokio::time::timeout(
+        WAIT,
+        fixture.handle.fork_helper(
+            &child,
+            AgentIdentity::from("helper-of-the-child"),
+            "helper task text",
+            crate::launch::ForkContext::FullHistory,
+            HelperOptions {
+                role_name: Some(ProfileName::from("lead")),
+                runtime_mode: Some(crate::MobRuntimeMode::TurnDriven),
+                ..HelperOptions::default()
+            },
+            "helper-of-the-child-result",
+            256,
+        ),
+    )
+    .await
+    .expect("fork_helper answers")
+    .expect("fork_helper succeeds");
+    let request = fixture
+        .client
+        .requests()
+        .get(before)
+        .cloned()
+        .expect("the helper's first request");
+    let notice = fork_notice_summary(&request).expect("the helper reads its fork notice");
+    assert!(
+        !notice.contains("host.standing/member"),
+        "the child never activated the key it copied: {notice}"
+    );
+    fixture.finish().await;
+}
+
+/// A source forked while its own turn runs (as when a member forks itself
+/// from one of its tool calls) still has its tools compared: the notice
+/// reads the tools the source's session last published, without waiting on
+/// that turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fork_of_a_running_source_names_a_tool_the_child_cannot_call() {
+    let fixture = Fixture::restored_member().await;
+    fixture.run_turn("source turn before the fork").await;
+    let denied = fixture
+        .client
+        .requests()
+        .last()
+        .and_then(|request| request.tools.iter().map(|tool| tool.name.to_string()).min())
+        .expect("the source can call a tool");
+    fixture.client.block();
+    let before = fixture.client.requests().len();
+    let held = fixture
+        .start_turn("a source turn that runs through the fork")
+        .await;
+    fixture.client.wait_started(before + 1).await;
+
+    let helper = tokio::spawn({
+        let handle = fixture.handle.clone();
+        let identity = fixture.identity.clone();
+        let denied = denied.clone();
+        async move {
+            handle
+                .fork_helper(
+                    &identity,
+                    AgentIdentity::from("running-source-helper"),
+                    "helper task text",
+                    crate::launch::ForkContext::FullHistory,
+                    HelperOptions {
+                        role_name: Some(ProfileName::from("lead")),
+                        runtime_mode: Some(crate::MobRuntimeMode::TurnDriven),
+                        tool_access_policy: Some(meerkat_core::ops::ToolAccessPolicy::DenyList(
+                            [denied.as_str()].into_iter().collect(),
+                        )),
+                        ..HelperOptions::default()
+                    },
+                    "running-source-helper-result",
+                    256,
+                )
+                .await
+        }
+    });
+    // The helper's first model request starts while the source's turn is
+    // still held: the child was created, and its notice built, mid-turn.
+    fixture.client.wait_started(before + 2).await;
+    fixture.client.release();
+    tokio::time::timeout(WAIT, held.wait())
+        .await
+        .expect("the source's turn finishes")
+        .expect("the source's turn runs");
+    tokio::time::timeout(WAIT, helper)
+        .await
+        .expect("fork_helper answers")
+        .expect("fork_helper task")
+        .expect("fork_helper succeeds");
+
+    let request = fixture
+        .client
+        .requests()
+        .into_iter()
+        .skip(before)
+        .find(|request| format!("{:?}", request.messages).contains("helper task text"))
+        .expect("the helper's first request");
+    let notices = fork_notices(&request.messages);
+    assert_eq!(notices.len(), 1, "one fork notice: {:?}", request.messages);
+    let tools = &notices[0].1["tools"];
+    assert_eq!(
+        tools["comparison"], "compared",
+        "the running source's tools are compared: {}",
+        notices[0].1
+    );
+    assert!(
+        tools["removed"]
+            .as_array()
+            .is_some_and(|removed| removed.iter().any(|name| name == denied.as_str())),
+        "the notice names {denied} as removed: {}",
+        notices[0].1
     );
     fixture.finish().await;
 }
@@ -2446,6 +3680,16 @@ impl MobSessionService for NonForwardingDecorator {
         session_id: &SessionId,
     ) -> Result<(), SessionError> {
         <Service as MobSessionService>::settle_durable_tail_before_cold_start(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+    async fn settle_durable_tail_before_cold_start_reporting(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::ColdStartTailSettlement, SessionError> {
+        <Service as MobSessionService>::settle_durable_tail_before_cold_start_reporting(
             &self.inner,
             session_id,
         )

@@ -4301,6 +4301,7 @@ mod tests {
                 non_portable_disabled: None,
                 preview_unavailable,
                 registration_refusal: None,
+                custody_deferred: None,
             }
         };
         let note = |marker: Option<Marker>, run_state: Option<WireMemberRunState>| {
@@ -5925,6 +5926,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
+                durable: false,
             })),
         );
         profiles.insert(
@@ -5949,6 +5951,7 @@ mod tests {
                 max_inline_peer_notifications: None,
                 output_schema: None,
                 provider_params: None,
+                durable: false,
             })),
         );
 
@@ -9248,6 +9251,7 @@ mod tests {
                     max_inline_peer_notifications: None,
                     output_schema: None,
                     provider_params: None,
+                    durable: false,
                 },
             ))),
             allow_overlay: None,
@@ -9291,6 +9295,7 @@ mod tests {
                     max_inline_peer_notifications: None,
                     output_schema: None,
                     provider_params: None,
+                    durable: false,
                 },
             ))),
             allow_overlay: None,
@@ -9326,6 +9331,7 @@ mod tests {
                     max_inline_peer_notifications: None,
                     output_schema: None,
                     provider_params: None,
+                    durable: false,
                 },
             ))),
             allow_overlay: None,
@@ -9357,6 +9363,7 @@ mod tests {
                     max_inline_peer_notifications: None,
                     output_schema: None,
                     provider_params: None,
+                    durable: false,
                 },
             ))),
             allow_overlay: None,
@@ -9390,6 +9397,7 @@ mod tests {
                     max_inline_peer_notifications: None,
                     output_schema: None,
                     provider_params: None,
+                    durable: false,
                 },
             ))),
             allow_overlay: Some(vec!["send".to_string()]),
@@ -9424,6 +9432,7 @@ mod tests {
                     max_inline_peer_notifications: None,
                     output_schema: None,
                     provider_params: None,
+                    durable: false,
                 },
             ))),
             allow_overlay: None,

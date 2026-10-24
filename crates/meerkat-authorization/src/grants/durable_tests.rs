@@ -1201,3 +1201,63 @@ fn an_uncertain_child_append_is_recovered_by_the_same_intent() {
             .expect("usable now");
     }
 }
+
+/// A process this test spawns that holds a copy of one of the test's
+/// descriptors, as its standard input, until it is dropped: what any process
+/// spawned meanwhile holds until it executes its program, kept for as long as
+/// the test needs.
+#[cfg(unix)]
+struct DescriptorCopy(std::process::Child);
+
+#[cfg(unix)]
+impl DescriptorCopy {
+    /// Spawn a process holding a copy of `file`'s descriptor.
+    fn spawn(file: &std::fs::File) -> Self {
+        let copy = file.try_clone().expect("a copy of the descriptor");
+        #[allow(clippy::disallowed_methods)] // the test's own process, which holds the copy
+        let child = std::process::Command::new("sleep")
+            .arg("600")
+            .stdin(copy)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("a process holding the copy");
+        Self(child)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for DescriptorCopy {
+    fn drop(&mut self) {
+        // On request (MEERKAT_TEST_DESCRIPTOR_COPY_LINGER_MS), the copy stays open
+        // that long first, so an fd sampler watching the run sees it.
+        if let Some(linger) = std::env::var("MEERKAT_TEST_DESCRIPTOR_COPY_LINGER_MS")
+            .ok()
+            .and_then(|millis| millis.parse::<u64>().ok())
+        {
+            std::thread::sleep(std::time::Duration::from_millis(linger));
+        }
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// A released lease is free at once for the next opener while a process
+/// spawned meanwhile still holds a copy of its writer's descriptor.
+#[cfg(unix)]
+#[test]
+fn a_released_lease_is_free_while_a_spawned_process_holds_its_descriptor() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let path = directory.path().join("grant-owner.jsonl");
+    let store = Arc::new(FileGrantOwnerStore::new(&path));
+    let owner = durable(store.clone());
+    issue(&owner, "held");
+    let writer = store.writer_descriptor_copy().expect("the lease's writer");
+    let copy = DescriptorCopy::spawn(&writer);
+    drop(writer);
+    drop(owner);
+    let restored = restart(Arc::new(FileGrantOwnerStore::new(&path)))
+        .expect("a released lease is free while a spawned process holds a copy of its descriptor");
+    assert_eq!(state(&restored).revision, 1);
+    drop(copy);
+}

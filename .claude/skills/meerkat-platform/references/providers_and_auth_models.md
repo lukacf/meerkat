@@ -412,6 +412,15 @@ rkat run -p self-hosted "Say hello"   # uses [self_hosted] default_model
 - With `store = true` in an `open_ai` tag, the client continues from
   `previous_response_id` and falls back to a full replay when the server
   rejects that id.
+- Hosted web search on the public OpenAI API: a request with the hosted
+  `web_search` tool also asks for `web_search_call.action.sources`, and
+  later steps replay the search call with those sources and the answer with
+  its `url_citation` annotations (only citations whose range fits the
+  replayed text, and only for an answer of one `output_text` part; its
+  citations block records `text_parts`). The pages' text never comes back;
+  for that, use `store = true` or the Meerkat `web_search` fallback tool.
+  The ChatGPT backend, Azure OpenAI and Copilot wires replay the search call
+  without sources and the answer with `annotations: []`.
 - Unknown output item types or execution semantics (async, namespaced or
   programmatic function calls) fail the turn instead of being dropped.
 - OpenAI-compatible Chat Completions streams (vLLM and similar): after a

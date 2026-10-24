@@ -52,7 +52,10 @@ const MODEL_A: &str = "gpt-5.4";
 const MODEL_B: &str = "gpt-5.5";
 const TEST_REALM: &str = "default";
 const TEST_BINDING: &str = "default_openai";
-const TEST_ACCOUNT: &str = "account_a";
+/// The managed-store scenario's credential account. A credential account
+/// names one process-wide lease and login lifecycle (realm and account), so
+/// no other test of this lib may configure it.
+const TEST_ACCOUNT: &str = "hot_swap_account_a";
 const ANSWER: &str = "answered";
 
 fn configured_binding() -> AuthBindingRef {
@@ -486,6 +489,11 @@ mod chatgpt_backend {
 
     const ACCESS_TOKEN: &str = "external-chatgpt-access";
     const PROVIDER_ACCOUNT: &str = "chatgpt-provider-account";
+    /// This scenario's credential account. A credential account names one
+    /// process-wide lease and login lifecycle (realm and account), and the
+    /// managed-store scenario above holds `TEST_ACCOUNT`'s while both run at
+    /// once in one test process: each scenario holds an account of its own.
+    const CHATGPT_ACCOUNT: &str = "chatgpt_account_a";
 
     /// One model request as the loopback server received it.
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -551,6 +559,12 @@ mod chatgpt_backend {
             .get_mut(TEST_BINDING)
             .expect("the test auth profile is configured")
             .auth_method = "external_chatgpt_tokens".to_string();
+        section
+            .binding
+            .get_mut(TEST_BINDING)
+            .expect("the test binding is configured")
+            .credential_account =
+            Some(meerkat_core::CredentialAccountId::parse(CHATGPT_ACCOUNT).expect("valid account"));
         config
     }
 

@@ -26,8 +26,8 @@ mod live_pipeline {
         LiveChannelVerbError, LiveIngressError, LiveOpenError, LiveOpenPrecheckError,
     };
     use meerkat::session_runtime::live_orchestration::{
-        LiveOrchestrator, LiveSessionIngressReconciler, LiveTransportContext,
-        RealtimeSessionOpenProjectionError,
+        LiveOrchestrator, LiveSessionAddressing, LiveSessionIngressReconciler,
+        LiveTransportContext, RealtimeSessionOpenProjectionError,
     };
     use meerkat::session_runtime::runtime_state::ArchiveRuntimeCleanup;
     use meerkat::surface::{
@@ -274,6 +274,7 @@ mod live_pipeline {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push(actor_witness_slot);
             }),
+            session_addressing: LiveSessionAddressing::SessionScoped,
         }
     }
 

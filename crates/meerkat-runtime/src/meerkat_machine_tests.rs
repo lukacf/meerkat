@@ -977,8 +977,184 @@ fn realtime_policy(target_realtime_capable: bool) -> ModelRoutingRealtimePolicy 
     }
 }
 
+/// A requeue disposition the stop mark cannot record as given is refused at
+/// the runtime boundary, typed, before any unregister starts, by both entry
+/// points: a max age under one millisecond (zero included) and one over the
+/// cap. The session stays registered. The accepted bounds record exactly
+/// their whole milliseconds, so nothing is clamped.
+#[tokio::test]
+async fn an_unregister_refuses_a_requeue_max_age_it_cannot_record() {
+    use crate::meerkat_machine::{UnregisterQueuedInputs, UnregisterQueuedInputsError};
+
+    let machine = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("register the session");
+    let registration = machine
+        .current_session_registration_witness(&session_id)
+        .await
+        .expect("the registered session exposes its exact registration");
+    let registration_use = machine
+        .session_registration_use(&registration)
+        .await
+        .expect("the current registration has a use");
+    let over = UnregisterQueuedInputs::MAX_AGE_CAP + Duration::from_millis(1);
+    for (max_age, refusal) in [
+        (
+            Duration::ZERO,
+            UnregisterQueuedInputsError::MaxAgeUnderOneMillisecond {
+                max_age: Duration::ZERO,
+            },
+        ),
+        (
+            Duration::from_micros(999),
+            UnregisterQueuedInputsError::MaxAgeUnderOneMillisecond {
+                max_age: Duration::from_micros(999),
+            },
+        ),
+        (
+            over,
+            UnregisterQueuedInputsError::MaxAgeOverCap {
+                max_age: over,
+                cap: UnregisterQueuedInputs::MAX_AGE_CAP,
+            },
+        ),
+    ] {
+        let queued_inputs = UnregisterQueuedInputs::Requeue { max_age };
+        assert_eq!(queued_inputs.check(), Err(refusal));
+        let current = machine
+            .observe_unregister_session_registration_with_queued_inputs_if_current(
+                &registration,
+                queued_inputs,
+            )
+            .await
+            .expect_err("the current-registration entry refuses it");
+        assert!(
+            matches!(current, RuntimeDriverError::QueuedInputsRefused(found) if found == refusal),
+            "{current}"
+        );
+        let unchanged = machine
+            .observe_unregister_session_registration_with_queued_inputs_if_use_unchanged(
+                &registration,
+                registration_use,
+                queued_inputs,
+            )
+            .await
+            .expect_err("the use-gated entry refuses it");
+        assert!(
+            matches!(unchanged, RuntimeDriverError::QueuedInputsRefused(found) if found == refusal),
+            "{unchanged}"
+        );
+        assert!(
+            machine.contains_session(&session_id).await,
+            "a refused disposition starts no unregister"
+        );
+    }
+    for (max_age, recorded_ms) in [
+        (Duration::from_millis(1), 1),
+        (UnregisterQueuedInputs::MAX_AGE_CAP, 86_400_000),
+    ] {
+        assert_eq!(
+            UnregisterQueuedInputs::Requeue { max_age }
+                .recorded()
+                .map(|disposition| disposition.dsl_disposition()),
+            Ok((
+                crate::meerkat_machine::dsl::UnregisterQueuedInputsDisposition::Requeue,
+                recorded_ms
+            ))
+        );
+    }
+}
+
 fn memory_blob_store() -> Arc<dyn meerkat_core::BlobStore> {
     Arc::new(meerkat_store::MemoryBlobStore::new())
+}
+
+/// A graceful process shutdown that names no disposition (rkat-rpc's and the
+/// REST server's) requeues on a runtime with a persistence store, with the
+/// 15 minute default max age recorded exactly, and stops on a runtime
+/// without one. Its until-terminal unregister entry point refuses a
+/// disposition it cannot record before it starts anything, as the other
+/// entry points do, and with the ephemeral default it unregisters the exact
+/// registration to terminal.
+#[tokio::test]
+async fn a_graceful_shutdown_requeues_on_a_persistent_runtime_and_stops_on_an_ephemeral_one() {
+    use crate::meerkat_machine::{UnregisterQueuedInputs, UnregisterQueuedInputsError};
+
+    let store: Arc<dyn crate::store::RuntimeStore> =
+        Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let persistent =
+        MeerkatMachine::persistent(store, memory_blob_store()).expect("persistent machine");
+    let ephemeral = MeerkatMachine::ephemeral();
+    assert_eq!(
+        UnregisterQueuedInputs::DEFAULT_MAX_AGE,
+        Duration::from_mins(15)
+    );
+    assert_eq!(
+        persistent.graceful_shutdown_queued_inputs(),
+        UnregisterQueuedInputs::Requeue {
+            max_age: UnregisterQueuedInputs::DEFAULT_MAX_AGE
+        }
+    );
+    assert_eq!(
+        persistent
+            .graceful_shutdown_queued_inputs()
+            .recorded()
+            .map(|disposition| disposition.dsl_disposition()),
+        Ok((
+            crate::meerkat_machine::dsl::UnregisterQueuedInputsDisposition::Requeue,
+            900_000
+        ))
+    );
+    assert_eq!(
+        ephemeral.graceful_shutdown_queued_inputs(),
+        UnregisterQueuedInputs::Stop
+    );
+
+    let session_id = SessionId::new();
+    ephemeral
+        .register_session(session_id.clone())
+        .await
+        .expect("register the session");
+    let registration = ephemeral
+        .current_session_registration_witness(&session_id)
+        .await
+        .expect("the registered session exposes its exact registration");
+    let refused = ephemeral
+        .unregister_session_registration_until_terminal_with_queued_inputs_if_current(
+            &registration,
+            UnregisterQueuedInputs::Requeue {
+                max_age: Duration::ZERO,
+            },
+        )
+        .await
+        .expect_err("an unrecordable disposition is refused");
+    assert!(
+        matches!(
+            refused,
+            RuntimeDriverError::QueuedInputsRefused(
+                UnregisterQueuedInputsError::MaxAgeUnderOneMillisecond { .. }
+            )
+        ),
+        "{refused}"
+    );
+    assert!(
+        ephemeral.contains_session(&session_id).await,
+        "a refused disposition starts no unregister"
+    );
+    let unregistered = ephemeral
+        .unregister_session_registration_until_terminal_with_queued_inputs_if_current(
+            &registration,
+            ephemeral.graceful_shutdown_queued_inputs(),
+        )
+        .await
+        .expect("the shutdown unregister completes");
+    assert!(
+        unregistered && !ephemeral.contains_session(&session_id).await,
+        "the exact registration is torn down to terminal"
+    );
 }
 
 #[derive(Clone)]
@@ -5800,32 +5976,33 @@ async fn mixed_directed_max_attempt_failure_terminalizes_only_exhausted_contribu
         .await
         .expect("accept first max-attempt input");
 
-    tokio::time::timeout(STEP_BOUND, async {
-        loop {
-            let first = machine
-                .input_state(&session_id, &first_input_id)
-                .await
-                .expect("read first input after initial failure")
-                .expect("first input remains inspectable");
-            if first.seed.phase == crate::input_state::InputLifecycleState::Queued
-                && first.seed.attempt_count == 1
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("first directed input must park after its initial failed attempt");
-    assert!(
-        machine
-            .wake_runtime_if_active_inputs(&session_id)
-            .await
-            .expect("wake first input for its second attempt")
-    );
+    // The initial attempt fails while it is the only queued work, so the loop
+    // keeps draining: it rolls the input back to its queue and retries it at
+    // once. An observer on a loaded host may read only once that retry began.
     tokio::time::timeout(STEP_BOUND, second_apply_started.notified())
         .await
-        .expect("first input must reach its gated second attempt");
+        .expect("the runtime retries the rolled-back first input by itself");
+    // The input's Queued state at attempt 1 lasted only until that retry; its
+    // recorded rollback stays.
+    let first = machine
+        .input_state(&session_id, &first_input_id)
+        .await
+        .expect("read first input in its gated second attempt")
+        .expect("first input remains inspectable");
+    assert_eq!(
+        first
+            .state
+            .history
+            .iter()
+            .filter(|entry| {
+                entry.from == crate::input_state::InputLifecycleState::Staged
+                    && entry.to == crate::input_state::InputLifecycleState::Queued
+                    && entry.reason.as_deref() == Some("ResolveStagedRollback")
+            })
+            .count(),
+        1,
+        "the first input's initial attempt failed and rolled it back to its queue once"
+    );
 
     let second_uuid = meerkat_core::time_compat::new_uuid_v7();
     let second_input = crate::mob_adapter::create_tracked_flow_step_input(
@@ -8455,11 +8632,14 @@ async fn local_materialization_concludes_a_cold_recovered_drain() {
         )
         .expect("persistent machine"),
     );
-    let prepared = recovered
+    let mut prepared = recovered
         .prepare_local_session_materialization(session_id.clone())
         .await
         .expect("the materialization concludes the cold-recovered drain and prepares the fresh registration");
-    drop(prepared);
+    // Read the concluded teardown while the fresh registration is still
+    // prepared. Dropping it would roll the registration back on a
+    // process-owned task, whose own unregister writes Draining progress
+    // while it runs, so a read after the drop races that rollback.
     assert!(
         crate::store::load_machine_lifecycle(inner.as_ref(), &runtime_id)
             .await
@@ -8468,6 +8648,27 @@ async fn local_materialization_concludes_a_cold_recovered_drain() {
             .unregister_progress()
             .is_none(),
         "the concluded teardown left no Draining progress"
+    );
+    assert!(
+        prepared.inserted_registration(),
+        "the materialization registers the session again for its own claim"
+    );
+    assert!(
+        prepared
+            .rollback_now()
+            .await
+            .expect("roll the fresh registration back"),
+        "the prepared materialization owns its rollback"
+    );
+    assert!(!recovered.contains_session(&session_id).await);
+    assert!(
+        crate::store::load_machine_lifecycle(inner.as_ref(), &runtime_id)
+            .await
+            .expect("load final record")
+            .expect("lifecycle record should remain queryable")
+            .unregister_progress()
+            .is_none(),
+        "the rollback's unregister settled"
     );
 }
 
@@ -9333,6 +9534,196 @@ async fn quiescent_close_queued_behind_ingress_that_won_the_mutation_gate_answer
     );
     assert_eq!(hard_cancels.load(Ordering::SeqCst), 0);
     assert_eq!(recorded_contributions(&contributions), vec![vec![won_id]]);
+}
+
+/// Commit the canonical drain prefix without installing a teardown owner,
+/// reproducing the recovery case separately from an ordinary quiescent close.
+async fn inject_orphaned_quiescent_close_drain(machine: &MeerkatMachine, session_id: &SessionId) {
+    let state = machine
+        .session_dsl_state(session_id)
+        .await
+        .expect("registered session retains DSL authority");
+    machine
+        .apply_session_dsl_input(
+            session_id,
+            mm_dsl::MeerkatMachineInput::BeginUnregisterSession {
+                session_id: mm_dsl::SessionId::from_domain(session_id),
+                agent_runtime_id: state.active_runtime_id,
+                fence_token: state.active_fence_token,
+                generation: state.active_runtime_generation,
+                runtime_epoch_id: state.active_runtime_epoch_id,
+                queued_inputs: mm_dsl::UnregisterQueuedInputsDisposition::Stop,
+                requeue_max_age_ms: 0,
+            },
+            "BeginUnregisterSession(orphaned quiescent-close regression)",
+        )
+        .await
+        .expect("the orphaned drain prefix commits");
+    assert_eq!(
+        machine
+            .session_dsl_state(session_id)
+            .await
+            .expect("draining session retains DSL authority")
+            .registration_phase,
+        mm_dsl::RegistrationPhase::Draining
+    );
+    let sessions = machine.sessions.read().await;
+    assert!(
+        sessions
+            .get(session_id)
+            .expect("the drain retains its registration")
+            .unregister_coordinator
+            .is_none(),
+        "the injected drain has no teardown owner"
+    );
+}
+
+#[tokio::test]
+async fn quiescent_close_distinguishes_orphaned_drain_from_idle() {
+    // An empty orphaned drain is still recovery, not a new idle admission.
+    for (orphaned, queued) in [(false, false), (true, false), (true, true)] {
+        let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+        let machine = MeerkatMachine::persistent(store.clone(), memory_blob_store())
+            .expect("persistent machine");
+        let session_id = SessionId::new();
+        machine
+            .register_session(session_id.clone())
+            .await
+            .expect("idle registration");
+        let registration = machine
+            .current_session_registration_witness(&session_id)
+            .await
+            .expect("exact registration witness");
+        let queued_id = if queued {
+            let input = make_prompt("retained by the orphaned drain");
+            let input_id = input.id().clone();
+            assert!(
+                machine
+                    .accept_input_without_wake(&session_id, input)
+                    .await
+                    .expect("queued input is admitted")
+                    .is_accepted()
+            );
+            Some(input_id)
+        } else {
+            None
+        };
+        if orphaned {
+            inject_orphaned_quiescent_close_drain(&machine, &session_id).await;
+        }
+
+        let answer = tokio::time::timeout(
+            Duration::from_secs(5),
+            machine.unregister_session_registration_until_terminal_if_quiescent(&registration),
+        )
+        .await
+        .expect("the exact close completes")
+        .expect("the close answers typed");
+        assert_eq!(
+            answer,
+            if orphaned {
+                RuntimeSessionQuiescentClose::ClosedOrphanedDrain
+            } else {
+                RuntimeSessionQuiescentClose::Closed
+            }
+        );
+        assert!(!machine.contains_session(&session_id).await);
+        if let Some(input_id) = queued_id {
+            let input = store
+                .load_input_state(&runtime_id_for_session(&session_id), &input_id)
+                .await
+                .expect("read durable input after recovery")
+                .expect("the abandoned input remains in history");
+            assert_eq!(
+                input.seed.terminal_outcome,
+                Some(crate::input_state::InputTerminalOutcome::Abandoned {
+                    reason: crate::input_state::InputAbandonReason::Stopped,
+                }),
+                "orphaned-drain recovery must not be reported as non-interrupting idle"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn quiescent_close_of_orphaned_drain_with_a_run_in_flight_is_busy() {
+    let machine = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    let apply_started = Arc::new(Notify::new());
+    let apply_release = Arc::new(Notify::new());
+    let contributions = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let hard_cancels = Arc::new(AtomicUsize::new(0));
+    machine
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(QuiescentCloseExecutor {
+                apply_started: Arc::clone(&apply_started),
+                apply_release: Some(Arc::clone(&apply_release)),
+                contributions,
+                hard_cancels: Arc::clone(&hard_cancels),
+            }),
+        )
+        .await
+        .expect("runtime executor registration");
+    let registration = machine
+        .current_session_registration_witness(&session_id)
+        .await
+        .expect("exact registration witness");
+    assert!(
+        machine
+            .accept_input(
+                &session_id,
+                make_prompt("running when the orphaned drain begins")
+            )
+            .await
+            .expect("input is admitted")
+            .is_accepted()
+    );
+    tokio::time::timeout(Duration::from_secs(5), apply_started.notified())
+        .await
+        .expect("the admitted run starts");
+    inject_orphaned_quiescent_close_drain(&machine, &session_id).await;
+    let run_id = machine
+        .session_dsl_state(&session_id)
+        .await
+        .expect("running drain state")
+        .current_run_id
+        .expect("the drain still has a live run");
+
+    assert_eq!(
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            machine.unregister_session_registration_until_terminal_if_quiescent(&registration),
+        )
+        .await
+        .expect("busy answers without waiting for the run")
+        .expect("the close answers typed"),
+        RuntimeSessionQuiescentClose::Busy
+    );
+    assert_eq!(hard_cancels.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("busy preserves the running drain")
+            .current_run_id,
+        Some(run_id)
+    );
+    {
+        let sessions = machine.sessions.read().await;
+        let entry = sessions
+            .get(&session_id)
+            .expect("busy retains the registration");
+        assert!(entry.unregister_coordinator.is_none());
+    }
+
+    // Explicit ordinary teardown owns cleanup after the Busy assertions.
+    apply_release.notify_one();
+    machine
+        .unregister_session_registration_until_terminal_if_current(&registration)
+        .await
+        .expect("cleanup joins the exact registration");
+    assert!(!machine.contains_session(&session_id).await);
 }
 
 /// The quiescent close's own prefix is owned by the canonical unregister
@@ -18568,6 +18959,8 @@ async fn exact_hard_interrupt_reaches_retiring_draining_run_only() {
                 fence_token: state.active_fence_token,
                 generation: state.active_runtime_generation,
                 runtime_epoch_id: state.active_runtime_epoch_id,
+                queued_inputs: mm_dsl::UnregisterQueuedInputsDisposition::Stop,
+                requeue_max_age_ms: 0,
             },
             "BeginUnregisterSession(exact retiring interrupt regression)",
         )
@@ -21378,6 +21771,7 @@ mod stop_teardown_coordinator_class {
                 epoch_id: entry.epoch_id.clone(),
                 coordinator_id: uuid::Uuid::new_v4(),
                 result_rx,
+                queued_inputs: UnregisterDisposition::STOP,
             });
         }
         drop(held_transaction);
@@ -22617,6 +23011,8 @@ mod stop_under_gate_deadlock_class {
                     fence_token: first_sample.active_fence_token,
                     generation: first_sample.active_runtime_generation,
                     runtime_epoch_id: first_sample.active_runtime_epoch_id,
+                    queued_inputs: mm_dsl::UnregisterQueuedInputsDisposition::Stop,
+                    requeue_max_age_ms: 0,
                 },
                 "BeginUnregisterSession(test post-stop watcher recheck)",
             )
@@ -22673,6 +23069,8 @@ mod stop_under_gate_deadlock_class {
                     fence_token: state.active_fence_token,
                     generation: state.active_runtime_generation,
                     runtime_epoch_id: state.active_runtime_epoch_id,
+                    queued_inputs: mm_dsl::UnregisterQueuedInputsDisposition::Stop,
+                    requeue_max_age_ms: 0,
                 },
                 "BeginUnregisterSession(test stop coordinator phase recheck)",
             )
@@ -23869,6 +24267,8 @@ async fn exact_run_boundary_cancel_remains_admitted_after_unregister_drain_begin
                 fence_token: state.active_fence_token,
                 generation: state.active_runtime_generation,
                 runtime_epoch_id: state.active_runtime_epoch_id,
+                queued_inputs: mm_dsl::UnregisterQueuedInputsDisposition::Stop,
+                requeue_max_age_ms: 0,
             },
             "BeginUnregisterSession(exact retire cancel regression)",
         )
@@ -37704,6 +38104,364 @@ async fn persistent_machine_terminal_commit_recovers_consumed_input_and_failed_t
     );
 }
 
+/// A durable session's resumed run, as the runtime holds it while the run
+/// executes: `applied` of its inputs one of its committed rounds already
+/// applied (pending consumption), and `staged` more still staged, all bound
+/// to the run. The store holds the run's provisional tail over a committed
+/// base, its cursor binding every input, as the session's durable state
+/// leaves it for a restart.
+struct ResumedRunWithAppliedInputs {
+    store: Arc<crate::store::InMemoryRuntimeStore>,
+    driver: SharedDriver,
+    session_id: SessionId,
+    runtime_id: LogicalRuntimeId,
+    run_id: RunId,
+    applied: Vec<InputId>,
+    staged: Vec<InputId>,
+    /// The run's tail, and the store-issued receipt naming it.
+    tail: meerkat_core::Session,
+    tail_receipt: meerkat_core::RunCheckpointReceipt,
+}
+
+impl ResumedRunWithAppliedInputs {
+    /// Every input of the run, in admission order.
+    fn inputs(&self) -> Vec<InputId> {
+        self.applied.iter().chain(&self.staged).cloned().collect()
+    }
+}
+
+/// `round_complete` names the tail's resume point: a completed round awaits
+/// the model (a tail a run's failure may promote); otherwise the round's
+/// first commit holds its staged call only in the run cursor.
+async fn resumed_run_with_applied_inputs(
+    applied: usize,
+    staged: usize,
+    round_complete: bool,
+) -> ResumedRunWithAppliedInputs {
+    use meerkat_core::types::{
+        AssistantBlock, BlockAssistantMessage, Message, StopReason, TranscriptMessageIdentity,
+        UserMessage,
+    };
+
+    let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let session_id = SessionId::new();
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    let mut committed = meerkat_core::Session::with_id(session_id.clone());
+    committed.push(Message::User(UserMessage::text("committed before the run")));
+    let base = store
+        .commit_prepared_session_boundary(
+            &runtime_id,
+            crate::store::PreparedRuntimeSessionCommit::snapshot_only(
+                BoundSessionCommit::sealed(Arc::new(committed.clone()))
+                    .expect("seal the committed base"),
+            ),
+        )
+        .await
+        .expect("the committed base commits")
+        .authority()
+        .and_then(|authority| authority.whole_blob())
+        .cloned()
+        .expect("the committed base has a WholeBlob authority");
+
+    let mut driver = PersistentRuntimeDriver::new(
+        runtime_id.clone(),
+        Arc::clone(&store) as Arc<dyn RuntimeStore>,
+        memory_blob_store(),
+    );
+    let mut inputs = Vec::new();
+    for ordinal in 0..applied + staged {
+        let input = make_prompt(&format!("the resumed run's input {ordinal}"));
+        inputs.push(input.id().clone());
+        driver
+            .accept_input(input)
+            .await
+            .expect("the input is accepted");
+    }
+    let run_id = RunId::new();
+    driver
+        .contract_begin_run_authority(run_id.clone())
+        .expect("the run begins through generated authority");
+    driver
+        .machine_realize_authorized_stage_batch(
+            crate::meerkat_machine::driver::test_authorized_stage_for_run(
+                inputs.clone(),
+                run_id.clone(),
+            ),
+        )
+        .expect("the inputs stage for the run");
+    let (applied_inputs, staged_inputs) = inputs.split_at(applied);
+    if !applied_inputs.is_empty() {
+        let receipt = RunBoundaryReceiptDraft {
+            run_id: run_id.clone(),
+            boundary: RunApplyBoundary::Immediate,
+            contributing_input_ids: applied_inputs.to_vec(),
+            conversation_digest: None,
+            message_count: 0,
+        }
+        .into_sequenced(1);
+        driver
+            .machine_realize_boundary_applied_in_memory(&run_id, &receipt)
+            .expect("a committed round applies its contributors");
+    }
+
+    // The run's tail, its cursor binding every input of the run.
+    let staged_call = BlockAssistantMessage {
+        blocks: vec![AssistantBlock::ToolUse {
+            id: "resumed-call".to_string(),
+            name: "durable_tool".to_string(),
+            args: serde_json::value::RawValue::from_string("{}".to_string())
+                .expect("raw tool arguments"),
+            meta: None,
+        }],
+        stop_reason: Some(StopReason::ToolUse),
+        identity: TranscriptMessageIdentity::default().with_run_id(run_id.clone()),
+        created_at: meerkat_core::types::message_timestamp_now(),
+        assistant_message_id: Some(
+            serde_json::from_value(serde_json::Value::String(uuid::Uuid::now_v7().to_string()))
+                .expect("an assistant message id"),
+        ),
+    };
+    let resume_point = if round_complete {
+        meerkat_core::RunResumePoint::AwaitingModel
+    } else {
+        meerkat_core::RunResumePoint::ToolsPending {
+            assistant_message: staged_call,
+        }
+    };
+    let mut tail = committed;
+    tail.push(Message::User(UserMessage::text(
+        "the run's committed round",
+    )));
+    tail.set_run_cursor(&meerkat_core::SessionRunCursor::new(
+        run_id.clone(),
+        inputs.clone(),
+        0,
+        resume_point,
+    ))
+    .expect("the run cursor is recorded");
+    let tail_authority = store
+        .write_prepared_whole_blob_provisional_tail(
+            &runtime_id,
+            crate::store::PreparedWholeBlobProvisionalTail::prepare(
+                base,
+                run_id.clone(),
+                1,
+                &BoundSessionCommit::sealed(Arc::new(tail.clone())).expect("seal the run's tail"),
+            )
+            .expect("the run's tail prepares"),
+        )
+        .await
+        .expect("the run's tail is written");
+    let tail_receipt = meerkat_core::RunCheckpointReceipt::issued(
+        meerkat_core::RunCheckpointAuthority::WholeBlob(tail_authority),
+        tail.transcript_content_digest()
+            .expect("the tail's transcript digests"),
+        u64::try_from(tail.messages().len()).expect("message count fits"),
+    )
+    .expect("a well-formed checkpoint receipt");
+
+    ResumedRunWithAppliedInputs {
+        store,
+        driver: Arc::new(Mutex::new(DriverEntry::Persistent(driver))),
+        session_id,
+        runtime_id,
+        run_id,
+        applied: applied_inputs.to_vec(),
+        staged: staged_inputs.to_vec(),
+        tail,
+        tail_receipt,
+    }
+}
+
+/// The durable phase and terminal outcome each input of `run` ended with, in
+/// admission order. The live driver keeps none of them bound to the run and
+/// none of them queued.
+async fn ended_run_input_outcomes(
+    run: &ResumedRunWithAppliedInputs,
+) -> Vec<(
+    crate::input_state::InputLifecycleState,
+    Option<crate::input_state::InputTerminalOutcome>,
+)> {
+    {
+        let entry = run.driver.lock().await;
+        for input_id in run.inputs() {
+            assert!(
+                !entry.input_bound_to_open_run(&input_id, &run.run_id),
+                "no input stays bound to the ended run: {input_id}"
+            );
+        }
+        assert!(
+            !entry.has_queued_input_in_any_lane(),
+            "the ended run returned none of its inputs to a lane"
+        );
+    }
+    let mut outcomes = Vec::new();
+    for input_id in run.inputs() {
+        let stored = run
+            .store
+            .load_input_state(&run.runtime_id, &input_id)
+            .await
+            .expect("the input's durable row loads")
+            .expect("the ended run's input stays inspectable");
+        outcomes.push((stored.seed.phase, stored.seed.terminal_outcome));
+    }
+    outcomes
+}
+
+/// A cold registration over the ended run's store, as a restart takes it:
+/// the run is not kept resumable, and none of its inputs is requeued, so no
+/// committed round's content runs again.
+async fn assert_cold_registration_neither_resumes_nor_requeues(run: ResumedRunWithAppliedInputs) {
+    let ResumedRunWithAppliedInputs {
+        store,
+        driver,
+        session_id,
+        run_id,
+        ..
+    } = run;
+    drop(driver);
+    let machine = MeerkatMachine::persistent_without_blobs(store as Arc<dyn RuntimeStore>)
+        .expect("persistent machine");
+    machine
+        .register_session(session_id.clone())
+        .await
+        .expect("a cold registration recovers the ended run's durable state");
+    assert_eq!(
+        machine.resumable_run_id(&session_id).await,
+        None,
+        "a cold registration does not resume the ended run {run_id}"
+    );
+    let recovered = machine
+        .session_dsl_state(&session_id)
+        .await
+        .expect("the recovered authority reads");
+    assert!(
+        recovered.input_lane.is_empty(),
+        "a cold registration requeues none of the ended run's inputs: {:?}",
+        recovered.input_lane
+    );
+}
+
+/// RED before: a cancelled resumed run whose inputs one of its committed
+/// rounds had all applied could not end. Its cancel collected only staged
+/// contributors and was refused ("run cancelled requires at least one staged
+/// contributor"), and a refused cancel stops the runtime loop's executor.
+/// The cancel now ends the run, so the loop's refusal arm is never taken, and
+/// the applied input ends cancelled, as the graceful stop leaves an in-flight
+/// input. A cold registration then neither resumes the run nor requeues the
+/// input.
+#[tokio::test]
+async fn a_resumed_run_whose_inputs_were_all_applied_is_cancellable() {
+    let run = resumed_run_with_applied_inputs(1, 0, false).await;
+
+    crate::meerkat_machine::cancel_runtime_loop_run(&run.driver, run.run_id.clone())
+        .await
+        .expect("the cancel ends the run instead of stopping the executor");
+
+    let cancelled = (
+        crate::input_state::InputLifecycleState::Abandoned,
+        Some(crate::input_state::InputTerminalOutcome::Abandoned {
+            reason: crate::input_state::InputAbandonReason::Cancelled,
+        }),
+    );
+    assert_eq!(ended_run_input_outcomes(&run).await, vec![cancelled]);
+    assert_cold_registration_neither_resumes_nor_requeues(run).await;
+}
+
+/// RED before: a cancelled resumed run abandoned only its staged inputs; the
+/// one a committed round had already applied stayed bound to the cancelled
+/// run, and a later registration found the run open and resumable again.
+/// Every input bound to the run now ends cancelled.
+#[tokio::test]
+async fn a_cancelled_resumed_run_leaves_none_of_its_inputs_bound() {
+    let run = resumed_run_with_applied_inputs(1, 1, false).await;
+
+    crate::meerkat_machine::cancel_runtime_loop_run(&run.driver, run.run_id.clone())
+        .await
+        .expect("the cancel ends the run");
+
+    let cancelled = (
+        crate::input_state::InputLifecycleState::Abandoned,
+        Some(crate::input_state::InputTerminalOutcome::Abandoned {
+            reason: crate::input_state::InputAbandonReason::Cancelled,
+        }),
+    );
+    assert_eq!(
+        ended_run_input_outcomes(&run).await,
+        vec![cancelled.clone(), cancelled]
+    );
+    assert_cold_registration_neither_resumes_nor_requeues(run).await;
+}
+
+/// RED before: a machine-terminal failure of a resumed run collected only its
+/// staged inputs, so the receipt, which names every input of the run, did
+/// not match them and the failure was refused. The run's failed boundary
+/// promotes the tail its completed round left, as a hard failure over a held
+/// checkpoint does, and the input a committed round already applied is
+/// consumed with the staged one: its effect is the run's committed history.
+#[tokio::test]
+async fn a_hard_failure_of_a_resumed_run_consumes_its_staged_and_applied_inputs() {
+    let run = resumed_run_with_applied_inputs(1, 1, true).await;
+    mark_staged_runtime_turn_machine_failed(&run.driver, &run.run_id).await;
+
+    commit_machine_terminal_run(
+        &run.driver,
+        run.run_id.clone(),
+        machine_terminal_tool_failure(),
+        crate::meerkat_machine::driver::MachineTerminalAppliedDraft {
+            receipt: machine_terminal_receipt(run.run_id.clone(), run.inputs(), &run.tail),
+            session: BoundSessionCommit::provisional_promotion(run.tail_receipt.clone()),
+        },
+    )
+    .await
+    .expect("the machine-terminal failure commits");
+
+    let consumed = (
+        crate::input_state::InputLifecycleState::Consumed,
+        Some(crate::input_state::InputTerminalOutcome::Consumed),
+    );
+    assert_eq!(
+        ended_run_input_outcomes(&run).await,
+        vec![consumed.clone(), consumed]
+    );
+    assert_cold_registration_neither_resumes_nor_requeues(run).await;
+}
+
+/// RED before: a resumed run that never began executing abandoned only its
+/// staged inputs, as never executed, and left the applied one bound. The
+/// staged input keeps that reason; the applied one did execute, so it is
+/// consumed, never reported as never executed.
+#[tokio::test]
+async fn a_never_started_resumed_run_consumes_the_inputs_its_rounds_applied() {
+    let run = resumed_run_with_applied_inputs(1, 1, false).await;
+
+    fail_runtime_loop_run(
+        &run.driver,
+        run.run_id.clone(),
+        CoreApplyFailureCause::executor_stopped(),
+        crate::meerkat_machine::FailedRunContributorDisposition::Terminalized,
+    )
+    .await
+    .expect("the never-started run terminalizes");
+
+    assert_eq!(
+        ended_run_input_outcomes(&run).await,
+        vec![
+            (
+                crate::input_state::InputLifecycleState::Consumed,
+                Some(crate::input_state::InputTerminalOutcome::Consumed),
+            ),
+            (
+                crate::input_state::InputLifecycleState::Abandoned,
+                Some(crate::input_state::InputTerminalOutcome::Abandoned {
+                    reason: crate::input_state::InputAbandonReason::NeverExecuted,
+                }),
+            ),
+        ]
+    );
+    assert_cold_registration_neither_resumes_nor_requeues(run).await;
+}
+
 #[tokio::test]
 async fn persistent_failed_run_lifecycle_commit_failure_preserves_pre_terminal_state() {
     let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
@@ -50566,6 +51324,9 @@ fn summarize_runtime_parity_driver_error(error: &RuntimeDriverError) -> String {
         RuntimeDriverError::ScopedContextGenerationNotAdvanced { bound, requested } => {
             format!("scoped_context_generation_not_advanced:{bound}:{requested}")
         }
+        RuntimeDriverError::QueuedInputsRefused(refusal) => {
+            format!("queued_inputs_refused:{refusal:?}")
+        }
     }
 }
 
@@ -52558,6 +53319,38 @@ fn host_addressed_trust_commands_are_served_off_drain_by_host_daemon() {
     }
 }
 
+/// Protocol V7 (prompt-context fork children): the host-addressed
+/// `HostFeatures` probe is admitted and served off the member drain by the
+/// host daemon, as `HostStatus` is; the member-addressed
+/// `ReadMemberVisibleTools` read is admitted through the bound-supervisor
+/// ladder and served on the member drain, as `ReadMemberHistory` is.
+#[test]
+fn v7_fork_child_commands_are_classified() {
+    use crate::meerkat_machine_types::{
+        OffDrainResponder, SupervisorBridgeCommandAdmissionRoute, SupervisorBridgeCommandKind,
+        SupervisorBridgeCommandRealization,
+    };
+
+    assert_eq!(
+        SupervisorBridgeCommandKind::HostFeatures.admission_route(),
+        SupervisorBridgeCommandAdmissionRoute::NotMemberAddressed,
+    );
+    assert_eq!(
+        SupervisorBridgeCommandKind::HostFeatures.realization(),
+        SupervisorBridgeCommandRealization::RealizedOffDrain {
+            by: OffDrainResponder::HostDaemon,
+        },
+    );
+    assert_eq!(
+        SupervisorBridgeCommandKind::ReadMemberVisibleTools.admission_route(),
+        SupervisorBridgeCommandAdmissionRoute::SupervisorBridgeCommand,
+    );
+    assert_eq!(
+        SupervisorBridgeCommandKind::ReadMemberVisibleTools.realization(),
+        SupervisorBridgeCommandRealization::Realized,
+    );
+}
+
 /// Multi-host mobs phase 6 (§7.4, DEC-P6E-1): the observation pair and
 /// member-input cancellation commands are served by member-drain arms and the
 /// manifest says so; the live-channel family stays fail-closed until phase 6b.
@@ -52655,6 +53448,7 @@ async fn member_addressed_bridge_admission_covers_manifest_kinds() {
         SupervisorBridgeCommandKind::CloseMemberLiveChannel,
         SupervisorBridgeCommandKind::MemberLiveChannelStatus,
         SupervisorBridgeCommandKind::ControlMemberLiveChannel,
+        SupervisorBridgeCommandKind::ReadMemberVisibleTools,
     ] {
         assert!(
             member_addressed.contains(&kind),
@@ -54301,6 +55095,563 @@ async fn empty_compaction_outbox_skips_the_identity_checkpoint_cycle_after_commi
     assert_eq!(store.session_snapshot_commits(), 2);
 }
 
+/// While a run's provisional tail stands over the committed WholeBlob base (a
+/// run resumed from it, or kept across a requeue stop), the startup and
+/// teardown reconciliation keeps the outboxed intents' stages and does nothing
+/// else: no reload, no recommit (the store refuses one under the tail), no
+/// executor checkpoint (it would replace the resumed actor's image with the
+/// committed base) and no finalization. Once the tail is gone, the recovery
+/// form refreshes as before. Unrun: written while Cargo is not run.
+#[tokio::test]
+async fn compaction_reconciliation_defers_to_a_standing_provisional_tail() {
+    struct RecordingCompactionExecutor {
+        reconcile_intent_counts: Vec<usize>,
+        checkpoint_calls: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for RecordingCompactionExecutor {
+        async fn apply(
+            &mut self,
+            _run_id: RunId,
+            _primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Err(CoreExecutorError::Internal(
+                "outbox reconciliation never applies a primitive".to_string(),
+            ))
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn checkpoint_committed_session_snapshot(
+            &mut self,
+            _session_snapshot: Arc<Vec<u8>>,
+        ) -> Result<(), CoreExecutorError> {
+            self.checkpoint_calls += 1;
+            Ok(())
+        }
+
+        async fn reconcile_committed_compaction_projections(
+            &mut self,
+            intents: &[meerkat_core::CompactionProjectionIntent],
+        ) -> Result<(), CoreExecutorError> {
+            self.reconcile_intent_counts.push(intents.len());
+            Ok(())
+        }
+    }
+
+    let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let store = Arc::new(RuntimeCommitAtomicityStore::pass_through(Arc::clone(
+        &inner,
+    )));
+    let mut session = meerkat_core::Session::new();
+    session.push(meerkat_core::types::Message::User(
+        meerkat_core::types::UserMessage::text("committed before the run"),
+    ));
+    let session_id = session.id().clone();
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    let committed = serde_json::to_vec(&session).expect("committed session serializes");
+    let base = inner
+        .inject_committed_whole_blob_bytes_for_test(&runtime_id, &session_id, committed)
+        .await
+        .expect("base authority");
+    session.push(meerkat_core::types::Message::User(
+        meerkat_core::types::UserMessage::text("the open run's committed round"),
+    ));
+    let run_id = RunId::new();
+    let prepared = crate::store::PreparedWholeBlobProvisionalTail::prepare_from_session(
+        base,
+        run_id.clone(),
+        1,
+        &session,
+    )
+    .expect("the run's tail prepares");
+    crate::store::RuntimeStore::write_prepared_whole_blob_provisional_tail(
+        inner.as_ref(),
+        &runtime_id,
+        prepared,
+    )
+    .await
+    .expect("the run's tail is written");
+
+    let driver: crate::meerkat_machine::SharedDriver = Arc::new(Mutex::new(
+        DriverEntry::Persistent(PersistentRuntimeDriver::new(
+            runtime_id.clone(),
+            Arc::clone(&store) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        )),
+    ));
+    let mut executor = RecordingCompactionExecutor {
+        reconcile_intent_counts: Vec::new(),
+        checkpoint_calls: 0,
+    };
+
+    for empty_outbox in [
+        crate::runtime_loop::EmptyOutboxCheckpoint::RefreshFromStore,
+        crate::runtime_loop::EmptyOutboxCheckpoint::SkipIdentityRefresh,
+    ] {
+        let checkpoint = crate::runtime_loop::reconcile_loaded_compaction_projection_outbox(
+            &driver,
+            &mut executor,
+            Vec::new(),
+            empty_outbox,
+        )
+        .await
+        .expect("reconciliation under a standing tail succeeds");
+        assert_eq!(checkpoint, None, "{empty_outbox:?}");
+    }
+    assert_eq!(
+        executor.reconcile_intent_counts,
+        vec![0, 0],
+        "the outboxed intents' stages are reconciled every time"
+    );
+    assert_eq!(
+        executor.checkpoint_calls, 0,
+        "the resumed actor's image is left exactly as seeded"
+    );
+    assert_eq!(inner.committed_whole_blob_bytes_loads(), 0);
+    assert_eq!(store.session_snapshot_loads(), 0);
+    assert_eq!(
+        store.session_snapshot_commits(),
+        0,
+        "nothing is written under the tail"
+    );
+    let tail =
+        crate::store::RuntimeStore::load_whole_blob_provisional_tail(inner.as_ref(), &runtime_id)
+            .await
+            .expect("the tail loads")
+            .expect("the tail still stands");
+    assert_eq!(tail.authority().run_id(), &run_id);
+
+    // Once the run's tail is gone, the recovery form heals as before.
+    assert!(
+        crate::store::RuntimeStore::discard_whole_blob_provisional_tail(
+            inner.as_ref(),
+            &runtime_id,
+            tail.authority(),
+        )
+        .await
+        .expect("the tail discards")
+    );
+    let checkpoint = crate::runtime_loop::reconcile_loaded_compaction_projection_outbox(
+        &driver,
+        &mut executor,
+        Vec::new(),
+        crate::runtime_loop::EmptyOutboxCheckpoint::RefreshFromStore,
+    )
+    .await
+    .expect("the recovery form refreshes once no tail stands");
+    assert!(checkpoint.is_some());
+    assert_eq!(executor.checkpoint_calls, 1);
+    assert_eq!(store.session_snapshot_commits(), 1);
+}
+
+/// A settled run's tail repair makes the session reload only while a tail
+/// stands: a tail of another run stands (the run guard touches nothing), so
+/// the session reloads; with no tail at all the committed document is already
+/// aligned, nothing is written, and the session keeps serving. This row
+/// covers those two arms. The committing arm (the settled run's own tail, its
+/// inputs terminal, repaired and answered without a reload, the session layer
+/// resynchronizing the seeded actor) needs the settled run's durable input
+/// rows, which the run-guarded recovery's own contract row builds; the long
+/// run harness covers it end to end (a refused resume and a deploy stop past
+/// its bound, each serving the session's next run).
+#[tokio::test]
+async fn a_settled_runs_repair_reloads_only_while_a_tail_stands() {
+    let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let mut session = meerkat_core::Session::new();
+    session.push(meerkat_core::types::Message::User(
+        meerkat_core::types::UserMessage::text("committed before the run"),
+    ));
+    let session_id = session.id().clone();
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    let base = inner
+        .inject_committed_whole_blob_bytes_for_test(
+            &runtime_id,
+            &session_id,
+            serde_json::to_vec(&session).expect("committed session serializes"),
+        )
+        .await
+        .expect("base authority");
+    let driver = DriverEntry::Persistent(PersistentRuntimeDriver::new(
+        runtime_id.clone(),
+        Arc::clone(&inner) as Arc<dyn RuntimeStore>,
+        memory_blob_store(),
+    ));
+    let settled_run = RunId::new();
+    assert!(
+        !driver
+            .repair_settled_run_tail(&session_id, &settled_run)
+            .await,
+        "no tail stood: the committed document is aligned and the session keeps serving"
+    );
+
+    let mut candidate = session.clone();
+    candidate.push(meerkat_core::types::Message::User(
+        meerkat_core::types::UserMessage::text("another run's committed round"),
+    ));
+    let other_run = RunId::new();
+    crate::store::RuntimeStore::write_prepared_whole_blob_provisional_tail(
+        inner.as_ref(),
+        &runtime_id,
+        crate::store::PreparedWholeBlobProvisionalTail::prepare_from_session(
+            base,
+            other_run.clone(),
+            1,
+            &candidate,
+        )
+        .expect("the other run's tail prepares"),
+    )
+    .await
+    .expect("the other run's tail is written");
+    assert!(
+        driver
+            .repair_settled_run_tail(&session_id, &settled_run)
+            .await,
+        "another run's tail stands: the session reloads"
+    );
+    let tail =
+        crate::store::RuntimeStore::load_whole_blob_provisional_tail(inner.as_ref(), &runtime_id)
+            .await
+            .expect("the tail loads")
+            .expect("the other run's tail is untouched");
+    assert_eq!(tail.authority().run_id(), &other_run);
+}
+
+/// Under a standing provisional tail the reconciliation keeps an outboxed
+/// compaction intent pending: the executor reconciles its stage, and nothing
+/// finalizes it (a finalization here would fail on an intent the store never
+/// outboxed). Its finalization belongs to the run's boundary. Unrun: written
+/// while Cargo is not run.
+#[tokio::test]
+async fn compaction_reconciliation_keeps_an_outboxed_intent_pending_under_a_tail() {
+    struct CountingExecutor {
+        reconcile_intent_counts: Vec<usize>,
+        checkpoint_calls: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for CountingExecutor {
+        async fn apply(
+            &mut self,
+            _run_id: RunId,
+            _primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Err(CoreExecutorError::Internal(
+                "outbox reconciliation never applies a primitive".to_string(),
+            ))
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn checkpoint_committed_session_snapshot(
+            &mut self,
+            _session_snapshot: Arc<Vec<u8>>,
+        ) -> Result<(), CoreExecutorError> {
+            self.checkpoint_calls += 1;
+            Ok(())
+        }
+
+        async fn reconcile_committed_compaction_projections(
+            &mut self,
+            intents: &[meerkat_core::CompactionProjectionIntent],
+        ) -> Result<(), CoreExecutorError> {
+            self.reconcile_intent_counts.push(intents.len());
+            Ok(())
+        }
+    }
+
+    let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let mut session = meerkat_core::Session::new();
+    session.append_system_message("system prompt");
+    for turn in 0..5 {
+        session.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage::text(format!("question {turn}")),
+        ));
+    }
+    let live = session.messages().to_vec();
+    let mut replacement = vec![live[0].clone()];
+    replacement.push(meerkat_core::types::Message::User(
+        meerkat_core::types::UserMessage::compaction_summary(
+            "[Compaction summary] earlier questions",
+        ),
+    ));
+    replacement.extend(live[4..].iter().cloned());
+    let (_rewrite, intent) = session
+        .stage_validated_compaction_for_test(replacement, 12)
+        .expect("the run compacts");
+    let session_id = session.id().clone();
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    let base = inner
+        .inject_committed_whole_blob_bytes_for_test(
+            &runtime_id,
+            &session_id,
+            serde_json::to_vec(&session).expect("the compacted session serializes"),
+        )
+        .await
+        .expect("base authority");
+    let mut candidate = session.clone();
+    candidate.push(meerkat_core::types::Message::User(
+        meerkat_core::types::UserMessage::text("a round after the compaction"),
+    ));
+    crate::store::RuntimeStore::write_prepared_whole_blob_provisional_tail(
+        inner.as_ref(),
+        &runtime_id,
+        crate::store::PreparedWholeBlobProvisionalTail::prepare_from_session(
+            base,
+            RunId::new(),
+            1,
+            &candidate,
+        )
+        .expect("the run's tail prepares"),
+    )
+    .await
+    .expect("the run's tail is written");
+
+    let driver: crate::meerkat_machine::SharedDriver = Arc::new(Mutex::new(
+        DriverEntry::Persistent(PersistentRuntimeDriver::new(
+            runtime_id,
+            Arc::clone(&inner) as Arc<dyn RuntimeStore>,
+            memory_blob_store(),
+        )),
+    ));
+    let mut executor = CountingExecutor {
+        reconcile_intent_counts: Vec::new(),
+        checkpoint_calls: 0,
+    };
+    for empty_outbox in [
+        crate::runtime_loop::EmptyOutboxCheckpoint::RefreshFromStore,
+        crate::runtime_loop::EmptyOutboxCheckpoint::SkipIdentityRefresh,
+    ] {
+        let checkpoint = crate::runtime_loop::reconcile_loaded_compaction_projection_outbox(
+            &driver,
+            &mut executor,
+            vec![intent.clone()],
+            empty_outbox,
+        )
+        .await
+        .expect("nothing is finalized under the tail");
+        assert_eq!(checkpoint, None, "{empty_outbox:?}");
+    }
+    assert_eq!(
+        executor.reconcile_intent_counts,
+        vec![1, 1],
+        "the intent's stage is reconciled, and kept"
+    );
+    assert_eq!(executor.checkpoint_calls, 0);
+}
+
+/// A released run (its inputs requeued to run again) leaves no provisional
+/// tail: it is discarded by its own exact authority, and the session's next
+/// run then writes its first round commit over the same committed base.
+/// Another run's tail is never discarded in its place. Unrun: written while
+/// Cargo is not run.
+#[tokio::test]
+async fn a_released_runs_tail_is_discarded_so_the_next_runs_first_commit_lands() {
+    let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let mut session = meerkat_core::Session::new();
+    session.push(meerkat_core::types::Message::User(
+        meerkat_core::types::UserMessage::text("committed before the run"),
+    ));
+    let session_id = session.id().clone();
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    let base = inner
+        .inject_committed_whole_blob_bytes_for_test(
+            &runtime_id,
+            &session_id,
+            serde_json::to_vec(&session).expect("committed session serializes"),
+        )
+        .await
+        .expect("base authority");
+    let write_tail = |run_id: RunId, text: &'static str| {
+        let mut candidate = session.clone();
+        candidate.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage::text(text),
+        ));
+        let prepared = crate::store::PreparedWholeBlobProvisionalTail::prepare_from_session(
+            base.clone(),
+            run_id,
+            1,
+            &candidate,
+        )
+        .expect("the tail prepares");
+        let inner = Arc::clone(&inner);
+        let runtime_id = runtime_id.clone();
+        async move {
+            crate::store::RuntimeStore::write_prepared_whole_blob_provisional_tail(
+                inner.as_ref(),
+                &runtime_id,
+                prepared,
+            )
+            .await
+        }
+    };
+    let tail_run = |inner: Arc<crate::store::InMemoryRuntimeStore>,
+                    runtime_id: LogicalRuntimeId| async move {
+        crate::store::RuntimeStore::load_whole_blob_provisional_tail(inner.as_ref(), &runtime_id)
+            .await
+            .expect("the tail loads")
+            .map(|tail| tail.authority().run_id().clone())
+    };
+
+    let released_run = RunId::new();
+    write_tail(released_run.clone(), "the released run's committed round")
+        .await
+        .expect("the released run's tail is written");
+    let driver = DriverEntry::Persistent(PersistentRuntimeDriver::new(
+        runtime_id.clone(),
+        Arc::clone(&inner) as Arc<dyn RuntimeStore>,
+        memory_blob_store(),
+    ));
+
+    assert!(
+        !driver
+            .discard_run_provisional_tail(&RunId::new())
+            .await
+            .expect("the tail reads"),
+        "another run's discard leaves the released run's tail alone"
+    );
+    assert_eq!(
+        tail_run(Arc::clone(&inner), runtime_id.clone()).await,
+        Some(released_run.clone())
+    );
+
+    assert!(
+        driver
+            .discard_run_provisional_tail(&released_run)
+            .await
+            .expect("the tail discards")
+    );
+    assert_eq!(tail_run(Arc::clone(&inner), runtime_id.clone()).await, None);
+    assert!(
+        driver
+            .discard_run_provisional_tail(&released_run)
+            .await
+            .expect("nothing left to discard"),
+        "no tail of the run is left"
+    );
+
+    write_tail(RunId::new(), "the next run's first round")
+        .await
+        .expect("the next run's first round commit lands over the same base");
+}
+
+/// A run whose provisional tail records its re-base is never released to
+/// requeue (`MeerkatMachine::release_resumable_run` refuses it): its inputs
+/// are already in the committed body. The driver reads the fact from the
+/// tail's own cursor. A tail of the run whose cursor carries the re-base,
+/// or whose cursor names another run, records it; a cursor without the
+/// re-base, a tail without a cursor, and no tail at all do not. RED before:
+/// a release discarded such a tail and requeued the inputs. Unrun: written
+/// while Cargo is not run.
+#[tokio::test]
+async fn a_run_tail_that_records_its_rebase_is_never_released() {
+    let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let mut session = meerkat_core::Session::new();
+    session.push(meerkat_core::types::Message::User(
+        meerkat_core::types::UserMessage::text("committed by the run's re-base"),
+    ));
+    let session_id = session.id().clone();
+    let runtime_id = LogicalRuntimeId::for_session(&session_id);
+    let base = inner
+        .inject_committed_whole_blob_bytes_for_test(
+            &runtime_id,
+            &session_id,
+            serde_json::to_vec(&session).expect("committed session serializes"),
+        )
+        .await
+        .expect("base authority");
+    let driver = DriverEntry::Persistent(PersistentRuntimeDriver::new(
+        runtime_id.clone(),
+        Arc::clone(&inner) as Arc<dyn RuntimeStore>,
+        memory_blob_store(),
+    ));
+    let run_id = RunId::new();
+    assert!(
+        !driver
+            .run_tail_records_rebase(&run_id)
+            .await
+            .expect("the tail reads"),
+        "no tail records no re-base"
+    );
+
+    for (cursor_run, rebased, records) in [
+        (Some(run_id.clone()), true, true),
+        (Some(run_id.clone()), false, false),
+        (Some(RunId::new()), false, true),
+        (None, false, false),
+    ] {
+        assert!(
+            driver
+                .discard_run_provisional_tail(&run_id)
+                .await
+                .expect("the previous tail of the run discards"),
+            "no other run's tail stands"
+        );
+        let mut candidate = session.clone();
+        candidate.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage::text("a round the run committed after its re-base"),
+        ));
+        if let Some(cursor_run) = cursor_run.clone() {
+            let mut cursor = meerkat_core::SessionRunCursor::new(
+                cursor_run,
+                Vec::new(),
+                1,
+                meerkat_core::RunResumePoint::AwaitingModel,
+            );
+            cursor.rebased = rebased;
+            candidate
+                .set_run_cursor(&cursor)
+                .expect("the cursor is recorded");
+        }
+        crate::store::RuntimeStore::write_prepared_whole_blob_provisional_tail(
+            inner.as_ref(),
+            &runtime_id,
+            crate::store::PreparedWholeBlobProvisionalTail::prepare_from_session(
+                base.clone(),
+                run_id.clone(),
+                1,
+                &candidate,
+            )
+            .expect("the run's tail prepares"),
+        )
+        .await
+        .expect("the run's tail is written");
+        assert_eq!(
+            driver
+                .run_tail_records_rebase(&run_id)
+                .await
+                .expect("the tail reads"),
+            records,
+            "cursor of {cursor_run:?}, rebased {rebased}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Runtime host health probes.
 //
@@ -55791,6 +57142,8 @@ fn unregister_completes_after_normal_close_of_a_staged_live_channel() {
                 fence_token,
                 generation,
                 runtime_epoch_id: None,
+                queued_inputs: mm_dsl::UnregisterQueuedInputsDisposition::Stop,
+                requeue_max_age_ms: 0,
             }
         }),
         "begin unregister",
@@ -56721,6 +58074,97 @@ async fn a_fresh_executor_attachment_publishes_only_after_its_settlement() {
         ),
         "the publication completed the lineage's settlement"
     );
+}
+
+/// Binding preparation for a session another runtime owner hosts refuses
+/// with the typed hosting refusal, not a preparation string, on every
+/// preparation seam. The refusal is not claimed as no-effect (a caller keeps
+/// its cleanup open), and the refused owner publishes no registration.
+#[cfg(feature = "sqlite-store")]
+#[tokio::test]
+async fn binding_preparation_for_a_session_another_owner_hosts_refuses_typed() {
+    use crate::session_hosting::HostingPaths;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn RuntimeStore> = Arc::new(
+        crate::store::SqliteRuntimeStore::new(dir.path().join("runtime.sqlite3"))
+            .unwrap()
+            .with_hosting_paths(HostingPaths {
+                hosting_lock_dir: dir.path().join("hosting"),
+                cold_delivery_lock: dir.path().join("delivery").join("cold-delivery.lock"),
+                database: None,
+            }),
+    );
+    let host = MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store()).unwrap();
+    let other = Arc::new(
+        MeerkatMachine::persistent(Arc::clone(&store), memory_blob_store())
+            .expect("separate machines may share one store"),
+    );
+    let session_id = SessionId::new();
+    host.register_session(session_id.clone())
+        .await
+        .expect("the first owner registers");
+
+    let local = other
+        .prepare_local_session_bindings(session_id.clone())
+        .await
+        .expect_err("another runtime owner's local bindings are refused");
+    let authoritative = other
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect_err("another runtime owner's bindings are refused");
+    let Err(materialization) = other
+        .prepare_local_session_materialization_with_mode(
+            session_id.clone(),
+            crate::LocalSessionMaterializationMode::Ordinary,
+        )
+        .await
+    else {
+        panic!("another runtime owner's materialization is refused");
+    };
+    for (seam, error) in [
+        ("local bindings", &local),
+        ("bindings", &authoritative),
+        ("materialization", &materialization),
+    ] {
+        assert!(
+            matches!(
+                error,
+                crate::meerkat_machine::RuntimeBindingsError::Hosting(
+                    refused,
+                    meerkat_core::SessionError::ServedElsewhere { id },
+                ) if refused == &session_id && id == &session_id
+            ),
+            "{seam}: the typed hosting refusal: {error:?}"
+        );
+        assert!(
+            !error.rejected_before_effect(),
+            "{seam}: a hosting refusal is not claimed as no-effect"
+        );
+    }
+    assert!(
+        !other.contains_session(&session_id).await,
+        "the refused owner published no registration"
+    );
+    assert!(matches!(
+        crate::meerkat_machine::RuntimeBindingsError::from_preparation_error(
+            session_id.clone(),
+            &RuntimeDriverError::HostingUnavailable {
+                session_id: session_id.clone(),
+            },
+        ),
+        crate::meerkat_machine::RuntimeBindingsError::Hosting(
+            _,
+            meerkat_core::SessionError::HostingUnavailable { .. },
+        )
+    ));
+    assert!(matches!(
+        crate::meerkat_machine::RuntimeBindingsError::from_preparation_error(
+            session_id,
+            &RuntimeDriverError::Destroyed,
+        ),
+        crate::meerkat_machine::RuntimeBindingsError::PrepareFailed(..)
+    ));
 }
 
 /// #1813 (ADR's R6 objection): hosting claims are owner-scoped. Two

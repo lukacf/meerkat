@@ -350,7 +350,11 @@ where
 /// reaches the hook with its profile's mob tools setting and the default
 /// authority again. A host applies the narrowing (or the disable) on every
 /// build, restores included, or a restored member returns to the default
-/// authority.
+/// authority. When a restored member's settled authority holds operator facts
+/// that the authority recorded with its session did not, the build logs one
+/// warning naming them. That record is unsealed and advisory, so the warning
+/// is a hint, not enforcement; it also shows a profile the mob gained since
+/// the member's previous build.
 ///
 /// It refuses a mob the context holds no spawn-profile scope for, and a
 /// context that generated authority did not mint.

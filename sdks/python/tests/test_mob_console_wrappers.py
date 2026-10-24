@@ -5,13 +5,22 @@ wrappers never touch logging (token opacity, ADJ-P6B-14)."""
 from __future__ import annotations
 
 import logging
-from typing import Any
+import sys
+from typing import Any, get_args, get_origin
 
 import pytest
 
 from meerkat import MeerkatClient
 from meerkat.errors import MeerkatError
+from meerkat.generated.types import WireProviderMeta
 from meerkat.mob import Mob
+
+# Python 3.10's typing lacks Required, and its get_type_hints keeps the
+# typing_extensions qualifiers that 3.11+ strips.
+if sys.version_info >= (3, 11):
+    from typing import Required, get_type_hints
+else:
+    from typing_extensions import Required, get_type_hints
 
 CANNED: dict[str, dict[str, Any]] = {
     "mob/grant_scopes": {
@@ -531,6 +540,9 @@ def test_history_validator_does_not_widen_non_nullable_fields(
         {"provider": "anthropic_redacted", "data": "redacted"},
         {"provider": "anthropic_compaction", "content": "compact"},
         {"provider": "gemini", "thoughtSignature": "thought"},
+        {"provider": "gemini_function_call", "provider_id": "native-call"},
+        {"provider": "gemini_function_call", "provider_id": "native-call", "thoughtSignature": "thought"},
+        {"provider": "gemini_function_call", "provider_id": "native-call", "thoughtSignature": None},
         {
             "provider": "open_ai",
             "id": "item-1",
@@ -539,6 +551,21 @@ def test_history_validator_does_not_widen_non_nullable_fields(
             "response_id": None,
         },
         {"provider": "open_ai_response", "response_id": "response-1"},
+        {"provider": "open_ai_assistant_message", "id": "msg-1"},
+        {
+            "provider": "open_ai_assistant_message",
+            "id": "msg-1",
+            "phase": "commentary",
+            "response_id": "response-1",
+        },
+        {
+            "provider": "open_ai_assistant_message",
+            "id": "msg-1",
+            "phase": "final_answer",
+            "response_id": None,
+        },
+        {"provider": "open_ai_assistant_message", "id": "msg-1", "phase": None},
+        {"provider": "open_ai_assistant_message", "id": "msg-1", "phase": "analysis"},
         {"provider": "unknown"},
     ],
 )
@@ -549,6 +576,80 @@ def test_assistant_validator_accepts_closed_provider_metadata(
         {"block_type": "text", "data": {"text": "ok", "meta": meta}},
         "assistant",
     )
+
+
+def test_assistant_validator_accepts_every_generated_provider_metadata_variant() -> None:
+    # Every variant of the generated wire union, with only its required
+    # fields: a variant Core sends that the validator refuses fails here.
+    for variant in get_args(WireProviderMeta):
+        hints = get_type_hints(variant, include_extras=True)
+        (provider,) = get_args(get_args(hints["provider"])[0])
+        meta: dict[str, Any] = {"provider": provider}
+        for field, hint in hints.items():
+            if field == "provider" or get_origin(hint) is not Required:
+                continue
+            assert get_args(hint) == (str,), f"{variant.__name__}.{field} is not a string"
+            meta[field] = f"{field}-1"
+        MeerkatClient._validate_wire_assistant_block(
+            {"block_type": "text", "data": {"text": "ok", "meta": meta}},
+            "assistant",
+        )
+
+
+@pytest.mark.parametrize("meta", [
+    {"provider": "gemini_function_call"},
+    {"provider": "gemini_function_call", "id": "native-call"},
+    {"provider": "gemini_function_call", "id": "native-call", "thoughtSignature": "thought"},
+    {"provider": "gemini_function_call", "provider_id": None},
+    {"provider": "gemini_function_call", "provider_id": 7},
+    {"provider": "gemini_function_call", "provider_id": "native-call", "thoughtSignature": 7},
+])
+def test_assistant_validator_rejects_invalid_gemini_call_metadata(meta: dict[str, Any]) -> None:
+    with pytest.raises(MeerkatError):
+        MeerkatClient._validate_wire_assistant_block(
+            {"block_type": "tool_use", "data": {"id": "fc_0", "name": "lookup", "args": {}, "meta": meta}},
+            "assistant",
+        )
+
+
+@pytest.mark.parametrize("meta", [
+    {"provider": "open_ai_assistant_message"},
+    {"provider": "open_ai_assistant_message", "id": None},
+    {"provider": "open_ai_assistant_message", "id": 7},
+    {"provider": "open_ai_assistant_message", "id": "msg-1", "phase": 7},
+    {"provider": "open_ai_assistant_message", "id": "msg-1", "phase": ["commentary"]},
+    {"provider": "open_ai_assistant_message", "id": "msg-1", "response_id": 7},
+])
+def test_assistant_validator_rejects_invalid_openai_assistant_message_metadata(
+    meta: dict[str, Any],
+) -> None:
+    with pytest.raises(MeerkatError) as exc_info:
+        MeerkatClient._validate_wire_assistant_block(
+            {"block_type": "text", "data": {"text": "ok", "meta": meta}},
+            "assistant",
+        )
+    assert exc_info.value.code == "INVALID_RESPONSE"
+
+
+def test_history_read_keeps_an_openai_assistant_message_block() -> None:
+    meta = {
+        "provider": "open_ai_assistant_message",
+        "id": "msg-1",
+        "phase": "final_answer",
+        "response_id": "response-1",
+    }
+    block = {"block_type": "text", "data": {"text": "done", "meta": meta}}
+    row = {
+        "role": "block_assistant",
+        "created_at": "2026-07-12T10:00:01Z",
+        "blocks": [block],
+        "stop_reason": "end_turn",
+    }
+
+    assert MeerkatClient._validate_wire_history_row(row, "history") is row
+    parsed = MeerkatClient._parse_session_assistant_block(block)
+    assert parsed.text == "done"
+    assert parsed.meta == meta
 
 
 @pytest.mark.parametrize(

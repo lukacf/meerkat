@@ -101,6 +101,8 @@ pub enum DurableTailRecoveryClass {
     InterruptedRepairableCandidate,
     #[serde(rename = "Ambiguous")]
     Ambiguous,
+    #[serde(rename = "ContinuableCandidate")]
+    ContinuableCandidate,
 }
 impl DurableTailRecoveryClass {
     pub fn as_str(&self) -> &'static str {
@@ -108,6 +110,7 @@ impl DurableTailRecoveryClass {
             Self::CompletedCandidate => "CompletedCandidate",
             Self::InterruptedRepairableCandidate => "InterruptedRepairableCandidate",
             Self::Ambiguous => "Ambiguous",
+            Self::ContinuableCandidate => "ContinuableCandidate",
         }
     }
 }
@@ -118,6 +121,7 @@ impl std::convert::TryFrom<&str> for DurableTailRecoveryClass {
             "CompletedCandidate" => Ok(Self::CompletedCandidate),
             "InterruptedRepairableCandidate" => Ok(Self::InterruptedRepairableCandidate),
             "Ambiguous" => Ok(Self::Ambiguous),
+            "ContinuableCandidate" => Ok(Self::ContinuableCandidate),
             other => Err(format!("invalid DurableTailRecoveryClass value `{other}`")),
         }
     }
@@ -129,6 +133,60 @@ impl std::convert::TryFrom<String> for DurableTailRecoveryClass {
     }
 }
 impl std::fmt::Display for DurableTailRecoveryClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum DurableTailRunCursor {
+    #[default]
+    #[serde(rename = "Disagrees")]
+    Disagrees,
+    #[serde(rename = "Absent")]
+    Absent,
+    #[serde(rename = "Agrees")]
+    Agrees,
+}
+impl DurableTailRunCursor {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Disagrees => "Disagrees",
+            Self::Absent => "Absent",
+            Self::Agrees => "Agrees",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for DurableTailRunCursor {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Disagrees" => Ok(Self::Disagrees),
+            "Absent" => Ok(Self::Absent),
+            "Agrees" => Ok(Self::Agrees),
+            other => Err(format!("invalid DurableTailRunCursor value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for DurableTailRunCursor {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for DurableTailRunCursor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -1483,6 +1541,8 @@ pub enum RunIdCardinality {
     SingleRunId,
     #[serde(rename = "MultipleRunIds")]
     MultipleRunIds,
+    #[serde(rename = "NoRunRows")]
+    NoRunRows,
 }
 impl RunIdCardinality {
     pub fn as_str(&self) -> &'static str {
@@ -1490,6 +1550,7 @@ impl RunIdCardinality {
             Self::NoRunId => "NoRunId",
             Self::SingleRunId => "SingleRunId",
             Self::MultipleRunIds => "MultipleRunIds",
+            Self::NoRunRows => "NoRunRows",
         }
     }
 }
@@ -1500,6 +1561,7 @@ impl std::convert::TryFrom<&str> for RunIdCardinality {
             "NoRunId" => Ok(Self::NoRunId),
             "SingleRunId" => Ok(Self::SingleRunId),
             "MultipleRunIds" => Ok(Self::MultipleRunIds),
+            "NoRunRows" => Ok(Self::NoRunRows),
             other => Err(format!("invalid RunIdCardinality value `{other}`")),
         }
     }
@@ -2360,6 +2422,8 @@ pub mod inputs {
         pub dangling_tool_use_count: u64,
         pub orphan_tool_result_count: u64,
         pub messages_after_terminal: bool,
+        pub run_cursor: DurableTailRunCursor,
+        pub cursor_inputs_open: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ApplyPendingToolResults {
@@ -3075,6 +3139,7 @@ pub enum TransitionId {
     ArchiveSessionDocumentActive,
     ArchiveSessionDocumentAlreadyArchived,
     ArchiveSessionDocumentCompleteRetire,
+    ClassifyDurableTailContinuable,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

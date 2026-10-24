@@ -299,6 +299,8 @@ pub struct Adapter {
     /// inside the admission attempt, so the third read fails with the
     /// outcome unknown.
     pub panic_at_custody_read: std::sync::atomic::AtomicUsize,
+    /// The source owner cancelled the operations of original `work-7`.
+    pub cancelled: std::sync::atomic::AtomicBool,
 }
 
 /// Holds the native admission of original `work-7` inside the adapter's
@@ -440,6 +442,27 @@ impl AuthenticatedOriginalSource for Adapter {
         } else {
             meerkat_runtime::meerkat_machine::RetainedCustody::NotRetained
         })
+    }
+
+    fn original_disposition(
+        &self,
+        _namespace: &QualifiedIngressNamespace,
+        original: &OriginalWorkRef,
+    ) -> Result<
+        meerkat_runtime::meerkat_machine::OriginalDisposition,
+        meerkat_core::authorization::ControllerReadinessFailure,
+    > {
+        Ok(
+            if original.work == id("work-7")
+                && self.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+            {
+                meerkat_runtime::meerkat_machine::OriginalDisposition::OperationCancelled {
+                    evidence: evidence("original-cancellation"),
+                }
+            } else {
+                meerkat_runtime::meerkat_machine::OriginalDisposition::Active
+            },
+        )
     }
 }
 
@@ -654,6 +677,7 @@ pub fn mob_definition_with(external_addressable: bool) -> MobDefinition {
             max_inline_peer_notifications: None,
             output_schema: None,
             provider_params: None,
+            durable: false,
         })),
     );
     let mut definition = MobDefinition::explicit(MobId::from(format!(
@@ -668,6 +692,10 @@ pub fn mob_definition_with(external_addressable: bool) -> MobDefinition {
 /// with the member's session document bound to the original's destination.
 pub struct Fixture {
     pub handle: MobHandle,
+    pub grants: Arc<LocalGrantAuthority>,
+    /// The requester's invocation grant, which the host invocation policy
+    /// resolves for every admission.
+    pub invocation: GrantLineageRef,
     pub machine: Arc<MeerkatMachine>,
     pub service: Arc<EphemeralSessionService<FactoryAgentBuilder>>,
     pub provider: Arc<ScriptedProvider>,
@@ -974,6 +1002,7 @@ impl Fixture {
             basis: Mutex::new(None),
             gate: AdmissionGate::default(),
             panic_at_custody_read: Default::default(),
+            cancelled: Default::default(),
         });
         let configuration = ScopedGrantComposition {
             grants: Arc::clone(&grants),
@@ -984,7 +1013,7 @@ impl Fixture {
             originals: adapter.clone(),
             invocation: ScopedInvocation::from_policy(Arc::new(GrantedInvocation {
                 grants: Arc::clone(&grants),
-                lineage: invocation,
+                lineage: invocation.clone(),
             })),
             operation_owner: Arc::new(ControllerOwner),
             retained_resume: None,
@@ -1079,6 +1108,8 @@ impl Fixture {
         }
         Self {
             handle,
+            grants,
+            invocation,
             machine,
             service,
             provider,

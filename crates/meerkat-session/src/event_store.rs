@@ -2029,6 +2029,18 @@ struct SequenceAllocationLock {
     _lock: std::fs::File,
 }
 
+/// Released before the file closes: the lock belongs to the open file
+/// description, and a process spawned meanwhile holds a copy of the
+/// descriptor until it executes its program, which would keep a lock released
+/// by the close alone. The lock opened its own description, so the unlock
+/// releases no other holder's lock.
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for SequenceAllocationLock {
+    fn drop(&mut self) {
+        let _ = self._lock.unlock();
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 impl FileEventStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
@@ -8419,5 +8431,69 @@ mod tests {
             "pre-bump row must surface the typed schema mismatch, got: {err}"
         );
         Ok(())
+    }
+
+    /// A process this test spawns that holds a copy of one of the test's
+    /// descriptors, as its standard input, until it is dropped: what any process
+    /// spawned meanwhile holds until it executes its program, kept for as long as
+    /// the test needs.
+    #[cfg(unix)]
+    struct DescriptorCopy(std::process::Child);
+
+    #[cfg(unix)]
+    impl DescriptorCopy {
+        /// Spawn a process holding a copy of `file`'s descriptor.
+        fn spawn(file: &std::fs::File) -> Self {
+            let copy = file.try_clone().expect("a copy of the descriptor");
+            #[allow(clippy::disallowed_methods)] // the test's own process, which holds the copy
+            let child = std::process::Command::new("sleep")
+                .arg("600")
+                .stdin(copy)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("a process holding the copy");
+            Self(child)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for DescriptorCopy {
+        fn drop(&mut self) {
+            // On request (MEERKAT_TEST_DESCRIPTOR_COPY_LINGER_MS), the copy stays open
+            // that long first, so an fd sampler watching the run sees it.
+            if let Some(linger) = std::env::var("MEERKAT_TEST_DESCRIPTOR_COPY_LINGER_MS")
+                .ok()
+                .and_then(|millis| millis.parse::<u64>().ok())
+            {
+                std::thread::sleep(std::time::Duration::from_millis(linger));
+            }
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// A released sequence lock is free at once while a process spawned
+    /// meanwhile still holds a copy of its descriptor.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_released_sequence_lock_is_free_while_a_spawned_process_holds_its_descriptor() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("session.seq.lock");
+        let lock = FileEventStore::lock_sequence_file(path.clone())
+            .await
+            .unwrap();
+        let copy = DescriptorCopy::spawn(&lock._lock);
+        drop(lock);
+        let probe = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        assert!(
+            probe.try_lock().is_ok(),
+            "a released sequence lock is free while a spawned process holds a copy of its descriptor"
+        );
+        drop(copy);
     }
 }

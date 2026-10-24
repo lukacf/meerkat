@@ -52,7 +52,7 @@ adapter types remain owned by `meerkat-live`.
   <Step title="Add the dependency">
     ```toml
     [dependencies]
-    meerkat = "=0.9.4"
+    meerkat = "=0.9.5"
     tokio = { version = "1", features = ["full"] }
     ```
   </Step>
@@ -62,17 +62,17 @@ adapter types remain owned by `meerkat-live`.
     <CodeGroup>
     ```toml Default (all providers, no storage)
     [dependencies]
-    meerkat = "=0.9.4"
+    meerkat = "=0.9.5"
     ```
 
     ```toml Add persistence
     [dependencies]
-    meerkat = { version = "=0.9.4", features = ["sqlite-store", "session-store"] }
+    meerkat = { version = "=0.9.5", features = ["sqlite-store", "session-store"] }
     ```
 
     ```toml Full native harness
     [dependencies]
-    meerkat = { version = "=0.9.4", features = [
+    meerkat = { version = "=0.9.5", features = [
         "sqlite-store", "session-store", "session-compaction",
         "memory-store-session", "atif", "comms", "mcp", "skills",
         "schedule", "workgraph", "openai-realtime", "live",
@@ -82,7 +82,7 @@ adapter types remain owned by `meerkat-live`.
 
     ```toml Minimal (single provider)
     [dependencies]
-    meerkat = { version = "=0.9.4", default-features = false, features = ["anthropic"] }
+    meerkat = { version = "=0.9.5", default-features = false, features = ["anthropic"] }
     ```
     </CodeGroup>
   </Step>
@@ -142,8 +142,8 @@ transitive dependencies are not available as direct crate imports.
 
 ```toml
 [dependencies]
-meerkat = { version = "=0.9.4", features = ["sqlite-store", "session-store"] }
-meerkat-store = "=0.9.4"
+meerkat = { version = "=0.9.5", features = ["sqlite-store", "session-store"] }
+meerkat-store = "=0.9.5"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -467,7 +467,7 @@ match event {
 
     // Tool execution
     AgentEvent::ToolExecutionStarted { id, name } => {}
-    AgentEvent::ToolExecutionCompleted { id, name, content, is_error, duration_ms } => {}
+    AgentEvent::ToolExecutionCompleted { id, name, is_error, duration_ms } => {}
     AgentEvent::ToolExecutionTimedOut { id, name, timeout_ms } => {}
 
     // Compaction

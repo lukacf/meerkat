@@ -505,11 +505,19 @@ impl SessionRuntimeLlmReconfigureService for PersistentSessionService<FactoryAge
         // turn-finalization boundary, so no run is mid-flight and committed
         // authority is complete rather than trailing a live session.
         //
+        // A run's provisional tail can still stand ahead of the committed
+        // snapshot between turns (a session restarted over a round commit, or
+        // a run whose tail recovery holds). The committed records are the
+        // committed snapshot then, so the read-only observation serves that
+        // snapshot instead of refusing with a transcript revision conflict,
+        // which would make the runtime loop leave without serving the queued
+        // input. It writes nothing and decides nothing about the tail.
+        //
         // The live fallback covers the session that has no durable row yet
         // (created, never persisted): committed authority reports nothing, and
         // the live actor is then the only carrier there is.
         let committed = self
-            .observe_authoritative_session_body(session_id)
+            .observe_authoritative_session_body_tolerating_tail(session_id)
             .await?
             .map(|session| session.model_routing_control().clone());
         if let Some(committed) = committed {

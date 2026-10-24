@@ -12,6 +12,11 @@
 //! - a host that restarts over the tail with no live actor finds the
 //!   committed session present: stale, so the surface takes its cold path,
 //!   where recovery decides the tail.
+//!
+//! The runtime loop's pre-dequeue model-routing read of such a restarted
+//! host reads the committed routing log through the tail too, so the loop
+//! serves the turn queued behind the resumed run instead of leaving on a
+//! revision conflict.
 
 #![allow(
     clippy::expect_used,
@@ -35,7 +40,8 @@ mod tests {
     use meerkat::session_runtime::recovery::RecoveryContext;
     use meerkat::session_runtime::runtime_state::{LiveStalenessPosition, RuntimeStateOps};
     use meerkat::surface::{
-        build_runtime_backed_service, default_persistent_executor, materialize_session,
+        build_runtime_backed_service, build_runtime_backed_service_with_default_reconfigure_host,
+        default_persistent_executor, materialize_session,
     };
     use meerkat::{
         AgentFactory, Config, CreateSessionRequest, FactoryAgentBuilder, PersistentSessionService,
@@ -43,7 +49,9 @@ mod tests {
     };
     use meerkat_client::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest};
     use meerkat_core::{Message, SessionBuildOptions};
-    use meerkat_runtime::{Input, MeerkatMachine, PromptInput};
+    use meerkat_runtime::{
+        CompletionOutcome, Input, MeerkatMachine, PromptInput, SessionServiceRuntimeExt as _,
+    };
     use tokio::sync::Semaphore;
     use tokio::time::Duration;
 
@@ -146,6 +154,24 @@ mod tests {
 
     impl Host {
         async fn open(root: &Path, client: Arc<HeldAfterOneToolRound>) -> Self {
+            Self::open_with(root, client, false).await
+        }
+
+        /// A host composed as the product surfaces compose theirs, with the
+        /// session-LLM reconfigure host installed: its runtime loop reads the
+        /// committed model-routing log before every dequeue.
+        async fn open_with_reconfigure_host(
+            root: &Path,
+            client: Arc<HeldAfterOneToolRound>,
+        ) -> Self {
+            Self::open_with(root, client, true).await
+        }
+
+        async fn open_with(
+            root: &Path,
+            client: Arc<HeldAfterOneToolRound>,
+            reconfigure_host: bool,
+        ) -> Self {
             let (_manifest, persistence) = meerkat::open_realm_persistence_in(
                 root,
                 "staleness-realm",
@@ -165,10 +191,21 @@ mod tests {
             config.shell.security_mode = meerkat_core::types::SecurityMode::Unrestricted;
             let mut builder = FactoryAgentBuilder::new(factory, config);
             builder.default_llm_client = Some(client);
-            let (service, adapter) = build_runtime_backed_service(builder, 4, persistence)
-                .expect("compose the runtime-backed service");
+            let (service, adapter) = if reconfigure_host {
+                build_runtime_backed_service_with_default_reconfigure_host(
+                    builder,
+                    4,
+                    persistence,
+                    root.join("config-state.json"),
+                )
+                .expect("compose the runtime-backed service")
+            } else {
+                let (service, adapter) = build_runtime_backed_service(builder, 4, persistence)
+                    .expect("compose the runtime-backed service");
+                (Arc::new(service), adapter)
+            };
             Self {
-                service: Arc::new(service),
+                service,
                 adapter,
                 staged_sessions: Arc::new(meerkat::StagedSessionRegistry::new()),
                 staged_capacity_admissions: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -339,5 +376,87 @@ mod tests {
             "a committed session with no live actor sends the surface down its cold path"
         );
         client.release.add_permits(1);
+    }
+
+    /// A host restarted over a round commit, composed with the session-LLM
+    /// reconfigure host as the product surfaces are, has no run in flight
+    /// while the tail stands. Its runtime loop's pre-dequeue read of the
+    /// committed model-routing log answers that log through the tail, where
+    /// it refused with a transcript revision conflict and the loop left
+    /// without serving the queued input. The host then resumes the run and
+    /// serves a turn queued behind it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_restarted_hosts_routing_read_answers_the_committed_log_under_a_round_commit() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let client = Arc::new(HeldAfterOneToolRound::new());
+        let host = Host::open(temp.path(), Arc::clone(&client)).await;
+        let (id, run) = run_held_after_its_tool_round(&host, &client).await;
+
+        // The power goes out while the run waits on the model.
+        let after_the_cut = tempfile::tempdir().expect("tempdir");
+        copy_tree(temp.path(), after_the_cut.path());
+        let restarted_client = Arc::new(HeldAfterOneToolRound::new());
+        let restarted =
+            Host::open_with_reconfigure_host(after_the_cut.path(), Arc::clone(&restarted_client))
+                .await;
+        assert_eq!(
+            restarted.tail_run(&id).await,
+            Some(run),
+            "the round commit stands over the committed boundary"
+        );
+
+        let owed = tokio::time::timeout(
+            Duration::from_secs(5),
+            restarted
+                .adapter
+                .reconcile_and_list_committed_model_routing_handoffs(&id),
+        )
+        .await
+        .expect("the routing read answers at once")
+        .expect("the routing read answers the committed log under the round commit");
+        assert!(owed.is_empty(), "no handoff is owed: {owed:?}");
+
+        let committed = restarted
+            .service
+            .load_committed_session_tolerating_tail(&id)
+            .await
+            .expect("read the committed session")
+            .expect("the session is committed");
+        let service = Arc::clone(&restarted.service);
+        let adapter = Arc::clone(&restarted.adapter);
+        let mut resume = create_request();
+        resume.system_prompt = meerkat::SystemPromptOverride::Inherit;
+        Box::pin(materialize_session(
+            &restarted.service,
+            &restarted.adapter,
+            committed,
+            resume,
+            move |session_id| default_persistent_executor(service, adapter, session_id),
+        ))
+        .await
+        .expect("materialize the session on the restarted host");
+        let (_outcome, completion) = restarted
+            .adapter
+            .accept_input_with_completion(&id, Input::Prompt(PromptInput::new("next", None)))
+            .await
+            .expect("accept the queued turn");
+        // One answer for the resumed run's model call, one for the queued
+        // turn's.
+        restarted_client.release.add_permits(2);
+        let answered = tokio::time::timeout(
+            Duration::from_secs(60),
+            completion.expect("the queued turn has a completion").wait(),
+        )
+        .await
+        .expect("the queued turn is answered");
+        assert!(
+            matches!(answered, Ok(CompletionOutcome::Completed(_))),
+            "the queued turn runs after the resumed run: {answered:?}"
+        );
+        assert_eq!(
+            restarted.tail_run(&id).await,
+            None,
+            "the resumed run committed its boundary"
+        );
     }
 }

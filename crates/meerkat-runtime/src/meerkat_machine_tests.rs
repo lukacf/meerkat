@@ -58640,6 +58640,28 @@ mod terminal_completion_batch_bound {
             expected: &InputTerminalOutcome,
             context: &str,
         ) {
+            self.assert_every_terminal_outcome(input_ids, expected, context)
+                .await;
+            for input_id in input_ids {
+                let completion = self
+                    .machine
+                    .input_terminal_completion(&self.session_id, input_id)
+                    .await
+                    .expect("read an input's terminal completion");
+                assert!(
+                    completion.is_some(),
+                    "{context}: input {input_id} has its exact terminal completion"
+                );
+            }
+        }
+
+        /// Every input reached `expected`.
+        async fn assert_every_terminal_outcome(
+            &self,
+            input_ids: &[InputId],
+            expected: &InputTerminalOutcome,
+            context: &str,
+        ) {
             for input_id in input_ids {
                 let stored = self
                     .machine
@@ -58651,15 +58673,6 @@ mod terminal_completion_batch_bound {
                     stored.seed.terminal_outcome.as_ref(),
                     Some(expected),
                     "{context}: input {input_id} reached its terminal"
-                );
-                let completion = self
-                    .machine
-                    .input_terminal_completion(&self.session_id, input_id)
-                    .await
-                    .expect("read an input's terminal completion");
-                assert!(
-                    completion.is_some(),
-                    "{context}: input {input_id} has its exact terminal completion"
                 );
             }
         }
@@ -58993,33 +59006,54 @@ mod terminal_completion_batch_bound {
     /// A retired session whose held runtime loop still owns the drain gets
     /// its retirement cleanup: the cleanup completes the whole 300-input
     /// backlog as retired.
+    ///
+    /// The backlog queues before the loop attaches, with the run-start hold
+    /// staged for the registration, so the held loop wakes once instead of
+    /// once per admission. (Retire holds the session mutation gate while it
+    /// wakes the loop on its bounded wake channel, and the loop takes that
+    /// gate to process each wake; a full channel would hold both.)
     async fn retired_pending_cleanup_completes_every_input(store: BoundStore) {
         let fixture = Fixture::new(store).await;
+        fixture
+            .machine
+            .stage_registration_run_start_hold(
+                &fixture.session_id,
+                crate::RunStartHoldReason::MobStop,
+            )
+            .await
+            .expect("stage the registration's run-start hold");
+        fixture
+            .machine
+            .register_session(fixture.session_id.clone())
+            .await
+            .expect("register the held session without a loop");
+        let (input_ids, waiters) = fixture.admit_backlog(BACKLOG, HandlingMode::Queue).await;
+        let mut parks = fixture.machine.run_start_held_parks();
         let runs = Arc::new(std::sync::Mutex::new(Vec::new()));
         fixture
             .machine
-            .register_session_with_executor(
+            .ensure_session_with_executor(
                 fixture.session_id.clone(),
                 Box::new(RecordingCompletingExecutor {
                     runs: Arc::clone(&runs),
                 }),
             )
             .await
-            .expect("register the session with a loop");
-        fixture
-            .machine
-            .hold_run_starts(&fixture.session_id, crate::RunStartHoldReason::MobStop)
-            .await
-            .expect("hold run starts");
-        let mut parks = fixture.machine.run_start_held_parks();
-        let (input_ids, waiters) = fixture.admit_backlog(BACKLOG, HandlingMode::Queue).await;
+            .expect("attach the held loop");
         tokio::time::timeout(Duration::from_secs(30), parks.wait_for(|parks| *parks >= 1))
             .await
             .expect("the runtime loop parks on the hold")
             .expect("park signal");
-        crate::traits::RuntimeControlPlane::retire(fixture.machine.as_ref(), &fixture.runtime_id())
-            .await
-            .expect("retire while the held loop owns the drain");
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            crate::traits::RuntimeControlPlane::retire(
+                fixture.machine.as_ref(),
+                &fixture.runtime_id(),
+            ),
+        )
+        .await
+        .expect("the retire returns within 60 s")
+        .expect("retire while the held loop owns the drain");
         let abandoned_count = tokio::time::timeout(
             Duration::from_secs(120),
             fixture
@@ -59084,8 +59118,11 @@ mod terminal_completion_batch_bound {
                 "every predecessor waiter fails as replaced: {outcome:?}"
             );
         }
+        // The replacement fails each predecessor waiter itself and publishes
+        // only directed batches; a batch with no directed recipient keeps
+        // its pending completion for a later recovery, as before.
         fixture
-            .assert_every_terminal(
+            .assert_every_terminal_outcome(
                 &input_ids,
                 &abandoned(InputAbandonReason::Cancelled),
                 "attachment replacement",

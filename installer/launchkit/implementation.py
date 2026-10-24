@@ -309,10 +309,17 @@ lifecycle. Construction and offline trials have runtime=None; native reconcile
 and dynamic native callback availability remain explicitly unavailable until a
 trusted trial host implements them. Do not replace missing lifecycle support with
 raw ensure_member, edited protected config, reused seed context or fake success.
-The seeded host keeps native agent memory enabled and Recorder tools bound to the
-actual owning identity, while distiller and steward are disabled and operator_scope
-is off. This preserves useful own-identity memory without implicit promotion into
-shared knowledge. Publish approved shared information through the application's
+Read the frozen config/mob.toml and selected native host before relying on memory.
+A requested Blueprint memory grant or enabled host storage does not establish
+an available Recorder tool. Some selected Connect routes disable it because the
+installed native policy does not yet admit its operations. Keep required native
+memory as an unmet outcome with its exact native dependency; conversation history
+or an application database is not a substitute. Do not edit protected profiles or
+add replacement memory callbacks to conceal the gap.
+Where native Recorder is supported and granted, it binds to the actual owning
+identity. The ordinary generated host disables distiller/steward and operator_scope,
+preserving useful own-identity memory without implicit promotion into shared
+knowledge. Publish approved shared information through the application's
 explicit library and access policy; do not share another identity's private context.
 These defaults do not erase preexisting or explicitly shared Mob/Realm data.
 Trusted host inspection, memory and Console APIs are not automatic agent tool

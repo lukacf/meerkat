@@ -15948,14 +15948,22 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     )
                     .await?;
             } else if let Some(seed) = continued_run.as_ref()
-                && runtime_marked_run.as_ref() != Some(&seed.run_id)
+                && !self
+                    .runtime_resumes_run(
+                        resume_session_id,
+                        runtime_hosted,
+                        runtime_marked_run.as_ref(),
+                        &seed.run_id,
+                    )
+                    .await
             {
-                // A prepared continuation whose run the registration does not
-                // mark would never be dispatched, and the session's ordinary
-                // writes are refused while the run's provisional tail stands:
-                // refused as held, as an unprepared one is.
+                // A prepared continuation whose run the hosting runtime
+                // neither marks nor runs would never be dispatched, and the
+                // session's ordinary writes are refused while the run's
+                // provisional tail stands: refused as held, as an unprepared
+                // one is.
                 let reason = format!(
-                    "the prepared continuation of run {} is not the run the registration marks",
+                    "the prepared continuation of run {} is not the run the registration resumes",
                     seed.run_id
                 );
                 tracing::warn!(
@@ -19172,16 +19180,39 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         adapter.resumable_run_id(id).await
     }
 
+    /// Whether the runtime that hosts an actor being materialized resumes
+    /// `run_id`, the open run its durable tail continues: the registration
+    /// marked the run resumable (`marked`, read when the materialization
+    /// began), or the runtime holds the run open now, as its current run or
+    /// its resumable one ([`Self::runtime_holds_run_open`]). The runtime loop
+    /// begins a resumed run by making it current, which clears the mark
+    /// (`ResumeRun`), so an executor that materializes its actor on the
+    /// resumed run's own dispatch finds the run current, not marked. An actor
+    /// no runtime hosts resumes nothing.
+    async fn runtime_resumes_run(
+        &self,
+        id: &SessionId,
+        hosted: bool,
+        marked: Option<&RunId>,
+        run_id: &RunId,
+    ) -> bool {
+        hosted && (marked == Some(run_id) || self.runtime_holds_run_open(id, run_id).await)
+    }
+
     /// Settle what an actor's durable-tail recovery means for the run the
     /// session's registration marked resumable, and return the open run the
     /// actor resumes, if any. `hosted` is whether a runtime registration
     /// hosts the actor (a `SessionOwned` build), and `marked` the run it
     /// marks.
     ///
-    /// - The recovery continues the marked run: the actor is seeded from it.
-    /// - It continues a run nothing marked, or another run than the marked
-    ///   one: no runtime dispatches that continuation, and the session's
-    ///   ordinary writes are refused while the run's provisional tail stands.
+    /// - The recovery continues the run the hosting runtime resumes (the
+    ///   marked run, or the runtime's current run once its loop has begun the
+    ///   resumed run; see [`Self::runtime_resumes_run`]): the actor is seeded
+    ///   from it.
+    /// - It continues a run the runtime does not resume (nothing marked, or
+    ///   another run than the marked one): no runtime dispatches that
+    ///   continuation, and the session's ordinary writes are refused while
+    ///   the run's provisional tail stands.
     ///   The materialization is refused as held for recovery
     ///   ([`SessionError::DurableTailHeldForRecovery`]), and a hosting
     ///   runtime reloads, so its registration observes the tail again.
@@ -19205,7 +19236,10 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     ) -> Result<Option<ContinuedRunSeed>, SessionError> {
         match recovery {
             Ok(ResumeBoundaryRecovery::Continue(seed)) => {
-                if marked == Some(&seed.run_id) {
+                if self
+                    .runtime_resumes_run(id, hosted, marked, &seed.run_id)
+                    .await
+                {
                     return Ok(Some(seed));
                 }
                 let reason = match marked {

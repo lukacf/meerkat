@@ -13531,33 +13531,26 @@ Ok::<(), RuntimeDriverError>(())
                 "retired pending-input abandonment for session {session_id} failed: {error}"
             ))
         })?;
-        let prepared = outcome.and_then(
-            |(abandoned, completion_input_ids, candidate_owner_input_id)| {
-                let dispatch = match publication_handle {
-                    Some(publication_handle) => {
-                        Some(self.prepare_runless_terminal_publication_dispatch(
-                            &driver,
-                            &completions,
-                            &mutation_gate,
-                            publication_handle,
-                        )?)
-                    }
-                    None => None,
-                };
-                Ok((
-                    abandoned,
-                    completion_input_ids,
-                    candidate_owner_input_id,
-                    dispatch,
-                ))
-            },
-        );
+        let prepared = outcome.and_then(|(abandoned, terminal_batches)| {
+            let dispatch = match publication_handle {
+                Some(publication_handle) => {
+                    Some(self.prepare_runless_terminal_publication_dispatch(
+                        &driver,
+                        &completions,
+                        &mutation_gate,
+                        publication_handle,
+                    )?)
+                }
+                None => None,
+            };
+            Ok((abandoned, terminal_batches, dispatch))
+        });
         drop(gate_guard);
         // Every native guard is released: tell the abandonment now, before
         // its publication and before any error returns. Entering retirement
         // abandons nothing here and tells nothing.
         runless_terminal.release();
-        let (abandoned, completion_input_ids, candidate_owner_input_id, dispatch) = prepared?;
+        let (abandoned, terminal_batches, dispatch) = prepared?;
 
         if let Some((result_rx, start_tx)) = dispatch {
             if let Some(start_tx) = start_tx {
@@ -13575,18 +13568,21 @@ Ok::<(), RuntimeDriverError>(())
             .await?;
         }
 
-        if candidate_owner_input_id.is_none() && !completion_input_ids.is_empty() {
-            crate::control_plane::publish_and_resolve_runless_runtime_termination_before(
-                &driver,
-                Some(&completions),
-                None,
-                &completion_input_ids,
-                None,
-                &reason,
-                deadline,
-            )
-            .await?;
-        }
+        // The directed batches published above, each with its nondirected
+        // siblings; a batch with no directed recipient resolves here.
+        let nondirected = terminal_batches
+            .into_iter()
+            .filter(|batch| !batch.is_directed())
+            .collect::<Vec<_>>();
+        crate::control_plane::publish_and_resolve_runless_runtime_terminations_before(
+            &driver,
+            Some(&completions),
+            None,
+            &nondirected,
+            &reason,
+            deadline,
+        )
+        .await?;
         Ok(abandoned)
     }
 
@@ -13594,15 +13590,21 @@ Ok::<(), RuntimeDriverError>(())
     /// detached work that holds the session's M: abandon every pending input
     /// of the retired session, owing `runless_terminal` when the abandonment
     /// commits, and, when a later step fails, as a conservative re-observation
-    /// after a possibly committed transition. Returns the abandoned count, the
-    /// inputs whose waiters the abandonment terminates, and the candidate owner
-    /// of its committed terminal outbox.
+    /// after a possibly committed transition. Returns the abandoned count and
+    /// the committed terminal batches, which name the inputs whose waiters the
+    /// abandonment terminates and each directed batch's outbox owner.
     async fn abandon_retired_pending_inputs_owing(
         driver: &SharedDriver,
         completions: &SharedCompletionRegistry,
         reason: String,
         runless_terminal: &mut super::RunlessTerminalAnnouncement,
-    ) -> Result<(usize, Vec<InputId>, Option<InputId>), RuntimeDriverError> {
+    ) -> Result<
+        (
+            usize,
+            Vec<crate::meerkat_machine::driver::RunlessTerminalBatch>,
+        ),
+        RuntimeDriverError,
+    > {
         let mut driver = driver.lock().await;
         // Inputs a store-owned durable-tail recovery consumed are not
         // pending: adopt them before this sweep names its batch.
@@ -13634,9 +13636,9 @@ Ok::<(), RuntimeDriverError>(())
         if abandoned > 0 {
             runless_terminal.owe();
         }
-        let candidate_owner_input_id =
+        let terminal_batches =
             crate::meerkat_machine::driver::DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared);
-        Ok((abandoned, completion_input_ids, candidate_owner_input_id))
+        Ok((abandoned, terminal_batches))
     }
 
     /// Abandon every input `session_id` holds queued, in either lane, at one
@@ -13865,7 +13867,10 @@ Ok::<(), RuntimeDriverError>(())
                 .await
             {
                 Ok(true) => {
-                    let candidate_owner_input_id = crate::meerkat_machine::driver::DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared);
+                    let candidate_owner_input_id =
+                        crate::meerkat_machine::driver::RunlessTerminalBatch::sole_directed_owner(
+                            crate::meerkat_machine::driver::DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared),
+                        );
                     runless_terminal.owe();
                     abandoned.push((input_id, candidate_owner_input_id));
                 }

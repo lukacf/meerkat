@@ -159,7 +159,8 @@ fi
 # resolution followed by every run-ending arm; deeper bounds run by hand. It
 # then requires TLC to reach a durable join of the late Steer input once per
 # content input kind (five short runs), so the invariants are not vacuous for
-# any of them.
+# any of them, and substitutes a small run contributor bound for the generated
+# 256 (three short runs), so the join the contributor guard refuses is explored.
 durable_steer_audit="${workspace_root}/specs/machines/meerkat_machine/durable_in_turn_steer_audit.sh"
 if [[ ! -x "${durable_steer_audit}" ]]; then
   echo "error: durable in-turn steer audit runner is missing from workspace runfiles: ${durable_steer_audit}" >&2

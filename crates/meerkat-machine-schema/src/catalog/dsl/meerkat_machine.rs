@@ -25616,6 +25616,15 @@ macro_rules! meerkat_catalog_machine_dsl {
                     == Some(LiveBoundaryDelivery::DurableAppend)
             }
             guard "not_already_joined" { !self.input_live_boundary_join_run.contains_key(input_id) }
+            // The run's commit names its batch and every join as one
+            // terminal-completion batch, and that batch names at most
+            // `meerkat_machine_run_contributor_limit()` inputs. A join past it
+            // is refused: the input keeps its steer-lane follow-up and the
+            // next run delivers it.
+            guard "run_contributor_capacity" {
+                meerkat_machine_run_staged_contributor_count(self.input_run_associations, self.input_phases, run_id)
+                    < meerkat_machine_run_contributor_limit()
+            }
             update {
                 self.input_phases.insert(input_id, InputPhase::Staged);
                 self.input_run_associations.insert(input_id, run_id);
@@ -39284,6 +39293,18 @@ macro_rules! meerkat_catalog_machine_dsl {
                 Steer,
             }
 
+            /// The most inputs one runtime-loop batch stages into a run.
+            ///
+            /// A run's commit names every input its batch staged and every
+            /// durable Steer that joined its turn as one terminal-completion
+            /// batch, and such a batch names at most this many inputs: its
+            /// owner row carries the whole recipient set, every reader
+            /// validates that bound at load, and its finalization and receipt
+            /// writes are one input-state batch CAS, which the store contract
+            /// caps at the same 256 rows. A full batch leaves the rest of its
+            /// lane queued, in admission order, for the next run.
+            pub const RUNTIME_LOOP_BATCH_MAX_INPUTS: usize = 256;
+
             #[must_use = "generated runtime-loop batch plan must be consumed by exact dequeue/stage realization"]
             #[derive(Debug, PartialEq, Eq)]
             pub struct RuntimeLoopBatchPlan {
@@ -39601,6 +39622,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                                 .copied()
                                 == target_terminal_intent
                     })
+                    .take(RUNTIME_LOOP_BATCH_MAX_INPUTS)
                     .cloned()
                     .collect()
             }
@@ -39624,6 +39646,9 @@ macro_rules! meerkat_catalog_machine_dsl {
                 };
                 let mut selected = Vec::new();
                 for input_id in ordered {
+                    if selected.len() == RUNTIME_LOOP_BATCH_MAX_INPUTS {
+                        break;
+                    }
                     if state.input_authority_batch_keys.get(input_id) != state.input_authority_batch_keys.get(first) {
                         break;
                     }
@@ -39653,6 +39678,30 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         impl MeerkatMachineAuthority {
+        // The inputs staged for `run_id`: its batch and every durable Steer
+        // that joined its turn. The run's commit names them (less any join
+        // its terminal returns to the lane) as one terminal-completion batch.
+        fn meerkat_machine_run_staged_contributor_count(
+            run_associations: &std::collections::BTreeMap<String, RunId>,
+            input_phases: &std::collections::BTreeMap<String, InputPhase>,
+            run_id: &RunId,
+        ) -> u64 {
+            let staged = run_associations
+                .iter()
+                .filter(|(input_id, associated)| {
+                    *associated == run_id
+                        && input_phases.get(*input_id) == Some(&InputPhase::Staged)
+                })
+                .count();
+            u64::try_from(staged).unwrap_or(u64::MAX)
+        }
+
+        // The most contributors one run's commit names: the bound of one
+        // terminal-completion batch, which also caps a runtime-loop batch.
+        fn meerkat_machine_run_contributor_limit() -> u64 {
+            u64::try_from(command_capabilities::RUNTIME_LOOP_BATCH_MAX_INPUTS).unwrap_or(u64::MAX)
+        }
+
         fn meerkat_machine_session_id_matches_string(
             current: &Option<SessionId>,
             candidate: &str,

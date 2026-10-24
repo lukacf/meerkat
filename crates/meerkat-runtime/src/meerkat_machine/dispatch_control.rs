@@ -9,8 +9,7 @@ struct MutationGuardedControlEntry {
 
 struct MutationGuardedResetCommit {
     report: ResetReport,
-    completion_input_ids: Vec<InputId>,
-    candidate_owner_input_id: Option<InputId>,
+    terminal_batches: Vec<crate::meerkat_machine::driver::RunlessTerminalBatch>,
 }
 
 impl MeerkatMachine {
@@ -130,8 +129,27 @@ impl MeerkatMachine {
         runless_terminal: &mut super::RunlessTerminalAnnouncement,
     ) -> Result<MutationGuardedResetCommit, RuntimeControlPlaneError> {
         let reason = "runtime reset";
-        let (completion_input_ids, prepared_terminals, ended_run) = {
+        let (prepared_terminals, ended_run) = {
             let mut drv = driver.lock().await;
+            // The machine admits Reset only from Initializing, Idle, Attached
+            // and Retired. Ask it before anything is ended, prepared or
+            // checkpointed: a reset it refuses is a typed refusal that left
+            // the session as it was, never a rolled-back terminal
+            // preparation, which fails a persistent session closed.
+            if let Err(refusal) = Self::preview_dsl_input_on_shared_authority(
+                &drv.shared_dsl_authority(),
+                crate::meerkat_machine::dsl::MeerkatMachineInput::Reset,
+                "Reset",
+            ) {
+                let state = drv.runtime_state();
+                return Err(match state {
+                    RuntimeState::Initializing
+                    | RuntimeState::Idle
+                    | RuntimeState::Attached
+                    | RuntimeState::Retired => RuntimeControlPlaneError::Internal(refusal),
+                    _ => RuntimeControlPlaneError::InvalidState { state },
+                });
+            }
             // Inputs a store-owned durable-tail recovery consumed are not
             // pending: adopt them before this sweep names its batch.
             drv.adopt_durable_consumed_inputs(Some(completions))
@@ -163,7 +181,7 @@ impl MeerkatMachine {
                     return Err(RuntimeControlPlaneError::Internal(error.to_string()));
                 }
             };
-            (completion_input_ids, prepared_terminals, ended_run)
+            (prepared_terminals, ended_run)
         };
 
         if let Err(error) = self
@@ -194,14 +212,13 @@ impl MeerkatMachine {
                 return Err(RuntimeControlPlaneError::Internal(err.to_string()));
             }
         };
-        let candidate_owner_input_id =
+        let terminal_batches =
             crate::meerkat_machine::driver::DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared_terminals);
         drop(drv);
 
         Ok(MutationGuardedResetCommit {
             report,
-            completion_input_ids,
-            candidate_owner_input_id,
+            terminal_batches,
         })
     }
 
@@ -272,8 +289,7 @@ impl MeerkatMachine {
             )
             .await
             .map_err(|error| RuntimeDriverError::Internal(error.to_string()))?;
-        debug_assert!(committed.completion_input_ids.is_empty());
-        debug_assert!(committed.candidate_owner_input_id.is_none());
+        debug_assert!(committed.terminal_batches.is_empty());
         Ok(committed.report)
     }
 
@@ -1027,11 +1043,12 @@ impl MeerkatMachine {
                                 &mut runless_terminal,
                             )
                             .await?;
-                        let dispatch = match (
-                            committed.candidate_owner_input_id.as_ref(),
-                            publication_handle,
-                        ) {
-                            (Some(_), Some(publication_handle)) => Some(
+                        let directed = committed
+                            .terminal_batches
+                            .iter()
+                            .any(crate::meerkat_machine::driver::RunlessTerminalBatch::is_directed);
+                        let dispatch = match (directed, publication_handle) {
+                            (true, Some(publication_handle)) => Some(
                                 self.prepare_runless_terminal_publication_dispatch(
                                     &driver,
                                     &completions,
@@ -1042,20 +1059,42 @@ impl MeerkatMachine {
                                     RuntimeControlPlaneError::Internal(error.to_string())
                                 })?,
                             ),
-                            (Some(_), None) => {
+                            (true, None) => {
                                 return Err(RuntimeControlPlaneError::Internal(
                                     "runtime reset committed directed terminals without an exact publication capability"
                                         .to_string(),
                                 ));
                             }
-                            (None, _) => None,
+                            (false, _) => None,
                         };
                         drop(gate_guard);
                         runless_terminal.release();
-                        if let Some((result_rx, start_tx)) = dispatch {
+                        // The dispatch publishes every committed directed
+                        // batch with its nondirected siblings. Its start
+                        // permit is sent before anything is awaited, so a
+                        // dropped caller cannot strand it.
+                        let dispatch = dispatch.map(|(result_rx, start_tx)| {
                             if let Some(start_tx) = start_tx {
                                 let _ = start_tx.send(());
                             }
+                            result_rx
+                        });
+                        // A batch with no directed recipient resolves here.
+                        let nondirected = committed
+                            .terminal_batches
+                            .into_iter()
+                            .filter(|batch| !batch.is_directed())
+                            .collect::<Vec<_>>();
+                        let nondirected_result =
+                            crate::control_plane::publish_and_resolve_runless_runtime_terminations(
+                                &driver,
+                                Some(&completions),
+                                None,
+                                &nondirected,
+                                "runtime reset",
+                            )
+                            .await;
+                        if let Some(result_rx) = dispatch {
                             self.await_runless_terminal_publication_dispatch(
                                 &runtime_id,
                                 result_rx,
@@ -1065,20 +1104,10 @@ impl MeerkatMachine {
                             .map_err(|error| {
                                 RuntimeControlPlaneError::Internal(error.to_string())
                             })?;
-                        } else if !committed.completion_input_ids.is_empty() {
-                            crate::control_plane::publish_and_resolve_runless_runtime_termination(
-                                &driver,
-                                Some(&completions),
-                                None,
-                                &committed.completion_input_ids,
-                                None,
-                                "runtime reset",
-                            )
-                            .await
-                            .map_err(|error| {
-                                RuntimeControlPlaneError::Internal(error.to_string())
-                            })?;
                         }
+                        nondirected_result.map_err(|error| {
+                            RuntimeControlPlaneError::Internal(error.to_string())
+                        })?;
                         break Ok(MeerkatMachineCommandResult::ResetReport(committed.report));
                     }
                 })
@@ -1341,7 +1370,7 @@ impl MeerkatMachine {
                             return Err(RuntimeControlPlaneError::Internal(err.to_string()));
                         }
                     }
-                    let candidate_owner_input_id =
+                    let terminal_batches =
                         crate::meerkat_machine::driver::DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared_terminals);
                     drop(drv);
 
@@ -1362,11 +1391,11 @@ impl MeerkatMachine {
                         .lock()
                         .await
                         .sync_control_projection_from_dsl_authority();
-                    let publication_dispatch = match (
-                        candidate_owner_input_id.as_ref(),
-                        publication_handle,
-                    ) {
-                        (Some(_), Some(publication_handle)) => Some(
+                    let directed = terminal_batches
+                        .iter()
+                        .any(crate::meerkat_machine::driver::RunlessTerminalBatch::is_directed);
+                    let publication_dispatch = match (directed, publication_handle) {
+                        (true, Some(publication_handle)) => Some(
                             self.prepare_runless_terminal_publication_dispatch(
                                 &driver,
                                 &completions,
@@ -1377,40 +1406,53 @@ impl MeerkatMachine {
                                 RuntimeControlPlaneError::Internal(error.to_string())
                             })?,
                         ),
-                        (Some(_), None) => {
+                        (true, None) => {
                             return Err(RuntimeControlPlaneError::Internal(
                                 "runtime destroy committed directed terminals without an exact publication capability"
                                     .to_string(),
                             ));
                         }
-                        (None, _) => None,
+                        (false, _) => None,
                     };
                     drop(mutation_guard);
                     #[cfg(feature = "live")]
                     drop(live_lifecycle_lease);
                     runless_terminal.release();
-                    let publication_result =
-                        if let Some((result_rx, start_tx)) = publication_dispatch {
-                            if let Some(start_tx) = start_tx {
-                                let _ = start_tx.send(());
-                            }
-                            self.await_runless_terminal_publication_dispatch(
+                    // The dispatch publishes every committed directed batch
+                    // with its nondirected siblings. Its start permit is sent
+                    // before anything is awaited, so a dropped caller cannot
+                    // strand it.
+                    let publication_dispatch = publication_dispatch.map(|(result_rx, start_tx)| {
+                        if let Some(start_tx) = start_tx {
+                            let _ = start_tx.send(());
+                        }
+                        result_rx
+                    });
+                    // A batch with no directed recipient resolves here.
+                    let nondirected = terminal_batches
+                        .into_iter()
+                        .filter(|batch| !batch.is_directed())
+                        .collect::<Vec<_>>();
+                    let nondirected_result =
+                        crate::control_plane::publish_and_resolve_runless_runtime_terminations(
+                            &driver,
+                            Some(&completions),
+                            None,
+                            &nondirected,
+                            reason,
+                        )
+                        .await;
+                    let publication_result = match publication_dispatch {
+                        Some(result_rx) => self
+                            .await_runless_terminal_publication_dispatch(
                                 &runtime_id,
                                 result_rx,
                                 None,
                             )
                             .await
-                        } else {
-                            crate::control_plane::publish_and_resolve_runless_runtime_termination(
-                                &driver,
-                                Some(&completions),
-                                None,
-                                &completion_input_ids,
-                                None,
-                                reason,
-                            )
-                            .await
-                        };
+                            .and(nondirected_result),
+                        None => nondirected_result,
+                    };
                     if let Err(reason) = apply_result {
                         return Err(RuntimeControlPlaneError::Internal(reason));
                     }

@@ -1053,6 +1053,20 @@ fn render_command_capability_section(out: &mut String, schema: &MachineSchema) {
         pushln!(out);
         pushln!(
             out,
+            "    /// The most inputs one runtime-loop batch stages into a run: the bound of"
+        );
+        pushln!(
+            out,
+            "    /// the one terminal-completion batch a run's commit names."
+        );
+        pushln!(
+            out,
+            "    pub const RUNTIME_LOOP_BATCH_MAX_INPUTS: usize = {};",
+            meerkat_machine_schema::catalog::dsl::meerkat_machine::command_capabilities::RUNTIME_LOOP_BATCH_MAX_INPUTS
+        );
+        pushln!(out);
+        pushln!(
+            out,
             "    #[must_use = \"generated runtime-loop batch plan must be consumed by exact dequeue/stage realization\"]"
         );
         pushln!(out, "    #[derive(Debug, PartialEq, Eq)]");
@@ -1404,6 +1418,7 @@ fn render_command_capability_section(out: &mut String, schema: &MachineSchema) {
         pushln!(out, "                        .copied()");
         pushln!(out, "                        == target_terminal_intent");
         pushln!(out, "            }})");
+        pushln!(out, "            .take(RUNTIME_LOOP_BATCH_MAX_INPUTS)");
         pushln!(out, "            .cloned()");
         pushln!(out, "            .collect()");
         pushln!(out, "    }}");
@@ -1434,6 +1449,12 @@ fn render_command_capability_section(out: &mut String, schema: &MachineSchema) {
         pushln!(out, "        }};");
         pushln!(out, "        let mut selected = Vec::new();");
         pushln!(out, "        for input_id in ordered {{");
+        pushln!(
+            out,
+            "            if selected.len() == RUNTIME_LOOP_BATCH_MAX_INPUTS {{"
+        );
+        pushln!(out, "                break;");
+        pushln!(out, "            }}");
         pushln!(
             out,
             "            if state.input_runtime_execution_kind.get(input_id).copied()"

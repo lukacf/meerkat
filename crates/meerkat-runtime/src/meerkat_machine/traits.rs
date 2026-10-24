@@ -2236,7 +2236,9 @@ impl MeerkatMachine {
                     return Err(internal(error));
                 }
                 runless_terminal.owe();
-                crate::meerkat_machine::driver::DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared)
+                crate::meerkat_machine::driver::RunlessTerminalBatch::sole_directed_owner(
+                    crate::meerkat_machine::driver::DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared),
+                )
             };
             if candidate_owner_input_id.is_none() {
                 crate::control_plane::publish_and_resolve_runless_runtime_termination_before(
@@ -2654,10 +2656,10 @@ impl MeerkatMachine {
                 if abandoned > 0 {
                     runless_terminal.owe();
                 }
-                let candidate_owner_input_id = crate::meerkat_machine::driver::DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared);
+                let terminal_batches = crate::meerkat_machine::driver::DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared);
                 report.inputs_abandoned += abandoned;
                 report.inputs_pending_drain = report.inputs_pending_drain.saturating_sub(abandoned);
-                ended_run_batch = Some((held, candidate_owner_input_id, reason));
+                ended_run_batch = Some((terminal_batches, reason));
             }
         }
 
@@ -2670,7 +2672,7 @@ impl MeerkatMachine {
             };
             if !woke_runtime {
                 let reason = "retired without runtime loop";
-                let (abandoned, completion_input_ids, candidate_owner_input_id) = {
+                let (abandoned, terminal_batches) = {
                     let mut drv = driver.lock().await;
                     let completion_input_ids = drv.as_driver().active_input_ids();
                     let prepared = drv
@@ -2692,12 +2694,12 @@ impl MeerkatMachine {
                     if abandoned > 0 {
                         runless_terminal.owe();
                     }
-                    let candidate_owner_input_id = crate::meerkat_machine::driver::DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared);
-                    (abandoned, completion_input_ids, candidate_owner_input_id)
+                    let terminal_batches = crate::meerkat_machine::driver::DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared);
+                    (abandoned, terminal_batches)
                 };
                 report.inputs_abandoned += abandoned;
                 report.inputs_pending_drain = 0;
-                abandoned_batch = Some((completion_input_ids, candidate_owner_input_id, reason));
+                abandoned_batch = Some((terminal_batches, reason));
             }
         }
 
@@ -2782,18 +2784,18 @@ impl MeerkatMachine {
             })?;
         }
 
-        for (completion_input_ids, candidate_owner_input_id, reason) in
-            [ended_run_batch, abandoned_batch].into_iter().flatten()
-        {
-            if candidate_owner_input_id.is_some() {
-                continue;
-            }
-            crate::control_plane::publish_and_resolve_runless_runtime_termination_before(
+        // The directed batches published above, each with its nondirected
+        // siblings; a batch with no directed recipient resolves here.
+        for (terminal_batches, reason) in [ended_run_batch, abandoned_batch].into_iter().flatten() {
+            let nondirected = terminal_batches
+                .into_iter()
+                .filter(|batch| !batch.is_directed())
+                .collect::<Vec<_>>();
+            crate::control_plane::publish_and_resolve_runless_runtime_terminations_before(
                 &driver,
                 Some(&completions),
                 None,
-                &completion_input_ids,
-                None,
+                &nondirected,
                 reason,
                 deadline,
             )
@@ -3232,7 +3234,9 @@ mod tests {
                 .expect("abandon dispatch inputs before committing terminal outbox");
         }
         assert_eq!(
-            DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared),
+            crate::meerkat_machine::driver::RunlessTerminalBatch::sole_directed_owner(
+                DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared),
+            ),
             Some(input_id.clone())
         );
     }

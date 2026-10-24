@@ -35,6 +35,10 @@
 \* with AuditLateKinds narrowed to that kind), so the admission lets every
 \* kind join and the exactly-once invariants are not vacuous for any of them.
 \*
+\* The runner also substitutes a small run contributor bound for the
+\* generated 256 (one, then two), so TLC explores the durable join the
+\* run_contributor_capacity guard refuses and the one it takes at the bound.
+\*
 \* Scope limit: the generated model has no crash action, so durable-row
 \* recovery (RecoverInputLifecycle and durable-tail adoption after a process
 \* dies mid-run) is outside this audit. The Rust test
@@ -161,4 +165,35 @@ AuditJoinedInputNotInAnyLane ==
 \* report it violated for each content kind, proving the late input of that
 \* kind joins the running run within the bound.
 AuditLateNeverJoins == AuditLate \notin DOMAIN input_live_boundary_join_run
+
+\* Run contributor bound. The generated join guard (run_contributor_capacity)
+\* refuses a durable join once the run's staged contributors, its batch and
+\* its joins, reach meerkat_machine_run_contributor_limit: 256 in the
+\* generated model, which no bounded run reaches. The contributor-bound runs
+\* substitute a small bound for it in their config
+\* (meerkat_machine_run_contributor_limit <- AuditOneContributor), so TLC
+\* explores the join the guard refuses: with a bound of one the batch input
+\* alone fills the run, and with two exactly one join fits.
+AuditOneContributor == 1
+AuditTwoContributors == 2
+
+\* The audited run never stages more contributors than the bound in force.
+AuditRunContributorsWithinBound ==
+    meerkat_machine_run_staged_contributor_count(input_run_associations, input_phases, AuditRun)
+        <= meerkat_machine_run_contributor_limit
+
+\* Reachability goal, never a safety property: the late Steer input waits at
+\* a model boundary of the audited run, queued in the Steer lane with a
+\* durable delivery, while the run already stages the bound's worth of
+\* contributors, so the contributor guard is what keeps it out of the run.
+\* The runner requires TLC to report it violated under a bound of one.
+AuditCapacityRefusalNeverReached ==
+    ~ ( /\ current_run_id = Some(AuditRun)
+        /\ turn_phase = "CallingLlm"
+        /\ IF AuditLate \in DOMAIN input_lane THEN input_lane[AuditLate] = "Steer" ELSE FALSE
+        /\ IF AuditLate \in DOMAIN input_live_boundary_delivery
+               THEN input_live_boundary_delivery[AuditLate] = "DurableAppend"
+               ELSE FALSE
+        /\ meerkat_machine_run_staged_contributor_count(input_run_associations, input_phases, AuditRun)
+               >= meerkat_machine_run_contributor_limit )
 ====

@@ -2124,6 +2124,34 @@ them.
   member stays attached and serving. Run the mob on a persistent realm to
   adopt its members.
 
+- `meerkat-runtime`, `meerkat-machine-schema`, `meerkat-machine-kernels`: a
+  session that completes more than 256 inputs at once no longer becomes
+  reload-required. One terminal-completion batch names at most 256 inputs:
+  its owner row carries the whole recipient set, every released reader
+  validates the bound at load, and its finalization and receipt writes are
+  one input-state batch CAS (`MAX_INPUT_STATE_BATCH_CAS`). A run took every
+  queued input of a compatible lane, and a stop, destroy, retire, retirement
+  cleanup, attachment replacement or reset completed every active input as
+  one batch, so a backlog past 256 was refused after the terminal checkpoint,
+  which marks the registration reload-required (a mob member with a large
+  backlog could stop its whole mob). A run now stages at most 256 inputs
+  (`command_capabilities::RUNTIME_LOOP_BATCH_MAX_INPUTS`) and the rest of its
+  lane runs in the next run, in admission order. A runless termination
+  completes every input in batches of at most 256, committed together in its
+  one durable commit. Past 256 contributors (a run's batch and its joins), a
+  durable Steer that cannot join the running turn is delivered in the next run
+  instead: the machine's `JoinLiveBoundaryDurableAppend` gains the
+  `run_contributor_capacity` guard. A recipient set past the bound is refused,
+  typed, before any checkpoint.
+
+- `meerkat-runtime`: a Reset the machine refuses, on a running or a stopped
+  runtime, answers `RuntimeControlPlaneError::InvalidState { state }`
+  (`RuntimeDriverError::NotReady { state }` through
+  `SessionServiceRuntimeExt::reset_runtime`) before it ends a resumable run or
+  prepares anything. It used to prepare its inputs' terminals first and roll
+  them back once the machine refused, which marked the registration
+  reload-required and answered an internal error.
+
 - `meerkat`, `meerkat-rpc`: a graceful stop that keeps queued work keeps a
   session's first turn as well. When the stop suspended the run of a first
   turn that was materializing its session (a session created without a

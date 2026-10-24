@@ -4469,7 +4469,7 @@ impl PendingRuntimeExecutorAttachment {
         if let Some((driver, completions, publication_handle)) = predecessor_request_state {
             const REPLACED_REASON: &str =
                 "executor attachment was replaced before request completion";
-            let (predecessor_input_ids, candidate_owner_input_id) = {
+            let (predecessor_input_ids, directed_batches) = {
                 let mut driver = driver.lock().await;
                 // Inputs a store-owned durable-tail recovery consumed are not
                 // pending: adopt them before this sweep names its batch.
@@ -4478,7 +4478,7 @@ impl PendingRuntimeExecutorAttachment {
                     .await?;
                 let predecessor_input_ids = driver.as_driver().active_input_ids();
                 if predecessor_input_ids.is_empty() {
-                    (predecessor_input_ids, None)
+                    (predecessor_input_ids, Vec::new())
                 } else {
                     // The outbox candidates and Cancelled input terminals are
                     // persisted by one driver checkpoint. Replacement may
@@ -4498,8 +4498,13 @@ impl PendingRuntimeExecutorAttachment {
                     // Told once M is released or handed off, whether or not
                     // this replacement then commits.
                     self.runless_terminal.owe();
-                    let candidate_owner_input_id = crate::meerkat_machine::driver::DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared);
-                    (predecessor_input_ids, candidate_owner_input_id)
+                    // Only a directed batch has a terminal to publish: its
+                    // durable outbox. Every waiter fails below either way.
+                    let directed_batches = crate::meerkat_machine::driver::DriverEntry::commit_prepared_runless_interaction_terminal_outboxes(prepared)
+                        .into_iter()
+                        .filter(crate::meerkat_machine::driver::RunlessTerminalBatch::is_directed)
+                        .collect::<Vec<_>>();
+                    (predecessor_input_ids, directed_batches)
                 }
             };
             if !predecessor_input_ids.is_empty() {
@@ -4514,13 +4519,9 @@ impl PendingRuntimeExecutorAttachment {
                     crate::completion::CompletionWaitError::AttachmentReplaced,
                 );
                 self.should_wake = false;
-                if let Some(candidate_owner_input_id) = candidate_owner_input_id {
-                    predecessor_terminal_publication = Some((
-                        driver,
-                        publication_handle,
-                        predecessor_input_ids,
-                        candidate_owner_input_id,
-                    ));
+                if !directed_batches.is_empty() {
+                    predecessor_terminal_publication =
+                        Some((driver, publication_handle, directed_batches));
                 }
             }
         }
@@ -4543,7 +4544,7 @@ impl PendingRuntimeExecutorAttachment {
                 self.runless_terminal.release();
             }
             self.armed = false;
-            if let Some((driver, publication_handle, input_ids, candidate_owner_input_id)) =
+            if let Some((driver, publication_handle, directed_batches)) =
                 predecessor_terminal_publication
             {
                 // External publication must never pin M or delay B's serving
@@ -4553,12 +4554,11 @@ impl PendingRuntimeExecutorAttachment {
                 // later attachment's ordinary startup recovery.
                 let _terminal_publication = self.cleanup_spawner.spawn(async move {
                     let deadline = Instant::now() + std::time::Duration::from_secs(5);
-                    if let Err(error) = crate::control_plane::publish_and_resolve_runless_runtime_termination_before(
+                    if let Err(error) = crate::control_plane::publish_and_resolve_runless_runtime_terminations_before(
                         &driver,
                         None,
                         publication_handle.as_deref(),
-                        &input_ids,
-                        Some(&candidate_owner_input_id),
+                        &directed_batches,
                         "executor attachment was replaced before request completion",
                         Some(deadline),
                     )

@@ -86,8 +86,9 @@ The installation declares both Console domains even when all classes start with
 zero members. Existing seed routes must agree with those installed domains; they
 are not used to invent missing installation authority. Restore preserves older
 prepared plans with neither domain; ordinary Add refuses those plans. Adopting
-new domain-aware native artifacts requires a supported installation migration
-before relying on Add. A source or SDK refresh alone does not supply the pair.
+new domain-aware native artifacts for a pre-release dynamic installation requires
+a fresh install and new preparation before relying on Add. Dynamic rosters cannot
+be updated in place. A source or SDK refresh alone does not supply the pair.
 
 The application may initiate Add for its ordinary declared classes under the
 installation operator's grant when its own domain policy permits the action.

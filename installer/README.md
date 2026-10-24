@@ -1854,6 +1854,15 @@ Canonical compilation and native provider binding remain required. This trusted
 host observation is not a native principal or approval; source validation alone
 does not establish a working native deployment.
 
+Dynamic-roster installations prepared before installation-owned Console domains
+were introduced must be installed fresh when moving to a Toolkit that requires
+that domain pair. The new preparation selects both `authentication_domain` and
+`event_domain`, including when there are no initial members. Restoring an older
+preparation preserves its original bytes and refuses member-class Add when the
+pair is absent. Updating source or SDK files alone does not upgrade it, and
+dynamic rosters cannot be updated in place. Static-roster installations do not
+use member-class Add and are unaffected by this requirement.
+
 The trusted preparation draft can explicitly select Toolkit's
 `application.helper_tools = "checked_installation"` composition. The native
 driver requires the application's real terminal or Console review presenter;

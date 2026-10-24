@@ -309,7 +309,9 @@ pub enum PeerIngressBindRefusal {
 ///     pins the member's controller. A supervisor delivery often reaches a
 ///     member mid-turn, and answering it `NotReady` at once (only trying the
 ///     pin) rejects it, a rejection neither Core nor the mob retries. The
-///     member's later deliveries wait behind that bind, at most the bound.
+///     member's later deliveries wait behind that bind, at most the bound,
+///     and a turn that is itself waiting on the member's ingress cannot end
+///     meanwhile: that bind expires and the delivery is rejected `NotReady`.
 /// - It binds Core's exact `request.input`, setting only its authority
 ///   association, its idempotency key (to `request.event_key`) and its
 ///   trusted ingress observation, for example through `bind_scoped_original`.

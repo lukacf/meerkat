@@ -4066,12 +4066,16 @@ impl PendingRuntimeExecutorAttachment {
                 .map(|(_, input)| input.clone())
                 .collect(),
         };
-        // A run whose provisional tail the store holds is committed by
-        // durable-tail recovery (which may run after this attachment, when
-        // the host builds the agent lazily). Settling it here would capture
-        // and abandon inputs that recovery then commits anyway, so its
-        // evidence is left for a later materialization, where the run is no
-        // longer in flight.
+        // A run whose provisional tail the store holds is committed or
+        // continued by durable-tail recovery (which may run after this
+        // attachment, when the host builds the agent lazily). Settling it here
+        // would capture and abandon inputs that recovery then commits anyway,
+        // or that the resumed run still holds, so its evidence is left: a
+        // resumed run's round reads it itself
+        // (`MeerkatMachine::resumed_run_interrupted_tool_calls`) and
+        // acknowledges it once the run has ended, and any other run's is
+        // settled at a later materialization, where the run is no longer in
+        // flight.
         let provisional_run = self
             .machine
             .provisional_tail_run(self.witness.session_id())

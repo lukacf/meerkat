@@ -741,11 +741,13 @@ def guide_package_availability(state, *, runtime_target=None, verified_artifacts
     result = {"guide_id": state.get("id"), "guide_version": state.get("version"),
         "source": source, "blueprint_hash": fingerprint(plan),
         **package_availability(plan, runtime_target=runtime_target, verified_artifacts=verified_artifacts)}
-    from .runtime_selection import MetaToolkitRuntimeTarget
-    if type(runtime_target) is MetaToolkitRuntimeTarget and Blueprint.model_validate(plan).acquisition is not None:
+    from .compiler import connect_route
+    if connect_route(plan, runtime_target):
         result["design_constraints"] = [
             "This selected Connect route denies ordinary peer messaging tools. "
             "Configured edges do not implement optional agent-to-agent delegation. "
+            "It also disables native Recorder memory, even when the plan requests memory. "
+            "Conversation history does not provide native memory recall. "
             "Native setup requests use their separate selected tools; additional required collaboration remains implementation work."]
     return result
 

@@ -2442,19 +2442,18 @@ impl MeerkatMachine {
             _live_lifecycle_lease: live_lifecycle_lease,
             _mutation_guard: mutation_guard,
         };
-        let result = self
-            .realize_retire_with_archive_lease_announcing(
-                lease,
-                None,
-                deadline,
-                None,
-                &[],
-                &mut runless_terminal,
-            )
-            .await
-            .map(|(report, _)| report);
-        drop(direct_member_slot_guard);
-        result.map_err(super::DirectMemberRetireError::Runtime)
+        self.realize_retire_with_archive_lease_announcing(
+            lease,
+            None,
+            deadline,
+            None,
+            &[],
+            &mut runless_terminal,
+            direct_member_slot_guard,
+        )
+        .await
+        .map(|(report, _)| report)
+        .map_err(super::DirectMemberRetireError::Runtime)
     }
 
     /// [`Self::realize_retire_with_archive_lease_announcing`] that tells the
@@ -2484,6 +2483,7 @@ impl MeerkatMachine {
             post_commit_hook,
             archive_handoffs,
             &mut runless_terminal,
+            None,
         )
         .await
     }
@@ -2491,7 +2491,64 @@ impl MeerkatMachine {
     /// Realize Retire under `lease`, owing `runless_terminal` the inputs it
     /// abandons. The caller took the announcement before every guard it holds
     /// around this realization, so that it is told after them.
+    ///
+    /// The lease holds M, the registration transaction and the live lifecycle
+    /// lease, so from here the retire changes the session: it runs in one
+    /// task that owns the lease, `retained_guard` (a guard the caller holds
+    /// around the whole retire) and the announcement, so a caller dropped
+    /// mid-await only detaches it, and the retire commits and publishes, or
+    /// fails typed, as a whole. The task hands the announcement back to a
+    /// caller that still waits, so it is told after the caller's guards; a
+    /// dropped caller's is told once the task ends, after M is released.
+    #[allow(clippy::too_many_arguments)]
     async fn realize_retire_with_archive_lease_announcing(
+        &self,
+        lease: super::MachineSessionArchiveLease,
+        archive_publication_handle: Option<
+            Arc<dyn meerkat_core::lifecycle::CoreExecutorPublicationHandle>,
+        >,
+        deadline: Option<meerkat_core::time_compat::Instant>,
+        post_commit_hook: Option<Arc<dyn super::MachineSessionArchivePostCommitHook>>,
+        archive_handoffs: &[crate::meerkat_machine_types::CommittedModelRoutingHandoff],
+        runless_terminal: &mut super::RunlessTerminalAnnouncement,
+        retained_guard: Option<crate::tokio::sync::OwnedMutexGuard<()>>,
+    ) -> Result<
+        (
+            RetireReport,
+            Vec<meerkat_core::image_generation::SwitchTurnRequestId>,
+        ),
+        RuntimeControlPlaneError,
+    > {
+        let machine = self.clone();
+        let archive_handoffs = archive_handoffs.to_vec();
+        let announcement = std::mem::take(runless_terminal);
+        let retirement = crate::tokio::spawn(async move {
+            let mut announcement = announcement;
+            let result = machine
+                .realize_retire_owning_lease(
+                    lease,
+                    archive_publication_handle,
+                    deadline,
+                    post_commit_hook,
+                    &archive_handoffs,
+                    &mut announcement,
+                )
+                .await;
+            drop(retained_guard);
+            (result, announcement)
+        });
+        let (result, announcement) = retirement.await.map_err(|error| {
+            RuntimeControlPlaneError::Internal(format!(
+                "the runtime retire task ended before it answered: {error}"
+            ))
+        })?;
+        *runless_terminal = announcement;
+        result
+    }
+
+    /// The body of [`Self::realize_retire_with_archive_lease_announcing`], in
+    /// the task that owns the lease.
+    async fn realize_retire_owning_lease(
         &self,
         lease: super::MachineSessionArchiveLease,
         archive_publication_handle: Option<

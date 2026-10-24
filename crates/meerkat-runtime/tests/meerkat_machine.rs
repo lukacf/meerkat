@@ -957,8 +957,14 @@ async fn archive_post_commit_hook_does_not_run_before_failed_retire_commit() {
     assert_eq!(hook.calls.load(Ordering::SeqCst), 1);
 }
 
+/// A caller cancelled while the archive's post-commit hook runs detaches the
+/// retire instead of cancelling it: once it holds the session gate, the
+/// retire runs in its own task, so the hook still runs to completion, once,
+/// after durable Retired, and only then is the gate free. A later archive of
+/// the retired runtime invokes the hook again, which the hook contract makes
+/// idempotent.
 #[tokio::test]
-async fn cancelled_archive_post_commit_hook_retries_after_durable_retired() {
+async fn a_cancelled_archive_caller_leaves_its_post_commit_hook_to_finish() {
     let store = Arc::new(HarnessRuntimeStore::new());
     let adapter = Arc::new(
         MeerkatMachine::persistent(store.clone() as Arc<dyn RuntimeStore>, memory_blob_store())
@@ -1004,12 +1010,26 @@ async fn cancelled_archive_post_commit_hook_retries_after_durable_retired() {
     );
     task.abort();
     let _ = task.await;
-    assert_eq!(hook.completions.load(Ordering::SeqCst), 0);
-    let retry_lease = adapter
-        .prepare_session_archive_lease(&sid)
-        .await
-        .expect("prepare retry after cancellation")
-        .expect("cancelled hook retains registration");
+    assert_eq!(
+        hook.completions.load(Ordering::SeqCst),
+        0,
+        "the hook still waits for its release"
+    );
+    hook.release.notify_one();
+    let retry_lease = tokio::time::timeout(
+        Duration::from_secs(5),
+        adapter.prepare_session_archive_lease(&sid),
+    )
+    .await
+    .expect("the detached retire finishes its hook and releases the session gate")
+    .expect("prepare an archive lease after the detached retire")
+    .expect("the retired runtime keeps its registration");
+    assert_eq!(hook.attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        hook.completions.load(Ordering::SeqCst),
+        1,
+        "the detached retire completed its hook"
+    );
     adapter
         .retire_session_with_archive_lease_and_post_commit_hook_before(
             retry_lease,
@@ -1017,9 +1037,9 @@ async fn cancelled_archive_post_commit_hook_retries_after_durable_retired() {
             meerkat_core::time_compat::Instant::now() + Duration::from_secs(2),
         )
         .await
-        .expect("Retired retry invokes outstanding hook");
+        .expect("a later archive of the retired runtime invokes the hook again");
     assert_eq!(hook.attempts.load(Ordering::SeqCst), 2);
-    assert_eq!(hook.completions.load(Ordering::SeqCst), 1);
+    assert_eq!(hook.completions.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]

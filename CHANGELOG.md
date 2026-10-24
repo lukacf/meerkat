@@ -2153,6 +2153,13 @@ them.
   already guarantees the loop wakes, so retire now counts it as woken; only a
   closed channel means there is no loop.
 
+- `meerkat-runtime`: a reset, destroy or retire whose caller is dropped
+  mid-operation (a JSON-RPC request aborted after EOF or SIGTERM, an aborted
+  mob task, a cancelled schedule host) completes. The operation ran in its
+  caller's task, so the drop could leave the registration reload-required,
+  or a retired session with pending inputs that never ended; once it holds
+  the session's mutation gate, it now runs in its own task.
+
 - `meerkat-runtime`: a Reset the machine refuses, on a running or a stopped
   runtime, answers `RuntimeControlPlaneError::InvalidState { state }`
   (`RuntimeDriverError::NotReady { state }` through

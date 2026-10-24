@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import signal
 import socket
 import subprocess
@@ -81,6 +82,44 @@ def test_archive_keeps_flexible_accepted_ui_and_assets_and_excludes_private_stat
         assert all(b'must-not-upload' not in archive.extractfile(name).read() for name in names)
         manifest_paths = {row.split('  ', 1)[1] for row in archive.extractfile('SHA256SUMS').read().decode().splitlines()}
         assert manifest_paths == set(names) - {'SHA256SUMS'}
+
+
+def test_install_command_runs_locally_before_linux_guard(package, monkeypatch, capsys):
+    module = load_helper(package / 'remote_operations.py')
+    monkeypatch.setattr(sys, 'platform', 'darwin')
+    monkeypatch.setattr(sys, 'argv', ['remote_operations.py', 'install-command', 'my-team', 'a' * 32, 'b' * 64])
+    module.main()
+    command = shlex.split(capsys.readouterr().out)
+    assert command[:3] == ['python3', '-I', '-c']
+    assert command[4:] == ['my-team', 'a' * 32, 'b' * 64,
+                          hashlib.sha256((package / 'remote_operations.py').read_bytes()).hexdigest()]
+    blueprint = starter_blueprint().model_copy(update={'target': 'gcp'})
+    script = generate_files(blueprint)['deploy/deploy-gcp.sh']
+    assignment = next(line for line in script.splitlines() if line.startswith('REMOTE_INSTALL='))
+    assert 'remote_operations.py install-command' in assignment and '<<' not in assignment
+
+
+def test_generated_install_command_verifies_helper_and_receives_exact_archive(package, tmp_path):
+    module = load_helper(package / 'remote_operations.py')
+    remote = tmp_path / 'remote home'
+    remote.mkdir()
+    archive = remote / 'mobkit-package.tar.gz'
+    module.archive_package(archive, package)
+    digest = module.source_digest(package)
+    # Quoting must survive the shell's command string without altering arguments.
+    instance = "team with 'quote'"
+    args = shlex.split(module.remote_install_command(instance, 'a' * 32, digest, package))
+    assert args[4:7] == [instance, 'a' * 32, digest]
+    env = {**os.environ, 'HOME': str(remote)}
+    refused = subprocess.run([sys.executable, *args[1:-1], '0' * 64], env=env,
+                             capture_output=True, text=True, timeout=10)
+    assert refused.returncode != 0 and 'differs from accepted source' in refused.stderr
+    assert not (remote / 'src').exists()
+    accepted = subprocess.run([sys.executable, *args[1:]], env=env,
+                              capture_output=True, text=True, timeout=10)
+    assert accepted.returncode == 0, accepted.stderr
+    assert module.source_digest(remote / 'src' / instance) == digest
+    assert not (remote / 'src' / instance / '.env').exists()
 
 
 def test_changed_top_level_asset_invalidates_resume_binding(package):

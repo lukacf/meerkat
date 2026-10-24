@@ -70,7 +70,7 @@ mod tests {
     use meerkat_core::{Message, SessionBuildOptions};
     use meerkat_runtime::{
         AcceptOutcome, Input, InputLifecycleState, InputTerminalOutcome, MeerkatMachine,
-        PromptInput, RuntimeSessionPersistenceProfile, RuntimeStore as _, SessionServiceRuntimeExt,
+        PromptInput, RuntimeSessionPersistenceProfile, SessionServiceRuntimeExt,
     };
     use tokio::time::Duration;
 

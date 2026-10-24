@@ -18,6 +18,9 @@
 //! `started.fifo` on its first execution only, so a call that runs again
 //! shows as a second line (and as its effect) instead of blocking on the
 //! FIFO.
+//!
+//! The on-demand attach row runs on a HeadCanonical (SQLite) realm and on a
+//! WholeBlob (JSONL) realm.
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 #![allow(
@@ -51,6 +54,9 @@ const ANSWER: &str = "noted";
 /// Bound on the gateway reaching its tool; a gateway that exits first fails
 /// the row at once.
 const CHILD_BOUND: Duration = Duration::from_secs(120);
+/// Present in a row's root when every incarnation opens a WholeBlob (JSONL)
+/// realm instead of a HeadCanonical (SQLite) one.
+const WHOLE_BLOB_MARKER: &str = "whole-blob";
 const PHASE_GATEWAY: &str = "gateway";
 /// Run a quick tool, then pause the run's terminal commit (the turn is
 /// terminal in its agent, its provisional tail written, its boundary not
@@ -254,14 +260,26 @@ fn mkfifo(path: &Path) {
 }
 
 async fn build_runtime(root: &Path, client: Arc<ScriptedShellClient>) -> Arc<SessionRuntime> {
+    let whole_blob = root.join(WHOLE_BLOB_MARKER).exists();
+    let backend = if whole_blob {
+        meerkat_store::RealmBackend::Jsonl
+    } else {
+        meerkat_store::RealmBackend::Sqlite
+    };
     let (_manifest, persistence) = meerkat::open_realm_persistence_in(
         root,
         "custody-rpc-realm",
-        Some(meerkat_store::RealmBackend::Sqlite),
+        Some(backend),
         Some(meerkat_store::RealmOrigin::Explicit),
     )
     .await
     .expect("open realm persistence");
+    let expected = if whole_blob {
+        meerkat_runtime::RuntimeSessionPersistenceProfile::WholeBlobV1
+    } else {
+        meerkat_runtime::RuntimeSessionPersistenceProfile::HeadCanonicalV1
+    };
+    assert_eq!(persistence.session_persistence_profile(), expected);
     let project = root.join("project");
     std::fs::create_dir_all(&project).expect("project dir");
     let factory = AgentFactory::new(root.join("sessions"))
@@ -406,10 +424,12 @@ async fn rpc_custody_gateway_child() {
     std::future::pending::<()>().await;
 }
 
-#[tokio::test]
-async fn rpc_on_demand_attach_settles_an_interrupted_run_instead_of_replaying_it() {
+async fn on_demand_attach_resumes_the_interrupted_run(whole_blob: bool) {
     let temp = tempfile::tempdir().expect("tempdir");
     let root = temp.path();
+    if whole_blob {
+        std::fs::write(root.join(WHOLE_BLOB_MARKER), "").expect("profile marker");
+    }
     mkfifo(&root.join("started.fifo"));
 
     let mut gateway = spawn_child(root, PHASE_GATEWAY);
@@ -540,6 +560,16 @@ async fn rpc_on_demand_attach_settles_an_interrupted_run_instead_of_replaying_it
         "the interrupted tool's effect happened"
     );
     assert_eq!(tool_runs(root), 1, "the interrupted call ran again");
+}
+
+#[tokio::test]
+async fn rpc_on_demand_attach_settles_an_interrupted_run_instead_of_replaying_it() {
+    on_demand_attach_resumes_the_interrupted_run(false).await;
+}
+
+#[tokio::test]
+async fn rpc_on_demand_attach_settles_an_interrupted_run_instead_of_replaying_it_whole_blob() {
+    on_demand_attach_resumes_the_interrupted_run(true).await;
 }
 
 /// Crash window: the run finished (its tool ran once) and its provisional

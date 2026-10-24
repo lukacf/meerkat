@@ -498,6 +498,13 @@ organization plugin does not rewrite an existing guide or build. Acceptance and
 package matching include the saved context, so changing it requires fresh review.
 Older builds without organization context retain their original scope.
 
+That context can be a plain document or skill describing tools, data and how to
+reach them. The application agent receives the saved wording and can give it to
+Connect's setup agent when it needs a connection. Connect uses its existing
+discovery and installation flow; an organization does not need to define a tool
+catalog. See the [workplace example](examples/workplace-starters/README.md) for
+a short prose contribution and the supported handoff.
+
 This handoff carries visible context and references only. A reference to a private
 authentication or installation package does not install it or grant access. The
 host must adopt the actual package through its supported source-preparation path,

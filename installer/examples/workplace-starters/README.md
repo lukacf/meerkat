@@ -35,10 +35,25 @@ The fields are documented by `launchkit.organization.OrganizationPlugin`:
 - `schema_version`: 1.
 - `id`, `version`, `label`: the contribution's identity and visible label.
 - `description`: optional opening copy.
-- `guide_context`: optional context for the guide.
+- `guide_context`: optional original text for the guide, up to 6,000 characters.
 - `starting_examples`: up to eight examples, each with an `id`, `title`,
   `outcome` and `initial_brief`. Optional `context` and `integration_hints`
   explain relevance to the guide.
+
+`guide_context` can be an ordinary document or skill explaining which workplace
+tools and data are useful and how to reach them. For example:
+
+> Incident history is available through our workplace tools. Follow the setup
+> instructions at https://tools.example.test/start. Use the account connection
+> offered there, and ask the incident owner before publishing a report.
+
+This is fictional prose for the agent to interpret. There is no required tool
+catalog or document parser. Forge preserves the saved text for the application
+builder. When the application needs a connection, its agent is instructed to pass
+the original text in Connect's existing `find_and_install` `user_context` array. Connect's setup
+agent resolves the tool and installation steps through its normal flow. The plan
+still needs a supported setup helper and caller; describing a tool does not make
+it installed or accessible. Keep this text available after those roles are chosen.
 
 An empty example list intentionally leaves only the user's own idea. Selecting
 an example puts its brief in the ordinary composer; sending remains an explicit

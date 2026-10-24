@@ -82,11 +82,12 @@ def _product_setup_authoring(spec, *, runtime_target):
         "Select the caller bundle on at least one actual identity other than acquisition.helper_identity. Choose that caller from the requested responsibilities; the helper selection alone does not expose find_and_install.",
         "Keep the real setup helper and caller in the initial roster. Declare zero-instance application classes in application/native-inventory.json with their actual callbacks and grants; do not add placeholder members. This source route supports no other native bundle names.",
         "Use inspect_blueprint with include_schema:true for the exact authoring schema. These fields describe desired source; they do not establish tool registration, invocation authority, installation, account access or runtime readiness."]
+    requirements.append(
+        "Give original organizational documents and tool access descriptions intact to the application agent and, when a connection is needed, the existing find_and_install user_context array. The selected Connect setup agent interprets the text and resolves installation through its existing flow. Keep this context after selecting the helper and caller. Add and known-service attachment do not discover or install. No organization catalog, document parser or new setup engine is required.")
     if spec.acquisition is None:
         requirements.extend([
             "Supply application/native-inventory.json in accepted application source using the existing native schema1 inventory. Preserve the compiled roster; declare zero-instance classes without creating placeholder identities.",
             "Supply explicit fixed-seed grants in application/native-tool-policy.json using the existing application tool-policy format. Class grants do not grant tools to existing seeds. Preserve the protected policy's provider, policy ID, revision and member set.",
-            "Give original organizational documents and tool access descriptions to the application agent and selected Connect setup role to interpret. Add and known-service attachment do not discover or install. No organization catalog, document parser or new setup engine is required.",
             "Native preparation and the original installation owner still validate declarations, callbacks, grants and actual execution. Source availability is not installed readiness."])
     return {
         "scope": "selected_runtime_source_authoring",

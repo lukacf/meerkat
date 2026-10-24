@@ -166,7 +166,10 @@ async def test_selected_startup_retains_actual_dynamic_providers_and_customizer(
     assert f.app._application_callbacks is f.owner.callbacks
     assert set(f.owner.callbacks.member_classes) == {"reader"}
     assert callable(f.app.context._begin_member_class_add)
+    assert f.app.context._native_original_operations.runtime is runtime
+    assert not f.app.context._native_original_operations._closed
     await f.owner.shutdown(runtime)
+    assert f.app.context._native_original_operations._closed
     with pytest.raises(CustodyError):
         await f.app.context._begin_member_class_add(admission_id="after-shutdown", class_id="reader",
             spec=object(), retain_request=lambda value: None, publish=lambda: None)

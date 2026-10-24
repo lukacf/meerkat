@@ -363,6 +363,10 @@ async def _continue_owned_shutdown(owner, runtime):
     private endpoint join with that stop. A normal return is the lifetime join;
     the termination record alone never permits releasing the project lease.
     """
+    context = getattr(getattr(owner, "application", None), "context", None)
+    participant = getattr(context, "_native_original_operations", None)
+    if participant is not None:
+        await participant.close()
     while True:
         owner._shutdown_attempt = asyncio.create_task(runtime.shutdown())
         try:
@@ -655,6 +659,8 @@ class FreshApplicationStartup:
             _require_model_builder(self, config)
             from .connect_member_class_requests import bind_member_class_requests
             bind_member_class_requests(self, application, runtime)
+            from .connect_native_operations import bind_native_operations
+            bind_native_operations(self, application, runtime)
             return runtime
         except BaseException as original_failure:
             try:
@@ -906,6 +912,8 @@ class RestoredApplicationStartup:
             _require_model_builder(self, config)
             from .connect_member_class_requests import bind_member_class_requests
             bind_member_class_requests(self, application, runtime)
+            from .connect_native_operations import bind_native_operations
+            bind_native_operations(self, application, runtime)
             return runtime
         except BaseException as original_failure:
             try:

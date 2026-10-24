@@ -309,6 +309,39 @@ lifecycle. Construction and offline trials have runtime=None; native reconcile
 and dynamic native callback availability remain explicitly unavailable until a
 trusted trial host implements them. Do not replace missing lifecycle support with
 raw ensure_member, edited protected config, reused seed context or fake success.
+When the selected host supplies context.prepare_original_native_operations, a trusted application
+can prepare one new authenticated original for Connect's finite native operations.
+First retain its actual event through runtime.host_control.retain_authenticated_event;
+preserve the exact original ref, text and transport evidence in PrivateOriginalSubmit.
+Then await context.prepare_original_native_operations(submission, request,
+retain_request=save_exact_request, timeout=60.0) before the first
+runtime.host_control.submit_authenticated_original call. save_exact_request receives
+immutable JSON {submission,request}; durably compare and save those exact bytes in
+the SAME private application event row before returning. Restore that request for
+an exact retry; never select new issuance IDs, target routes or lifetimes after a
+timeout or attach new selections to an admitted original. Native owns replay and
+currentness. The host joins entered callbacks/calls before stop closes the store.
+
+The request is {not_before_ms,expires_at_ms,targets:[{issuance_id,target}]} with
+1-32 finite targets. Select actual installed routes, including completed Active
+Adds; do not derive them from a desired edge, class name or seed identity. Targets
+are {kind:"peer",route,actions:["message","request"]}, {kind:"peer_directory"},
+or {kind:"recorder_identity",actions:["read","write","delete"]}. Choose only the
+required actions in the displayed order, with distinct retained issuance IDs and
+finite ordered times. Connect derives and revalidates the actual member, session,
+controller, peer key, audience and own-identity scope. The same method works after
+Fresh or Restore once the app has reconstructed its real participants and native
+ownership. It has no seed-only lookup and creates no missing member or admission.
+
+Preparation is not input admission, tool availability or delivery. The selected
+class/profile and consequence policy must independently expose the operation;
+this adapter does not remove the current compiler's peer/Recorder guards. A host
+must adopt a coherent supported profile and native tuple separately. Incoming peer
+turns, send_response/reply_to_peer, mob-scope Propose, other identities/scopes and
+session memory_search remain unsupported by this finite selection API. Do not
+replace them with application callback tools or report sender permission as a
+completed receiver turn. Existing setup-result continuation is a separate path.
+
 Incoming sources use Meta's native announcement declarations. When the selected
 host includes announcement_configuration.py, package an optional
 application/announcement-declarations.json containing the native object

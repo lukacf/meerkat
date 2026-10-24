@@ -86,6 +86,19 @@ class ApplicationContext:
         self.console_url = None
         self._application = None
         self._begin_member_class_add = None
+        self._native_original_operations = None
+
+    async def prepare_original_native_operations(self, submission, request, *, retain_request, timeout=60.0):
+        """Retain explicit native intent for an already authenticated original.
+
+        The trusted application saves the supplied immutable JSON in its existing
+        private event row before Connect prepares it. This does not submit input,
+        grant receiving/reply authority, enable tools or prove delivery.
+        """
+        if self._native_original_operations is None:
+            raise RuntimeError("Native preparation requires a connected selected Fresh or Restore application host.")
+        return await self._native_original_operations.prepare(submission, request,
+            retain_request=retain_request, timeout=timeout)
 
     async def begin_member_class_add(self, *, admission_id, class_id, spec, retain_request, publish,
                                      hold_timeout_ms=60_000, expected_predecessor=None, timeout=60.0):
@@ -1046,6 +1059,12 @@ class Application:
     async def stop(self):
         failures = []
         try:
+            if self.context._native_original_operations is not None:
+                try:
+                    await _settle_application_shutdown(self.context._native_original_operations.close,
+                        preserve_cancellation=True)
+                except BaseException as error:
+                    failures.append(error)
             if self._member_mcp is not None:
                 try:
                     await _settle_application_shutdown(self._member_mcp.join, preserve_cancellation=True)
@@ -1063,7 +1082,7 @@ class Application:
         if len(failures) == 1:
             raise failures[0]
         if failures:
-            raise BaseExceptionGroup("Member MCP join and application stop failed", failures)
+            raise BaseExceptionGroup("Native participant join and application stop failed", failures)
 
 
 async def application_check(spec):

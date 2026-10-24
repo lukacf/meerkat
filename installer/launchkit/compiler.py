@@ -177,7 +177,7 @@ def connect_application_finalizer_export():
     names = ("connect_application_finalizer.py", "connect_application_policy.py",
         "connect_installer_caller.py", "connect_policy_input.py",
         "connect_application_startup.py", "connect_application_callbacks.py",
-        "connect_member_class_requests.py")
+        "connect_member_class_requests.py", "connect_native_operations.py")
     return [PackageFile("launchkit/__init__.py", ""),
         *(PackageFile("launchkit/" + name, (Path(__file__).parent / name).read_bytes().decode("utf-8"))
             for name in names)]

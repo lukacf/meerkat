@@ -15023,15 +15023,15 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             // run's to answer. Evidence that cannot be read holds the run: the
             // executor stops with the run's provisional tail kept, and nothing
             // requeues or replays the run's inputs, so the round whose calls
-            // may have run is not planned again. The next start resumes or
-            // repairs the run from its tail.
+            // may have run is not planned again. The stop ends those inputs,
+            // so the next start repairs the run from its tail as interrupted.
             let interrupted_calls = match adapter {
                 Some(adapter) => adapter
                     .resumed_run_interrupted_tool_calls(id, run_id)
                     .await
                     .map_err(|error| {
                         SessionError::runtime_executor_stopped(format!(
-                            "resumed run {run_id} of session {id} is held: its tool-process custody evidence cannot be read: {error}; the run resumes or is repaired at the next start"
+                            "resumed run {run_id} of session {id} is held: its tool-process custody evidence cannot be read: {error}; the run is repaired at the next start"
                         ))
                     })?,
                 None => Vec::new(),
@@ -15558,8 +15558,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     /// `continued_tail` is the receipt of the run the actor was seeded to
     /// continue, which recovery's own `Continue` handed over. That run's
     /// HeadCanonical provisional tail stands ahead of the committed head
-    /// until the run commits its boundary, so the physical head is checked
-    /// against the tail the receipt names, never against the committed head.
+    /// until the run commits its boundary, so on every branch the physical
+    /// head is checked against the tail the receipt names, never against the
+    /// committed head.
     async fn reject_archived_resume_under_recovery_gate(
         &self,
         resume_session_id: &SessionId,
@@ -15616,6 +15617,12 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             return Err(SessionError::NotFound {
                 id: resume_session_id.clone(),
             });
+        }
+        // The actor continues the run whose tail it was seeded from: the
+        // physical head must still be that tail, unprepared or not.
+        if let Some(receipt) = continued_tail {
+            self.verify_continued_tail_physical_head_current(resume_session_id, receipt)
+                .await?;
         }
         // The rewrite-audit replay a preparation otherwise owns runs on the
         // committed snapshot. A run this registration resumes holds its

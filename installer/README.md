@@ -499,8 +499,9 @@ package matching include the saved context, so changing it requires fresh review
 Older builds without organization context retain their original scope.
 
 That context can be a plain document or skill describing tools, data and how to
-reach them. The application agent receives the saved wording and can give it to
-Connect's setup agent when it needs a connection. Connect uses its existing
+reach them. The application builder receives the saved wording and is instructed
+to give it to the application agent, which can pass it to Connect's setup agent
+when it needs a connection. Connect uses its existing
 discovery and installation flow; an organization does not need to define a tool
 catalog. See the [workplace example](examples/workplace-starters/README.md) for
 a short prose contribution and the supported handoff.

@@ -998,8 +998,11 @@ them.
     runtime, for one) is refused as `SessionError::DurableTailHeldForRecovery`
     instead of failing on its first write. The resumed agent waits for its
     MCP servers before it re-dispatches the round's staged calls, and
-    receives the interrupted tool calls of its run that the runtime still
-    owes notices for (`MeerkatMachine::owed_interrupted_tool_calls`).
+    receives the interrupted tool calls of its run from the session's
+    process-custody evidence
+    (`MeerkatMachine::resumed_run_interrupted_tool_calls`), which is
+    acknowledged once the resumed run has ended
+    (`MeerkatMachine::acknowledge_resumed_run_interrupted_tool_calls`).
   - A marked run that is settled without resuming (a refused resume, an
     expired requeue stop, or a stop) has its provisional tail repaired as
     interrupted once its inputs' abandonment commits: rows kept, open calls

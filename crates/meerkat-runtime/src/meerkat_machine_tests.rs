@@ -58871,6 +58871,17 @@ mod terminal_completion_batch_bound {
             waiters: Vec<CompletionHandle>,
             context: &str,
         ) -> Vec<Result<CompletionOutcome, CompletionWaitError>> {
+            self.settle_within(waiters, context, Duration::from_secs(120))
+                .await
+        }
+
+        /// [`Self::settle`] within `bound`.
+        async fn settle_within(
+            &self,
+            waiters: Vec<CompletionHandle>,
+            context: &str,
+            bound: Duration,
+        ) -> Vec<Result<CompletionOutcome, CompletionWaitError>> {
             let mut all = tokio::spawn(async move {
                 let mut outcomes = Vec::with_capacity(waiters.len());
                 for waiter in waiters {
@@ -58878,7 +58889,7 @@ mod terminal_completion_batch_bound {
                 }
                 outcomes
             });
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+            let deadline = tokio::time::Instant::now() + bound;
             loop {
                 match tokio::time::timeout(Duration::from_millis(100), &mut all).await {
                     Ok(joined) => return joined.expect("the waiter task"),
@@ -58886,7 +58897,7 @@ mod terminal_completion_batch_bound {
                         self.assert_ready(context).await;
                         assert!(
                             tokio::time::Instant::now() < deadline,
-                            "{context}: the waiters did not settle within 120 s"
+                            "{context}: the waiters did not settle within {bound:?}"
                         );
                     }
                 }
@@ -59029,6 +59040,154 @@ mod terminal_completion_batch_bound {
         ) -> Result<(), CoreExecutorError> {
             Ok(())
         }
+    }
+
+    /// Refuses every directed interaction terminal it is asked to publish.
+    #[derive(Default)]
+    struct RefusingTerminalPublisher {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_core::lifecycle::CoreExecutorPublicationHandle for RefusingTerminalPublisher {
+        async fn publish_interaction_terminals(
+            &self,
+            _events: &[meerkat_core::event::AgentEvent],
+        ) -> Result<
+            Vec<meerkat_core::lifecycle::core_executor::CoreInteractionTerminalPublicationReceipt>,
+            CoreExecutorError,
+        > {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(CoreExecutorError::Internal(
+                "the directed terminal publication is refused".to_string(),
+            ))
+        }
+    }
+
+    /// Completes every run at once and publishes directed terminals through
+    /// `publisher`.
+    struct PublishingCompletingExecutor {
+        publisher: Arc<dyn meerkat_core::lifecycle::CoreExecutorPublicationHandle>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for PublishingCompletingExecutor {
+        fn publication_handle(
+            &self,
+        ) -> Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorPublicationHandle>> {
+            Some(Arc::clone(&self.publisher))
+        }
+
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Ok(CoreApplyOutput::with_untyped_snapshot(
+                RunBoundaryReceiptDraft {
+                    run_id,
+                    boundary: primitive.apply_boundary(),
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                },
+                None,
+                None,
+            ))
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    /// A tracked flow step: a directed input, whose terminal is published as
+    /// its interaction's terminal.
+    fn directed_flow_step(index: usize) -> Input {
+        let interaction = meerkat_core::time_compat::new_uuid_v7();
+        crate::mob_adapter::create_tracked_flow_step_input(
+            &format!("directed-{index}"),
+            meerkat_core::types::ContentInput::Text(format!("directed step {index}")),
+            "batch-bound-flow",
+            None,
+            &interaction.to_string(),
+        )
+        .expect("a directed flow step")
+    }
+
+    /// A retired session whose held runtime loop owns the drain, with
+    /// `directed` directed inputs admitted first and `nondirected` queued
+    /// external events after them, all pending: every input's id and waiter,
+    /// in admission order, and which inputs are directed.
+    async fn retired_with_pending_mixed_inputs(
+        fixture: &Fixture,
+        publisher: Arc<dyn meerkat_core::lifecycle::CoreExecutorPublicationHandle>,
+        directed: usize,
+        nondirected: usize,
+    ) -> (
+        Vec<InputId>,
+        Vec<CompletionHandle>,
+        std::collections::HashSet<InputId>,
+    ) {
+        // Bound like a mob member's session: a directed terminal names its
+        // runtime placement.
+        fixture
+            .machine
+            .prepare_bindings(fixture.session_id.clone())
+            .await
+            .expect("prepare the session's runtime bindings");
+        fixture
+            .machine
+            .ensure_session_with_executor(
+                fixture.session_id.clone(),
+                Box::new(PublishingCompletingExecutor { publisher }),
+            )
+            .await
+            .expect("attach the publishing loop");
+        fixture
+            .machine
+            .hold_run_starts(&fixture.session_id, crate::RunStartHoldReason::MobStop)
+            .await
+            .expect("hold run starts");
+        let mut parks = fixture.machine.run_start_held_parks();
+        let mut inputs = (0..directed).map(directed_flow_step).collect::<Vec<_>>();
+        inputs.extend((0..nondirected).map(|index| {
+            let mut input = make_queued_external_event(&format!("nondirected-{index}"));
+            if let Input::ExternalEvent(event) = &mut input {
+                event.handling_mode = HandlingMode::Queue;
+            }
+            input
+        }));
+        let directed_ids = inputs[..directed]
+            .iter()
+            .map(|input| input.id().clone())
+            .collect::<std::collections::HashSet<_>>();
+        let (input_ids, waiters) = fixture.admit(inputs).await;
+        tokio::time::timeout(Duration::from_secs(30), parks.wait_for(|parks| *parks >= 1))
+            .await
+            .expect("the runtime loop parks on the hold")
+            .expect("park signal");
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            crate::traits::RuntimeControlPlane::retire(
+                fixture.machine.as_ref(),
+                &fixture.runtime_id(),
+            ),
+        )
+        .await
+        .expect("the retire returns within 60 s")
+        .expect("retire while the held loop owns the drain");
+        (input_ids, waiters, directed_ids)
     }
 
     fn abandoned(reason: InputAbandonReason) -> InputTerminalOutcome {
@@ -59723,6 +59882,86 @@ mod terminal_completion_batch_bound {
         fixture.assert_ready("after the later input").await;
     }
 
+    /// A retirement cleanup of 300 inputs, four of them directed and admitted
+    /// first, commits two batches: the first 256 in canonical order, with
+    /// every directed input, and 44 nondirected ones with no outbox. When the
+    /// publisher refuses the directed terminals, their publication retries
+    /// past the caller's deadline (the mob provisioner's cleanup passes one),
+    /// and the cleanup answers that error; the 44 inputs' waiters are
+    /// answered all the same. Neither the dispatch nor a later retry ever
+    /// resolves a batch with no outbox, and a retired session reaches no
+    /// drain that would. RED while the cleanup awaited the directed dispatch
+    /// first and returned its error before resolving them.
+    async fn retirement_cleanup_answers_the_batch_a_failed_publication_leaves(store: BoundStore) {
+        const DIRECTED: usize = 4;
+        let fixture = Fixture::new(store).await;
+        let publisher = Arc::new(RefusingTerminalPublisher::default());
+        let (input_ids, waiters, directed_ids) = retired_with_pending_mixed_inputs(
+            &fixture,
+            Arc::clone(&publisher) as _,
+            DIRECTED,
+            BACKLOG - DIRECTED,
+        )
+        .await;
+        let mut canonical = input_ids.clone();
+        canonical.sort_by_key(|input_id| input_id.0);
+        let unowned = canonical[BATCH_BOUND..].to_vec();
+        assert!(
+            canonical[..BATCH_BOUND]
+                .iter()
+                .filter(|input_id| directed_ids.contains(input_id))
+                .count()
+                == DIRECTED,
+            "every directed input is in the first batch, so the second has no outbox"
+        );
+
+        let deadline = meerkat_core::time_compat::Instant::now()
+            + meerkat_core::time_compat::Duration::from_secs(2);
+        let cleanup = tokio::time::timeout(
+            Duration::from_secs(120),
+            fixture.machine.abandon_retired_pending_inputs_before(
+                &fixture.session_id,
+                "retired cleanup",
+                deadline,
+            ),
+        )
+        .await
+        .expect("the retirement cleanup returns by its deadline");
+        assert!(
+            cleanup.is_err(),
+            "the refused directed publication outlives the deadline: {cleanup:?}"
+        );
+        assert!(
+            publisher.calls.load(Ordering::SeqCst) >= 1,
+            "the directed batch reached the publisher: {cleanup:?}"
+        );
+
+        let mut unowned_waiters = Vec::with_capacity(unowned.len());
+        for (input_id, waiter) in input_ids.iter().zip(waiters) {
+            if unowned.contains(input_id) {
+                unowned_waiters.push(waiter);
+            }
+        }
+        let outcomes = fixture
+            .settle_within(
+                unowned_waiters,
+                "the batch with no outbox",
+                Duration::from_secs(30),
+            )
+            .await;
+        assert_every_runtime_terminated(&outcomes, "retired cleanup", "the batch with no outbox");
+        fixture
+            .assert_every_terminal(
+                &unowned,
+                &abandoned(InputAbandonReason::Retired),
+                "the batch with no outbox",
+            )
+            .await;
+        fixture
+            .assert_ready("after the refused directed publication")
+            .await;
+    }
+
     macro_rules! on_every_store {
         ($($row:ident),* $(,)?) => {
             $(
@@ -59760,5 +59999,6 @@ mod terminal_completion_batch_bound {
         attachment_replacement_completes_every_input,
         reset_refused_while_running_keeps_the_session_usable,
         reset_refused_while_stopped_keeps_the_session_usable,
+        retirement_cleanup_answers_the_batch_a_failed_publication_leaves,
     );
 }

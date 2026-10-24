@@ -6794,12 +6794,12 @@ impl Session {
     /// identity): nothing is appended, requests included, so retried delivery
     /// converges. No turn is started.
     ///
-    /// An interrupted-call block whose foreground shell call the transcript
-    /// already answers owes the model nothing: the call's own result told it
-    /// (a resumed run's round answers such a call as interrupted, with an
-    /// outcome-uncertain result). The block is left out, and a notice left
-    /// with no block appends nothing, requests included, and reads as a
-    /// duplicate, so its delivery converges the same way.
+    /// An interrupted-call block of a run that had already completed, whose
+    /// foreground shell call the transcript answers, owes the model nothing:
+    /// the call's own result told it (a resumed run's round answers such a
+    /// call as interrupted, with an outcome-uncertain result). The block is
+    /// left out, and a notice left with no block appends nothing and reads
+    /// as a duplicate, so its delivery converges the same way.
     pub fn append_system_notice_once(
         &mut self,
         record: crate::types::SystemNoticeRecord,
@@ -6832,19 +6832,21 @@ impl Session {
         crate::service::AppendSystemContextStatus::Applied
     }
 
-    /// Whether `block` reports an interrupted foreground shell call that the
-    /// transcript already answers: an assistant message of the block's run
-    /// asked for the call, and the tool results that follow that message
-    /// hold the call's result. Tool call ids can repeat across runs, so the
-    /// call is matched within its run. A background job, a monitor or a
-    /// command hook outlives the call that started it (that call's result
-    /// says nothing about how its process ended), so their blocks are never
-    /// answered here.
+    /// Whether `block` reports an interrupted foreground shell call of a run
+    /// that had already completed, and the transcript answers that call: an
+    /// assistant message of the block's run asked for the call, and the tool
+    /// results that follow that message hold the call's result. Tool call ids
+    /// can repeat across runs, so the call is matched within its run. A
+    /// background job, a monitor or a command hook outlives the call that
+    /// started it (that call's result says nothing about how its process
+    /// ended), and a block that settled its run's inputs restores the run's
+    /// user requests with its notice, so neither is answered here.
     fn answers_interrupted_shell_call(&self, block: &crate::types::SystemNoticeBlock) -> bool {
         let crate::types::SystemNoticeBlock::ToolProcessInterrupted {
             run_id,
             tool_call_id: Some(tool_call_id),
             spawner: crate::tool_process::ToolProcessSpawner::ShellCall,
+            disposition: crate::tool_process::InterruptedToolRunDisposition::RunCompleted,
             ..
         } = block
         else {
@@ -10352,8 +10354,8 @@ mod tests {
     /// once the run has ended, then owes the model no notice: its block is
     /// left out, and a notice left with no block appends nothing. A call of
     /// another run with the same id, a call the transcript does not answer,
-    /// and a background job started by the answered call still get their
-    /// blocks.
+    /// a background job started by the answered call, and a block that
+    /// settled the run's inputs still get their blocks.
     #[test]
     fn an_interrupted_shell_call_the_transcript_answers_owes_no_notice() {
         use crate::tool_process::{
@@ -10422,16 +10424,27 @@ mod tests {
                 job_id: "job-1".to_string(),
             },
         );
+        let settled = SystemNoticeBlock::ToolProcessInterrupted {
+            run_id: run_id.clone(),
+            tool_call_id: Some("call-1".to_string()),
+            spawner: ToolProcessSpawner::ShellCall,
+            cessation: ToolProcessCessation::KilledByRecovery { members: 1 },
+            disposition: InterruptedToolRunDisposition::InputsSettled {
+                inputs: 1,
+                unrestored: Vec::new(),
+            },
+        };
         assert_eq!(
             session.append_system_notice_once(notice(vec![
                 answered,
                 other_run.clone(),
                 unanswered.clone(),
                 job.clone(),
+                settled.clone(),
             ])),
             crate::service::AppendSystemContextStatus::Applied
         );
-        let expected = vec![other_run, unanswered, job];
+        let expected = vec![other_run, unanswered, job, settled];
         let messages = session.messages();
         assert_eq!(messages.len(), transcript + 1, "one notice");
         assert!(

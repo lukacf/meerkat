@@ -674,7 +674,7 @@ for (const outcome of ['success', 'error']) test(`navigation cancels the old upl
   const session = new Map();
   createGuideAttachmentStore(() => storage(session)).add(guide.id, [ref('kept.md')]);
   let finishOld, finishNew;
-  await mount({ session, otherGuides: [other], onPost: ({ url }) => {
+  await mount({ session, otherGuides: [other, { ...structuredClone(guide), name: 'Original saved setup' }], onPost: ({ url }) => {
     if (url === `/api/guide/${guide.id}/attachments`) return new Promise(resolve => {
       finishOld = () => resolve(outcome === 'success' ? { attachments: [ref('late.png', 4)] }
         : { httpError: 422, detail: 'Old guide upload failed.' });
@@ -713,6 +713,14 @@ for (const outcome of ['success', 'error']) test(`navigation cancels the old upl
     const recovered = createGuideAttachmentStore(() => storage(session));
     assert.deepEqual(recovered.read(guide.id), [ref('kept.md')]);
     assert.deepEqual(recovered.read(other.id), [ref('new.md', 2, other.id)]);
+    // Errors are scoped to their original guide, so inspect it again after
+    // the new upload completes to expose an incorrectly retained late error.
+    await act(async () => [...document.querySelectorAll('button')].find(node => node.textContent.includes('Your setups')).click());
+    await act(async () => { [...document.querySelectorAll('.setup-history-menu button')].find(node => node.textContent.includes('Original saved setup')).click(); await pause(); });
+    assert.match(document.body.textContent, /Which evidence\?/);
+    assert.doesNotMatch(document.body.textContent, /Old guide upload failed/);
+    assert.equal(document.querySelector('.setup-attachments [role="alert"]') === null, true);
+    assert.equal(document.querySelector('.setup-attachments a').textContent, 'kept.md');
     assert.equal(local.get(input.key), savedDraft, 'Navigation and late completion preserve the old guide draft and choices.');
     assert.equal(calls.filter(call => call.url.endsWith('/respond')).length, 0);
   });

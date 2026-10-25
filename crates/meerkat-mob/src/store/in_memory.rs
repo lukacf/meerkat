@@ -73,7 +73,7 @@ use crate::profile::Profile;
 use crate::run::flow_run;
 use crate::run::{
     FailureLedgerEntry, FlowAuthorityInputRecord, FrameSnapshot, LoopIterationLedgerEntry,
-    LoopSnapshot, MobRun, MobRunProvenanceAuthority, MobRunRemoteTurnIntent,
+    LoopSnapshot, MobRun, MobRunObserverBinding, MobRunProvenanceAuthority, MobRunRemoteTurnIntent,
     MobRunRemoteTurnReceipt, MobRunStatus, StepLedgerEntry, mob_machine_run_status_is_terminal,
 };
 use crate::temporary_council::TemporaryCouncilId;
@@ -3364,6 +3364,7 @@ pub struct InMemoryMobRunStore {
     pub(super) runs: Arc<RwLock<IndexMap<RunId, MobRun>>>,
     pub(super) remote_turn_intents: Arc<RwLock<BTreeMap<(RunId, u64), MobRunRemoteTurnIntent>>>,
     pub(super) remote_turn_receipts: Arc<RwLock<BTreeMap<(RunId, u64), MobRunRemoteTurnReceipt>>>,
+    pub(super) run_observers: Arc<RwLock<BTreeMap<RunId, MobRunObserverBinding>>>,
 }
 
 impl InMemoryMobRunStore {
@@ -3537,6 +3538,51 @@ impl MobRunStore for InMemoryMobRunStore {
             .await
             .remove(&(run_id.clone(), dispatch_sequence))
             .is_some())
+    }
+
+    fn holds_run_observers(&self) -> bool {
+        true
+    }
+
+    async fn put_run_observer(
+        &self,
+        binding: &MobRunObserverBinding,
+    ) -> Result<bool, MobStoreError> {
+        let mut observers = self.run_observers.write().await;
+        match observers.get(&binding.run_id) {
+            Some(existing) if existing == binding => Ok(false),
+            Some(_) => Err(MobStoreError::CasConflict(format!(
+                "run '{}' already has another observer binding",
+                binding.run_id
+            ))),
+            None => {
+                observers.insert(binding.run_id.clone(), binding.clone());
+                Ok(true)
+            }
+        }
+    }
+
+    async fn get_run_observer(
+        &self,
+        run_id: &RunId,
+    ) -> Result<Option<MobRunObserverBinding>, MobStoreError> {
+        Ok(self.run_observers.read().await.get(run_id).cloned())
+    }
+
+    async fn refresh_run_observer(
+        &self,
+        expected: &MobRunObserverBinding,
+        next: &MobRunObserverBinding,
+    ) -> Result<bool, MobStoreError> {
+        super::validate_run_observer_refresh(expected, next)?;
+        let mut observers = self.run_observers.write().await;
+        match observers.get_mut(&expected.run_id) {
+            Some(stored) if stored == expected => {
+                *stored = next.clone();
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
     }
 
     async fn cas_flow_state_with_authority(

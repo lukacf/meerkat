@@ -42,6 +42,9 @@ pub(crate) enum MobMachineCommand {
         /// The run's role targets; the actor admits them before anything is
         /// written. `None` runs every step role-wide.
         role_targets: Option<Arc<crate::run::FlowRoleTargets>>,
+        /// The member the run reports to; the actor binds it beside the run,
+        /// outside the params and targets a keyed replay compares.
+        observer: Option<crate::run::FlowRunObserver>,
     },
     CancelFlow {
         run_id: RunId,
@@ -716,6 +719,13 @@ const MOB_MACHINE_RUNTIME_INTERNAL_CLASSIFICATIONS:
         // from the tool surface's manage-scope and spawner-ownership
         // observations; driven by the tool surface, not a standalone command.
         input: MobMachineCatalogInput::ResolveOwnedMemberAdmission,
+        reason: MobMachineRuntimeInternalReason::OperatorScopeAdmissionAuthority,
+    },
+    MobMachineRuntimeInternalClassificationRecord {
+        // Read admission for one flow run is decided by MobMachine from the
+        // tool surface's manage-scope and observer-binding observations;
+        // driven by the tool surface, not a standalone command.
+        input: MobMachineCatalogInput::ResolveFlowRunObservationAdmission,
         reason: MobMachineRuntimeInternalReason::OperatorScopeAdmissionAuthority,
     },
     MobMachineRuntimeInternalClassificationRecord {

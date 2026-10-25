@@ -63,8 +63,8 @@ use crate::machines::mob_machine as mob_dsl;
 use crate::run::flow_run;
 use crate::run::{
     FailureLedgerEntry, FrameSnapshot, LoopIterationLedgerEntry, LoopSnapshot, MobRun,
-    MobRunProvenanceAuthority, MobRunRemoteTurnIntent, MobRunRemoteTurnReceipt, MobRunStatus,
-    StepLedgerEntry,
+    MobRunObserverBinding, MobRunProvenanceAuthority, MobRunRemoteTurnIntent,
+    MobRunRemoteTurnReceipt, MobRunStatus, StepLedgerEntry,
 };
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
@@ -6260,6 +6260,24 @@ pub trait MobIdentityStatusStore: Send + Sync {
     ) -> Result<(), MobStoreError>;
 }
 
+/// A run observer refresh may replace the retained work only.
+pub(crate) fn validate_run_observer_refresh(
+    expected: &MobRunObserverBinding,
+    next: &MobRunObserverBinding,
+) -> Result<(), MobStoreError> {
+    if next.run_id != expected.run_id
+        || next.mob_id != expected.mob_id
+        || next.flow_id != expected.flow_id
+        || next.observer.member() != expected.observer.member()
+    {
+        return Err(MobStoreError::Internal(format!(
+            "an observer binding refresh of run '{}' may replace its retained work only",
+            expected.run_id
+        )));
+    }
+    Ok(())
+}
+
 /// Trait for persisting and querying flow runs.
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -6337,6 +6355,57 @@ pub trait MobRunStore: Send + Sync {
         Err(MobStoreError::FrameAtomicPersistenceUnavailable {
             operation: FrameAtomicOperation::DeleteRemoteTurnReceipt,
         })
+    }
+    /// Whether this store holds flow run observer bindings
+    /// ([`Self::put_run_observer`], [`Self::get_run_observer`],
+    /// [`Self::refresh_run_observer`]). A mob refuses every observer, typed
+    /// (`FlowRunObserverRefusal::PersistenceUnavailable`), before it writes
+    /// anything when its store holds none. The default holds none.
+    fn holds_run_observers(&self) -> bool {
+        false
+    }
+    /// Bind a flow run to its observer, once. Returns `true` when the binding
+    /// is written now and `false` when the identical binding already exists;
+    /// any other binding for the same run fails closed with
+    /// [`MobStoreError::CasConflict`] and leaves the first one in place. The
+    /// binding is a record of its own: it never touches the run row.
+    ///
+    /// A store that cannot hold bindings refuses every one (the default; see
+    /// [`Self::holds_run_observers`]).
+    async fn put_run_observer(
+        &self,
+        binding: &MobRunObserverBinding,
+    ) -> Result<bool, MobStoreError> {
+        Err(MobStoreError::Internal(format!(
+            "this run store cannot hold the observer binding of run '{}'",
+            binding.run_id
+        )))
+    }
+    /// The observer binding of `run_id`, if one was written. A store that
+    /// cannot hold bindings has none (the default).
+    async fn get_run_observer(
+        &self,
+        _run_id: &RunId,
+    ) -> Result<Option<MobRunObserverBinding>, MobStoreError> {
+        Ok(None)
+    }
+    /// Replace the retained work of a run's observer binding: `next` replaces
+    /// the stored binding only while it is still exactly `expected`
+    /// (`Ok(true)`); a stored binding that changed or is gone answers
+    /// `Ok(false)` and is left as it is. `next` may differ from `expected`
+    /// in its retained work only: another run, mob, flow or member fails
+    /// closed with [`MobStoreError::Internal`].
+    ///
+    /// A store that cannot hold bindings refuses (the default).
+    async fn refresh_run_observer(
+        &self,
+        expected: &MobRunObserverBinding,
+        _next: &MobRunObserverBinding,
+    ) -> Result<bool, MobStoreError> {
+        Err(MobStoreError::Internal(format!(
+            "this run store cannot hold the observer binding of run '{}'",
+            expected.run_id
+        )))
     }
     async fn cas_flow_state_with_authority(
         &self,
@@ -6827,6 +6896,42 @@ impl MobRunStore for AuthorityValidatingMobRunStore {
         self.validate_existing_run_by_id(run_id, "delete_remote_turn_receipt")
             .await?;
         Ok(deleted)
+    }
+
+    fn holds_run_observers(&self) -> bool {
+        self.inner.holds_run_observers()
+    }
+
+    async fn put_run_observer(
+        &self,
+        binding: &MobRunObserverBinding,
+    ) -> Result<bool, MobStoreError> {
+        self.inner.put_run_observer(binding).await
+    }
+
+    async fn refresh_run_observer(
+        &self,
+        expected: &MobRunObserverBinding,
+        next: &MobRunObserverBinding,
+    ) -> Result<bool, MobStoreError> {
+        validate_run_observer_refresh(expected, next)?;
+        self.inner.refresh_run_observer(expected, next).await
+    }
+
+    async fn get_run_observer(
+        &self,
+        run_id: &RunId,
+    ) -> Result<Option<MobRunObserverBinding>, MobStoreError> {
+        let binding = self.inner.get_run_observer(run_id).await?;
+        if let Some(binding) = binding.as_ref()
+            && &binding.run_id != run_id
+        {
+            return Err(MobStoreError::Internal(format!(
+                "MobRunStore get_run_observer returned run '{}' while reading run '{}'",
+                binding.run_id, run_id
+            )));
+        }
+        Ok(binding)
     }
 
     async fn cas_flow_state_with_authority(

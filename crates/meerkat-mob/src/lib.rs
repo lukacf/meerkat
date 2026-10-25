@@ -121,13 +121,13 @@ pub use definition::{
     UnknownProfileKeys,
 };
 pub use error::{
-    FlowRoleTargetRefusal, FlowStepDispatchRejectKind, ForkSourceUnavailableCause,
-    ForkedParticipantLeaseOperation, ForkedParticipantOwnerHostRejection,
-    ForkedParticipantSourceRejection, IncarnationInconsistency, MemberCustodyDeferral,
-    MemberCustodyDeferralCause, MemberCustodyRestore, MemberProvisionFailureCause,
-    MemberRegistrationHookCall, MemberRuntimeDetachment, MemberSendIdempotencyRefusal,
-    MobDefinitionProjectionMismatchKind, MobError, MobFailureClass,
-    OperatorAuthorityCeilingRefusal, RuntimeEffectKind,
+    FlowRoleTargetRefusal, FlowRunObserverRefusal, FlowStepDispatchRejectKind,
+    ForkSourceUnavailableCause, ForkedParticipantLeaseOperation,
+    ForkedParticipantOwnerHostRejection, ForkedParticipantSourceRejection,
+    IncarnationInconsistency, MemberCustodyDeferral, MemberCustodyDeferralCause,
+    MemberCustodyRestore, MemberProvisionFailureCause, MemberRegistrationHookCall,
+    MemberRuntimeDetachment, MemberSendIdempotencyRefusal, MobDefinitionProjectionMismatchKind,
+    MobError, MobFailureClass, OperatorAuthorityCeilingRefusal, RuntimeEffectKind,
 };
 pub use event::{
     AttributedEvent, FlowCancelClass, ForkJobTerminalEvent, MemberWireEdge, MobEvent, MobEventKind,
@@ -239,12 +239,13 @@ pub use profile::{
 };
 pub use roster::{MobMemberKickoffPhase, MobMemberKickoffSnapshot};
 pub use run::{
-    CreateMobAdmission, FailureLedgerEntry, FlowContext, FlowRoleTargets, FlowRoleTargetsError,
-    FlowRunConfig, FrameSnapshot, LoopContextHistory, LoopIterationLedgerEntry, LoopSnapshot,
-    MobFlowRunPublicResultClass, MobRun, MobRunStatus, ProfileMutationAdmission, StepLedgerEntry,
-    StepRunStatus, mob_machine_create_mob_admission, mob_machine_profile_mutation_admission,
-    mob_machine_run_public_result_class, mob_machine_run_status_is_terminal,
-    mob_machine_step_status_is_terminal,
+    CreateMobAdmission, FLOW_RUN_WAKE_TOOL, FailureLedgerEntry, FlowContext, FlowRoleTargets,
+    FlowRoleTargetsError, FlowRunConfig, FlowRunObserver, FlowRunWake, FlowRunWakeStatus,
+    FrameSnapshot, LoopContextHistory, LoopIterationLedgerEntry, LoopSnapshot,
+    MobFlowRunPublicResultClass, MobRun, MobRunObserverBinding, MobRunStatus,
+    ProfileMutationAdmission, StepLedgerEntry, StepRunStatus, mob_machine_create_mob_admission,
+    mob_machine_profile_mutation_admission, mob_machine_run_public_result_class,
+    mob_machine_run_status_is_terminal, mob_machine_step_status_is_terminal,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use runtime::ControllerRouteObservation;
@@ -300,8 +301,8 @@ pub use runtime::{
     DelegationExecutionSource, DelegationMemberOptions, DelegationParentContext,
     DelegationTerminalizedExecution, DelegationTurnTerminal, DurableBoundedMemberState,
     DurableBoundedWorkRecovery, DurableBoundedWorkState, ExternalPeerBindingSpec, FlowRunHandle,
-    FlowRunWaitError, FlowTargetProvisioner, ForkBuildInheritance, ForkChildRun,
-    ForkChildRunOutcome, ForkJobBinding, ForkJobRecord, ForkJobTerminalError,
+    FlowRunObserverWake, FlowRunWaitError, FlowTargetProvisioner, ForkBuildInheritance,
+    ForkChildRun, ForkChildRunOutcome, ForkJobBinding, ForkJobRecord, ForkJobTerminalError,
     ForkMemberAtTurnBoundary, ForkMemberBoundedRunOutcome, ForkMemberResult, ForkOverlayOrigin,
     GovernedInputCustody, HELPER_RESULT_TRUNCATION_MARKER, HelperOptions, HelperResult,
     HostBindReport, HostBindRequest, HostCapabilityReport, HostRevokeReport,

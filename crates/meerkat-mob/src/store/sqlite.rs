@@ -85,8 +85,8 @@ use crate::profile::Profile;
 use crate::run::flow_run;
 use crate::run::{
     FailureLedgerEntry, FrameSnapshot, LoopIterationLedgerEntry, LoopSnapshot, MobRun,
-    MobRunProvenanceAuthority, MobRunRemoteTurnIntent, MobRunRemoteTurnReceipt, MobRunStatus,
-    StepLedgerEntry, mob_machine_run_status_is_terminal,
+    MobRunObserverBinding, MobRunProvenanceAuthority, MobRunRemoteTurnIntent,
+    MobRunRemoteTurnReceipt, MobRunStatus, StepLedgerEntry, mob_machine_run_status_is_terminal,
 };
 use crate::temporary_council::TemporaryCouncilId;
 use async_trait::async_trait;
@@ -146,6 +146,10 @@ CREATE TABLE IF NOT EXISTS mob_run_remote_turn_receipts (
     dispatch_sequence BLOB NOT NULL,
     receipt_json BLOB NOT NULL,
     PRIMARY KEY (run_id, dispatch_sequence)
+);
+CREATE TABLE IF NOT EXISTS mob_run_observers (
+    run_id TEXT PRIMARY KEY,
+    binding_json BLOB NOT NULL
 );
 CREATE TABLE IF NOT EXISTS mob_specs (
     mob_id TEXT PRIMARY KEY,
@@ -1270,6 +1274,15 @@ fn migration_0012_mob_runtime_incarnations(tx: &Transaction<'_>) -> Result<(), r
     )
 }
 
+fn migration_0013_run_observers(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    tx.execute_batch(
+        "CREATE TABLE mob_run_observers (
+             run_id TEXT PRIMARY KEY,
+             binding_json BLOB NOT NULL
+         );",
+    )
+}
+
 fn migration_0001_mob_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
     tx.execute_batch(CREATE_SCHEMA_SQL)
 }
@@ -2286,6 +2299,168 @@ fn verify_released_0_9_3_mob_schema(conn: &Connection) -> Result<(), String> {
     )
 }
 
+// Frozen v12 catalog: the shape 0.9.4 and 0.9.5 shipped, immediately before
+// the flow run observer bindings. Built from the frozen v11 catalog plus the
+// released migration 12, never from the current initializer, so a v12
+// database is proven against the exact released shape before the one
+// supported v12 -> v13 transition runs.
+fn build_released_0_9_5_mob_schema(tx: &Transaction<'_>) -> Result<(), rusqlite::Error> {
+    build_released_0_9_3_mob_schema(tx)?;
+    migration_0012_mob_runtime_incarnations(tx)
+}
+
+const RELEASED_0_9_5_MOB_OBJECTS: &[meerkat_sqlite::SchemaObject] = &[
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_events",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_event_meta",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_external_deliveries",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runs",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_run_remote_turn_intents",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_run_remote_turn_receipts",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_specs",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_supervisors",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_host_authorities",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_host_binding_generation_highwaters",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_member_operator_requests",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_placed_spawns",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_operator_grants",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_member_event_cursors",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_member_live_cleanups",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_binding_overlays",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_store_meta",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_intents",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_leases",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_operation_receipts",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_statuses",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "realm_profiles",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_intent_mutation_receipts",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_convergence_resolution_receipts",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_identity_adoption_receipts",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_forked_participants",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_forked_participant_member_associations",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_temporary_councils",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_callback_claim_verifiers",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "mob_forked_participants_fork_session",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "mob_events_mob_cursor",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "mob_identity_intents_session",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "mob_identity_intents_lineage",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Index,
+        name: "mob_identity_receipts_identity",
+    },
+    meerkat_sqlite::SchemaObject {
+        kind: meerkat_sqlite::SchemaObjectKind::Table,
+        name: "mob_runtime_incarnations",
+    },
+];
+
+fn verify_released_0_9_5_mob_schema(conn: &Connection) -> Result<(), String> {
+    meerkat_sqlite::verify_released_schema_fingerprint(
+        conn,
+        &MOB_DOMAIN,
+        RELEASED_0_9_5_MOB_OBJECTS,
+        build_released_0_9_5_mob_schema,
+    )
+}
+
 /// The mob store bundle's schema domain in the per-file migration ledger.
 ///
 /// The oldest historical transition admitted by this binary is the exact
@@ -2381,9 +2556,14 @@ pub const MOB_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomai
             name: "mob-incarnation",
             apply: migration_0012_mob_runtime_incarnations,
         },
+        meerkat_sqlite::Migration {
+            version: 13,
+            name: "run-observers",
+            apply: migration_0013_run_observers,
+        },
     ],
     initialize_current: initialize_current_mob_schema,
-    allowed_existing_versions: &[3, 4, 7, 8, 9, 10, 11, 12],
+    allowed_existing_versions: &[3, 4, 7, 8, 9, 10, 11, 12, 13],
     bridge_recoverable_versions: &[],
     released_predecessors: &[
         meerkat_sqlite::SchemaPredecessor {
@@ -2414,8 +2594,16 @@ pub const MOB_DOMAIN: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomai
             version: 11,
             verify: verify_released_0_9_3_mob_schema,
         },
+        meerkat_sqlite::SchemaPredecessor {
+            version: 12,
+            verify: verify_released_0_9_5_mob_schema,
+        },
     ],
     owned_objects: &[
+        meerkat_sqlite::SchemaObject {
+            kind: meerkat_sqlite::SchemaObjectKind::Table,
+            name: "mob_run_observers",
+        },
         meerkat_sqlite::SchemaObject {
             kind: meerkat_sqlite::SchemaObjectKind::Table,
             name: "mob_runtime_incarnations",
@@ -2601,7 +2789,7 @@ mod schema_floor_tests {
         let report =
             meerkat_sqlite::apply_domain_migrations(&mut conn, &MOB_DOMAIN).expect("upgrade");
         assert_eq!(report.from_version, 3);
-        assert_eq!(report.to_version, 12);
+        assert_eq!(report.to_version, 13);
     }
 
     #[test]
@@ -10258,6 +10446,111 @@ impl MobRunStore for SqliteMobRunStore {
         .await
     }
 
+    fn holds_run_observers(&self) -> bool {
+        true
+    }
+
+    async fn put_run_observer(
+        &self,
+        binding: &MobRunObserverBinding,
+    ) -> Result<bool, MobStoreError> {
+        let path = self.path.clone();
+        let binding = binding.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let run_key = binding.run_id.to_string();
+            let existing: Option<Vec<u8>> = tx
+                .query_row(
+                    "SELECT binding_json FROM mob_run_observers WHERE run_id = ?1",
+                    params![run_key],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(se)?;
+            if let Some(bytes) = existing {
+                let existing: MobRunObserverBinding = decode_json(&bytes)?;
+                if existing != binding {
+                    return Err(MobStoreError::CasConflict(format!(
+                        "run '{}' already has another observer binding",
+                        binding.run_id
+                    )));
+                }
+                return Ok(false);
+            }
+            let bytes = encode_json(&binding)?;
+            tx.execute(
+                "INSERT INTO mob_run_observers (run_id, binding_json) VALUES (?1, ?2)",
+                params![run_key, bytes],
+            )
+            .map_err(se)?;
+            tx.commit().map_err(se)?;
+            Ok(true)
+        })
+        .await
+    }
+
+    async fn get_run_observer(
+        &self,
+        run_id: &RunId,
+    ) -> Result<Option<MobRunObserverBinding>, MobStoreError> {
+        let path = self.path.clone();
+        let run_key = run_id.to_string();
+        run_sqlite_task(move || {
+            let conn = open_existing_read_connection(&path)?;
+            let bytes: Option<Vec<u8>> = conn
+                .query_row(
+                    "SELECT binding_json FROM mob_run_observers WHERE run_id = ?1",
+                    params![run_key],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(se)?;
+            bytes.map(|bytes| decode_json(&bytes)).transpose()
+        })
+        .await
+    }
+
+    async fn refresh_run_observer(
+        &self,
+        expected: &MobRunObserverBinding,
+        next: &MobRunObserverBinding,
+    ) -> Result<bool, MobStoreError> {
+        super::validate_run_observer_refresh(expected, next)?;
+        let path = self.path.clone();
+        let expected = expected.clone();
+        let next = next.clone();
+        run_sqlite_task(move || {
+            let mut conn = open_connection(&path)?;
+            let tx = begin_immediate(&mut conn)?;
+            let run_key = expected.run_id.to_string();
+            let stored: Option<Vec<u8>> = tx
+                .query_row(
+                    "SELECT binding_json FROM mob_run_observers WHERE run_id = ?1",
+                    params![run_key],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(se)?;
+            let Some(stored) = stored else {
+                return Ok(false);
+            };
+            let stored: MobRunObserverBinding = decode_json(&stored)?;
+            if stored != expected {
+                return Ok(false);
+            }
+            let bytes = encode_json(&next)?;
+            tx.execute(
+                "UPDATE mob_run_observers SET binding_json = ?2 WHERE run_id = ?1",
+                params![run_key, bytes],
+            )
+            .map_err(se)?;
+            tx.commit().map_err(se)?;
+            Ok(true)
+        })
+        .await
+    }
+
     async fn cas_flow_state_with_authority(
         &self,
         run_id: &RunId,
@@ -12164,7 +12457,7 @@ mod tests {
                 |row| row.get::<_, i64>(0),
             )
             .unwrap(),
-            12
+            13
         );
         for retired in [
             "mob_identity_declaration_scopes",
@@ -12255,7 +12548,7 @@ mod tests {
                 |row| row.get::<_, i64>(0),
             )
             .unwrap(),
-            12
+            13
         );
         for table in [
             "mob_identity_intent_mutation_receipts",
@@ -12333,7 +12626,7 @@ mod tests {
 
         drop(SqliteMobStores::open(&path).unwrap());
 
-        assert_eq!(ledger_version(&path), 12);
+        assert_eq!(ledger_version(&path), 13);
         for table in [
             "mob_forked_participants",
             "mob_forked_participant_member_associations",
@@ -12370,7 +12663,7 @@ mod tests {
 
         drop(SqliteMobStores::open(&path).unwrap());
 
-        assert_eq!(ledger_version(&path), 12);
+        assert_eq!(ledger_version(&path), 13);
         assert!(
             table_exists(&path, "mob_forked_participant_member_associations"),
             "migration 9 must run when a released-v8 file is opened"
@@ -12388,7 +12681,7 @@ mod tests {
 
         drop(SqliteMobStores::open(&path).unwrap());
 
-        assert_eq!(ledger_version(&path), 12);
+        assert_eq!(ledger_version(&path), 13);
         assert!(
             table_exists(&path, "mob_temporary_councils"),
             "migration 10 must run when a released-v9 file is opened"
@@ -12406,7 +12699,7 @@ mod tests {
 
         drop(SqliteMobStores::open(&path).unwrap());
 
-        assert_eq!(ledger_version(&path), 12);
+        assert_eq!(ledger_version(&path), 13);
         assert!(
             table_exists(&path, "mob_runtime_callback_claim_verifiers"),
             "migration 11 must run when a released-v10 file is opened"
@@ -12541,18 +12834,77 @@ mod tests {
     fn released_v11_migrates_to_canonical_current_schema() {
         // v11 (the 0.9.3 head) became a frozen predecessor when migration 12
         // landed. This proves the v11 verifier matches what migration 11
-        // actually produces, which is the only thing that keeps 12 legal as
-        // ledger head without a v12 verifier of its own.
+        // actually produces.
         let (_dir, path) = temp_db_path();
         seed_released_predecessor(&path, 11, build_released_0_9_3_mob_schema);
 
         drop(SqliteMobStores::open(&path).unwrap());
 
-        assert_eq!(ledger_version(&path), 12);
+        assert_eq!(ledger_version(&path), 13);
         assert!(
             table_exists(&path, "mob_runtime_incarnations"),
             "migration 12 must run when a released-v11 file is opened"
         );
+        assert!(
+            table_exists(&path, "mob_run_observers"),
+            "migration 13 must run when a released-v11 file is opened"
+        );
+    }
+
+    #[test]
+    fn released_v12_migrates_to_canonical_current_schema() {
+        // v12 (the 0.9.4 and 0.9.5 head) became a frozen predecessor when
+        // migration 13 landed. This proves the v12 verifier matches what
+        // migration 12 actually produces, which is the only thing that keeps
+        // 13 legal as ledger head without a v13 verifier of its own.
+        let (_dir, path) = temp_db_path();
+        seed_released_predecessor(&path, 12, build_released_0_9_5_mob_schema);
+        assert!(!table_exists(&path, "mob_run_observers"));
+
+        drop(SqliteMobStores::open(&path).unwrap());
+
+        assert_eq!(ledger_version(&path), 13);
+        assert!(
+            table_exists(&path, "mob_run_observers"),
+            "migration 13 must run when a released-v12 file is opened"
+        );
+    }
+
+    /// The run observer bindings take ledger head 13, and a binary whose mob
+    /// domain ends at v12 (0.9.4, 0.9.5) refuses a store at it, typed and
+    /// without touching the file: after a binary with the bindings opened a
+    /// store, 0.9.5 cannot.
+    #[test]
+    fn a_v12_binary_refuses_a_v13_store_typed_and_unmutated() {
+        const RELEASED_0_9_5_MOB_DOMAIN: meerkat_sqlite::SchemaDomain =
+            meerkat_sqlite::SchemaDomain {
+                migrations: MOB_DOMAIN.migrations.split_at(12).0,
+                allowed_existing_versions: &[3, 4, 7, 8, 9, 10, 11, 12],
+                released_predecessors: MOB_DOMAIN.released_predecessors.split_at(7).0,
+                ..MOB_DOMAIN
+            };
+        assert!(
+            !RELEASED_0_9_5_MOB_DOMAIN
+                .allowed_existing_versions
+                .contains(&13)
+        );
+        let (_dir, path) = temp_db_path();
+        drop(SqliteMobStores::open(&path).unwrap());
+        assert_eq!(ledger_version(&path), 13);
+        assert!(table_exists(&path, "mob_run_observers"));
+
+        let mut conn = Connection::open(&path).unwrap();
+        let err = meerkat_sqlite::apply_domain_migrations(&mut conn, &RELEASED_0_9_5_MOB_DOMAIN)
+            .expect_err("a v12 binary must refuse a v13 store");
+        assert!(
+            matches!(
+                err,
+                meerkat_sqlite::SqliteStoreError::SchemaFromTheFuture { .. }
+            ),
+            "{err}"
+        );
+        assert_eq!(ledger_version(&path), 13);
+        assert!(table_exists(&path, "mob_run_observers"));
     }
 
     /// A binary whose mob domain ends at v10 (0.9.2) refuses a store this
@@ -12570,7 +12922,7 @@ mod tests {
             };
         let (_dir, path) = temp_db_path();
         drop(SqliteMobStores::open(&path).unwrap());
-        assert_eq!(ledger_version(&path), 12);
+        assert_eq!(ledger_version(&path), 13);
 
         let mut conn = Connection::open(&path).unwrap();
         let err = meerkat_sqlite::apply_domain_migrations(&mut conn, &RELEASED_0_9_2_MOB_DOMAIN)
@@ -12582,7 +12934,7 @@ mod tests {
             ),
             "{err}"
         );
-        assert_eq!(ledger_version(&path), 12);
+        assert_eq!(ledger_version(&path), 13);
         assert!(table_exists(&path, "mob_runtime_callback_claim_verifiers"));
     }
 
@@ -12605,7 +12957,7 @@ mod tests {
         );
         let (_dir, path) = temp_db_path();
         drop(SqliteMobStores::open(&path).unwrap());
-        assert_eq!(ledger_version(&path), 12);
+        assert_eq!(ledger_version(&path), 13);
         assert!(table_exists(&path, "mob_runtime_incarnations"));
 
         let mut conn = Connection::open(&path).unwrap();
@@ -12618,7 +12970,7 @@ mod tests {
             ),
             "{err}"
         );
-        assert_eq!(ledger_version(&path), 12);
+        assert_eq!(ledger_version(&path), 13);
         assert!(table_exists(&path, "mob_runtime_incarnations"));
     }
 
@@ -12708,17 +13060,21 @@ mod tests {
                     version: 11,
                     verify: verify_released_0_9_3_mob_schema,
                 },
+                meerkat_sqlite::SchemaPredecessor {
+                    version: 12,
+                    verify: verify_released_0_9_5_mob_schema,
+                },
                 // The requested "exact frozen predecessor verifier" for the
                 // head version itself.
                 meerkat_sqlite::SchemaPredecessor {
-                    version: 12,
-                    verify: verify_released_0_9_3_mob_schema,
+                    version: 13,
+                    verify: verify_released_0_9_5_mob_schema,
                 },
             ],
             ..MOB_DOMAIN
         };
         const WITHOUT_HEAD_FLOOR: meerkat_sqlite::SchemaDomain = meerkat_sqlite::SchemaDomain {
-            allowed_existing_versions: &[3, 4, 7, 8, 9, 10, 11],
+            allowed_existing_versions: &[3, 4, 7, 8, 9, 10, 11, 12],
             ..MOB_DOMAIN
         };
 

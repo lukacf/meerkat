@@ -41049,6 +41049,174 @@ control_mob_AdmitDestroyMemberRetireRuntimeEndedStopped(arg_mob_id, arg_agent_id
        /\ model_step_count' = model_step_count + 1
 
 
+control_mob_ResolveFlowRunObservationAdmissionAllowedRunning(arg_can_manage_mob, arg_caller_observes_run) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "ResolveFlowRunObservationAdmission"
+       /\ packet.payload.can_manage_mob = arg_can_manage_mob
+       /\ packet.payload.caller_observes_run = arg_caller_observes_run
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Running"
+       /\ (IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.caller_observes_run = TRUE))
+       /\ control_mob_phase' = "Running"
+       /\ UnchangedFrame_d7fd2d44e3acb442
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "FlowRunObservationAdmissionResolved", payload |-> [admission |-> "Allowed"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveFlowRunObservationAdmissionAllowedRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ResolveFlowRunObservationAdmissionAllowedRunning", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Running"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+control_mob_ResolveFlowRunObservationAdmissionAllowedStopped(arg_can_manage_mob, arg_caller_observes_run) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "ResolveFlowRunObservationAdmission"
+       /\ packet.payload.can_manage_mob = arg_can_manage_mob
+       /\ packet.payload.caller_observes_run = arg_caller_observes_run
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Stopped"
+       /\ (IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.caller_observes_run = TRUE))
+       /\ control_mob_phase' = "Stopped"
+       /\ UnchangedFrame_d7fd2d44e3acb442
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "FlowRunObservationAdmissionResolved", payload |-> [admission |-> "Allowed"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveFlowRunObservationAdmissionAllowedStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ResolveFlowRunObservationAdmissionAllowedStopped", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Stopped"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+control_mob_ResolveFlowRunObservationAdmissionAllowedCompleted(arg_can_manage_mob, arg_caller_observes_run) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "ResolveFlowRunObservationAdmission"
+       /\ packet.payload.can_manage_mob = arg_can_manage_mob
+       /\ packet.payload.caller_observes_run = arg_caller_observes_run
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Completed"
+       /\ (IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.caller_observes_run = TRUE))
+       /\ control_mob_phase' = "Completed"
+       /\ UnchangedFrame_d7fd2d44e3acb442
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "FlowRunObservationAdmissionResolved", payload |-> [admission |-> "Allowed"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveFlowRunObservationAdmissionAllowedCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ResolveFlowRunObservationAdmissionAllowedCompleted", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Completed"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+control_mob_ResolveFlowRunObservationAdmissionAllowedDestroyed(arg_can_manage_mob, arg_caller_observes_run) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "ResolveFlowRunObservationAdmission"
+       /\ packet.payload.can_manage_mob = arg_can_manage_mob
+       /\ packet.payload.caller_observes_run = arg_caller_observes_run
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Destroyed"
+       /\ (IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.caller_observes_run = TRUE))
+       /\ control_mob_phase' = "Destroyed"
+       /\ UnchangedFrame_d7fd2d44e3acb442
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "FlowRunObservationAdmissionResolved", payload |-> [admission |-> "Allowed"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveFlowRunObservationAdmissionAllowedDestroyed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ResolveFlowRunObservationAdmissionAllowedDestroyed", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Destroyed"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+control_mob_ResolveFlowRunObservationAdmissionDeniedRunning(arg_can_manage_mob, arg_caller_observes_run) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "ResolveFlowRunObservationAdmission"
+       /\ packet.payload.can_manage_mob = arg_can_manage_mob
+       /\ packet.payload.caller_observes_run = arg_caller_observes_run
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Running"
+       /\ ((packet.payload.can_manage_mob = FALSE) /\ (packet.payload.caller_observes_run = FALSE))
+       /\ control_mob_phase' = "Running"
+       /\ UnchangedFrame_d7fd2d44e3acb442
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "FlowRunObservationAdmissionResolved", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveFlowRunObservationAdmissionDeniedRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ResolveFlowRunObservationAdmissionDeniedRunning", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Running"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+control_mob_ResolveFlowRunObservationAdmissionDeniedStopped(arg_can_manage_mob, arg_caller_observes_run) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "ResolveFlowRunObservationAdmission"
+       /\ packet.payload.can_manage_mob = arg_can_manage_mob
+       /\ packet.payload.caller_observes_run = arg_caller_observes_run
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Stopped"
+       /\ ((packet.payload.can_manage_mob = FALSE) /\ (packet.payload.caller_observes_run = FALSE))
+       /\ control_mob_phase' = "Stopped"
+       /\ UnchangedFrame_d7fd2d44e3acb442
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "FlowRunObservationAdmissionResolved", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveFlowRunObservationAdmissionDeniedStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ResolveFlowRunObservationAdmissionDeniedStopped", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Stopped"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+control_mob_ResolveFlowRunObservationAdmissionDeniedCompleted(arg_can_manage_mob, arg_caller_observes_run) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "ResolveFlowRunObservationAdmission"
+       /\ packet.payload.can_manage_mob = arg_can_manage_mob
+       /\ packet.payload.caller_observes_run = arg_caller_observes_run
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Completed"
+       /\ ((packet.payload.can_manage_mob = FALSE) /\ (packet.payload.caller_observes_run = FALSE))
+       /\ control_mob_phase' = "Completed"
+       /\ UnchangedFrame_d7fd2d44e3acb442
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "FlowRunObservationAdmissionResolved", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveFlowRunObservationAdmissionDeniedCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ResolveFlowRunObservationAdmissionDeniedCompleted", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Completed"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+control_mob_ResolveFlowRunObservationAdmissionDeniedDestroyed(arg_can_manage_mob, arg_caller_observes_run) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "control_mob"
+       /\ packet.variant = "ResolveFlowRunObservationAdmission"
+       /\ packet.payload.can_manage_mob = arg_can_manage_mob
+       /\ packet.payload.caller_observes_run = arg_caller_observes_run
+       /\ ~HigherPriorityReady("control_mob_authority")
+       /\ control_mob_phase = "Destroyed"
+       /\ ((packet.payload.can_manage_mob = FALSE) /\ (packet.payload.caller_observes_run = FALSE))
+       /\ control_mob_phase' = "Destroyed"
+       /\ UnchangedFrame_d7fd2d44e3acb442
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "control_mob", variant |-> "FlowRunObservationAdmissionResolved", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveFlowRunObservationAdmissionDeniedDestroyed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "control_mob", transition |-> "ResolveFlowRunObservationAdmissionDeniedDestroyed", actor |-> "control_mob_authority", step |-> (model_step_count + 1), from_phase |-> control_mob_phase, to_phase |-> "Destroyed"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
 control_mob_stopped_mob_holds_member_run_starts == (IF (control_mob_phase # "Stopped") THEN TRUE ELSE (control_mob_member_run_starts_held = TRUE))
 control_mob_bindings_require_known_identity == (\A id \in DOMAIN control_mob_member_session_bindings : (id \in DOMAIN control_mob_identity_to_runtime))
 control_mob_placed_spawn_pending_attempt_is_complete == ((\A id \in DOMAIN control_mob_pending_placed_spawn_ids : ((id \in DOMAIN control_mob_pending_placed_spawn_generations) /\ (id \in DOMAIN control_mob_pending_placed_spawn_fence_tokens) /\ (id \in DOMAIN control_mob_pending_placed_spawn_hosts) /\ (id \in DOMAIN control_mob_pending_placed_spawn_host_binding_generations) /\ (id \in DOMAIN control_mob_pending_placed_spawn_spec_digests) /\ (id \in DOMAIN control_mob_pending_placed_spawn_provision_operation_ids) /\ (id \in DOMAIN control_mob_pending_placed_spawn_operation_owner_session_ids))) /\ (\A id \in DOMAIN control_mob_pending_placed_spawn_generations : (id \in DOMAIN control_mob_pending_placed_spawn_ids)) /\ (\A id \in DOMAIN control_mob_pending_placed_spawn_fence_tokens : (id \in DOMAIN control_mob_pending_placed_spawn_ids)) /\ (\A id \in DOMAIN control_mob_pending_placed_spawn_hosts : (id \in DOMAIN control_mob_pending_placed_spawn_ids)) /\ (\A id \in DOMAIN control_mob_pending_placed_spawn_host_binding_generations : (id \in DOMAIN control_mob_pending_placed_spawn_ids)) /\ (\A id \in DOMAIN control_mob_pending_placed_spawn_spec_digests : (id \in DOMAIN control_mob_pending_placed_spawn_ids)) /\ (\A id \in DOMAIN control_mob_pending_placed_spawn_provision_operation_ids : (id \in DOMAIN control_mob_pending_placed_spawn_ids)) /\ (\A id \in DOMAIN control_mob_pending_placed_spawn_operation_owner_session_ids : (id \in DOMAIN control_mob_pending_placed_spawn_ids)))
@@ -80821,6 +80989,174 @@ layer_mob_AdmitDestroyMemberRetireRuntimeEndedStopped(arg_mob_id, arg_agent_iden
        /\ model_step_count' = model_step_count + 1
 
 
+layer_mob_ResolveFlowRunObservationAdmissionAllowedRunning(arg_can_manage_mob, arg_caller_observes_run) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "ResolveFlowRunObservationAdmission"
+       /\ packet.payload.can_manage_mob = arg_can_manage_mob
+       /\ packet.payload.caller_observes_run = arg_caller_observes_run
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Running"
+       /\ (IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.caller_observes_run = TRUE))
+       /\ layer_mob_phase' = "Running"
+       /\ UnchangedFrame_98019bac3005b50c
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "FlowRunObservationAdmissionResolved", payload |-> [admission |-> "Allowed"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveFlowRunObservationAdmissionAllowedRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ResolveFlowRunObservationAdmissionAllowedRunning", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Running"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+layer_mob_ResolveFlowRunObservationAdmissionAllowedStopped(arg_can_manage_mob, arg_caller_observes_run) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "ResolveFlowRunObservationAdmission"
+       /\ packet.payload.can_manage_mob = arg_can_manage_mob
+       /\ packet.payload.caller_observes_run = arg_caller_observes_run
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Stopped"
+       /\ (IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.caller_observes_run = TRUE))
+       /\ layer_mob_phase' = "Stopped"
+       /\ UnchangedFrame_98019bac3005b50c
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "FlowRunObservationAdmissionResolved", payload |-> [admission |-> "Allowed"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveFlowRunObservationAdmissionAllowedStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ResolveFlowRunObservationAdmissionAllowedStopped", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Stopped"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+layer_mob_ResolveFlowRunObservationAdmissionAllowedCompleted(arg_can_manage_mob, arg_caller_observes_run) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "ResolveFlowRunObservationAdmission"
+       /\ packet.payload.can_manage_mob = arg_can_manage_mob
+       /\ packet.payload.caller_observes_run = arg_caller_observes_run
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Completed"
+       /\ (IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.caller_observes_run = TRUE))
+       /\ layer_mob_phase' = "Completed"
+       /\ UnchangedFrame_98019bac3005b50c
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "FlowRunObservationAdmissionResolved", payload |-> [admission |-> "Allowed"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveFlowRunObservationAdmissionAllowedCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ResolveFlowRunObservationAdmissionAllowedCompleted", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Completed"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+layer_mob_ResolveFlowRunObservationAdmissionAllowedDestroyed(arg_can_manage_mob, arg_caller_observes_run) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "ResolveFlowRunObservationAdmission"
+       /\ packet.payload.can_manage_mob = arg_can_manage_mob
+       /\ packet.payload.caller_observes_run = arg_caller_observes_run
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Destroyed"
+       /\ (IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.caller_observes_run = TRUE))
+       /\ layer_mob_phase' = "Destroyed"
+       /\ UnchangedFrame_98019bac3005b50c
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "FlowRunObservationAdmissionResolved", payload |-> [admission |-> "Allowed"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveFlowRunObservationAdmissionAllowedDestroyed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ResolveFlowRunObservationAdmissionAllowedDestroyed", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Destroyed"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+layer_mob_ResolveFlowRunObservationAdmissionDeniedRunning(arg_can_manage_mob, arg_caller_observes_run) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "ResolveFlowRunObservationAdmission"
+       /\ packet.payload.can_manage_mob = arg_can_manage_mob
+       /\ packet.payload.caller_observes_run = arg_caller_observes_run
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Running"
+       /\ ((packet.payload.can_manage_mob = FALSE) /\ (packet.payload.caller_observes_run = FALSE))
+       /\ layer_mob_phase' = "Running"
+       /\ UnchangedFrame_98019bac3005b50c
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "FlowRunObservationAdmissionResolved", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveFlowRunObservationAdmissionDeniedRunning"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ResolveFlowRunObservationAdmissionDeniedRunning", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Running"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+layer_mob_ResolveFlowRunObservationAdmissionDeniedStopped(arg_can_manage_mob, arg_caller_observes_run) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "ResolveFlowRunObservationAdmission"
+       /\ packet.payload.can_manage_mob = arg_can_manage_mob
+       /\ packet.payload.caller_observes_run = arg_caller_observes_run
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Stopped"
+       /\ ((packet.payload.can_manage_mob = FALSE) /\ (packet.payload.caller_observes_run = FALSE))
+       /\ layer_mob_phase' = "Stopped"
+       /\ UnchangedFrame_98019bac3005b50c
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "FlowRunObservationAdmissionResolved", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveFlowRunObservationAdmissionDeniedStopped"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ResolveFlowRunObservationAdmissionDeniedStopped", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Stopped"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+layer_mob_ResolveFlowRunObservationAdmissionDeniedCompleted(arg_can_manage_mob, arg_caller_observes_run) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "ResolveFlowRunObservationAdmission"
+       /\ packet.payload.can_manage_mob = arg_can_manage_mob
+       /\ packet.payload.caller_observes_run = arg_caller_observes_run
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Completed"
+       /\ ((packet.payload.can_manage_mob = FALSE) /\ (packet.payload.caller_observes_run = FALSE))
+       /\ layer_mob_phase' = "Completed"
+       /\ UnchangedFrame_98019bac3005b50c
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "FlowRunObservationAdmissionResolved", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveFlowRunObservationAdmissionDeniedCompleted"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ResolveFlowRunObservationAdmissionDeniedCompleted", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Completed"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
+layer_mob_ResolveFlowRunObservationAdmissionDeniedDestroyed(arg_can_manage_mob, arg_caller_observes_run) ==
+    /\ \E packet \in SeqElements(pending_inputs) :
+       /\ packet.machine = "layer_mob"
+       /\ packet.variant = "ResolveFlowRunObservationAdmission"
+       /\ packet.payload.can_manage_mob = arg_can_manage_mob
+       /\ packet.payload.caller_observes_run = arg_caller_observes_run
+       /\ ~HigherPriorityReady("layer_mob_authority")
+       /\ layer_mob_phase = "Destroyed"
+       /\ ((packet.payload.can_manage_mob = FALSE) /\ (packet.payload.caller_observes_run = FALSE))
+       /\ layer_mob_phase' = "Destroyed"
+       /\ UnchangedFrame_98019bac3005b50c
+       /\ pending_inputs' = SeqRemove(pending_inputs, packet)
+       /\ observed_inputs' = observed_inputs
+       /\ pending_routes' = pending_routes
+       /\ delivered_routes' = delivered_routes
+       /\ emitted_effects' = emitted_effects \cup { [machine |-> "layer_mob", variant |-> "FlowRunObservationAdmissionResolved", payload |-> [admission |-> "Denied"], effect_id |-> (model_step_count + 1), source_transition |-> "ResolveFlowRunObservationAdmissionDeniedDestroyed"] }
+       /\ observed_transitions' = observed_transitions \cup {[machine |-> "layer_mob", transition |-> "ResolveFlowRunObservationAdmissionDeniedDestroyed", actor |-> "layer_mob_authority", step |-> (model_step_count + 1), from_phase |-> layer_mob_phase, to_phase |-> "Destroyed"]}
+       /\ UnchangedFrame_5c73fa0d7ecc522a
+       /\ model_step_count' = model_step_count + 1
+
+
 layer_mob_stopped_mob_holds_member_run_starts == (IF (layer_mob_phase # "Stopped") THEN TRUE ELSE (layer_mob_member_run_starts_held = TRUE))
 layer_mob_bindings_require_known_identity == (\A id \in DOMAIN layer_mob_member_session_bindings : (id \in DOMAIN layer_mob_identity_to_runtime))
 layer_mob_placed_spawn_pending_attempt_is_complete == ((\A id \in DOMAIN layer_mob_pending_placed_spawn_ids : ((id \in DOMAIN layer_mob_pending_placed_spawn_generations) /\ (id \in DOMAIN layer_mob_pending_placed_spawn_fence_tokens) /\ (id \in DOMAIN layer_mob_pending_placed_spawn_hosts) /\ (id \in DOMAIN layer_mob_pending_placed_spawn_host_binding_generations) /\ (id \in DOMAIN layer_mob_pending_placed_spawn_spec_digests) /\ (id \in DOMAIN layer_mob_pending_placed_spawn_provision_operation_ids) /\ (id \in DOMAIN layer_mob_pending_placed_spawn_operation_owner_session_ids))) /\ (\A id \in DOMAIN layer_mob_pending_placed_spawn_generations : (id \in DOMAIN layer_mob_pending_placed_spawn_ids)) /\ (\A id \in DOMAIN layer_mob_pending_placed_spawn_fence_tokens : (id \in DOMAIN layer_mob_pending_placed_spawn_ids)) /\ (\A id \in DOMAIN layer_mob_pending_placed_spawn_hosts : (id \in DOMAIN layer_mob_pending_placed_spawn_ids)) /\ (\A id \in DOMAIN layer_mob_pending_placed_spawn_host_binding_generations : (id \in DOMAIN layer_mob_pending_placed_spawn_ids)) /\ (\A id \in DOMAIN layer_mob_pending_placed_spawn_spec_digests : (id \in DOMAIN layer_mob_pending_placed_spawn_ids)) /\ (\A id \in DOMAIN layer_mob_pending_placed_spawn_provision_operation_ids : (id \in DOMAIN layer_mob_pending_placed_spawn_ids)) /\ (\A id \in DOMAIN layer_mob_pending_placed_spawn_operation_owner_session_ids : (id \in DOMAIN layer_mob_pending_placed_spawn_ids)))
@@ -82621,6 +82957,14 @@ EntryPacketAdmissible_control_mob(packet) ==
     \/ /\ (packet.variant = "ObserveRuntimeDestroyed") /\ (control_mob_phase = "Completed") /\ ((packet.payload.agent_runtime_id \in control_mob_live_runtime_ids)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_fence_tokens THEN control_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token)))
     \/ /\ (packet.variant = "AdmitDestroyMemberRetire") /\ (control_mob_phase = "Running") /\ ((control_mob_destroy_admitted = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE)) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime THEN control_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ (((packet.payload.agent_runtime_id \in control_mob_live_runtime_ids) = FALSE)) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_fence_tokens) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_fence_tokens THEN control_mob_identity_runtime_fence_tokens[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations THEN control_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.generation))) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))) /\ (((packet.payload.agent_runtime_id \in control_mob_pending_session_ingress_detach_runtime_ids) = FALSE)) /\ (((packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_retire_pending_sessions) = FALSE)) /\ ((((packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_retire_refusal_codes) = FALSE) /\ ((packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_retire_refusal_reasons) = FALSE))) /\ ((packet.payload.session_id # None)) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings THEN control_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) = packet.payload.session_id))
     \/ /\ (packet.variant = "AdmitDestroyMemberRetire") /\ (control_mob_phase = "Stopped") /\ ((control_mob_destroy_admitted = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN control_mob_member_placement) = FALSE)) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_to_runtime THEN control_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ (((packet.payload.agent_runtime_id \in control_mob_live_runtime_ids) = FALSE)) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_fence_tokens) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_fence_tokens THEN control_mob_identity_runtime_fence_tokens[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_identity_runtime_generations THEN control_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.generation))) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN control_mob_member_state_markers THEN control_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))) /\ (((packet.payload.agent_runtime_id \in control_mob_pending_session_ingress_detach_runtime_ids) = FALSE)) /\ (((packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_retire_pending_sessions) = FALSE)) /\ ((((packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_retire_refusal_codes) = FALSE) /\ ((packet.payload.agent_runtime_id \in DOMAIN control_mob_runtime_retire_refusal_reasons) = FALSE))) /\ ((packet.payload.session_id # None)) /\ (((IF (packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN control_mob_member_session_bindings THEN control_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) = packet.payload.session_id))
+    \/ /\ (packet.variant = "ResolveFlowRunObservationAdmission") /\ (control_mob_phase = "Running") /\ ((IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.caller_observes_run = TRUE)))
+    \/ /\ (packet.variant = "ResolveFlowRunObservationAdmission") /\ (control_mob_phase = "Stopped") /\ ((IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.caller_observes_run = TRUE)))
+    \/ /\ (packet.variant = "ResolveFlowRunObservationAdmission") /\ (control_mob_phase = "Completed") /\ ((IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.caller_observes_run = TRUE)))
+    \/ /\ (packet.variant = "ResolveFlowRunObservationAdmission") /\ (control_mob_phase = "Destroyed") /\ ((IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.caller_observes_run = TRUE)))
+    \/ /\ (packet.variant = "ResolveFlowRunObservationAdmission") /\ (control_mob_phase = "Running") /\ (((packet.payload.can_manage_mob = FALSE) /\ (packet.payload.caller_observes_run = FALSE)))
+    \/ /\ (packet.variant = "ResolveFlowRunObservationAdmission") /\ (control_mob_phase = "Stopped") /\ (((packet.payload.can_manage_mob = FALSE) /\ (packet.payload.caller_observes_run = FALSE)))
+    \/ /\ (packet.variant = "ResolveFlowRunObservationAdmission") /\ (control_mob_phase = "Completed") /\ (((packet.payload.can_manage_mob = FALSE) /\ (packet.payload.caller_observes_run = FALSE)))
+    \/ /\ (packet.variant = "ResolveFlowRunObservationAdmission") /\ (control_mob_phase = "Destroyed") /\ (((packet.payload.can_manage_mob = FALSE) /\ (packet.payload.caller_observes_run = FALSE)))
 
 layer_mob__entry_packet__identity_reconcile_decision(intent, lease, replacement, external_binding_required, initial_delivery_required, session_creation_receipt, retirement_receipt, session, runtime, member, external_binding_receipt, external_trust, external_ceremony, initial_delivery_receipt, initial_delivery, wiring) == (IF (replacement = "AdmissionOpen") THEN "CloseMemberAdmission" ELSE (IF (replacement = "Draining") THEN "AwaitMemberDrain" ELSE (IF (replacement = "DrainBlocked") THEN "DrainBlocked" ELSE (IF (replacement = "CancelActive") THEN "CancelActiveMember" ELSE (IF (replacement = "Ready") THEN "RetireMemberMaterialization" ELSE (IF (intent = "Unavailable") THEN "Backoff" ELSE (IF (IF (intent = "Missing") THEN TRUE ELSE (intent = "Malformed")) THEN "RepairBlocked" ELSE (IF (lease = "Unavailable") THEN "Backoff" ELSE (IF (IF (lease = "Missing") THEN TRUE ELSE (IF (lease = "HeldByExpiredIncarnation") THEN TRUE ELSE (lease = "HeldByEndedIncarnation"))) THEN "AcquireLease" ELSE (IF (lease = "Malformed") THEN "RepairBlocked" ELSE (IF (lease = "HeldByOtherLiveIncarnation") THEN "AwaitLease" ELSE (IF (intent = "Absent") THEN (IF (wiring = "Unavailable") THEN "Backoff" ELSE (IF (wiring = "Malformed") THEN "RepairBlocked" ELSE (IF (IF (wiring = "Matching") THEN TRUE ELSE (wiring = "Divergent")) THEN "ReconcileWiring" ELSE (IF (member = "Unavailable") THEN "Backoff" ELSE (IF (member = "Malformed") THEN "RepairBlocked" ELSE (IF (IF (member = "Matching") THEN TRUE ELSE (member = "Divergent")) THEN "RetireMemberMaterialization" ELSE (IF (runtime = "Unavailable") THEN "Backoff" ELSE (IF (runtime = "Malformed") THEN "RepairBlocked" ELSE (IF (IF (runtime = "Matching") THEN TRUE ELSE (runtime = "Divergent")) THEN "RetireRuntimeRegistration" ELSE (IF (session = "Unavailable") THEN "Backoff" ELSE (IF (IF (session = "Malformed") THEN TRUE ELSE (session = "AmbiguousDivergence")) THEN "RepairBlocked" ELSE (IF (IF (session = "Matching") THEN TRUE ELSE (IF (session = "RecoverableDivergence") THEN TRUE ELSE (session = "IrrecoverablyCorrupt"))) THEN "ReleaseSessionAuthority" ELSE (IF (retirement_receipt = "Unavailable") THEN "Backoff" ELSE (IF (retirement_receipt = "Missing") THEN "SealRetirementProven" ELSE (IF (retirement_receipt = "Matching") THEN "Tombstoned" ELSE "RepairBlocked"))))))))))))))) ELSE (IF (session = "Unavailable") THEN "Backoff" ELSE (IF (IF (session = "Malformed") THEN TRUE ELSE (IF (session = "IrrecoverablyCorrupt") THEN TRUE ELSE (IF (session = "AmbiguousDivergence") THEN TRUE ELSE ((session = "Missing") /\ (intent = "PresentRequireExisting"))))) THEN (IF (wiring = "Unavailable") THEN "Backoff" ELSE (IF (wiring = "Malformed") THEN "RepairBlocked" ELSE (IF (IF (wiring = "Matching") THEN TRUE ELSE (wiring = "Divergent")) THEN "ReconcileWiring" ELSE (IF (member = "Unavailable") THEN "Backoff" ELSE (IF (member = "Malformed") THEN "RepairBlocked" ELSE (IF (IF (member = "Matching") THEN TRUE ELSE (member = "Divergent")) THEN "RetireMemberMaterialization" ELSE (IF (runtime = "Unavailable") THEN "Backoff" ELSE (IF (runtime = "Malformed") THEN "RepairBlocked" ELSE (IF (IF (runtime = "Matching") THEN TRUE ELSE (runtime = "Divergent")) THEN "RetireRuntimeRegistration" ELSE (IF (session = "IrrecoverablyCorrupt") THEN "Quarantined" ELSE "RepairBlocked")))))))))) ELSE (IF (IF (session = "Missing") THEN TRUE ELSE (session = "RecoverableDivergence")) THEN (IF ((intent = "PresentCreateIfAbsent") /\ (session_creation_receipt = "Unavailable")) THEN "Backoff" ELSE (IF ((intent = "PresentCreateIfAbsent") /\ (IF (session_creation_receipt = "Conflicting") THEN TRUE ELSE (IF (session_creation_receipt = "Malformed") THEN TRUE ELSE (session_creation_receipt = "NotRequired")))) THEN "RepairBlocked" ELSE (IF ((intent = "PresentCreateIfAbsent") /\ (session_creation_receipt = "Matching") /\ (session = "Missing")) THEN "RepairBlocked" ELSE (IF ((intent = "PresentCreateIfAbsent") /\ (IF (session_creation_receipt = "Missing") THEN TRUE ELSE (session_creation_receipt = "Matching"))) THEN "EnsureSessionAuthority" ELSE (IF ((intent = "PresentRequireExisting") /\ (session_creation_receipt = "NotRequired")) THEN "EnsureSessionAuthority" ELSE (IF ((intent = "PresentRequireExisting") /\ (session_creation_receipt = "Unavailable")) THEN "Backoff" ELSE "RepairBlocked")))))) ELSE (IF ((intent = "PresentCreateIfAbsent") /\ (session_creation_receipt = "Unavailable")) THEN "Backoff" ELSE (IF ((intent = "PresentCreateIfAbsent") /\ (session_creation_receipt = "Missing")) THEN "SealSessionCreationConsumed" ELSE (IF ~((IF ((intent = "PresentCreateIfAbsent") /\ (session_creation_receipt = "Matching")) THEN TRUE ELSE ((intent = "PresentRequireExisting") /\ (session_creation_receipt = "NotRequired")))) THEN "RepairBlocked" ELSE (IF (runtime = "Unavailable") THEN "Backoff" ELSE (IF (runtime = "Malformed") THEN "RepairBlocked" ELSE (IF (IF (runtime = "Missing") THEN TRUE ELSE (runtime = "Divergent")) THEN "EnsureRuntimeRegistration" ELSE (IF (external_binding_required = TRUE) THEN (IF (external_binding_receipt = "Unavailable") THEN "Backoff" ELSE (IF (external_binding_receipt = "Missing") THEN "EnsureExternalBindingReceipt" ELSE (IF (IF (external_binding_receipt = "Conflicting") THEN TRUE ELSE (IF (external_binding_receipt = "Malformed") THEN TRUE ELSE (external_binding_receipt = "NotRequired"))) THEN "RepairBlocked" ELSE (IF (external_trust = "Unavailable") THEN "Backoff" ELSE (IF (external_trust = "Absent") THEN (IF (external_ceremony = "FreshAvailable") THEN "EnsureExternalBinding" ELSE (IF (external_ceremony = "AwaitFresh") THEN "AwaitExternalBindingCeremony" ELSE (IF (external_ceremony = "TemporarilyUnavailable") THEN "Backoff" ELSE "RepairBlocked"))) ELSE (IF (IF (external_trust = "Contradictory") THEN TRUE ELSE (IF (external_trust = "Indeterminate") THEN TRUE ELSE (IF (external_trust = "Malformed") THEN TRUE ELSE (external_trust = "NotRequired")))) THEN "RepairBlocked" ELSE (IF (member = "Unavailable") THEN "Backoff" ELSE (IF (IF (member = "Malformed") THEN TRUE ELSE (member = "Divergent")) THEN "RepairBlocked" ELSE (IF (member = "Missing") THEN "EnsureMemberMaterialization" ELSE (IF (initial_delivery_required = TRUE) THEN (IF (initial_delivery_receipt = "Unavailable") THEN "Backoff" ELSE (IF (initial_delivery_receipt = "Missing") THEN "EnsureInitialDeliveryReceipt" ELSE (IF (IF (initial_delivery_receipt = "Conflicting") THEN TRUE ELSE (IF (initial_delivery_receipt = "Malformed") THEN TRUE ELSE (initial_delivery_receipt = "NotRequired"))) THEN "RepairBlocked" ELSE (IF (initial_delivery = "Unavailable") THEN "Backoff" ELSE (IF (initial_delivery = "ProvenAbsent") THEN "EnsureInitialDelivery" ELSE (IF (initial_delivery = "AcceptedPendingExact") THEN "AwaitInitialDelivery" ELSE (IF (IF (initial_delivery = "ContentOnlyMatch") THEN TRUE ELSE (IF (initial_delivery = "OperationCollision") THEN TRUE ELSE (IF (initial_delivery = "Contradictory") THEN TRUE ELSE (IF (initial_delivery = "Indeterminate") THEN TRUE ELSE (IF (initial_delivery = "Malformed") THEN TRUE ELSE (initial_delivery = "NotRequired")))))) THEN "RepairBlocked" ELSE (IF (retirement_receipt # "NotRequired") THEN "RepairBlocked" ELSE (IF (wiring = "Unavailable") THEN "Backoff" ELSE (IF (wiring = "Malformed") THEN "RepairBlocked" ELSE (IF (IF (wiring = "Missing") THEN TRUE ELSE (wiring = "Divergent")) THEN "ReconcileWiring" ELSE "Converged"))))))))))) ELSE (IF (IF (initial_delivery_receipt # "NotRequired") THEN TRUE ELSE (initial_delivery # "NotRequired")) THEN "RepairBlocked" ELSE (IF (retirement_receipt # "NotRequired") THEN "RepairBlocked" ELSE (IF (wiring = "Unavailable") THEN "Backoff" ELSE (IF (wiring = "Malformed") THEN "RepairBlocked" ELSE (IF (IF (wiring = "Missing") THEN TRUE ELSE (wiring = "Divergent")) THEN "ReconcileWiring" ELSE "Converged"))))))))))))))) ELSE (IF (IF (external_binding_receipt # "NotRequired") THEN TRUE ELSE (IF (external_trust # "NotRequired") THEN TRUE ELSE (external_ceremony # "NotRequired"))) THEN "RepairBlocked" ELSE (IF (member = "Unavailable") THEN "Backoff" ELSE (IF (IF (member = "Malformed") THEN TRUE ELSE (member = "Divergent")) THEN "RepairBlocked" ELSE (IF (member = "Missing") THEN "EnsureMemberMaterialization" ELSE (IF (initial_delivery_required = TRUE) THEN (IF (initial_delivery_receipt = "Unavailable") THEN "Backoff" ELSE (IF (initial_delivery_receipt = "Missing") THEN "EnsureInitialDeliveryReceipt" ELSE (IF (IF (initial_delivery_receipt = "Conflicting") THEN TRUE ELSE (IF (initial_delivery_receipt = "Malformed") THEN TRUE ELSE (initial_delivery_receipt = "NotRequired"))) THEN "RepairBlocked" ELSE (IF (initial_delivery = "Unavailable") THEN "Backoff" ELSE (IF (initial_delivery = "ProvenAbsent") THEN "EnsureInitialDelivery" ELSE (IF (initial_delivery = "AcceptedPendingExact") THEN "AwaitInitialDelivery" ELSE (IF (IF (initial_delivery = "ContentOnlyMatch") THEN TRUE ELSE (IF (initial_delivery = "OperationCollision") THEN TRUE ELSE (IF (initial_delivery = "Contradictory") THEN TRUE ELSE (IF (initial_delivery = "Indeterminate") THEN TRUE ELSE (IF (initial_delivery = "Malformed") THEN TRUE ELSE (initial_delivery = "NotRequired")))))) THEN "RepairBlocked" ELSE (IF (retirement_receipt # "NotRequired") THEN "RepairBlocked" ELSE (IF (wiring = "Unavailable") THEN "Backoff" ELSE (IF (wiring = "Malformed") THEN "RepairBlocked" ELSE (IF (IF (wiring = "Missing") THEN TRUE ELSE (wiring = "Divergent")) THEN "ReconcileWiring" ELSE "Converged"))))))))))) ELSE (IF (IF (initial_delivery_receipt # "NotRequired") THEN TRUE ELSE (initial_delivery # "NotRequired")) THEN "RepairBlocked" ELSE (IF (retirement_receipt # "NotRequired") THEN "RepairBlocked" ELSE (IF (wiring = "Unavailable") THEN "Backoff" ELSE (IF (wiring = "Malformed") THEN "RepairBlocked" ELSE (IF (IF (wiring = "Missing") THEN TRUE ELSE (wiring = "Divergent")) THEN "ReconcileWiring" ELSE "Converged"))))))))))))))))))))))))))))))))
 
@@ -84367,6 +84711,14 @@ EntryPacketAdmissible_layer_mob(packet) ==
     \/ /\ (packet.variant = "ObserveRuntimeDestroyed") /\ (layer_mob_phase = "Completed") /\ ((packet.payload.agent_runtime_id \in layer_mob_live_runtime_ids)) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_fence_tokens THEN layer_mob_runtime_fence_tokens[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) = Some(packet.payload.fence_token)))
     \/ /\ (packet.variant = "AdmitDestroyMemberRetire") /\ (layer_mob_phase = "Running") /\ ((layer_mob_destroy_admitted = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE)) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime THEN layer_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ (((packet.payload.agent_runtime_id \in layer_mob_live_runtime_ids) = FALSE)) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_fence_tokens) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_fence_tokens THEN layer_mob_identity_runtime_fence_tokens[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations THEN layer_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.generation))) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))) /\ (((packet.payload.agent_runtime_id \in layer_mob_pending_session_ingress_detach_runtime_ids) = FALSE)) /\ (((packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_retire_pending_sessions) = FALSE)) /\ ((((packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_retire_refusal_codes) = FALSE) /\ ((packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_retire_refusal_reasons) = FALSE))) /\ ((packet.payload.session_id # None)) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings THEN layer_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) = packet.payload.session_id))
     \/ /\ (packet.variant = "AdmitDestroyMemberRetire") /\ (layer_mob_phase = "Stopped") /\ ((layer_mob_destroy_admitted = TRUE)) /\ (((packet.payload.agent_identity \in DOMAIN layer_mob_member_placement) = FALSE)) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_to_runtime THEN layer_mob_identity_to_runtime[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.agent_runtime_id))) /\ (((packet.payload.agent_runtime_id \in layer_mob_live_runtime_ids) = FALSE)) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_fence_tokens) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_fence_tokens THEN layer_mob_identity_runtime_fence_tokens[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.fence_token))) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_identity_runtime_generations THEN layer_mob_identity_runtime_generations[packet.payload.agent_identity] ELSE "None")) ELSE None) = Some(packet.payload.generation))) /\ (((IF (packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers) THEN Some((IF packet.payload.agent_runtime_id \in DOMAIN layer_mob_member_state_markers THEN layer_mob_member_state_markers[packet.payload.agent_runtime_id] ELSE "None")) ELSE None) # Some("Retiring"))) /\ (((packet.payload.agent_runtime_id \in layer_mob_pending_session_ingress_detach_runtime_ids) = FALSE)) /\ (((packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_retire_pending_sessions) = FALSE)) /\ ((((packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_retire_refusal_codes) = FALSE) /\ ((packet.payload.agent_runtime_id \in DOMAIN layer_mob_runtime_retire_refusal_reasons) = FALSE))) /\ ((packet.payload.session_id # None)) /\ (((IF (packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings) THEN Some((IF packet.payload.agent_identity \in DOMAIN layer_mob_member_session_bindings THEN layer_mob_member_session_bindings[packet.payload.agent_identity] ELSE "None")) ELSE None) = packet.payload.session_id))
+    \/ /\ (packet.variant = "ResolveFlowRunObservationAdmission") /\ (layer_mob_phase = "Running") /\ ((IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.caller_observes_run = TRUE)))
+    \/ /\ (packet.variant = "ResolveFlowRunObservationAdmission") /\ (layer_mob_phase = "Stopped") /\ ((IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.caller_observes_run = TRUE)))
+    \/ /\ (packet.variant = "ResolveFlowRunObservationAdmission") /\ (layer_mob_phase = "Completed") /\ ((IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.caller_observes_run = TRUE)))
+    \/ /\ (packet.variant = "ResolveFlowRunObservationAdmission") /\ (layer_mob_phase = "Destroyed") /\ ((IF (packet.payload.can_manage_mob = TRUE) THEN TRUE ELSE (packet.payload.caller_observes_run = TRUE)))
+    \/ /\ (packet.variant = "ResolveFlowRunObservationAdmission") /\ (layer_mob_phase = "Running") /\ (((packet.payload.can_manage_mob = FALSE) /\ (packet.payload.caller_observes_run = FALSE)))
+    \/ /\ (packet.variant = "ResolveFlowRunObservationAdmission") /\ (layer_mob_phase = "Stopped") /\ (((packet.payload.can_manage_mob = FALSE) /\ (packet.payload.caller_observes_run = FALSE)))
+    \/ /\ (packet.variant = "ResolveFlowRunObservationAdmission") /\ (layer_mob_phase = "Completed") /\ (((packet.payload.can_manage_mob = FALSE) /\ (packet.payload.caller_observes_run = FALSE)))
+    \/ /\ (packet.variant = "ResolveFlowRunObservationAdmission") /\ (layer_mob_phase = "Destroyed") /\ (((packet.payload.can_manage_mob = FALSE) /\ (packet.payload.caller_observes_run = FALSE)))
 
 EntryPacketAdmissible(packet) ==
     CASE
@@ -85882,6 +86234,14 @@ CoreNext ==
     \/ \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : control_mob_ObserveRuntimeDestroyedCompleted(arg_agent_runtime_id, arg_fence_token)
     \/ \E arg_mob_id \in MobIdValues : \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : \E arg_session_id \in OptionSessionIdValues : control_mob_AdmitDestroyMemberRetireRuntimeEndedRunning(arg_mob_id, arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation, arg_session_id)
     \/ \E arg_mob_id \in MobIdValues : \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : \E arg_session_id \in OptionSessionIdValues : control_mob_AdmitDestroyMemberRetireRuntimeEndedStopped(arg_mob_id, arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation, arg_session_id)
+    \/ \E arg_can_manage_mob \in BOOLEAN : \E arg_caller_observes_run \in BOOLEAN : control_mob_ResolveFlowRunObservationAdmissionAllowedRunning(arg_can_manage_mob, arg_caller_observes_run)
+    \/ \E arg_can_manage_mob \in BOOLEAN : \E arg_caller_observes_run \in BOOLEAN : control_mob_ResolveFlowRunObservationAdmissionAllowedStopped(arg_can_manage_mob, arg_caller_observes_run)
+    \/ \E arg_can_manage_mob \in BOOLEAN : \E arg_caller_observes_run \in BOOLEAN : control_mob_ResolveFlowRunObservationAdmissionAllowedCompleted(arg_can_manage_mob, arg_caller_observes_run)
+    \/ \E arg_can_manage_mob \in BOOLEAN : \E arg_caller_observes_run \in BOOLEAN : control_mob_ResolveFlowRunObservationAdmissionAllowedDestroyed(arg_can_manage_mob, arg_caller_observes_run)
+    \/ control_mob_ResolveFlowRunObservationAdmissionDeniedRunning(FALSE, FALSE)
+    \/ control_mob_ResolveFlowRunObservationAdmissionDeniedStopped(FALSE, FALSE)
+    \/ control_mob_ResolveFlowRunObservationAdmissionDeniedCompleted(FALSE, FALSE)
+    \/ control_mob_ResolveFlowRunObservationAdmissionDeniedDestroyed(FALSE, FALSE)
     \/ \E arg_run_id \in RunIdValues : \E arg_status \in FlowRunStatusValues : layer_mob_ClassifyFlowRunTerminalityTerminalRunning(arg_run_id, arg_status)
     \/ \E arg_run_id \in RunIdValues : \E arg_status \in FlowRunStatusValues : layer_mob_ClassifyFlowRunTerminalityNonTerminalRunning(arg_run_id, arg_status)
     \/ \E arg_run_id \in RunIdValues : \E arg_step_id \in StepIdValues : \E arg_status \in StepRunStatusValues : layer_mob_ClassifyFlowStepTerminalityTerminalRunning(arg_run_id, arg_step_id, arg_status)
@@ -87327,6 +87687,14 @@ CoreNext ==
     \/ \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : layer_mob_ObserveRuntimeDestroyedCompleted(arg_agent_runtime_id, arg_fence_token)
     \/ \E arg_mob_id \in MobIdValues : \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : \E arg_session_id \in OptionSessionIdValues : layer_mob_AdmitDestroyMemberRetireRuntimeEndedRunning(arg_mob_id, arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation, arg_session_id)
     \/ \E arg_mob_id \in MobIdValues : \E arg_agent_identity \in AgentIdentityValues : \E arg_agent_runtime_id \in AgentRuntimeIdValues : \E arg_fence_token \in FenceTokenValues : \E arg_generation \in GenerationValues : \E arg_session_id \in OptionSessionIdValues : layer_mob_AdmitDestroyMemberRetireRuntimeEndedStopped(arg_mob_id, arg_agent_identity, arg_agent_runtime_id, arg_fence_token, arg_generation, arg_session_id)
+    \/ \E arg_can_manage_mob \in BOOLEAN : \E arg_caller_observes_run \in BOOLEAN : layer_mob_ResolveFlowRunObservationAdmissionAllowedRunning(arg_can_manage_mob, arg_caller_observes_run)
+    \/ \E arg_can_manage_mob \in BOOLEAN : \E arg_caller_observes_run \in BOOLEAN : layer_mob_ResolveFlowRunObservationAdmissionAllowedStopped(arg_can_manage_mob, arg_caller_observes_run)
+    \/ \E arg_can_manage_mob \in BOOLEAN : \E arg_caller_observes_run \in BOOLEAN : layer_mob_ResolveFlowRunObservationAdmissionAllowedCompleted(arg_can_manage_mob, arg_caller_observes_run)
+    \/ \E arg_can_manage_mob \in BOOLEAN : \E arg_caller_observes_run \in BOOLEAN : layer_mob_ResolveFlowRunObservationAdmissionAllowedDestroyed(arg_can_manage_mob, arg_caller_observes_run)
+    \/ layer_mob_ResolveFlowRunObservationAdmissionDeniedRunning(FALSE, FALSE)
+    \/ layer_mob_ResolveFlowRunObservationAdmissionDeniedStopped(FALSE, FALSE)
+    \/ layer_mob_ResolveFlowRunObservationAdmissionDeniedCompleted(FALSE, FALSE)
+    \/ layer_mob_ResolveFlowRunObservationAdmissionDeniedDestroyed(FALSE, FALSE)
     \/ OwnerFeedback_control_mob_mob_destroying_session_ingress_SessionIngressDetachedForMobDestroy
     \/ OwnerFeedback_control_mob_mob_destroying_session_ingress_SessionIngressDetachFailedForMobDestroy
     \/ OwnerFeedback_layer_mob_mob_destroying_session_ingress_SessionIngressDetachedForMobDestroy

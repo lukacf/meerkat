@@ -597,6 +597,7 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::ResolveSpawnMemberAdmission { .. }
             | mob_dsl::MobMachineInput::ResolveCurrentMobAdmission { .. }
             | mob_dsl::MobMachineInput::ResolveOwnedMemberAdmission { .. }
+            | mob_dsl::MobMachineInput::ResolveFlowRunObservationAdmission { .. }
             | mob_dsl::MobMachineInput::ResolveSpawnToolAdmission { .. }
             | mob_dsl::MobMachineInput::ResolveCreateMobAdmission { .. }
             | mob_dsl::MobMachineInput::ResolveProfileMutationAdmission { .. }
@@ -1873,6 +1874,7 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::ResolveSpawnMemberAdmission { .. }
             | mob_dsl::MobMachineInput::ResolveCurrentMobAdmission { .. }
             | mob_dsl::MobMachineInput::ResolveOwnedMemberAdmission { .. }
+            | mob_dsl::MobMachineInput::ResolveFlowRunObservationAdmission { .. }
             | mob_dsl::MobMachineInput::ResolveSpawnToolAdmission { .. }
             | mob_dsl::MobMachineInput::ResolveCreateMobAdmission { .. }
             | mob_dsl::MobMachineInput::ResolveProfileMutationAdmission { .. }
@@ -4981,6 +4983,54 @@ impl MobRun {
         })
     }
 
+    /// The view of this run its observer reads through `mob_flow_status`,
+    /// least privilege: the public result envelope
+    /// ([`Self::public_result_value`]: the run, mob and flow ids, the status,
+    /// the result and the root step outputs), the `created_at` and
+    /// `completed_at` timestamps, and `result_class`, MobMachine's public
+    /// result class of a terminal run (`success` or `error`; `null` while the
+    /// run is not terminal). The activation params, the step and failure
+    /// ledgers, frames, loops, role targets and flow authority inputs are not
+    /// part of it. A manager reads the whole run.
+    pub fn observer_view_value(&self) -> Result<serde_json::Value, MobError> {
+        let encode = |error: serde_json::Error| {
+            MobError::Internal(format!(
+                "the observer view of run '{}' could not be encoded: {error}",
+                self.run_id
+            ))
+        };
+        let mut view = serde_json::to_value(self.public_result_value()?).map_err(encode)?;
+        let result_class = if mob_machine_run_status_is_terminal(&self.run_id, &self.status)? {
+            Some(
+                match mob_machine_run_public_result_class(&self.run_id, &self.status)? {
+                    MobFlowRunPublicResultClass::Success => "success",
+                    MobFlowRunPublicResultClass::Error => "error",
+                },
+            )
+        } else {
+            None
+        };
+        let Some(object) = view.as_object_mut() else {
+            return Err(MobError::Internal(format!(
+                "the observer view of run '{}' did not encode as an object",
+                self.run_id
+            )));
+        };
+        object.insert(
+            "created_at".to_string(),
+            serde_json::to_value(self.created_at).map_err(encode)?,
+        );
+        object.insert(
+            "completed_at".to_string(),
+            serde_json::to_value(self.completed_at).map_err(encode)?,
+        );
+        object.insert(
+            "result_class".to_string(),
+            serde_json::to_value(result_class).map_err(encode)?,
+        );
+        Ok(view)
+    }
+
     /// Read-only access to the run's current status.
     pub fn status(&self) -> &MobRunStatus {
         &self.status
@@ -6537,6 +6587,196 @@ impl<'de> Deserialize<'de> for FlowRoleTargets {
         let entries = deserializer.deserialize_map(RoleTargetsVisitor)?;
         Self::new(entries).map_err(serde::de::Error::custom)
     }
+}
+
+/// The member a keyed explicit-target flow run reports to.
+///
+/// The bound member may read that run's status and terminal outcome
+/// (`mob_flow_status`) without manage scope over the mob; it gains no other
+/// authority over the run or the mob. The host names the member from its own
+/// trusted binding of the member, never from activation params or model
+/// text. On a runtime with a native work authorization host the observer also
+/// carries the member's retained work (the staged run that waits for this
+/// flow run); a binding without it is refused there, so a run never reports to
+/// a member that could not be resumed by its outcome.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FlowRunObserver {
+    member: AgentIdentity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    retained_work: Option<meerkat_core::retained_work::RetainedWorkIdentity>,
+}
+
+impl FlowRunObserver {
+    /// An observer for `member`, without retained work.
+    pub fn new(member: AgentIdentity) -> Self {
+        Self {
+            member,
+            retained_work: None,
+        }
+    }
+
+    /// This observer, carrying the member's retained work.
+    #[must_use]
+    pub fn with_retained_work(
+        mut self,
+        retained_work: meerkat_core::retained_work::RetainedWorkIdentity,
+    ) -> Self {
+        self.retained_work = Some(retained_work);
+        self
+    }
+
+    /// The observing member.
+    pub fn member(&self) -> &AgentIdentity {
+        &self.member
+    }
+
+    /// The member's retained work, when the host supplied it.
+    pub fn retained_work(&self) -> Option<&meerkat_core::retained_work::RetainedWorkIdentity> {
+        self.retained_work.as_ref()
+    }
+}
+
+/// The durable binding of one keyed explicit-target flow run to its observer.
+///
+/// It is written beside the run and never in the run row: the run's
+/// activation params and role targets, which a keyed replay compares, stay
+/// exactly what the caller admitted. A run has at most one binding, and its
+/// member never changes: a binding for another member is refused. Only the
+/// member's retained work can be refreshed (see
+/// [`crate::MobHandle::bind_flow_run_observer`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MobRunObserverBinding {
+    pub run_id: RunId,
+    pub mob_id: MobId,
+    pub flow_id: FlowId,
+    pub observer: FlowRunObserver,
+}
+
+impl MobRunObserverBinding {
+    /// The continuation key of this binding's wake ([`FlowRunWake`]): one per
+    /// run and binding version. A binding that carries retained work names
+    /// the run that staged it, so a binding refreshed with another runtime's
+    /// work (the member was respawned or repointed) is woken under a key of
+    /// its own, and a wake refused for stale work never blocks it.
+    pub fn wake_key(&self) -> String {
+        match self.observer.retained_work() {
+            Some(work) => format!("{FLOW_RUN_WAKE_TOOL}:{}:{}", self.run_id, work.run_id()),
+            None => format!("{FLOW_RUN_WAKE_TOOL}:{}", self.run_id),
+        }
+    }
+}
+
+/// The tool name of a flow run wake's `BackgroundJob` notice, and the prefix
+/// of its continuation key.
+pub const FLOW_RUN_WAKE_TOOL: &str = "mob_flow_run";
+
+/// The wake a flow run's observer receives once the run is terminal: a
+/// `BackgroundJob` notice of the run's terminal status, owed to the bound
+/// member under the binding's wake key ([`MobRunObserverBinding::wake_key`]).
+/// Its outcome names the mob, flow, run and status only; the observer reads
+/// the rest through `mob_flow_status`. The host delivers it as a
+/// continuation, durable from submission; its result digest is confirmed
+/// again from the run's committed record when it is delivered.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FlowRunWake {
+    key: String,
+    run_id: RunId,
+    status: meerkat_core::event::BackgroundJobTerminalStatus,
+    outcome: serde_json::Value,
+    result_digest: String,
+}
+
+impl FlowRunWake {
+    /// The wake `binding` is owed once `run`, its run, is terminal: `None`
+    /// while the run is not terminal, or when `run` is another run.
+    pub fn for_terminal_run(binding: &MobRunObserverBinding, run: &MobRun) -> Option<Self> {
+        if run.run_id != binding.run_id
+            || run.mob_id != binding.mob_id
+            || run.flow_id != binding.flow_id
+        {
+            return None;
+        }
+        let status = match run.status {
+            MobRunStatus::Completed => meerkat_core::event::BackgroundJobTerminalStatus::Completed,
+            MobRunStatus::Failed => meerkat_core::event::BackgroundJobTerminalStatus::Failed,
+            MobRunStatus::Canceled => meerkat_core::event::BackgroundJobTerminalStatus::Cancelled,
+            MobRunStatus::Pending | MobRunStatus::Running => return None,
+        };
+        let outcome = serde_json::json!({
+            "mob_id": run.mob_id.to_string(),
+            "flow_id": run.flow_id.to_string(),
+            "run_id": run.run_id.to_string(),
+            "status": status.as_str(),
+        });
+        let result_digest = crate::event::detached_outcome_digest(&outcome);
+        Some(Self {
+            key: binding.wake_key(),
+            run_id: run.run_id.clone(),
+            status,
+            outcome,
+            result_digest,
+        })
+    }
+
+    /// The wake's continuation key.
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// The run whose outcome the wake reports: its producer id.
+    pub fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+
+    /// The run's terminal status, as a background job status.
+    pub fn status(&self) -> meerkat_core::event::BackgroundJobTerminalStatus {
+        self.status
+    }
+
+    /// The outcome the notice carries.
+    pub fn outcome(&self) -> &serde_json::Value {
+        &self.outcome
+    }
+
+    /// The digest of the outcome
+    /// ([`crate::event::detached_outcome_digest`]).
+    pub fn result_digest(&self) -> &str {
+        &self.result_digest
+    }
+}
+
+/// Where a flow run's observer wake stands, as the host reports it
+/// ([`crate::MobHandle::flow_run_observer_wake_status`]); `mob_flow_status`
+/// shows it as `observer_wake`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum FlowRunWakeStatus {
+    /// Not submitted: the run is not terminal yet, or its wake was not
+    /// submitted (yet).
+    NotSubmitted,
+    /// Submitted and durable, not yet admitted to the member.
+    Pending,
+    /// Admitted to the member as input.
+    Applied,
+    /// Refused at delivery, for good. `no_admissible_work_binding`: the
+    /// binding's retained work no longer resumes on the member's runtime (it
+    /// was respawned or repointed, or the work's rows left a storeless
+    /// runtime's ledger). Binding the member again with its current retained
+    /// work wakes it again.
+    Refused {
+        reason: meerkat_runtime::RuntimeDeliveryRefusalReason,
+    },
+    /// Never admitted: the member incarnation it was owed to is retired.
+    Stranded,
+    /// This mob's host delivers no wakes (none installed, or it bound no
+    /// continuation owner).
+    Unavailable,
+    /// The host could not read the wake's status now; asking again may
+    /// answer.
+    Unreadable { detail: String },
 }
 
 /// Per-loop iteration output history, ordered by iteration index.

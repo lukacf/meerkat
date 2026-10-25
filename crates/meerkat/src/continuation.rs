@@ -99,6 +99,9 @@ pub enum ContinuationProducer {
     ForkOff,
     /// A council run.
     Council,
+    /// A mob flow run's terminal outcome, owed to the member the run reports
+    /// to (its observer). The producer id is the run id.
+    MobFlowRun,
 }
 
 /// A reference to an immutable result; the reference is the contract.
@@ -230,14 +233,15 @@ impl ContinuationDelivery {
     /// `ForkOff` and `Council` results admit under their live key
     /// (`{tool}:{job_id}`, the continuation key itself), so a completion
     /// delivered live before an upgrade and re-submitted as a continuation
-    /// dedupes against the earlier input. Host results admit under the
-    /// hash-namespaced delivery id, which a host-chosen key can never collide
-    /// with.
+    /// dedupes against the earlier input. A `MobFlowRun` wake admits under
+    /// its key too (`mob_flow_run:...`, one per run and observer binding).
+    /// Host results admit under the hash-namespaced delivery id, which a
+    /// host-chosen key can never collide with.
     pub fn admission_key(&self, delivery_id: &RuntimeDeliveryId) -> String {
         match self.result.producer {
-            ContinuationProducer::ForkOff | ContinuationProducer::Council => {
-                self.key.as_str().to_string()
-            }
+            ContinuationProducer::ForkOff
+            | ContinuationProducer::Council
+            | ContinuationProducer::MobFlowRun => self.key.as_str().to_string(),
             ContinuationProducer::Host { .. } => delivery_id.as_str().to_string(),
         }
     }
@@ -824,6 +828,7 @@ impl ContinuationOwnerService {
             ContinuationProducer::Host { namespace } => format!("host:{namespace}"),
             ContinuationProducer::ForkOff => "fork_off".to_string(),
             ContinuationProducer::Council => "council".to_string(),
+            ContinuationProducer::MobFlowRun => "mob_flow_run".to_string(),
         };
         let payload = serde_json::to_vec(&ContinuationRow {
             delivery,
@@ -2344,7 +2349,9 @@ async fn verify_committed_job(
         )
     };
     match &delivery.result.producer {
-        ContinuationProducer::ForkOff | ContinuationProducer::Council => {}
+        ContinuationProducer::ForkOff
+        | ContinuationProducer::Council
+        | ContinuationProducer::MobFlowRun => {}
         // An empty namespace names no host operation.
         ContinuationProducer::Host { namespace } if !namespace.is_empty() => {}
         ContinuationProducer::Host { .. } => return Err(invalid()),

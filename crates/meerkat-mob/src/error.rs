@@ -452,6 +452,45 @@ pub enum FlowRoleTargetRefusal {
     },
 }
 
+/// Why a flow run observer binding was refused. Serialized in the error's
+/// structured data as `{"kind": "<variant>"}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum FlowRunObserverRefusal {
+    /// The run was not admitted with role targets: only a keyed
+    /// explicit-target run reports to an observer.
+    NotExplicitTarget,
+    /// The runtime has a native work authorization host and the observer
+    /// carries no retained work, so the run's outcome could never resume it.
+    RetainedWorkRequired,
+    /// The observer's retained work was staged by another runtime than the
+    /// member's current one (a snapshot from before a respawn or repoint, or
+    /// another member's), so the run's outcome could never resume it there.
+    RetainedWorkElsewhere,
+    /// The mob's run store holds no observer bindings
+    /// ([`crate::store::MobRunStore::holds_run_observers`]): for now a host
+    /// store over the storage SPI. Nothing was written.
+    PersistenceUnavailable,
+}
+
+impl std::fmt::Display for FlowRunObserverRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotExplicitTarget => f.write_str("the run was not admitted with role targets"),
+            Self::RetainedWorkRequired => f.write_str(
+                "the runtime governs work authority and the observer carries no retained work",
+            ),
+            Self::RetainedWorkElsewhere => f.write_str(
+                "the observer's retained work belongs to another runtime than the member's current one",
+            ),
+            Self::PersistenceUnavailable => {
+                f.write_str("the mob's run store holds no flow run observer bindings")
+            }
+        }
+    }
+}
+
 impl std::fmt::Display for FlowRoleTargetRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1117,6 +1156,18 @@ pub enum MobError {
         "flow run '{run_id}' of flow '{flow_id}' was admitted under this idempotency key with other activation params or role targets"
     )]
     FlowRunIdempotencyConflict { run_id: RunId, flow_id: FlowId },
+
+    /// A flow run observer binding named another member than the one the
+    /// run already reports to. The first binding stands.
+    #[error("flow run '{run_id}' already reports to observer '{bound}'")]
+    FlowRunObserverConflict { run_id: RunId, bound: AgentIdentity },
+
+    /// A flow run observer binding was refused before anything was written.
+    #[error("flow run '{run_id}' refused its observer: {refusal}")]
+    FlowRunObserverRefused {
+        run_id: RunId,
+        refusal: FlowRunObserverRefusal,
+    },
 
     /// Topology policy denied a dispatch edge.
     #[error("topology violation: {from_role} -> {to_role}")]
@@ -2462,6 +2513,16 @@ impl MobError {
                 "kind": "flow_run_idempotency_conflict",
                 "run_id": run_id.to_string(),
                 "flow_id": flow_id.as_str(),
+            })),
+            Self::FlowRunObserverConflict { run_id, bound } => Some(serde_json::json!({
+                "kind": "flow_run_observer_conflict",
+                "run_id": run_id.to_string(),
+                "bound": bound.as_str(),
+            })),
+            Self::FlowRunObserverRefused { run_id, refusal } => Some(serde_json::json!({
+                "kind": "flow_run_observer_refused",
+                "run_id": run_id.to_string(),
+                "refusal": refusal,
             })),
             Self::SharedRetirementFailure(error) | Self::SharedLifecycleFailure(error) => {
                 error.structured_data()

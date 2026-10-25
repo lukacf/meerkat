@@ -1051,6 +1051,7 @@ pub(super) enum MobCommand {
         scoped_event_tx: Option<tokio::sync::mpsc::Sender<meerkat_core::ScopedAgentEvent>>,
         exact_operation: Option<super::handle::FlowOperationCustody>,
         role_targets: Option<std::sync::Arc<crate::run::FlowRoleTargets>>,
+        observer: Option<crate::run::FlowRunObserver>,
         reply_tx: oneshot::Sender<Result<RunId, MobError>>,
     },
     PreviewRunFlowAdmission {
@@ -1386,6 +1387,15 @@ pub(super) enum MobCommand {
         owner_identity: crate::ids::AgentIdentity,
         objective_id: meerkat_core::interaction::ObjectiveId,
         reply_tx: oneshot::Sender<Result<(), crate::MobError>>,
+    },
+    /// Bind an observer to the existing keyed explicit-target run `run_id`
+    /// (derived from its key by the handle). Never starts or rewrites a run;
+    /// replies with the binding that stands.
+    BindFlowRunObserver {
+        run_id: RunId,
+        flow_id: crate::ids::FlowId,
+        observer: crate::run::FlowRunObserver,
+        reply_tx: oneshot::Sender<Result<crate::run::MobRunObserverBinding, crate::MobError>>,
     },
     MemberMachineProjection {
         agent_identity: crate::ids::AgentIdentity,
@@ -2071,6 +2081,7 @@ impl MobCommand {
             Self::ResolveIdentityConvergenceBlock { .. } => ShutdownAnswerClass::CallerRequest,
             Self::ConcludeObjective { .. } => ShutdownAnswerClass::CallerRequest,
             Self::BindObjectiveOwner { .. } => ShutdownAnswerClass::CallerRequest,
+            Self::BindFlowRunObserver { .. } => ShutdownAnswerClass::CallerRequest,
             Self::MemberMachineProjection { .. } => ShutdownAnswerClass::CallerRequest,
             Self::MemberHistory { .. } => ShutdownAnswerClass::CallerRequest,
             Self::CreateForkedParticipant { .. } => ShutdownAnswerClass::CallerRequest,
@@ -2287,6 +2298,7 @@ impl MobCommand {
             Self::ResolveIdentityConvergenceBlock { .. } => "ResolveIdentityConvergenceBlock",
             Self::ConcludeObjective { .. } => "ConcludeObjective",
             Self::BindObjectiveOwner { .. } => "BindObjectiveOwner",
+            Self::BindFlowRunObserver { .. } => "BindFlowRunObserver",
             Self::MemberMachineProjection { .. } => "MemberMachineProjection",
             Self::Stop { .. } => "Stop",
             Self::ResumeLifecycle { .. } => "ResumeLifecycle",

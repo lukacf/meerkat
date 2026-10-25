@@ -75,6 +75,9 @@ impl MobCommand {
             | Self::RunFlow { .. }
             | Self::ConcludeObjective { .. }
             | Self::BindObjectiveOwner { .. }
+            // Binding an observer to an admitted run is the admitting
+            // authority's own act: the same class as the RunFlow it follows.
+            | Self::BindFlowRunObserver { .. }
             // Minting a forked-participant capability hands a holder a
             // delegable grant to drive a branch of the source's conversation:
             // that is the same authority class as sending work into a member.
@@ -317,8 +320,11 @@ impl MobCommand {
         match self.required_control_scope() {
             Some(ControlScope::SendCommand) => !matches!(
                 self,
-                // Settles an existing objective; starts nothing.
-                Self::ConcludeObjective { .. } | Self::AdmitControlScope { .. }
+                // Settles an existing objective, or binds an observer to an
+                // existing run; starts nothing.
+                Self::ConcludeObjective { .. }
+                    | Self::BindFlowRunObserver { .. }
+                    | Self::AdmitControlScope { .. }
             ),
             Some(ControlScope::Live) => match self {
                 // Committing buffered input starts a turn; interrupt,
@@ -409,6 +415,9 @@ impl MobCommand {
             }
             Self::ConcludeObjective { reply_tx, .. }
             | Self::BindObjectiveOwner { reply_tx, .. } => {
+                let _ = reply_tx.send(Err(error));
+            }
+            Self::BindFlowRunObserver { reply_tx, .. } => {
                 let _ = reply_tx.send(Err(error));
             }
             Self::DeclareMemberOutboundTaint { reply_tx, .. } => {
@@ -852,6 +861,21 @@ mod tests {
             .required_control_scope(),
             Some(ControlScope::SendCommand),
         );
+        let (tx, _rx) = oneshot::channel();
+        let bind = MobCommand::BindFlowRunObserver {
+            run_id: crate::ids::RunId::new(),
+            flow_id: crate::ids::FlowId::from("review"),
+            observer: crate::run::FlowRunObserver::new(crate::ids::AgentIdentity::from("lead")),
+            reply_tx: tx,
+        };
+        assert_eq!(
+            bind.required_control_scope(),
+            Some(ControlScope::SendCommand)
+        );
+        assert!(
+            !bind.refused_while_admission_closed(),
+            "binding an observer starts nothing, so a closing mob still admits it"
+        );
     }
 
     #[tokio::test]
@@ -896,6 +920,25 @@ mod tests {
                 })))
             ),
             "BindObjectiveOwner denial must use its typed reply channel"
+        );
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        MobCommand::BindFlowRunObserver {
+            run_id: crate::ids::RunId::new(),
+            flow_id: crate::ids::FlowId::from("review"),
+            observer: crate::run::FlowRunObserver::new(crate::ids::AgentIdentity::from("lead")),
+            reply_tx,
+        }
+        .reject_scope_denied(denial());
+        assert!(
+            matches!(
+                reply_rx.await,
+                Ok(Err(MobError::ScopeDenied(ScopeDenial {
+                    required: ControlScope::SendCommand,
+                    ..
+                })))
+            ),
+            "BindFlowRunObserver denial must use its typed reply channel"
         );
     }
 

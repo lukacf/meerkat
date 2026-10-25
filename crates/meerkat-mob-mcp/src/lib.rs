@@ -1702,6 +1702,8 @@ impl MobMcpState {
                 runtime,
             });
         *held = Some(binding);
+        // Wakes owed before this state could deliver them.
+        self.schedule_flow_run_wake_relink(None);
         Ok(())
     }
 
@@ -2064,6 +2066,7 @@ impl MobMcpState {
         storage_path: Option<PathBuf>,
         origin: ManagedInsertOrigin,
     ) -> ManagedMob {
+        self.adopt_flow_run_observer_wakes(&handle);
         match origin {
             ManagedInsertOrigin::HostInsert => self
                 .handles_inserted
@@ -2074,6 +2077,72 @@ impl MobMcpState {
             handle,
             storage_path,
         }
+    }
+
+    /// Deliver `handle`'s flow run observer wakes through this state's
+    /// continuation owner, and submit any wake its runs still owe (one the
+    /// previous process did not submit, or a run its recovery canceled). A
+    /// state not shared through [`Self::into_shared`] runs no such task and
+    /// delivers no wakes, as it runs no restore sweeps.
+    #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
+    fn adopt_flow_run_observer_wakes(&self, handle: &MobHandle) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let Some(weak) = self.self_weak.get().cloned() else {
+                return;
+            };
+            handle.install_flow_run_observer_wake(Arc::new(
+                crate::detached_completion_sink::MobStateFlowRunWake { state: weak },
+            ));
+            self.schedule_flow_run_wake_relink(Some(vec![handle.clone()]));
+        }
+    }
+
+    /// Submit the flow run observer wakes `handles` (every managed mob when
+    /// `None`) still owe, on a task of this state. Nothing runs before this
+    /// state can deliver: binding its continuations re-links every managed
+    /// mob. Submission is idempotent by each wake's key.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn schedule_flow_run_wake_relink(&self, handles: Option<Vec<MobHandle>>) {
+        if self.detached_delivery_route().is_err() {
+            return;
+        }
+        let Some(weak) = self.self_weak.get().cloned() else {
+            return;
+        };
+        let _ = self.state_tasks.spawn(
+            state_tasks::StateTaskKind::Convergent,
+            "flow run observer wake re-link",
+            async move {
+                let handles = match handles {
+                    Some(handles) => handles,
+                    None => match weak.upgrade() {
+                        Some(state) => state
+                            .managed_mob_handles()
+                            .await
+                            .into_iter()
+                            .map(|(_, handle)| handle)
+                            .collect(),
+                        None => return,
+                    },
+                };
+                for handle in handles {
+                    match handle.resubmit_flow_run_observer_wakes().await {
+                        Ok(0) => {}
+                        Ok(submitted) => tracing::info!(
+                            mob_id = %handle.mob_id(),
+                            submitted,
+                            "flow run observer wakes re-submitted"
+                        ),
+                        Err(error) => tracing::warn!(
+                            mob_id = %handle.mob_id(),
+                            %error,
+                            "flow run observer wake re-link failed"
+                        ),
+                    }
+                }
+            },
+        );
     }
 
     /// Whether this state hosts every mob whose roster could name a session:

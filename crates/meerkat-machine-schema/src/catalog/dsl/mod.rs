@@ -4663,6 +4663,9 @@ runtime_internal_inputs!(
         // classifier in the same command as the step it guards, so it is
         // never a standalone surface command.
         RetireAtScope,
+        // The flow-run observation verdict is composed for `mob_flow_status`
+        // inside the tool shell's admission, never a standalone command.
+        ResolveFlowRunObservationAdmission,
     ]
 );
 

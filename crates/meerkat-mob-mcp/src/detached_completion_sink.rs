@@ -12,19 +12,26 @@
 //! On a runtime with a native work authorization host the continuation
 //! carries the dispatching run's retained work, read back from the job's
 //! committed record, and is admitted as a resume of exactly that work.
+//!
+//! A keyed flow run's observer wake travels the same path
+//! ([`MobStateFlowRunWake`]): a `BackgroundJob` notice of the run's terminal
+//! status under the binding's wake key, confirmed on a governed runtime
+//! against the binding's retained work and the run's committed record.
 
 use std::sync::{Arc, Weak};
 
 use meerkat::{
     AddressObservation, AddressResolution, ContinuationAddressResolver, ContinuationBody,
     ContinuationDelivery, ContinuationHandling, ContinuationKey, ContinuationOwner,
-    ContinuationOwnerService, ContinuationProducer, ContinuationResultRef, ContinuationSubmitError,
-    HostOriginalBinder, HostOriginalLookup, RetainedJobFacts, RetainedJobLookup, RetainedJobRecord,
-    RetainedJobSource,
+    ContinuationOwnerService, ContinuationProducer, ContinuationResultRef, ContinuationStatus,
+    ContinuationSubmitError, HostOriginalBinder, HostOriginalLookup, RetainedJobFacts,
+    RetainedJobLookup, RetainedJobRecord, RetainedJobSource,
 };
 use meerkat_core::SessionId;
 use meerkat_core::event::BackgroundJobTerminalStatus;
-use meerkat_mob::{MobHandle, MobId};
+use meerkat_mob::{
+    FLOW_RUN_WAKE_TOOL, FlowRunWake, FlowRunWakeStatus, MobHandle, MobId, MobRunObserverBinding,
+};
 use meerkat_runtime::LogicalRuntimeId;
 
 use crate::MobMcpState;
@@ -384,8 +391,153 @@ impl RetainedJobSource for MobJobOwner {
                     Err(error) => RetainedJobLookup::Unavailable(error),
                 }
             }
+            ContinuationProducer::MobFlowRun => {
+                let Ok(run_id) = job_id.parse::<meerkat_mob::RunId>() else {
+                    return RetainedJobLookup::Absent;
+                };
+                let mut found = Vec::new();
+                for (_, handle) in state.managed_mob_handles().await {
+                    match handle.flow_run_observer_wake_facts(&run_id).await {
+                        Ok(Some(facts)) => found.push(facts),
+                        Ok(None) => {}
+                        Err(error) => return RetainedJobLookup::Unavailable(error.to_string()),
+                    }
+                }
+                match <[_; 1]>::try_from(found) {
+                    // The binding's retained work as it stands (the first one
+                    // stored, unless a rebind refreshed it), owed to the
+                    // session whose runtime staged it.
+                    Ok([(binding, wake)]) => {
+                        let Some(work) = binding.observer.retained_work() else {
+                            return RetainedJobLookup::Absent;
+                        };
+                        let Some(owner_session_id) =
+                            LogicalRuntimeId(work.runtime_id().to_string()).session_id()
+                        else {
+                            return RetainedJobLookup::Absent;
+                        };
+                        RetainedJobLookup::Found(RetainedJobFacts {
+                            owner_session_id,
+                            retained_work: Some(work.clone()),
+                            result_digest: wake.result_digest().to_string(),
+                        })
+                    }
+                    // Not found while the host may still restore the run's
+                    // mob: the wake waits rather than being refused.
+                    Err(found) if found.is_empty() && !state.mob_set_complete() => {
+                        RetainedJobLookup::Unavailable(format!(
+                            "no mob of this host holds flow run {job_id} before its mobs are restored"
+                        ))
+                    }
+                    Err(_) => RetainedJobLookup::Absent,
+                }
+            }
             ContinuationProducer::Host { .. } => RetainedJobLookup::Absent,
         }
+    }
+}
+
+/// Flow run observer wakes through this state's continuation owner: the
+/// durable path of fork_off and council completions, under each wake's key,
+/// for the bound member. A host that bound no continuation owner delivers
+/// none.
+pub(crate) struct MobStateFlowRunWake {
+    pub(crate) state: Weak<MobMcpState>,
+}
+
+#[async_trait::async_trait]
+impl meerkat_mob::FlowRunObserverWake for MobStateFlowRunWake {
+    async fn submit(
+        &self,
+        handle: &MobHandle,
+        binding: &MobRunObserverBinding,
+        wake: &FlowRunWake,
+    ) -> Result<(), String> {
+        let state = self
+            .state
+            .upgrade()
+            .ok_or_else(|| "the mob host is gone".to_string())?;
+        let sink = state.detached_delivery_route().map_err(|unavailable| {
+            format!("this host delivers no flow run observer wakes: {unavailable:?}")
+        })?;
+        let job_id = wake.run_id().to_string();
+        let delivery = ContinuationDelivery {
+            key: ContinuationKey::new(wake.key()).map_err(|error| error.to_string())?,
+            result: ContinuationResultRef {
+                producer: ContinuationProducer::MobFlowRun,
+                producer_id: job_id.clone(),
+                result_digest: wake.result_digest().to_string(),
+                summary: None,
+            },
+            body: ContinuationBody::notice(
+                detached_completion_notice(
+                    FLOW_RUN_WAKE_TOOL,
+                    &job_id,
+                    wake.status(),
+                    wake.outcome(),
+                )
+                .map_err(|error| error.to_string())?,
+            ),
+            handling: ContinuationHandling::Queue,
+        };
+        let member = binding.observer.member();
+        let committed_at_ms = now_ms();
+        let submitted = if sink.continuations.governs_work_authority() {
+            let job = RetainedJobRecord::from_owner(
+                sink.jobs.as_ref(),
+                ContinuationProducer::MobFlowRun,
+                &job_id,
+            )
+            .await?
+            .ok_or_else(|| {
+                format!("no committed outcome of flow run {job_id} confirms its wake")
+            })?;
+            handle
+                .submit_retained_continuation(
+                    &sink.continuations,
+                    member,
+                    delivery,
+                    &job,
+                    committed_at_ms,
+                )
+                .await
+        } else {
+            handle
+                .submit_continuation(&sink.continuations, member, delivery, committed_at_ms)
+                .await
+        };
+        submitted.map(|_| ()).map_err(|error| error.to_string())
+    }
+
+    async fn status(
+        &self,
+        handle: &MobHandle,
+        binding: &MobRunObserverBinding,
+        key: &str,
+    ) -> Result<FlowRunWakeStatus, String> {
+        let Some(state) = self.state.upgrade() else {
+            return Ok(FlowRunWakeStatus::Unavailable);
+        };
+        let Ok(sink) = state.detached_delivery_route() else {
+            return Ok(FlowRunWakeStatus::Unavailable);
+        };
+        let key = ContinuationKey::new(key).map_err(|error| error.to_string())?;
+        let owner = ContinuationOwner::Member {
+            mob_id: handle.mob_id().to_string(),
+            identity: binding.observer.member().as_str().to_string(),
+        };
+        let status = sink
+            .continuations
+            .continuation_status(&owner, &key)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(match status {
+            ContinuationStatus::NotCommitted => FlowRunWakeStatus::NotSubmitted,
+            ContinuationStatus::Pending { .. } => FlowRunWakeStatus::Pending,
+            ContinuationStatus::Applied { .. } => FlowRunWakeStatus::Applied,
+            ContinuationStatus::Stranded { .. } => FlowRunWakeStatus::Stranded,
+            ContinuationStatus::Refused { reason, .. } => FlowRunWakeStatus::Refused { reason },
+        })
     }
 }
 

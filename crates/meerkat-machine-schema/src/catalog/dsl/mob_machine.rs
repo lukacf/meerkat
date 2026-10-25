@@ -1697,6 +1697,14 @@ macro_rules! mob_catalog_machine_dsl {
             // `update {}`; the actor applies it in the same command as the
             // step it guards.
             RetireAtScope { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, session_id: SessionId },
+            // Admission for reading ONE flow run's status and terminal outcome.
+            // The tool shell extracts two pure observations: manage scope over
+            // the current mob, and whether the run's durable observer binding
+            // names the calling member (the member a keyed explicit-target
+            // admission bound as the run's observer). MobMachine composes the
+            // disjunction and decides the verdict; the shell mirrors it
+            // (Deny -> access_denied).
+            ResolveFlowRunObservationAdmission { can_manage_mob: bool, caller_observes_run: bool },
         }
 
         surface_only [
@@ -2149,6 +2157,10 @@ macro_rules! mob_catalog_machine_dsl {
             ExplicitResumeMemberOutcomeClassified { attempt: ResumeAttemptId, agent_identity: AgentIdentity, binding: ResumeMemberBinding, disposition: Enum<ResumeMemberOutcomeDisposition> },
             ExplicitResumeFinished { attempt: ResumeAttemptId, cancelled: bool },
             RetireAtScopeResolved { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, verdict: Enum<RetireAtScopeVerdictKind>, expected_fence_token: Option<FenceToken>, actual_fence_token: Option<FenceToken>, current_session_id: Option<SessionId> },
+            // Machine-owned flow-run observation verdict for `mob_flow_status`:
+            // manage scope, or the run's observer binding naming the caller.
+            // The tool shell mirrors it (Denied -> access_denied).
+            FlowRunObservationAdmissionResolved { admission: Enum<MobCurrentMobAdmissionKind> },
         }
 
         // One total, pure classifier over desired authority, lease ownership,
@@ -2849,6 +2861,7 @@ macro_rules! mob_catalog_machine_dsl {
         disposition GrantRecorded => local seam SurfaceResultAlignment,
         disposition GrantRevoked => local seam SurfaceResultAlignment,
         disposition RetireAtScopeResolved => local seam SurfaceResultAlignment,
+        disposition FlowRunObservationAdmissionResolved => local seam SurfaceResultAlignment,
 
         // =====================================================================
         // Invariants
@@ -22645,6 +22658,36 @@ macro_rules! mob_catalog_machine_dsl {
             }
             emit RequestSessionIngressDetachForMobDestroy { mob_id: mob_id, agent_runtime_id: agent_runtime_id }
             emit RequestKickoffQuiesce { member_id: agent_identity }
+        }
+
+        // --- Flow-run observation admission ---
+        //
+        // Read one flow run's status and terminal outcome: manage scope over
+        // the mob, or the run's durable observer binding naming the caller.
+        // Pure classification across all phases, like owned-member
+        // admission: a finished, stopped or destroyed mob's runs stay
+        // readable by their observer.
+
+        transition ResolveFlowRunObservationAdmissionAllowed {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ResolveFlowRunObservationAdmission { can_manage_mob, caller_observes_run }
+            guard "manage_scope_or_observer_binding_allows" {
+                can_manage_mob == true || caller_observes_run == true
+            }
+            update {}
+            to Running
+            emit FlowRunObservationAdmissionResolved { admission: MobCurrentMobAdmissionKind::Allowed }
+        }
+
+        transition ResolveFlowRunObservationAdmissionDenied {
+            per_phase [Running, Stopped, Completed, Destroyed]
+            on input ResolveFlowRunObservationAdmission { can_manage_mob, caller_observes_run }
+            guard "neither_manage_scope_nor_observer_binding_denies" {
+                can_manage_mob == false && caller_observes_run == false
+            }
+            update {}
+            to Running
+            emit FlowRunObservationAdmissionResolved { admission: MobCurrentMobAdmissionKind::Denied }
         }
     }
         }

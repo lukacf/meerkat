@@ -1233,6 +1233,40 @@ impl MobOperatorToolDispatcher {
         }
     }
 
+    /// Admission for reading one flow run: manage scope over the mob, or the
+    /// run's observer binding naming the member whose session dispatched the
+    /// call. A manager is admitted exactly as before, on manage scope alone,
+    /// whatever its args. Without it the origin must be a current member's
+    /// session (else denied before the run is looked at), and a run the
+    /// caller does not observe is denied whether or not it exists, as is an
+    /// unreadable run id. MobMachine decides; this mirrors it.
+    async fn ensure_flow_run_observation_scope(
+        &self,
+        owner: Option<&SessionId>,
+        tool_name: &str,
+        run_id: Option<&RunId>,
+        authority: &MobToolAuthorityContext,
+    ) -> Result<FlowRunRead, ToolError> {
+        let can_manage_mob = self.can_manage_current_mob(authority);
+        let caller = if can_manage_mob {
+            None
+        } else {
+            self.validated_caller(owner, tool_name).await?
+        };
+        let admission = self
+            .handle
+            .resolve_flow_run_observation_admission(can_manage_mob, caller.as_ref(), run_id)
+            .await
+            .map_err(|error| Self::map_mob_error_to_tool_access(tool_name, error))?;
+        match admission {
+            CurrentMobAdmission::Allowed if can_manage_mob => Ok(FlowRunRead::Manager),
+            // Admitted without manage scope: only the run's observer binding
+            // names the caller, which reads the observer's view.
+            CurrentMobAdmission::Allowed => Ok(FlowRunRead::Observer),
+            CurrentMobAdmission::Denied => Err(ToolError::access_denied(tool_name)),
+        }
+    }
+
     fn can_manage_current_mob(&self, authority: &MobToolAuthorityContext) -> bool {
         let mob_id = self.handle.definition().id.as_str();
         authority.can_manage_mob(mob_id, self.handle.incarnation())
@@ -1858,6 +1892,7 @@ impl MobOperatorToolDispatcher {
         // Every check of this call reads one snapshot of the authority.
         let authority = self.admission_authority(call.name)?;
         let mut owner_list_view = None;
+        let mut flow_run_read = FlowRunRead::Manager;
         if matches!(
             call.name,
             TOOL_MEMBER_STATUS | TOOL_RETIRE_MEMBER | TOOL_FORCE_CANCEL_MEMBER
@@ -1883,6 +1918,19 @@ impl MobOperatorToolDispatcher {
                 // spawned (its fork_off children).
                 owner_list_view = Some(validated.ok_or(denied)?);
             }
+        } else if call.name == TOOL_MOB_FLOW_STATUS
+            && self.tools.iter().any(|tool| tool.name == call.name)
+        {
+            // Manage scope, or the run's observer binding names the caller.
+            // Without manage scope an unreadable run id is denied, never
+            // reported as invalid: the admission runs before arg validation.
+            let parsed: Result<FlowStatusArgs, _> = call.parse_args();
+            let run_id = parsed
+                .ok()
+                .and_then(|args| args.run_id.parse::<RunId>().ok());
+            flow_run_read = self
+                .ensure_flow_run_observation_scope(owner, call.name, run_id.as_ref(), &authority)
+                .await?;
         } else if self.tools.iter().any(|tool| tool.name == call.name)
             && !matches!(call.name, TOOL_SPAWN_MEMBER | TOOL_SPAWN_MANY_MEMBERS)
         {
@@ -2167,12 +2215,33 @@ impl MobOperatorToolDispatcher {
                 let run_id = args.run_id.parse::<RunId>().map_err(|error| {
                     ToolError::invalid_arguments(call.name, format!("invalid run_id: {error}"))
                 })?;
+                // A bound run's observer wake, beside the run: a wake the
+                // host refused stays visible here, to the observer too.
+                let observer_wake = self
+                    .handle
+                    .flow_run_observer_wake_status(&run_id)
+                    .await
+                    .map_err(|error| Self::map_mob_error(call, error))?
+                    .map(|(binding, status)| observer_wake_value(&binding, &status));
                 let run = self
                     .handle
                     .flow_status(run_id)
                     .await
                     .map_err(|error| Self::map_mob_error(call, error))?;
-                Self::encode_result(call, json!({ "run": run }))
+                let mut result = match (flow_run_read, run) {
+                    // An observer reads its own narrower view of its run.
+                    (FlowRunRead::Observer, Some(run)) => {
+                        let view = run
+                            .observer_view_value()
+                            .map_err(|error| Self::map_mob_error(call, error))?;
+                        json!({ "run": view })
+                    }
+                    (_, run) => json!({ "run": run }),
+                };
+                if let Some(wake) = observer_wake {
+                    result["observer_wake"] = wake;
+                }
+                Self::encode_result(call, result)
             }
             TOOL_MOB_CANCEL_FLOW => {
                 let args: FlowStatusArgs = call
@@ -2228,6 +2297,33 @@ const TOOL_LIST_MEMBERS: &str = "list_members";
 const TOOL_MOB_LIST_FLOWS: &str = "mob_list_flows";
 const TOOL_MOB_RUN_FLOW: &str = "mob_run_flow";
 const TOOL_MOB_FLOW_STATUS: &str = "mob_flow_status";
+
+/// `mob_flow_status`'s `observer_wake`: the bound member, the wake's key and
+/// where the wake stands ([`crate::run::FlowRunWakeStatus`]).
+fn observer_wake_value(
+    binding: &crate::run::MobRunObserverBinding,
+    status: &crate::run::FlowRunWakeStatus,
+) -> serde_json::Value {
+    let mut value = serde_json::to_value(status)
+        .unwrap_or_else(|error| json!({ "status": "unreadable", "detail": error.to_string() }));
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "member".to_string(),
+            json!(binding.observer.member().as_str()),
+        );
+        object.insert("key".to_string(), json!(binding.wake_key()));
+    }
+    value
+}
+
+/// Which view of a flow run a `mob_flow_status` caller was admitted to: a
+/// manager reads the whole run, an observer its own narrower view
+/// ([`crate::run::MobRun::observer_view_value`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlowRunRead {
+    Manager,
+    Observer,
+}
 const TOOL_MOB_CANCEL_FLOW: &str = "mob_cancel_flow";
 
 #[cfg(test)]

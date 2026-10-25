@@ -9313,6 +9313,81 @@ mod tests {
         );
     }
 
+    /// Reading one flow run is admitted on manage scope or on the run's
+    /// observer binding naming the caller, and on nothing else, in every
+    /// phase: the verdict is pure classification and leaves the phase as it
+    /// is, so a stopped, completed or destroyed mob's runs stay readable by
+    /// their observer.
+    #[test]
+    fn flow_run_observation_admission_is_manage_scope_or_the_observer_binding_in_every_phase() {
+        let running = MobMachineAuthority::new();
+        let mut stopped = MobMachineAuthority::new();
+        begin_completion_lifecycle_quiesce(&mut stopped, PlacedCompletionLifecycleIntentKind::Stop);
+        MobMachineMutator::apply(&mut stopped, MobMachineInput::Stop).expect("stop");
+        let mut completed = MobMachineAuthority::new();
+        begin_completion_lifecycle_quiesce(
+            &mut completed,
+            PlacedCompletionLifecycleIntentKind::Complete,
+        );
+        MobMachineMutator::apply(&mut completed, MobMachineInput::Complete).expect("complete");
+        let mut destroyed = MobMachineAuthority::new();
+        begin_completion_lifecycle_quiesce(
+            &mut destroyed,
+            PlacedCompletionLifecycleIntentKind::Destroy,
+        );
+        destroyed
+            .apply_signal(MobMachineSignal::AdmitDestroyCleanup)
+            .expect("admit the destroy");
+        MobMachineMutator::apply(&mut destroyed, MobMachineInput::Destroy).expect("destroy");
+
+        // Boxed: four authorities side by side exceed the stack-array budget.
+        for (mut authority, phase) in [
+            (Box::new(running), MobPhase::Running),
+            (Box::new(stopped), MobPhase::Stopped),
+            (Box::new(completed), MobPhase::Completed),
+            (Box::new(destroyed), MobPhase::Destroyed),
+        ] {
+            assert_eq!(authority.state().lifecycle_phase, phase);
+            for can_manage_mob in [false, true] {
+                for caller_observes_run in [false, true] {
+                    let transition = MobMachineMutator::apply(
+                        &mut *authority,
+                        MobMachineInput::ResolveFlowRunObservationAdmission {
+                            can_manage_mob,
+                            caller_observes_run,
+                        },
+                    )
+                    .expect("the verdict is decided in every phase");
+                    let verdicts: Vec<MobCurrentMobAdmissionKind> = transition
+                        .effects()
+                        .iter()
+                        .filter_map(|effect| match effect {
+                            MobMachineEffect::FlowRunObservationAdmissionResolved { admission } => {
+                                Some(*admission)
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    let expected = if can_manage_mob || caller_observes_run {
+                        MobCurrentMobAdmissionKind::Allowed
+                    } else {
+                        MobCurrentMobAdmissionKind::Denied
+                    };
+                    assert_eq!(
+                        verdicts,
+                        vec![expected],
+                        "{phase:?}: manage {can_manage_mob}, observes {caller_observes_run}"
+                    );
+                    assert_eq!(
+                        authority.state().lifecycle_phase,
+                        phase,
+                        "the verdict leaves the phase as it is"
+                    );
+                }
+            }
+        }
+    }
+
     /// The fence `runtime_id` holds in `authority`.
     fn live_fence(authority: &MobMachineAuthority, runtime_id: &AgentRuntimeId) -> FenceToken {
         *authority

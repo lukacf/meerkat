@@ -35,6 +35,145 @@ them.
 
 ## [Unreleased]
 
+### Breaking
+
+- **Generated `MobMachine` vocabulary (`meerkat-machine-schema`,
+  `meerkat-machine-kernels`, `meerkat-mob`):** the machine gains the input
+  `ResolveFlowRunObservationAdmission { can_manage_mob, caller_observes_run }`,
+  the effect `FlowRunObservationAdmissionResolved { admission }`, and the
+  per-phase transitions `ResolveFlowRunObservationAdmissionAllowedRunning`,
+  `ResolveFlowRunObservationAdmissionAllowedStopped`,
+  `ResolveFlowRunObservationAdmissionAllowedCompleted`,
+  `ResolveFlowRunObservationAdmissionAllowedDestroyed`,
+  `ResolveFlowRunObservationAdmissionDeniedRunning`,
+  `ResolveFlowRunObservationAdmissionDeniedStopped`,
+  `ResolveFlowRunObservationAdmissionDeniedCompleted`, and
+  `ResolveFlowRunObservationAdmissionDeniedDestroyed`. The schema enums
+  `MobMachineInput` and `MobMachineInputVariant` gain
+  `ResolveFlowRunObservationAdmission`; `MobMachineEffect` and
+  `MobMachineEffectVariant` gain `FlowRunObservationAdmissionResolved`. The
+  kernel `Input` and `InputKind` gain `ResolveFlowRunObservationAdmission`;
+  the kernel `Effect` and `EffectKind` gain
+  `FlowRunObservationAdmissionResolved`; the kernel `TransitionId` gains the
+  eight transitions above; `MobMachineCatalogInput` gains
+  `ResolveFlowRunObservationAdmission`. Exhaustive matches must add the arms.
+  The new variants are appended last in each of those enums, so no existing
+  variant's implicit discriminant or `PartialOrd` position changes.
+- `meerkat`: `ContinuationProducer` gains `MobFlowRun`, the producer of a
+  flow run observer wake (see Added). Exhaustive matches must add the arm.
+- Behaviour-only (not measured by the gate): this release migrates a mob's
+  SQLite store to schema version 13 (a table for flow run observer
+  bindings) when it opens it, and 0.9.5 refuses a store at version 13 with
+  its typed future-schema error. Downgrading after the migration is not
+  supported: keep a copy of the mob stores from before the upgrade to roll
+  back.
+
+### Added
+
+- `meerkat-mob`: a keyed explicit-target flow run can report to an
+  observer. The member it names reads that run through `mob_flow_status`
+  without manage scope over the mob, in its own narrower view
+  (`MobRun::observer_view_value`): the run, mob and flow ids, the status,
+  the `created_at` and `completed_at` timestamps, the terminal
+  `result_class` (`success` or `error`), the result and the root step
+  outputs. It never reads the activation params, the step and failure
+  ledgers, frames, loops, role targets or flow authority inputs, and gains
+  nothing else: cancelling, starting and listing flows stay manage-only. A
+  manager reads every run's whole record exactly as before, and a member
+  the run does not report to is still denied, for an absent run too.
+  MobMachine decides each read (`ResolveFlowRunObservationAdmission`).
+  - `MobHandle::run_flow_with_role_targets_and_external_identity_observed`
+    admits a run as `run_flow_with_role_targets_and_external_identity` does
+    and binds its `FlowRunObserver` in the same admission command: the
+    observer is admitted before anything is written, and its binding is
+    written right after the run's own row and before the run starts, so a
+    refused admission leaves neither a run nor a binding. The observer is
+    never part of the activation params or role targets, so a replay under
+    the same key compares exactly what was admitted: it never raises
+    `FlowRunIdempotencyConflict`, and it binds an observer to a run admitted
+    without one.
+  - `MobHandle::bind_flow_run_observer(flow_id, &identity, observer)` binds
+    an observer to an existing keyed explicit-target run by its key, in
+    flight or terminal, and returns the binding that stands. It is how a run
+    admitted before observers existed reports to its current coordinator: it
+    never rewrites the run's id, params or role targets and starts nothing.
+    It needs the `SendCommand` scope, as the admission does; no member tool
+    reaches it.
+  - The binding is stored beside the run (`MobRunStore::put_run_observer`,
+    `get_run_observer` and `refresh_run_observer`, in memory and in SQLite;
+    `MobRunStore::holds_run_observers` reports whether a store holds them).
+    A conflict is decided on the member alone: another member is the new
+    `MobError::FlowRunObserverConflict`. The same member again keeps the
+    stored binding whole while its retained work names the member's current
+    runtime; when the stored binding carries no retained work, or names
+    another runtime (the member was respawned or repointed), fresh retained
+    work replaces only the stored retained work (`refresh_run_observer`, a
+    compare-and-swap). A non-member observer is `MemberNotFound`. The new
+    `MobError::FlowRunObserverRefused` carries a `FlowRunObserverRefusal`:
+    a run without role targets (`NotExplicitTarget`), an observer without
+    the member's retained work on a runtime with a native work authorization
+    host (`RetainedWorkRequired`), retained work staged by another runtime
+    than the member's current one (`RetainedWorkElsewhere`, read from the
+    member's session binding when the observer is bound, so a stale snapshot
+    is never stored), and a run store that holds no observer bindings
+    (`PersistenceUnavailable`). Every refusal is decided before anything is
+    written.
+  - `FlowRunObserver { member, retained_work }` and `MobRunObserverBinding`
+    are new public types.
+- `meerkat-mob`, `meerkat-mob-mcp`: a bound flow run wakes its observer once
+  the run is terminal, and at once when a terminal run is bound or its
+  binding is refreshed. The mob asks the `FlowRunObserverWake` its host
+  installed (`MobHandle::install_flow_run_observer_wake`) to submit the
+  run's `FlowRunWake`: a `BackgroundJob` notice (`mob_flow_run`) of the
+  run's terminal status for the bound member, as a continuation under the
+  binding's wake key (`MobRunObserverBinding::wake_key`:
+  `mob_flow_run:{run_id}`, or `mob_flow_run:{run_id}:{retained run id}` for
+  a binding with retained work), durable from submission and delivered once
+  per key. `MobMcpState` installs it on every mob it manages and delivers
+  through its continuation owner, under the new
+  `ContinuationProducer::MobFlowRun`; on a governed runtime the wake carries
+  the binding's retained work, confirmed at delivery against the binding and
+  the run's committed record. The state re-submits owed wakes
+  (`MobHandle::resubmit_flow_run_observer_wakes`) when it manages a mob and
+  when it binds its continuations, which covers a run that ended before a
+  restart and a run its recovery canceled. `mob_flow_status` shows a bound
+  run's `observer_wake` beside the run, to the observer too: the member,
+  the key and a `FlowRunWakeStatus` (`not_submitted`, `pending`, `applied`,
+  `refused` with its reason, `stranded`, `unavailable` or `unreadable`), so a
+  wake refused at delivery stays visible; binding the member again with its
+  current retained work wakes it again. New: `FlowRunWake`,
+  `FlowRunWakeStatus`, `FLOW_RUN_WAKE_TOOL`, and
+  `MobHandle::{flow_run_observer, flow_run_observer_wake_facts,
+  flow_run_observer_wake_status}`; `LogicalRuntimeId::session_id` is now
+  public.
+
+### Upgrade notes
+
+- Opening a mob's SQLite store with this release, or with a build of its
+  development line, migrates the store to schema version 13, and 0.9.5
+  refuses a store at version 13 with its typed future-schema error. 0.9.5
+  also cannot decode a flow run wake's continuation row (producer
+  `mob_flow_run`) in the runtime store. Keep a copy of the mob and runtime
+  stores from before the upgrade to roll back.
+
+### Known limitations
+
+- A mob over a host store (the storage SPI) holds no flow run observer
+  bindings yet: an observed admission or bind there is refused with
+  `FlowRunObserverRefusal::PersistenceUnavailable` before anything is
+  written.
+- On a governed runtime without a durable runtime store, a turn's
+  contributor rows live in the runtime's live ledger only: a flow run wake
+  that carries that turn's retained work and is delivered after the rows
+  left the ledger is refused (`observer_wake` shows `refused` with
+  `no_admissible_work_binding`). Binding again with current retained work
+  wakes the member again.
+- A wake owed to a member bound without retained work goes to the member
+  incarnation current when it is submitted. If the member is respawned
+  before it is delivered, the wake is stranded (`observer_wake` shows it),
+  and binding again without retained work does not wake the new
+  incarnation.
+
 ## [0.9.5] - 2026-10-23
 
 ### Breaking

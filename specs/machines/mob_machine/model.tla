@@ -19152,6 +19152,70 @@ AdmitDestroyMemberRetireRuntimeEndedStopped(mob_id, agent_identity, agent_runtim
     /\ UnchangedFrame_760d676b1566b1a7
 
 
+ResolveFlowRunObservationAdmissionAllowedRunning(can_manage_mob, caller_observes_run) ==
+    /\ phase = "Running"
+    /\ (IF (can_manage_mob = TRUE) THEN TRUE ELSE (caller_observes_run = TRUE))
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_6442c4792a0a93bc
+
+
+ResolveFlowRunObservationAdmissionAllowedStopped(can_manage_mob, caller_observes_run) ==
+    /\ phase = "Stopped"
+    /\ (IF (can_manage_mob = TRUE) THEN TRUE ELSE (caller_observes_run = TRUE))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_6442c4792a0a93bc
+
+
+ResolveFlowRunObservationAdmissionAllowedCompleted(can_manage_mob, caller_observes_run) ==
+    /\ phase = "Completed"
+    /\ (IF (can_manage_mob = TRUE) THEN TRUE ELSE (caller_observes_run = TRUE))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_6442c4792a0a93bc
+
+
+ResolveFlowRunObservationAdmissionAllowedDestroyed(can_manage_mob, caller_observes_run) ==
+    /\ phase = "Destroyed"
+    /\ (IF (can_manage_mob = TRUE) THEN TRUE ELSE (caller_observes_run = TRUE))
+    /\ phase' = "Destroyed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_6442c4792a0a93bc
+
+
+ResolveFlowRunObservationAdmissionDeniedRunning(can_manage_mob, caller_observes_run) ==
+    /\ phase = "Running"
+    /\ ((can_manage_mob = FALSE) /\ (caller_observes_run = FALSE))
+    /\ phase' = "Running"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_6442c4792a0a93bc
+
+
+ResolveFlowRunObservationAdmissionDeniedStopped(can_manage_mob, caller_observes_run) ==
+    /\ phase = "Stopped"
+    /\ ((can_manage_mob = FALSE) /\ (caller_observes_run = FALSE))
+    /\ phase' = "Stopped"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_6442c4792a0a93bc
+
+
+ResolveFlowRunObservationAdmissionDeniedCompleted(can_manage_mob, caller_observes_run) ==
+    /\ phase = "Completed"
+    /\ ((can_manage_mob = FALSE) /\ (caller_observes_run = FALSE))
+    /\ phase' = "Completed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_6442c4792a0a93bc
+
+
+ResolveFlowRunObservationAdmissionDeniedDestroyed(can_manage_mob, caller_observes_run) ==
+    /\ phase = "Destroyed"
+    /\ ((can_manage_mob = FALSE) /\ (caller_observes_run = FALSE))
+    /\ phase' = "Destroyed"
+    /\ model_step_count' = model_step_count + 1
+    /\ UnchangedFrame_6442c4792a0a93bc
+
+
 Next ==
     \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E status \in FlowRunStatusValues : ClassifyFlowRunTerminalityTerminalRunning(run_id, status)
     \/ (phase = "Running") /\ \E run_id \in RunIdValues : \E status \in FlowRunStatusValues : ClassifyFlowRunTerminalityNonTerminalRunning(run_id, status)
@@ -20598,6 +20662,14 @@ Next ==
     \/ (phase = "Completed") /\ \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : ObserveRuntimeDestroyedCompleted(agent_runtime_id, fence_token)
     \/ (phase = "Running") /\ \E mob_id \in MobIdValues : \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : \E session_id \in OptionSessionIdValues : AdmitDestroyMemberRetireRuntimeEndedRunning(mob_id, agent_identity, agent_runtime_id, fence_token, generation, session_id)
     \/ (phase = "Stopped") /\ \E mob_id \in MobIdValues : \E agent_identity \in AgentIdentityValues : \E agent_runtime_id \in AgentRuntimeIdValues : \E fence_token \in FenceTokenValues : \E generation \in GenerationValues : \E session_id \in OptionSessionIdValues : AdmitDestroyMemberRetireRuntimeEndedStopped(mob_id, agent_identity, agent_runtime_id, fence_token, generation, session_id)
+    \/ (phase = "Running") /\ \E can_manage_mob \in BOOLEAN : \E caller_observes_run \in BOOLEAN : ResolveFlowRunObservationAdmissionAllowedRunning(can_manage_mob, caller_observes_run)
+    \/ (phase = "Stopped") /\ \E can_manage_mob \in BOOLEAN : \E caller_observes_run \in BOOLEAN : ResolveFlowRunObservationAdmissionAllowedStopped(can_manage_mob, caller_observes_run)
+    \/ (phase = "Completed") /\ \E can_manage_mob \in BOOLEAN : \E caller_observes_run \in BOOLEAN : ResolveFlowRunObservationAdmissionAllowedCompleted(can_manage_mob, caller_observes_run)
+    \/ (phase = "Destroyed") /\ \E can_manage_mob \in BOOLEAN : \E caller_observes_run \in BOOLEAN : ResolveFlowRunObservationAdmissionAllowedDestroyed(can_manage_mob, caller_observes_run)
+    \/ ResolveFlowRunObservationAdmissionDeniedRunning(FALSE, FALSE)
+    \/ ResolveFlowRunObservationAdmissionDeniedStopped(FALSE, FALSE)
+    \/ ResolveFlowRunObservationAdmissionDeniedCompleted(FALSE, FALSE)
+    \/ ResolveFlowRunObservationAdmissionDeniedDestroyed(FALSE, FALSE)
     \/ TerminalStutter
 
 stopped_mob_holds_member_run_starts == (IF (phase # "Stopped") THEN TRUE ELSE (member_run_starts_held = TRUE))

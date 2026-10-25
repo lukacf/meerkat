@@ -2030,6 +2030,20 @@ mod identity_recovery_slice_tests {
     }
 }
 
+/// What an admitted flow run observer writes
+/// ([`MobActor::admit_flow_run_observer`]).
+enum FlowRunObserverWrite {
+    /// A new binding.
+    Insert(crate::run::MobRunObserverBinding),
+    /// The stored binding of the same member, unchanged.
+    Keep(crate::run::MobRunObserverBinding),
+    /// The stored binding of the same member, its retained work replaced.
+    Refresh {
+        expected: crate::run::MobRunObserverBinding,
+        next: crate::run::MobRunObserverBinding,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum HostOrphanReleaseReservation {
     InFlight,
@@ -8608,6 +8622,9 @@ pub(super) struct MobActor {
     /// including member-session operator tools created by the actor.
     pub(super) flow_target_provisioner:
         Arc<std::sync::RwLock<Option<super::handle::FlowTargetProvisioner>>>,
+    /// The host's late-bound delivery of flow run observer wakes, shared
+    /// with every handle.
+    pub(super) flow_run_observer_wake: super::handle::FlowRunObserverWakeSlot,
     /// Handle-clone shared explicit-Resume operation custody. Actor-admitted
     /// lifecycle commands invalidate predecessor results at this serialized
     /// ownership boundary.
@@ -15473,6 +15490,280 @@ impl MobActor {
             .collect()
     }
 
+    /// Bind `observer` to the existing keyed explicit-target run `run_id`
+    /// and return the binding that stands. The run is read, never written:
+    /// its row, activation params and role targets stay as admitted, and
+    /// nothing starts.
+    async fn handle_bind_flow_run_observer(
+        &mut self,
+        run_id: RunId,
+        flow_id: FlowId,
+        observer: crate::run::FlowRunObserver,
+    ) -> Result<crate::run::MobRunObserverBinding, MobError> {
+        let Some(run) = self.run_store.get_run(&run_id).await? else {
+            return Err(MobError::RunNotFound(run_id));
+        };
+        // The id is derived from this mob, the flow and the key, so another
+        // mob or flow under it is an integrity failure.
+        if run.mob_id != self.definition.id || run.flow_id != flow_id {
+            return Err(MobError::Internal(format!(
+                "stable external flow run '{run_id}' belongs to another mob or flow"
+            )));
+        }
+        if run.role_targets.is_none() {
+            return Err(MobError::FlowRunObserverRefused {
+                run_id,
+                refusal: crate::error::FlowRunObserverRefusal::NotExplicitTarget,
+            });
+        }
+        self.bind_flow_run_observer_record(&run_id, &flow_id, &observer)
+            .await
+    }
+
+    /// Bind `observer` to `run_id` and return the binding that stands: the
+    /// observer's admission ([`Self::admit_flow_run_observer`]), then its
+    /// write ([`Self::write_flow_run_observer`]), in one actor command.
+    async fn bind_flow_run_observer_record(
+        &self,
+        run_id: &RunId,
+        flow_id: &FlowId,
+        observer: &crate::run::FlowRunObserver,
+    ) -> Result<crate::run::MobRunObserverBinding, MobError> {
+        let write = self
+            .admit_flow_run_observer(run_id, flow_id, observer)
+            .await?;
+        let bound = self
+            .write_flow_run_observer(run_id, observer, write)
+            .await?;
+        // A run already terminal wakes its observer at once (a refreshed
+        // binding under its own key); a live run wakes it when it ends.
+        self.wake_flow_run_observer(run_id);
+        Ok(bound)
+    }
+
+    /// Wake `run_id`'s observer once the run is terminal, on a task of its
+    /// own so the actor never waits on its host's delivery. The host submits
+    /// durably and idempotently by the binding's wake key; a run without an
+    /// observer, a run not yet terminal and a mob without a wake host submit
+    /// nothing. A wake this misses (the process ended first, or the host
+    /// could not deliver yet) is submitted by the host's re-link
+    /// ([`MobHandle::resubmit_flow_run_observer_wakes`]).
+    fn wake_flow_run_observer(&self, run_id: &RunId) {
+        if self
+            .flow_run_observer_wake
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none()
+        {
+            return;
+        }
+        let handle = self.mob_handle_for_tools();
+        let run_id = run_id.clone();
+        tokio::spawn(async move {
+            if let Err(error) = handle.submit_flow_run_observer_wake(&run_id).await {
+                tracing::warn!(
+                    run_id = %run_id,
+                    error = %error,
+                    "flow run observer wake not submitted; the host's re-link submits it"
+                );
+            }
+        });
+    }
+
+    /// Admit `observer` for `run_id` and decide what to write, writing
+    /// nothing.
+    ///
+    /// The run store must hold observer bindings, else
+    /// `PersistenceUnavailable`. A conflict is decided next, on the member
+    /// alone: another member is `FlowRunObserverConflict`, whatever retained
+    /// work it carries. A new binding's observer must be a member of this
+    /// mob. Supplied retained work must have been staged by the member's
+    /// current runtime, read here from MobMachine's session binding of the
+    /// member, serialized with every membership change: a snapshot from
+    /// another runtime is `RetainedWorkElsewhere`.
+    ///
+    /// The same member again keeps the stored binding whole while its
+    /// retained work names the member's current runtime. When the stored
+    /// binding carries no retained work, or names another runtime (the member
+    /// was respawned or repointed), fresh retained work replaces only the
+    /// retained work. A new binding on a runtime with a native work
+    /// authorization host must carry retained work.
+    async fn admit_flow_run_observer(
+        &self,
+        run_id: &RunId,
+        flow_id: &FlowId,
+        observer: &crate::run::FlowRunObserver,
+    ) -> Result<FlowRunObserverWrite, MobError> {
+        if !self.run_store.holds_run_observers() {
+            return Err(MobError::FlowRunObserverRefused {
+                run_id: run_id.clone(),
+                refusal: crate::error::FlowRunObserverRefusal::PersistenceUnavailable,
+            });
+        }
+        let bound = match self.run_store.get_run_observer(run_id).await? {
+            Some(bound) => Some(Self::same_flow_run_observer(run_id, bound, observer)?),
+            None => None,
+        };
+        let identity = mob_dsl::AgentIdentity::from_domain(observer.member());
+        if bound.is_none()
+            && !self
+                .dsl_authority
+                .state()
+                .member_profile_names
+                .contains_key(&identity)
+        {
+            return Err(MobError::MemberNotFound(observer.member().clone()));
+        }
+        let current_runtime = self.member_current_runtime_id(observer.member());
+        if let Some(retained_work) = observer.retained_work()
+            && current_runtime.as_deref() != Some(retained_work.runtime_id())
+        {
+            return Err(MobError::FlowRunObserverRefused {
+                run_id: run_id.clone(),
+                refusal: crate::error::FlowRunObserverRefusal::RetainedWorkElsewhere,
+            });
+        }
+        if let Some(bound) = bound {
+            return Ok(Self::rebind_flow_run_observer(
+                bound,
+                observer,
+                current_runtime.as_deref(),
+            ));
+        }
+        if self.governs_work_authority() && observer.retained_work().is_none() {
+            return Err(MobError::FlowRunObserverRefused {
+                run_id: run_id.clone(),
+                refusal: crate::error::FlowRunObserverRefusal::RetainedWorkRequired,
+            });
+        }
+        Ok(FlowRunObserverWrite::Insert(
+            crate::run::MobRunObserverBinding {
+                run_id: run_id.clone(),
+                mob_id: self.definition.id.clone(),
+                flow_id: flow_id.clone(),
+                observer: observer.clone(),
+            },
+        ))
+    }
+
+    /// The same member binding again (see
+    /// [`Self::admit_flow_run_observer`]): keep the stored binding unless it
+    /// carries no retained work or names another runtime than the member's
+    /// current one, and fresh retained work (already checked against it) is
+    /// supplied, which then replaces only the retained work.
+    fn rebind_flow_run_observer(
+        bound: crate::run::MobRunObserverBinding,
+        observer: &crate::run::FlowRunObserver,
+        current_runtime: Option<&str>,
+    ) -> FlowRunObserverWrite {
+        let stale = bound
+            .observer
+            .retained_work()
+            .is_none_or(|stored| Some(stored.runtime_id()) != current_runtime);
+        let Some(fresh) = observer.retained_work().filter(|_| stale) else {
+            return FlowRunObserverWrite::Keep(bound);
+        };
+        let next = crate::run::MobRunObserverBinding {
+            observer: bound.observer.clone().with_retained_work(fresh.clone()),
+            ..bound.clone()
+        };
+        FlowRunObserverWrite::Refresh {
+            expected: bound,
+            next,
+        }
+    }
+
+    /// Write an admitted observer binding and return the binding that
+    /// stands. A write another writer won first reports the binding it left.
+    async fn write_flow_run_observer(
+        &self,
+        run_id: &RunId,
+        observer: &crate::run::FlowRunObserver,
+        write: FlowRunObserverWrite,
+    ) -> Result<crate::run::MobRunObserverBinding, MobError> {
+        match write {
+            FlowRunObserverWrite::Keep(bound) => Ok(bound),
+            FlowRunObserverWrite::Insert(binding) => {
+                match self.run_store.put_run_observer(&binding).await {
+                    Ok(_) => Ok(binding),
+                    Err(crate::store::MobStoreError::CasConflict(_)) => {
+                        self.standing_flow_run_observer(run_id, observer).await
+                    }
+                    Err(error) => Err(error.into()),
+                }
+            }
+            FlowRunObserverWrite::Refresh { expected, next } => {
+                if self
+                    .run_store
+                    .refresh_run_observer(&expected, &next)
+                    .await?
+                {
+                    Ok(next)
+                } else {
+                    self.standing_flow_run_observer(run_id, observer).await
+                }
+            }
+        }
+    }
+
+    /// The binding of `run_id` after another writer changed it first.
+    async fn standing_flow_run_observer(
+        &self,
+        run_id: &RunId,
+        observer: &crate::run::FlowRunObserver,
+    ) -> Result<crate::run::MobRunObserverBinding, MobError> {
+        match self.run_store.get_run_observer(run_id).await? {
+            Some(bound) => Self::same_flow_run_observer(run_id, bound, observer),
+            None => Err(MobError::Internal(format!(
+                "run '{run_id}' holds no observer binding after a lost write"
+            ))),
+        }
+    }
+
+    fn same_flow_run_observer(
+        run_id: &RunId,
+        bound: crate::run::MobRunObserverBinding,
+        observer: &crate::run::FlowRunObserver,
+    ) -> Result<crate::run::MobRunObserverBinding, MobError> {
+        if bound.observer.member() == observer.member() {
+            Ok(bound)
+        } else {
+            Err(MobError::FlowRunObserverConflict {
+                run_id: run_id.clone(),
+                bound: bound.observer.member().clone(),
+            })
+        }
+    }
+
+    /// The logical runtime id of `member`'s current session, from
+    /// MobMachine's session binding of the member: the runtime that stages
+    /// its work. `None` for a member without a session binding.
+    fn member_current_runtime_id(&self, member: &AgentIdentity) -> Option<String> {
+        let identity = mob_dsl::AgentIdentity::from_domain(member);
+        let binding = self
+            .dsl_authority
+            .state()
+            .member_session_bindings
+            .get(&identity)?;
+        let session_id = SessionId::parse(&binding.0).ok()?;
+        Some(meerkat_runtime::LogicalRuntimeId::for_session(&session_id).to_string())
+    }
+
+    /// Whether this runtime has a native work authorization host, under which
+    /// every resumption carries retained work.
+    fn governs_work_authority(&self) -> bool {
+        #[cfg(feature = "runtime-adapter")]
+        {
+            self.runtime_adapter
+                .as_ref()
+                .is_some_and(|runtime| runtime.has_native_work_authorization_host())
+        }
+        #[cfg(not(feature = "runtime-adapter"))]
+        {
+            false
+        }
+    }
+
     /// Admit a flow run's role targets: the binding must fit the flow
     /// (every bound role is a step role, every step role is bound, no quorum
     /// exceeds its role's bound set), and every bound identity must be an
@@ -15640,6 +15931,7 @@ impl MobActor {
             realtime_session_factory: None,
             fork_instruction_policy: self.fork_instruction_policy,
             flow_target_provisioner: Arc::clone(&self.flow_target_provisioner),
+            flow_run_observer_wake: Arc::clone(&self.flow_run_observer_wake),
             explicit_resume_operations: Arc::clone(&self.explicit_resume_operations),
             member_admission_backlog: Arc::clone(&self.member_admission_backlog),
             lifecycle_observations: Arc::clone(&self.lifecycle_observations),
@@ -28977,6 +29269,7 @@ impl MobActor {
                     scoped_event_tx,
                     exact_operation,
                     role_targets,
+                    observer,
                     reply_tx,
                 } => {
                     let result = self
@@ -28988,7 +29281,19 @@ impl MobActor {
                             scoped_event_tx,
                             exact_operation,
                             role_targets,
+                            observer,
                         )
+                        .await;
+                    let _ = reply_tx.send(result);
+                }
+                MobCommand::BindFlowRunObserver {
+                    run_id,
+                    flow_id,
+                    observer,
+                    reply_tx,
+                } => {
+                    let result = self
+                        .handle_bind_flow_run_observer(run_id, flow_id, observer)
                         .await;
                     let _ = reply_tx.send(result);
                 }
@@ -59794,6 +60099,7 @@ impl MobActor {
         scoped_event_tx: Option<mpsc::Sender<meerkat_core::ScopedAgentEvent>>,
         exact_operation: Option<super::handle::FlowOperationCustody>,
         role_targets: Option<Arc<crate::run::FlowRoleTargets>>,
+        observer: Option<crate::run::FlowRunObserver>,
     ) -> Result<RunId, MobError> {
         self.ensure_pending_spawn_alignment("handle_run_flow preflight")?;
         self.ensure_flow_tracker_alignment("handle_run_flow preflight")
@@ -59908,6 +60214,14 @@ impl MobActor {
                     "stable external flow run '{run_id}' is durable but has no live execution tracker; the actor is fail-stopping for cold recovery"
                 ))));
             }
+            // The observer was never part of what the replay compares: it is
+            // bound beside the run, so a replay may bind one to a run admitted
+            // without it, and never re-executes anything.
+            if let Some(observer) = observer.as_ref() {
+                let _bound = self
+                    .bind_flow_run_observer_record(&run_id, &existing.flow_id, observer)
+                    .await?;
+            }
             return Ok(run_id);
         }
         if let Some(intent) = external_delivery_intent.as_ref() {
@@ -59953,6 +60267,25 @@ impl MobActor {
         if let Some(role_targets) = role_targets.as_deref() {
             self.admit_flow_role_targets(&config, role_targets)?;
         }
+        // The observer is admitted here, before anything is written; its
+        // binding is written right after the run's own row, in this command
+        // and before the run starts, so a refused admission leaves no
+        // binding behind.
+        let observer_write = match observer.as_ref() {
+            Some(observer) => {
+                if role_targets.is_none() {
+                    return Err(MobError::FlowRunObserverRefused {
+                        run_id,
+                        refusal: crate::error::FlowRunObserverRefusal::NotExplicitTarget,
+                    });
+                }
+                let write = self
+                    .admit_flow_run_observer(&run_id, &config.flow_id, observer)
+                    .await?;
+                Some((observer, write))
+            }
+            None => None,
+        };
         let run_flow = MobRun::run_flow_input(&run_id, &config)?;
         debug_assert!(matches!(run_flow, mob_dsl::MobMachineInput::RunFlow { .. }));
         let prepared_run_flow = self
@@ -59975,6 +60308,13 @@ impl MobActor {
                 "flow admission run-store create failed before committing MobMachine RunFlow"
             );
         })?;
+        if let Some((observer, write)) = observer_write
+            && let Err(error) = self.write_flow_run_observer(&run_id, observer, write).await
+        {
+            // The run's row is durable and its observer is not: recovery
+            // settles the run, and a replay under its key binds the observer.
+            return Err(self.durable_uncertainty_fail_stop.record(error));
+        }
         if let Some(intent) = external_delivery_intent.as_ref() {
             let realization = crate::store::MobExternalDeliveryRealizationCommit::new(
                 intent.clone(),
@@ -60419,6 +60759,7 @@ impl MobActor {
 
         if !has_task && !has_token && !has_stream {
             self.resolve_flow_exact_operation(&run_id).await;
+            self.wake_flow_run_observer(&run_id);
             self.flow_exact_operations.remove(&run_id);
             tracing::debug!(
                 run_id = %run_id,
@@ -60435,6 +60776,7 @@ impl MobActor {
         let _ = self.run_cancel_tokens.remove(&run_id);
         let _ = self.flow_streams.lock().await.remove(&run_id);
         self.resolve_flow_exact_operation(&run_id).await;
+        self.wake_flow_run_observer(&run_id);
         self.flow_exact_operations.remove(&run_id);
         self.ensure_flow_tracker_alignment("handle_flow_cleanup completion")
             .await?;
@@ -60490,6 +60832,7 @@ impl MobActor {
                 })?;
             let _ = self.run_cancel_tokens.remove(&run_id);
             self.resolve_flow_exact_operation(&run_id).await;
+            self.wake_flow_run_observer(&run_id);
             self.flow_exact_operations.remove(&run_id);
             self.ensure_flow_tracker_alignment("handle_cancel_flow no-task cleanup")
                 .await?;
@@ -61190,6 +61533,7 @@ impl MobActor {
 
             let _ = self.run_cancel_tokens.remove(&run_id);
             self.resolve_flow_exact_operation(&run_id).await;
+            self.wake_flow_run_observer(&run_id);
             self.flow_exact_operations.remove(&run_id);
         }
         self.ensure_flow_tracker_alignment("cancel_all_flow_tasks completion")

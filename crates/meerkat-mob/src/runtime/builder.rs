@@ -8531,6 +8531,8 @@ impl MobBuilder {
             // the returned owner handle, and actor-created member tool handles
             // must all observe installations made after construction.
             let flow_target_provisioner = Arc::new(std::sync::RwLock::new(None));
+            let flow_run_observer_wake: super::handle::FlowRunObserverWakeSlot =
+                Arc::new(std::sync::RwLock::new(None));
             // Every public/internal handle clone and the actor share one
             // process-owned explicit-Resume operation registry. Caller
             // deadlines never own its terminal result.
@@ -8586,6 +8588,7 @@ impl MobBuilder {
                 realtime_session_factory: realtime_session_factory.clone(),
                 fork_instruction_policy,
                 flow_target_provisioner: Arc::clone(&flow_target_provisioner),
+                flow_run_observer_wake: Arc::clone(&flow_run_observer_wake),
                 explicit_resume_operations: Arc::clone(&explicit_resume_operations),
                 member_admission_backlog: Arc::clone(&member_admission_backlog),
                 lifecycle_observations: Arc::clone(&lifecycle_observations),
@@ -8880,6 +8883,7 @@ impl MobBuilder {
                 placed_recovery.next_carrier_fence_token,
                 !destroy_storage_finalizing,
                 flow_target_provisioner,
+                flow_run_observer_wake,
                 explicit_resume_operations,
                 member_admission_backlog,
                 lifecycle_observations,
@@ -10751,6 +10755,8 @@ impl MobBuilder {
                 incarnation,
             };
             let flow_target_provisioner = Arc::new(std::sync::RwLock::new(None));
+            let flow_run_observer_wake: super::handle::FlowRunObserverWakeSlot =
+                Arc::new(std::sync::RwLock::new(None));
             let explicit_resume_operations =
                 Arc::new(super::handle::ResumeOperationRegistry::default());
             let member_admission_backlog =
@@ -10788,6 +10794,7 @@ impl MobBuilder {
                 1,
                 true,
                 flow_target_provisioner,
+                flow_run_observer_wake,
                 explicit_resume_operations,
                 member_admission_backlog,
                 lifecycle_observations,
@@ -10840,6 +10847,7 @@ impl MobBuilder {
         flow_target_provisioner: Arc<
             std::sync::RwLock<Option<super::handle::FlowTargetProvisioner>>,
         >,
+        flow_run_observer_wake: super::handle::FlowRunObserverWakeSlot,
         explicit_resume_operations: Arc<super::handle::ResumeOperationRegistry>,
         member_admission_backlog: Arc<super::handle::MemberAdmissionBacklogGauge>,
         lifecycle_observations: Arc<super::MemberLifecycleObservations>,
@@ -10928,6 +10936,7 @@ impl MobBuilder {
                 realtime_session_factory,
                 fork_instruction_policy,
                 flow_target_provisioner: Arc::clone(&flow_target_provisioner),
+                flow_run_observer_wake: Arc::clone(&flow_run_observer_wake),
                 explicit_resume_operations: Arc::clone(&explicit_resume_operations),
                 member_admission_backlog: Arc::clone(&member_admission_backlog),
                 lifecycle_observations: Arc::clone(&lifecycle_observations),
@@ -11083,6 +11092,7 @@ impl MobBuilder {
                 flow_streams: handle.flow_streams.clone(),
                 command_tx,
                 flow_target_provisioner,
+                flow_run_observer_wake,
                 explicit_resume_operations,
                 tool_bundles,
                 default_llm_client,

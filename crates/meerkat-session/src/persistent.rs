@@ -20391,9 +20391,17 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let _turn_finalization_guard = self
             .durable_tail_recovery_turn_boundary(id, turn_boundary_held)
             .await?;
+        // The hosted preparation's future holds the state of the whole resume
+        // body (durable-tail recovery, observations, materialization). Built
+        // boxed in its own frame, it stays out of the write-hosting scope's
+        // poll frames, this one's and its callers'. A mob spawn's deferred
+        // resume runs this on a tokio worker: fork_relink's worker stack
+        // budget test pins it.
         meerkat_core::session_hosting::with_write_hosting(
             hosting,
-            self.prepare_committed_boundary_resume_hosted(id),
+            meerkat_runtime::stack_relief::box_in_own_frame(|| {
+                self.prepare_committed_boundary_resume_hosted(id)
+            }),
         )
         .await
     }
@@ -20427,7 +20435,15 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         } else {
             None
         };
-        let (recovery, aligned_body) = match self.recover_committed_boundary_for_resume(id).await {
+        // The recovery's future holds the state of the durable-tail recovery
+        // chain. Built boxed in its own frame, it stays out of this poll frame,
+        // which a mob spawn's deferred resume stacks on a tokio worker:
+        // fork_relink's worker stack budget test pins it.
+        let boundary_recovery = meerkat_runtime::stack_relief::box_in_own_frame(|| {
+            self.recover_committed_boundary_for_resume(id)
+        })
+        .await;
+        let (recovery, aligned_body) = match boundary_recovery {
             Ok(ResumeBoundaryRecovery::Continue(seed)) => {
                 return self
                     .prepare_continued_run_resume(id, pre_recovery_observation, seed)

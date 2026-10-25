@@ -3034,7 +3034,9 @@ fn spawn_many_failure_observation(error: &MobError) -> mob_dsl::MobSpawnManyFail
         // or runs a flow. Classify as Internal to keep the match total.
         MobError::FlowRoleTargetsRefused { .. }
         | MobError::BoundFlowTargetsUnavailable { .. }
-        | MobError::FlowRunIdempotencyConflict { .. } => {
+        | MobError::FlowRunIdempotencyConflict { .. }
+        | MobError::FlowRunObserverConflict { .. }
+        | MobError::FlowRunObserverRefused { .. } => {
             mob_dsl::MobSpawnManyFailureObservationKind::Internal
         }
         // Flow-step dispatch classification never runs during spawn-many
@@ -6128,6 +6130,38 @@ impl From<AgentIdentity> for PeerTarget {
 pub type FlowTargetProvisioner =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<(), MobError>> + Send>> + Send + Sync>;
 
+/// The host's delivery of flow run observer wakes, installed on a mob with
+/// [`MobHandle::install_flow_run_observer_wake`].
+///
+/// Once a bound run is terminal, and when a run already terminal is bound,
+/// the mob asks its host to submit the run's [`crate::run::FlowRunWake`] for
+/// the bound member: durably and idempotently by the wake's key, so a wake
+/// submitted twice is delivered once. A host that delivers continuations
+/// submits it the way it submits a detached job's completion, so the
+/// member's next turn sees the outcome.
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+pub trait FlowRunObserverWake: Send + Sync {
+    /// Submit `wake` for `binding`'s member.
+    async fn submit(
+        &self,
+        handle: &MobHandle,
+        binding: &crate::run::MobRunObserverBinding,
+        wake: &crate::run::FlowRunWake,
+    ) -> Result<(), String>;
+
+    /// Where the wake under `key` for `binding`'s member stands.
+    async fn status(
+        &self,
+        handle: &MobHandle,
+        binding: &crate::run::MobRunObserverBinding,
+        key: &str,
+    ) -> Result<crate::run::FlowRunWakeStatus, String>;
+}
+
+/// The mob's one late-bound wake host, shared by the actor and every handle.
+pub(crate) type FlowRunObserverWakeSlot = Arc<StdRwLock<Option<Arc<dyn FlowRunObserverWake>>>>;
+
 /// Opaque change signal over the actor-published [`mob_dsl::MobMachineState`]
 /// watch (see [`MobHandle::machine_state_changes`]).
 ///
@@ -6220,6 +6254,7 @@ pub struct MobHandle {
     /// ([`super::MobBuilder::with_fork_instruction_policy`]).
     pub(super) fork_instruction_policy: meerkat_core::ForkInstructionPolicy,
     pub(super) flow_target_provisioner: Arc<StdRwLock<Option<FlowTargetProvisioner>>>,
+    pub(super) flow_run_observer_wake: FlowRunObserverWakeSlot,
     pub(super) explicit_resume_operations: Arc<ResumeOperationRegistry>,
     /// Read-only view of the actor's per-member admission lanes (#1102).
     pub(super) member_admission_backlog: Arc<MemberAdmissionBacklogGauge>,
@@ -6265,6 +6300,131 @@ impl MobHandle {
             .flow_target_provisioner
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(provisioner);
+    }
+
+    /// Install or replace the host's delivery of this mob's flow run
+    /// observer wakes ([`FlowRunObserverWake`]). Without one a bound run's
+    /// observer reads its run but is not woken. A wake owed before the host
+    /// was installed is submitted by
+    /// [`Self::resubmit_flow_run_observer_wakes`].
+    pub fn install_flow_run_observer_wake(&self, wake: Arc<dyn FlowRunObserverWake>) {
+        *self
+            .flow_run_observer_wake
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(wake);
+    }
+
+    fn flow_run_observer_wake_host(&self) -> Option<Arc<dyn FlowRunObserverWake>> {
+        self.flow_run_observer_wake
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The observer binding of this mob's run `run_id`, if one was written.
+    pub async fn flow_run_observer(
+        &self,
+        run_id: &RunId,
+    ) -> Result<Option<crate::run::MobRunObserverBinding>, MobError> {
+        Ok(self
+            .run_store
+            .get_run_observer(run_id)
+            .await?
+            .filter(|binding| binding.mob_id == self.definition.id))
+    }
+
+    /// The observer binding of `run_id` and the wake it is owed, when this
+    /// mob's run is bound and terminal: what a host's job source confirms a
+    /// delivered wake against.
+    pub async fn flow_run_observer_wake_facts(
+        &self,
+        run_id: &RunId,
+    ) -> Result<Option<(crate::run::MobRunObserverBinding, crate::run::FlowRunWake)>, MobError>
+    {
+        let Some(binding) = self.flow_run_observer(run_id).await? else {
+            return Ok(None);
+        };
+        let Some(run) = self.run_store.get_run(run_id).await? else {
+            return Ok(None);
+        };
+        Ok(crate::run::FlowRunWake::for_terminal_run(&binding, &run).map(|wake| (binding, wake)))
+    }
+
+    /// Submit `run_id`'s observer wake through the installed host: `true`
+    /// when submitted (idempotent by its key), `false` when there is nothing
+    /// to submit (no host, no binding, or the run is not terminal).
+    pub(crate) async fn submit_flow_run_observer_wake(
+        &self,
+        run_id: &RunId,
+    ) -> Result<bool, MobError> {
+        let Some(host) = self.flow_run_observer_wake_host() else {
+            return Ok(false);
+        };
+        let Some((binding, wake)) = self.flow_run_observer_wake_facts(run_id).await? else {
+            return Ok(false);
+        };
+        host.submit(self, &binding, &wake).await.map_err(|detail| {
+            MobError::Internal(format!(
+                "the host did not submit the observer wake of run '{run_id}': {detail}"
+            ))
+        })?;
+        Ok(true)
+    }
+
+    /// Submit the observer wake of every bound terminal run of this mob
+    /// through the installed host, and return how many were submitted: the
+    /// host's re-link, for a wake the previous process never submitted, a
+    /// run its recovery canceled, and wakes owed before the host could
+    /// deliver. Submission is idempotent by each wake's key, so a wake
+    /// already submitted is not delivered twice. A wake the host refuses is
+    /// logged and the pass goes on.
+    pub async fn resubmit_flow_run_observer_wakes(&self) -> Result<usize, MobError> {
+        if self.flow_run_observer_wake_host().is_none() {
+            return Ok(0);
+        }
+        let mut submitted = 0;
+        for run in self.run_store.list_runs(&self.definition.id, None).await? {
+            if !crate::run::mob_machine_run_status_is_terminal(&run.run_id, &run.status)? {
+                continue;
+            }
+            match self.submit_flow_run_observer_wake(&run.run_id).await {
+                Ok(true) => submitted += 1,
+                Ok(false) => {}
+                Err(error) => tracing::warn!(
+                    mob_id = %self.definition.id,
+                    run_id = %run.run_id,
+                    error = %error,
+                    "flow run observer wake was not re-submitted"
+                ),
+            }
+        }
+        Ok(submitted)
+    }
+
+    /// Where the observer wake of `run_id` stands, with the binding it
+    /// belongs to: `None` for a run without an observer binding. A host that
+    /// cannot read the status now answers `Unreadable`.
+    pub async fn flow_run_observer_wake_status(
+        &self,
+        run_id: &RunId,
+    ) -> Result<
+        Option<(
+            crate::run::MobRunObserverBinding,
+            crate::run::FlowRunWakeStatus,
+        )>,
+        MobError,
+    > {
+        let Some(binding) = self.flow_run_observer(run_id).await? else {
+            return Ok(None);
+        };
+        let Some(host) = self.flow_run_observer_wake_host() else {
+            return Ok(Some((binding, crate::run::FlowRunWakeStatus::Unavailable)));
+        };
+        let status = host
+            .status(self, &binding, &binding.wake_key())
+            .await
+            .unwrap_or_else(|detail| crate::run::FlowRunWakeStatus::Unreadable { detail });
+        Ok(Some((binding, status)))
     }
 
     /// Rebind a clone of this handle onto `authority` (phase 5, ADJ-P5-10).
@@ -8436,6 +8596,7 @@ impl MobHandle {
                 scoped_event_tx,
                 exact_operation,
                 role_targets,
+                observer,
             } => {
                 let run_id = self
                     .send_actor_command(|reply_tx| MobCommand::RunFlow {
@@ -8446,6 +8607,7 @@ impl MobHandle {
                         scoped_event_tx,
                         exact_operation,
                         role_targets,
+                        observer,
                         reply_tx,
                     })
                     .await??;
@@ -11912,6 +12074,103 @@ impl MobHandle {
         .await
     }
 
+    /// [`Self::run_flow_with_role_targets_and_external_identity`] for a run
+    /// that reports to `observer`.
+    ///
+    /// The observer is bound beside the run, never in its activation params
+    /// or role targets: a replay under the same key compares exactly what the
+    /// caller admitted, so the observer never raises
+    /// `MobError::FlowRunIdempotencyConflict`. The actor admits the observer
+    /// before it writes anything, and writes its binding right after the
+    /// run's own row, in the run's admission command and before the run
+    /// starts: a refused admission leaves neither a run nor a binding.
+    ///
+    /// The mob's run store must hold observer bindings (else
+    /// `MobError::FlowRunObserverRefused` with `PersistenceUnavailable`; a
+    /// host store over the storage SPI holds none yet). The observer must be
+    /// a member of this mob (else `MobError::MemberNotFound`). On a runtime
+    /// with a native work authorization host it must carry the member's
+    /// retained work (else `FlowRunObserverRefused` with
+    /// `RetainedWorkRequired`), and retained work it carries must have been
+    /// staged by the member's current runtime (else `FlowRunObserverRefused`
+    /// with `RetainedWorkElsewhere`). A replay binds the observer to a run
+    /// admitted without one. A conflict is decided on the member alone:
+    /// another member is refused with `MobError::FlowRunObserverConflict`.
+    /// The same member again keeps the stored binding whole while its
+    /// retained work names the member's current runtime; when the stored
+    /// binding carries none, or names another runtime (the member was
+    /// respawned or repointed), fresh retained work replaces only the stored
+    /// retained work.
+    ///
+    /// The bound member may then read the run through `mob_flow_status`
+    /// without manage scope over the mob, in its own narrower view
+    /// ([`crate::run::MobRun::observer_view_value`]): the run, mob and flow
+    /// ids, the status, the created and completed timestamps, the terminal
+    /// result class, the result and the root step outputs. It never reads the
+    /// activation params, the ledgers, frames, loops, role targets or flow
+    /// authority inputs, and gains no other authority over the run or the
+    /// mob.
+    pub async fn run_flow_with_role_targets_and_external_identity_observed(
+        &self,
+        flow_id: FlowId,
+        params: serde_json::Value,
+        role_targets: crate::run::FlowRoleTargets,
+        identity: &crate::store::MobExternalDeliveryIdentity,
+        observer: crate::run::FlowRunObserver,
+    ) -> Result<RunId, MobError> {
+        self.run_flow_with_stream_external_identity_and_observer(
+            flow_id,
+            params,
+            None,
+            Some(identity),
+            None,
+            Some(Arc::new(role_targets)),
+            Some(observer),
+        )
+        .await
+    }
+
+    /// Bind `observer` to the keyed explicit-target run that `identity`'s key
+    /// names, and return the binding that stands.
+    ///
+    /// This is how a run admitted before observers existed, or admitted
+    /// without one, comes to report to its current coordinator: the caller
+    /// attributes the member explicitly, and nothing about the run changes.
+    /// Its row, run id, activation params and role targets stay exactly as
+    /// admitted, and no run starts.
+    ///
+    /// The run id is derived from this mob, `flow_id` and the key exactly as
+    /// keyed admission derives it, so only a run admitted under that key can
+    /// be named, never another run by its id. The run must exist (else
+    /// `MobError::RunNotFound`) and must have been admitted with role targets
+    /// (else `MobError::FlowRunObserverRefused` with `NotExplicitTarget`); it
+    /// may be in flight or terminal. The observer is admitted as for
+    /// [`Self::run_flow_with_role_targets_and_external_identity_observed`]
+    /// (the store, membership, retained work and conflict rules) before
+    /// anything is written. The call returns the binding that stands: the
+    /// stored one when the same member binds again and nothing is refreshed,
+    /// else the new or refreshed one.
+    ///
+    /// The command needs the `SendCommand` scope, the scope of the admission
+    /// it follows; no member tool issues it.
+    pub async fn bind_flow_run_observer(
+        &self,
+        flow_id: FlowId,
+        identity: &crate::store::MobExternalDeliveryIdentity,
+        observer: crate::run::FlowRunObserver,
+    ) -> Result<crate::run::MobRunObserverBinding, MobError> {
+        identity.validate()?;
+        let run_id =
+            RunId::for_external_delivery(&self.definition.id, &flow_id, &identity.idempotency_key);
+        self.send_actor_command(|reply_tx| MobCommand::BindFlowRunObserver {
+            run_id,
+            flow_id,
+            observer,
+            reply_tx,
+        })
+        .await?
+    }
+
     /// Admit one exact Flow run after registering its terminal waiter.
     ///
     /// The caller must construct `spec` before invoking this method, so an
@@ -11969,6 +12228,7 @@ impl MobHandle {
                 scoped_event_tx: None,
                 exact_operation: Some(exact_operation.clone()),
                 role_targets: None,
+                observer: None,
             })
             .await;
         match admission {
@@ -12305,6 +12565,7 @@ impl MobHandle {
                 scoped_event_tx: None,
                 exact_operation: None,
                 role_targets: None,
+                observer: None,
             })
             .await
         {
@@ -12338,6 +12599,29 @@ impl MobHandle {
         identity: Option<&crate::store::MobExternalDeliveryIdentity>,
         provision_bound: Option<&super::MemberOperatorAuthorityCeiling>,
         role_targets: Option<Arc<crate::run::FlowRoleTargets>>,
+    ) -> Result<RunId, MobError> {
+        self.run_flow_with_stream_external_identity_and_observer(
+            flow_id,
+            params,
+            scoped_event_tx,
+            identity,
+            provision_bound,
+            role_targets,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_flow_with_stream_external_identity_and_observer(
+        &self,
+        flow_id: FlowId,
+        params: serde_json::Value,
+        scoped_event_tx: Option<mpsc::Sender<meerkat_core::ScopedAgentEvent>>,
+        identity: Option<&crate::store::MobExternalDeliveryIdentity>,
+        provision_bound: Option<&super::MemberOperatorAuthorityCeiling>,
+        role_targets: Option<Arc<crate::run::FlowRoleTargets>>,
+        observer: Option<crate::run::FlowRunObserver>,
     ) -> Result<RunId, MobError> {
         self.execute_machine_command(MobMachineCommand::PreviewRunFlowAdmission)
             .await?;
@@ -12385,6 +12669,7 @@ impl MobHandle {
                 scoped_event_tx,
                 exact_operation: None,
                 role_targets,
+                observer,
             })
             .await?
         {
@@ -19410,6 +19695,77 @@ impl MobHandle {
             mob_dsl::MobCurrentMobAdmissionKind::Allowed => CurrentMobAdmission::Allowed,
             mob_dsl::MobCurrentMobAdmissionKind::Denied => CurrentMobAdmission::Denied,
         })
+    }
+
+    /// Resolve admission for reading one flow run's status and terminal
+    /// outcome.
+    ///
+    /// The caller supplies manage scope and the member it acts as (resolved
+    /// from its own session binding, never from tool arguments). Whether the
+    /// run reports to that member is read from the run's durable observer
+    /// binding, and only for a run of this mob that exists, so a caller
+    /// without manage scope cannot tell an absent run from one it does not
+    /// observe. No run id (the caller's args named none readable) observes
+    /// nothing. MobMachine composes the verdict.
+    pub async fn resolve_flow_run_observation_admission(
+        &self,
+        can_manage_mob: bool,
+        caller: Option<&AgentIdentity>,
+        run_id: Option<&RunId>,
+    ) -> Result<CurrentMobAdmission, MobError> {
+        let caller_observes_run = match (caller, run_id) {
+            (Some(caller), Some(run_id)) if !can_manage_mob => {
+                self.run_reports_to(run_id, caller).await?
+            }
+            _ => false,
+        };
+        let effects = self
+            .apply_machine_input_effects(
+                mob_dsl::MobMachineInput::ResolveFlowRunObservationAdmission {
+                    can_manage_mob,
+                    caller_observes_run,
+                },
+            )
+            .await?;
+        let admission = effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                mob_dsl::MobMachineEffect::FlowRunObservationAdmissionResolved { admission } => {
+                    Some(admission)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                MobError::Internal(
+                    "MobMachine accepted flow-run observation observations but emitted no verdict"
+                        .into(),
+                )
+            })?;
+        Ok(match admission {
+            mob_dsl::MobCurrentMobAdmissionKind::Allowed => CurrentMobAdmission::Allowed,
+            mob_dsl::MobCurrentMobAdmissionKind::Denied => CurrentMobAdmission::Denied,
+        })
+    }
+
+    /// Whether run `run_id` of this mob exists and its observer binding names
+    /// `member`. A binding is written before a new run's own row, so it counts
+    /// only once the run exists.
+    async fn run_reports_to(
+        &self,
+        run_id: &RunId,
+        member: &AgentIdentity,
+    ) -> Result<bool, MobError> {
+        let Some(binding) = self.run_store.get_run_observer(run_id).await? else {
+            return Ok(false);
+        };
+        if binding.observer.member() != member || binding.mob_id != self.definition.id {
+            return Ok(false);
+        }
+        Ok(self
+            .run_store
+            .get_run(run_id)
+            .await?
+            .is_some_and(|run| run.mob_id == binding.mob_id && run.flow_id == binding.flow_id))
     }
 
     /// Resolve the coarse spawn-tool admission verdict for the spawn-member

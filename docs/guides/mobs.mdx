@@ -1148,6 +1148,45 @@ In text mode the same facts print as `usage`, `cost`, and `transcript` lines,
 the last of which carries the ready-to-run `rkat session export-atif <id>`
 command. `rkat run --export-atif` writes a trajectory for a single-session run.
 
+### Reporting a run to an observer
+
+A Rust host that starts a keyed run with role targets for a coordinating
+member can make that member the run's observer. Admit the run with
+`MobHandle::run_flow_with_role_targets_and_external_identity_observed`, or
+bind a keyed run that is already admitted, by its key, with
+`MobHandle::bind_flow_run_observer`. The host names the member from its own
+trusted binding of it, never from model text. On a runtime with a native
+work authorization host it also passes the member's current retained work.
+
+The observer reads that run through `mob_flow_status` without manage scope,
+in its own narrower view: the run, mob and flow ids, the status, the created
+and completed timestamps, the result class, the result and the root step
+outputs. It never reads the activation params, ledgers or authority inputs,
+and it cannot start, cancel or list flows.
+
+Once the run is terminal, and at once when a terminal run is bound, the
+mob's host wakes the observer: a `mob_flow_run` background-job notice of the
+run's terminal status arrives as a continuation, durable from submission and
+delivered once. An idle coordinator runs a turn that sees it; a busy one
+sees it after its current turn. `mob_flow_status` reports where the wake
+stands as `observer_wake` (`pending`, `applied`, `refused` with its reason,
+and so on).
+
+A wake carries the binding's retained work, which must still resume on the
+member's runtime when the wake is delivered. After the member is respawned
+or repointed, bind it again with its current retained work: that refreshes
+the binding and, for a run that already ended, wakes the member again.
+
+Limitations:
+
+- On a governed runtime without a durable runtime store, a turn's
+  contributor rows live in the runtime's live ledger only. A wake delivered
+  after they leave it is refused (`no_admissible_work_binding`); bind again
+  with current retained work.
+- A mob over a host store (the storage SPI) holds no observer bindings yet:
+  binding is refused with `PersistenceUnavailable`.
+- Observers are a Rust host API. The RPC and MCP surfaces do not bind them.
+
 ## Observe And Operate
 
 | Task | Methods |

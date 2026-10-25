@@ -8335,6 +8335,11 @@ pub mod inputs {
         pub fence_token: FenceToken,
         pub session_id: SessionId,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveFlowRunObservationAdmission {
+        pub can_manage_mob: bool,
+        pub caller_observes_run: bool,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -8565,6 +8570,7 @@ pub enum Input {
     SettleExplicitResumeCleanup(inputs::SettleExplicitResumeCleanup),
     FinishExplicitResume(inputs::FinishExplicitResume),
     RetireAtScope(inputs::RetireAtScope),
+    ResolveFlowRunObservationAdmission(inputs::ResolveFlowRunObservationAdmission),
 }
 impl Input {
     pub fn kind(&self) -> InputKind {
@@ -8871,6 +8877,9 @@ impl Input {
             Self::SettleExplicitResumeCleanup(_) => InputKind::SettleExplicitResumeCleanup,
             Self::FinishExplicitResume(_) => InputKind::FinishExplicitResume,
             Self::RetireAtScope(_) => InputKind::RetireAtScope,
+            Self::ResolveFlowRunObservationAdmission(_) => {
+                InputKind::ResolveFlowRunObservationAdmission
+            }
         }
     }
 }
@@ -9094,6 +9103,7 @@ pub enum InputKind {
     SettleExplicitResumeCleanup,
     FinishExplicitResume,
     RetireAtScope,
+    ResolveFlowRunObservationAdmission,
 }
 
 pub mod signals {
@@ -10663,6 +10673,10 @@ pub mod effects {
         pub actual_fence_token: Option<FenceToken>,
         pub current_session_id: Option<SessionId>,
     }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct FlowRunObservationAdmissionResolved {
+        pub admission: MobCurrentMobAdmissionKind,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -10820,6 +10834,7 @@ pub enum Effect {
     ExplicitResumeMemberOutcomeClassified(effects::ExplicitResumeMemberOutcomeClassified),
     ExplicitResumeFinished(effects::ExplicitResumeFinished),
     RetireAtScopeResolved(effects::RetireAtScopeResolved),
+    FlowRunObservationAdmissionResolved(effects::FlowRunObservationAdmissionResolved),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
@@ -10972,6 +10987,7 @@ pub enum EffectKind {
     ExplicitResumeMemberOutcomeClassified,
     ExplicitResumeFinished,
     RetireAtScopeResolved,
+    FlowRunObservationAdmissionResolved,
 }
 
 pub mod command_capabilities {
@@ -12556,6 +12572,14 @@ pub enum TransitionId {
     ObserveRuntimeDestroyedCompleted,
     AdmitDestroyMemberRetireRuntimeEndedRunning,
     AdmitDestroyMemberRetireRuntimeEndedStopped,
+    ResolveFlowRunObservationAdmissionAllowedRunning,
+    ResolveFlowRunObservationAdmissionAllowedStopped,
+    ResolveFlowRunObservationAdmissionAllowedCompleted,
+    ResolveFlowRunObservationAdmissionAllowedDestroyed,
+    ResolveFlowRunObservationAdmissionDeniedRunning,
+    ResolveFlowRunObservationAdmissionDeniedStopped,
+    ResolveFlowRunObservationAdmissionDeniedCompleted,
+    ResolveFlowRunObservationAdmissionDeniedDestroyed,
 }
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

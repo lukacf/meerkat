@@ -4365,6 +4365,30 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AdmitDestroyMemberRetireRuntimeEndedStopped`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
+- `ResolveFlowRunObservationAdmissionAllowedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveFlowRunObservationAdmissionAllowedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveFlowRunObservationAdmissionAllowedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveFlowRunObservationAdmissionAllowedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveFlowRunObservationAdmissionDeniedRunning`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveFlowRunObservationAdmissionDeniedStopped`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveFlowRunObservationAdmissionDeniedCompleted`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `ResolveFlowRunObservationAdmissionDeniedDestroyed`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
 
 ### Effects
 - `HoldMemberRunStarts`
@@ -4812,6 +4836,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 - `RetireAtScopeResolved`
+  - anchors: (unclaimed)
+  - scenarios: (unclaimed)
+- `FlowRunObservationAdmissionResolved`
   - anchors: (unclaimed)
   - scenarios: (unclaimed)
 

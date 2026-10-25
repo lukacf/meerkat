@@ -330,8 +330,10 @@ pub fn format_peer_lifecycle_projection(
         "Peer lifecycle notice from {sender}\n\
          Kind: {kind}{params_str}\n\
          \n\
-         This is a one-way status notice, not a request. There is nothing to \
-         answer: do not call send_response or send_message for it."
+         This is a one-way status notice, not a request. No peer reply is required. \
+         Do not call send_response or send_message for it. Complete the current \
+         local turn with a short, nonempty final response recording any action \
+         taken, or that no action is needed."
     )
 }
 
@@ -1377,6 +1379,30 @@ pub struct PeerIngressRuntimeSnapshot {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kickoff_lifecycle_projection_preserves_no_peer_reply_and_local_completion() {
+        let peer_id = PeerId::new();
+        for kind in ["mob.kickoff_starting", "mob.kickoff_started"] {
+            let projection = format_peer_lifecycle_projection(
+                Some(peer_id),
+                Some("review_orchestrator"),
+                kind,
+                &serde_json::json!({ "peer": "review_orchestrator" }),
+            );
+
+            assert!(projection.contains(&peer_id.to_string()));
+            assert!(projection.contains("review_orchestrator"));
+            assert!(projection.contains(&format!("Kind: {kind}")));
+            assert!(projection.contains("not a request. No peer reply is required."));
+            assert!(projection.contains("Do not call send_response or send_message for it."));
+            assert!(projection.contains("Complete the current local turn"));
+            assert!(projection.contains("short, nonempty final response"));
+            assert!(projection.contains("or that no action is needed."));
+            assert!(!projection.contains("There is nothing to answer"));
+            assert!(!projection.contains("Request ID:"));
+        }
+    }
 
     #[test]
     fn interaction_id_json_roundtrip() {

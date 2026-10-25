@@ -2733,6 +2733,12 @@ them.
 
 ### Fixed
 
+- `meerkat-core`: a peer lifecycle notice (such as a mob kickoff status) no
+  longer tells the model there is nothing to answer. It still forbids a peer
+  reply (no `send_response` or `send_message`) and now asks for a short,
+  nonempty final response for the local turn, so the notice no longer
+  contradicts a turn that requires a visible completion.
+
 - `meerkat-mob`: a Running mob whose member's runtime was stopped after the
   restart rebuilt the member, and before the mob restored it, starts and
   serves the member instead of stopping. The stopped runtime keeps its

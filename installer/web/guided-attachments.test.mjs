@@ -163,7 +163,7 @@ test('the narrow Menu retains existing controls and closes with Escape without c
   });
 });
 
-test('actual textarea focus compacts mobile chrome and preserves native mounts, accessible attachment control and growing draft', async () => {
+test('actual textarea focus preserves mobile navigation mounts, accessible attachment control and growing draft', async () => {
   await mount({ narrow: true, draft: '', selected: [] }, async ({ document, window, calls, input, local, setNarrow }) => {
     const shell = document.querySelector('.setup-shell'), textarea = document.querySelector('#setup-message');
     const native = document.querySelector('[data-native-console-chat]'), header = document.querySelector('.setup-header');

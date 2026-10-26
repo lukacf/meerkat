@@ -2150,7 +2150,7 @@ export function GuidedSetup({
     return (
       <div className="setup-loading">
         <GuideAvatar />
-        <h1>Meta Forge setup</h1>
+        <h1>Meerkat Forge</h1>
         <p role={loadError ? "alert" : undefined}>{loadError || "Opening your conversation..."}</p>
         {loadError && <div className="setup-loading-actions">
           <button disabled={loadingSetup} onClick={() => failedSelection?.deepLink

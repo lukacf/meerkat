@@ -314,7 +314,7 @@ export function setupProgress(guide, { build, trial, deployment, remoteDeploymen
       detail: packageReason, actions: [], attention: true };
     if (setupNeedsApplicationBuild(guide, build, flags)) return { title: 'Your application needs to be built',
       detail: 'Your current plan includes application work that the agent team package does not implement. Open the builder to create and check the application from this proposal.',
-      actions: [action('build', 'Build application')] };
+      actions: [action('build', guide.service_preparation ? 'Review build status' : 'Build application')] };
     // A Forge that offers no agent team package leads to the builder instead.
     if (agentTeamAvailable && nativeTeamCanInstall(guide)) return { title: 'Your agent team is ready to install',
       detail: 'Check the selected destination, then set up private credentials and start the Console, agents and tools. No custom application build is needed.',

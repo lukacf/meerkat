@@ -295,8 +295,7 @@
   .setup-shell .setup-header-actions .setup-history-menu > button { min-height: 44px; }
   .setup-shell .setup-mobile-tabs { padding: 2px 14px; gap: 8px; }
   .setup-shell .setup-mobile-tabs button { min-height: 36px; padding: 4px 10px; }
-  .setup-shell.setup-composer-focused > .setup-header,
-  .setup-shell.setup-composer-focused > .setup-mobile-tabs { display: none; }
+  /* Keep workspace navigation available while the composer has focus. */
   .setup-shell .setup-chat-top,
   .setup-shell .setup-chat-top.has-lifecycle { min-height: 40px; padding: 4px 14px; gap: 8px; flex-wrap: nowrap; }
   .setup-shell .setup-chat-top > span { flex-shrink: 0; font-size: 12px; }

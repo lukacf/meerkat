@@ -184,7 +184,7 @@ test('an unreadable overview opens an explicit failure state and refresh can est
     assert.equal(document.querySelector('[aria-label="Installation and operation"]'), null);
     unavailable = false;
     await click('Refresh deployment records');
-    assert.match(document.body.textContent, /No selected deployment records/);
+    assert.match(document.body.textContent, /No saved deployments/);
     assert.doesNotMatch(document.body.textContent, /Some deployment records could not be checked/);
     assert.ok(calls.every(call => call.method === 'GET'));
   });

@@ -86,7 +86,7 @@ export function MyDeployments({ onClose, onOpenSetup, Icon }) {
       {!detail && <p role="status">Reading this setup's deployment controls...</p>}
       {detail?.error && <p role="alert">{detail.error}</p>}
       {detail?.state && !detail.entries.length && <div className="my-deployments-empty" role="status">
-        <h2>No selected deployment records</h2><p>This setup has no selected local, remote or cloud deployment. Return to its conversation to review the next step.</p>
+        <h2>No saved deployments</h2><p>Forge has no saved deployment for this setup in your workspace. Return to its conversation to review the next step.</p>
       </div>}
       {detail?.entries?.some(entry => entry.receiptKnown === false) && <div role="status" className="deployment-warning">
         <strong>Some deployment records could not be checked</strong>
@@ -105,7 +105,7 @@ export function MyDeployments({ onClose, onOpenSetup, Icon }) {
         {view.loading && <span role="status">Checking recorded deployments...</span>}</div>
       {view.error && <p role="alert">{view.error}</p>}
       {!view.loading && !view.error && !shown.length && <div className="my-deployments-empty">
-        <h2>No selected deployment records</h2><p>Your saved setups remain available in Your setups. Once deployed through Forge, their receipts appear here.</p></div>}
+        <h2>No saved deployments</h2><p>Forge has no saved deployments in your workspace. Your saved setups remain available in Your setups. Deployments created through Forge appear here.</p></div>}
       {shown.map(setup => <article className="my-deployment-card" key={setup.id}>
         <h2>{setup.name}</h2>
         <ul>{view.rows[setup.id].map(entry => <li key={entry.kind}>
@@ -114,7 +114,7 @@ export function MyDeployments({ onClose, onOpenSetup, Icon }) {
         </li>)}</ul>
         <button type="button" className="setup-action primary" onClick={() => choose(setup)}>{view.rows[setup.id].some(entry => entry.receiptKnown) ? 'Open and manage' : 'Check deployment records'}</button>
       </article>)}
-      {shown.length > 0 && <p className="deployment-note">Status reflects the latest check in this view. Open and manage rechecks the original receipts before offering actions.</p>}
+      {shown.length > 0 && <p className="deployment-note">Status reflects the latest check in this view. Open and manage checks the saved deployment status again before offering actions.</p>}
     </>}
   </dialog>;
 }

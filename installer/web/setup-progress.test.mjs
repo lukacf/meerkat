@@ -1081,6 +1081,9 @@ test('unresolved application work leads to the builder while an agent-only plan 
   assert.equal(progress.title, 'Your application needs to be built');
   assert.deepEqual(progress.actions, [{ target: 'build', label: 'Build application' }]);
   assert.match(progress.detail, /agent team package does not implement/);
+  const blocked = { ...state, service_preparation: { detail: 'Required service connections are not ready.' } };
+  assert.deepEqual(setupProgress(blocked).actions, [{ target: 'build', label: 'Review build status' }]);
+  assert.equal(blocked.service_preparation.detail, 'Required service connections are not ready.');
   assert.equal(setupNeedsApplicationBuild(state), true);
   assert.equal(setupProgressHasLifecycle(state), false);
   assert.equal(setupGuideResume(state), null);

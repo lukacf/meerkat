@@ -8,7 +8,7 @@ import { inputKey, captureGuideResumeInput, preservedGuideResume, recoverGuideRe
 
 const bundled = await build({ entryPoints: [fileURLToPath(new URL('./setup-progress.mjs', import.meta.url))],
   bundle: true, write: false, format: 'esm', platform: 'node', logLevel: 'silent' });
-const { setupProgress, setupNeedsApplicationBuild, setupProgressHasLifecycle, setupGuideResume, admitSetupGuideResume, GUIDE_RESUME_PROMPT, SETUP_DISCOVERY_PROMPT } = await import(`data:text/javascript;base64,${Buffer.from(bundled.outputFiles[0].text).toString('base64')}`);
+const { setupProgress, setupNeedsApplicationBuild, setupInstallationRelevant, setupProgressHasLifecycle, setupGuideResume, admitSetupGuideResume, GUIDE_RESUME_PROMPT, SETUP_DISCOVERY_PROMPT } = await import(`data:text/javascript;base64,${Buffer.from(bundled.outputFiles[0].text).toString('base64')}`);
 const rendered = await build({ entryPoints: [fileURLToPath(new URL('./guided.jsx', import.meta.url))],
   bundle: true, write: false, format: 'esm', platform: 'node', logLevel: 'silent', loader: { '.css': 'empty' },
   nodePaths: [fileURLToPath(new URL('node_modules', import.meta.url))],
@@ -707,7 +707,7 @@ test('busy, transient error and exact saved guide failure remain primary over ap
   }
 });
 
-test('returning-user status anchor keeps the exact first admitted action and labels retained history', () => {
+test('returning-user status anchor keeps the exact first admitted action and collapses secondary choices', () => {
   const progress = setupProgress(guide, { deployment: { guide_id: guide.id, deployment_id: 'owned', status: 'stopped' } });
   const props = { progress, statusText: progress.title, disabled: true, Icon: () => null };
   const html = renderToStaticMarkup(React.createElement(SetupCurrentStatusAnchor, props));
@@ -716,19 +716,19 @@ test('returning-user status anchor keeps the exact first admitted action and lab
   assert.ok(html.includes(progress.actions[0].label));
   assert.match(html, /<button type="button" disabled=""/);
   assert.equal((html.match(/<button/g) || []).length, 1);
-  assert.match(html, /Conversation history/);
-  assert.match(html, /Earlier messages are kept as written\. Current status is above\./);
+  assert.ok(html.includes(progress.detail));
   assert.doesNotMatch(html, /aria-live|status-dot/);
   const consoleProgress = { ...progress, actions: [{ target: 'console', url: 'http://127.0.0.1:4110/console', label: 'Existing Console' },
     { target: 'deployment', label: 'A separate action' }] };
   const linked = renderToStaticMarkup(React.createElement(SetupCurrentStatusAnchor,
     { ...props, progress: consoleProgress, disabled: false }));
   assert.match(linked, /href="http:\/\/127\.0\.0\.1:4110\/console" target="_blank" rel="noreferrer"/);
-  assert.doesNotMatch(linked, /A separate action/);
+  assert.match(linked, /<details class="setup-status-options"><summary>More options<\/summary>/);
+  assert.match(linked, /A separate action/);
 });
 
 test('returning-user status anchor preserves unknown status and yields to guide busy, error and saved failure', () => {
-  const progress = setupProgress(guide, {}, { deploymentObservation: 'unknown' });
+  const progress = setupProgress(guide, { deployment: { guide_id: guide.id, deployment_id: 'owned' } }, { deploymentObservation: 'unknown' });
   const props = { progress, statusText: progress.title, Icon: () => null };
   const html = renderToStaticMarkup(React.createElement(SetupCurrentStatusAnchor, props));
   assert.match(html, /Installation status is unavailable/);
@@ -1144,4 +1144,25 @@ test('an accepted ready team offers direct private installation while proposals 
   assert.deepEqual(live.actions, [{ target: 'deployment', label: 'Use your agent team' },
     { target: 'console', label: 'Open agent team Console', url: running.console_url }]);
   assert.deepEqual(setupProgress(ready, { build: { ...accepted, guide_id: ready.id, guide_version: ready.version } }).actions.map(item => item.target), ['trial', 'deployment']);
+});
+
+test('unstarted installation reads cannot replace a pending or unfinished first build', () => {
+  const state = { ...guide, proposal: { target: 'gcp' }, readiness: { context_ready: true,
+    decision_blockers: [], implementation_blockers: ['Application screens'] } };
+  for (const observation of ['loading', 'unknown']) {
+    const flags = { agentTeamAvailable: false, deploymentObservation: observation, remoteObservation: observation,
+      buildObservation: 'known' };
+    const pending = { ...flags, buildAdmissionPending: true };
+    assert.equal(setupProgress(state, {}, pending).title, 'Build request in progress');
+    assert.equal(setupInstallationRelevant(state, {}, pending), false);
+    const receipts = { build: { ...accepted, status: 'interrupted', ready_to_package: false, source_verified: false } };
+    assert.equal(setupProgress(state, receipts, flags).title, 'Your application still needs work');
+    assert.equal(setupInstallationRelevant(state, receipts, flags), false);
+    assert.equal(setupProgress(state, {}, { ...flags, buildObservation: observation }).actions[0].target, 'build');
+    const retained = { ...flags, installationAttention: true };
+    assert.equal(setupInstallationRelevant(state, {}, retained), true);
+    assert.equal(setupProgress(state, {}, retained).title, 'Review your saved installation operation');
+    assert.deepEqual(setupProgress(state, {}, retained).actions,
+      [{ target: 'deployment', label: 'Review saved operation' }]);
+  }
 });

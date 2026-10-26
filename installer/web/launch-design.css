@@ -55,6 +55,8 @@
 .setup-shell .setup-current-status .setup-eyebrow { font-size: 10px; letter-spacing: .08em; color: var(--setup-muted); }
 .setup-shell .setup-current-status h2 { margin: 4px 0 0; font-size: 15px; line-height: 1.4; letter-spacing: -.015em; font-weight: 650; }
 .setup-shell .setup-current-status-note { margin: 5px 0 0; font-size: 12px; line-height: 1.5; color: var(--setup-muted); }
+.setup-shell .setup-status-options { flex-basis: 100%; padding: 0; }
+.setup-shell .setup-status-options > summary { padding: 4px 0; }
 .setup-shell .setup-current-status > button,
 .setup-shell .setup-current-status > a {
   display: inline-flex;
@@ -267,6 +269,11 @@
     max-width: clamp(680px, calc(166.667dvh - 765px), 100%);
     margin-inline: auto;
   }
+}
+@media (min-width: 761px) {
+  .setup-shell .setup-columns:has(.setup-plan-details:not([open])) { position: relative; grid-template-columns: minmax(0, 1fr); }
+  .setup-shell .setup-plan-pane:has(.setup-plan-details:not([open])) { position: absolute; top: 0; right: 8px; z-index: 2; background: transparent; }
+  .setup-shell .setup-columns:has(.setup-plan-details:not([open])) .setup-chat-top { padding-right: 220px; }
 }
 @media (max-width: 760px) {
   .setup-shell .setup-header { min-height: 52px; padding: 4px 14px; flex-wrap: nowrap; position: relative; gap: 8px; }

@@ -61,6 +61,7 @@ export function DeploymentPanel({ state, plan, build, designBusy, pendingManual,
   const nativeTeam = sourceKind === "native-team";
   const [snapshot, setSnapshot] = useState({ guideId: null, selectionToken: null, receipt: null, observation: "loading" });
   const [cloudRemoval, setCloudRemoval] = useState(null);
+  const [cloudOperation, setCloudOperation] = useState(null);
   const [options, setOptions] = useState(null), [destination, setDestination] = useState("");
   const [values, setValues] = useState({}), [useHost, setUseHost] = useState(false);
   const [executionMode, setExecutionMode] = useState("interactive");
@@ -143,8 +144,11 @@ export function DeploymentPanel({ state, plan, build, designBusy, pendingManual,
   const stale = receipt && (!artifactIsCurrent(receipt, state) ||
     deploymentSourceKind(receipt) === "application" && build?.guide_id === state.id &&
       !!build.build_id && receipt.build_id !== build.build_id);
-  useEffect(() => { onReceipt?.(receipt, { guideId: state.id, selectionToken, observation }); },
-    [receipt, state.id, selectionToken, observation, onReceipt]);
+  const retainedOperation = !!(busy || commandReturn || connection.guideId === state.id && connection.actionIssue ||
+    supportTracking.guideId === state.id && supportTracking.intent ||
+    cloudOperation?.guideId === state.id && cloudOperation.selectionToken === selectionToken && cloudOperation.retained);
+  useEffect(() => { onReceipt?.(receipt, { guideId: state.id, selectionToken, observation, retainedOperation }); },
+    [receipt, state.id, selectionToken, observation, retainedOperation, onReceipt]);
 
   function chooseSource(kind) {
     if (!guideSelectionAvailable(selectionScope, state, selectionToken)) return;
@@ -800,6 +804,7 @@ export function DeploymentPanel({ state, plan, build, designBusy, pendingManual,
   // moves elsewhere. New installation still uses the selected application.
   const cloudControls = <GcpGuided selectionScope={selectionScope} state={state} build={build} allowPreparation={!managementOnly && !nativeTeam && plan.target === "gcp"}
     blocked={busy || designBusy || pendingManual} onChooseProject={onChooseCloudProject}
+    onRetainedOperation={setCloudOperation}
     onCloudRemoval={setCloudRemoval} removalLabel={managementOnly ? "Remove cloud computer..." : undefined}
     onDownload={handoff && options.target === "gcp" ? downloadRemotePackage : undefined} downloading={downloading} />;
   const remoteControls = <RemoteDeployment selectionScope={selectionScope} state={state} build={build} options={nativeTeam ? null : options}

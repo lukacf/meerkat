@@ -33,7 +33,7 @@ import { DeploymentPanel } from "./deployment-panel.jsx";
 import { MyDeployments } from "./my-deployments.jsx";
 import { deploymentCanPrepare, nativeTeamCanInstall, deploymentSourceKey } from "./deployment-panel.mjs";
 import { gcpProjectFeedbackCurrent, gcpProjectBlueprint, gcpProjectBlueprintMatches } from "./gcp-preflight.mjs";
-import { nativeTeamPackagePlan, setupNeedsApplicationBuild, setupProgress, setupProgressHasLifecycle, setupGuideResume, admitSetupGuideResume } from "./setup-progress.mjs";
+import { nativeTeamPackagePlan, setupNeedsApplicationBuild, setupInstallationRelevant, setupProgress, setupProgressHasLifecycle, setupGuideResume, admitSetupGuideResume } from "./setup-progress.mjs";
 import { RehearsalPanel } from "./rehearsal-panel.jsx";
 import { ProviderSetup } from "./provider-setup.jsx";
 import { hasForgeOpeningContext, isForgeOpening, ForgeWelcomeIntro, ForgeWelcomeNext, ForgeWelcomeOrientation, ForgeIllustrationMotionProvider, useForgeProposalNotice } from "./first-experience.jsx";
@@ -223,7 +223,7 @@ export function SetupProgressCard({ progress, primary = false, resume, onResume,
 }
 
 /** Keep the current receipt projection visible above the retained conversation. */
-export function SetupCurrentStatusAnchor({ progress, statusText, onNavigate, disabled, Icon }) {
+export function SetupCurrentStatusAnchor({ progress, statusText, onNavigate, disabled, Icon, resume, onResume }) {
   if (!progress || statusText !== progress.title) return null;
   const action = progress.actions?.[0];
   return <>
@@ -231,6 +231,7 @@ export function SetupCurrentStatusAnchor({ progress, statusText, onNavigate, dis
       <div className="setup-current-status-copy">
         <span className="setup-eyebrow">CURRENT APPLICATION STATUS</span>
         <h2>{progress.title}</h2>
+        <p>{progress.detail}</p>
       </div>
       {action && (action.target === "console"
         ? <a href={action.url} target="_blank" rel="noreferrer" aria-disabled={disabled || undefined}
@@ -240,11 +241,14 @@ export function SetupCurrentStatusAnchor({ progress, statusText, onNavigate, dis
         : <button type="button" disabled={disabled} onClick={event => {
           if (!disabled && event.currentTarget.isConnected) onNavigate(action);
         }}>{action.label} <Icon name="arrow" size={14} /></button>)}
+    {(progress.actions.length > 1 || resume) && <details className="setup-status-options">
+      <summary>More options</summary>
+      {progress.actions.slice(1).map(item => item.target === "console"
+        ? <a key={item.target} href={item.url} target="_blank" rel="noreferrer">{item.label}</a>
+        : <button key={item.target} type="button" disabled={disabled} onClick={() => onNavigate(item)}>{item.label}</button>)}
+      {resume && <button type="button" disabled={disabled} onClick={() => onResume(resume)}>Ask the guide what is next</button>}
+    </details>}
     </section>
-    <div className="setup-conversation-history-boundary">
-      <span>Conversation history</span>
-      <small>Earlier messages are kept as written. Current status is above.</small>
-    </div>
   </>;
 }
 
@@ -274,7 +278,8 @@ function savedGuideResponse(state) {
 }
 
 function primaryGuideTranscript(scroll) {
-  return scroll?.querySelector?.(':scope > [data-native-console-chat="true"]');
+  const transcript = scroll?.querySelector?.(':scope > [data-native-console-chat="true"]');
+  return transcript?.querySelector?.('[data-current-guide-transcript="true"]') || transcript;
 }
 
 function guideActivityScrollTop(scroll) {
@@ -663,6 +668,7 @@ export function GuidedSetup({
   const [remoteDeploymentSnapshot, setRemoteDeploymentSnapshot] = useState(null);
   const [rehearsal, setRehearsal] = useState(null);
   const [actionsExpansion, setActionsExpansion] = useState(null);
+  const [phaseSelection, setPhaseSelection] = useState(null);
   const [savedBuildReturn, setSavedBuildReturn] = useState(null);
   const savedBuildReturnRef = useRef(null);
   const [trialNavigation, setTrialNavigation] = useState(null);
@@ -729,6 +735,8 @@ export function GuidedSetup({
     remoteDeploymentSnapshot?.selectionToken === lifecycleToken && !loadGate.current.pending();
   const remoteDeployment = state?.id && remoteDeploymentSnapshot?.guideId === state.id ? remoteDeploymentSnapshot.receipt : null;
   const remoteObservation = remoteObservationCurrent ? remoteDeploymentSnapshot.observation : "loading";
+  const installationAttention = deploymentObservationCurrent && deploymentSnapshot.retainedOperation === true ||
+    remoteObservationCurrent && remoteDeploymentSnapshot.retainedOperation === true;
   const latestImplementation = useRef(implementation);
   latestImplementation.current = implementation;
   const publishLifecycle = useCallback((setter, value) => {
@@ -747,7 +755,8 @@ export function GuidedSetup({
   const acceptRemoteDeploymentReceipt = useCallback((receipt, snapshot) => {
     if (snapshot?.guideId === state?.id && snapshot.selectionToken === lifecycleToken)
       publishLifecycle(setRemoteDeploymentSnapshot, previous => previous?.guideId === snapshot.guideId &&
-        previous.selectionToken === snapshot.selectionToken && previous.observation === snapshot.observation && previous.receipt === receipt
+        previous.selectionToken === snapshot.selectionToken && previous.observation === snapshot.observation &&
+        previous.retainedOperation === snapshot.retainedOperation && previous.receipt === receipt
         ? previous : { ...snapshot, receipt });
   }, [publishLifecycle, state?.id, lifecycleToken]);
   const acceptRehearsalReceipt = useCallback(value => publishLifecycle(setRehearsal, value), [publishLifecycle]);
@@ -765,7 +774,7 @@ export function GuidedSetup({
     (!sendingMessage || sendingMessage.status === "unconfirmed");
   const sendUnconfirmed = sendingMessage?.status === "unconfirmed" || creationUnconfirmed;
   latestLifecycle.current = { receipts: { build: implementation, trial: rehearsal, deployment, remoteDeployment },
-    flags: { active, pendingChanges: !!manualNote, designBusy: busy || applyUnconfirmed || sendUnconfirmed, packageBusy, buildObservation, buildAdmissionPending, deploymentObservation, remoteObservation, agentTeamAvailable } };
+    flags: { active, pendingChanges: !!manualNote, designBusy: busy || applyUnconfirmed || sendUnconfirmed, packageBusy, buildObservation, buildAdmissionPending, deploymentObservation, remoteObservation, installationAttention, agentTeamAvailable } };
   const timeline = useGuideTimeline(active ? state : null);
 
   function savedManual(id) {
@@ -2103,6 +2112,7 @@ export function GuidedSetup({
     forceFollow.current = false;
     setMobilePanel("chat");
     setActionsExpansion({ guideId: intent.guideId, open: true });
+    setPhaseSelection({ guideId: intent.guideId, version: intent.selectedVersion, phase: "build" });
     const frame = requestAnimationFrame(() => {
       if (savedBuildReturnRef.current === intent && setupsMounted.current &&
           latestLifecycle.current?.flags.active && !loadGate.current.pending() &&
@@ -2157,11 +2167,18 @@ export function GuidedSetup({
   const requirements = unresolvedRequirements(state, plan);
   const checkedApplication = implementationCanDownload(implementation, state);
   const progress = setupProgress(state, { build: implementation, trial: rehearsal, deployment, remoteDeployment },
-    { pendingChanges: !!manualNote, designBusy: busy || applyUnconfirmed || sendUnconfirmed || state.operation?.status === "running", buildObservation, buildAdmissionPending, deploymentObservation, remoteObservation, agentTeamAvailable });
+    { pendingChanges: !!manualNote, designBusy: busy || applyUnconfirmed || sendUnconfirmed || state.operation?.status === "running", buildObservation, buildAdmissionPending, deploymentObservation, remoteObservation, installationAttention, agentTeamAvailable });
   const hasLifecycle = setupProgressHasLifecycle(state, { build: implementation, trial: rehearsal, deployment, remoteDeployment });
   const applicationBuildRequired = setupNeedsApplicationBuild(state, implementation, { buildObservation });
   const optionalBuildProgress = applicationBuildRequired && !hasLifecycle && state.status !== "ready";
   const designConversationActive = !hasLifecycle && (!!question || optionalBuildProgress);
+  const installationRelevant = setupInstallationRelevant(state, { build: implementation, deployment, remoteDeployment },
+    { buildObservation, buildAdmissionPending, installationAttention, agentTeamAvailable });
+  const progressTarget = progress?.actions?.[0]?.target;
+  const defaultPhase = designConversationActive ? "conversation" : ["deployment", "remote"].includes(progressTarget)
+    ? "deployment" : progressTarget === "trial" ? "trial" : "build";
+  const currentPhase = phaseSelection?.guideId === state.id && phaseSelection.version === state.version
+    ? phaseSelection.phase : defaultPhase;
   const journeyPhase = !firstTurnWaiting && (plan || messages.some(message => message.role === "user") ||
     state.answers?.length || Object.values(state.brief?.facts || {}).some(fact => fact?.summary?.trim()))
     ? "shape" : "idea";
@@ -2186,6 +2203,8 @@ export function GuidedSetup({
     const guideId = state.id;
     releaseResponseFollow();
     setActionsExpansion({ guideId, open: true });
+    const phase = target?.closest?.("[data-setup-phase]")?.dataset.setupPhase;
+    if (phase) setPhaseSelection({ guideId, version: state.version, phase });
     requestAnimationFrame(() => {
       if (latestState.current?.id === guideId && target?.isConnected)
         target.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -2422,6 +2441,7 @@ export function GuidedSetup({
             </span>
             <SetupGuideStatusCaption lifecycle={!!primaryProgress} statusText={statusText} ready={ready} review={review} />
             {(state.proposal || state.blueprint) && (
+              <details className="setup-other-steps"><summary>Other steps</summary>
               <nav className="setup-stage-shortcuts" aria-label="Try, build and run this proposal">
                 {designConversationActive ? <a href="#setup-trial" title="Optional ways to try, build and run this proposal"
                   onClick={(event) => {
@@ -2446,6 +2466,7 @@ export function GuidedSetup({
                     }}>Run</a>}
                 </>}
               </nav>
+              </details>
             )}
             {consoleUrl && (
               <a
@@ -2461,7 +2482,8 @@ export function GuidedSetup({
           </div>
           {!busy && !error && !appError && !savedGuideFailure(state) &&
             <SetupCurrentStatusAnchor progress={primaryProgress} statusText={statusText}
-              disabled={blocked || loadingSetup || !active} onNavigate={navigateCurrentStatusAction} Icon={Icon} />}
+              disabled={blocked || loadingSetup || !active} onNavigate={navigateCurrentStatusAction} Icon={Icon}
+              resume={guideResume} onResume={resumeGuide} />}
           {narrow && <div className="setup-mobile-response">
             <GuideResponseNotice state={state} publicationKey={unseenResponse} busy={busy}
               onReveal={(key) => revealResponse(true, key)} Icon={Icon} />
@@ -2510,6 +2532,7 @@ export function GuidedSetup({
               state={state}
               snapshot={timeline}
               pendingMessage={pendingMessage}
+              collapseCompleted={hasLifecycle && !question}
               Icon={Icon}
             />
             {failedSelection && loadError && <div className="setup-error" role="alert">
@@ -2584,7 +2607,7 @@ export function GuidedSetup({
             )}
             <SetupOperationFailure state={state} busy={busy} failureRef={operationFailureRef} onRetry={retryOperation}
               onReviewDraft={reviewCurrentDraft} reviewDraftDisabled={blocked || !active} />
-            {progress && !busy && !designConversationActive && <SetupProgressCard progress={progress} primary={!!primaryProgress} resume={guideResume}
+            {progress && !primaryProgress && !busy && !designConversationActive && <SetupProgressCard progress={progress} resume={guideResume}
               onResume={resumeGuide} onNavigate={navigateProgressAction} disabled={blocked || loadingSetup} Icon={Icon} />}
             {question && !firstTurnWaiting && (
               <div className={`setup-current-question ${opening ? "setup-opening" : ""}`} ref={questionRef}
@@ -2624,16 +2647,24 @@ export function GuidedSetup({
                 event.preventDefault();
                 setActionsExpansion({ guideId: state.id, open: !actionsOpen });
               }}>
-                <strong>Try, build and run</strong>
-                <span>Explore this proposal or prepare it to use.</span>
+                <strong>Application steps</strong>
+                <span>Open a step to review its work. Your saved activity stays available.</span>
               </summary>
               {designConversationActive && progress && !busy && <SetupProgressCard progress={progress} resume={guideResume}
                 onResume={resumeGuide} onNavigate={navigateProgressAction} disabled={blocked || loadingSetup} Icon={Icon} />}
+              <details data-setup-phase="trial" className="setup-phase" open={currentPhase === "trial"}
+                hidden={!agentTeamAvailable && !checkedApplication && !rehearsal?.rehearsal_id && currentPhase !== "trial"}>
+              <summary onClick={event => { event.preventDefault(); setPhaseSelection({ guideId: state.id, version: state.version,
+                phase: currentPhase === "trial" ? "conversation" : "trial" }); }}>Try with sample data</summary>
               <div id="setup-trial" ref={trialRef}>
               <RehearsalPanel state={state} plan={plan} build={implementation} busy={busy || applyUnconfirmed || sendUnconfirmed || state.operation?.status === "running"}
                 selectionScope={lifecycleSelection.current} pendingManual={!!manualNote} navigation={trialNavigation}
                 onActivity={acceptRehearsalActivity} onRepairReceipt={acceptImplementationAdmission} onReceipt={acceptRehearsalReceipt} />
               </div>
+              </details>
+              <details data-setup-phase="build" className="setup-phase" open={currentPhase === "build"}>
+              <summary onClick={event => { event.preventDefault(); setPhaseSelection({ guideId: state.id, version: state.version,
+                phase: currentPhase === "build" ? "conversation" : "build" }); }}>Build and checks</summary>
               <div ref={implementationRef} role="region" aria-label="Application build" tabIndex={-1}>
               <p className="setup-custom-application-intro"><strong>Custom application</strong>
                 <span>{agentTeamAvailable ? "Use the builder when your requested outcomes need custom screens or application code. The agent team package does not implement remaining application work."
@@ -2643,6 +2674,11 @@ export function GuidedSetup({
                 navigation={implementationNavigation} onNavigate={navigateProgressAction} onRevise={revisePackagePlan}
                 onReceipt={acceptImplementationReceipt} onDownloaded={acceptApplicationDownloaded} />
               </div>
+              </details>
+              <details data-setup-phase="deployment" className="setup-phase" open={currentPhase === "deployment"}
+                hidden={!installationRelevant}>
+              <summary onClick={event => { event.preventDefault(); setPhaseSelection({ guideId: state.id, version: state.version,
+                phase: currentPhase === "deployment" ? "conversation" : "deployment" }); }}>Installation</summary>
               <div id="setup-deployment" ref={deploymentRef}>
               <DeploymentPanel state={state} plan={plan} build={implementation}
                 initialSourceKind={!agentTeamAvailable || deploymentCanPrepare(implementation, state) ? "application" : "native-team"}
@@ -2652,6 +2688,7 @@ export function GuidedSetup({
                 onReceipt={acceptDeploymentReceipt} onRemoteReceipt={acceptRemoteDeploymentReceipt} remoteTargetRef={remoteDeploymentRef}
                 onRepairReceipt={acceptImplementationAdmission} onChooseCloudProject={chooseCloudProject} />
               </div>
+              </details>
             </details>}
             {review && !busy && plan && (
               <AgentMessage>
@@ -2993,6 +3030,8 @@ export function GuidedSetup({
           </div>
         </section>
         <aside className="setup-plan-pane" aria-label="Your evolving system">
+          <details className="setup-plan-details" open={welcome || mobilePanel === "plan"}>
+          <summary>Review or edit your plan</summary>
           <SetupPlan
             welcome={welcome}
             welcomeDraft={welcome ? draft : ""}
@@ -3022,6 +3061,7 @@ export function GuidedSetup({
             onExpand={() => setMobilePanel("plan")}
             onConfigure={openConfig}
           />
+          </details>
         </aside>
       </div>
       {configOpen && (

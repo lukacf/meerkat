@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ConversationTranscript } from "../../packages/console-components/src/conversation/conversation-transcript";
+import { groupConversationTranscriptTurns } from "../../packages/console-components/src/conversation/conversation-turns";
 import { Icon as ConsoleIcon, SpriteSheet } from "../../console/src/icon";
 import { createGuideFrameLog, ingestGuideTimeline, guideConversation, nextGuideTimelineCursor } from "./native-guide-chat.mjs";
 import { request } from "./state.mjs";
@@ -76,17 +77,28 @@ export function useGuideTimeline(state) {
     : { frames: [], bindings: [], error: "", available: false };
 }
 
-export function NativeGuideChat({ state, snapshot, pendingMessage, Icon, onActivity }) {
+export function NativeGuideChat({ state, snapshot, pendingMessage, Icon, onActivity, collapseCompleted = false }) {
   const conversation = useMemo(() => guideConversation({ state,
     frames: snapshot.frames, bindings: snapshot.bindings, pendingMessage,
   }), [state, snapshot.frames, snapshot.bindings, pendingMessage]);
   useEffect(() => onActivity?.(conversation.entries), [conversation.entries, onActivity]);
   const startup = guideStartupPresentation(state, snapshot);
   const startupDetail = snapshot.guideId === state.id ? guideStartupDetail(snapshot.startup) : null;
+  const turns = groupConversationTranscriptTurns(conversation.viewState.groups);
+  const completed = collapseCompleted && !pendingMessage && state.operation?.status !== "running";
+  const historyTurns = completed ? turns : turns.slice(0, -1);
+  const history = historyTurns.flatMap(turn => turn.groups);
+  const current = completed ? [] : turns.at(-1)?.groups || [];
   return (
     <div className="setup-native-chat" data-native-console-chat="true">
       <SpriteSheet />
-      <ConversationTranscript viewState={conversation.viewState} Icon={ConsoleIcon} showTurnDiff={false} />
+      {history.length > 0 && <details className="setup-conversation-history" key={state.id}>
+        <summary>Earlier conversation ({historyTurns.length} {historyTurns.length === 1 ? "turn" : "turns"})</summary>
+        <ConversationTranscript viewState={{ ...conversation.viewState, groups: history }} Icon={ConsoleIcon} showTurnDiff={false} />
+      </details>}
+      <div data-current-guide-transcript="true">
+        <ConversationTranscript viewState={{ ...conversation.viewState, groups: current }} Icon={ConsoleIcon} showTurnDiff={false} />
+      </div>
       {(startup === "failed" || startup === "retrying" || startup === "unavailable" || snapshot.retryError || snapshot.checkingStatus) && <div className="setup-error" role="status">
         <strong>{startup === "retrying" ? "Retrying setup team" : startup === "failed" ? startupDetail?.title || "Setup team could not start"
           : startup === "unavailable" ? "Setup team is unavailable" : "Check setup team status"}</strong>

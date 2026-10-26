@@ -18,7 +18,7 @@ const PREPARATION_STEPS = new Map([
   ['vm-ready', 'Cloud computer preparation verified'],
 ]);
 
-export function GcpGuided({ state, build, blocked = false, allowPreparation = true, onChooseProject, onDownload, downloading = false, onCloudRemoval, selectionScope, removalLabel = 'Review cloud removal' }) {
+export function GcpGuided({ state, build, blocked = false, allowPreparation = true, onChooseProject, onDownload, downloading = false, onCloudRemoval, onRetainedOperation, selectionScope, removalLabel = 'Review cloud removal' }) {
   blocked = blocked || !allowPreparation;
   const selectionToken = selectionScope?.token();
   const selectionBlocked = !guideSelectionAvailable(selectionScope, state, selectionToken);
@@ -31,6 +31,9 @@ export function GcpGuided({ state, build, blocked = false, allowPreparation = tr
   const selected = view.guideId === state.id ? view : { cloud: null, intent: null, removalIntent: null, loaded: false, unavailable: true, storageError: '' };
   latest.current = { state, build, blocked, selected };
   const cloud = selected.cloud;
+  const retainedOperation = !!(cloud || selected.intent || selected.removalIntent || selected.storageError || busy);
+  useEffect(() => { onRetainedOperation?.({ guideId: state.id, selectionToken, retained: retainedOperation }); },
+    [state.id, selectionToken, retainedOperation, onRetainedOperation]);
   const removalStarted = !!selected.removalIntent || gcpRemovalLifecycle(cloud?.status);
   const current = !removalStarted && gcpCloudCurrent(cloud, state, build, blocked);
   const preparationStep = !removalStarted && PREPARATION_STEPS.get(cloud?.phase);

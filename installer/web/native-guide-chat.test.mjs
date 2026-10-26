@@ -404,3 +404,27 @@ test("mounted typed failed startup keeps its existing retry control and an unmou
     assert.deepEqual(calls, before);
   });
 });
+
+test('previous turns remain accessible but collapsed while the current reply stays visible', async () => {
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const saved = { id: 'history-guide', operation: { status: 'completed' }, messages: [
+    { id: 'one', role: 'user', text: 'Original requirement', created_at: '2026-10-26T10:00:00Z' },
+    { id: 'two', role: 'assistant', text: 'Original saved answer', created_at: '2026-10-26T10:00:01Z' },
+    { id: 'three', role: 'user', text: 'Current question', created_at: '2026-10-26T10:01:00Z' },
+    { id: 'four', role: 'assistant', text: 'Current saved answer', created_at: '2026-10-26T10:01:01Z' },
+  ] };
+  const before = structuredClone(saved);
+  const html = renderToStaticMarkup(React.createElement(NativeGuideChat,
+    { state: saved, snapshot: { frames: [], bindings: [], available: true } }));
+  const dom = new JSDOM(html), document = dom.window.document;
+  const history = document.querySelector('.setup-conversation-history');
+  assert.equal(history.open, false);
+  assert.match(history.textContent, /Original requirement/);
+  assert.match(history.textContent, /Original saved answer/);
+  const current = document.querySelector('[data-current-guide-transcript]');
+  assert.match(current.textContent, /Current question/);
+  assert.match(current.textContent, /Current saved answer/);
+  assert.doesNotMatch(current.textContent, /Original requirement/);
+  assert.deepEqual(saved, before);
+  dom.window.close();
+});

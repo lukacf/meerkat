@@ -591,7 +591,7 @@ export function GuidedSetup({
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [composerFocused, setComposerFocused] = useState(false);
   const [startingHelpEdit, setStartingHelpEdit] = useState(null);
-  const mobileMenuButton = useRef(null);
+  const mobileMenuButton = useRef(null), deploymentsButton = useRef(null);
   const [savedToolsGuide, setSavedToolsGuide] = useState(null);
   const [deploymentNavigation, setDeploymentNavigation] = useState(null);
   const [providerDismissed, setProviderDismissed] = useState(false);
@@ -2331,7 +2331,7 @@ export function GuidedSetup({
             <small className="setup-provider-model">{available === false ? "Provider setup needed"
               : runtime?.model || state.capabilities?.model || config?.architect?.model || "Meerkat + MobKit"}</small>
           </button>
-          <button type="button" onClick={() => { setDeploymentsOpen(true); setHistoryOpen(false); setMobileMenuOpen(false); }}>My deployments</button>
+          <button type="button" ref={deploymentsButton} onClick={() => { setDeploymentsOpen(true); setHistoryOpen(false); setMobileMenuOpen(false); }}>My deployments</button>
           <div className="setup-history-control">
             <button
               aria-expanded={historyOpen}
@@ -2409,7 +2409,10 @@ export function GuidedSetup({
           <div data-forge-workspace-slot="" />
         </div>
       </header>
-      {deploymentsOpen && <MyDeployments Icon={Icon} onClose={() => setDeploymentsOpen(false)}
+      {deploymentsOpen && <MyDeployments Icon={Icon} returnFocusRef={narrow ? mobileMenuButton : deploymentsButton}
+        signInRequired={timeline.authenticationRequired} onCheckSignIn={timeline.checkSignIn}
+        onSignInRequired={timeline.requireSignIn}
+        onClose={() => setDeploymentsOpen(false)}
         onOpenSetup={id => { setDeploymentsOpen(false); switchSetup(id); }} />}
       {narrow && !welcome && (firstTurnWaiting || designConversationActive) && <div className="forge-mobile-journey">
         <ForgeWelcomeOrientation phase={journeyPhase} />
@@ -2497,7 +2500,7 @@ export function GuidedSetup({
               </a>
             )}
           </div>
-          {timeline.authenticationRequired && <SignInRecovery key={state.id}
+          {timeline.authenticationRequired && !deploymentsOpen && <SignInRecovery key={state.id}
             className="setup-sign-in-anchor" onCheck={timeline.checkSignIn} />}
           {!timeline.authenticationRequired && !busy && !error && !appError && !savedGuideFailure(state) &&
             <SetupCurrentStatusAnchor progress={primaryProgress} statusText={statusText}

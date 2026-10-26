@@ -189,3 +189,18 @@ test('an unreadable overview opens an explicit failure state and refresh can est
     assert.ok(calls.every(call => call.method === 'GET'));
   });
 });
+
+test('receipt-read authentication failures remain authoritative while ordinary permission failures stay unknown', async () => {
+  for (const failure of [Object.assign(new Error('Sign in'), { status: 401 }),
+    Object.assign(new Error('Sign in'), { status: 403, code: 'sign_in_required' })]) {
+    await assert.rejects(readDeploymentSummary(setup, async url => {
+      if (url.endsWith('/deployment')) throw failure;
+      return null;
+    }), error => error === failure);
+  }
+  const denied = await readDeploymentSummary(setup, async url => {
+    if (url.endsWith('/deployment')) throw Object.assign(new Error('Forbidden'), { status: 403 });
+    return null;
+  });
+  assert.equal(denied[0].unknown, true);
+});

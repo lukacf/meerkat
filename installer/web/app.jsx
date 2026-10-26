@@ -638,7 +638,7 @@ export function App() {
         <div className="brandmark">
           <Icon name="spark" size={32} />
         </div>
-        <h1>Meta Forge</h1>
+        <h1>Meerkat Forge</h1>
         <p role={loadError ? "alert" : "status"}>{loadError || "Getting your setup guide ready..."}</p>
         {savedStartupDraft && <p>Your saved draft is kept unchanged until it opens successfully or you choose to replace it. Saved conversations and installations are kept separately.</p>}
         {loadError && <Button disabled={starting} onClick={() => load()}>Try again</Button>}

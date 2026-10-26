@@ -3,26 +3,45 @@ import { request } from './state.mjs';
 import { guidePlan } from './evolving-plan-state.mjs';
 import { DeploymentPanel } from './deployment-panel.jsx';
 import { deploymentSetups, readDeploymentSummaries, readDeploymentSummary } from './my-deployments.mjs';
+import { SignInRecovery } from './sign-in-recovery.jsx';
+import { isSignInRequired } from './sign-in-recovery.mjs';
 import './my-deployments.css';
 
-export function MyDeployments({ onClose, onOpenSetup, Icon }) {
+export function MyDeployments({ onClose, onOpenSetup, returnFocusRef, signInRequired = false,
+  onCheckSignIn, onSignInRequired, Icon }) {
   const dialog = useRef(null), heading = useRef(null), lifetime = useRef(null);
+  const returnTarget = useRef(returnFocusRef);
+  returnTarget.current = returnFocusRef;
   const [revision, setRevision] = useState(0), [selected, setSelected] = useState(null);
   const [view, setView] = useState({ loading: true, setups: [], rows: {}, error: '' });
   const [detail, setDetail] = useState(null);
+  const [authFailure, setAuthFailure] = useState(false);
+  const authRequired = signInRequired || authFailure;
   // Retire action closures synchronously, before React unmounts their controls.
   const retire = () => { lifetime.current = null; };
   const close = () => { retire(); onClose(); };
   const choose = setup => { retire(); setDetail(null); setSelected(setup); };
   const back = () => { retire(); setSelected(null); setDetail(null); setRevision(value => value + 1); };
+  const requireSignIn = () => { retire(); setAuthFailure(true); onSignInRequired?.(); };
+  async function checkSignIn() {
+    const node = dialog.current;
+    const confirmed = await onCheckSignIn?.() === true;
+    if (!node?.isConnected || !node.open || dialog.current !== node) return false;
+    if (confirmed) { setAuthFailure(false); setDetail(null); setRevision(value => value + 1); }
+    return confirmed;
+  }
   useEffect(() => {
     const node = dialog.current, previous = document.activeElement;
     node.showModal();
-    return () => { retire(); node.close(); if (previous?.isConnected) previous.focus(); };
+    return () => {
+      retire(); node.close();
+      const target = returnTarget.current?.current || previous;
+      if (target?.isConnected) target.focus();
+    };
   }, []);
   useEffect(() => { heading.current?.focus(); }, [selected?.id]);
   useEffect(() => {
-    if (selected) return;
+    if (selected || authRequired) return;
     const controller = new AbortController();
     setView({ loading: true, setups: [], rows: {}, error: '' });
     (async () => {
@@ -34,15 +53,18 @@ export function MyDeployments({ onClose, onOpenSetup, Icon }) {
           setView(previous => ({ ...previous, rows: { ...previous.rows, [setup.id]: entries } }));
         });
         if (!controller.signal.aborted) setView(previous => ({ ...previous, loading: false }));
-      } catch {
+      } catch (failure) {
+        if (!controller.signal.aborted && isSignInRequired(failure)) {
+          controller.abort(); requireSignIn(); return;
+        }
         if (!controller.signal.aborted) setView(previous => ({ ...previous, loading: false,
           error: 'Your deployments could not be listed. This does not mean they are absent. Retry to check again.' }));
       }
     })();
     return () => controller.abort();
-  }, [revision, selected?.id]);
+  }, [revision, selected?.id, authRequired]);
   useEffect(() => {
-    if (!selected) return;
+    if (!selected || authRequired) return;
     const controller = new AbortController(), owner = { id: selected.id };
     lifetime.current = owner;
     const current = () => lifetime.current === owner && !controller.signal.aborted;
@@ -60,12 +82,15 @@ export function MyDeployments({ onClose, onOpenSetup, Icon }) {
           return current;
         } };
         setDetail({ state, selectionScope, entries });
-      } catch {
+      } catch (failure) {
+        if (current() && isSignInRequired(failure)) {
+          controller.abort(); requireSignIn(); return;
+        }
         if (current()) setDetail({ error: 'This setup could not be verified. Return to the list and retry; no action was sent.' });
       }
     })();
     return () => { controller.abort(); if (lifetime.current === owner) retire(); };
-  }, [selected?.id, revision]);
+  }, [selected?.id, revision, authRequired]);
 
   const shown = view.setups.filter(setup => view.rows[setup.id]?.length);
   return <dialog ref={dialog} className="my-deployments" aria-labelledby="my-deployments-title"
@@ -75,7 +100,7 @@ export function MyDeployments({ onClose, onOpenSetup, Icon }) {
         <h1 id="my-deployments-title" tabIndex={-1} ref={heading}>{selected ? selected.name : 'My deployments'}</h1></div>
       <button type="button" className="setup-action" onClick={close}>Close</button>
     </header>
-    {selected ? <>
+    {authRequired ? <SignInRecovery onCheck={checkSignIn} /> : selected ? <>
       <nav className="deployment-actions" aria-label="Deployment navigation">
         <button type="button" className="setup-action" onClick={back}>All my deployments</button>
         <button type="button" className="setup-action" disabled={!detail} onClick={() => {

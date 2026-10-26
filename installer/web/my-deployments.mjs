@@ -1,6 +1,7 @@
 import { deploymentInstalledSourceKind, deploymentPhase } from './deployment-panel.mjs';
 import { remoteReceiptOwned, remoteObservationAvailable, remotePhase } from './remote-deployment.mjs';
 import { gcpCloudOwned } from './gcp-guided.mjs';
+import { isSignInRequired } from './sign-in-recovery.mjs';
 
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const LOCAL_STATES = new Set(['queued', 'installing', 'checking', 'starting', 'running', 'stopping', 'stopped', 'failed', 'interrupted']);
@@ -24,6 +25,8 @@ export function deploymentSetups(value) {
 export async function readDeploymentSummary(setup, send, signal) {
   const results = await Promise.allSettled(sources.map(source => send(
     `/api/guide/${encodeURIComponent(setup.id)}/${source}`, { signal, timeoutMs: 30000 })));
+  const auth = results.find(result => result.status === 'rejected' && isSignInRequired(result.reason));
+  if (auth) throw auth.reason;
   return results.flatMap((result, index) => {
     const unknown = () => [{ kind: sources[index], label: labels[index], status: 'Status unknown',
       destination: 'No destination could be verified', unknown: true, receiptKnown: false }];

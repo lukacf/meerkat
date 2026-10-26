@@ -18,8 +18,11 @@ def required_service_operations(state):
         if required(item) and item.get("requirement_id") not in incoming:
             operations.append({"id": "incoming:" + item["id"],
                 "requirement_id": item["requirement_id"], "service": item["name"],
-                "capability": "incoming_interaction", "operation": item["purpose"],
-                "resource": item["scope"], "source_message_ids": item["source_message_ids"]})
+                # IncomingDataIntent also represents polled collections. Its
+                # presence alone cannot select a conversation-delivery operation.
+                "capability": "unresolved", "operation": item["purpose"],
+                "resource": item["scope"], "source_message_ids": item["source_message_ids"],
+                "reason_code": "source_operation_not_selected"})
 
     # Selected connections without operation rows still need refinement, even
     # when an empty inventory was proposed. A missing inventory is gated by the

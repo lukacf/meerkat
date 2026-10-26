@@ -134,8 +134,20 @@ def test_only_required_operations_are_reported_and_incoming_cannot_use_outbound_
     original = copy.deepcopy(state)
     rows = impl.service_preparation(state)["required_operations"]
     assert [r["id"] for r in rows] == ["slack-incoming", "incoming:self-dm"]
-    assert rows[1]["capability"] == "incoming_interaction"
+    assert rows[1]["capability"] == "unresolved"
+    assert rows[1]["reason_code"] == "source_operation_not_selected"
     assert state == original
+
+
+def test_polled_collection_is_not_mislabeled_as_incoming_conversation():
+    impl = ImplementationService("/unused", None, require_service_checks=True)
+    state = {"id": "guide", "version": 1, "brief": {"incoming_data": [{
+        "id": "ghe", "requirement_id": "repository-monitor", "name": "GHE repository changes",
+        "purpose": "Poll repository changes", "scope": "The two requested repositories",
+        "source_message_ids": ["request"]}]}}
+    observation = impl.service_preparation(state)
+    assert observation["reason_code"] == "service_inventory_missing"
+    assert observation["required_operations"][0]["capability"] == "unresolved"
 
 
 def test_legacy_selected_connections_need_inventory_and_workspace_is_not_a_service():

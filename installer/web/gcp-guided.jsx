@@ -18,7 +18,7 @@ const PREPARATION_STEPS = new Map([
   ['vm-ready', 'Cloud computer preparation verified'],
 ]);
 
-export function GcpGuided({ state, build, blocked = false, allowPreparation = true, onChooseProject, onDownload, downloading = false, onCloudRemoval, selectionScope }) {
+export function GcpGuided({ state, build, blocked = false, allowPreparation = true, onChooseProject, onDownload, downloading = false, onCloudRemoval, selectionScope, removalLabel = 'Review cloud removal' }) {
   blocked = blocked || !allowPreparation;
   const selectionToken = selectionScope?.token();
   const selectionBlocked = !guideSelectionAvailable(selectionScope, state, selectionToken);
@@ -224,7 +224,7 @@ export function GcpGuided({ state, build, blocked = false, allowPreparation = tr
         {removalStarted && cloud.status !== 'removed' && cloud.status !== 'removing' && <button type="button" className="setup-action" disabled={selectionBlocked || !!busy || selected.unavailable || !!selected.storageError} onClick={remove}>{busy === 'remove' ? 'Sending saved removal request...' : 'Continue removal'}</button>}
         <details className="deployment-evidence"><summary>Original resource details</summary><ul>{gcpRemovalResourceRows(cloud).map((row) => <li key={row.kind}>{row.label}: {row.name} - {row.id ? `Saved resource ID: ${row.id}` : 'Resource identity not yet verified'}</li>)}</ul></details>
       </div>}
-      {!removeOpen && !removalStarted && <button type="button" className="setup-action" disabled={selectionBlocked || !!busy || selected.unavailable || !!selected.storageError} onClick={() => { setDataLoss(false); setRemoveOpen(true); }}>Review cloud removal</button>}
+      {!removeOpen && !removalStarted && <button type="button" className="setup-action" disabled={selectionBlocked || !!busy || selected.unavailable || !!selected.storageError} onClick={() => { setDataLoss(false); setRemoveOpen(true); }}>{removalLabel}</button>}
     </section>}
     {connection?.guideId === state.id && connection.operationId === cloud?.operation_id && connection.sourceDigest === build?.source_digest && current && !removeOpen && <p role="status" className="gcp-application-handoff">Application access checks have started. Continue below when its destination checks pass. <a href={`#remote-cloud-${state.id}`} onClick={() => document.getElementById(`remote-cloud-${state.id}`)?.focus()}>Continue to private application setup</a></p>}
     {selected.unavailable && selected.loaded && <p className="deployment-warning" role="status">Cloud observation is unavailable. {cloud?.status === 'removed' ? 'The last confirmed removal receipt is preserved.'

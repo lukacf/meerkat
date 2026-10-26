@@ -104,9 +104,10 @@ class GuideStore:
             row = db.execute("SELECT body FROM guided_setups WHERE id=?", (identity,)).fetchone()
         return json.loads(row["body"]) if row else None
 
-    def list(self):
+    def list(self, *, include_all=False):
         with self._database() as db:
-            rows = db.execute("SELECT body FROM guided_setups ORDER BY rowid DESC LIMIT 100").fetchall()
+            rows = db.execute("SELECT body FROM guided_setups ORDER BY rowid DESC"
+                              + ("" if include_all else " LIMIT 100")).fetchall()
         result = []
         for row in rows:
             state = json.loads(row["body"])

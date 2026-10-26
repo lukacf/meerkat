@@ -785,8 +785,8 @@ async def new_guide():
 
 
 @app.get("/api/guide/list")
-async def list_guides():
-    return {"setups": await asyncio.to_thread(guide.store.list)}
+async def list_guides(include_all: bool = False):
+    return {"setups": await asyncio.to_thread(guide.store.list, include_all=include_all)}
 
 
 @app.post("/api/guide/start")

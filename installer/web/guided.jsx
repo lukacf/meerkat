@@ -30,6 +30,7 @@ import { guideStartupPresentation } from "./guide-startup.mjs";
 import { guideAdmissionMatches } from "./guide-admission.mjs";
 import { ImplementationPanel } from "./implementation-panel.jsx";
 import { DeploymentPanel } from "./deployment-panel.jsx";
+import { MyDeployments } from "./my-deployments.jsx";
 import { deploymentCanPrepare, nativeTeamCanInstall, deploymentSourceKey } from "./deployment-panel.mjs";
 import { gcpProjectFeedbackCurrent, gcpProjectBlueprint, gcpProjectBlueprintMatches } from "./gcp-preflight.mjs";
 import { nativeTeamPackagePlan, setupNeedsApplicationBuild, setupProgress, setupProgressHasLifecycle, setupGuideResume, admitSetupGuideResume } from "./setup-progress.mjs";
@@ -610,6 +611,7 @@ export function GuidedSetup({
     setInput((previous) => ({ ...previous, mode }));
   const [setups, setSetups] = useState([]),
     [historyOpen, setHistoryOpen] = useState(false);
+  const [deploymentsOpen, setDeploymentsOpen] = useState(false);
   const [setupsRead, setSetupsRead] = useState("idle");
   const [setupsPage, setSetupsPage] = useState(0);
   const setupsReading = useRef(false), setupsRequest = useRef(0), setupsMounted = useRef(true);
@@ -2304,6 +2306,7 @@ export function GuidedSetup({
               }); }}>
             Saved tools
           </button>
+          <button type="button" onClick={() => { setDeploymentsOpen(true); setHistoryOpen(false); setMobileMenuOpen(false); }}>My deployments</button>
           <div className="setup-history-control">
             <button
               aria-expanded={historyOpen}
@@ -2370,6 +2373,8 @@ export function GuidedSetup({
             aria-label="Open the Forge setup guide console in a new tab">Guide console <Icon name="arrow" size={12} /></a>}
         </div>
       </header>
+      {deploymentsOpen && <MyDeployments Icon={Icon} onClose={() => setDeploymentsOpen(false)}
+        onOpenSetup={id => { setDeploymentsOpen(false); switchSetup(id); }} />}
       {narrow && !welcome && (firstTurnWaiting || designConversationActive) && <div className="forge-mobile-journey">
         <ForgeWelcomeOrientation phase={journeyPhase} />
       </div>}

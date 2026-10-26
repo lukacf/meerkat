@@ -49,7 +49,7 @@ function canonicalInstallDestination(value, homeDirectory) {
 }
 
 export function DeploymentPanel({ state, plan, build, designBusy, pendingManual, Icon, onReceipt, onRemoteReceipt, remoteTargetRef, onRepairReceipt, onChooseCloudProject,
-  initialSourceKind = "application", sourceNavigation = null, selectionScope, agentTeamAvailable = true }) {
+  initialSourceKind = "application", sourceNavigation = null, selectionScope, agentTeamAvailable = true, managementOnly = false }) {
   const selectionToken = selectionScope?.token();
   const selectionBlocked = !guideSelectionAvailable(selectionScope, state, selectionToken);
   const optionsRequest = useRef(0);
@@ -104,10 +104,10 @@ export function DeploymentPanel({ state, plan, build, designBusy, pendingManual,
     intent: supportTracking.guideId === state.id ? supportTracking.intent : null,
     observation: supportTracking.guideId === state.id ? supportTracking.observation : null });
   const reconnecting = connection.guideId === state.id && connection.unavailable;
-  const active = deploymentIsActive(receipt), canPrepare = deploymentCanPrepare(build, state, sourceKind);
+  const active = deploymentIsActive(receipt), canPrepare = !managementOnly && deploymentCanPrepare(build, state, sourceKind);
   const packageReason = packagePreparationReason(state);
   const selectedOptions = deploymentSourceKind(options) === sourceKind ? options : null;
-  const canInstall = deploymentCanFreshInstall(build, state, selectedOptions), handoff = deploymentHandoff(selectedOptions, build, state);
+  const canInstall = !managementOnly && deploymentCanFreshInstall(build, state, selectedOptions), handoff = managementOnly ? null : deploymentHandoff(selectedOptions, build, state);
   const freshInstallRestriction = deploymentFreshInstallRestriction(build, state, selectedOptions);
   const consoleScope = deploymentOptionsCurrent(selectedOptions, build, state) ? selectedOptions.console_scope : null;
   const runtimeScope = receipt?.console_scope || (!receipt || deploymentSourceKind(receipt) === sourceKind &&
@@ -798,16 +798,16 @@ export function DeploymentPanel({ state, plan, build, designBusy, pendingManual,
   const remoteTarget = plan.target === "gcp" || plan.target === "linux" && options?.host_target !== "linux";
   // Saved destinations keep their observation and exit controls when the draft
   // moves elsewhere. New installation still uses the selected application.
-  const cloudControls = <GcpGuided selectionScope={selectionScope} state={state} build={build} allowPreparation={!nativeTeam && plan.target === "gcp"}
+  const cloudControls = <GcpGuided selectionScope={selectionScope} state={state} build={build} allowPreparation={!managementOnly && !nativeTeam && plan.target === "gcp"}
     blocked={busy || designBusy || pendingManual} onChooseProject={onChooseCloudProject}
-    onCloudRemoval={setCloudRemoval}
+    onCloudRemoval={setCloudRemoval} removalLabel={managementOnly ? "Remove cloud computer..." : undefined}
     onDownload={handoff && options.target === "gcp" ? downloadRemotePackage : undefined} downloading={downloading} />;
   const remoteControls = <RemoteDeployment selectionScope={selectionScope} state={state} build={build} options={nativeTeam ? null : options}
-    plan={plan} allowConnection={!nativeTeam && remoteTarget} blocked={busy || designBusy || pendingManual}
+    plan={plan} allowConnection={!managementOnly && !nativeTeam && remoteTarget} blocked={busy || designBusy || pendingManual}
     cloudRemoval={cloudRemoval}
     onReceipt={onRemoteReceipt} targetRef={remoteTargetRef}
     onRepairReceipt={onRepairReceipt} renderConfiguration={(props) => <DeploymentConfigurationFields {...props} />} />;
-  const showInstallation = !!(canPrepare || receipt || error || reconnecting || remoteTarget || formOpen ||
+  const showInstallation = !!(canPrepare || receipt || error || reconnecting || !managementOnly && remoteTarget || formOpen ||
     sourceChoice.current.guideId === state.id && sourceChoice.current.explicit);
   const configurationForm = formOpen && <form ref={configurationRef} data-configuration-key={configurationKey} className="deployment-form" onSubmit={install} autoComplete="off">
       <h3 tabIndex={-1} data-configuration-heading>{formIntent === "settings" ? "Change this installation's private settings" : receipt ? "Install in a new folder" : "Set up your installation"}</h3>
@@ -866,8 +866,8 @@ export function DeploymentPanel({ state, plan, build, designBusy, pendingManual,
 
   return <section className="deployment-panel" aria-disabled={selectionBlocked} {...guideSelectionEvents(selectionScope, state, selectionToken)} aria-label="Installation and operation" data-deployment-status={receipt?.status || handoff?.status || "not-installed"}>
     {showInstallation && <>
-    <span className="setup-eyebrow">INSTALL & RUN</span>
-    {agentTeamAvailable && <fieldset className="deployment-run-mode"><legend>What to install</legend>
+    <span className="setup-eyebrow">{managementOnly ? "MANAGE DEPLOYMENT" : "INSTALL & RUN"}</span>
+    {!managementOnly && agentTeamAvailable && <fieldset className="deployment-run-mode"><legend>What to install</legend>
       <label><input type="radio" name="deployment-source" value="native-team" checked={nativeTeam}
         disabled={selectionBlocked || busy} onChange={() => chooseSource("native-team")} /> Agent team - Console, agents and configured tools</label>
       <label><input type="radio" name="deployment-source" value="application" checked={!nativeTeam}

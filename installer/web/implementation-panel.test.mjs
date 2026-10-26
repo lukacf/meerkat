@@ -199,8 +199,8 @@ for (const existingBuild of [false, true]) test(`required service checks block $
   await pendingBuilderFeedback(false, document => {
     assert.match(document.body.textContent, /Check required services before building/);
     assert.match(document.body.textContent, /Native service preparation is unavailable/);
-    assert.match(document.body.textContent, /Slack: Receive and reply/);
-    assert.match(document.body.textContent, /resource still needs selection/);
+    assert.match(document.body.textContent, /Slack.*Receive and reply/);
+    assert.match(document.body.textContent, /Choose the resource this service should use/);
   }, { existingBuild, blocked: true, servicePreparation: {
     status: "unavailable", detail: "Native service preparation is unavailable.",
     required_operations: [{id:"incoming",service:"Slack",operation:"Receive and reply",resource:""}],

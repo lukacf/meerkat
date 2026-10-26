@@ -5,6 +5,8 @@ import { gcpCloudOwned } from './gcp-guided.mjs';
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const LOCAL_STATES = new Set(['queued', 'installing', 'checking', 'starting', 'running', 'stopping', 'stopped', 'failed', 'interrupted']);
 const sources = ['deployment', 'remote-deployment', 'gcp-deployment'];
+const absentMessages = ['No local deployment has been started for this setup.',
+  'No remote installation is selected for this setup.', null];
 const labels = ['Forge host', 'Remote application', 'Cloud computer'];
 
 export function deploymentSetups(value) {
@@ -24,26 +26,30 @@ export async function readDeploymentSummary(setup, send, signal) {
     `/api/guide/${encodeURIComponent(setup.id)}/${source}`, { signal, timeoutMs: 30000 })));
   return results.flatMap((result, index) => {
     const unknown = () => [{ kind: sources[index], label: labels[index], status: 'Status unknown',
-      destination: 'Saved destination could not be verified', unknown: true }];
-    if (result.status !== 'fulfilled') return unknown();
+      destination: 'No destination could be verified', unknown: true, receiptKnown: false }];
+    if (result.status !== 'fulfilled') {
+      // Only the endpoint's exact missing-selection response establishes absence.
+      if (absentMessages[index] && result.reason?.status === 404 && result.reason.message === absentMessages[index]) return [];
+      return unknown();
+    }
     const receipt = result.value;
     if (receipt === null) return [];
     if (index === 0) {
       if (!deploymentInstalledSourceKind(receipt, setup.id) || !LOCAL_STATES.has(receipt.status) ||
           ![undefined, null, 'local'].includes(receipt.target) || typeof receipt.destination !== 'string') return unknown();
-      return [{ kind: sources[index], label: labels[index], destination: receipt.destination,
+      return [{ kind: sources[index], label: labels[index], receiptKnown: true, destination: receipt.destination,
         status: deploymentPhase(receipt), removal: 'Forge has no generic uninstall for this folder. Stop keeps its files and history.' }];
     }
     if (index === 1) {
       if (!remoteReceiptOwned(receipt, setup)) return unknown();
-      return [{ kind: sources[index], label: labels[index], destination: `${receipt.endpoint.host}: ${receipt.destination}`,
+      return [{ kind: sources[index], label: labels[index], receiptKnown: true, destination: `${receipt.endpoint.host}: ${receipt.destination}`,
         status: remoteObservationAvailable(receipt) ? remotePhase(receipt) : 'Status unknown',
         unknown: !remoteObservationAvailable(receipt), removal: receipt.target === 'gcp'
           ? 'Stopping the application keeps the cloud computer and its charges. Use the recorded cloud removal controls separately.'
           : 'Forge has no generic remote uninstall. Stop keeps the application files and history.' }];
     }
     if (!gcpCloudOwned(receipt, setup.id)) return unknown();
-    return [{ kind: sources[index], label: labels[index],
+    return [{ kind: sources[index], label: labels[index], receiptKnown: true,
       destination: `${receipt.destination.project} / ${receipt.destination.zone} / ${receipt.destination.instance}`,
       status: ({ provisioning: 'Cloud preparation in progress', 'resume-required': 'Cloud setup needs attention',
         blocked: 'Cloud setup blocked', 'vm-ready': 'Cloud computer prepared - application status is separate',

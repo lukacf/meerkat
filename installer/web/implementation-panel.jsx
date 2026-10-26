@@ -1,3 +1,4 @@
+import { RequiredServiceChecks } from "./required-service-checks.jsx";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { captureGuideSelection, guideSelectionAvailable, guideSelectionEvents } from "./guide-selection.mjs";
 import { ConversationTranscript } from "../../packages/console-components/src/conversation/conversation-transcript";
@@ -546,17 +547,7 @@ export function ImplementationPanel({ state, plan, designBusy, pendingManual, Ic
     {serviceHold && !running && <div className="implementation-warning" role="status">
       <strong>Check required services before building</strong>
       <p>{serviceHold.detail}</p>
-      {!!serviceHold.required_operations?.length && <ul>{serviceHold.required_operations.map(item =>
-        <li key={item.id}>{item.service}: {item.operation}{item.resource ? ` (${item.resource})` : " - resource still needs selection"}
-          {item.capability === "incoming_interaction" && <span> - receiving messages needs its own check</span>}
-          {item.capability === "unresolved" && (item.reason_code === "source_binding_not_verified" && item.planned_operations?.length
-            ? <details><summary>{item.planned_operations.length} planned {item.planned_operations.length === 1 ? "operation" : "operations"}; source setup still needs checking</summary>
-              <p>These are the operations in your plan. The connection and access to each resource still need verification.</p>
-              <ul>{item.planned_operations.map(operation => <li key={operation.id}>{operation.service}: {operation.operation}
-                {operation.resource ? ` (${operation.resource})` : " - resource still needs selection"}</li>)}</ul>
-            </details>
-            : <span> - required operations still need selection</span>)}
-        </li>)}</ul>}
+      <RequiredServiceChecks operations={serviceHold.required_operations || []} />
     </div>}
     {decisionBlocked && !running && <p className="implementation-detail" role="status">Answer the guide's open setup decisions before building. Proposed defaults and remaining implementation work can be built once those decisions are clear.</p>}
     {canDownload && <p className="implementation-detail">The package passed the checks below. Installation, credentials, and any remaining integrations still need to be verified in your deployment.</p>}

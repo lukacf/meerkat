@@ -328,3 +328,12 @@
   .setup-shell .setup-composer-foot { display: none; }
   .setup-shell .evolving-plan .ep-inner { padding: 20px 14px; }
 }
+
+.setup-shell .setup-advanced-tools > summary { min-height: 36px; box-sizing: border-box; padding: 8px 10px; }
+@media (min-width: 701px) and (max-width: 760px) {
+  /* The host account disclosure uses the same breakpoint as the Forge menu. */
+  .setup-shell [data-forge-workspace-slot] > details > div { position: static !important; width: 100%; max-width: none; box-shadow: none; }
+}
+@media (max-width: 760px) {
+  .setup-shell .setup-advanced-tools > summary { min-height: 44px; padding: 12px 10px; }
+}

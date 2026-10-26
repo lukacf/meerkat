@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { request } from './state.mjs';
 import { guidePlan } from './evolving-plan-state.mjs';
 import { DeploymentPanel } from './deployment-panel.jsx';
-import { deploymentSetups, readDeploymentSummaries } from './my-deployments.mjs';
+import { deploymentSetups, readDeploymentSummaries, readDeploymentSummary } from './my-deployments.mjs';
 import './my-deployments.css';
 
 export function MyDeployments({ onClose, onOpenSetup, Icon }) {
@@ -48,7 +48,10 @@ export function MyDeployments({ onClose, onOpenSetup, Icon }) {
     const current = () => lifetime.current === owner && !controller.signal.aborted;
     (async () => {
       try {
-        const state = await request(`/api/guide/${encodeURIComponent(selected.id)}`, { signal: controller.signal, timeoutMs: 30000 });
+        const [state, entries] = await Promise.all([
+          request(`/api/guide/${encodeURIComponent(selected.id)}`, { signal: controller.signal, timeoutMs: 30000 }),
+          readDeploymentSummary(selected, request, controller.signal),
+        ]);
         if (!current()) return;
         if (state?.id !== owner.id || !Number.isSafeInteger(state.version) || state.version < 0)
           throw new Error('The saved setup identity could not be verified.');
@@ -56,13 +59,13 @@ export function MyDeployments({ onClose, onOpenSetup, Icon }) {
           if (!current() || guide?.id !== owner.id || token !== undefined && token !== owner) return null;
           return current;
         } };
-        setDetail({ state, selectionScope });
+        setDetail({ state, selectionScope, entries });
       } catch {
         if (current()) setDetail({ error: 'This setup could not be verified. Return to the list and retry; no action was sent.' });
       }
     })();
     return () => { controller.abort(); if (lifetime.current === owner) retire(); };
-  }, [selected?.id]);
+  }, [selected?.id, revision]);
 
   const shown = view.setups.filter(setup => view.rows[setup.id]?.length);
   return <dialog ref={dialog} className="my-deployments" aria-labelledby="my-deployments-title"
@@ -75,13 +78,23 @@ export function MyDeployments({ onClose, onOpenSetup, Icon }) {
     {selected ? <>
       <nav className="deployment-actions" aria-label="Deployment navigation">
         <button type="button" className="setup-action" onClick={back}>All my deployments</button>
+        <button type="button" className="setup-action" disabled={!detail} onClick={() => {
+          retire(); setDetail(null); setRevision(value => value + 1);
+        }}>Refresh deployment records</button>
         <button type="button" className="setup-action" onClick={() => { retire(); onOpenSetup(selected.id); }}>Open setup conversation</button>
       </nav>
-      <p>Use the checked controls below to open, stop or restart this deployment where supported. Stop keeps files and cloud resources.</p>
-      <p>Local and remote folders have no generic uninstall. Remove cloud computer only removes this setup's recorded cloud resources after you review the resources and accept permanent disk data loss.</p>
       {!detail && <p role="status">Reading this setup's deployment controls...</p>}
       {detail?.error && <p role="alert">{detail.error}</p>}
-      {detail?.state && <DeploymentPanel key={selected.id} state={detail.state}
+      {detail?.state && !detail.entries.length && <div className="my-deployments-empty" role="status">
+        <h2>No selected deployment records</h2><p>This setup has no selected local, remote or cloud deployment. Return to its conversation to review the next step.</p>
+      </div>}
+      {detail?.entries?.some(entry => entry.receiptKnown === false) && <div role="status" className="deployment-warning">
+        <strong>Some deployment records could not be checked</strong>
+        <p>This does not establish whether an installation exists. Refresh the records to try again.</p>
+        <ul>{detail.entries.filter(entry => entry.receiptKnown === false).map(entry => <li key={entry.kind}>{entry.label}: status unknown</li>)}</ul>
+      </div>}
+      {detail?.entries?.some(entry => entry.receiptKnown) && <p>Use the verified controls below. Stop keeps files and cloud resources. Cloud removal requires a separate data-loss confirmation.</p>}
+      {detail?.state && detail.entries.some(entry => entry.receiptKnown) && <DeploymentPanel key={selected.id} state={detail.state}
         plan={guidePlan(detail.state) || { project: { name: selected.name } }} build={null}
         designBusy={detail.state.operation?.status === 'running'} pendingManual={false} Icon={Icon}
         selectionScope={detail.selectionScope} managementOnly />}
@@ -92,14 +105,14 @@ export function MyDeployments({ onClose, onOpenSetup, Icon }) {
         {view.loading && <span role="status">Checking recorded deployments...</span>}</div>
       {view.error && <p role="alert">{view.error}</p>}
       {!view.loading && !view.error && !shown.length && <div className="my-deployments-empty">
-        <h2>No recorded deployments</h2><p>Your saved setups remain available in Your setups. Once deployed through Forge, their receipts appear here.</p></div>}
+        <h2>No selected deployment records</h2><p>Your saved setups remain available in Your setups. Once deployed through Forge, their receipts appear here.</p></div>}
       {shown.map(setup => <article className="my-deployment-card" key={setup.id}>
         <h2>{setup.name}</h2>
         <ul>{view.rows[setup.id].map(entry => <li key={entry.kind}>
           <strong>{entry.label}</strong><span className={entry.unknown ? 'deployment-warning' : 'my-deployment-status'}>{entry.status}</span>
-          <code>{entry.destination}</code>{entry.removal && <p>{entry.removal}</p>}
+          {entry.receiptKnown && <code>{entry.destination}</code>}{entry.removal && <p>{entry.removal}</p>}
         </li>)}</ul>
-        <button type="button" className="setup-action primary" onClick={() => choose(setup)}>Open and manage</button>
+        <button type="button" className="setup-action primary" onClick={() => choose(setup)}>{view.rows[setup.id].some(entry => entry.receiptKnown) ? 'Open and manage' : 'Check deployment records'}</button>
       </article>)}
       {shown.length > 0 && <p className="deployment-note">Status reflects the latest check in this view. Open and manage rechecks the original receipts before offering actions.</p>}
     </>}

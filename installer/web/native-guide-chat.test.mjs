@@ -448,3 +448,21 @@ test("expired sign-in stops native recovery and checks only saved timeline witho
     assertPreserved();
   }, { authenticationRequired: true });
 });
+
+test("returning to the original expired tab checks its timeline once and never replays input", async () => {
+  await mountedStartup(async ({ document, calls, assertPreserved, unmount }) => {
+    assert.match(document.body.textContent, /Sign in to continue/);
+    const view = document.defaultView;
+    await act(async () => {
+      view.dispatchEvent(new view.Event('focus'));
+      document.dispatchEvent(new view.Event('visibilitychange'));
+    });
+    assert.equal(document.querySelector('.setup-error'), null);
+    assert.equal(calls.length, 2);
+    assert.ok(calls.every(call => call.method === 'GET' && call.url.includes('/timeline?')));
+    assertPreserved();
+    await unmount();
+    view.dispatchEvent(new view.Event('focus'));
+    assert.equal(calls.length, 2);
+  }, { authenticationRequired: true });
+});

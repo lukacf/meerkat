@@ -380,6 +380,17 @@ export function ProviderSetup({ onRuntime, onClose, firstRun = false, idea = "",
     onClick={event => checkStart ? checkGuideStatus(event.currentTarget) : checkSettings()}>
     {checkStart ? checkingStart ? "Checking guide status..." : "Check guide status"
       : firstRun && pending === "check" ? "Checking settings..." : "Check saved settings"}</button>;
+  const configuredProvider = effective && <div className="setup-provider-configured">
+          <span className="setup-provider-configured-mark" aria-hidden="true">{LABELS[effective]?.[0]}</span>
+          <div><strong>{LABELS[effective]}</strong><p>{settings.providers?.find(item => item.provider === effective)?.source === "native_host_config"
+            ? "Configured by this Forge host"
+            : hostManagedProvider(settings.providers?.find(item => item.provider === effective))
+              ? "Configured by this server" : "Configured in Forge"}</p></div>
+          <span className="setup-provider-configured-label">{effectiveModel || MODELS[effective] ? <>
+            <span>{effectiveModel ? "Current model" : "Default model"}</span>
+            <strong>{effectiveModel || MODELS[effective]}</strong>
+          </> : "Provider configured"}</span>
+        </div>;
   return <section className={`setup-provider${firstRun ? " setup-provider-first-run" : ""}`} aria-label="Setup guide provider"
     data-provider-step={firstRun ? firstRunStep : undefined}>
     <div className="setup-provider-heading">{firstRun ? <div>
@@ -388,7 +399,7 @@ export function ProviderSetup({ onRuntime, onClose, firstRun = false, idea = "",
           : firstRunStep === "check" ? "CHECK BEFORE CONTINUING" : firstRunStep === "active" ? "GUIDE STATUS"
           : canContinue ? "CONTINUE TO YOUR IDEA" : effective ? "2. START YOUR GUIDE" : "1. CONNECT A MODEL"}</span>
       <h2 ref={heading} tabIndex={-1}>{firstRunHeading}</h2>
-    </div> : <h2>Connect a model provider</h2>}
+    </div> : <h2>Guide settings</h2>}
       <button type="button" onClick={onClose} disabled={checkingStart || !!pending && !readyToReturn} aria-label={firstRun ? "Back to my idea" : "Close provider settings"}>{firstRun ? "Back to my idea" : "Close"}</button>
     </div>
     <p className="setup-provider-intro">{firstRun
@@ -415,17 +426,7 @@ export function ProviderSetup({ onRuntime, onClose, firstRun = false, idea = "",
     {!settings && !error && <p role="status">Reading local settings...</p>}
     {settings && <>
       {firstRun ? <>
-        {effective && <div className="setup-provider-configured">
-          <span className="setup-provider-configured-mark" aria-hidden="true">{LABELS[effective]?.[0]}</span>
-          <div><strong>{LABELS[effective]}</strong><p>{settings.providers?.find(item => item.provider === effective)?.source === "native_host_config"
-            ? "Configured by this Forge host"
-            : hostManagedProvider(settings.providers?.find(item => item.provider === effective))
-              ? "Configured by this server" : "Configured in Forge"}</p></div>
-          <span className="setup-provider-configured-label">{effectiveModel || MODELS[effective] ? <>
-            <span>{effectiveModel ? "Current model" : "Default model"}</span>
-            <strong>{effectiveModel || MODELS[effective]}</strong>
-          </> : "Provider configured"}</span>
-        </div>}
+        {configuredProvider}
         {settings.work_active && !readyToReturn && <div className="setup-provider-work" role="status">
           <span className="setup-provider-work-mark" aria-hidden="true" />
           <p>Earlier work or a shutdown that has not been confirmed still needs Forge. Changing models and starting or stopping the guide are paused.</p>
@@ -459,9 +460,23 @@ export function ProviderSetup({ onRuntime, onClose, firstRun = false, idea = "",
           </div>
         </details>
       </> : <>
-        {providerFields}
-        {settings.work_active && <p className="setup-provider-work-note" role="status">Existing work or unconfirmed shutdown is keeping model settings and team controls paused. Check saved settings to refresh the status.</p>}
-        <div className="setup-provider-actions">{saveControl}{runtimeControl}{checkControl}</div>
+        {configuredProvider}
+        {effective && <div className="setup-provider-actions"><button type="button"
+          disabled={checkingStart || !!pending && !readyToReturn}
+          className="setup-provider-primary" onClick={onClose}>Return to conversation</button></div>}
+        {settings.work_active && <p className="setup-provider-work-note" role="status">Your existing work is keeping model settings and guide controls paused. Check saved settings to refresh the status.</p>}
+        {!effective ? <div className="setup-provider-connect-fields">{providerFields}
+          <div className="setup-provider-actions">{saveControl}{runtimeControl}{checkControl}</div></div> : <>
+          {hostManagedProvider(selected) ? <p>{selected?.source === "environment" ? "Configured by the server environment." : "Using the current model configured by this Forge host."}</p> :
+            <details className="setup-provider-secondary"><summary>Advanced model settings</summary>
+              {!editable && <p>Model changes are unavailable while the guide or saved work is active.</p>}
+              {providerFields}<div className="setup-provider-actions">{saveControl}</div>
+            </details>}
+          <details className="setup-provider-secondary"><summary>Advanced guide controls</summary>
+            <p>Stopping the setup team ends the guide runtime. Your saved conversation stays available.</p>
+            <div className="setup-provider-actions">{runtimeControl}{checkControl}</div>
+          </details>
+        </>}
       </>}
       {settings.load_error && <p role="alert">Saved provider settings need attention. Existing environment configuration remains available.</p>}
       {settings.provider_binding_error && <p role="alert">The saved setup team's provider could not be verified. Preserve its native state before changing credentials.</p>}

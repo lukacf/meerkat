@@ -2207,3 +2207,20 @@
   .setup-native-chat .cc-message p,
   .setup-native-chat .cc-message li { font-size: 15px; }
 }
+
+/* Secondary controls share the header without covering the conversation. */
+.setup-header-actions { flex-wrap: wrap; overflow: visible; }
+[data-forge-workspace-slot] { min-width: 0; max-width: 100%; overflow: visible; }
+[data-forge-workspace-slot]:empty { display: none; }
+.setup-advanced-tools { position: relative; font-size: 12px; }
+.setup-advanced-tools > summary { cursor: pointer; padding: 7px 0; font-weight: 600; }
+.setup-advanced-tools-menu { position: absolute; right: 0; top: 100%; z-index: 40; display: grid;
+  gap: 8px; width: min(250px, 85vw); padding: 16px; border: 1px solid #d5dad3; border-radius: 12px;
+  background: #fff; box-shadow: 0 8px 24px #17231820; }
+.setup-advanced-tools-menu button, .setup-advanced-tools-menu button:last-child { width: auto; justify-content: flex-start; text-align: left; }
+.setup-requirement-details { margin-top: 18px; }
+.setup-requirement-details > summary { cursor: pointer; font-weight: 600; }
+@media (max-width: 760px) {
+  .setup-advanced-tools-menu { position: static; width: auto; box-shadow: none; }
+  [data-forge-workspace-slot] { flex-basis: 100%; }
+}

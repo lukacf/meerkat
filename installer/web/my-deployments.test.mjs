@@ -151,3 +151,41 @@ test('management detail retains Stop and exact cloud removal confirmation', asyn
     assert.ok(calls.every(call => call.method === 'GET'));
   });
 });
+
+test('only the exact missing-selection response establishes absence; other404 and409 failures stay unknown', async () => {
+  const missing = (message, status = 404) => Object.assign(new Error(message), { status });
+  const rows = await readDeploymentSummary(setup, async url => {
+    if (url.endsWith('/remote-deployment')) throw missing('No remote installation is selected for this setup.');
+    if (url.endsWith('/deployment')) throw missing('No local deployment has been started for this setup.');
+    return null;
+  });
+  assert.deepEqual(rows, []);
+  for (const error of [missing('Not found'), missing('The saved selection could not be read.', 409),
+    missing('No local deployment has been started for this setup.', 503)]) {
+    const unknown = await readDeploymentSummary(setup, async url => {
+      if (url.endsWith('/deployment')) throw error;
+      return null;
+    });
+    assert.equal(unknown[0].receiptKnown, false);
+    assert.equal(unknown[0].unknown, true);
+  }
+});
+test('an unreadable overview opens an explicit failure state and refresh can establish absence without commands', async () => {
+  let unavailable = true;
+  await mounted(async url => {
+    if (url.startsWith('/api/guide/list')) return { setups: [setup] };
+    if (url === `/api/guide/${setup.id}`) return { id: setup.id, version: 1 };
+    if (unavailable) throw new Error('offline');
+    return null;
+  }, async ({ document, calls, click, button }) => {
+    assert.equal(button('Open and manage'), undefined);
+    await click('Check deployment records');
+    assert.match(document.body.textContent, /Some deployment records could not be checked/);
+    assert.equal(document.querySelector('[aria-label="Installation and operation"]'), null);
+    unavailable = false;
+    await click('Refresh deployment records');
+    assert.match(document.body.textContent, /No selected deployment records/);
+    assert.doesNotMatch(document.body.textContent, /Some deployment records could not be checked/);
+    assert.ok(calls.every(call => call.method === 'GET'));
+  });
+});

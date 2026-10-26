@@ -4,17 +4,29 @@ import { hostSignInPath } from "./sign-in-recovery.mjs";
 export function SignInRecovery({ onCheck, className = "" }) {
   const [checking, setChecking] = useState(false);
   const [unconfirmed, setUnconfirmed] = useState(false);
-  const mounted = useRef(true);
+  const mounted = useRef(true), inFlight = useRef(false), currentCheck = useRef(null);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const path = hostSignInPath();
   async function check() {
-    if (checking || !onCheck) return;
+    if (inFlight.current || !onCheck) return;
+    inFlight.current = true;
     setChecking(true);
     setUnconfirmed(false);
     let confirmed = false;
     try { confirmed = await onCheck() === true; } catch {}
+    inFlight.current = false;
     if (mounted.current) { setChecking(false); setUnconfirmed(!confirmed); }
   }
+  currentCheck.current = check;
+  useEffect(() => {
+    const recheck = () => { if (!document.hidden) currentCheck.current?.(); };
+    window.addEventListener("focus", recheck);
+    document.addEventListener("visibilitychange", recheck);
+    return () => {
+      window.removeEventListener("focus", recheck);
+      document.removeEventListener("visibilitychange", recheck);
+    };
+  }, []);
   return <div className={`setup-error ${className}`} role="alert">
     <strong>Sign in to continue</strong>
     <p>Your sign-in needs renewal. Your conversation and draft are kept. Nothing will be sent again automatically.</p>

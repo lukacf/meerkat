@@ -25,6 +25,7 @@ import { SetupPlan, ScopeDecisions, SetupRequirementGroups } from "./evolving-pl
 import { guidePlan } from "./evolving-plan-state.mjs";
 import { NativeGuideChat, useGuideTimeline } from "./native-guide-chat.jsx";
 import { isSignInRequired } from "./sign-in-recovery.mjs";
+import { GuideAdvancedTools } from "./guide-advanced-tools.jsx";
 import { SignInRecovery } from "./sign-in-recovery.jsx";
 import { GuideWaitStatus } from "./guide-wait.jsx";
 import { guideWaitBinding } from "./guide-wait.mjs";
@@ -2330,18 +2331,6 @@ export function GuidedSetup({
             <small className="setup-provider-model">{available === false ? "Provider setup needed"
               : runtime?.model || state.capabilities?.model || config?.architect?.model || "Meerkat + MobKit"}</small>
           </button>
-          <button aria-expanded={savedToolsOpen} disabled={!hasSavedToolsGuide || blocked}
-            onClick={() => { releaseResponseFollow();
-              setMobileMenuOpen(false);
-              const guideId = state.id;
-              setSavedToolsGuide(value => value === guideId ? null : guideId);
-              setMobilePanel("chat");
-              requestAnimationFrame(() => {
-                if (latestState.current?.id === guideId)
-                  chatScroll.current?.scrollTo?.({ top: 0, behavior: "smooth" });
-              }); }}>
-            Saved tools
-          </button>
           <button type="button" onClick={() => { setDeploymentsOpen(true); setHistoryOpen(false); setMobileMenuOpen(false); }}>My deployments</button>
           <div className="setup-history-control">
             <button
@@ -2398,15 +2387,26 @@ export function GuidedSetup({
               </div>
             )}
           </div>
+          <GuideAdvancedTools guideId={state.id} active={active} disabled={blocked}
+            savedToolsOpen={savedToolsOpen} onSavedTools={() => {
+              releaseResponseFollow(); setMobileMenuOpen(false);
+              const guideId = state.id;
+              setSavedToolsGuide(value => value === guideId ? null : guideId);
+              setMobilePanel("chat");
+              requestAnimationFrame(() => { if (latestState.current?.id === guideId)
+                chatScroll.current?.scrollTo?.({ top: 0, behavior: "smooth" }); });
+            }}>
           <button
             className={configOpen ? "selected" : ""}
             onClick={() => { setMobileMenuOpen(false); openConfig(); }}
             disabled={!plan || busy || packageBusy}
           >
-            <Icon name="code" size={15} /> Configuration
+            <Icon name="code" size={15} /> Advanced configuration
           </button>
           {narrow && consoleUrl && <a href={consoleUrl} target="_blank" rel="noreferrer"
             aria-label="Open the Forge setup guide console in a new tab">Guide console <Icon name="arrow" size={12} /></a>}
+          </GuideAdvancedTools>
+          <div data-forge-workspace-slot="" />
         </div>
       </header>
       {deploymentsOpen && <MyDeployments Icon={Icon} onClose={() => setDeploymentsOpen(false)}
@@ -2458,13 +2458,13 @@ export function GuidedSetup({
             </span>
             <SetupGuideStatusCaption lifecycle={!!primaryProgress} statusText={statusText} ready={ready} review={review} />
             {(state.proposal || state.blueprint) && (
-              <details className="setup-other-steps"><summary>Other steps</summary>
-              <nav className="setup-stage-shortcuts" aria-label="Try, build and run this proposal">
+              <details className="setup-other-steps"><summary>Optional testing and tools</summary>
+              <nav className="setup-stage-shortcuts" aria-label="Optional testing and tools">
                 {designConversationActive ? <a href="#setup-trial" title="Optional ways to try, build and run this proposal"
                   onClick={(event) => {
                     event.preventDefault();
                     revealActionsTarget(trialRef.current);
-                  }}>Try, build and run</a> : <>
+                  }}>Try with sample data</a> : <>
                 <SetupTrialShortcut progress={progress} onNavigate={navigateProgressAction}
                   onDesign={() => {
                     navigateTrial("design");
@@ -2480,7 +2480,7 @@ export function GuidedSetup({
                     onClick={(event) => {
                       event.preventDefault();
                       revealActionsTarget(deploymentRef.current);
-                    }}>Run</a>}
+                    }}>Installation</a>}
                 </>}
               </nav>
               </details>
@@ -2659,6 +2659,51 @@ export function GuidedSetup({
                 </AgentMessage>
               </div>
             )}
+            {review && !busy && plan && (
+              <AgentMessage>
+                <div className="setup-review-card">
+                  <span className="setup-eyebrow">PROPOSAL TO REVIEW</span>
+                  <h2>{plan.project.name}</h2>
+                  <p>{plan.project.description || state.summary}</p>
+                  <div className="setup-package-tags">
+                    <span>{identities(plan).length} agents</span>
+                    <span>{plan.connections.length} {plan.connections.length === 1 ? "connection" : "connections"}</span>
+                    <span>
+                      {plan.target === "gcp"
+                        ? "Google Cloud"
+                        : plan.target === "mac"
+                          ? "macOS"
+                          : "Linux"}
+                    </span>
+                  </div>
+                  <p className="setup-review-expectation">
+                    {packagePreparationReason(state, plan)
+                      ? "Accepting saves this design and its choices. Package preparation is pending; you can keep refining the plan."
+                      : "Accepting saves this plan. Before building, connect the required services and check access to the resources your application needs."}
+                  </p>
+                  {packagePreparationReason(state, plan) && <div className="setup-readiness" role="status">
+                    <p>{packagePreparationReason(state, plan)}</p>
+                    <button className="setup-action" disabled={blocked}
+                      onClick={() => revisePackagePlan(PACKAGE_REVISION_PROMPT, { id: state.id, version: state.version })}>Revise with guide <Icon name="arrow" size={16} /></button>
+                  </div>}
+                  <button
+                    className="setup-action primary"
+                    onClick={() => applyPlan(state)}
+                    disabled={blocked}
+                  >
+                    Use this plan <Icon name="arrow" size={16} />
+                  </button>
+                  <small className="setup-card-foot">
+                    Or tell me what you would change below.
+                  </small>
+                  {requirements.length > 0 && <details className="setup-readiness setup-requirement-details">
+                    <summary>Work and checks still needed ({requirements.length})</summary>
+                    <SetupRequirementGroups state={state} />
+                  </details>}
+                  <ScopeDecisions state={state} compact />
+                </div>
+              </AgentMessage>
+            )}
             {agentTeamAvailable && (state.proposal || state.blueprint) && !busy && <NativeTeamPackage state={state} packageBusy={packageBusy} blocked={blocked}
               deploymentObservation={deploymentObservation}
               onInstall={(displayed) => navigateInstallation("native-team", displayed)}
@@ -2668,7 +2713,7 @@ export function GuidedSetup({
                 event.preventDefault();
                 setActionsExpansion({ guideId: state.id, open: !actionsOpen });
               }}>
-                <strong>Application steps</strong>
+                <strong>Build, test and install</strong>
                 <span>Open a step to review its work. Your saved activity stays available.</span>
               </summary>
               {designConversationActive && progress && !busy && <SetupProgressCard progress={progress} resume={guideResume}
@@ -2676,7 +2721,7 @@ export function GuidedSetup({
               <details data-setup-phase="trial" className="setup-phase" open={currentPhase === "trial"}
                 hidden={!agentTeamAvailable && !checkedApplication && !rehearsal?.rehearsal_id && currentPhase !== "trial"}>
               <summary onClick={event => { event.preventDefault(); setPhaseSelection({ guideId: state.id, version: state.version,
-                phase: currentPhase === "trial" ? "conversation" : "trial" }); }}>Try with sample data</summary>
+                phase: currentPhase === "trial" ? "conversation" : "trial" }); }}>Try with sample data (optional)</summary>
               <div id="setup-trial" ref={trialRef}>
               <RehearsalPanel state={state} plan={plan} build={implementation} busy={busy || applyUnconfirmed || sendUnconfirmed || state.operation?.status === "running"}
                 selectionScope={lifecycleSelection.current} pendingManual={!!manualNote} navigation={trialNavigation}
@@ -2711,53 +2756,6 @@ export function GuidedSetup({
               </div>
               </details>
             </details>}
-            {review && !busy && plan && (
-              <AgentMessage>
-                <div className="setup-review-card">
-                  <span className="setup-eyebrow">PROPOSAL TO REVIEW</span>
-                  <h2>{plan.project.name}</h2>
-                  <p>{plan.project.description || state.summary}</p>
-                  <div className="setup-package-tags">
-                    <span>{identities(plan).length} agents</span>
-                    <span>{plan.connections.length} {plan.connections.length === 1 ? "connection" : "connections"}</span>
-                    <span>
-                      {plan.target === "gcp"
-                        ? "Google Cloud"
-                        : plan.target === "mac"
-                          ? "macOS"
-                          : "Linux"}
-                    </span>
-                  </div>
-                  {requirements.length > 0 && (
-                    <div className="setup-readiness">
-                      <strong>Before this can run</strong>
-                      <SetupRequirementGroups state={state} />
-                    </div>
-                  )}
-                  <ScopeDecisions state={state} />
-                  <p className="setup-review-expectation">
-                    {packagePreparationReason(state, plan)
-                      ? "Accepting saves this design and its choices. Package preparation is pending; you can keep refining the plan."
-                      : "Accepting prepares the native team and configuration. Before Build or Resume, connect the required services through protected setup and check each required operation. Missing or unsupported access must be resolved first."}
-                  </p>
-                  {packagePreparationReason(state, plan) && <div className="setup-readiness" role="status">
-                    <p>{packagePreparationReason(state, plan)}</p>
-                    <button className="setup-action" disabled={blocked}
-                      onClick={() => revisePackagePlan(PACKAGE_REVISION_PROMPT, { id: state.id, version: state.version })}>Revise with guide <Icon name="arrow" size={16} /></button>
-                  </div>}
-                  <button
-                    className="setup-action primary"
-                    onClick={() => applyPlan(state)}
-                    disabled={blocked}
-                  >
-                    Use this plan <Icon name="arrow" size={16} />
-                  </button>
-                  <small className="setup-card-foot">
-                    Or tell me what you would change below.
-                  </small>
-                </div>
-              </AgentMessage>
-            )}
             {(ready || state.status === "handoff") && !busy && plan && <ManualSetupExports
               plan={plan} showPackage={ready && checkedApplication} checkedApplication={checkedApplication}
               packageBusy={packageBusy} blocked={blocked} briefBlocked={blocked || loadingSetup} downloaded={downloaded} saving={saving}
@@ -3100,7 +3098,7 @@ export function GuidedSetup({
             <header>
               <div>
                 <span className="setup-eyebrow">OPTIONAL MANUAL OVERRIDE</span>
-                <h2 id="setup-config-title">Your configuration</h2>
+                <h2 id="setup-config-title">Advanced configuration</h2>
               </div>
               <button
                 aria-label="Close configuration"

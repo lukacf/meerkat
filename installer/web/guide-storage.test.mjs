@@ -1402,7 +1402,7 @@ test(`manual import ${outcome} cannot publish across navigation (${selection})`,
   });
   await mountedGuide({value:storage},async(document,calls)=>{
     const posts=()=>calls.filter(call=>call.method==='POST');
-    await clickGuideButton(document,'Configuration');
+    await clickGuideButton(document,'Advanced configuration');
     await typeConfig(document,JSON.stringify(originalCandidate,null,2));
     const submit=configSend(document),propsKey=Object.keys(submit).find(key=>key.startsWith('__reactProps$'));
     const retainedSubmit=submit[propsKey].onClick;
@@ -1428,7 +1428,7 @@ test(`manual import ${outcome} cannot publish across navigation (${selection})`,
       await act(async()=>{t.mock.timers.tick(2500);await settle();});
       assert.match(document.querySelector('.setup-error').textContent,/Current second observation interrupted/);
     }else if(selection!=='pending B'){
-      await clickGuideButton(document,'Configuration');
+      await clickGuideButton(document,'Advanced configuration');
       await typeConfig(document,'{');
       await sendConfig(document);
       currentEditorError=configModal(document).querySelector('.setup-error').textContent;
@@ -1463,9 +1463,9 @@ test(`manual import ${outcome} cannot publish across navigation (${selection})`,
       assert.equal(document.querySelector('.setup-guide-wait').dataset.requestId,second.operation.request_id);
       assert.ok([...document.querySelectorAll('.setup-current-question button')].every(button=>button.disabled));
       assert.match(document.querySelector('.setup-error').textContent,/Current second observation interrupted/);
-      assert.equal([...document.querySelectorAll('button')].find(button=>button.textContent.trim()==='Configuration').disabled,true);
+      assert.equal([...document.querySelectorAll('button')].find(button=>button.textContent.trim()==='Advanced configuration').disabled,true);
     }else{
-      if(!configModal(document))await clickGuideButton(document,'Configuration');
+      if(!configModal(document))await clickGuideButton(document,'Advanced configuration');
       const nextCandidate=configCandidate(current,'Selected owner manual change');
       await typeConfig(document,JSON.stringify(nextCandidate,null,2));
       await sendConfig(document);
@@ -1500,7 +1500,7 @@ test(`manual import ${outcome} cannot settle a newer editor (${replacement})`,as
   });
   await mountedGuide({value:storage},async(document,calls)=>{
     const posts=()=>calls.filter(call=>call.method==='POST');
-    await clickGuideButton(document,'Configuration');
+    await clickGuideButton(document,'Advanced configuration');
     await typeConfig(document,originalText);
     await sendConfig(document);
     assert.equal(configSend(document).disabled,true);
@@ -1521,7 +1521,7 @@ test(`manual import ${outcome} cannot settle a newer editor (${replacement})`,as
         await settle();
       });
       assert.equal(configModal(document) === null,true);
-      await clickGuideButton(document,'Configuration');
+      await clickGuideButton(document,'Advanced configuration');
       await typeConfig(document,originalText);
     }
     const retainedText=JSON.stringify(nextCandidate,null,2);
@@ -1564,7 +1564,7 @@ test('unchanged current configuration closes only its own editor without manual 
   const guide=acceptanceGuide('owned-unchanged-config','Unchanged proposal'),{storage,values,inputs}=acceptanceStorage([guide]);
   const read=configReads([guide],(url,options)=>url==='/api/blueprint/import'?{blueprint:JSON.parse(options.body)}:undefined);
   await mountedGuide({value:storage},async(document,calls)=>{
-    await clickGuideButton(document,'Configuration');
+    await clickGuideButton(document,'Advanced configuration');
     assert.deepEqual(JSON.parse(configText(document).value),guide.proposal);
     await sendConfig(document);
     await waitConfig(()=>configModal(document)===null);
@@ -1588,7 +1588,7 @@ test('current pending manual configuration remains the base through honest refus
     if(url===respond)return configRunning(guide,JSON.parse(options.body));
   });
   await mountedGuide({value:storage},async(document,calls)=>{
-    await clickGuideButton(document,'Configuration');
+    await clickGuideButton(document,'Advanced configuration');
     assert.deepEqual(JSON.parse(configText(document).value),pending.blueprint,'pending manual intent remains editable');
     await typeConfig(document,JSON.stringify(candidate,null,2));
     await sendConfig(document);
@@ -1623,7 +1623,7 @@ test('manual configuration in an anonymous setup retains supported startup and e
     if(url===respond)return configRunning(started,JSON.parse(options.body));
   });
   await mountedGuide({value:storage},async(document,calls)=>{
-    await clickGuideButton(document,'Configuration');
+    await clickGuideButton(document,'Advanced configuration');
     await typeConfig(document,JSON.stringify(candidate,null,2));
     await sendConfig(document);
     await waitConfig(()=>calls.some(call=>call.url===respond));
@@ -1655,7 +1655,7 @@ for(const outcome of ['success','failure'])test(`current saved manual import ${o
     if(url===respond)return configRunning(guide,JSON.parse(options.body));
   });
   await mountedGuide({value:storage},async(document,calls)=>{
-    await clickGuideButton(document,'Configuration');
+    await clickGuideButton(document,'Advanced configuration');
     await typeConfig(document,text);
     await sendConfig(document);
     assert.equal(configSend(document).disabled,true);
@@ -1707,7 +1707,7 @@ for(const outcome of ['success','failure'])test(`same-guide response revision fe
     if(url===respond)return ++responses===1?delayedResponse:configRunning(next,JSON.parse(options.body));
   });
   await mountedGuide({value:storage},async(document,calls)=>{
-    await clickGuideButton(document,'Configuration');
+    await clickGuideButton(document,'Advanced configuration');
     await typeConfig(document,originalText);
     await sendConfig(document);
     const composer=document.querySelector('#setup-message');
@@ -1741,7 +1741,7 @@ for(const outcome of ['success','failure'])test(`same-guide response revision fe
     assert.equal(document.querySelector('#setup-message').value,laterDraft);
     assert.equal(JSON.parse(values.get(inputKey(next))).draft,laterDraft);
     await act(async()=>{configModal(document).querySelector('[aria-label="Close configuration"]').click();await settle();});
-    await clickGuideButton(document,'Configuration');
+    await clickGuideButton(document,'Advanced configuration');
     assert.deepEqual(JSON.parse(configText(document).value),next.proposal);
     const currentCandidate=configCandidate(next,'Deliberate current revision adjustment');
     await typeConfig(document,JSON.stringify(currentCandidate,null,2));
@@ -1986,4 +1986,27 @@ test('count changes in an anonymous setup retain supported startup and exact new
     assert.equal(document.querySelector('#setup-message').value,inputs[0].draft);
     assert.equal(JSON.parse(values.get(inputKey(started))).draft,inputs[0].draft);
   },read,{allowedPosts:['/api/blueprint/import','/api/guide/start',respond]});
+});
+
+test('proposal decision precedes optional workflow and exact requirements remain folded', async () => {
+  const guide=acceptanceGuide('owned-proposal-order','A clear proposal');
+  guide.readiness.implementation_blockers=['Implement the report screen.', 'Add the scheduled report.'];
+  guide.brief.requirements=guide.readiness.implementation_blockers.map(outcome=>({outcome,disposition:'handoff'}));
+  const {storage}=acceptanceStorage([guide]);
+  const read=acceptanceReads([guide],url=>url===`/api/guide/${guide.id}`?structuredClone(guide):
+    url.endsWith('/toolkit-saved')?{available:false}:undefined);
+  await mountedGuide({value:storage},async(document,calls)=>{
+    const review=document.querySelector('.setup-review-card'),workflow=document.querySelector('.setup-proposal-actions');
+    assert.ok(review && workflow);
+    assert.ok(review.compareDocumentPosition(workflow)&document.defaultView.Node.DOCUMENT_POSITION_FOLLOWING);
+    const requirements=review.querySelector('.setup-requirement-details');
+    assert.equal(requirements.open,false);
+    assert.match(requirements.textContent,/Implement the report screen/);
+    assert.ok(usePlanButton(document).compareDocumentPosition(requirements)&document.defaultView.Node.DOCUMENT_POSITION_FOLLOWING);
+    const slot=document.querySelector('[data-forge-workspace-slot]');
+    assert.ok(slot.closest('#setup-header-menu'));assert.equal(slot.children.length,0);
+    assert.match(document.querySelector('.setup-advanced-tools').textContent,/Advanced configuration/);
+    assert.doesNotMatch(document.querySelector('.setup-header-actions').textContent,/Import saved tool/);
+    assert.ok(calls.every(call=>call.method==='GET'));
+  },read);
 });

@@ -342,12 +342,33 @@ always-on server or GCP. These are adaptive lenses, not a fixed questionnaire.
 Understand desired experience before translating it to host requirements. An
 admin console plus staff chat/custom UI is a combined requirement. A small native
 pilot is an explicit choice, not a silent replacement for the requested experience.
-Detailed API endpoints, device protocol fields, package names, authentication,
-server sizes and cloud project IDs belong to later implementation decisions.
+Detailed device protocol fields, package names, server sizes and cloud project IDs
+belong to later implementation decisions. Required service access and actual
+operations must be identified and checked before Build, not deferred to installation.
 Preserve user-named services. Once their role in the design is clear, research the
 appropriate MCP and exact capabilities yourself. Ask a technical field only when
 it is necessary for the next concrete configuration or the user explicitly asks.
 A request to discuss agents calls for agent design, not an integration questionnaire.
+
+Record required service uses in brief.service_requirements, each linked to a
+brief.requirements ID and actual user source_message_ids. Give each useful operation
+its own stable id, service name, capability (read, write or incoming_interaction),
+operation in the user's terms, and requested resource scope. Leave resource empty
+when unresolved; it never means all resources. Preserve user-required incoming
+Slack interaction separately from reading history or posting through outbound tools.
+These rows retain desired scope, not native tool names, executable probes, credentials,
+grants or check results. Changing their capability or linked feature needs later
+user evidence; keep native artifact and tool selection outside this intent.
+Do not omit a required service to offer Build or relabel it optional without the
+user's decision in the linked feature. Existing briefs without these rows have
+not thereby established that no service is needed. Resolve named services against
+the actual supported native route before Build. Request protected authentication
+through the host's connection controls only, never ask for secrets in conversation.
+Authentication, stored credentials and tool discovery do not prove a required
+operation on the selected resource. Only actual native operation results can do
+that, and outbound success cannot establish an incoming frontend. If this host
+lacks preparation or an operation is unsupported, state the concrete unmet
+requirement; do not promise that installation will supply it or invent a check.
 
 Keep brief.facts under outcome, audience, interfaces, ownership, inputs, workflow,
 knowledge, authority, destination, first_version. Each fact has summary, status
@@ -722,6 +743,8 @@ def compact_guidance_context(context):
         projected["implementation_actions"] = context["implementation_actions"]
     if context.get("package_availability") is not None:
         projected["package_availability"] = copy.deepcopy(context["package_availability"])
+    if context.get("service_preparation") is not None:
+        projected["service_preparation"] = copy.deepcopy(context["service_preparation"])
     projected["current_user_message"] = _compact_guide_message(context.get("current_user_message") or {})
     projected["evidence_messages"] = [_compact_guide_message(row) for row in context.get("evidence_messages", [])]
     projected["recent_guide_messages"] = [_compact_guide_message(row) for row in context.get("conversation", [])
@@ -767,8 +790,9 @@ def implementation_action_context(state, evidence, capability, checker_available
     saved_proposal = bool(state.get("proposal") or state.get("blueprint"))
     availability = availability if availability is not None else guide_package_availability(state)
     package_held = bool(availability and availability["available"] is False)
+    service_hold = state.get("service_preparation")
     gate_clear = lifecycle.get("build_gate_clear") is True
-    build_available = bool(host_capable and saved_proposal and gate_clear and not decisions and not package_held)
+    build_available = bool(host_capable and saved_proposal and gate_clear and not decisions and not package_held and not service_hold)
     content_current = lifecycle.get("content_current") is True
     acceptance_current = evidence.get("acceptance_current") is True
     action = "Build application"
@@ -788,6 +812,8 @@ def implementation_action_context(state, evidence, capability, checker_available
         reason = lifecycle.get("detail") or "Current build lifecycle evidence is unavailable. Refresh its status before choosing an action."
     elif decisions:
         reason = "Resolve the guide's remaining decisions before building: " + " ".join(decisions)
+    elif service_hold:
+        reason = service_hold["detail"]
     elif package_held:
         reason = availability["reason"]
     elif capability.get("available") is not True:
@@ -887,6 +913,7 @@ class GuideService:
         self.lock = asyncio.Lock()
         # A trusted host supplies its existing target, never browser/model input.
         self.package_runtime_provider = None
+        self.service_preparation_provider = None
         self._package_artifacts = {}
 
     async def package_availability(self, state):
@@ -969,6 +996,12 @@ class GuideService:
         return project_implementation_evidence(detached, evidence, unavailable=evidence is None)
 
     async def _with_implementation_evidence(self, state):
+        # This is a current host projection, never a saved or model-owned pass.
+        state.pop("service_preparation", None)
+        if self.service_preparation_provider is not None:
+            observation = self.service_preparation_provider(copy.deepcopy(state))
+            if observation is not None:
+                state["service_preparation"] = observation
         state.pop("package_availability", None)
         availability = await self.package_availability(state)
         if availability is not None:
@@ -1046,6 +1079,7 @@ class GuideService:
         saved.pop("deployment_evidence", None)
         saved.pop("remote_deployment_evidence", None)
         saved.pop("package_availability", None)
+        saved.pop("service_preparation", None)
         saved.pop("organization_update", None)
         saved = await asyncio.to_thread(self.store.save, saved, version)
         return await self._with_implementation_evidence(saved)
@@ -1243,6 +1277,8 @@ class GuideService:
             context["trial_evidence"] = await self.trial_evidence(state)
             context["deployment_evidence"] = await self.deployment_evidence(state, context["implementation_evidence"])
             context["remote_deployment_evidence"] = await self.remote_deployment_evidence(state, context["implementation_evidence"])
+            if state.get("service_preparation") is not None:
+                context["service_preparation"] = copy.deepcopy(state["service_preparation"])
             from .implementation_workspace import _sandbox_executable
             capability = planner_capability()
             context["implementation_actions"] = implementation_action_context(

@@ -1119,7 +1119,9 @@ def _package_archive(files):
 class ImplementationService:
     """Background build admission, snapshots, native timelines and checked packages."""
 
-    def __init__(self, root, guide, operations=None):
+    def __init__(self, root, guide, operations=None, *, require_service_checks=False):
+        if type(require_service_checks) is not bool:
+            raise TypeError("Select required service checks through the trusted host policy.")
         self.root = Path(root) / "implementations"
         self.guide = guide
         self.operations = operations
@@ -1127,6 +1129,23 @@ class ImplementationService:
         self.tasks = {}
         self.processes = {}
         self.checker_setup = None
+        # Trusted host policy only. The native preparation adapter is not yet
+        # available, so this required-checks mode has no successful admission.
+        # Never consume a model/browser "ready" assertion to clear this hold.
+        self._require_service_checks = require_service_checks
+
+    def service_preparation(self, state):
+        if not self._require_service_checks:
+            return None
+        return {"status": "unavailable", "guide_id": state["id"], "guide_version": state["version"],
+            "reason_code": "native_service_checks_unavailable",
+            "detail": "Required service access has not been verified. This host cannot yet prepare private service authentication and check each required operation before Build. Build and Resume are blocked; your saved source and results remain available.",
+            "required_operations": deepcopy(state.get("brief", {}).get("service_requirements", []))}
+
+    def _require_prebuild_service_checks(self, state):
+        observation = self.service_preparation(state)
+        if observation is not None:
+            raise ImplementationPrerequisiteNotAdmitted(observation["detail"])
 
     async def _guide(self, identity):
         if self.operations is not None:
@@ -1659,6 +1678,7 @@ class ImplementationService:
                     receipt["build_id"], prior_status["source_digest"], state, proposal)
             # Existing-build dedup above remains usable. Refuse a new package
             # before checker admission, history reservation or worker publication.
+            self._require_prebuild_service_checks(state)
             if not availability["available"] and not retained_candidate:
                 raise ValueError(availability["reason"])
             decisions = implementation_decision_blockers(state)
@@ -1883,6 +1903,7 @@ class ImplementationService:
 
                 def publish_admission():
                     # No awaits separate the final fences from worker publication.
+                    self._require_prebuild_service_checks(latest_state)
                     workspace.require_preparation_current()
                     if runtime_target is not None:
                         from .runtime_selection import implementation_candidate_selection

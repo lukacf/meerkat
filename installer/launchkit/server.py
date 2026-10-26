@@ -105,7 +105,8 @@ visualization_reviews = VisualizationReviewService(runtime=visual_review_runtime
     expected_renderer_hash=REVIEW_RENDERER_HASH, runtime_owner_id=visual_review_runtime.runtime_owner_id,
     reference_context=bundled_review_reference_context())
 visual_review_runtime.reviews = visualization_reviews
-implementation = ImplementationService(STUDIO_ROOT, guide, guide_operations)
+implementation = ImplementationService(STUDIO_ROOT, guide, guide_operations, require_service_checks=True)
+guide.service_preparation_provider = implementation.service_preparation
 application_host = None
 
 

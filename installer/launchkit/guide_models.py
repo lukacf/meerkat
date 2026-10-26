@@ -137,17 +137,41 @@ class IncomingDataIntent(StrictModel):
         return self
 
 
+class ServiceRequirement(StrictModel):
+    """Desired service use, never credentials, a native selection or a check result."""
+
+    id: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,79}$")
+    requirement_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,79}$")
+    service: str = Field(min_length=1, max_length=200)
+    capability: Literal["read", "write", "incoming_interaction"]
+    operation: str = Field(min_length=1, max_length=1200,
+        description="The required useful operation in the user's terms, not executable code or a purported native tool selection.")
+    resource: str = Field(default="", max_length=1200,
+        description="The requested repository, channel, account or other resource scope. Empty means unresolved, never unrestricted access.")
+    source_message_ids: list[str] = Field(min_length=1, max_length=40)
+
+    @model_validator(mode="after")
+    def distinct_evidence(self):
+        if len(self.source_message_ids) != len(set(self.source_message_ids)):
+            raise ValueError("Service requirement evidence IDs must be distinct.")
+        return self
+
+
 class DesignBrief(StrictModel):
     facts: dict[FactTopic, BriefFact] = Field(default_factory=dict)
     requirements: list[RequestedFeature] = Field(default_factory=list, max_length=32)
     incoming_data: list[IncomingDataIntent] = Field(default_factory=list, max_length=32,
         description="Optional proposed incoming sources and routing choices. This is user intent, not native configuration, provider capability evidence or permission to collect. Track implementation and access in the linked requirement.")
+    service_requirements: list[ServiceRequirement] = Field(default_factory=list, max_length=64,
+        description="Required service operations to resolve and check before Build. Separate read, write and incoming interaction. These are user requirements, not authentication, grants, selected native operations or successful checks. An omitted list does not prove the application needs no services.")
 
     @model_serializer(mode="wrap")
     def omit_unused_incoming_data(self, handler):
         data = handler(self)
         if not self.incoming_data:
             data.pop("incoming_data", None)
+        if not self.service_requirements:
+            data.pop("service_requirements", None)
         return data
 
     @model_validator(mode="after")
@@ -159,6 +183,10 @@ class DesignBrief(StrictModel):
         requirements = {item.id for item in self.requirements}
         if any(item.requirement_id not in requirements for item in self.incoming_data):
             raise ValueError("Link incoming data to an existing requested feature so its implementation remains visible.")
+        if len({item.id for item in self.service_requirements}) != len(self.service_requirements):
+            raise ValueError("Give each required service operation its own ID.")
+        if any(item.requirement_id not in requirements for item in self.service_requirements):
+            raise ValueError("Link each service operation to an existing requested feature.")
         return self
 
 
@@ -286,6 +314,17 @@ def validate_guide_publication(args: dict, context: dict, proposal: dict | None,
     old_sources = {item.id for item in old.incoming_data}
     if old_sources - {item.id for item in value.brief.incoming_data}:
         raise ValueError("Do not drop an incoming source. Revise its choices and record scope decisions in its linked feature.")
+    old_services = {item.id: item for item in old.service_requirements}
+    if old_services.keys() - {item.id for item in value.brief.service_requirements}:
+        raise ValueError("Do not drop a required service operation. Record scope decisions in its linked feature.")
+    for service in value.brief.service_requirements:
+        if any(identity not in evidence for identity in service.source_message_ids):
+            raise ValueError("Service requirements cite missing or non-user evidence.")
+        previous = old_services.get(service.id)
+        if previous and (service.capability, service.requirement_id) != (previous.capability, previous.requirement_id):
+            latest_source = max((positions.get(identity, -1) for identity in previous.source_message_ids), default=-1)
+            if not any(positions[identity] > latest_source for identity in service.source_message_ids):
+                raise ValueError("Changing a required service capability or its linked feature needs later user evidence; outbound tools do not replace incoming interaction.")
     for topic, fact in value.brief.facts.items():
         if any(identity not in evidence for identity in fact.source_message_ids):
             raise ValueError(f"The {topic} fact cites a missing or non-user message. Use evidence_messages IDs.")

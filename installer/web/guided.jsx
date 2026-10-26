@@ -30,6 +30,7 @@ import { GuideWaitStatus } from "./guide-wait.jsx";
 import { guideWaitBinding } from "./guide-wait.mjs";
 import { guideStartupPresentation } from "./guide-startup.mjs";
 import { guideAdmissionMatches } from "./guide-admission.mjs";
+import { readGuideLink, replaceGuideLink } from "./guide-link.mjs";
 import { ImplementationPanel } from "./implementation-panel.jsx";
 import { DeploymentPanel } from "./deployment-panel.jsx";
 import { MyDeployments } from "./my-deployments.jsx";
@@ -967,7 +968,7 @@ export function GuidedSetup({
     }
     return newlyCompleted;
   }
-  async function load(id, { refreshRuntimeStatus = true } = {}) {
+  async function load(id, { refreshRuntimeStatus = true, deepLink = null } = {}) {
     savedBuildReturnRef.current = null;
     setSavedBuildReturn(null);
     writeInput(guideStorage, latestInput.current);
@@ -983,17 +984,22 @@ export function GuidedSetup({
     setLoadingSetup(true);
     setLoadError("");
     setFailedSelection(null);
-    const requested = typeof id === "string" ? id : guideStorage.getItem(GUIDE_KEY);
+    const requested = deepLink ? deepLink.id : typeof id === "string" ? id : guideStorage.getItem(GUIDE_KEY);
     const unconfirmed = applyRequests.current.get(requested);
     if (unconfirmed) unconfirmed.checked = false;
     try {
+      if (deepLink?.error) throw new Error(deepLink.error);
       let next;
       const saved = requested;
       if (saved) {
         try {
           next = await request(`/api/guide/${encodeURIComponent(saved)}`, { timeoutMs: 30000 });
+          if (deepLink && next?.id !== saved)
+            throw new Error("The linked setup could not be verified. Your saved setups have not changed.");
         } catch (e) {
           if (e.status !== 404) throw e;
+          if (deepLink)
+            throw new Error("This linked setup was not found in this workspace. Your saved setups have not changed.");
           if (!recoverMissingGuideSelection(guideStorage, GUIDE_KEY, saved, loadGate.current, token)) return;
         }
       }
@@ -1002,6 +1008,7 @@ export function GuidedSetup({
       if (!loadGate.current.current(token)) return;
       setError("");
       const newlyCompleted = acceptState(next);
+      replaceGuideLink(next.id);
       setInput(previous => guideInputForState(guideStorage, next, previous, { newlyCompleted }));
       if (refreshRuntimeStatus) void refreshRuntime(token, next.id);
       refreshSetups();
@@ -1009,7 +1016,7 @@ export function GuidedSetup({
     } catch (e) {
       if (!loadGate.current.current(token)) return;
       setLoadError(e.message);
-      setFailedSelection({ id: requested, token });
+      setFailedSelection({ id: requested, token, deepLink });
       if (isSignInRequired(e)) timeline.requireSignIn?.();
       if (latestState.current) setError(e.message);
     } finally {
@@ -1017,7 +1024,7 @@ export function GuidedSetup({
     }
   }
   useEffect(() => {
-    load(undefined, { refreshRuntimeStatus: false });
+    load(undefined, { refreshRuntimeStatus: false, deepLink: readGuideLink(globalThis.window?.location?.search) });
   }, []);
   useEffect(() => {
     if (state?.id) guideStorage.setItem(GUIDE_KEY, state.id);
@@ -1938,6 +1945,7 @@ export function GuidedSetup({
     setTimeout(() => URL.revokeObjectURL(url), 10000);
   }
   function newSetup() {
+    replaceGuideLink(null);
     setMobileMenuOpen(false);
     setPendingMessage(null);
     writeInput(guideStorage, latestInput.current);
@@ -2144,8 +2152,11 @@ export function GuidedSetup({
         <h1>Meta Forge setup</h1>
         <p role={loadError ? "alert" : undefined}>{loadError || "Opening your conversation..."}</p>
         {loadError && <div className="setup-loading-actions">
-          <button disabled={loadingSetup} onClick={load}>Try again</button>
-          {failedSelection?.id && <button disabled={loadingSetup}
+          <button disabled={loadingSetup} onClick={() => failedSelection?.deepLink
+            ? load(failedSelection.id, { deepLink: failedSelection.deepLink }) : load()}>Try again</button>
+          {failedSelection?.deepLink && <button disabled={loadingSetup}
+            onClick={() => { replaceGuideLink(null); load(); }}>Open Forge</button>}
+          {!failedSelection?.deepLink && failedSelection?.id && <button disabled={loadingSetup}
             onClick={() => startNewAfterReadFailure(failedSelection)}>Start a new setup</button>}
         </div>}
         {loadError && failedSelection?.id && <p>Your saved setup and its drafts stay saved.</p>}
@@ -2547,7 +2558,8 @@ export function GuidedSetup({
             {failedSelection && loadError && <div className="setup-error" role="alert">
               <strong>That setup did not open.</strong>
               <p>{plan?.project?.name || "Your previous setup"} is still selected. Its saved work and running operations are kept.</p>
-              <button disabled={loadingSetup} onClick={() => load(failedSelection.id)}>Retry selected setup</button>
+              <button disabled={loadingSetup} onClick={() => load(failedSelection.id,
+                { deepLink: failedSelection.deepLink })}>Retry selected setup</button>
             </div>}
             <div
               ref={responseRef}

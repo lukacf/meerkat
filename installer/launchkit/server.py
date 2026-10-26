@@ -57,6 +57,27 @@ from .provider_settings import ProviderSettings, ProviderSettingsUnavailable, ca
 from .checker_setup import CheckerSetupService
 from .toolkit_saved_requests import ToolkitSavedRequests, ToolkitSavedRequestsError, MAX_MANIFEST_BYTES
 from .service_callback import MCP_CALLBACK_PATH, callback_landing, callback_unavailable
+from .service_login_host import ServiceLoginRoute, ServiceLoginUnavailable
+
+# Only the trusted workspace launcher can supply its actual authenticated
+# request/session join and same-native-host login owner. HTTP never selects it.
+service_login_route = None
+
+
+def select_service_login_host(host, authenticated_context):
+    """Install on the serving loop after registering host.close with logout.
+
+    The installation owner supplies authentication and native startup. This
+    hook neither derives identity from headers nor starts a second gateway.
+    A replacement is refused until the original owner's cleanup has joined.
+    """
+    global service_login_route
+    selected = ServiceLoginRoute(host, authenticated_context)
+    if service_login_route is not None and not service_login_route.host.retired:
+        raise ServiceLoginUnavailable()
+    service_login_route = selected  # Retain before native enrollment enters.
+    host.start()
+    return selected
 
 APP_ROOT = Path(__file__).resolve().parents[1]
 checker_setup = CheckerSetupService(APP_ROOT)
@@ -316,6 +337,8 @@ async def lifespan(app):
             def workers(service):
                 return lambda: list((getattr(service, "processes", None) or {}).values())
             failures = await stop_owners((
+                *((Owner("protected service login", service_login_route),)
+                  if service_login_route is not None else ()),
                 Owner("guide operations", guide_operations),
                 Owner("visualization operations", visualization_operations),
                 Owner("visualization reviews", visualization_reviews),
@@ -348,8 +371,9 @@ async def service_callback_landing():
 
 
 @app.post(MCP_CALLBACK_PATH)
-async def service_callback_return():
-    return callback_unavailable()
+async def service_callback_return(request: Request):
+    selected = service_login_route
+    return await selected.post(request) if selected is not None else callback_unavailable()
 
 
 @app.exception_handler(RequestValidationError)

@@ -124,7 +124,7 @@ test("first-run ready provider without an idea returns to Forge to describe a ne
     assert.equal(document.querySelector(".setup-provider-return p").textContent,
       "Return to Forge to describe what you need. A rough idea is enough.");
     assert.doesNotMatch(document.body.textContent, /Your idea has not been sent|Back to my draft|Next: send your idea/);
-    const action = button("Return to Forge");
+    const action = button("Continue");
     assert.equal(action.type, "button"); assert.equal(action.disabled, false);
     assert.equal(action.classList.contains("setup-provider-primary"), true);
     assert.equal(outsideClosedDetails(action), true);
@@ -136,7 +136,7 @@ test("first-run ready provider without an idea returns to Forge to describe a ne
       "Provider access is checked when you send your first message.");
     assert.equal(calls.length, 1);
     assert.deepEqual(runtimes, []);
-    await click("Return to Forge");
+    await click("Continue");
     assert.equal(closes(), 1, "Returning uses only the existing close callback.");
     assert.equal(calls.length, 1, "Returning does not save credentials, start the guide or send an idea.");
     assert.ok(calls.every(call => call.method === "GET"));
@@ -161,10 +161,10 @@ test("provider starting context: context-only handoff retains unsent choices and
     assert.match(document.querySelector(".setup-provider-intro").textContent, /Connecting does not send your starting point\./);
     assert.equal(document.querySelector(".setup-provider-return p").textContent,
       "Next: send your starting point, or add your own words. Your choices are still unsent.");
-    const action = button("Back to my starting point");
+    const action = button("Continue");
     assert.equal(action.type, "button"); assert.equal(action.disabled, false);
     assert.equal(outsideClosedDetails(action), true);
-    await click("Back to my starting point");
+    await click("Continue");
     assert.equal(closes(), 1);
     assert.equal(calls.length, 1, "Returning neither sends choices nor starts or configures the guide.");
     assert.deepEqual(runtimes, []);
@@ -201,7 +201,7 @@ test("provider starting context: raw words stay separate and exact during unavai
       "The ready handoff follows the retained idea before configuration details.");
     assert.ok(handoff.compareDocumentPosition(document.querySelector(".setup-provider-model-settings")) &
       document.defaultView.Node.DOCUMENT_POSITION_FOLLOWING);
-    await click("Back to my draft");
+    await click("Continue");
     assert.equal(closes(), 1);
     assert.equal(calls.length, 3);
     assert.ok(calls.every(call => call.method === "GET"));
@@ -217,7 +217,7 @@ test("provider starting context: malformed choices do not invent a retained star
     assert.equal(document.querySelector(".setup-provider-starting-context") === null, true);
     assert.equal(document.querySelector(".setup-provider-return p").textContent,
       "Return to Forge to describe what you need. A rough idea is enough.");
-    assert.ok(button("Return to Forge"));
+    assert.ok(button("Continue"));
     assert.equal(calls.length, 1);
   });
 });
@@ -255,10 +255,10 @@ test("configured credentials do not imply a started guide, and the observed read
       } }, async ({ document, calls, click, closes }) => {
       const heading = document.querySelector("h2");
       if (!active) {
-        assert.equal(heading.textContent, "Start your setup guide");
-        assert.equal(document.querySelector(".setup-provider-return") === null, true);
+        assert.equal(heading.textContent, "Your model is configured");
+        assert.ok(document.querySelector(".setup-provider-return button.setup-provider-primary"));
         assert.equal(outsideClosedDetails(document.querySelector("input")), false);
-        assert.equal(outsideClosedDetails([...document.querySelectorAll("button")].find(item => item.textContent === "Start guide")), true);
+        assert.equal(outsideClosedDetails([...document.querySelectorAll("button")].find(item => item.textContent === "Start guide")), false);
         assert.match(document.querySelector(".setup-provider-configured").textContent, /OpenAI.*Configured in Forge/);
       } else {
         assert.equal(heading.textContent, "Ready for your first message");
@@ -268,7 +268,7 @@ test("configured credentials do not imply a started guide, and the observed read
         assert.equal(outsideClosedDetails([...document.querySelectorAll("button")].find(item => item.textContent === "Stop setup team")), false);
         assert.equal(outsideClosedDetails([...document.querySelectorAll("button")].find(item => item.textContent === "Check saved settings")), false);
         const before = calls.length;
-        await click("Back to my draft");
+        await click("Continue");
         assert.equal(closes(), 1);
         assert.equal(calls.length, before, "Returning invokes only the existing close callback.");
       }
@@ -300,7 +300,7 @@ test("first-run save and startup remain separate explicit actions, with no model
   } }, async ({ document, calls, click, enter, closes }) => {
     await enter(secret);
     await click("Save locally");
-    assert.equal(document.querySelector("h2").textContent, "Start your setup guide");
+    assert.equal(document.querySelector("h2").textContent, "Your model is configured");
     assert.equal(document.querySelector("input").value, "");
     assert.doesNotMatch(document.body.innerHTML, /synthetic-onboarding-private-key/);
     assert.equal(calls.filter(call => call.method === "POST").length, 0);
@@ -314,7 +314,7 @@ test("first-run save and startup remain separate explicit actions, with no model
     assert.match(document.body.textContent, /provider access is checked when it runs/);
     assert.equal(closes(), 0, "Starting the guide does not close the handoff or send the idea.");
     const before = calls.length;
-    await click("Back to my draft");
+    await click("Continue");
     assert.equal(calls.length, before);
     assert.equal(closes(), 1);
     assert.doesNotMatch(document.body.innerHTML, /synthetic-onboarding-private-key/);
@@ -353,10 +353,12 @@ test("configured first-run model settings stay optional, and editing a key canno
   } }, async ({ document, calls, button, enter }) => {
     const detail = document.querySelector(".setup-provider-model-settings");
     assert.equal(detail.open, false);
-    assert.equal(button("Start guide").classList.contains("setup-provider-primary"), true);
+    assert.equal(button("Continue").classList.contains("setup-provider-primary"), true);
     await act(async () => detail.querySelector("summary").click());
     assert.equal(detail.open, true);
     await enter("synthetic-unsaved-provider-key");
+    assert.equal(document.querySelector(".setup-provider-return"), null,
+      "An unsaved replacement key cannot be skipped through Continue.");
     assert.equal(button("Save locally").disabled, false);
     assert.equal(button("Save locally").classList.contains("setup-provider-primary"), true);
     assert.equal(button("Start guide").disabled, true);
@@ -432,7 +434,7 @@ test("first-run focused Save hands keyboard focus to the incoming Start heading"
     await click("Save locally");
     assert.equal(initiating.isConnected, false, "The visible Save control is replaced by the next step.");
     const heading = document.querySelector("h2");
-    assert.equal(heading.textContent, "Start your setup guide");
+    assert.equal(heading.textContent, "Your model is configured");
     assert.equal(document.activeElement === heading, true, "Keyboard focus follows the completed local Save action.");
   });
 });
@@ -446,8 +448,9 @@ test("first-run focused Start hands keyboard focus to the incoming Ready heading
     active = true;
     return { status: "ready", available: true };
   } }, async ({ document, calls, button, click, closes }) => {
+    await act(async () => document.querySelector(".setup-provider-routine-controls summary").click());
     const initiating = button("Start guide");
-    const container = initiating.closest(".setup-provider"), remove = container.removeChild;
+    const container = initiating.parentElement, remove = container.removeChild;
     let browserBlur = false;
     container.removeChild = function(child) {
       if (child.contains(initiating)) {
@@ -648,5 +651,37 @@ test("first-run check-ready focus is discarded with the unmounted provider", asy
     await settle();
     assert.equal(document.activeElement === newer, true);
     assert.equal(calls.filter(call => call.method === "POST").length, 1);
+  });
+});
+
+
+test("confirmed first-run save offers primary Continue without starting the guide or sending the draft", async () => {
+  let configured = false;
+  const idea = "  Preserve this unsent draft exactly.  ";
+  await mounted({ props: { firstRun: true, idea }, read: call => {
+    if (call.url === "/api/provider-settings") {
+      if (call.method === "PUT") configured = true;
+      return settings({ configured });
+    }
+    assert.equal(call.url, "/api/architect/status");
+    assert.equal(call.method, "GET");
+    return { status: "stopped", available: true };
+  } }, async ({ document, calls, button, click, enter, closes }) => {
+    assert.equal(document.querySelector(".setup-provider-return"), null);
+    await enter("synthetic-continue-key");
+    await click("Save locally");
+    const action = button("Continue");
+    assert.ok(action.classList.contains("setup-provider-primary"));
+    assert.equal(outsideClosedDetails(action), true);
+    assert.equal(action.disabled, false);
+    assert.match(document.querySelector(".setup-provider-access-note").textContent,
+      /first message will start the guide/);
+    assert.equal(document.querySelector(".setup-provider-idea p").textContent, idea);
+    assert.equal(calls.filter(call => call.method === "POST").length, 0);
+    const before = calls.length;
+    await click("Continue");
+    assert.equal(closes(), 1);
+    assert.equal(calls.length, before, "Continue is navigation only, including after a successful save.");
+    assert.equal(document.querySelector(".setup-provider-idea p").textContent, idea);
   });
 });

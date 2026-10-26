@@ -279,13 +279,17 @@ export function ProviderSetup({ onRuntime, onClose, firstRun = false, idea = "",
   const needsCheck = saveUnknown || runtimeUnknown || !!error || !!settings?.load_error || !!settings?.provider_binding_error;
   const readyToReturn = !!settings && guideReady === true && settings.runtime_active === true
     && (!startCheck || startCheck === "ready") && (!pending || pending === "start" && startCheck === "ready") && !needsCheck;
+  // Returning to an unsent draft needs confirmed configuration, not a model
+  // invocation. Retain the stricter readback gate once startup was admitted.
+  const canContinue = readyToReturn || !!settings && !!effective && !settings.runtime_active
+    && !settings.work_active && !pending && !checkingStart && !checkStart && !apiKey.trim() && !needsCheck;
   const firstRunStep = readyToReturn ? "ready" : pending === "check" || checkingStart || needsCheck ? "check"
     : pending === "save" ? "saving" : pending === "start" ? "starting" : pending === "stop" ? "stopping"
       : !settings ? "loading" : settings.work_active ? "work" : settings.runtime_active ? "active" : effective ? "start" : "connect";
   const firstRunHeading = startupObservation?.status === "failed" && startupDetail
     ? "Your guide needs attention" : {
     loading: "A model for your guide", connect: "A model for your guide", saving: "Saving your model key",
-    start: "Start your setup guide", starting: "Starting your setup guide", stopping: "Stopping your setup guide",
+    start: "Your model is configured", starting: "Starting your setup guide", stopping: "Stopping your setup guide",
     ready: "Ready for your first message", active: "Check your guide's status", check: "Let's check your setup",
     work: "Existing work needs attention",
   }[firstRunStep];
@@ -312,7 +316,7 @@ export function ProviderSetup({ onRuntime, onClose, firstRun = false, idea = "",
       : "Next: send your starting point, or add your own words. Your choices are still unsent."
     : retainedIdea ? "Next: send your idea. Your draft is still unsent."
       : "Return to Forge to describe what you need. A rough idea is enough.";
-  const primaryAction = firstRunStep === "ready" ? "return"
+  const primaryAction = canContinue ? "return"
     : checkStart ? "check"
     : firstRunStep === "check" || firstRunStep === "active" || firstRunStep === "stopping" || firstRunStep === "work" ? "check"
       : !effective || apiKey.trim() || firstRunStep === "saving" ? "save" : "start";
@@ -365,9 +369,9 @@ export function ProviderSetup({ onRuntime, onClose, firstRun = false, idea = "",
     className={(!firstRun || primaryAction === "save") && (!effective || apiKey.trim()) ? "setup-provider-primary" : ""}
     disabled={!editable || !!pending || checkingStart || saveUnknown || !apiKey.trim()}
     onClick={event => act("save", event.currentTarget)}>{pending === "save" ? "Saving..." : "Save locally"}</button>;
-  const runtimeControl = settings?.runtime_active ? <button type="button" disabled={!!pending || checkingStart || runtimeUnknown || saveUnknown || settings.work_active}
+  const runtimeControl = settings?.runtime_active ? <button key="stop" type="button" disabled={!!pending || checkingStart || runtimeUnknown || saveUnknown || settings.work_active}
     onClick={() => act("stop")}>{pending === "stop" ? "Stopping..." : "Stop setup team"}</button>
-    : <button type="button" className={(!firstRun || primaryAction === "start") && effective && !apiKey.trim() ? "setup-provider-primary" : ""}
+    : <button key="start" type="button" className={(!firstRun || primaryAction === "start") && effective && !apiKey.trim() ? "setup-provider-primary" : ""}
       disabled={!!pending || checkingStart || runtimeUnknown || saveUnknown || !effective || !!apiKey.trim() || settings?.work_active || !!settings?.provider_binding_error}
       onClick={event => act("start", event.currentTarget)}>{pending === "start" ? "Starting guide..." : "Start guide"}</button>;
   const checkControl = <button type="button"
@@ -382,7 +386,7 @@ export function ProviderSetup({ onRuntime, onClose, firstRun = false, idea = "",
       <span className="setup-provider-eyebrow">{firstRunStep === "ready" ? "YOUR IDEA IS NEXT"
         : firstRunStep === "work" ? "SETUP CONTROLS PAUSED"
           : firstRunStep === "check" ? "CHECK BEFORE CONTINUING" : firstRunStep === "active" ? "GUIDE STATUS"
-          : effective ? "2. START YOUR GUIDE" : "1. CONNECT A MODEL"}</span>
+          : canContinue ? "CONTINUE TO YOUR IDEA" : effective ? "2. START YOUR GUIDE" : "1. CONNECT A MODEL"}</span>
       <h2 ref={heading} tabIndex={-1}>{firstRunHeading}</h2>
     </div> : <h2>Connect a model provider</h2>}
       <button type="button" onClick={onClose} disabled={checkingStart || !!pending && !readyToReturn} aria-label={firstRun ? "Back to my idea" : "Close provider settings"}>{firstRun ? "Back to my idea" : "Close"}</button>
@@ -400,11 +404,13 @@ export function ProviderSetup({ onRuntime, onClose, firstRun = false, idea = "",
       <p>{retainedIdea}</p>
       <small>Kept in your message box. You send it when you're ready.</small>
     </div>}
-    {firstRun && readyToReturn && <div className="setup-provider-return">
+    {firstRun && canContinue && <div className="setup-provider-return">
       <p role={hasStartingInput ? "status" : undefined}>{returnGuidance}</p>
       <button type="button" className="setup-provider-primary" aria-describedby="setup-provider-first-message-check"
-        onClick={onClose}>{retainedIdea ? "Back to my draft" : retainedContext ? "Back to my starting point" : "Return to Forge"}</button>
-      <small id="setup-provider-first-message-check" className="setup-provider-access-note">Provider access is checked when you send your first message.</small>
+        onClick={onClose}>Continue</button>
+      <small id="setup-provider-first-message-check" className="setup-provider-access-note">{readyToReturn
+        ? "Provider access is checked when you send your first message."
+        : "Your first message will start the guide and check provider access. Continue keeps your draft unsent."}</small>
     </div>}
     {!settings && !error && <p role="status">Reading local settings...</p>}
     {settings && <>

@@ -1,5 +1,6 @@
 """Only unresolved required service operations prevent new builder work."""
 import copy
+from types import SimpleNamespace
 
 import pytest
 
@@ -48,7 +49,7 @@ async def test_existing_inflight_admission_still_observes_the_same_owned_worker(
 
 
 async def test_projection_is_read_only_and_neither_saved_nor_model_supplied(tmp_path):
-    guide = GuideService(GuideStore(tmp_path), object())
+    guide = GuideService(GuideStore(tmp_path), SimpleNamespace())
     state = guide.store.create({'version':1, 'brief': required_brief(),
         'service_preparation': {'status':'ready'}})
     original = copy.deepcopy(state)
@@ -148,6 +149,34 @@ def test_polled_collection_is_not_mislabeled_as_incoming_conversation():
     observation = impl.service_preparation(state)
     assert observation["reason_code"] == "service_inventory_missing"
     assert observation["required_operations"][0]["capability"] == "unresolved"
+
+
+def test_incoming_operation_does_not_hide_sources_sharing_its_feature():
+    impl = ImplementationService("/unused", None, require_service_checks=True)
+    brief = required_brief()
+    brief["requirements"].append({"id": "later", "disposition": "deferred"})
+    brief["incoming_data"] = [
+        {"id": "self-dm", "requirement_id": "conversation", "name": "Slack",
+         "purpose": "Receive self-DM questions", "scope": "My self-DM",
+         "source_message_ids": ["slack-request"]},
+        {"id": "repositories", "requirement_id": "conversation", "name": "GHE",
+         "purpose": "Poll repository changes", "scope": "Both requested repositories",
+         "source_message_ids": ["ghe-request"]},
+        {"id": "later-source", "requirement_id": "later", "name": "Later",
+         "purpose": "Read later", "scope": "Deferred", "source_message_ids": ["later-request"]},
+    ]
+    state = {"id": "guide", "version": 1, "brief": brief}
+    original = copy.deepcopy(state)
+    observation = impl.service_preparation(state)
+    assert observation["status"] == "unavailable"
+    rows = observation["required_operations"]
+    assert [row["id"] for row in rows] == [
+        "slack-incoming", "incoming:self-dm", "incoming:repositories"]
+    assert rows[1]["source_message_ids"] == ["slack-request"]
+    assert rows[2]["resource"] == "Both requested repositories"
+    assert rows[2]["source_message_ids"] == ["ghe-request"]
+    assert all(row["capability"] == "unresolved" for row in rows[1:])
+    assert state == original
 
 
 def test_legacy_selected_connections_need_inventory_and_workspace_is_not_a_service():

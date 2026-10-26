@@ -12,10 +12,10 @@ def required_service_operations(state):
 
     declared = brief.get("service_requirements") or []
     operations = [deepcopy(item) for item in declared if required(item)]
-    incoming = {item.get("requirement_id") for item in operations
-                if item.get("capability") == "incoming_interaction"}
     for item in brief.get("incoming_data", []):
-        if required(item) and item.get("requirement_id") not in incoming:
+        # A feature may need multiple independent sources. A declared operation
+        # sharing that feature does not establish this source's native binding.
+        if required(item):
             operations.append({"id": "incoming:" + item["id"],
                 "requirement_id": item["requirement_id"], "service": item["name"],
                 # IncomingDataIntent also represents polled collections. Its

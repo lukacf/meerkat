@@ -28,6 +28,7 @@ from .architect import ArchitectService, ArchitectUnavailable
 from .projects import ProjectStore, DraftConflict, fingerprint
 from .guide import GuideService
 from .guide_store import GuideStore
+from .runtime_diagnostics import runtime_diagnostics
 from .organization import load_organization_plugin
 from .guide_attachments import AttachmentReference, MAX_FILES, MAX_FILE_BYTES, MAX_TURN_BYTES
 from .guide_operations import GuideOperations
@@ -296,40 +297,41 @@ guide.trial_evidence_provider = lambda state: rehearsal.status(state["id"], stat
 
 @asynccontextmanager
 async def lifespan(app):
-    try:
-        provider_settings.restore()
-        # Reconcile only persisted positive native termination observations.
-        # An invalid critic proof disables that feature without blocking setup.
-        await visual_review_runtime.reconcile_terminated()
-        yield
-    finally:
-        # Each service retains ownership of different native work. A failed or
-        # hung cleanup must not prevent the remaining owners from stopping theirs.
-        # The deployment, implementation and rehearsal workers stop themselves
-        # on owner loss; stop_owners never signals them, and no owner names
-        # its groups.
-        def workers(service):
-            return lambda: list((getattr(service, "processes", None) or {}).values())
-        failures = await stop_owners((
-            Owner("guide operations", guide_operations),
-            Owner("visualization operations", visualization_operations),
-            Owner("visualization reviews", visualization_reviews),
-            Owner("visual critic runtime", visual_review_runtime),
-            Owner("remote deployment", remote_deployment),
-            Owner("GCP resource preparation", gcp_provisioning),
-            Owner("GCP access checks", gcp_preflight),
-            Owner("deployment", deployment, workers=workers(deployment)),
-            Owner("rehearsal", rehearsal, workers=workers(rehearsal)),
-            Owner("implementation", implementation, workers=workers(implementation)),
-            Owner("checker preparation", checker_setup),
-            Owner("saved Toolkit requests", toolkit_saved_requests),
-            Owner("architect", architect),
-        ))
-        if failures:
-            raise BaseExceptionGroup(
-                "Meta Forge cleanup failed for: " + ", ".join(name for name, _ in failures),
-                [error for _, error in failures],
-            )
+    with runtime_diagnostics():
+        try:
+            provider_settings.restore()
+            # Reconcile only persisted positive native termination observations.
+            # An invalid critic proof disables that feature without blocking setup.
+            await visual_review_runtime.reconcile_terminated()
+            yield
+        finally:
+            # Each service retains ownership of different native work. A failed or
+            # hung cleanup must not prevent the remaining owners from stopping theirs.
+            # The deployment, implementation and rehearsal workers stop themselves
+            # on owner loss; stop_owners never signals them, and no owner names
+            # its groups.
+            def workers(service):
+                return lambda: list((getattr(service, "processes", None) or {}).values())
+            failures = await stop_owners((
+                Owner("guide operations", guide_operations),
+                Owner("visualization operations", visualization_operations),
+                Owner("visualization reviews", visualization_reviews),
+                Owner("visual critic runtime", visual_review_runtime),
+                Owner("remote deployment", remote_deployment),
+                Owner("GCP resource preparation", gcp_provisioning),
+                Owner("GCP access checks", gcp_preflight),
+                Owner("deployment", deployment, workers=workers(deployment)),
+                Owner("rehearsal", rehearsal, workers=workers(rehearsal)),
+                Owner("implementation", implementation, workers=workers(implementation)),
+                Owner("checker preparation", checker_setup),
+                Owner("saved Toolkit requests", toolkit_saved_requests),
+                Owner("architect", architect),
+            ))
+            if failures:
+                raise BaseExceptionGroup(
+                    "Meta Forge cleanup failed for: " + ", ".join(name for name, _ in failures),
+                    [error for _, error in failures],
+                )
 
 
 app = FastAPI(title="Meta Forge", docs_url=None, redoc_url=None, lifespan=lifespan)

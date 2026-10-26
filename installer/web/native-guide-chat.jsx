@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ConversationTranscript } from "../../packages/console-components/src/conversation/conversation-transcript";
 import { groupConversationTranscriptTurns } from "../../packages/console-components/src/conversation/conversation-turns";
 import { Icon as ConsoleIcon, SpriteSheet } from "../../console/src/icon";
-import { createGuideFrameLog, ingestGuideTimeline, guideConversation, nextGuideTimelineCursor } from "./native-guide-chat.mjs";
+import { createGuideFrameLog, ingestGuideTimeline, guideConversation, guideTranscriptSections, nextGuideTimelineCursor } from "./native-guide-chat.mjs";
 import { request } from "./state.mjs";
 import { createGuideStartupRecovery, guideStartupPresentation, guideStartupDetail } from "./guide-startup.mjs";
 import { isSignInRequired } from "./sign-in-recovery.mjs";
@@ -111,6 +111,7 @@ export function NativeGuideChat({ state, snapshot, pendingMessage, Icon, onActiv
   const historyTurns = completed ? turns : turns.slice(0, -1);
   const history = historyTurns.flatMap(turn => turn.groups);
   const current = completed ? [] : turns.at(-1)?.groups || [];
+  const currentSections = guideTranscriptSections(current);
   return (
     <div className="setup-native-chat" data-native-console-chat="true">
       <SpriteSheet />
@@ -119,8 +120,12 @@ export function NativeGuideChat({ state, snapshot, pendingMessage, Icon, onActiv
         <ConversationTranscript viewState={{ ...conversation.viewState, groups: history }} Icon={ConsoleIcon} showTurnDiff={false} />
       </details>}
       <div data-current-guide-transcript="true">
-        <ConversationTranscript viewState={{ ...conversation.viewState, groups: current }} Icon={ConsoleIcon} showTurnDiff={false} />
+        <ConversationTranscript viewState={{ ...conversation.viewState, groups: currentSections.conversation }} Icon={ConsoleIcon} showTurnDiff={false} />
       </div>
+      {currentSections.activity.length > 0 && <details className="setup-conversation-history" key={`${state.id}:${turns.at(-1)?.id}:activity`} data-guide-technical-activity="true">
+        <summary>Technical activity</summary>
+        <ConversationTranscript viewState={{ ...conversation.viewState, groups: currentSections.activity }} Icon={ConsoleIcon} showTurnDiff={false} />
+      </details>}
       {startup === "sign_in_required" && !signInNoticeExternal && <SignInRecovery key={state.id} onCheck={snapshot.checkSignIn} />}
       {startup !== "sign_in_required" && (startup === "failed" || startup === "retrying" || startup === "unavailable" || snapshot.retryError || snapshot.checkingStatus) && <div className="setup-error" role="status">
         <strong>{startup === "retrying" ? "Retrying setup team" : startup === "failed" ? startupDetail?.title || "Setup team could not start"

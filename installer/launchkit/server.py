@@ -1326,6 +1326,8 @@ async def end_rehearsal(identity: str, value: RehearsalCancel):
 @app.get("/api/guide/{identity}/rehearsal")
 async def rehearsal_status(identity: str):
     receipt = await guide_result(rehearsal.status(identity))
+    if isinstance(receipt, Response):
+        return receipt
     return {**receipt, "browser_console_url": await browser_console_url(rehearsal, identity, receipt, "rehearsal")}
 
 
@@ -1668,6 +1670,8 @@ async def stop_implementation(identity: str, value: ImplementationStopRequest):
 @app.get("/api/guide/{identity}/implementation")
 async def implementation_status(identity: str):
     receipt = await guide_result(implementation.status(identity))
+    if isinstance(receipt, Response):
+        return receipt
     return {**receipt, "browser_console_url": await browser_console_url(implementation, identity, receipt, "implementation")}
 
 

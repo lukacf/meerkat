@@ -1508,15 +1508,19 @@ class ImplementationService:
             if not proposal:
                 raise ValueError("Describe a concrete job and get a proposed system before building.")
             proposal = Blueprint.model_validate(proposal).model_dump(mode="json")
+            runtime_artifacts = None
+            if runtime_target is not None:
+                from .runtime_selection import selected_runtime_artifacts
+                runtime_artifacts = await asyncio.to_thread(selected_runtime_artifacts, runtime_target)
             from .compiler import package_availability
             availability = await asyncio.to_thread(package_availability, proposal,
-                **({"runtime_target": runtime_target}
+                **({"runtime_target": runtime_target, "verified_artifacts": runtime_artifacts}
                    if initial_product or preserve_design and runtime_target is not None else {}))
             runtime_candidate = None
             if runtime_target is not None:
                 from .runtime_selection import implementation_candidate_selection
                 runtime_candidate = await asyncio.to_thread(implementation_candidate_selection, runtime_target,
-                    deployment_target=proposal["target"])
+                    deployment_target=proposal["target"], verified_artifacts=runtime_artifacts)
             request = request.strip()
             if receipt and (receipt.get("stop_requested") and receipt["status"] in {"queued", "running", "checking"}
                     or receipt.get("cleanup_in_progress")
@@ -1882,7 +1886,9 @@ class ImplementationService:
                     workspace.require_preparation_current()
                     if runtime_target is not None:
                         from .runtime_selection import implementation_candidate_selection
-                        if fingerprint(implementation_candidate_selection(runtime_target, deployment_target=proposal["target"])) != fingerprint(runtime_candidate):
+                        if fingerprint(implementation_candidate_selection(runtime_target,
+                                deployment_target=proposal["target"],
+                                verified_artifacts=runtime_artifacts)) != fingerprint(runtime_candidate):
                             raise DraftConflict("The selected candidate changed before builder admission.")
                     self._fence_selected(guide_id, expected_selected_build_id,
                         _preparing_build_id=identity if previous is None else None)

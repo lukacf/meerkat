@@ -211,9 +211,14 @@ def product_prefix_entries(content, prefix):
     This reader checks generic archive confinement and preserves every selected
     file, directory mode and confined link, rather than reducing it to a binary.
     """
-    from pathlib import PurePosixPath
     _require(type(content) is bytes and 0 < len(content) <= MAX_PRODUCT_ARCHIVE_BYTES,
         "The native product archive exceeds its bound.")
+    return _product_prefix_stream(io.BytesIO(content), prefix)
+
+
+def _product_prefix_stream(compressed, prefix):
+    """Read a confined inventory without retaining the compressed archive."""
+    from pathlib import PurePosixPath
     entries, total = {}, 0
     class Expanded:
         def __init__(self, source):
@@ -225,7 +230,7 @@ def product_prefix_entries(content, prefix):
             _require(self.total <= MAX_PRODUCT_BYTES + MAX_PRODUCT_ENTRIES * 2048,
                 "The native product expansion exceeds its bound.")
             return value
-    with gzip.GzipFile(fileobj=io.BytesIO(content), mode="rb") as source:
+    with gzip.GzipFile(fileobj=compressed, mode="rb") as source:
         expanded = Expanded(source)
         with tarfile.open(fileobj=expanded, mode="r|") as archive:
             for member in archive:
@@ -516,7 +521,7 @@ def _read_meta_toolkit_artifacts(target, retained=None):
         inputs.pin(archive, MAX_PRODUCT_ARCHIVE_BYTES)
         entries, source = retained.entries, "retained"
     else:
-        entries, source = product_prefix_entries(read(archive, MAX_PRODUCT_ARCHIVE_BYTES), prefix), "archive"
+        entries, source = inputs.product_entries(archive, prefix), "archive"
     inventory = {item.name: item for item in entries}
     gateway = inventory.get(prefix + "/bin/toolkit_gateway")
     manifest = inventory.get(prefix + "/libexec/meerkat-connect/resources.json")
@@ -662,6 +667,34 @@ class _Inputs:
             artifact = ArtifactFile(path, total, expected)
             self.files[path] = artifact, _fingerprint(info)
         return artifact, b"".join(chunks) if keep else None
+
+    def product_entries(self, artifact, prefix):
+        """Hash and inventory one open archive with bounded read buffers."""
+        _require(type(artifact) is ArtifactFile and _positive(artifact.size)
+            and _hex(artifact.sha256), "A native product artifact binding is invalid.")
+        path = self.path(artifact.path)
+        with self.open(path, MAX_PRODUCT_ARCHIVE_BYTES) as (handle, info):
+            class Compressed:
+                def __init__(self):
+                    self.total, self.hashed = 0, hashlib.sha256()
+
+                def read(self, size=-1):
+                    data = handle.read(1024 * 1024 if size < 0 else min(size, 1024 * 1024))
+                    self.total += len(data)
+                    _require(self.total <= MAX_PRODUCT_ARCHIVE_BYTES,
+                        "A candidate artifact exceeds its byte bound.")
+                    self.hashed.update(data)
+                    return data
+
+            compressed = Compressed()
+            entries = _product_prefix_stream(compressed, prefix)
+            while compressed.read(1024 * 1024):
+                pass
+            _require(compressed.total == info.st_size == artifact.size
+                and compressed.hashed.hexdigest() == artifact.sha256,
+                "Candidate artifact bytes do not match their binding.")
+            self.files[path] = artifact, _fingerprint(info)
+        return entries
 
     def pin(self, artifact, limit):
         """Bind an unread input by size and fingerprint for the later rechecks."""

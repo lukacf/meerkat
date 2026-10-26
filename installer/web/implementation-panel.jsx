@@ -485,7 +485,7 @@ export function ImplementationPanel({ state, plan, designBusy, pendingManual, Ic
     </div>
     <h2>{overview.title || `Bring ${plan.project.name} to life`}</h2>
     <p role={overview.attention ? "status" : undefined}>{!statusUnconfirmed && packageReason && !running && !retainedContinuation ? "Your design can be accepted and refined while package preparation is pending." : overview.message}</p>
-    <p className="implementation-next">{serviceHold && !running ? "Review the required services below. The saved build can resume after their checks are available and pass."
+    <p className="implementation-next">{serviceHold && !running ? "Review the required services below. Building can continue after these operations are checked."
       : !statusUnconfirmed && packageReason && !running && !retainedContinuation ? "Review the limitation with your guide before starting a new build." : overview.next}</p>
     {packageReason && <div className="implementation-warning" role="status">
       <strong>New package preparation is pending</strong><p>{packageReason}</p>
@@ -547,7 +547,10 @@ export function ImplementationPanel({ state, plan, designBusy, pendingManual, Ic
       <strong>Check required services before building</strong>
       <p>{serviceHold.detail}</p>
       {!!serviceHold.required_operations?.length && <ul>{serviceHold.required_operations.map(item =>
-        <li key={item.id}>{item.service}: {item.operation}{item.resource ? ` (${item.resource})` : " - resource still needs selection"}</li>)}</ul>}
+        <li key={item.id}>{item.service}: {item.operation}{item.resource ? ` (${item.resource})` : " - resource still needs selection"}
+          {item.capability === "incoming_interaction" && <span> - receiving messages needs its own check</span>}
+          {item.capability === "unresolved" && <span> - required operations still need selection</span>}
+        </li>)}</ul>}
     </div>}
     {decisionBlocked && !running && <p className="implementation-detail" role="status">Answer the guide's open setup decisions before building. Proposed defaults and remaining implementation work can be built once those decisions are clear.</p>}
     {canDownload && <p className="implementation-detail">The package passed the checks below. Installation, credentials, and any remaining integrations still need to be verified in your deployment.</p>}

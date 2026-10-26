@@ -361,7 +361,10 @@ grants or check results. Changing their capability or linked feature needs later
 user evidence; keep native artifact and tool selection outside this intent.
 Do not omit a required service to offer Build or relabel it optional without the
 user's decision in the linked feature. Existing briefs without these rows have
-not thereby established that no service is needed. Resolve named services against
+not thereby established that no service is needed. Refresh the inventory for the
+current design on every publication. Use an explicit empty service_requirements
+list only when the design needs no service operations; null or omission means the
+inventory is still missing and Build or Resume needs a guide refresh. Resolve named services against
 the actual supported native route before Build. Request protected authentication
 through the host's connection controls only, never ask for secrets in conversation.
 Authentication, stored credentials and tool discovery do not prove a required

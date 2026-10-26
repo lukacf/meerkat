@@ -39,6 +39,12 @@
 .setup-shell .setup-chat-top small { color: var(--setup-muted); font-size: 12px; line-height: 1.5; }
 .setup-shell .setup-chat-top i { background: var(--setup-accent); }
 .setup-shell .setup-chat-scroll { padding: 28px 24px; scrollbar-color: #ccc9c0 transparent; }
+.setup-shell .setup-conversation > .setup-sign-in-anchor {
+  flex: 0 0 auto;
+  margin: 14px 24px 0;
+  padding: 14px 16px;
+}
+.setup-sign-in-anchor a, .setup-sign-in-anchor button { display: inline-block; margin-right: 10px; }
 .setup-shell .setup-current-status {
   flex: 0 0 auto;
   display: flex;

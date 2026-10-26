@@ -25,6 +25,7 @@ from .projects import DraftConflict, fingerprint
 from .templates.storage_setup import write_private
 from .owned_worker import spawn_owned_worker, stop_owned_worker
 from .deployment_deadlines import WORKER_STOP_TIMEOUT, PROCESS_FORCE_REAP_TIMEOUT
+from .service_requirements import required_service_operations
 
 ACCEPTANCE_POLICY_VERSION = 1
 IMPLEMENTATION_SECONDS = 2400
@@ -1130,17 +1131,25 @@ class ImplementationService:
         self.processes = {}
         self.checker_setup = None
         # Trusted host policy only. The native preparation adapter is not yet
-        # available, so this required-checks mode has no successful admission.
+        # available, so unresolved required service operations cannot be admitted.
         # Never consume a model/browser "ready" assertion to clear this hold.
         self._require_service_checks = require_service_checks
 
     def service_preparation(self, state):
         if not self._require_service_checks:
             return None
+        required = required_service_operations(state)
+        if (state.get("brief") or {}).get("service_requirements") is None:
+            return {"status": "needs_inventory", "guide_id": state["id"], "guide_version": state["version"],
+                "reason_code": "service_inventory_missing",
+                "detail": "The saved plan does not have a recorded service inventory. Ask your guide to refresh the required service operations, including an explicit empty inventory if none are needed, before Build or Resume. Your saved source and results remain available.",
+                "required_operations": required}
+        if not required:
+            return None
         return {"status": "unavailable", "guide_id": state["id"], "guide_version": state["version"],
             "reason_code": "native_service_checks_unavailable",
-            "detail": "Required service access has not been verified. This host cannot yet prepare private service authentication and check each required operation before Build. Build and Resume are blocked; your saved source and results remain available.",
-            "required_operations": deepcopy(state.get("brief", {}).get("service_requirements", []))}
+            "detail": "The required operations below have not been verified. Protected connection setup and operation checks are not available on this host yet. Build and Resume are blocked for this application; your saved source and results remain available.",
+            "required_operations": required}
 
     def _require_prebuild_service_checks(self, state):
         observation = self.service_preparation(state)

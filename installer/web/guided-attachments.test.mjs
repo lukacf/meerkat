@@ -1038,3 +1038,30 @@ test('first turn transition restores the initial question after refusal or inter
     assert.equal(calls.filter(call => call.method === 'POST').length, 0);
   });
 });
+
+
+test('expired-session send refusal offers host sign-in and preserves draft without replay', async () => {
+  const draft = '  Check GHE and Slack before building. Keep this exact draft.  ';
+  await mount({draft, selected:[], onPost: () => ({httpError:401,detail:'Current sign-in required'}),
+    onRead: ({url}) => url === '/api/architect/status' ? {available:true,status:'ready'} : null,
+    setupDom: ({window: {document}}) => {
+      const meta=document.createElement('meta'); meta.name='forge-sign-in'; meta.content='/host/login';
+      document.head.append(meta);
+    }}, async ({document,calls,local,input}) => {
+      await act(async () => {document.querySelector('#setup-send').click(); await pause();});
+      const alert = document.querySelector('.setup-sign-in-anchor[role="alert"]');
+      assert.ok(alert); assert.match(alert.textContent,/Sign in to continue/);
+      assert.doesNotMatch(document.body.textContent,/Live updates interrupted|Let's pick up from here/);
+      assert.equal(alert.querySelector('a').getAttribute('href'),'/host/login');
+      assert.equal(alert.querySelector('a').target,'_blank');
+      assert.equal(document.querySelector('#setup-message').value,draft);
+      assert.equal(document.querySelector('#setup-send').disabled,true);
+      assert.equal(JSON.parse(local.get(input.key)).draft,draft);
+      assert.equal(calls.filter(c=>c.method==='POST').length,1);
+      await act(async () => {[...alert.querySelectorAll('button')].find(b=>b.textContent==='Check sign-in').click(); await pause();});
+      assert.equal(document.querySelector('.setup-sign-in-anchor[role="alert"]'),null);
+      assert.equal(document.querySelector('#setup-send').disabled,false);
+      assert.equal(document.querySelector('#setup-message').value,draft);
+      assert.equal(calls.filter(c=>c.method==='POST').length,1,'Authentication recovery never resends the correction.');
+    });
+});

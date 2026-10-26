@@ -24,6 +24,8 @@ import {
 import { SetupPlan, ScopeDecisions, SetupRequirementGroups } from "./evolving-plan.jsx";
 import { guidePlan } from "./evolving-plan-state.mjs";
 import { NativeGuideChat, useGuideTimeline } from "./native-guide-chat.jsx";
+import { isSignInRequired } from "./sign-in-recovery.mjs";
+import { SignInRecovery } from "./sign-in-recovery.jsx";
 import { GuideWaitStatus } from "./guide-wait.jsx";
 import { guideWaitBinding } from "./guide-wait.mjs";
 import { guideStartupPresentation } from "./guide-startup.mjs";
@@ -1008,6 +1010,7 @@ export function GuidedSetup({
       if (!loadGate.current.current(token)) return;
       setLoadError(e.message);
       setFailedSelection({ id: requested, token });
+      if (isSignInRequired(e)) timeline.requireSignIn?.();
       if (latestState.current) setError(e.message);
     } finally {
       if (loadGate.current.finish(token)) setLoadingSetup(false);
@@ -1422,6 +1425,7 @@ export function GuidedSetup({
     return started;
   }
   async function respond(action = "answer", extra = {}, options = {}) {
+    if (timeline.authenticationRequired) return;
     const navigationToken = loadGate.current.token();
     if (processing.current || sendRequests.current.has(latestState.current?.id || "new") ||
         !latestState.current?.id && creationStorage.getItem(GUIDE_CREATION_KEY) !== null ||
@@ -1568,8 +1572,10 @@ export function GuidedSetup({
       const refused = Number.isInteger(e.status) && e.status >= 400 && e.status < 500;
       const notEntered = !owner.postEntered;
       if (refused || notEntered) releaseSend(owner);
-      if (loadGate.current.current(navigationToken) && (!requestGuideId || latestState.current?.id === requestGuideId))
-        setError(refused || notEntered ? e.message : "");
+      if (loadGate.current.current(navigationToken) && (!requestGuideId || latestState.current?.id === requestGuideId)) {
+        if (isSignInRequired(e)) timeline.requireSignIn?.();
+        setError(isSignInRequired(e) ? "" : refused || notEntered ? e.message : "");
+      }
     } finally {
       if (sendRequests.current.get(owner.id || "new") === owner) {
         owner.status = "unconfirmed";
@@ -2265,7 +2271,7 @@ export function GuidedSetup({
         : "Ask a question or tell your guide what to change...",
     disabled: packageBusy,
     submitDisabled:
-      blocked ||
+      blocked || timeline.authenticationRequired ||
       welcome && providerOpen ||
       attachmentPreparing || attachments.uploading || attachments.pending.length > 0 ||
       (!(welcome && available === false) && !(question && composeMode === "answer"
@@ -2480,7 +2486,9 @@ export function GuidedSetup({
               </a>
             )}
           </div>
-          {!busy && !error && !appError && !savedGuideFailure(state) &&
+          {timeline.authenticationRequired && <SignInRecovery key={state.id}
+            className="setup-sign-in-anchor" onCheck={timeline.checkSignIn} />}
+          {!timeline.authenticationRequired && !busy && !error && !appError && !savedGuideFailure(state) &&
             <SetupCurrentStatusAnchor progress={primaryProgress} statusText={statusText}
               disabled={blocked || loadingSetup || !active} onNavigate={navigateCurrentStatusAction} Icon={Icon}
               resume={guideResume} onResume={resumeGuide} />}
@@ -2533,6 +2541,7 @@ export function GuidedSetup({
               snapshot={timeline}
               pendingMessage={pendingMessage}
               collapseCompleted={hasLifecycle && !question}
+              signInNoticeExternal
               Icon={Icon}
             />
             {failedSelection && loadError && <div className="setup-error" role="alert">
@@ -2548,7 +2557,7 @@ export function GuidedSetup({
               tabIndex={-1}
               aria-label="Latest guide response"
             />
-            {(error || appError) && (
+            {(error || appError) && !timeline.authenticationRequired && (
               <div className="setup-error" role="alert">
                 <strong>Let's pick up from here.</strong>
                 <p>{error || appError}</p>
@@ -2717,7 +2726,7 @@ export function GuidedSetup({
                   <p className="setup-review-expectation">
                     {packagePreparationReason(state, plan)
                       ? "Accepting saves this design and its choices. Package preparation is pending; you can keep refining the plan."
-                      : "Accepting prepares the native team and configuration. Use Build for custom application code. Enter declared private settings during installation, then verify the actual connections separately."}
+                      : "Accepting prepares the native team and configuration. Before Build or Resume, connect the required services through protected setup and check each required operation. Missing or unsupported access must be resolved first."}
                   </p>
                   {packagePreparationReason(state, plan) && <div className="setup-readiness" role="status">
                     <p>{packagePreparationReason(state, plan)}</p>

@@ -162,15 +162,15 @@ class DesignBrief(StrictModel):
     requirements: list[RequestedFeature] = Field(default_factory=list, max_length=32)
     incoming_data: list[IncomingDataIntent] = Field(default_factory=list, max_length=32,
         description="Optional proposed incoming sources and routing choices. This is user intent, not native configuration, provider capability evidence or permission to collect. Track implementation and access in the linked requirement.")
-    service_requirements: list[ServiceRequirement] = Field(default_factory=list, max_length=64,
-        description="Required service operations to resolve and check before Build. Separate read, write and incoming interaction. These are user requirements, not authentication, grants, selected native operations or successful checks. An omitted list does not prove the application needs no services.")
+    service_requirements: list[ServiceRequirement] | None = Field(default=None, max_length=64,
+        description="Required service operations to resolve and check before Build. Separate read, write and incoming interaction. These are user requirements, not authentication, grants, selected native operations or successful checks. Null or omitted means not yet inventoried. An explicit empty list records that the current design needs no service operations.")
 
     @model_serializer(mode="wrap")
     def omit_unused_incoming_data(self, handler):
         data = handler(self)
         if not self.incoming_data:
             data.pop("incoming_data", None)
-        if not self.service_requirements:
+        if self.service_requirements is None:
             data.pop("service_requirements", None)
         return data
 
@@ -183,9 +183,9 @@ class DesignBrief(StrictModel):
         requirements = {item.id for item in self.requirements}
         if any(item.requirement_id not in requirements for item in self.incoming_data):
             raise ValueError("Link incoming data to an existing requested feature so its implementation remains visible.")
-        if len({item.id for item in self.service_requirements}) != len(self.service_requirements):
+        if len({item.id for item in (self.service_requirements or [])}) != len(self.service_requirements or []):
             raise ValueError("Give each required service operation its own ID.")
-        if any(item.requirement_id not in requirements for item in self.service_requirements):
+        if any(item.requirement_id not in requirements for item in (self.service_requirements or [])):
             raise ValueError("Link each service operation to an existing requested feature.")
         return self
 
@@ -314,10 +314,12 @@ def validate_guide_publication(args: dict, context: dict, proposal: dict | None,
     old_sources = {item.id for item in old.incoming_data}
     if old_sources - {item.id for item in value.brief.incoming_data}:
         raise ValueError("Do not drop an incoming source. Revise its choices and record scope decisions in its linked feature.")
-    old_services = {item.id: item for item in old.service_requirements}
-    if old_services.keys() - {item.id for item in value.brief.service_requirements}:
+    old_services = {item.id: item for item in (old.service_requirements or [])}
+    if old_services.keys() - {item.id for item in (value.brief.service_requirements or [])}:
         raise ValueError("Do not drop a required service operation. Record scope decisions in its linked feature.")
-    for service in value.brief.service_requirements:
+    if old.service_requirements is not None and value.brief.service_requirements is None:
+        raise ValueError("Preserve and refresh the recorded service inventory, including an explicit empty list when none are needed.")
+    for service in value.brief.service_requirements or []:
         if any(identity not in evidence for identity in service.source_message_ids):
             raise ValueError("Service requirements cite missing or non-user evidence.")
         previous = old_services.get(service.id)

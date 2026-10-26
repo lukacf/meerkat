@@ -286,7 +286,7 @@ const clickHandler = node => node[Object.keys(node).find(key => key.startsWith("
 
 // Mount the shipping timeline owner and Console presentation. Only transport
 // replies are synthetic; a status action cannot send an answer or start a team.
-async function mountedStartup(verify, { initialStatus = unavailable, heldChecks = false, savedMessages = [] } = {}) {
+async function mountedStartup(verify, { initialStatus = unavailable, heldChecks = false, savedMessages = [], authenticationRequired = false } = {}) {
   const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost/", pretendToBeVisual: true });
   const calls = [], held = new Map(), timelineReads = new Map();
   const selected = structuredClone({ ...state, messages: savedMessages,
@@ -309,7 +309,10 @@ async function mountedStartup(verify, { initialStatus = unavailable, heldChecks 
       const match = /^\/api\/guide\/([^/]+)\/timeline\?/.exec(url);
       assert.ok(match, `Unexpected fixture read: ${url}`);
       const count = (timelineReads.get(match[1]) || 0) + 1; timelineReads.set(match[1], count);
-      if (match[1] === selected.id && count === 1) throw new Error("Synthetic timeline is unavailable.");
+      if (match[1] === selected.id && count === 1) {
+        if (authenticationRequired) return {ok:false,status:401,json:async()=>({detail:"Current sign-in required"})};
+        throw new Error("Synthetic timeline is unavailable.");
+      }
       return response(emptyTimeline);
     } };
   const previous = new Map(Object.keys(replacements).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
@@ -427,4 +430,21 @@ test('previous turns remain accessible but collapsed while the current reply sta
   assert.doesNotMatch(current.textContent, /Original requirement/);
   assert.deepEqual(saved, before);
   dom.window.close();
+});
+
+
+test("expired sign-in stops native recovery and checks only saved timeline without resending", async () => {
+  await mountedStartup(async ({ document, calls, button, assertPreserved }) => {
+    const meta = document.createElement("meta"); meta.name = "forge-sign-in";
+    meta.content = "/host/login"; document.head.append(meta);
+    assert.match(document.querySelector(".setup-error").textContent, /Sign in to continue/);
+    assert.doesNotMatch(document.body.textContent, /Reconnecting|Retry setup team/);
+    assert.equal(calls.length, 1, "401 does not probe or start the native setup team");
+    assertPreserved();
+    await act(async () => button("Check sign-in").click());
+    assert.equal(document.querySelector(".setup-error"), null);
+    assert.equal(calls.length, 2);
+    assert.ok(calls.every(call => call.url.includes("/timeline?")));
+    assertPreserved();
+  }, { authenticationRequired: true });
 });

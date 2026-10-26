@@ -39,7 +39,13 @@ def publish(value, old=None):
 def test_legacy_briefs_do_not_acquire_an_empty_service_attestation():
     old = {"facts": {}, "requirements": []}
     assert DesignBrief.model_validate(old).model_dump(mode="json") == old
-    assert DesignBrief.model_validate({**old, "service_requirements": []}).model_dump(mode="json") == old
+    explicit_none = {**old, "service_requirements": []}
+    assert DesignBrief.model_validate(explicit_none).model_dump(mode="json") == explicit_none
+
+
+def test_recorded_empty_inventory_cannot_silently_revert_to_legacy_unknown():
+    with pytest.raises(ValueError, match="Preserve and refresh the recorded service inventory"):
+        publish({"facts": {}, "requirements": []}, {"facts": {}, "requirements": [], "service_requirements": []})
 
 
 def test_distinct_service_capabilities_survive_actual_store_reopen_as_unverified_intent(tmp_path):

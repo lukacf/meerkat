@@ -5,7 +5,7 @@
 use meerkat_core::compact::{
     COMPACTION_SUMMARY_PREFIX, CompactionConfig, CompactionContext, CompactionResult,
     CompactionSummary, Compactor, SummarizationSource, SummarizationSourceBound,
-    SummarizationSourceBudget,
+    SummarizationSourceBudget, shortened_tool_result_for_retention,
 };
 use meerkat_core::types::{
     AssistantBlock, BlockAssistantMessage, ContentBlock, Message,
@@ -27,6 +27,8 @@ Be concise and structured. Prioritize information the next context needs to act,
 
 const RETAINED_HISTORY_BUDGET_DENOMINATOR: u64 = 2;
 const MIN_RETAINED_HISTORY_BUDGET_BYTES: u64 = 4 * 1024;
+/// The least text a shortened tool result of the run in flight keeps.
+const MIN_RETAINED_TOOL_RESULT_BYTES: usize = 4 * 1024;
 /// The smallest a trimmed text is cut to while bounding a summarization
 /// source; below it, the next role is trimmed instead.
 const MIN_TRIMMED_TEXT_BYTES: usize = 512;
@@ -115,20 +117,7 @@ impl DefaultCompactor {
 /// Blob-backed image blocks in one message: references in the row, full
 /// payloads once the request is hydrated.
 fn blob_images(message: &Message) -> usize {
-    fn count(blocks: &[ContentBlock]) -> usize {
-        blocks
-            .iter()
-            .filter(|block| {
-                matches!(
-                    block,
-                    ContentBlock::Image {
-                        data: meerkat_core::types::ImageData::Blob { .. },
-                        ..
-                    }
-                )
-            })
-            .count()
-    }
+    let count = blob_image_blocks;
     match message {
         Message::User(user) => count(&user.content),
         Message::ToolResults { results, .. } => {
@@ -148,6 +137,105 @@ fn blob_images(message: &Message) -> usize {
             .sum(),
         _ => 0,
     }
+}
+
+/// Blob-backed image blocks among `blocks`.
+fn blob_image_blocks(blocks: &[ContentBlock]) -> usize {
+    blocks
+        .iter()
+        .filter(|block| {
+            matches!(
+                block,
+                ContentBlock::Image {
+                    data: meerkat_core::types::ImageData::Blob { .. },
+                    ..
+                }
+            )
+        })
+        .count()
+}
+
+/// Whether a turn's rows hold a completed tool round and have not ended in a
+/// final assistant answer: the run that owns the turn is still in flight, and
+/// its rounds are what it has already done.
+fn turn_is_open_with_tool_rounds(turn: &[Message]) -> bool {
+    let has_round = turn
+        .iter()
+        .any(|message| matches!(message, Message::ToolResults { .. }));
+    let answered = turn
+        .iter()
+        .rev()
+        .find(|message| !matches!(message, Message::System(_) | Message::SystemNotice(_)))
+        .is_some_and(|message| {
+            matches!(message, Message::BlockAssistant(assistant) if !assistant.has_tool_calls())
+        });
+    has_round && !answered
+}
+
+/// The `ToolResults` rows of the in-flight turn `turn` (starting at source
+/// offset `start`) that must be shortened for the turn to stay in the
+/// retained tail, keyed by source offset. The request and assistant rows are
+/// kept whole; the rest of `retention_budget` is shared evenly by the turn's
+/// results, with a floor, and each result costing more than its share
+/// (counting a blob image as `blob_image_bytes`) is replaced by its canonical
+/// shortened copy.
+fn shortened_in_flight_tool_results(
+    turn: &[Message],
+    start: usize,
+    retention_budget: usize,
+    blob_image_bytes: usize,
+) -> std::collections::BTreeMap<usize, Message> {
+    let fixed = turn
+        .iter()
+        .filter(|message| !matches!(message, Message::System(_) | Message::ToolResults { .. }))
+        .map(|message| serde_json::to_vec(message).map_or(usize::MAX, |encoded| encoded.len()))
+        .fold(0usize, usize::saturating_add);
+    let result_count = turn
+        .iter()
+        .map(|message| match message {
+            Message::ToolResults { results, .. } => results.len(),
+            _ => 0,
+        })
+        .sum::<usize>();
+    let share = (retention_budget.saturating_sub(fixed) / result_count.max(1))
+        .max(MIN_RETAINED_TOOL_RESULT_BYTES);
+    let mut shortened = std::collections::BTreeMap::new();
+    for (index, message) in turn.iter().enumerate() {
+        let Message::ToolResults {
+            results,
+            created_at,
+        } = message
+        else {
+            continue;
+        };
+        let mut changed = false;
+        let kept = results
+            .iter()
+            .map(|result| {
+                let cost = serde_json::to_vec(&result.content)
+                    .map_or(usize::MAX, |encoded| encoded.len())
+                    .saturating_add(
+                        blob_image_blocks(&result.content).saturating_mul(blob_image_bytes),
+                    );
+                if cost > share {
+                    changed = true;
+                    shortened_tool_result_for_retention(result, share)
+                } else {
+                    result.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        if changed {
+            shortened.insert(
+                start + index,
+                Message::ToolResults {
+                    results: kept,
+                    created_at: *created_at,
+                },
+            );
+        }
+    }
+    shortened
 }
 
 /// Project media blocks to text placeholders for the summarization LLM input.
@@ -803,27 +891,66 @@ impl Compactor for DefaultCompactor {
             }
             retain_turn_count -= 1;
         };
-        // The in-flight turn's request bundle (its conversational user row
-        // plus the injected context glued before it) stays verbatim even
-        // when the whole turn does not fit: a mid-turn rewrite must not drop
-        // the request the turn is answering. Only the rest of that turn is
-        // summarized. A bundle that alone exceeds the retention budget
+        // A run still in flight keeps its own turn whole: its request, every
+        // tool call it made and every result it got. Summarizing its
+        // completed rounds left the model a paraphrase of a call it had
+        // already made, and it made the call again. When those rows alone
+        // exceed the retention budget, oversized results are kept as their
+        // canonical shortened copies (identity kept, content cut to a marked
+        // head) rather than summarized. Only older rows are summarized, so a
+        // turn with nothing older to replace keeps the rule below.
+        let in_flight_candidate = turn_starts.last().copied().filter(|start| {
+            *start < retain_from
+                && turn_is_open_with_tool_rounds(&messages[*start..])
+                && messages[..*start]
+                    .iter()
+                    .enumerate()
+                    .any(|(offset, message)| {
+                        !matches!(message, Message::System(_))
+                            || superseded_system_prompts.contains(&offset)
+                    })
+        });
+        let shortened = match in_flight_candidate {
+            Some(start) if turn_bytes(start..messages.len()) > retention_budget => {
+                shortened_in_flight_tool_results(
+                    &messages[start..],
+                    start,
+                    retention_budget,
+                    blob_image_bytes,
+                )
+            }
+            _ => std::collections::BTreeMap::new(),
+        };
+        // Keeping the run's turn must still let the rewrite advance: an older
+        // conversational turn is summarized, or the turn's own oversized
+        // results are shortened. A prior summary alone is not progress.
+        let in_flight_turn =
+            in_flight_candidate.filter(|_| turn_starts.len() > 1 || !shortened.is_empty());
+        // Otherwise the in-flight turn's request bundle (its conversational
+        // user row plus the injected context glued before it) stays verbatim
+        // even when the whole turn does not fit: a mid-turn rewrite must not
+        // drop the request the turn is answering. Only the rest of that turn
+        // is summarized. A bundle that alone exceeds the retention budget
         // (a large request, or a short one behind large injected context)
         // cannot be resent as is; it is summarized instead, and the
         // summarizer source keeps user rows to the last.
-        let pinned_request = turn_starts
-            .last()
-            .copied()
-            .filter(|start| *start < retain_from)
-            .and_then(|start| {
-                let request = (start..messages.len()).find(|offset| {
-                    matches!(
-                        &messages[*offset],
-                        Message::User(user) if user.transcript_role.is_conversational()
-                    )
-                })?;
-                (turn_bytes(start..request + 1) <= retention_budget).then_some(start..request + 1)
-            });
+        let pinned_request = match in_flight_turn {
+            Some(start) => Some(start..messages.len()),
+            None => turn_starts
+                .last()
+                .copied()
+                .filter(|start| *start < retain_from)
+                .and_then(|start| {
+                    let request = (start..messages.len()).find(|offset| {
+                        matches!(
+                            &messages[*offset],
+                            Message::User(user) if user.transcript_role.is_conversational()
+                        )
+                    })?;
+                    (turn_bytes(start..request + 1) <= retention_budget)
+                        .then_some(start..request + 1)
+                }),
+        };
         let keep = |source_offset: usize, message: &Message| {
             !superseded_system_prompts.contains(&source_offset)
                 && (matches!(message, Message::System(_))
@@ -855,6 +982,7 @@ impl Compactor for DefaultCompactor {
                 rebuilt.push(summary_message.clone());
             }
             if keep(source_offset, message) {
+                let message = shortened.get(&source_offset).unwrap_or(message);
                 retained.push(meerkat_core::compact::CompactionRetained::new(
                     u64::try_from(source_offset).unwrap_or(u64::MAX),
                     u64::try_from(rebuilt.len()).unwrap_or(u64::MAX),
@@ -1960,8 +2088,12 @@ mod tests {
         assert_eq!(result.discarded.len(), 2);
     }
 
+    /// The in-flight turn holds a tool round larger than the retention
+    /// budget. Its request and its result stay, the result as its canonical
+    /// shortened copy (identity kept, a marked head), and only the older turn
+    /// is summarized: the model still sees the call it already made.
     #[test]
-    fn rebuild_does_not_retain_a_single_turn_larger_than_the_recovery_budget() {
+    fn an_oversized_in_flight_turn_keeps_its_round_with_a_shortened_result() {
         use meerkat_core::types::ToolResult;
 
         let c = DefaultCompactor::new(CompactionConfig {
@@ -1984,10 +2116,18 @@ mod tests {
         let result = c.rebuild_history(&messages, "bounded summary");
         assert_eq!(
             result.messages.len(),
-            2,
-            "an individually oversized newest turn is summarized; only its request is retained verbatim"
+            3,
+            "the summary, the in-flight request and its shortened result"
         );
-        assert_eq!(result.discarded.len(), messages.len() - 1);
+        assert_eq!(
+            result
+                .discarded
+                .iter()
+                .map(|discard| discard.source_offset)
+                .collect::<Vec<_>>(),
+            vec![0],
+            "only the older turn is summarized"
+        );
         assert!(matches!(
             &result.messages[0],
             Message::User(user) if user.transcript_role.is_compaction_summary()
@@ -1996,6 +2136,193 @@ mod tests {
             &result.messages[1],
             Message::User(user) if user.text_content() == "inspect the large result"
         ));
+        let Message::ToolResults { results, .. } = &result.messages[2] else {
+            panic!(
+                "the in-flight round's result is retained: {:?}",
+                result.messages[2]
+            );
+        };
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].tool_use_id, "tc_oversized");
+        assert!(!results[0].is_error);
+        let head = match results[0].content.first() {
+            Some(ContentBlock::Text { text }) => text.len(),
+            other => panic!("a shortened result starts with its text head: {other:?}"),
+        };
+        assert!(
+            (MIN_RETAINED_TOOL_RESULT_BYTES..200_000).contains(&head),
+            "the head is bounded by the retention budget: {head}"
+        );
+        assert!(
+            meerkat_core::compact::is_shortened_tool_results_row_of(
+                &result.messages[2],
+                &messages[2]
+            ),
+            "the retained row is the canonical shortened copy of its source"
+        );
+        assert_eq!(
+            result
+                .retained
+                .last()
+                .map(|retention| retention.source_offset),
+            Some(2),
+            "the shortened row keeps its source provenance"
+        );
+    }
+
+    /// A run whose first round returned a very large result is compacted at
+    /// its next round boundary. Its own rounds are not summarized: both tool
+    /// calls stay verbatim, the large result as its shortened copy and the
+    /// small one whole, and only the turns before the run are summarized.
+    /// Summarizing the first round left the model a paraphrase of a call it
+    /// had already made, and it made the call again.
+    #[test]
+    fn an_open_runs_completed_rounds_are_not_summarized() {
+        use meerkat_core::types::{AssistantBlock, BlockAssistantMessage, StopReason, ToolResult};
+
+        let c = DefaultCompactor::new(CompactionConfig {
+            auto_compact_threshold: 100_000,
+            recent_turn_budget: 2,
+            ..make_config()
+        });
+        let tool_use = |id: &str| {
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::ToolUse {
+                    id: id.into(),
+                    name: "list_records".into(),
+                    args: serde_json::value::RawValue::from_string("{}".into()).unwrap(),
+                    meta: None,
+                }],
+                StopReason::ToolUse,
+            ))
+        };
+        let mut messages = vec![Message::System(SystemMessage::new("You are helpful."))];
+        for n in 0..3 {
+            messages.push(Message::User(UserMessage::text(format!(
+                "earlier request {n}"
+            ))));
+            messages.push(Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::Text {
+                    text: format!("earlier answer {n}"),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+            )));
+        }
+        let run_start = messages.len();
+        messages.push(Message::User(UserMessage::text("compare every record")));
+        messages.push(tool_use("tc_1"));
+        messages.push(Message::tool_results(vec![ToolResult::new(
+            "tc_1".into(),
+            "r".repeat(570_000),
+            false,
+        )]));
+        messages.push(tool_use("tc_2"));
+        messages.push(Message::tool_results(vec![ToolResult::new(
+            "tc_2".into(),
+            "small".into(),
+            false,
+        )]));
+
+        let result = c.rebuild_history(&messages, "summary");
+
+        assert_eq!(
+            result
+                .discarded
+                .iter()
+                .map(|discard| usize::try_from(discard.source_offset).unwrap())
+                .collect::<Vec<_>>(),
+            (1..run_start).collect::<Vec<_>>(),
+            "exactly the turns before the run are summarized"
+        );
+        let retained = |offset: usize| {
+            result
+                .retained
+                .iter()
+                .find(|retention| retention.source_offset == u64::try_from(offset).unwrap())
+                .map(|retention| &retention.message)
+                .unwrap_or_else(|| panic!("source row {offset} is retained"))
+        };
+        for offset in [run_start, run_start + 1, run_start + 3, run_start + 4] {
+            assert_eq!(
+                retained(offset),
+                &messages[offset],
+                "the run's request, both tool calls and the small result stay verbatim"
+            );
+        }
+        assert!(
+            meerkat_core::compact::is_shortened_tool_results_row_of(
+                retained(run_start + 2),
+                &messages[run_start + 2]
+            ),
+            "the large first-round result stays, as its shortened copy"
+        );
+        assert_eq!(
+            result.messages.len(),
+            2 + 5,
+            "the System row, the summary and the run's five rows"
+        );
+    }
+
+    /// The shortened copy is deterministic and verifiable: the canonical copy
+    /// passes, and any change to its identity, head or recorded length fails.
+    #[test]
+    fn a_shortened_tool_result_is_verified_against_its_source() {
+        use meerkat_core::compact::{
+            is_shortened_tool_result_of, is_shortened_tool_results_row_of,
+            shortened_tool_result_for_retention,
+        };
+        use meerkat_core::types::ToolResult;
+
+        let source = ToolResult::with_blocks(
+            "tc_big".to_string(),
+            vec![
+                ContentBlock::Text {
+                    text: "é".repeat(10_000),
+                },
+                blob_image_block("image/jpeg", "cam-a"),
+            ],
+            false,
+        );
+        let shortened = shortened_tool_result_for_retention(&source, 4_097);
+        assert!(is_shortened_tool_result_of(&shortened, &source));
+        let Some(ContentBlock::Text { text: head }) = shortened.content.first() else {
+            panic!("a text head");
+        };
+        assert_eq!(head.len(), 4_096, "cut back to a character boundary");
+
+        let mut renamed = shortened.clone();
+        renamed.tool_use_id = "tc_other".to_string();
+        assert!(!is_shortened_tool_result_of(&renamed, &source));
+        let mut flipped = shortened.clone();
+        flipped.is_error = true;
+        assert!(!is_shortened_tool_result_of(&flipped, &source));
+        let mut edited = shortened.clone();
+        edited.content[0] = ContentBlock::Text {
+            text: "x".repeat(4_096),
+        };
+        assert!(!is_shortened_tool_result_of(&edited, &source));
+        let mut forged = shortened.clone();
+        forged.content[1] = ContentBlock::Text {
+            text: "[compaction shortened this tool result: kept the first 4096 of 1 bytes of \
+                   its text; media blocks are shown as text placeholders]"
+                .to_string(),
+        };
+        assert!(!is_shortened_tool_result_of(&forged, &source));
+
+        let row = Message::tool_results(vec![source.clone()]);
+        let Message::ToolResults { created_at, .. } = &row else {
+            unreachable!()
+        };
+        let kept_row = Message::ToolResults {
+            results: vec![shortened],
+            created_at: *created_at,
+        };
+        assert!(is_shortened_tool_results_row_of(&kept_row, &row));
+        assert!(
+            !is_shortened_tool_results_row_of(&row, &row),
+            "an unchanged row is retained as itself, not as a shortened copy"
+        );
     }
 
     #[test]
@@ -3002,9 +3329,10 @@ mod tests {
     }
 
     /// A downstream app's mid-turn rewrite: System rows larger than the retention
-    /// budget must not crowd out the in-flight turn. Its request stays
-    /// verbatim whether the whole turn fits (kept whole) or not (the request
-    /// row kept, the rest of the turn summarized).
+    /// budget must not crowd out the in-flight turn. Its request and its tool
+    /// call stay verbatim whether the whole turn fits (kept whole) or not (the
+    /// oversized result kept as its shortened copy, the earlier turn
+    /// summarized).
     #[test]
     fn a_system_heavy_session_keeps_the_in_flight_request() {
         use meerkat_core::types::{AssistantBlock, BlockAssistantMessage, StopReason, ToolResult};
@@ -3067,24 +3395,43 @@ mod tests {
         );
 
         // The in-flight turn's tool result alone is larger than any retention
-        // budget: the request row is still kept verbatim.
+        // budget: the request and the tool call stay verbatim, the result as
+        // its shortened copy, and nothing of the in-flight turn is summarized.
         let messages = in_flight(1_000_000);
         let result = c.rebuild_history(&messages, "summary");
         let kept = texts_of(&result.messages);
         assert!(
             kept.iter().any(|text| text == request),
-            "the in-flight request survives even when its turn cannot: {kept:?}"
+            "the in-flight request survives even when its turn does not fit: {kept:?}"
         );
         assert!(
-            matches!(result.messages.last(), Some(Message::User(user)) if user.text_content() == request),
-            "the request is the last row, its oversized turn tail summarized"
+            result.messages.iter().any(|message| matches!(
+                message,
+                Message::BlockAssistant(assistant) if assistant.has_tool_calls()
+            )),
+            "the tool call the run already made stays in the transcript"
+        );
+        let last = result.messages.last().expect("rebuilt rows");
+        assert!(
+            meerkat_core::compact::is_shortened_tool_results_row_of(
+                last,
+                messages.last().expect("source rows")
+            ),
+            "the oversized result is the last row, as its shortened copy"
         );
         assert!(
             result
                 .discarded
                 .iter()
-                .any(|discard| matches!(discard.message, Message::ToolResults { .. })),
-            "the oversized tool result is summarized, not retained"
+                .all(|discard| discard.source_offset < 7),
+            "only rows before the in-flight turn are summarized"
+        );
+        assert!(
+            result
+                .discarded
+                .iter()
+                .any(|discard| discard.source_offset == 5),
+            "the earlier turn is summarized"
         );
     }
 
@@ -3093,6 +3440,9 @@ mod tests {
     /// that same vector verbatim, with exact source/rebuilt mappings: the
     /// System row and the instruction keep their offsets, the summary takes
     /// the first discarded position, and every tool exchange is discarded.
+    /// With no row older than the run to summarize, a rewrite that kept the
+    /// run's own rounds would discard nothing, so this case keeps the
+    /// request-only rule.
     #[test]
     fn the_single_active_instruction_survives_oversized_tool_exchanges() {
         use meerkat_core::types::{AssistantBlock, BlockAssistantMessage, StopReason, ToolResult};

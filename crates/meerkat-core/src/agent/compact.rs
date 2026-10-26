@@ -177,7 +177,15 @@ fn validate_compaction_rebuild(
             checked_offset("retained source", retention.source_offset, messages.len())?;
         let rebuilt_offset =
             checked_offset("retained rebuilt", retention.rebuilt_offset, rebuilt.len())?;
-        if messages[source_offset] != retention.message {
+        // A retained row is its source row, or a ToolResults row of the run
+        // in flight whose oversized results the compactor replaced by their
+        // canonical shortened copies, which this check recomputes.
+        if messages[source_offset] != retention.message
+            && !crate::compact::is_shortened_tool_results_row_of(
+                &retention.message,
+                &messages[source_offset],
+            )
+        {
             return Err(CompactionError::InvalidRebuild(format!(
                 "retention at source offset {} does not match the source transcript message",
                 retention.source_offset

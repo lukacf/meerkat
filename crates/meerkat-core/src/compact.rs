@@ -265,7 +265,10 @@ pub struct CompactionRetained {
     pub source_offset: u64,
     /// Offset of `message` in the rebuilt transcript.
     pub rebuilt_offset: u64,
-    /// Message retained from the source transcript.
+    /// Message retained from the source transcript: the source row itself,
+    /// or, for a `ToolResults` row of the run still in flight, that row with
+    /// oversized results replaced by their canonical shortened copies
+    /// ([`shortened_tool_result_for_retention`]).
     pub message: Message,
 }
 
@@ -278,6 +281,125 @@ impl CompactionRetained {
             message,
         }
     }
+}
+
+const SHORTENED_TOOL_RESULT_MARKER_PREFIX: &str =
+    "[compaction shortened this tool result: kept the first ";
+const SHORTENED_TOOL_RESULT_MARKER_MIDDLE: &str = " of ";
+const SHORTENED_TOOL_RESULT_MARKER_SUFFIX: &str =
+    " bytes of its text; media blocks are shown as text placeholders]";
+
+fn shortened_tool_result_marker(kept: usize, total: usize) -> String {
+    format!(
+        "{SHORTENED_TOOL_RESULT_MARKER_PREFIX}{kept}{SHORTENED_TOOL_RESULT_MARKER_MIDDLE}{total}{SHORTENED_TOOL_RESULT_MARKER_SUFFIX}"
+    )
+}
+
+fn parse_shortened_tool_result_marker(marker: &str) -> Option<(usize, usize)> {
+    let counts = marker
+        .strip_prefix(SHORTENED_TOOL_RESULT_MARKER_PREFIX)?
+        .strip_suffix(SHORTENED_TOOL_RESULT_MARKER_SUFFIX)?;
+    let (kept, total) = counts.split_once(SHORTENED_TOOL_RESULT_MARKER_MIDDLE)?;
+    Some((kept.parse().ok()?, total.parse().ok()?))
+}
+
+/// The text a shortened tool result keeps the head of: every content block's
+/// text projection, in order, joined by newlines. Media blocks project to
+/// text placeholders.
+fn tool_result_text_projection(result: &crate::types::ToolResult) -> String {
+    result
+        .content
+        .iter()
+        .map(crate::types::ContentBlock::text_projection)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn shortened_tool_result_with_head(
+    result: &crate::types::ToolResult,
+    projection: &str,
+    kept: usize,
+) -> Option<crate::types::ToolResult> {
+    let head = projection.get(..kept)?;
+    let mut shortened = result.clone();
+    shortened.content = vec![
+        crate::types::ContentBlock::Text {
+            text: head.to_string(),
+        },
+        crate::types::ContentBlock::Text {
+            text: shortened_tool_result_marker(kept, projection.len()),
+        },
+    ];
+    Some(shortened)
+}
+
+/// The canonical shortened copy of `result` a compaction may retain in place
+/// of an oversized result of the run still in flight.
+///
+/// A compaction must not summarize away the run's own completed rounds: the
+/// model would see only a paraphrase of a tool call it already made and could
+/// make it again. When those rounds alone exceed the retention budget, each
+/// oversized result is kept with its identity (`tool_use_id`, `is_error`,
+/// settlement diagnostics and host metadata) and the first `max_text_bytes`
+/// bytes of its text projection (cut back to a character boundary), followed
+/// by a marker block that records how much was kept. Media blocks become
+/// their text placeholders. The copy is deterministic, so
+/// [`is_shortened_tool_result_of`] can verify it against the source.
+pub fn shortened_tool_result_for_retention(
+    result: &crate::types::ToolResult,
+    max_text_bytes: usize,
+) -> crate::types::ToolResult {
+    let projection = tool_result_text_projection(result);
+    let mut kept = max_text_bytes.min(projection.len());
+    while !projection.is_char_boundary(kept) {
+        kept -= 1;
+    }
+    shortened_tool_result_with_head(result, &projection, kept).unwrap_or_else(|| result.clone())
+}
+
+/// Whether `candidate` is exactly the canonical shortened copy of `source`
+/// for the head length its marker records.
+pub fn is_shortened_tool_result_of(
+    candidate: &crate::types::ToolResult,
+    source: &crate::types::ToolResult,
+) -> bool {
+    let Some(crate::types::ContentBlock::Text { text: marker }) = candidate.content.last() else {
+        return false;
+    };
+    let Some((kept, total)) = parse_shortened_tool_result_marker(marker) else {
+        return false;
+    };
+    let projection = tool_result_text_projection(source);
+    total == projection.len()
+        && shortened_tool_result_with_head(source, &projection, kept)
+            .is_some_and(|expected| &expected == candidate)
+}
+
+/// Whether `retained` is the `ToolResults` row `source` with each result
+/// either unchanged or replaced by its canonical shortened copy, and at least
+/// one of them shortened. The only form of a retained row that differs from
+/// its source row.
+pub fn is_shortened_tool_results_row_of(retained: &Message, source: &Message) -> bool {
+    let (
+        Message::ToolResults {
+            results: kept,
+            created_at: kept_at,
+        },
+        Message::ToolResults {
+            results,
+            created_at,
+        },
+    ) = (retained, source)
+    else {
+        return false;
+    };
+    kept_at == created_at
+        && kept.len() == results.len()
+        && kept != results
+        && kept
+            .iter()
+            .zip(results)
+            .all(|(kept, source)| kept == source || is_shortened_tool_result_of(kept, source))
 }
 
 /// Fraction of `CompactionConfig::max_request_bytes` at which the byte-aware

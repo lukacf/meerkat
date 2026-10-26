@@ -55,6 +55,25 @@ them.
   `RequeueExpired`, and is closed as interrupted, by a start past the max
   age.
 
+- `meerkat-session`: compaction no longer summarizes the completed tool
+  rounds of the run still in flight. When the newest turn held a tool round
+  and its rows alone exceeded the retention budget, `DefaultCompactor` kept
+  only the turn's request and summarized its tool calls and results; the
+  model then saw only a paraphrase of a call it had already made, and could
+  make it again (a side-effecting tool would act twice). The in-flight turn
+  now stays whole: its request and every tool call verbatim, each result
+  verbatim or, when the turn exceeds the budget, as its canonical shortened
+  copy (`tool_use_id`, `is_error`, settlement diagnostics and host metadata
+  kept, content cut to a head of its text projection with a marker that
+  records how much was kept, media shown as placeholders). Only turns older
+  than the run are summarized. A run with nothing older to summarize keeps
+  the request-only rule. `meerkat-core` adds
+  `compact::shortened_tool_result_for_retention`,
+  `compact::is_shortened_tool_result_of` and
+  `compact::is_shortened_tool_results_row_of`, and the compaction rebuild
+  validator accepts a retained `ToolResults` row that is exactly the
+  canonical shortened copy of its source row.
+
 ## [0.9.5] - 2026-10-23
 
 ### Breaking

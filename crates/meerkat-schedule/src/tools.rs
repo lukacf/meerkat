@@ -1,9 +1,10 @@
 use crate::{
-    CreateScheduleRequest, Occurrence, ScheduleDomainError, ScheduleId, ScheduleService,
-    ScheduleStoreError, ScheduledSessionAction, SessionTargetBinding, TargetBinding,
-    UpdateScheduleRequest,
+    CreateScheduleRequest, Occurrence, OccurrenceFilter, OccurrenceId, OccurrencePhase,
+    ScheduleDomainError, ScheduleId, ScheduleService, ScheduleStoreError, ScheduledSessionAction,
+    SessionTargetBinding, TargetBinding, TriggerSpec, UpdateScheduleRequest,
 };
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use meerkat_core::error::ToolError;
 use meerkat_core::types::SessionId;
 use meerkat_core::types::{ToolCallView, ToolDef, ToolProvenance, ToolResult, ToolSourceKind};
@@ -52,6 +53,52 @@ struct ScheduleIdArgs {
     schedule_id: String,
 }
 
+/// Arguments of `meerkat_schedule_occurrences`. Only `schedule_id` is
+/// required; with nothing else set the tool returns every occurrence in full,
+/// exactly as before the bounded options existed.
+#[derive(Debug, Deserialize)]
+struct OccurrencesArgs {
+    schedule_id: String,
+    #[serde(default)]
+    occurrence_id: Option<String>,
+    #[serde(default)]
+    due_after_utc: Option<String>,
+    #[serde(default)]
+    due_before_utc: Option<String>,
+    #[serde(default)]
+    phase: Option<OccurrencePhase>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default)]
+    view: OccurrencesView,
+}
+
+impl OccurrencesArgs {
+    fn is_unbounded(&self) -> bool {
+        self.occurrence_id.is_none()
+            && self.due_after_utc.is_none()
+            && self.due_before_utc.is_none()
+            && self.phase.is_none()
+            && self.limit.is_none()
+            && self.cursor.is_none()
+            && self.view == OccurrencesView::Full
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum OccurrencesView {
+    #[default]
+    Full,
+    Summary,
+}
+
+/// The largest page `meerkat_schedule_occurrences` returns in one call.
+const MAX_OCCURRENCE_PAGE: usize = 500;
+const OCCURRENCE_CURSOR_PREFIX: &str = "occ1.";
+
 #[derive(Debug, Deserialize)]
 struct UpdateScheduleArgs {
     schedule_id: String,
@@ -92,7 +139,7 @@ pub fn schedule_tools_list() -> Vec<Value> {
         ),
         tool_descriptor(
             "meerkat_schedule_list",
-            "List all schedules in the active realm. Returns an array of schedule objects. Includes active, paused, and deleted schedules. Use this to discover existing schedules before creating duplicates.",
+            "List the schedules in the active realm. Returns an array of schedule objects for active and paused schedules; deleted schedules are not listed (their occurrence history stays readable with meerkat_schedule_occurrences). Use this to discover existing schedules before creating duplicates.",
             empty_schema(),
         ),
         tool_descriptor(
@@ -117,8 +164,21 @@ pub fn schedule_tools_list() -> Vec<Value> {
         ),
         tool_descriptor(
             "meerkat_schedule_occurrences",
-            "List all occurrences (planned and historical) for a schedule. Each occurrence has a phase: pending (not yet due), claimed (picked up by driver), dispatching (delivery in progress), awaiting_completion, completed, skipped, misfired, superseded, or delivery_failed. Use this to verify a schedule is firing correctly, diagnose misfires, or check delivery history.",
-            schedule_id_schema("The schedule_id whose occurrences should be listed."),
+            concat!(
+                "List occurrences (planned and historical) for a schedule. Each occurrence has a phase: ",
+                "pending (not yet due), claimed (picked up by driver), dispatching (delivery in progress), ",
+                "awaiting_completion, completed, skipped, misfired, superseded, or delivery_failed. Use this ",
+                "to verify a schedule is firing correctly, diagnose misfires, or check delivery history. ",
+                "With only schedule_id it returns every occurrence in full, which can be large for a ",
+                "long-running schedule. To read less: occurrence_id returns that one occurrence with all ",
+                "of its delivery receipts (not found if it belongs to another schedule); due_after_utc / ",
+                "due_before_utc (inclusive, RFC 3339 with any offset) and phase filter the rows; limit pages ",
+                "them in due order and the reply's page.next_cursor continues after the last row; ",
+                "view=summary drops the trigger, target action and machine state. A receipt with stage ",
+                "completed records that delivery finished, not the outcome of the work the target did; a ",
+                "missing or null materialized_session_id means the runtime session is unknown.",
+            ),
+            occurrences_schema(),
         ),
     ]
 }
@@ -691,10 +751,13 @@ pub(crate) async fn run_schedule_tools_call(
             Ok(encode(name, schedule)?)
         }
         "meerkat_schedule_occurrences" => {
-            let args: ScheduleIdArgs = parse_args(name, arguments)?;
+            let args: OccurrencesArgs = parse_args(name, arguments)?;
             let schedule_id = parse_schedule_id(&args.schedule_id)?;
-            let occurrences = service.list_occurrences(&schedule_id).await?;
-            Ok(encode_occurrences(occurrences)?)
+            if args.is_unbounded() {
+                let occurrences = service.list_occurrences(&schedule_id).await?;
+                return Ok(encode_occurrences(occurrences)?);
+            }
+            bounded_occurrences(service, &schedule_id, &args).await
         }
         other => Err(ScheduleToolError::invalid_arguments(format!(
             "unknown schedule tool: {other}"
@@ -729,6 +792,275 @@ fn encode_occurrences(occurrences: Vec<Occurrence>) -> Result<Value, ScheduleToo
         "meerkat_schedule_occurrences",
         json!({ "occurrences": occurrences }),
     )
+}
+
+/// `meerkat_schedule_occurrences` with any bounded option set. Phase and due
+/// bounds go to the store as an [`OccurrenceFilter`], which applies them in
+/// its query; the cursor and page cut are applied here on the store's
+/// `(due_at, schedule_revision, occurrence_ordinal)` order.
+async fn bounded_occurrences(
+    service: &ScheduleService,
+    schedule_id: &ScheduleId,
+    args: &OccurrencesArgs,
+) -> Result<Value, ScheduleToolFailure> {
+    if let Some(raw) = &args.occurrence_id {
+        if args.due_after_utc.is_some()
+            || args.due_before_utc.is_some()
+            || args.phase.is_some()
+            || args.limit.is_some()
+            || args.cursor.is_some()
+        {
+            return Err(ScheduleToolError::invalid_arguments(
+                "occurrence_id reads one occurrence; it cannot be combined with \
+                 due_after_utc, due_before_utc, phase, limit or cursor",
+            )
+            .into());
+        }
+        let occurrence_id = OccurrenceId::parse(raw).map_err(|error| {
+            ScheduleToolError::invalid_arguments(format!("invalid occurrence_id: {error}"))
+        })?;
+        let Some(occurrence) = service
+            .get_schedule_occurrence(schedule_id, &occurrence_id)
+            .await?
+        else {
+            return Err(ScheduleToolError {
+                code: NOT_FOUND,
+                message: "occurrence not found for this schedule".into(),
+                data: None,
+            }
+            .into());
+        };
+        let receipts = service.list_occurrence_receipts(&occurrence_id).await?;
+        let rendered = render_occurrence(&occurrence, args.view)?;
+        return Ok(encode(
+            "meerkat_schedule_occurrences",
+            json!({ "occurrences": [rendered], "receipts": receipts }),
+        )?);
+    }
+
+    let due_after = parse_due_bound("due_after_utc", args.due_after_utc.as_deref())?;
+    let due_before = parse_due_bound("due_before_utc", args.due_before_utc.as_deref())?;
+    if let (Some(after), Some(before)) = (due_after, due_before)
+        && after > before
+    {
+        return Err(ScheduleToolError::invalid_arguments(
+            "due_after_utc must not be later than due_before_utc",
+        )
+        .into());
+    }
+    let limit = match args.limit {
+        Some(0) => {
+            return Err(ScheduleToolError::invalid_arguments("limit must be at least 1").into());
+        }
+        Some(limit) if limit > MAX_OCCURRENCE_PAGE => {
+            return Err(ScheduleToolError::invalid_arguments(format!(
+                "limit must be at most {MAX_OCCURRENCE_PAGE}"
+            ))
+            .into());
+        }
+        other => other,
+    };
+    let after_key = match args.cursor.as_deref() {
+        Some(_) if limit.is_none() => {
+            return Err(ScheduleToolError::invalid_arguments("cursor requires limit").into());
+        }
+        Some(raw) => Some(OccurrencePageKey::decode(raw)?),
+        None => None,
+    };
+
+    // A cursor narrows the store read to rows due at or after its row; rows at
+    // that same instant up to and including the cursor row are dropped below,
+    // so the store must not cut the page before that happens.
+    let cursor_due = after_key
+        .as_ref()
+        .and_then(|key| DateTime::<Utc>::from_timestamp_millis(key.due_at_ms));
+    let store_due_after = match (due_after, cursor_due) {
+        (Some(after), Some(cursor)) => Some(after.max(cursor)),
+        (after, cursor) => after.or(cursor),
+    };
+    let store_limit = match (limit, &after_key) {
+        (Some(limit), None) => Some(limit + 1),
+        _ => None,
+    };
+    let mut rows = service
+        .list_occurrences_matching(
+            schedule_id,
+            OccurrenceFilter {
+                schedule_id: None,
+                phase: args.phase,
+                include_terminal: true,
+                due_after_utc: store_due_after,
+                due_before_utc: due_before,
+                limit: store_limit,
+            },
+        )
+        .await?;
+    rows.sort_by_key(OccurrencePageKey::of);
+    if let Some(after) = &after_key {
+        rows.retain(|occurrence| OccurrencePageKey::of(occurrence) > *after);
+    }
+
+    let mut page = None;
+    if let Some(limit) = limit {
+        let has_more = rows.len() > limit;
+        rows.truncate(limit);
+        let next_cursor = if has_more {
+            rows.last().map(|last| OccurrencePageKey::of(last).encode())
+        } else {
+            None
+        };
+        page = Some(json!({
+            "returned": rows.len(),
+            "has_more": has_more,
+            "next_cursor": next_cursor,
+        }));
+    }
+    let rendered = rows
+        .iter()
+        .map(|occurrence| render_occurrence(occurrence, args.view))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut reply = json!({ "occurrences": rendered });
+    if let (Some(page), Some(object)) = (page, reply.as_object_mut()) {
+        object.insert("page".into(), page);
+    }
+    Ok(reply)
+}
+
+fn parse_due_bound(
+    field: &str,
+    raw: Option<&str>,
+) -> Result<Option<DateTime<Utc>>, ScheduleToolError> {
+    raw.map(|value| {
+        DateTime::parse_from_rfc3339(value)
+            .map(|parsed| parsed.with_timezone(&Utc))
+            .map_err(|error| {
+                ScheduleToolError::invalid_arguments(format!(
+                    "{field} must be an RFC 3339 timestamp: {error}"
+                ))
+            })
+    })
+    .transpose()
+}
+
+/// The order the store lists one schedule's occurrences in, and the position
+/// a page cursor names. A revision bump re-plans with new ordinals, so
+/// `(due_at, revision, ordinal)` stays a strict, stable order across it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct OccurrencePageKey {
+    due_at_ms: i64,
+    schedule_revision: u64,
+    occurrence_ordinal: u64,
+}
+
+impl OccurrencePageKey {
+    fn of(occurrence: &Occurrence) -> Self {
+        Self {
+            due_at_ms: occurrence.due_at_utc.timestamp_millis(),
+            schedule_revision: occurrence.schedule_revision.0,
+            occurrence_ordinal: occurrence.occurrence_ordinal.0,
+        }
+    }
+
+    fn encode(&self) -> String {
+        format!(
+            "{OCCURRENCE_CURSOR_PREFIX}{}.{}.{}",
+            self.due_at_ms, self.schedule_revision, self.occurrence_ordinal
+        )
+    }
+
+    fn decode(raw: &str) -> Result<Self, ScheduleToolError> {
+        let invalid = || ScheduleToolError::invalid_arguments("invalid cursor");
+        let body = raw
+            .strip_prefix(OCCURRENCE_CURSOR_PREFIX)
+            .ok_or_else(invalid)?;
+        let mut parts = body.split('.');
+        let (Some(due), Some(revision), Some(ordinal), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return Err(invalid());
+        };
+        Ok(Self {
+            due_at_ms: due.parse().map_err(|_| invalid())?,
+            schedule_revision: revision.parse().map_err(|_| invalid())?,
+            occurrence_ordinal: ordinal.parse().map_err(|_| invalid())?,
+        })
+    }
+}
+
+fn render_occurrence(
+    occurrence: &Occurrence,
+    view: OccurrencesView,
+) -> Result<Value, ScheduleToolError> {
+    match view {
+        OccurrencesView::Full => encode("meerkat_schedule_occurrences", occurrence),
+        OccurrencesView::Summary => occurrence_summary(occurrence),
+    }
+}
+
+/// A compact occurrence: identity, timing, delivery state and the target's
+/// kind, without the trigger, the target's action payload or machine state.
+fn occurrence_summary(occurrence: &Occurrence) -> Result<Value, ScheduleToolError> {
+    let target = encode("meerkat_schedule_occurrences", &occurrence.target_snapshot)?;
+    let target_kind: Map<String, Value> = target
+        .as_object()
+        .map(|object| {
+            object
+                .iter()
+                .filter(|(_, value)| value.is_string())
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let (due_at_local, timezone) =
+        local_due_at(&occurrence.trigger_snapshot, occurrence.due_at_utc).unzip();
+    let last_receipt = occurrence.last_receipt.as_ref().map(|receipt| {
+        json!({
+            "receipt_id": receipt.receipt_id,
+            "occurrence_id": receipt.occurrence_id,
+            "attempt": receipt.attempt,
+            "stage": receipt.stage,
+            "recorded_at_utc": receipt.recorded_at_utc,
+            "materialized_session_id": receipt.materialized_session_id,
+        })
+    });
+    encode(
+        "meerkat_schedule_occurrences",
+        json!({
+            "occurrence_id": occurrence.occurrence_id,
+            "schedule_id": occurrence.schedule_id,
+            "schedule_revision": occurrence.schedule_revision,
+            "occurrence_ordinal": occurrence.occurrence_ordinal,
+            "phase": occurrence.phase,
+            "due_at_utc": occurrence.due_at_utc,
+            "due_at_local": due_at_local,
+            "timezone": timezone,
+            "attempt_count": occurrence.attempt_count,
+            "created_at_utc": occurrence.created_at_utc,
+            "claimed_at_utc": occurrence.claimed_at_utc,
+            "dispatched_at_utc": occurrence.dispatched_at_utc,
+            "completed_at_utc": occurrence.completed_at_utc,
+            "superseded_by_revision": occurrence.superseded_by_revision,
+            "last_receipt": last_receipt,
+            "runtime_outcome": occurrence.runtime_outcome,
+            "failure_class": occurrence.failure_class,
+            "failure_detail": occurrence.failure_detail,
+            "target": target_kind,
+        }),
+    )
+}
+
+/// The wall-clock time a calendar trigger meant for `due_at_utc`, in the
+/// trigger's own timezone, with that timezone's name. Other triggers are
+/// defined in UTC and have no local time.
+fn local_due_at(trigger: &TriggerSpec, due_at_utc: DateTime<Utc>) -> Option<(String, String)> {
+    let TriggerSpec::Calendar(calendar) = trigger else {
+        return None;
+    };
+    let timezone = calendar.timezone.parse::<chrono_tz::Tz>().ok()?;
+    Some((
+        due_at_utc.with_timezone(&timezone).to_rfc3339(),
+        calendar.timezone.clone(),
+    ))
 }
 
 fn map_schedule_error(error: ScheduleDomainError) -> ScheduleToolError {
@@ -909,6 +1241,53 @@ fn empty_schema() -> Value {
     json!({
         "type": "object",
         "properties": {},
+        "additionalProperties": false,
+    })
+}
+
+fn occurrences_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "schedule_id": {
+                "type": "string",
+                "description": "The schedule_id whose occurrences should be listed.",
+            },
+            "occurrence_id": {
+                "type": "string",
+                "description": "Read only this occurrence, with all of its delivery receipts. Not found when it belongs to a different schedule. Cannot be combined with the filters or paging.",
+            },
+            "due_after_utc": {
+                "type": "string",
+                "description": "Only occurrences due at or after this instant (RFC 3339, any offset; e.g. 2026-03-29T00:00:00+01:00).",
+            },
+            "due_before_utc": {
+                "type": "string",
+                "description": "Only occurrences due at or before this instant (RFC 3339, any offset). Inclusive: to cover one local day, pass its last second.",
+            },
+            "phase": {
+                "type": "string",
+                "enum": [
+                    "pending", "claimed", "dispatching", "awaiting_completion", "completed",
+                    "skipped", "misfired", "superseded", "delivery_failed"
+                ],
+                "description": "Only occurrences in this phase.",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Return at most this many occurrences (1 to 500) in due order. The reply then carries page.returned (rows in this page), page.has_more and page.next_cursor.",
+            },
+            "cursor": {
+                "type": "string",
+                "description": "page.next_cursor from the previous reply, to continue after its last row. Requires limit; pass the same filters again.",
+            },
+            "view": {
+                "type": "string",
+                "enum": ["full", "summary"],
+                "description": "full (default) returns whole occurrence objects; summary returns ids, phase, due time in UTC and in the trigger's timezone, attempts, the last receipt, the runtime outcome and the target's kind, without the trigger, the target action or machine state.",
+            },
+        },
+        "required": ["schedule_id"],
         "additionalProperties": false,
     })
 }
@@ -2643,5 +3022,539 @@ mod tests {
             persisted, creator,
             "the stored schedule must carry the creator's policy"
         );
+    }
+
+    // --- bounded occurrence reads -------------------------------------------
+
+    fn interval_trigger(every_seconds: u64) -> TriggerSpec {
+        TriggerSpec::Interval(IntervalTriggerSpec {
+            start_at_utc: Utc::now() + Duration::minutes(1),
+            every_seconds,
+            end_at_utc: None,
+        })
+    }
+
+    fn bounded_read_request(trigger: TriggerSpec, occurrences: u32) -> CreateScheduleRequest {
+        CreateScheduleRequest {
+            trigger,
+            planning_horizon_days: Some(2),
+            planning_horizon_occurrences: Some(occurrences),
+            ..schedule_request()
+        }
+    }
+
+    async fn create_for_bounded_reads(
+        service: &ScheduleService,
+        occurrences: u32,
+    ) -> Result<String, String> {
+        let schedule = service
+            .create(bounded_read_request(interval_trigger(60), occurrences))
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(schedule.schedule_id.to_string())
+    }
+
+    async fn read_occurrences(
+        service: &ScheduleService,
+        args: Value,
+    ) -> Result<Value, ScheduleToolError> {
+        handle_schedule_tools_call(service, "meerkat_schedule_occurrences", &args).await
+    }
+
+    fn rows_of(reply: &Value) -> Result<Vec<Value>, String> {
+        reply["occurrences"]
+            .as_array()
+            .cloned()
+            .ok_or_else(|| format!("reply has no occurrences array: {reply}"))
+    }
+
+    fn ids_of(rows: &[Value]) -> Vec<String> {
+        rows.iter()
+            .filter_map(|row| row["occurrence_id"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    fn utc(text: &str) -> Result<DateTime<Utc>, String> {
+        DateTime::parse_from_rfc3339(text)
+            .map(|parsed| parsed.with_timezone(&Utc))
+            .map_err(|error| format!("{text}: {error}"))
+    }
+
+    fn row_key(row: &Value) -> Result<OccurrencePageKey, String> {
+        let due = row["due_at_utc"]
+            .as_str()
+            .ok_or_else(|| format!("row has no due_at_utc: {row}"))?;
+        Ok(OccurrencePageKey {
+            due_at_ms: utc(due)?.timestamp_millis(),
+            schedule_revision: row["schedule_revision"]
+                .as_u64()
+                .ok_or_else(|| format!("row has no schedule_revision: {row}"))?,
+            occurrence_ordinal: row["occurrence_ordinal"]
+                .as_u64()
+                .ok_or_else(|| format!("row has no occurrence_ordinal: {row}"))?,
+        })
+    }
+
+    fn stockholm_morning_and_afternoon() -> TriggerSpec {
+        TriggerSpec::Calendar(crate::CalendarTriggerSpec {
+            timezone: "Europe/Stockholm".into(),
+            minute: crate::CalendarFieldSpec::Values(vec![15]),
+            hour: crate::CalendarFieldSpec::Values(vec![6, 16]),
+            day_of_month: crate::CalendarFieldSpec::Any,
+            month: crate::CalendarFieldSpec::Any,
+            day_of_week: crate::CalendarFieldSpec::Any,
+            year: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn occurrences_without_bounded_options_keep_the_full_unpaged_reply() -> Result<(), String>
+    {
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let schedule_id = create_for_bounded_reads(&service, 4).await?;
+
+        let reply = read_occurrences(&service, json!({ "schedule_id": schedule_id }))
+            .await
+            .map_err(|error| format!("{error:?}"))?;
+
+        let object = reply.as_object().ok_or("reply should be an object")?;
+        assert_eq!(
+            object.len(),
+            1,
+            "no page or receipts keys by default: {reply}"
+        );
+        let rows = rows_of(&reply)?;
+        assert_eq!(rows.len(), 4);
+        assert!(
+            rows.iter()
+                .all(|row| row.get("machine_state").is_some()
+                    && row.get("target_snapshot").is_some()),
+            "the default view stays the full occurrence object"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn summary_view_drops_the_payload_and_keeps_delivery_state() -> Result<(), String> {
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let schedule_id = create_for_bounded_reads(&service, 2).await?;
+
+        let reply = read_occurrences(
+            &service,
+            json!({ "schedule_id": schedule_id, "view": "summary" }),
+        )
+        .await
+        .map_err(|error| format!("{error:?}"))?;
+
+        assert!(reply.get("page").is_none(), "no limit, no page: {reply}");
+        let rows = rows_of(&reply)?;
+        assert_eq!(rows.len(), 2);
+        for row in &rows {
+            for dropped in ["machine_state", "trigger_snapshot", "target_snapshot"] {
+                assert!(row.get(dropped).is_none(), "summary keeps {dropped}: {row}");
+            }
+            assert_eq!(row["phase"], "pending");
+            assert!(
+                row["last_receipt"].is_null(),
+                "a pending occurrence has no receipt"
+            );
+            assert!(
+                row["due_at_local"].is_null(),
+                "an interval trigger has no local time"
+            );
+            assert_eq!(row["target"]["target_kind"], "session");
+            assert_eq!(row["target"]["type"], "exact_session");
+            assert!(
+                row["target"].get("action").is_none(),
+                "the action payload is dropped"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn calendar_occurrences_map_to_local_time_across_the_dst_change() -> Result<(), String> {
+        // Europe/Stockholm leaves summer time on 2026-10-25 at 03:00 local.
+        let trigger = stockholm_morning_and_afternoon();
+        let planned = crate::occurrences_for_horizon(
+            &trigger,
+            Some(utc("2026-10-24T12:00:00Z")?),
+            utc("2026-11-01T00:00:00Z")?,
+            64,
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(
+            planned.iter().take(4).copied().collect::<Vec<_>>(),
+            vec![
+                utc("2026-10-24T14:15:00Z")?,
+                utc("2026-10-25T05:15:00Z")?,
+                utc("2026-10-25T15:15:00Z")?,
+                utc("2026-10-26T05:15:00Z")?,
+            ],
+            "16:15 is 14:15Z in summer time and 15:15Z after the change"
+        );
+        assert!(planned.contains(&utc("2026-10-31T15:15:00Z")?));
+
+        let local = |at: DateTime<Utc>| local_due_at(&trigger, at);
+        assert_eq!(
+            local(utc("2026-10-24T14:15:00Z")?),
+            Some((
+                "2026-10-24T16:15:00+02:00".to_string(),
+                "Europe/Stockholm".to_string()
+            ))
+        );
+        assert_eq!(
+            local(utc("2026-10-25T05:15:00Z")?).map(|(at, _)| at),
+            Some("2026-10-25T06:15:00+01:00".to_string())
+        );
+        assert_eq!(
+            local(utc("2026-10-25T15:15:00Z")?).map(|(at, _)| at),
+            Some("2026-10-25T16:15:00+01:00".to_string())
+        );
+        assert_eq!(
+            local(utc("2026-10-31T15:15:00Z")?).map(|(at, _)| at),
+            Some("2026-10-31T16:15:00+01:00".to_string())
+        );
+        assert_eq!(
+            local_due_at(&interval_trigger(60), utc("2026-10-25T15:15:00Z")?),
+            None
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_local_day_range_selects_exactly_that_days_occurrences() -> Result<(), String> {
+        // The 25-hour local day 2026-10-25 in Europe/Stockholm, as a caller
+        // would pass it: first and last second, each with its own offset.
+        let after = parse_due_bound("due_after_utc", Some("2026-10-25T00:00:00+02:00"))
+            .map_err(|error| error.message)?
+            .ok_or("due_after_utc should parse")?;
+        let before = parse_due_bound("due_before_utc", Some("2026-10-25T23:59:59+01:00"))
+            .map_err(|error| error.message)?
+            .ok_or("due_before_utc should parse")?;
+        assert_eq!(after, utc("2026-10-24T22:00:00Z")?);
+        assert_eq!(before, utc("2026-10-25T22:59:59Z")?);
+
+        let planned = crate::occurrences_for_horizon(
+            &stockholm_morning_and_afternoon(),
+            Some(utc("2026-10-24T12:00:00Z")?),
+            utc("2026-11-01T00:00:00Z")?,
+            64,
+        )
+        .map_err(|error| error.to_string())?;
+        // The store's due bounds are inclusive on both ends.
+        let day: Vec<_> = planned
+            .into_iter()
+            .filter(|due| *due >= after && *due <= before)
+            .collect();
+        assert_eq!(
+            day,
+            vec![utc("2026-10-25T05:15:00Z")?, utc("2026-10-25T15:15:00Z")?],
+            "the day before (14:15Z) and the next week (10-31) stay out"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn due_bounds_are_inclusive_and_accept_any_offset() -> Result<(), String> {
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let schedule_id = create_for_bounded_reads(&service, 6).await?;
+        let all = rows_of(
+            &read_occurrences(
+                &service,
+                json!({ "schedule_id": schedule_id, "view": "summary" }),
+            )
+            .await
+            .map_err(|error| format!("{error:?}"))?,
+        )?;
+        let second = all.get(1).ok_or("expected six planned occurrences")?;
+        let third = all.get(2).ok_or("expected six planned occurrences")?;
+        let plus_one = chrono::FixedOffset::east_opt(3600).ok_or("offset")?;
+        let bound = |row: &Value| -> Result<String, String> {
+            let due = row["due_at_utc"].as_str().ok_or("due_at_utc")?;
+            Ok(utc(due)?.with_timezone(&plus_one).to_rfc3339())
+        };
+
+        let reply = read_occurrences(
+            &service,
+            json!({
+                "schedule_id": schedule_id,
+                "view": "summary",
+                "due_after_utc": bound(second)?,
+                "due_before_utc": bound(third)?,
+            }),
+        )
+        .await
+        .map_err(|error| format!("{error:?}"))?;
+
+        assert_eq!(
+            ids_of(&rows_of(&reply)?),
+            ids_of(&[second.clone(), third.clone()]),
+            "both bounds are inclusive and their offset is honored"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_exact_occurrence_read_never_crosses_schedules() -> Result<(), String> {
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let mine = create_for_bounded_reads(&service, 2).await?;
+        let other = create_for_bounded_reads(&service, 2).await?;
+        let my_rows = rows_of(
+            &read_occurrences(&service, json!({ "schedule_id": mine }))
+                .await
+                .map_err(|error| format!("{error:?}"))?,
+        )?;
+        let occurrence_id = ids_of(&my_rows)
+            .into_iter()
+            .next()
+            .ok_or("expected a planned occurrence")?;
+
+        let exact = read_occurrences(
+            &service,
+            json!({ "schedule_id": mine, "occurrence_id": occurrence_id, "view": "summary" }),
+        )
+        .await
+        .map_err(|error| format!("{error:?}"))?;
+        assert_eq!(ids_of(&rows_of(&exact)?), vec![occurrence_id.clone()]);
+        let receipts = exact["receipts"]
+            .as_array()
+            .ok_or("an exact read carries the receipts array")?;
+        assert!(
+            receipts
+                .iter()
+                .all(|receipt| receipt["occurrence_id"] == occurrence_id.as_str()),
+            "only this occurrence's receipts"
+        );
+
+        // The same id under another schedule is not found, exactly like an
+        // id that exists nowhere.
+        for (schedule_id, candidate) in [
+            (other, occurrence_id.clone()),
+            (mine.clone(), crate::OccurrenceId::new().to_string()),
+        ] {
+            match read_occurrences(
+                &service,
+                json!({ "schedule_id": schedule_id, "occurrence_id": candidate }),
+            )
+            .await
+            {
+                Err(error) => assert_eq!(error.code, NOT_FOUND, "{error:?}"),
+                Ok(reply) => return Err(format!("expected not found, got {reply}")),
+            }
+        }
+
+        match read_occurrences(
+            &service,
+            json!({ "schedule_id": mine, "occurrence_id": occurrence_id, "limit": 1 }),
+        )
+        .await
+        {
+            Err(error) => assert_eq!(error.code, INVALID_ARGUMENTS, "{error:?}"),
+            Ok(reply) => return Err(format!("occurrence_id with limit was accepted: {reply}")),
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pages_cover_every_row_once_in_due_order() -> Result<(), String> {
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let schedule_id = create_for_bounded_reads(&service, 6).await?;
+        let everything = ids_of(&rows_of(
+            &read_occurrences(&service, json!({ "schedule_id": schedule_id }))
+                .await
+                .map_err(|error| format!("{error:?}"))?,
+        )?);
+        assert_eq!(everything.len(), 6);
+
+        let mut seen = Vec::new();
+        let mut pages = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..10 {
+            let mut args = json!({ "schedule_id": schedule_id, "limit": 4, "view": "summary" });
+            if let Some(cursor) = &cursor {
+                args["cursor"] = json!(cursor);
+            }
+            let reply = read_occurrences(&service, args)
+                .await
+                .map_err(|error| format!("{error:?}"))?;
+            let rows = rows_of(&reply)?;
+            let page = &reply["page"];
+            assert_eq!(page["returned"].as_u64(), Some(rows.len() as u64));
+            let has_more = page["has_more"].as_bool().ok_or("page.has_more")?;
+            pages.push((rows.len(), has_more));
+            seen.extend(ids_of(&rows));
+            if !has_more {
+                assert!(page["next_cursor"].is_null(), "the last page has no cursor");
+                break;
+            }
+            cursor = Some(
+                page["next_cursor"]
+                    .as_str()
+                    .ok_or("has_more without next_cursor")?
+                    .to_string(),
+            );
+        }
+        assert_eq!(pages, vec![(4, true), (2, false)]);
+        assert_eq!(seen, everything, "every row exactly once, in due order");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_revision_supersede_between_pages_neither_repeats_nor_reorders() -> Result<(), String>
+    {
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let schedule_id = create_for_bounded_reads(&service, 6).await?;
+        let first = read_occurrences(
+            &service,
+            json!({ "schedule_id": schedule_id, "limit": 2, "view": "summary" }),
+        )
+        .await
+        .map_err(|error| format!("{error:?}"))?;
+        let first_rows = rows_of(&first)?;
+        let first_ids = ids_of(&first_rows);
+        let boundary = row_key(first_rows.last().ok_or("first page is empty")?)?;
+        let cursor = first["page"]["next_cursor"]
+            .as_str()
+            .ok_or("first page should continue")?
+            .to_string();
+
+        // Re-plan between the pages: the revision bumps and the old pending
+        // rows are superseded by new ones.
+        let parsed_id = parse_schedule_id(&schedule_id).map_err(|error| error.message)?;
+        service
+            .update(
+                &parsed_id,
+                UpdateScheduleRequest {
+                    trigger: Some(interval_trigger(120)),
+                    ..UpdateScheduleRequest::default()
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+
+        let second = read_occurrences(
+            &service,
+            json!({
+                "schedule_id": schedule_id,
+                "limit": 50,
+                "cursor": cursor,
+                "view": "summary",
+            }),
+        )
+        .await
+        .map_err(|error| format!("{error:?}"))?;
+        let second_rows = rows_of(&second)?;
+        let mut previous = boundary;
+        for row in &second_rows {
+            let id = row["occurrence_id"].as_str().ok_or("occurrence_id")?;
+            assert!(
+                !first_ids.iter().any(|seen| seen == id),
+                "row {id} repeated after the cursor"
+            );
+            let key = row_key(row)?;
+            assert!(
+                key > previous,
+                "rows after the cursor stay in key order: {row}"
+            );
+            previous = key;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn page_cursor_round_trips_and_orders_by_due_revision_ordinal() {
+        let key = OccurrencePageKey {
+            due_at_ms: 1_792_941_300_000,
+            schedule_revision: 3,
+            occurrence_ordinal: 78,
+        };
+        assert_eq!(OccurrencePageKey::decode(&key.encode()).ok(), Some(key));
+        let superseding = OccurrencePageKey {
+            schedule_revision: 4,
+            occurrence_ordinal: 79,
+            ..key
+        };
+        assert!(
+            superseding > key,
+            "a later revision at the same instant sorts after"
+        );
+        let later = OccurrencePageKey {
+            due_at_ms: key.due_at_ms + 1,
+            schedule_revision: 1,
+            occurrence_ordinal: 1,
+        };
+        assert!(later > superseding, "due time decides first");
+        for bad in [
+            "",
+            "occ1.",
+            "occ1.1.2",
+            "occ1.1.2.3.4",
+            "occ1.a.2.3",
+            "x.1.2.3",
+        ] {
+            assert!(OccurrencePageKey::decode(bad).is_err(), "{bad:?} decoded");
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_bounded_options_are_refused() -> Result<(), String> {
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let schedule_id = create_for_bounded_reads(&service, 2).await?;
+        let cases = [
+            json!({ "limit": 0 }),
+            json!({ "limit": MAX_OCCURRENCE_PAGE + 1 }),
+            json!({ "cursor": "occ1.1.1.1" }),
+            json!({ "limit": 2, "cursor": "not-a-cursor" }),
+            json!({ "due_after_utc": "yesterday" }),
+            json!({
+                "due_after_utc": "2026-10-26T00:00:00Z",
+                "due_before_utc": "2026-10-25T00:00:00Z",
+            }),
+            json!({ "occurrence_id": "not-a-uuid" }),
+            json!({ "view": "everything" }),
+        ];
+        for mut case in cases {
+            case["schedule_id"] = json!(schedule_id);
+            match read_occurrences(&service, case.clone()).await {
+                Err(error) => assert_eq!(error.code, INVALID_ARGUMENTS, "{case}: {error:?}"),
+                Ok(reply) => return Err(format!("{case} was accepted: {reply}")),
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn schedule_list_describes_and_omits_deleted_schedules() -> Result<(), String> {
+        let list_tool = schedule_tools_list()
+            .into_iter()
+            .find(|tool| tool["name"] == "meerkat_schedule_list")
+            .ok_or("list tool")?;
+        let description = list_tool["description"].as_str().ok_or("description")?;
+        assert!(description.contains("deleted schedules are not listed"));
+
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let kept = create_for_bounded_reads(&service, 1).await?;
+        let deleted = create_for_bounded_reads(&service, 1).await?;
+        handle_schedule_tools_call(
+            &service,
+            "meerkat_schedule_delete",
+            &json!({ "schedule_id": deleted }),
+        )
+        .await
+        .map_err(|error| format!("{error:?}"))?;
+
+        let listed = handle_schedule_tools_call(&service, "meerkat_schedule_list", &json!({}))
+            .await
+            .map_err(|error| format!("{error:?}"))?;
+        let ids: Vec<&str> = listed["schedules"]
+            .as_array()
+            .ok_or("schedules array")?
+            .iter()
+            .filter_map(|schedule| schedule["schedule_id"].as_str())
+            .collect();
+        assert!(ids.contains(&kept.as_str()));
+        assert!(!ids.contains(&deleted.as_str()));
+        Ok(())
     }
 }

@@ -35,6 +35,27 @@ them.
 
 ## [Unreleased]
 
+### Added
+
+- `meerkat-schedule`: `meerkat_schedule_occurrences` takes optional bounded
+  read arguments: `occurrence_id` (one occurrence with all of its delivery
+  receipts, not found when it belongs to another schedule), inclusive
+  `due_after_utc` / `due_before_utc` (RFC 3339, any offset), `phase`, `limit`
+  (1 to 500) with a `page` object (`returned`, `has_more`, `next_cursor`), a
+  `cursor` over `(due_at, schedule_revision, occurrence_ordinal)`, and
+  `view: "summary"`, which drops the trigger, the target action and machine
+  state and adds the due time in a calendar trigger's own timezone. Phase and
+  due bounds run in the store query. A call with only `schedule_id` returns
+  exactly what it returned before. `ScheduleService` gains
+  `list_occurrences_matching`, `get_schedule_occurrence` and
+  `list_occurrence_receipts`.
+
+### Fixed
+
+- `meerkat-schedule`: the `meerkat_schedule_list` description said deleted
+  schedules are included; the tool lists active and paused schedules only, and
+  the description now says so.
+
 ## [0.9.5] - 2026-10-23
 
 ### Breaking

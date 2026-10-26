@@ -10,8 +10,8 @@ use crate::store::{
 };
 use crate::trigger::{next_due_after, occurrences_for_horizon};
 use crate::types::{
-    CreateScheduleRequest, Occurrence, OccurrencePhase, Schedule, ScheduleId, SchedulePhase,
-    TargetBinding, UpdateScheduleRequest,
+    CreateScheduleRequest, DeliveryReceipt, Occurrence, OccurrenceId, OccurrencePhase, Schedule,
+    ScheduleId, SchedulePhase, TargetBinding, UpdateScheduleRequest,
 };
 use chrono::{Duration, Utc};
 use meerkat_core::SessionId;
@@ -556,6 +556,46 @@ impl ScheduleService {
                 include_terminal,
                 ..OccurrenceFilter::default()
             })
+            .await
+            .map_err(Into::into)
+    }
+
+    /// List one schedule's occurrences under an explicit store filter (phase,
+    /// inclusive due bounds, limit). The filter's `schedule_id` is always
+    /// replaced by `schedule_id`, so a caller cannot widen the read to other
+    /// schedules.
+    pub async fn list_occurrences_matching(
+        &self,
+        schedule_id: &ScheduleId,
+        filter: OccurrenceFilter,
+    ) -> Result<Vec<Occurrence>, ScheduleDomainError> {
+        self.store
+            .list_occurrences(OccurrenceFilter {
+                schedule_id: Some(schedule_id.clone()),
+                ..filter
+            })
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Read one occurrence of `schedule_id`. An occurrence that belongs to a
+    /// different schedule reads as absent, exactly like an unknown id.
+    pub async fn get_schedule_occurrence(
+        &self,
+        schedule_id: &ScheduleId,
+        occurrence_id: &OccurrenceId,
+    ) -> Result<Option<Occurrence>, ScheduleDomainError> {
+        let occurrence = self.store.get_occurrence(occurrence_id).await?;
+        Ok(occurrence.filter(|occurrence| &occurrence.schedule_id == schedule_id))
+    }
+
+    /// The delivery receipts recorded for one occurrence, oldest first.
+    pub async fn list_occurrence_receipts(
+        &self,
+        occurrence_id: &OccurrenceId,
+    ) -> Result<Vec<DeliveryReceipt>, ScheduleDomainError> {
+        self.store
+            .list_receipts(occurrence_id)
             .await
             .map_err(Into::into)
     }

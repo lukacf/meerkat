@@ -28,6 +28,11 @@ calendar. Schedules own time and delivery. They do not own live work state.
   for bounded catch-up, concurrency, or different missing-target behavior.
 - Inspect with `meerkat_schedule_get`, `meerkat_schedule_list`, and
   `meerkat_schedule_occurrences` before creating duplicates.
+- A long-running schedule has a long occurrence history. To check one
+  occurrence, pass its `occurrence_id`; to check a window, pass
+  `due_after_utc` / `due_before_utc` (inclusive), and add `limit` with
+  `view: "summary"` to page through it. Match receipts to occurrences by
+  `occurrence_id`, never by time of day.
 - Pause for temporary suspension, resume to reactivate, update to change future
   behavior, and delete only when the schedule should stop permanently. Delete
   is irreversible, but historical occurrences remain queryable.

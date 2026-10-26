@@ -44,6 +44,7 @@ from .owned_console import (browser_console_url, console_response, resolve_owner
 from .forge_application_host import ForgeApplicationHost, application_setup_binding
 from .local_application_registry import LocalApplicationRegistry
 from .deployment import DeploymentService
+from .deployment_records import original_deployment_record
 from .installed_feedback import InstalledFeedbackNotAdmitted, InstalledSuccessNotAdmitted
 from .remote_deployment import RemoteDeploymentService, RemoteProductActionNotSent
 from .gcp_preflight import GcpPreflightService
@@ -1394,6 +1395,12 @@ async def gcp_deployment_status(identity: str, operation_id: str | None = None):
     return await guide_result(gcp_provisioning.status(identity, operation_id))
 
 
+@app.get("/api/guide/{identity}/gcp-deployment/record")
+async def original_gcp_deployment_record(identity: str, operation_id: str):
+    return await guide_result(original_deployment_record("gcp-deployment", gcp_provisioning, identity, operation_id),
+        failure_detail="The original cloud receipt could not be read. Its state remains unknown.")
+
+
 @app.post("/api/guide/{identity}/gcp-deployment/create", status_code=202)
 async def create_gcp_deployment(identity: str, value: GcpCreateRequest):
     return await guide_result(gcp_provisioning.create(identity, value.version, value.build_id, value.account, value.project, value.request_id))
@@ -1424,6 +1431,12 @@ async def connect_gcp_deployment(identity: str, value: GcpConnectRequest):
 @app.get("/api/guide/{identity}/remote-deployment")
 async def remote_deployment_status(identity: str, force: bool = False):
     return await guide_result(remote_deployment.status(identity, force=force))
+
+
+@app.get("/api/guide/{identity}/remote-deployment/record")
+async def original_remote_deployment_record(identity: str, deployment_id: str):
+    return await guide_result(original_deployment_record("remote-deployment", remote_deployment, identity, deployment_id),
+        failure_detail="The original remote receipt could not be read. Its state remains unknown.")
 
 
 @app.post("/api/guide/{identity}/remote-deployment/connect", status_code=202)
@@ -1553,6 +1566,12 @@ async def application_setup_status(identity: str, deployment_id: str):
 @app.get("/api/guide/{identity}/deployment")
 async def deployment_status(identity: str):
     return await guide_result(deployment.status(identity))
+
+
+@app.get("/api/guide/{identity}/deployment/record")
+async def original_local_deployment_record(identity: str, deployment_id: str):
+    return await guide_result(original_deployment_record("deployment", deployment, identity, deployment_id),
+        failure_detail="The original deployment receipt could not be read. Its state remains unknown.")
 
 
 @app.get("/api/guide/{identity}/deployment/experiences")

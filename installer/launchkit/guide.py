@@ -359,6 +359,13 @@ Slack interaction separately from reading history or posting through outbound to
 These rows retain desired scope, not native tool names, executable probes, credentials,
 grants or check results. Changing their capability or linked feature needs later
 user evidence; keep native artifact and tool selection outside this intent.
+For each incoming_data source, record service_requirement_ids with the exact IDs
+of every required operation for that source, within its linked requested feature.
+Use the read operations for a polled repository source; do not invent an incoming
+conversation operation to associate it. Keep different sources distinct even when
+they support the same feature. These links only describe the plan: they do not
+verify the source binding, its resources, receipt freshness or initial history.
+An empty or omitted association means its required operations still need selection.
 Do not omit a required service to offer Build or relabel it optional without the
 user's decision in the linked feature. Existing briefs without these rows have
 not thereby established that no service is needed. Refresh the inventory for the

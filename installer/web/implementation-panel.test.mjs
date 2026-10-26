@@ -207,6 +207,29 @@ for (const existingBuild of [false, true]) test(`required service checks block $
   } });
 });
 
+test("planned source operations stay distinct from verified access and do not enable Build", async () => {
+  await pendingBuilderFeedback(false, document => {
+    const warning = document.querySelector(".implementation-warning");
+    assert.match(warning.textContent, /2 planned operations; source setup still needs checking/);
+    assert.match(warning.textContent, /connection and access to each resource still need verification/);
+    assert.match(warning.textContent, /Repository A/);
+    assert.match(warning.textContent, /Repository B/);
+    assert.match(warning.textContent, /Slack questions.*required operations still need selection/);
+    assert.equal(warning.querySelector("details").open, false);
+    assert.equal(warning.querySelectorAll("button").length, 0);
+  }, { blocked: true, servicePreparation: { status: "unavailable", detail: "Protected setup is unavailable.",
+    required_operations: [
+      { id: "incoming:repositories", service: "Repositories", operation: "Poll changes", resource: "Two repositories",
+        capability: "unresolved", reason_code: "source_binding_not_verified", planned_operations: [
+          { id: "read-a", service: "GHE", operation: "Read changes", resource: "Repository A" },
+          { id: "read-b", service: "GHE", operation: "Read changes", resource: "Repository B" },
+        ] },
+      { id: "incoming:slack", service: "Slack questions", operation: "Receive questions", resource: "My channel",
+        capability: "unresolved", reason_code: "source_operation_not_selected", planned_operations: [] },
+    ],
+  } });
+});
+
 test("retained builder activity shows the current checking and review phase, then removes it when the receipt ends", async () => {
   const require = createRequire(import.meta.url);
   const { JSDOM } = createRequire(new URL("../../console/package.json", import.meta.url))("jsdom");

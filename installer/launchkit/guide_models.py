@@ -122,6 +122,15 @@ class IncomingDataIntent(StrictModel):
     history_window: str = Field(default="", max_length=500)
     routes: list[IncomingDataRoute] = Field(default_factory=list, max_length=64)
     source_message_ids: list[str] = Field(min_length=1, max_length=40)
+    service_requirement_ids: list[str] = Field(default_factory=list, max_length=64,
+        description="Exact IDs of the service operations this source needs. These are plan associations, not native bindings, successful checks or permission to collect.")
+
+    @model_serializer(mode="wrap")
+    def omit_unselected_service_operations(self, handler):
+        data = handler(self)
+        if not self.service_requirement_ids:
+            data.pop("service_requirement_ids", None)
+        return data
 
     @model_validator(mode="after")
     def coherent_intent(self):
@@ -134,6 +143,8 @@ class IncomingDataIntent(StrictModel):
             raise ValueError("A history window belongs only to a bounded-history choice.")
         if len(self.source_message_ids) != len(set(self.source_message_ids)):
             raise ValueError("Incoming data evidence IDs must be distinct.")
+        if len(self.service_requirement_ids) != len(set(self.service_requirement_ids)):
+            raise ValueError("A source's required service operation IDs must be distinct.")
         return self
 
 
@@ -187,6 +198,13 @@ class DesignBrief(StrictModel):
             raise ValueError("Give each required service operation its own ID.")
         if any(item.requirement_id not in requirements for item in (self.service_requirements or [])):
             raise ValueError("Link each service operation to an existing requested feature.")
+        services = {item.id: item for item in (self.service_requirements or [])}
+        for source in self.incoming_data:
+            if any(identity not in services for identity in source.service_requirement_ids):
+                raise ValueError("Link a source only to existing required service operations.")
+            if any(services[identity].requirement_id != source.requirement_id
+                   for identity in source.service_requirement_ids):
+                raise ValueError("A source and its required service operations must belong to the same requested feature.")
         return self
 
 

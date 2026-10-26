@@ -882,6 +882,29 @@ async def respond_guide(identity: str, value: GuideResponse):
     return JSONResponse({**state, "input_surface": guide.input_surface()}, status_code=202 if pending else 200)
 
 
+@app.get("/api/guide/{identity}/commands/{command_id}")
+async def read_guide_command(identity: str, command_id: str = ApiPath(pattern=r"^[0-9a-f]{64}$")):
+    from .guide_commands import command_response
+    return await guide_result(asyncio.to_thread(command_response, guide.store, command_id, identity))
+
+
+class GuideCommandRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    version: int = Field(ge=1, strict=True)
+    text: str = Field(min_length=1, max_length=6000, strict=True)
+
+
+@app.post("/api/guide/{identity}/commands/{command_id}")
+async def submit_guide_command(identity: str, value: GuideCommandRequest,
+                               command_id: str = ApiPath(pattern=r"^[0-9a-f]{64}$")):
+    # The existing authenticated workspace host owns access and channel binding.
+    # This route accepts no workspace, native principal or runtime override.
+    request = GuideResponse(version=value.version, action="chat", text=value.text)
+    state, pending = await guide_result(guide_operations.submit(guide, identity, request, command_id=command_id))
+    return JSONResponse(state, status_code=202 if pending else 200,
+                        headers={"Cache-Control": "private, no-store"})
+
+
 @app.post("/api/guide/{identity}/apply")
 async def apply_guide(identity: str, value: GuideApply):
     return await guide_result(guide.apply(identity, value.version))
@@ -1698,6 +1721,8 @@ async def implementation_status(identity: str):
 @app.api_route("/api/owned-console/guide/{generation}/{path:path}", methods=["GET", "HEAD", "POST"])
 async def owned_guide_console(generation: str, path: str, request: Request):
     owner = resolve_guide_owner(architect, generation)
+    if request.method == "POST" and pending_guide_command():
+        raise HTTPException(409, "Recover the original guide command before sending Console actions.")
     return await console_response(request, owner, path)
 
 
@@ -1876,9 +1901,14 @@ async def architect_status():
         return architect.status()
 
 
+def pending_guide_command():
+    from .guide_commands import pending_command
+    return pending_command(guide.store) is not None
+
+
 def provider_owned_work():
     """Keep credentials fixed for every currently owned native operation."""
-    if (architect.message_lock.locked() or architect.pending_interaction
+    if (architect.message_lock.locked() or architect.pending_interaction or pending_guide_command()
             or architect.visualizer.lock.locked() or architect.visualizer.pending
             or visual_review_runtime.runtime is not None or visual_review_runtime.lock.locked()):
         return True
@@ -1995,7 +2025,7 @@ async def stop_setup_team():
 
 @app.post("/api/architect/context")
 async def architect_context(value: BlueprintBody):
-    if architect.message_lock.locked() or architect.pending_interaction:
+    if architect.message_lock.locked() or architect.pending_interaction or pending_guide_command():
         raise HTTPException(409, "Wait for the current design request before changing its context.")
     blueprint = blueprint_or_error(value.blueprint).model_dump(mode="json")
     architect.set_context(blueprint)
@@ -2005,7 +2035,7 @@ async def architect_context(value: BlueprintBody):
 @app.post("/api/architect/start")
 async def architect_start(value: BlueprintBody | None = None):
     if value:
-        if architect.message_lock.locked() or architect.pending_interaction:
+        if architect.message_lock.locked() or architect.pending_interaction or pending_guide_command():
             raise HTTPException(409, "The current design request is still running.")
         blueprint = blueprint_or_error(value.blueprint)
         architect.set_context(blueprint.model_dump(mode="json"))

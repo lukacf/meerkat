@@ -909,6 +909,7 @@ class GuideService:
         self.store = store
         self.attachments = GuideAttachments(store.root)
         self.architect = architect
+        self.architect.guide_command_store = store
         self.implementation_evidence_provider = implementation_evidence_provider
         self.trial_evidence_provider = trial_evidence_provider
         self.deployment_evidence_provider = deployment_evidence_provider
@@ -1073,7 +1074,7 @@ class GuideService:
             return project_remote_deployment_evidence(detached, unavailable=True)
         return project_remote_deployment_evidence(detached, receipt)
 
-    async def _save(self, state, version):
+    async def _save(self, state, version, *, command=None):
         # Read projections are recomputed after a revision change. Their presence
         # in an API response cannot turn them into durable guide truth.
         saved = copy.deepcopy(state)
@@ -1084,7 +1085,7 @@ class GuideService:
         saved.pop("package_availability", None)
         saved.pop("service_preparation", None)
         saved.pop("organization_update", None)
-        saved = await asyncio.to_thread(self.store.save, saved, version)
+        saved = await asyncio.to_thread(self.store.save, saved, version, **({"command": command} if command else {}))
         return await self._with_implementation_evidence(saved)
 
     async def get(self, identity):
@@ -1123,14 +1124,31 @@ class GuideService:
             })
         return await self._with_implementation_evidence(state)
 
-    async def respond(self, identity, value):
+    async def respond(self, identity, value, *, command_id=None):
         from .projects import DraftConflict
         if self.lock.locked():
             raise ArchitectUnavailable("Your setup agent is still considering the previous answer.")
         async with self.lock:
+            from .guide_commands import GuideCommand, pending_command
+            command = None
+            retained = None
+            if command_id is not None:
+                if value.action != "chat" or value.attachments or value.blueprint or value.manual_intent:
+                    raise ValueError("A stable guide command accepts a plain chat message only.")
+                command = GuideCommand(self.store, command_id, identity, value.model_dump(mode="json"))
+                retained = await asyncio.to_thread(command.load)
+                if retained and retained["applied"] is not None:
+                    return await self._with_implementation_evidence(copy.deepcopy(retained["applied"]))
+                if retained and retained["failure"] is not None:
+                    raise DraftConflict("This original command ended without a saved response. Submit a new command to try again.")
+            pending = await asyncio.to_thread(pending_command, self.store)
+            if pending is not None and pending != command_id:
+                raise DraftConflict("Recover the previous guide command before starting another.")
             state = await self.get(identity)
             if state["version"] != value.version:
                 raise DraftConflict("This setup changed in another tab. Reload before continuing.")
+            if retained is not None:
+                return await self._respond_prepared(retained["prepared"], value.version, command)
             action = value.action
             if action == "organization":
                 from .organization import organization_snapshot
@@ -1258,7 +1276,8 @@ class GuideService:
             context = {
                 "guide_id": identity, "guide_version": value.version, "action": action, "answers": state["answers"],
                 "input_surface": self.input_surface(),
-                "operation_request_id": fingerprint({"guide_id": identity, **value.model_dump(mode="json")}),
+                "operation_request_id": fingerprint({"guide_id": identity, **value.model_dump(mode="json"),
+                    **({"command_id": command_id} if command_id else {})}),
                 "current_stage": stage, "current_status": state["status"],
                 "current_question": question, "saved_plan_available": bool(previous_plan),
                 "manual_plan_submitted": value.blueprint is not None,
@@ -1296,56 +1315,72 @@ class GuideService:
             if context.get("organization") is not None:
                 from .organization import ORGANIZATION_GUIDANCE
                 prompt += "\n" + ORGANIZATION_GUIDANCE
-            result = await self.architect.message(prompt, draft, guide_context=context)
-            if not result.get("guide"):
-                raise GuidePublicationMissing("The guide answered without publishing its response. Your saved setup remains unchanged.")
-            proposed = result.get("proposal")
-            if proposed is not None:
-                proposed = Blueprint.model_validate(proposed).model_dump(mode="json")
-            guided = validate_guide_publication(result["guide"], context, proposed, current_blueprint=draft)
-            if guided.get("visualization_feedback") is not None:
-                state["visualization_feedback"] = publication_visualization_feedback(guided, context)
-            if status_only_publication(guided, context, proposed):
-                # Operational prose is a conversation update, never application
-                # scope, a final review, or proof that a requested job succeeded.
-                state["messages"] += [current_message, conversation_message(
-                    "assistant", guided["message"], stage=stage, action=action,
-                    question=None, changes=[],
-                )]
-                # Operational guidance does not answer or replace a pending decision.
-                state.update(source="agent", summary=guided["summary"],
-                             warnings=guided["warnings"], changes=[],
-                             console_url=result.get("console_url") or state.get("console_url"))
-                return await self._save(state, value.version)
-            refining = guided["publication_mode"] == "refinement"
-            actual_stage = stage if refining else guided["question"]["stage"] if guided["question"] else "review"
-            brief = guided["brief"]
-            for topic, fact in state["brief"]["facts"].items():
-                if fact != brief["facts"].get(topic):
-                    state["fact_history"].append({"topic": topic, "fact": fact, "obsolete": True, "reason": "revised", "message_id": current_message["id"]})
-            reopened = [topic for topic in state["reopened_topics"]
-                        if brief["facts"].get(topic, {}).get("status") == "unresolved"]
-            changes = []
-            if proposed is not None:
-                changes = summarize_changes(previous_plan, proposed) if previous_plan else ["Initial agent team proposed"]
+            prepared = {"state": state, "draft": draft, "previous_plan": previous_plan,
+                        "current_message": current_message, "stage": stage, "action": action,
+                        "context": context, "prompt": prompt}
+            if command is not None:
+                prepared = await asyncio.to_thread(command.prepare, prepared)
+            return await self._respond_prepared(prepared, value.version, command)
+
+    async def _respond_prepared(self, prepared, version, command):
+        prepared = copy.deepcopy(prepared)
+        state, draft, previous_plan = (prepared[key] for key in ("state", "draft", "previous_plan"))
+        current_message, stage, action, context = (prepared[key] for key in
+            ("current_message", "stage", "action", "context"))
+        result = await self.architect.message(prepared["prompt"], draft, guide_context=context,
+            **({"command": command} if command else {}))
+        if not result.get("guide"):
+            raise GuidePublicationMissing("The guide answered without publishing its response. Your saved setup remains unchanged.")
+        proposed = result.get("proposal")
+        if proposed is not None:
+            proposed = Blueprint.model_validate(proposed).model_dump(mode="json")
+        guided = validate_guide_publication(result["guide"], context, proposed, current_blueprint=draft)
+        if guided.get("visualization_feedback") is not None:
+            state["visualization_feedback"] = publication_visualization_feedback(guided, context)
+        if status_only_publication(guided, context, proposed):
+            # Operational prose is a conversation update, never application
+            # scope, a final review, or proof that a requested job succeeded.
             state["messages"] += [current_message, conversation_message(
-                "assistant", guided["message"], stage=actual_stage, action=action,
-                question=guided["question"], changes=changes,
+                "assistant", guided["message"], stage=stage, action=action,
+                question=None, changes=[],
             )]
-            state.update(stage=actual_stage, question=guided["question"], source="agent", brief=brief,
-                         reopened_topics=reopened, readiness=review_readiness(brief),
-                         status=("refining" if refining else "review" if actual_stage == "review" else "handoff" if any(item["disposition"] == "handoff" for item in brief["requirements"]) else "question"),
-                         summary=guided["summary"], warnings=guided["warnings"],
-                         proposal=proposed if proposed is not None else state.get("proposal"),
-                         changes=changes, console_url=result.get("console_url") or state.get("console_url"),
-                         completed_stages=_completed_groups(brief, reopened))
-            return await self._save(state, value.version)
+            # Operational guidance does not answer or replace a pending decision.
+            state.update(source="agent", summary=guided["summary"],
+                         warnings=guided["warnings"], changes=[],
+                         console_url=result.get("console_url") or state.get("console_url"))
+            return await self._save(state, version, command=command)
+        refining = guided["publication_mode"] == "refinement"
+        actual_stage = stage if refining else guided["question"]["stage"] if guided["question"] else "review"
+        brief = guided["brief"]
+        for topic, fact in state["brief"]["facts"].items():
+            if fact != brief["facts"].get(topic):
+                state["fact_history"].append({"topic": topic, "fact": fact, "obsolete": True, "reason": "revised", "message_id": current_message["id"]})
+        reopened = [topic for topic in state["reopened_topics"]
+                    if brief["facts"].get(topic, {}).get("status") == "unresolved"]
+        changes = []
+        if proposed is not None:
+            changes = summarize_changes(previous_plan, proposed) if previous_plan else ["Initial agent team proposed"]
+        state["messages"] += [current_message, conversation_message(
+            "assistant", guided["message"], stage=actual_stage, action=action,
+            question=guided["question"], changes=changes,
+        )]
+        state.update(stage=actual_stage, question=guided["question"], source="agent", brief=brief,
+                     reopened_topics=reopened, readiness=review_readiness(brief),
+                     status=("refining" if refining else "review" if actual_stage == "review" else "handoff" if any(item["disposition"] == "handoff" for item in brief["requirements"]) else "question"),
+                     summary=guided["summary"], warnings=guided["warnings"],
+                     proposal=proposed if proposed is not None else state.get("proposal"),
+                     changes=changes, console_url=result.get("console_url") or state.get("console_url"),
+                     completed_stages=_completed_groups(brief, reopened))
+        return await self._save(state, version, command=command)
 
     async def apply(self, identity, version):
         from .projects import DraftConflict
         if self.lock.locked():
             raise ArchitectUnavailable("Wait for the setup agent to finish before applying the recommendation.")
         async with self.lock:
+            from .guide_commands import pending_command
+            if await asyncio.to_thread(pending_command, self.store):
+                raise DraftConflict("Recover the previous guide command before applying a recommendation.")
             state = await self.get(identity)
             if state["version"] != version:
                 raise DraftConflict("This setup changed. Reload before applying its recommendation.")

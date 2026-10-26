@@ -699,6 +699,9 @@ class ArchitectService:
         self.guide_result = None
         self.guide_edit_turn = None
         self.message_publications = None
+        self.active_guide_command = None
+        self.guide_command_store = None
+        self.pending_command_id = None
         self.reference_read = False
         self.on_interaction_admitted = None
         self.model_catalog_lock = asyncio.Lock()
@@ -1170,8 +1173,10 @@ class ArchitectService:
         if self.message_publications is None:
             return result
         token = str(uuid.uuid4())
-        self.message_publications[token] = copy.deepcopy({
-            "proposal": self.proposal, "guide": self.guide_result})
+        snapshot = copy.deepcopy({"proposal": self.proposal, "guide": self.guide_result})
+        if self.active_guide_command is not None:
+            self.active_guide_command.publication(token, snapshot)
+        self.message_publications[token] = snapshot
         return {**result, "publication_token": token}
 
     async def propose(self, args):
@@ -1454,10 +1459,21 @@ class ArchitectService:
                     raise BaseExceptionGroup("Setup startup and owned cleanup failed.", [error, cleanup_error]) from None
                 raise
 
-    async def message(self, message: str, blueprint: dict, *, guide_context=None):
-        if self.pending_interaction:
+    async def message(self, message: str, blueprint: dict, *, guide_context=None, command=None):
+        from .guide_commands import pending_command
+        retained = await asyncio.to_thread(command.load) if command is not None else None
+        if command is not None and (retained is None or retained["failure"] is not None):
+            raise ArchitectUnavailable("The original guide command is unavailable or terminal.")
+        if retained and retained["result"] is not None:
+            return copy.deepcopy(retained["result"])
+        if self.guide_command_store is not None:
+            pending = await asyncio.to_thread(pending_command, self.guide_command_store)
+            if pending is not None and (command is None or command.command_id != pending):
+                raise ArchitectUnavailable("Recover the previous guide command before starting another.")
+        same_command = command is not None and command.command_id == self.pending_command_id
+        if self.pending_interaction and not same_command:
             await self.refresh_status()
-        if self.message_lock.locked() or self.pending_interaction:
+        if self.message_lock.locked() or (self.pending_interaction and not same_command):
             raise ArchitectUnavailable("The architect is working on your previous request.")
         async with self.message_lock:
             before = self.set_context(blueprint)
@@ -1465,24 +1481,43 @@ class ArchitectService:
             self.guide_context = guide_context
             self.guide_result = None
             self.guide_edit_turn = None
-            publications = self.message_publications = {}
+            publications = self.message_publications = copy.deepcopy(retained["publications"]) if retained else {}
+            self.active_guide_command = command
+            staged = publications.get(retained.get("last_publication")) if retained else None
+            if staged is not None:
+                self.proposal, self.guide_result = copy.deepcopy((staged["proposal"], staged["guide"]))
             try:
-                await self.start()
-                self.state = "working"
+                # A recovering runtime can resume tools during startup. Restore
+                # the original publication context before it can call them.
                 if guide_context and guide_context.get("edit_base_token"):
                     token = guided_edit_token(guide_context, before)
                     if token != guide_context["edit_base_token"]:
                         raise ValueError("The guided edit source changed before this turn started.")
                     self.guide_edit_turn = {"context": guide_context, "token": token,
                         "blueprint": copy.deepcopy(before), "document": guided_document(before, guide_context.get("brief"))}
+                await self.start()
+                self.state = "working"
                 import httpx
                 base = self.runtime.rust_http_base_url
-                content = await self._message_content(message, guide_context)
+                if command is not None and retained["native"]:
+                    request = retained["native"]["request"]
+                else:
+                    content = await self._message_content(message, guide_context)
+                    from .guide_commands import COMMAND_ORIGIN
+                    request = {"identity": "architect:main", "content": content,
+                        "origin": COMMAND_ORIGIN if command else "launch-workbench",
+                        "idempotency_key": command.command_id if command else str(uuid.uuid4())}
+                    if command is not None:
+                        request["handling_mode"] = "queue"
                 async with httpx.AsyncClient(timeout=20, trust_env=False) as client:
-                    response = await _native_request(client, "post", base + "/console/send", json={"identity": "architect:main", "content": content,
-                        "origin": "launch-workbench", "idempotency_key": str(uuid.uuid4())})
-                    response.raise_for_status()
-                    accepted = response.json()
+                    if command is not None:
+                        from .console_command import send_command
+                        self.pending_command_id = command.command_id
+                        accepted = await send_command(client, base, command, request, setup_runtime_root(self.root))
+                    else:
+                        response = await _native_request(client, "post", base + "/console/send", json=request)
+                        response.raise_for_status()
+                        accepted = response.json()
                     self.pending_interaction = dict(accepted)
                     if self.on_interaction_admitted and guide_context:
                         try:
@@ -1517,6 +1552,8 @@ class ArchitectService:
                             or (owned_frame(frame) and frame.get("kind") in {"interaction_failed", "run_failed"})), None)
                         if failure is not None:
                             self.pending_interaction = None
+                            if command is not None:
+                                await asyncio.to_thread(command.fail, "native_turn_failed")
                             raise ArchitectUnavailable("The setup team could not complete this request.")
                         if any(completed_frame(frame) for frame in batch):
                             break
@@ -1551,17 +1588,23 @@ class ArchitectService:
                                          if snapshot is not None else (None, None))
                 if guide_context and publication is None:
                     from .guide_models import GuidePublicationMissing
+                    if command is not None:
+                        await asyncio.to_thread(command.fail, "publication_missing")
                     raise GuidePublicationMissing("The guide answered without publishing its response. Your saved setup remains unchanged.")
                 output = completion.get("payload", {}).get("result")
                 if not isinstance(output, str) or not output.strip():
                     output = publication.get("message") if publication else None
-                return {"message": output or (proposal["summary"] if proposal else "The setup team completed its turn. Open the console to inspect the details."),
+                response = {"message": output or (proposal["summary"] if proposal else "The setup team completed its turn. Open the console to inspect the details."),
                         "proposal": proposal["blueprint"] if proposal else None, "source": "agent",
                         "changes": proposal["changes"] if proposal else [], "warnings": [],
                         "guide": publication,
                         "base_hash": fingerprint(before), "console_url": base + "/console",
                         "browser_console_url": self.status()["browser_console_url"]}
+                if command is not None:
+                    await asyncio.to_thread(command.result, response)
+                return response
             finally:
+                self.active_guide_command = None
                 self.message_publications = None
                 self.guide_edit_turn = None
                 if self.runtime:

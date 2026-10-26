@@ -56,6 +56,7 @@ from .rehearsal import RehearsalService, StartNotAdmitted, start_request_fingerp
 from .provider_settings import ProviderSettings, ProviderSettingsUnavailable, canonical_setup_provider
 from .checker_setup import CheckerSetupService
 from .toolkit_saved_requests import ToolkitSavedRequests, ToolkitSavedRequestsError, MAX_MANIFEST_BYTES
+from .service_callback import MCP_CALLBACK_PATH, callback_landing, callback_unavailable
 
 APP_ROOT = Path(__file__).resolve().parents[1]
 checker_setup = CheckerSetupService(APP_ROOT)
@@ -341,6 +342,16 @@ app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost
 design_lock = asyncio.Lock()
 
 
+@app.get(MCP_CALLBACK_PATH)
+async def service_callback_landing():
+    return callback_landing()
+
+
+@app.post(MCP_CALLBACK_PATH)
+async def service_callback_return():
+    return callback_unavailable()
+
+
 @app.exception_handler(RequestValidationError)
 async def request_validation_error(request: Request, error: RequestValidationError):
     # Installation fields and trial feedback may contain private context. Return
@@ -387,7 +398,9 @@ async def local_requests(request: Request, call_next):
     allowed = {f"{request.url.scheme}://{request.url.netloc}", "http://127.0.0.1:5173", "http://localhost:5173"}
     if request.url.path.startswith("/api/") and origin and origin not in allowed:
         return JSONResponse({"detail": "Open Meta Forge from its local setup URL."}, status_code=403)
-    if request.method in ("POST", "PUT"):
+    if request.method in ("POST", "PUT") and request.url.path != MCP_CALLBACK_PATH:
+        # The protected callback owns its body handling. While no native owner
+        # is composed, it refuses the request without consuming private input.
         # The animation request includes the fully resolved graph, not just its
         # class definitions. Keep every identity and relationship for large mobs.
         if request.url.path.startswith("/api/owned-console/"):
@@ -418,7 +431,7 @@ async def local_requests(request: Request, call_next):
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
-    response.headers["Cache-Control"] = "no-store" if request.url.path.startswith("/api/") else "no-cache"
+    response.headers["Cache-Control"] = "no-store" if request.url.path.startswith("/api/") or request.url.path == MCP_CALLBACK_PATH else "no-cache"
     return response
 
 

@@ -225,7 +225,10 @@ kernel or lifecycle facts. The original process-entry unsafe boundary still
 needs actual Linux qualification on the existing lane.
 
 The separate `startup_ownership` test target supplies six pending Linux kernel
-controls for the private entry function. Its harness is disabled so each case
+controls for the private entry function. It requires the explicit
+`linux-startup-controls` feature so default test commands retain their existing
+scope, including on macOS. This feature enables only the test target and adds
+no dependency or production configuration. Its harness is disabled so each case
 can execute the exact production module in a fresh, single-thread child before
 any stdin/stdout wrappers, logger or runtime. It checks original descriptor
 numbers and object identities, unchanged open-FD inventory, CLOEXEC, repeated

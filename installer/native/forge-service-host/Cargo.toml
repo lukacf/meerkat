@@ -10,10 +10,14 @@ publish = false
 # existing owner lane qualifies this exact graph and protected installation.
 [workspace]
 
+[features]
+linux-startup-controls = []
+
 [[test]]
 name = "startup_ownership"
 path = "tests/startup_ownership.rs"
 harness = false
+required-features = ["linux-startup-controls"]
 
 [dependencies]
 forge-ghe-collections = { path = "../ghe-collections" }

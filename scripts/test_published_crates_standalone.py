@@ -56,6 +56,23 @@ class FloorNormalization(unittest.TestCase):
             self.normalize("missing", {"workspace": True})
 
 
+class FloorSurface(unittest.TestCase):
+    def metadata(self, *packages):
+        return {"packages": [{"name": name, "targets": [{"kind": [kind]} for kind in kinds]} for name, kinds in packages]}
+
+    def test_libraries_and_binaries_of_the_members_only(self):
+        metadata = self.metadata(("app", ["bin", "test"]), ("lib", ["lib", "test"]), ("dep", ["lib"]))
+        self.assertEqual(pcs.surface_flags(metadata, {"app", "lib"}), ["--lib", "--bins"])
+
+    def test_no_bins_flag_without_a_binary(self):
+        metadata = self.metadata(("lib", ["lib", "example"]))
+        self.assertEqual(pcs.surface_flags(metadata, {"lib"}), ["--lib"])
+
+    def test_nothing_to_check_is_a_usage_error(self):
+        with self.assertRaises(pcs.UsageError):
+            pcs.surface_flags(self.metadata(("only-tests", ["test"])), {"only-tests"})
+
+
 class FloorResolveProblem(unittest.TestCase):
     def test_an_unmet_requirement_is_named(self):
         stderr = "error: failed to select a version for the requirement `meerkat = \"=0.9.6\"`\ncandidate versions found which didn't match: 0.9.5\n"

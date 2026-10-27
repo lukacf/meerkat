@@ -16,9 +16,10 @@ name: Meta release
 #     repository lukacf/meerkat, workflow meta-release.yml, tag prefix meta-v,
 #     version from meta/crates/meerkat-meta/Cargo.toml, --latest=false);
 #   - floor_check: Meta's published-floor check (the packaged Meta crates
-#     resolve and build against crates.io Core at the versions they declare)
-#     gates candidates and publication; it replaces the old cold
-#     `cargo package` verify build (11.6 min of the 0.9.5 promote run);
+#     resolve and build, libraries and binaries, against crates.io Core at
+#     the versions they declare) gates candidates and publication; it
+#     replaces the old cold `cargo package` verify build (11.6 min of the
+#     0.9.5 promote run), which built the same targets;
 #   - artifacts build on the FAST PATH only: from the workspace, when the
 #     in-tree Core equals the published Core it declares (`git diff --quiet
 #     v<Core> <commit> -- crates/`), so a lockstep release from one commit
@@ -26,8 +27,8 @@ name: Meta release
 #     workspace) is not wired in this draft: the leg refuses instead;
 #   - the gateways build with the named profile `release-meta` (Meta's former
 #     [profile.release]: opt-level 1, opt-level 0 for the mega crates), which
-#     the root Cargo.toml must define (work/release/root-cargo-profile-release-meta.toml);
-#     the old step that appended overrides to Cargo.toml is gone;
+#     the root Cargo.toml defines; the old step that appended overrides to
+#     Cargo.toml is gone;
 #   - crates publish through scripts/release-publish-rust-crates.sh with
 #     MEERKAT_RELEASE_CRATE_LIST=scripts/release-meta-crates.sh, bound to the
 #     checksums the floor-checked packages produced.

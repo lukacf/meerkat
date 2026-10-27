@@ -62,8 +62,13 @@ scripts/release-rust-crates.sh lists.
         - resolve: every other in-repo crate must come from crates.io at the
           declared version (a version crates.io lacks fails here, naming it:
           the product needs an unreleased dependency);
-        - build: `cargo check --workspace --all-targets` (--mode pr) or
-          `cargo test --workspace --no-run` (--mode release).
+        - build: what a downloader compiles, the product's libraries and
+          binaries: `cargo check --workspace --lib --bins` (--mode pr) or
+          `cargo build --workspace --lib --bins` (--mode release). Test
+          targets are not part of a published crate's contract, and a
+          product's packaged tests may read files its package does not ship
+          (Meta's lib tests read tests/fixtures, which its package excludes;
+          its integration tests read the repository's docs).
       Writes floor.json to --out. Exit 1 names the first failing stage.
 
 Exit 0 = proven, 1 = a crate fails, 2 = usage error or unreadable input.
@@ -914,6 +919,22 @@ def normalized_manifest(crate_dir: pathlib.Path, root: pathlib.Path, kept_paths:
     return manifest
 
 
+def surface_flags(metadata: dict, members) -> list[str]:
+    """`--lib` and `--bins` for the floor members' published surface: each
+    flag only when some member has such a target (Cargo refuses `--lib`
+    when no selected package has a library)."""
+    kinds = {kind for pkg in metadata["packages"] if pkg["name"] in members
+             for target in pkg["targets"] for kind in target["kind"]}
+    flags = []
+    if kinds & {"lib", "rlib", "dylib", "proc-macro"}:
+        flags.append("--lib")
+    if "bin" in kinds:
+        flags.append("--bins")
+    if not flags:
+        raise UsageError("the product's crates have no library or binary target to check")
+    return flags
+
+
 def resolve_problem(stderr: str) -> str:
     """What keeps a product's declared dependencies from resolving against
     crates.io, from `cargo metadata`'s stderr: the requirements no published
@@ -946,7 +967,9 @@ def floor(root: pathlib.Path, product_name: str, out: pathlib.Path, mode: str, a
     if not product_crates:
         raise UsageError(f"no workspace member lies under {product['root']}/")
     in_repo = {pkg["name"]: pkg for pkg in members}
-    out.mkdir(parents=True, exist_ok=False)
+    if out.exists():
+        raise UsageError(f"--out {out} exists; the floor check writes a fresh directory")
+    out.mkdir(parents=True)
     logs = out / "logs"
     logs.mkdir()
     env = build_env("mirror", out / "target", toolchain(root))
@@ -1015,7 +1038,7 @@ def floor(root: pathlib.Path, product_name: str, out: pathlib.Path, mode: str, a
         f"{pkg['name']} {pkg['version']}" for pkg in resolved["packages"] if pkg["name"] in in_repo and pkg["name"] not in floor_members
     )
 
-    command = [cargo(), "check", "--workspace", "--all-targets"] if mode == "pr" else [cargo(), "test", "--workspace", "--no-run"]
+    command = [cargo(), "check" if mode == "pr" else "build", "--workspace", *surface_flags(resolved, floor_members)]
     rc, output = run(command, ws, env, logs / "build.log")
     if rc != 0:
         errors = [line for line in output.splitlines() if line.startswith("error")][:10]

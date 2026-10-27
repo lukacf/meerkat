@@ -537,12 +537,20 @@ fn format_ownership_diff_messages(
 }
 
 fn collect_repo_rs_files(root: &Path) -> Result<Vec<PathBuf>> {
+    // Core's tree: the other products' roots (ci/products.json) keep their
+    // own conventions and are not Core's RMAT domain.
+    let products = crate::public_contracts::product_roots(root);
     let mut files = Vec::new();
-    collect_rs_files_recursive(root, root, &mut files)?;
+    collect_rs_files_recursive(root, root, &products, &mut files)?;
     Ok(files)
 }
 
-fn collect_rs_files_recursive(root: &Path, dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+fn collect_rs_files_recursive(
+    root: &Path,
+    dir: &Path,
+    products: &[PathBuf],
+    files: &mut Vec<PathBuf>,
+) -> Result<()> {
     for entry in fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
         let entry = entry?;
         let path = entry.path();
@@ -564,9 +572,10 @@ fn collect_rs_files_recursive(root: &Path, dir: &Path, files: &mut Vec<PathBuf>)
                 })
                 // A nested git checkout (agent/codex worktree parked inside
                 // the repo) is another repository's source, not ours.
-                || path.join(".git").exists();
+                || path.join(".git").exists()
+                || products.contains(&path);
             if !skip {
-                collect_rs_files_recursive(root, &path, files)?;
+                collect_rs_files_recursive(root, &path, products, files)?;
             }
         } else if path.extension().and_then(OsStr::to_str) == Some("rs") {
             let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy();
@@ -828,7 +837,7 @@ fn collect_route_realization_findings(root: &Path, policy: &AuditPolicy) -> Vec<
             continue;
         }
         let mut files: Vec<PathBuf> = Vec::new();
-        if collect_rs_files_recursive(root, &root_path, &mut files).is_err() {
+        if collect_rs_files_recursive(root, &root_path, &[], &mut files).is_err() {
             continue;
         }
         for file in files {
@@ -3140,6 +3149,43 @@ mod tests {
             rels,
             vec!["crates/meerkat-core/src/agent.rs".to_string()],
             "hidden dirs and nested git checkouts must be excluded"
+        );
+    }
+
+    #[test]
+    fn repo_walker_leaves_the_other_products_roots_to_them() {
+        let root = tempfile::tempdir().expect("create temp dir");
+        let write = |rel: &str, text: &str| {
+            let path = root.path().join(rel);
+            fs::create_dir_all(path.parent().expect("parent")).expect("create parent");
+            fs::write(&path, text).expect("write file");
+        };
+        write("crates/meerkat-core/src/agent.rs", "fn f() {}\n");
+        write("meta/crates/meerkat-meta/src/lib.rs", "fn f() {}\n");
+        write("metadata/src/lib.rs", "fn f() {}\n");
+        write(
+            "ci/products.json",
+            r#"{"schema_version": 1, "products": [{"name": "core", "root": ""}, {"name": "meta", "root": "meta"}]}"#,
+        );
+
+        let files = collect_repo_rs_files(root.path()).expect("walk temp repo");
+        let mut rels = files
+            .iter()
+            .map(|path| {
+                path.strip_prefix(root.path())
+                    .expect("under root")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        rels.sort();
+        assert_eq!(
+            rels,
+            vec![
+                "crates/meerkat-core/src/agent.rs".to_string(),
+                "metadata/src/lib.rs".to_string(),
+            ],
+            "a product root is left to its product; a directory that only shares its prefix is not"
         );
     }
 }

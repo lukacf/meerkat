@@ -40,6 +40,16 @@ already selected in the native requirement. The call budget reserves the final
 read, and the byte budget includes every result. Filenames, patches, author
 fields and messages remain data; the program never opens paths or follows them.
 
+`PullRequestDiscussion` reads ordinary PR comments or review summaries after an
+exact PR read. It pages until a short response, requiring another empty page for
+an exact multiple of 100 rows. Explicit comment totals detect visible gaps;
+missing totals remain unknown. Comment/review IDs must match their resource URLs
+and remain unique across pages. Review states and old commit IDs remain
+historical data, not the current effective approval decision. A returned
+`ReportedDiscussionPages` records a short-page observation, not proof of complete
+coverage. The native adapter must verify actual unfiltered installed behavior
+before it can use that observation to qualify the source.
+
 ## Pinned upstream behavior
 
 Contract: GitHub MCP server v2.0.3, source
@@ -47,6 +57,7 @@ Contract: GitHub MCP server v2.0.3, source
 
 - [PR read implementation](https://github.com/github/github-mcp-server/blob/b98d115bbb080e9555466a96656ec4df605aea21/pkg/github/pullrequests.go)
 - [Result types](https://github.com/github/github-mcp-server/blob/b98d115bbb080e9555466a96656ec4df605aea21/pkg/github/minimal_types.go)
+- [Ordinary comment implementation](https://github.com/github/github-mcp-server/blob/b98d115bbb080e9555466a96656ec4df605aea21/pkg/github/issues.go)
 
 `get_status` fetches the PR head and requests combined statuses without pagination
 options. When `total_count` differs from the returned row count, this program
@@ -63,8 +74,10 @@ the server filters comments and replaces each thread's count with the filtered
 length. The native adapter must therefore verify the actual installed invocation
 has unfiltered behavior before qualifying full discussion coverage. Count checks
 alone cannot prove it, and Python/browser labels cannot establish that setting.
-Review-summary pagination has a related limitation: `get_reviews` can filter
-rows after REST pagination, so a short array alone is not proof of the final page.
+Ordinary comment and review-summary pagination have the same limitation:
+`get_comments` and `get_reviews` can filter rows after REST pagination and discard
+pagination headers. A short array alone is not proof of the final source page.
+The PR's optional `comments` total belongs to ordinary comments, not reviews.
 
 The file and commit methods discard response pagination headers. This program
 uses the explicit initial PR totals to detect incomplete or capped responses.
@@ -76,8 +89,8 @@ snapshot of that head. Patches are optional and may be absent or incomplete;
 listing every file does not establish a complete diff.
 
 Remaining work includes the native bridge/adapter and the other required GHE
-collection programs: ordinary PR comments and review summaries, bounded
-repository history, workflow runs/jobs, and issues. Repository
+collection programs: bounded repository history, workflow runs/jobs, and issues.
+Repository
 metadata and historical non-PR commit checks still need a supported source.
 These programs do not close those requirements or the overall shared ingestion
 outcome.

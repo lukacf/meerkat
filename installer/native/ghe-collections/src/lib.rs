@@ -15,6 +15,11 @@ pub use changes::{
     ChangesReadLimits, CommitAuthor, PullRequestChanges, PullRequestCommit, PullRequestFile,
     ReportedPullRequestChanges,
 };
+mod discussion;
+pub use discussion::{
+    CommentReactions, DiscussionKind, DiscussionReadLimits, DiscussionRows, DiscussionUser,
+    PullRequestComment, PullRequestDiscussion, PullRequestReview, ReportedDiscussionPages,
+};
 mod review_threads;
 pub use review_threads::{
     PullRequestReviewThreads, ReportedReviewThreads, ReviewComment, ReviewReadLimits, ReviewThread,

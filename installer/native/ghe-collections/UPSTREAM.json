@@ -26,6 +26,12 @@
       "git_blob": "d0f8887e6a4ed10c6a861915964f2029c57e37ab",
       "sha256": "bc1c28e59b8e2241c5a30ccfee1f894f723d4286a6ded232dc84e9edfdce4f58",
       "bytes": 156819
+    },
+    {
+      "path": "pkg/github/issues.go",
+      "git_blob": "30005854aaf2cc583f26600925432ec4550ddeee",
+      "sha256": "ffc7cb691392736f75cfba4d23e7043fb69f25efb854a4d66ac749e3dab58b35",
+      "bytes": 152081
     }
   ],
   "verification": "All file bytes match the pinned commit tree Git blob IDs. No upstream executable or authenticated provider request was run."

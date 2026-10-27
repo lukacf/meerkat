@@ -1486,9 +1486,13 @@ function testTagsFromName(pkg, target) {
   return [...new Set(tags)].sort();
 }
 
+// The product crates' files ride along too: no Bazel rule builds them, but
+// the cargo-equivalent lanes run Cargo in the workspace copy, and Cargo reads
+// every workspace member (a member glob such as meta/crates/* that matches
+// nothing fails the whole workspace).
 const packageRunfileLabels = [
   ...new Set(
-    [...localPackages.values(), ...inTreePathPackages]
+    [...localPackages.values(), ...inTreePathPackages, ...productPackages]
       .map((pkg) => relative(root, packageDir(pkg)))
       .filter((dir) => dir !== "")
       .map((dir) => `//${dir}:package_runfiles`),
@@ -1505,7 +1509,7 @@ const packageRunfileLabels = [
 // exports its BUILD file as `:build_file`; tools/buildbuddy declares its own.
 const workspaceBuildFileLabels = [
   ...new Set(
-    [...localPackages.values(), ...inTreePathPackages]
+    [...localPackages.values(), ...inTreePathPackages, ...productPackages]
       .map((pkg) => relative(root, packageDir(pkg)))
       .filter((dir) => dir !== "")
       .map((dir) => `//${dir}:build_file`),
@@ -3052,7 +3056,8 @@ for (const pkg of localPackages.values()) {
 }
 
 // A product crate's BUILD file: its manifest as a source of the package, so
-// crate_universe can read the workspace member, and no rule.
+// crate_universe can read the workspace member, its files for the
+// cargo-equivalent lanes' workspace copy, and no rule.
 for (const pkg of productPackages) {
   const product = productRoots.find((productRoot) =>
     relative(root, dirname(pkg.manifest_path)).split(sep).join("/").startsWith(`${productRoot}/`),
@@ -3062,8 +3067,23 @@ for (const pkg of productPackages) {
     [
       `# ${pkg.name} belongs to ${product}/, which builds with Cargo only: no Bazel`,
       "# target builds it. Its manifest is a workspace member manifest that",
-      "# crate_universe reads (MODULE.bazel crate.from_cargo).",
+      "# crate_universe reads (MODULE.bazel crate.from_cargo), and the",
+      "# cargo-equivalent lanes copy its files with the workspace (Cargo reads",
+      "# every member).",
       'exports_files(["Cargo.toml"])',
+      "",
+      "filegroup(",
+      '    name = "package_runfiles",',
+      '    srcs = glob(["Cargo.toml", "**/*"], exclude = ["BUILD", "BUILD.bazel"], allow_empty = True),',
+      '    visibility = ["//visibility:public"],',
+      ")",
+      "",
+      "# This package's BUILD file, for the cargo-equivalent lanes' workspace copy.",
+      "filegroup(",
+      '    name = "build_file",',
+      '    srcs = ["BUILD.bazel"],',
+      '    visibility = ["//visibility:public"],',
+      ")",
     ].join("\n"),
   );
 }

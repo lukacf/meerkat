@@ -1,4 +1,19 @@
 # toolkit-package belongs to connect/, which builds with Cargo only: no Bazel
 # target builds it. Its manifest is a workspace member manifest that
-# crate_universe reads (MODULE.bazel crate.from_cargo).
+# crate_universe reads (MODULE.bazel crate.from_cargo), and the
+# cargo-equivalent lanes copy its files with the workspace (Cargo reads
+# every member).
 exports_files(["Cargo.toml"])
+
+filegroup(
+    name = "package_runfiles",
+    srcs = glob(["Cargo.toml", "**/*"], exclude = ["BUILD", "BUILD.bazel"], allow_empty = True),
+    visibility = ["//visibility:public"],
+)
+
+# This package's BUILD file, for the cargo-equivalent lanes' workspace copy.
+filegroup(
+    name = "build_file",
+    srcs = ["BUILD.bazel"],
+    visibility = ["//visibility:public"],
+)

@@ -24,6 +24,14 @@ The pure program returns the commit represented by the result. It does not claim
 that the PR still has that head or that credentials remain usable afterward.
 The eventual adapter must retain the native observation alongside these data.
 
+`PullRequestReviewThreads` reads the exact PR and then follows the provider's
+opaque `after` cursor. It preserves outdated and resolved threads and nullable
+line coordinates. It refuses repeated cursors, duplicate thread/comment
+identities, changed totals, visible nested truncation and incomplete final pages.
+Explicit call and cumulative-result-byte bounds include the initial PR read.
+Results are provider-reported page sets, not an atomic revision snapshot or
+proof of an unfiltered conversation.
+
 ## Pinned upstream behavior
 
 Contract: GitHub MCP server v2.0.3, source
@@ -41,11 +49,21 @@ not establish which head each page observed. Reading the PR before and after the
 call does not rule out an intervening head change. A supported result with exact
 revision correlation is still needed for complete check-run coverage.
 
+`get_review_comments` fetches at most 100 comments per thread and supplies no
+nested continuation. A larger reported thread count refuses. In lockdown mode,
+the server filters comments and replaces each thread's count with the filtered
+length. The native adapter must therefore verify the actual installed invocation
+has unfiltered behavior before qualifying full discussion coverage. Count checks
+alone cannot prove it, and Python/browser labels cannot establish that setting.
+Review-summary pagination has a related limitation: `get_reviews` can filter
+rows after REST pagination, so a short array alone is not proof of the final page.
+
 Remaining work includes the native bridge/adapter and the other required GHE
-collection programs: PR discussions, files and commits, bounded repository
-history, workflow runs/jobs, and issues. Repository metadata and historical
-non-PR commit checks still need a supported source. This status program does not
-close those requirements or the overall shared ingestion outcome.
+collection programs: ordinary PR comments and review summaries, files and
+commits, bounded repository history, workflow runs/jobs, and issues. Repository
+metadata and historical non-PR commit checks still need a supported source.
+These programs do not close those requirements or the overall shared ingestion
+outcome.
 
 ## Verification
 

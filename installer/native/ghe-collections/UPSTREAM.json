@@ -20,6 +20,12 @@
       "git_blob": "6d6abaed632877104c657497245b72296bc0f331",
       "sha256": "ed38d4c176acdcd946577bdc69c57994070a3b5fc661d399dbc92457411d78a5",
       "bytes": 22284
+    },
+    {
+      "path": "pkg/github/pullrequests_test.go",
+      "git_blob": "d0f8887e6a4ed10c6a861915964f2029c57e37ab",
+      "sha256": "bc1c28e59b8e2241c5a30ccfee1f894f723d4286a6ded232dc84e9edfdce4f58",
+      "bytes": 156819
     }
   ],
   "verification": "All file bytes match the pinned commit tree Git blob IDs. No upstream executable or authenticated provider request was run."

@@ -10,6 +10,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
+mod review_threads;
+pub use review_threads::{
+    PullRequestReviewThreads, ReportedReviewThreads, ReviewComment, ReviewReadLimits, ReviewThread,
+};
+
 pub const RESULT_LIMIT: usize = 1024 * 1024;
 pub const MCP_SOURCE: &str = "b98d115bbb080e9555466a96656ec4df605aea21";
 
@@ -24,6 +29,12 @@ pub enum Refusal {
     DuplicateContext,
     ResultTooLarge,
     AlreadyFinished,
+    BudgetExceeded,
+    CursorRepeated,
+    DuplicateItem,
+    CollectionChanged,
+    IncompleteCollection,
+    IncompleteThread,
 }
 
 #[derive(Debug, Clone)]
@@ -57,14 +68,19 @@ enum Phase {
 #[derive(Debug)]
 pub struct PullRequestStatuses {
     phase: Phase,
-    repository: String,
-    pull_url: String,
-    pull_number: u64,
+    scope: PullRequestScope,
     expected_head: Option<String>,
 }
 
-impl PullRequestStatuses {
-    pub fn new(host: &str, owner: &str, repo: &str, pull_number: u64) -> Result<Self, Refusal> {
+#[derive(Debug)]
+struct PullRequestScope {
+    repository: String,
+    pull_url: String,
+    pull_number: u64,
+}
+
+impl PullRequestScope {
+    fn new(host: &str, owner: &str, repo: &str, pull_number: u64) -> Result<Self, Refusal> {
         if !enterprise_host(host)
             || !segment(owner)
             || !segment(repo)
@@ -74,12 +90,34 @@ impl PullRequestStatuses {
             return Err(Refusal::InvalidTarget);
         }
         Ok(Self {
-            phase: Phase::PullRequest(ReadCall {
-                arguments: json!({"method": "get", "owner": owner, "repo": repo, "pullNumber": pull_number}),
-            }),
             repository: format!("{owner}/{repo}"),
             pull_url: format!("https://{host}/{owner}/{repo}/pull/{pull_number}"),
             pull_number,
+        })
+    }
+
+    fn check(&self, pr: &PullRequest) -> Result<(), Refusal> {
+        if pr.number != self.pull_number
+            || pr.html_url != self.pull_url
+            || pr.base.repo.full_name != self.repository
+        {
+            return Err(Refusal::WrongResource);
+        }
+        if !commit_id(&pr.head.sha) {
+            return Err(Refusal::UnsupportedShape);
+        }
+        Ok(())
+    }
+}
+
+impl PullRequestStatuses {
+    pub fn new(host: &str, owner: &str, repo: &str, pull_number: u64) -> Result<Self, Refusal> {
+        let scope = PullRequestScope::new(host, owner, repo, pull_number)?;
+        Ok(Self {
+            phase: Phase::PullRequest(ReadCall {
+                arguments: json!({"method": "get", "owner": owner, "repo": repo, "pullNumber": pull_number}),
+            }),
+            scope,
             expected_head: None,
         })
     }
@@ -131,15 +169,7 @@ impl PullRequestStatuses {
         match phase {
             Phase::PullRequest(mut call) => {
                 let pr: PullRequest = decode(payload)?;
-                if pr.number != self.pull_number
-                    || pr.html_url != self.pull_url
-                    || pr.base.repo.full_name != self.repository
-                {
-                    return Err(Refusal::WrongResource);
-                }
-                if !commit_id(&pr.head.sha) {
-                    return Err(Refusal::UnsupportedShape);
-                }
+                self.scope.check(&pr)?;
                 if self
                     .expected_head
                     .as_ref()

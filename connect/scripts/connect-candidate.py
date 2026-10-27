@@ -177,7 +177,7 @@ def preflight(*, native=False):
     if native:
         require_native_host(target)
     inputs = input_path(target)
-    require(os.environ.get("GITHUB_REPOSITORY") == "lukacf/meerkat-connect", "wrong candidate repository")
+    require(os.environ.get("GITHUB_REPOSITORY") == PUBLICATION_REPO, "wrong candidate repository")
     revision, tree = source_state()
     expected = os.environ.get("CONNECT_INPUTS_SHA256", "")
     require(HEX.fullmatch(expected) and digest(inputs) == expected, "release input selection differs")
@@ -903,8 +903,11 @@ def fetch_built():
 # Publication consumes this producer's installed preview, never a rebuilt or
 # relabeled staging product. This local acceptance record is not a new runtime
 # selection: the original v1 document and Meta-owned reader remain authoritative.
-PUBLICATION_REPO = "lukacf/meerkat-connect"
-PUBLICATION_WORKFLOW = ".github/workflows/connect-candidate.yml"
+# Connect releases from the monorepo (lukacf/meerkat) on its own version line:
+# candidates build in connect-release.yml, and releases are connect-vX.Y.Z.
+# Releases up to 0.9.4 stay in lukacf/meerkat-connect.
+PUBLICATION_REPO = "lukacf/meerkat"
+PUBLICATION_WORKFLOW = ".github/workflows/connect-release.yml"
 SLSA = "https://slsa.dev/provenance/v1"
 MAX_METADATA = 32 * 1024**2
 

@@ -57,8 +57,14 @@ assert SPEC is not None and SPEC.loader is not None
 assets = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(assets)
 
-REPOSITORY = "lukacf/meerkat-meta"
-WORKFLOW = ".github/workflows/release.yml"
+# Meta releases from the monorepo (lukacf/meerkat) on its own version line:
+# tags meta-vX.Y.Z, the meta-release.yml workflow, and the version of the
+# meerkat-meta crate (Meta's crates carry explicit versions; the workspace
+# version is Core's). Releases up to 0.9.6 stay in lukacf/meerkat-meta.
+REPOSITORY = "lukacf/meerkat"
+WORKFLOW = ".github/workflows/meta-release.yml"
+TAG_PREFIX = "meta-v"
+VERSION_MANIFEST = "meta/crates/meerkat-meta/Cargo.toml"
 MAIN = "refs/heads/main"
 MANIFEST = "candidate-manifest.json"
 SELECTION = "candidate-selection.json"
@@ -255,15 +261,16 @@ def verify_remote_tag(tag, sha):
 
 
 def version_at(sha):
-    value = tomllib.loads(git("show", f"{sha}:Cargo.toml"))["workspace"]["package"]["version"]
+    value = tomllib.loads(git("show", f"{sha}:{VERSION_MANIFEST}"))["package"]["version"]
     require(isinstance(value, str) and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?", value),
-            "invalid workspace version")
+            "invalid Meta version")
     return value
 
 
 def valid_tag(tag):
-    require(isinstance(tag, str) and re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?", tag),
-            "release tag must be v<workspace version>")
+    require(isinstance(tag, str)
+            and re.fullmatch(re.escape(TAG_PREFIX) + r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?", tag),
+            f"release tag must be {TAG_PREFIX}<Meta version>")
     return tag
 
 
@@ -370,7 +377,7 @@ def validate_identity(value):
 def validate_source(value, tier=None):
     digest(value["source_sha"], "source SHA", 40)
     valid_tag(value["tag"])
-    require(value["tag"] == "v" + value["version"], "tag/version mismatch")
+    require(value["tag"] == TAG_PREFIX + value["version"], "tag/version mismatch")
     exact_keys(value["metadata"], " ".join(assets.metadata_names(tier)), "metadata")
     for value_hash in value["metadata"].values():
         digest(value_hash)
@@ -429,7 +436,7 @@ def resolve():
     event, ref = os.environ.get("GITHUB_EVENT_NAME"), os.environ.get("GITHUB_REF", "")
     head = digest(git("rev-parse", "HEAD"), "checkout SHA", 40)
     tier = ""
-    if event == "push" and ref.startswith("refs/tags/v"):
+    if event == "push" and ref.startswith(f"refs/tags/{TAG_PREFIX}"):
         mode, tag, publish, dry = "tag", valid_tag(ref.removeprefix("refs/tags/")), False, False
     else:
         require(event == "workflow_dispatch", "unsupported release event")
@@ -469,10 +476,10 @@ def resolve():
         sha = head
         require(sha == os.environ.get("GITHUB_SHA"), "source checkout/event SHA mismatch")
     version = version_at(sha)
-    require(not tag or tag == "v" + version, "tag does not match workspace version")
+    require(not tag or tag == TAG_PREFIX + version, "tag does not match the Meta version")
     result = {
         "mode": mode, "sha": sha, "version": version,
-        "tag": "v" + version if mode == "candidate" else tag,
+        "tag": TAG_PREFIX + version if mode == "candidate" else tag,
         "publish_packages": str(publish).lower(), "dry_run": str(dry).lower(),
         "ci_bypass": str(mode == "existing" and not tag and publish and dry).lower(),
         "tier": tier,
@@ -493,7 +500,7 @@ def source_context():
     sha = digest(os.environ.get("RELEASE_SHA"), "RELEASE_SHA", 40)
     version = os.environ.get("RELEASE_VERSION", "")
     tag = valid_tag(os.environ.get("RELEASE_TAG", ""))
-    require(tag == "v" + version, "resolved version/tag mismatch")
+    require(tag == TAG_PREFIX + version, "resolved version/tag mismatch")
     require(git("rev-parse", "HEAD") == sha and version_at(sha) == version,
             "source checkout/version mismatch")
     return sha, version, tag
@@ -927,7 +934,7 @@ def download_release_inventory(inventory, folder):
 
 def protocol_source(sha):
     files = git("ls-tree", "-r", "--name-only", sha).splitlines()
-    return "scripts/release-candidate.py" in files
+    return "meta/scripts/release-candidate.py" in files
 
 
 def verify_selected_run(selected, sha):
@@ -1190,8 +1197,10 @@ def publish(args):
         if release is not None:
             require(release_inventory(release) == inventory, "release changed before write")
         else:
+            # --latest=false: in the monorepo only Core's release is latest
+            # (the Homebrew update and Core's SDK downloads depend on it).
             run(["gh", "release", "create", tag, "--repo", repository(), "--verify-tag",
-                 "--draft", "--title", tag, "--notes", RELEASE_NOTES])
+                 "--draft", "--latest=false", "--title", tag, "--notes", RELEASE_NOTES])
             release = newly_created_release_for_tag(tag)
             require(release is not None and release["draft"] is True, "new draft release missing")
             require(not release_inventory(release), "new draft unexpectedly contains assets")
@@ -1203,7 +1212,7 @@ def publish(args):
                 upload(tag, expected[name])
         readback(release, expected, original, work, sha, tag)
         if release["draft"]:
-            run(["gh", "release", "edit", tag, "--repo", repository(), "--draft=false"])
+            run(["gh", "release", "edit", tag, "--repo", repository(), "--draft=false", "--latest=false"])
         final = release_for_tag(tag)
         require(final is not None and final["id"] == release["id"] and final["draft"] is False,
                 "release was not published as expected")
@@ -1386,7 +1395,7 @@ def dispatch(args):
     env.pop("GITHUB_API_TOKEN", None)
     print("Release protocol: tag pushes validate only; publication requires explicit accepted-byte promotion.",
           file=sys.stderr)
-    run(["gh", "workflow", "run", "release.yml", "--repo", REPOSITORY, "--ref", "main", "--json"],
+    run(["gh", "workflow", "run", Path(WORKFLOW).name, "--repo", REPOSITORY, "--ref", "main", "--json"],
         data=json_bytes(inputs), env=env)
     print(f"dispatched {mode} using owner gh authentication on main")
 

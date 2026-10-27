@@ -1,0 +1,410 @@
+name: Connect release
+# DRAFT for the 0.9.7 monorepo (Connect under connect/).
+#
+# Connect's own release line: tags connect-vX.Y.Z. Connect publishes no
+# registry package: its products, gateway archives, wheel and npm tarball are
+# GitHub release assets only, and its release is never "latest" (only Core's
+# is). Adapted from lukacf/meerkat-connect's connect-candidate.yml and
+# release/CONNECT-CANDIDATE.md, whose protocol is kept:
+#   1. candidate (dispatch, one target per run): build and verify the native
+#      product from the dispatched commit, then attest the original closure in
+#      a separate job that never runs the product;
+#   2. tag push connect-vX.Y.Z: validate only (exact-main CI green, the tag
+#      names the Connect version, Connect's published-floor check), then create
+#      the release object as a prerelease that is not latest;
+#   3. accept (dispatch): bounded, data-only acceptance of one attested
+#      candidate against the Meta reader, which in the monorepo is the in-tree
+#      meta/ at the same commit; the owner selects the printed acceptance
+#      SHA-256;
+#   4. publish (dispatch): `publish-accepted` adds exactly the accepted three
+#      assets to that release, never replacing one.
+# Prerequisites (connect-candidate-monorepo patch): connect-candidate.py names
+# lukacf/meerkat and this workflow; after the workspace wire-up it must build
+# meerkat-connect from the root workspace instead of native-candidate/.
+
+"on":
+  push:
+    tags:
+      - "connect-v*"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "candidate: build one target; accept: accept an attested candidate; publish: add accepted assets"
+        required: true
+        type: choice
+        options: [candidate, accept, publish]
+      target:
+        description: Native target (candidate and accept modes)
+        required: false
+        type: choice
+        options: [linux-x86_64, macos-arm64]
+      source_sha:
+        description: Candidate only - exact dispatched commit (40 lowercase hex)
+        required: false
+        default: ""
+        type: string
+      inputs_sha256:
+        description: Candidate only - SHA-256 of the target's release input JSON at that commit
+        required: false
+        default: ""
+        type: string
+      candidate_run_id:
+        description: Accept only - run id of the attested candidate
+        required: false
+        default: ""
+        type: string
+      publication_request:
+        description: Accept only - the ten-field publication request JSON (release/CONNECT-CANDIDATE.md)
+        required: false
+        default: ""
+        type: string
+      acceptance_run_id:
+        description: Publish only - run id of the accept run
+        required: false
+        default: ""
+        type: string
+      acceptance_sha256:
+        description: Publish only - the owner-selected SHA-256 of acceptance.json
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: connect-release-${{ github.event_name == 'push' && github.ref || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Resolve Connect release mode and version
+    runs-on: ubuntu-24.04
+    outputs:
+      mode: ${{ steps.resolve.outputs.mode }}
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Resolve
+        id: resolve
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          # Connect's version line: its crates carry an explicit version after
+          # the workspace wire-up (meerkat-connect's manifest); in the
+          # transition it is native-candidate's workspace version.
+          version="$(python3 - <<'PY'
+          import pathlib, tomllib
+          crate = tomllib.loads(pathlib.Path("connect/crates/meerkat-connect/Cargo.toml").read_text())["package"]["version"]
+          if isinstance(crate, str):
+              print(crate)
+          else:
+              native = tomllib.loads(pathlib.Path("connect/native-candidate/Cargo.toml").read_text())
+              print(native["workspace"]["package"]["version"])
+          PY
+          )"
+          if [[ "${EVENT}" == "push" ]]; then
+            mode=tag
+            tag="${REF#refs/tags/}"
+            if [[ "${tag}" != "connect-v${version}" ]]; then
+              echo "::error::tag ${tag} does not name the Connect version ${version} (expected connect-v${version})" >&2
+              exit 1
+            fi
+          else
+            mode="${MODE}"
+            tag="connect-v${version}"
+          fi
+          {
+            echo "mode=${mode}"
+            echo "version=${version}"
+            echo "tag=${tag}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "Connect ${version}: mode ${mode}, tag ${tag}"
+
+  require_ci_green:
+    name: Require green exact-main CI
+    needs: [resolve]
+    if: needs.resolve.outputs.mode == 'tag'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Refuse unless exact-main CI is already green for this commit
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const ref = context.sha;
+            const { data } = await github.rest.actions.listWorkflowRuns({
+              owner, repo, workflow_id: "ci.yml", branch: "main", event: "push", head_sha: ref, per_page: 100,
+            });
+            const runs = data.workflow_runs.filter(
+              (run) => run.head_sha === ref && run.head_branch === "main" && run.event === "push"
+            );
+            const success = runs.find((run) => run.status === "completed" && run.conclusion === "success");
+            if (!success) {
+              core.setFailed(`Connect release commit ${ref} has no green exact-main CI run (${runs.length} run(s)).`);
+              return;
+            }
+            core.info(`Connect release commit ${ref} has green exact-main CI: ${success.html_url}`);
+
+  # Connect's published floor: copies of its manifests with path dependencies
+  # dropped (Connect publishes no crate) resolve Core and Meta from crates.io
+  # at the versions they declare, and build. Required for a Connect release.
+  floor_check:
+    name: Connect published-floor check
+    needs: [resolve, require_ci_green]
+    if: needs.resolve.outputs.mode == 'tag' && needs.require_ci_green.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust-ci
+      - name: Build Connect against published Core and Meta
+        run: python3 scripts/published_crates_standalone.py floor --product connect --mode release --out "${RUNNER_TEMP}/connect-floor"
+
+  create_release:
+    name: Create the Connect prerelease (not latest)
+    needs: [resolve, require_ci_green, floor_check]
+    if: >-
+      needs.resolve.outputs.mode == 'tag' &&
+      needs.require_ci_green.result == 'success' &&
+      needs.floor_check.result == 'success'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Create the release object for the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "${TAG}: release exists; nothing to create"
+            exit 0
+          fi
+          # A prerelease that is not latest: Core's release stays latest, and
+          # the accepted assets arrive later through publish-accepted.
+          gh release create "${TAG}" --repo "${GITHUB_REPOSITORY}" --verify-tag \
+            --prerelease --latest=false --title "Meerkat Connect ${TAG#connect-v}" \
+            --notes "Meerkat Connect ${TAG#connect-v}. Assets are added only from accepted, attested candidates."
+
+  build:
+    name: Build and verify ${{ inputs.target }}
+    needs: [resolve]
+    if: github.event_name == 'workflow_dispatch' && needs.resolve.outputs.mode == 'candidate'
+    runs-on: ${{ inputs.target == 'macos-arm64' && 'macos-15' || 'ubuntu-24.04' }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: connect
+    env:
+      CONNECT_TARGET: ${{ inputs.target }}
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
+    steps:
+      - name: Checkout the dispatched source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Select Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.11'
+      - name: Check native host, source, versions and complete input selection
+        env:
+          CONNECT_SOURCE_SHA: ${{ inputs.source_sha }}
+          CONNECT_INPUTS_SHA256: ${{ inputs.inputs_sha256 }}
+        run: python3 scripts/connect-candidate.py preflight
+      - name: Prepare Linux build tools
+        if: inputs.target == 'linux-x86_64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y build-essential pkg-config libssl-dev zstd
+      - name: Prepare macOS build tools
+        if: inputs.target == 'macos-arm64'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+        run: |
+          xcode-select --print-path
+          brew install pkg-config openssl@3 zstd
+          printf 'OPENSSL_DIR=%s\n' "$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+      - name: Select Rust
+        run: rustup toolchain install 1.97.0 --profile minimal
+      - name: Emit actual build, installed verification and selection
+        env:
+          CONNECT_SOURCE_SHA: ${{ inputs.source_sha }}
+          CONNECT_INPUTS_SHA256: ${{ inputs.inputs_sha256 }}
+          XDG_CACHE_HOME: ${{ runner.temp }}/connect-cargo-cache
+          RUST_LANE_ID: connect-release-${{ github.run_id }}-${{ github.run_attempt }}
+          CARGO_INCREMENTAL: '0'
+          CARGO_TERM_COLOR: never
+        run: python3 scripts/connect-candidate.py build
+      - name: Upload exact candidate closure
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: connect-${{ inputs.target }}-build-${{ github.run_id }}-${{ github.run_attempt }}
+          path: connect/dist/*
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 90
+
+  attest:
+    name: Attest original candidate bytes
+    needs: [resolve, build]
+    if: github.event_name == 'workflow_dispatch' && needs.resolve.outputs.mode == 'candidate' && needs.build.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: connect
+    env:
+      CONNECT_TARGET: ${{ inputs.target }}
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout the same workflow source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Fetch this job's immutable artifact by ID and digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONNECT_SOURCE_SHA: ${{ inputs.source_sha }}
+          CONNECT_INPUTS_SHA256: ${{ inputs.inputs_sha256 }}
+          CONNECT_ARTIFACT_ID: ${{ needs.build.outputs.artifact_id }}
+          CONNECT_ARTIFACT_DIGEST: ${{ needs.build.outputs.artifact_digest }}
+        run: python3 scripts/connect-candidate.py fetch-built
+      - name: Attest candidate closure and manifest
+        id: provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
+        with:
+          subject-path: connect/dist/*
+      - name: Retain the original attestation bundle
+        env:
+          BUNDLE_PATH: ${{ steps.provenance.outputs.bundle-path }}
+        run: cp -- "$BUNDLE_PATH" "dist/connect-${CONNECT_TARGET}-provenance.jsonl"
+      - name: Upload attested candidate without publication
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: connect-${{ inputs.target }}-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: connect/dist/*
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 90
+
+  # Data-only acceptance. The Meta reader is the in-tree meta/ of the
+  # candidate's own commit (one repository), so no second checkout is
+  # selected; the request still names every identity explicitly.
+  accept:
+    name: Accept an attested ${{ inputs.target }} candidate
+    needs: [resolve]
+    if: github.event_name == 'workflow_dispatch' && needs.resolve.outputs.mode == 'accept'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Select Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.11'
+      - name: Download the attested candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.candidate_run_id }}
+          TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          [[ "${RUN_ID}" =~ ^[1-9][0-9]*$ ]] || { echo "::error::candidate_run_id must be a run id" >&2; exit 1; }
+          gh run download "${RUN_ID}" --repo "${GITHUB_REPOSITORY}" \
+            --pattern "connect-${TARGET}-candidate-${RUN_ID}-*" --dir "${RUNNER_TEMP}/candidate-download"
+          mkdir -p "${RUNNER_TEMP}/candidate"
+          find "${RUNNER_TEMP}/candidate-download" -type f -exec cp -n -- {} "${RUNNER_TEMP}/candidate/" \;
+      - name: Accept the candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUEST: ${{ inputs.publication_request }}
+        working-directory: connect
+        run: |
+          set -euo pipefail
+          printf '%s' "${REQUEST}" > "${RUNNER_TEMP}/request.json"
+          python3 scripts/connect-candidate.py accept-publication \
+            --request "${RUNNER_TEMP}/request.json" --candidate "${RUNNER_TEMP}/candidate" \
+            --meta-source "${GITHUB_WORKSPACE}/meta" --output "${RUNNER_TEMP}/acceptance"
+          echo "acceptance.json sha256: $(sha256sum "${RUNNER_TEMP}/acceptance/acceptance.json" | cut -d' ' -f1)"
+      - name: Upload the acceptance record
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: connect-${{ inputs.target }}-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/acceptance
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 90
+
+  publish:
+    name: Publish accepted Connect assets
+    needs: [resolve]
+    if: github.event_name == 'workflow_dispatch' && needs.resolve.outputs.mode == 'publish'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Select Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.11'
+      - name: Download the acceptance record
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.acceptance_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "${RUN_ID}" =~ ^[1-9][0-9]*$ ]] || { echo "::error::acceptance_run_id must be a run id" >&2; exit 1; }
+          gh run download "${RUN_ID}" --repo "${GITHUB_REPOSITORY}" --pattern "connect-*-acceptance-${RUN_ID}-*" \
+            --dir "${RUNNER_TEMP}/acceptance-download"
+          accepted="$(find "${RUNNER_TEMP}/acceptance-download" -name acceptance.json -printf '%h\n')"
+          [[ "$(printf '%s\n' "${accepted}" | wc -l)" == 1 ]] || { echo "::error::expected exactly one acceptance record" >&2; exit 1; }
+          echo "ACCEPTED_DIR=${accepted}" >> "${GITHUB_ENV}"
+      - name: Add exactly the accepted assets (never replacing one)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACCEPTANCE_SHA256: ${{ inputs.acceptance_sha256 }}
+        working-directory: connect
+        run: |
+          set -euo pipefail
+          python3 scripts/connect-candidate.py publish-accepted \
+            --accepted "${ACCEPTED_DIR}" --acceptance-sha256 "${ACCEPTANCE_SHA256}" \
+            --output "${RUNNER_TEMP}/publication"

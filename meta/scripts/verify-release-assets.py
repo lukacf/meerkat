@@ -50,7 +50,12 @@ def normalized_version(release_tag):
     tag = release_tag.strip()
     if not tag:
         raise ReleaseAssetError("release tag must not be empty")
-    version = tag[1:] if tag.startswith("v") else tag
+    # Monorepo Meta tags are meta-vX.Y.Z; tags released from lukacf/meerkat-meta
+    # (up to 0.9.6) are vX.Y.Z.
+    if tag.startswith("meta-v"):
+        version = tag[len("meta-v"):]
+    else:
+        version = tag[1:] if tag.startswith("v") else tag
     version = version.replace("/", "-")
     if not version:
         raise ReleaseAssetError("release tag does not contain a version")

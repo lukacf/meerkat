@@ -39,17 +39,19 @@ set -euo pipefail
 source_root=""
 out_dir=""
 crates=()
+version_crate="meerkat-core"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --source-root) source_root="$2"; shift 2 ;;
         --out) out_dir="$2"; shift 2 ;;
         --crate) crates+=("$2"); shift 2 ;;
+        --version-crate) version_crate="$2"; shift 2 ;;
         -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
         *) echo "error: unknown argument $1" >&2; exit 2 ;;
     esac
 done
 [[ -n "$source_root" && -n "$out_dir" ]] || {
-    echo "usage: $0 --source-root DIR --out DIR [--crate NAME]..." >&2
+    echo "usage: $0 --source-root DIR --out DIR [--crate NAME]... [--version-crate NAME]" >&2
     exit 2
 }
 source_root="$(cd "$source_root" && pwd)"
@@ -109,7 +111,7 @@ for name in sys.argv[2:]:
 PY
 
 workspace_version="$(
-    "$PYTHON" -c 'import json,sys; m=json.load(open(sys.argv[1])); print(next(p["version"] for p in m["packages"] if p["name"]=="meerkat-core"))' "$metadata_file"
+    "$PYTHON" -c 'import json,sys; m=json.load(open(sys.argv[1])); print(next(p["version"] for p in m["packages"] if p["name"]==sys.argv[2]))' "$metadata_file" "$version_crate"
 )"
 rustc_version="$(rustc -V)"
 rustc_commit="$(rustc -Vv | awk '/^commit-hash:/ {print $2}')"

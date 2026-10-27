@@ -193,7 +193,7 @@ No data-export protocol or successful ingestion claim is added here.
 
 ## Dependency and verification limits
 
-The manifest pins Connect `8e1c7c61e296f6cbdcc4670480acd89554552e8c` and uses the
+The manifest pins Connect `2eef4a3684a45cd6c51dcbec4515400ad6a86d3f` and uses the
 same Core development patch graph as that commit's native workspace. It stays
 separate from the pure serde-only GHE crate and the released Forge runtime.
 This revision includes the reviewed protected entry, bounded diagnostics and
@@ -202,6 +202,9 @@ accept repeated reads with distinct native observations while rejecting replay.
 The original SDK regression and SDK boundary suites pass; those results do not
 qualify the native adapter. The existing native validation lane remains the
 owner of compilation and platform-specific acceptance.
+The successor to the SDK revision changes only the native diagnostic test-module
+path. It addresses the original macOS typecheck's E0583; the failed check is
+retained, and the corrected native validation result remains pending.
 There is no lockfile or native build result yet. Formatting parses the source;
 it does not typecheck the APIs, resolve the native graph or execute controls.
 

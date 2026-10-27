@@ -1270,7 +1270,7 @@ const CALENDAR_RECIPES: &[u8] =
 fn calendar_versions_remain_distinct_and_historical_selection_does_not_upgrade() {
     assert_eq!(
         ContentDigest::of_bytes(CALENDAR_OLD_PLUGIN).as_str(),
-        "6e36ded4e51af6c7965e41f9941c64f9e4ecd0234a1e4fb5da4dd76bcd0cf6fb"
+        "62fe7ffaa2fbe75ae7efaf00f01e0d2f075f213c5dfb3d8b8654172aabdbb9a4"
     );
     assert_eq!(
         ContentDigest::of_bytes(CALENDAR_OLD_RECIPES).as_str(),

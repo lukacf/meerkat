@@ -4,6 +4,7 @@
 meta-installer.yml and meta-e2e-live.yml, and the workflows still kept under
 meta/.github."""
 
+import fnmatch
 import importlib.util
 import json
 import os
@@ -38,6 +39,14 @@ _CI_CHANGES_SPEC.loader.exec_module(ci_changes)
 # The variables rust-cache hashes into its key.
 HASHED_ENV = re.compile(r"(?:CARGO|CC|CFLAGS|CXX|CMAKE|RUST)\w*")
 SETUP_RUST = "./.github/actions/setup-rust-ci"
+# The jobs that run on pull requests only: the root CI runs their tests on
+# the push (main unit, feature suite and closure-tests rows for Meta's
+# packages).
+PULL_REQUEST_ONLY_JOBS = {"rust-unit": "rust", "rust-conformance": "rust", "rust-integration": "integration",
+                          "rust-extension-state-lib": "extension_state", "rust-voice-lib": "voice"}
+PULL_REQUEST_ONLY = " && github.event_name == 'pull_request'"
+# Meta's workspace packages: the only ones a Meta job names to Cargo.
+META_PACKAGES = ("meerkat-meta", "meta-extension-state", "meta-store-conformance")
 SETUP_SCCACHE = "./.github/actions/setup-sccache-ci"
 
 
@@ -48,6 +57,51 @@ def load(path: Path) -> dict:
 def triggers(workflow: dict) -> dict:
     # YAML 1.1 reads the bare key `on` as True.
     return workflow.get("on", workflow.get(True))
+
+
+def step_run(text: str, name: str) -> str:
+    """The dedented `run` script of the workflow step named `name` (the
+    root's scripts/ci-release-projection-selftest.mjs reads it the same
+    way)."""
+    lines = text.split("\n")
+    at = next(index for index, line in enumerate(lines) if line.strip() == f"- name: {name}")
+    step_indent = lines[at].index("-")
+    run_at = None
+    for index in range(at + 1, len(lines)):
+        if re.match(r"^\s*#", lines[index]):
+            continue
+        indent = len(lines[index]) - len(lines[index].lstrip())
+        if lines[index].strip() and indent <= step_indent:
+            break
+        if re.match(r"^\s+run: \|\s*$", lines[index]):
+            run_at = index
+            break
+    assert run_at is not None, f"step {name} has a run block"
+    run_indent = len(lines[run_at]) - len(lines[run_at].lstrip())
+    body = []
+    for line in lines[run_at + 1:]:
+        if line.strip() and len(line) - len(line.lstrip()) <= run_indent:
+            break
+        body.append(line)
+    indent = min(len(line) - len(line.lstrip()) for line in body if line.strip())
+    return "\n".join(line[indent:] for line in body).rstrip()
+
+
+def meta_test_targets() -> list[tuple[str, dict]]:
+    """Meta's workspace packages' targets as Cargo reads them (`cargo
+    metadata --no-deps` from the monorepo's root resolves nothing)."""
+    result = subprocess.run(
+        ["cargo", "metadata", "--no-deps", "--offline", "--format-version", "1"],
+        cwd=MONOREPO, check=True, capture_output=True, text=True,
+    )
+    metadata = json.loads(result.stdout)
+    members = set(metadata["workspace_members"])
+    return [
+        (package["name"], target)
+        for package in metadata["packages"]
+        if package["id"] in members and package["name"] in META_PACKAGES
+        for target in package["targets"]
+    ]
 
 
 def job_block(name: str, path: Path = CI_WORKFLOW) -> str:
@@ -313,7 +367,11 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertEqual([use for use in reference_uses if use in setup_order], setup_order)
         jobs = rust_jobs(meta)
         self.assertEqual(sorted(jobs), sorted(["test-python", "console-backends", "console-fixtures",
-                                               "console-acceptance", "flow-editor"]))
+                                               "console-acceptance", "flow-editor", "rust-unit",
+                                               "rust-examples", "rust-conformance", "rust-integration",
+                                               "rust-features-check", "rust-extension-state",
+                                               "rust-extension-state-lib", "rust-voice", "rust-voice-lib",
+                                               "warm-cache"]))
         for name, job in jobs.items():
             with self.subTest(job=name):
                 self.assertEqual(hashed(job.get("env")), hashed(reference.get("env")))
@@ -336,9 +394,10 @@ class CiWorkflowTests(unittest.TestCase):
 
     def test_cargo_runs_one_package_from_the_root_wrapper(self):
         """Cargo runs from the repository's root through ./scripts/repo-cargo,
-        for meerkat-meta alone: a step in meta/ reaches it through make with
-        CARGO=../scripts/repo-cargo. No step names the workspace, so no Meta
-        job compiles Core's or Connect's packages, and the planner's product
+        for Meta's packages alone: a step in meta/ reaches it through make
+        with CARGO=../scripts/repo-cargo. No step names the workspace, so no
+        Meta job compiles Core's or Connect's packages (only as Meta's
+        dependencies, from the root CI's cache), and the planner's product
         rows stay the only workspace lanes."""
         commands = []
         for path in (CI_WORKFLOW, E2E_LIVE_WORKFLOW):
@@ -353,11 +412,13 @@ class CiWorkflowTests(unittest.TestCase):
                 commands.append(line)
                 if line.startswith("./scripts/repo-cargo "):
                     self.assertEqual(step.get("working-directory"), ".", line)
-                    self.assertIn(" -p meerkat-meta ", f"{line} ", line)
+                    packages = re.findall(r"(?:^|\s)-p\s+(\S+)", line)
+                    self.assertTrue(packages, line)
+                    self.assertLessEqual(set(packages), set(META_PACKAGES), line)
                 else:
                     self.assertRegex(line, r"^make (test-python|e2e-live) CARGO=\.\./scripts/repo-cargo$")
         self.assertEqual(sum(line.startswith("make ") for line in commands), 2)
-        self.assertEqual(len(commands), 7, commands)
+        self.assertEqual(len(commands), 25, commands)
         self.assertNotIn("repo-cargo", INSTALLER_WORKFLOW.read_text())
 
     def test_every_external_action_is_pinned_and_takes_the_root_pins(self):
@@ -560,6 +621,9 @@ class CiWorkflowTests(unittest.TestCase):
                 permissions = job.get("permissions")
                 if name in rust_jobs(workflow):
                     self.assertEqual(permissions, {"contents": "read", "id-token": "write"})
+                elif name == "gate":
+                    # The budget step reads this run's jobs and attempts.
+                    self.assertEqual(permissions, {"contents": "read", "actions": "read"})
                 else:
                     self.assertIsNone(permissions)
                 for step in steps_of(job):
@@ -798,19 +862,22 @@ class CiWorkflowTests(unittest.TestCase):
             "- name: Native MCP Apps rendering and reload\n",
             "- name: Native MCP Apps polling during an active model turn\n",
             "- name: Native MCP Apps on a builder host with identity-first members\n",
-            "- run: node console/browser-e2e.cjs --shard=${{ matrix.shard }}/6\n",
+            "- if: matrix.shard != 'mcp-apps'\n        run: node console/browser-e2e.cjs --shard=${{ matrix.shard }}/6\n",
             "name: console-browser-${{ github.run_id }}-${{ matrix.shard }}-${{ github.run_attempt }}\n",
         ]
         positions = [browser.index(marker) for marker in order]
         self.assertEqual(positions, sorted(positions))
-        # Six legs, each dealt its own scenarios by the registry's
-        # --shard=i/6; the matrix and the shard count must agree. MCP Apps
-        # run once, in leg 1, on its evidence path under meta/.
-        legs = re.search(r"(?m)^        shard: \[([0-9, ]+)\]$", browser).group(1).split(", ")
-        self.assertEqual(legs, [str(index) for index in range(1, 7)])
-        self.assertIn(f"--shard=${{{{ matrix.shard }}}}/{len(legs)}\n", browser)
+        # Six scenario legs, each dealt its own scenarios by the registry's
+        # --shard=i/6 (the matrix and the shard count must agree), and one
+        # leg that runs only the MCP Apps checks, on its evidence path under
+        # meta/: the legs wait for the backends, so leg 1 no longer carries
+        # them on top of its share.
+        legs = re.search(r"(?m)^        shard: \[([0-9a-z, -]+)\]$", browser).group(1).split(", ")
+        self.assertEqual(legs, [*(str(index) for index in range(1, 7)), "mcp-apps"])
+        self.assertIn(f"--shard=${{{{ matrix.shard }}}}/{len(legs) - 1}\n", browser)
         self.assertIn("      fail-fast: false\n", browser)
-        self.assertEqual(browser.count("        if: matrix.shard == 1\n"), 3)
+        self.assertEqual(browser.count("        if: matrix.shard == 'mcp-apps'\n"), 3)
+        self.assertIn("if-no-files-found: ${{ matrix.shard == 'mcp-apps' && 'error' || 'warn' }}\n", browser)
         self.assertEqual(browser.count("META_BROWSER_EVIDENCE: ${{ github.workspace }}/meta/output/playwright/"
                                        "console-acceptance/mcp-apps\n"), 3)
         self.assertIn("          path: meta/output/playwright/console-acceptance/\n", browser)
@@ -865,6 +932,106 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertLess(browser.index("./scripts/repo-cargo build -p meerkat-meta --bin meta_flow_editor\n"),
                         browser.index("test:browser-source"))
 
+    def test_the_budget_is_the_root_ci_step_byte_for_byte(self):
+        """At the cutover Meta CI gets the root CI's time limit: lane
+        execution 1080 s and push-to-terminal 1200 s, runner queue excluded,
+        enforced on pull requests only. The gate runs ci.yml's own budget
+        step, copied byte for byte (the root's
+        scripts/ci-release-projection-selftest.mjs checks the same from
+        Core's side), with this workflow's job names, and the jobs that wait
+        for another job besides the classification are exactly those its
+        LANE_UPSTREAMS names: a lane's execution path then holds every job
+        it waited for."""
+        meta_text, root_text = CI_WORKFLOW.read_text(), ROOT_CI_WORKFLOW.read_text()
+        name = "Enforce lane execution budget"
+        self.assertEqual(step_run(meta_text, name), step_run(root_text, name))
+        meta, root = load(CI_WORKFLOW), load(ROOT_CI_WORKFLOW)
+        for key in ("CI_MAX_EXEC_SECONDS", "CI_MAX_TERMINAL_SECONDS", "CI_QUEUE_WARN_SECONDS"):
+            self.assertEqual(meta["env"][key], root["env"][key], key)
+        self.assertEqual(meta["env"]["CI_MAX_EXEC_SECONDS"], "1080")
+        self.assertEqual(meta["env"]["CI_MAX_TERMINAL_SECONDS"], "1200")
+        gate = meta["jobs"]["gate"]
+        step = next(step for step in steps_of(gate) if step.get("name") == name)
+        env = step["env"]
+        self.assertEqual(step["if"], "${{ !cancelled() }}")
+        self.assertEqual(env["ENFORCE_BUDGET"], "${{ github.event_name == 'pull_request' }}")
+        self.assertEqual(env["GATE_JOB_NAME"], gate["name"])
+        self.assertEqual(env["CLASSIFICATION_JOB_NAME"], meta["jobs"]["changes"]["name"])
+        self.assertEqual(env["ROOT_JOB_NAMES"], meta["jobs"]["changes"]["name"])
+        self.assertEqual(env["MAX_EXEC_SECONDS"], "${{ env.CI_MAX_EXEC_SECONDS }}")
+        self.assertEqual(env["MAX_TERMINAL_SECONDS"], "${{ env.CI_MAX_TERMINAL_SECONDS }}")
+        self.assertEqual(env["QUEUE_WARN_SECONDS"], "${{ env.CI_QUEUE_WARN_SECONDS }}")
+        self.assertEqual(env["GUARD_LANE_REASONS"], "{}")
+        declared = {}
+        for entry in env["LANE_UPSTREAMS"].split(";"):
+            waiter, _, upstreams = entry.partition("=")
+            declared[waiter] = set(upstreams.split("|"))
+        waits = {}
+        for job_id, job in meta["jobs"].items():
+            needs = job.get("needs") or []
+            needs = [needs] if isinstance(needs, str) else needs
+            upstream = {meta["jobs"][need]["name"] for need in needs if need != "changes"}
+            if job_id == "gate" or not upstream:
+                continue
+            label = job["name"].split(" (")[0] + ("*" if "strategy" in job else "")
+            waits[label] = upstream
+        self.assertEqual(declared, waits)
+
+    def test_the_integration_shards_cover_every_target_once(self):
+        """rust-integration runs meerkat-meta's integration tests in shards
+        by test target name, each shard a list of patterns (rust-examples
+        and rust-conformance run the other two packages' whole suites).
+        Their union is every integration test target of meerkat-meta only
+        while each matches exactly one pattern of one shard, none needs a
+        feature the shard does not enable, and no package turns its tests/
+        discovery off."""
+        workflow = load(CI_WORKFLOW)
+        job = workflow["jobs"]["rust-integration"]
+        rows = job["strategy"]["matrix"]["include"]
+        # The shards are numbered 1..N and the job's name says of how many.
+        self.assertEqual([row["shard"] for row in rows], list(range(1, len(rows) + 1)))
+        self.assertEqual(job["name"], f"rust-integration (${{{{ matrix.shard }}}}/{len(rows)})")
+        patterns = [pattern for row in rows for pattern in row["tests"].split()]
+        problems = []
+        for package in META_PACKAGES:
+            manifest = MONOREPO / "meta" / "crates" / package / "Cargo.toml"
+            if tomllib.loads(manifest.read_text()).get("package", {}).get("autotests") is False:
+                problems.append(f"{package}: autotests = false")
+        for package, target in meta_test_targets():
+            # rust-examples and rust-conformance run the two small crates'
+            # whole suites.
+            if target["kind"] != ["test"] or package != "meerkat-meta":
+                continue
+            label = f"{package} test {target['name']}"
+            if target.get("required-features"):
+                problems.append(f"{label}: required-features {target['required-features']}")
+            matched = [pattern for pattern in patterns if fnmatch.fnmatchcase(target["name"], pattern)]
+            if len(matched) != 1:
+                problems.append(f"{label}: matches {matched}")
+        self.assertEqual(problems, [])
+        # Every pattern selects something, or Cargo refuses the shard.
+        names = [target["name"] for package, target in meta_test_targets()
+                 if target["kind"] == ["test"] and package == "meerkat-meta"]
+        for pattern in patterns:
+            self.assertTrue(fnmatch.filter(names, pattern), pattern)
+        # The step passes one --test per pattern, without letting the shell
+        # expand them against the checkout.
+        self.assertIn('read -r -a patterns <<< "${TESTS}"\n', job_block("rust-integration"))
+
+    def test_the_unit_partitions_run_every_lib_test_once(self):
+        """rust-unit's legs each compile meerkat-meta's lib test harness and
+        run one nextest count partition of its tests: the matrix is 1..N and
+        the job's name and its --partition both say N, so every test runs in
+        exactly one leg."""
+        job = load(CI_WORKFLOW)["jobs"]["rust-unit"]
+        legs = job["strategy"]["matrix"]["partition"]
+        self.assertEqual(legs, list(range(1, len(legs) + 1)))
+        self.assertEqual(job["name"], f"rust-unit (${{{{ matrix.partition }}}}/{len(legs)})")
+        step = next(step for step in steps_of(job) if step.get("name") == "Lib tests")
+        self.assertEqual(step["env"]["PARTITION"], "${{ matrix.partition }}")
+        self.assertEqual(step["run"].strip(), "./scripts/repo-cargo nextest run -p meerkat-meta --lib "
+                         f'--partition "count:${{PARTITION}}/{len(legs)}" --no-fail-fast')
+
     def test_gate_requires_every_job_it_lists(self):
         """A job absent from `gate` can fail without failing the check suite.
 
@@ -888,13 +1055,24 @@ class CiWorkflowTests(unittest.TestCase):
         listed = set(gate["needs"])
         must_gate = {"changes", "meta-checks", "test-typescript", "test-python", "console-backends", "console",
                      "console-browser", "console-fixtures", "console-acceptance", "console-perf",
-                     "flow-editor-contracts", "flow-editor"}
+                     "flow-editor-contracts", "flow-editor", "rust-unit", "rust-examples", "rust-conformance",
+                     "rust-integration", "rust-features-check", "rust-extension-state",
+                     "rust-extension-state-lib", "rust-voice", "rust-voice-lib"}
         missing = must_gate - listed
         self.assertFalse(missing, f"these jobs must gate the suite and are absent from `needs`: {sorted(missing)}")
-        self.assertEqual(listed | {"gate"}, set(workflow["jobs"]), "every job gates")
+        # warm-cache only warms the sccache bucket on a push that reaches no
+        # Meta lane: a failure leaves a later pull request slower, never
+        # wrong, and the root CI's downstream rows prove what it compiles.
+        self.assertEqual(listed | {"gate", "warm-cache"}, set(workflow["jobs"]), "every other job gates")
+        self.assertEqual(workflow["jobs"]["warm-cache"]["if"],
+                         "github.event_name == 'push' && needs.changes.outputs.meta == 'false'")
 
-        checks = dict(re.findall(r'(?m)^\s+check ([a-z-]+) "\$\{\{ needs\.\1\.result \}\}" (required|[a-z_]+)$', block))
+        found = re.findall(r'(?m)^\s+check ([a-z-]+) "\$\{\{ needs\.\1\.result \}\}" (required|[a-z_]+)( pull_request)?$', block)
+        checks = {name: mode for name, mode, _ in found}
+        pull_request_only = {name for name, _, only in found if only}
         self.assertEqual(set(checks), listed, "every job in `needs` is checked exactly by name")
+        self.assertEqual(pull_request_only, set(PULL_REQUEST_ONLY_JOBS),
+                         "exactly the pull-request-only jobs may be skipped on a push")
         self.assertIn('"$3" != "required" && "$2" == "skipped" && "${lane_value}" == "false"', block)
         self.assertIn('local variable="LANE_${3^^}"', block)
         for lane in (*ci_changes.LANES, "meta"):
@@ -905,7 +1083,8 @@ class CiWorkflowTests(unittest.TestCase):
             if mode == "required":
                 self.assertIsNone(condition, name)
                 continue
-            self.assertEqual(condition, f"needs.changes.outputs.{mode} == 'true'", name)
+            only = PULL_REQUEST_ONLY if name in pull_request_only else ""
+            self.assertEqual(condition, f"needs.changes.outputs.{mode} == 'true'{only}", name)
             needs = workflow["jobs"][name]["needs"]
             self.assertIn("changes", [needs] if isinstance(needs, str) else needs, name)
             lanes.setdefault(mode, set()).add(name)
@@ -914,12 +1093,16 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertEqual(lanes, {lane: set(jobs) for lane, jobs in ci_changes.LANE_JOBS.items() if jobs})
         self.assertEqual(checks["changes"], "required")
 
-    def run_gate(self, results: dict[str, str], lanes: dict[str, str]) -> subprocess.CompletedProcess:
-        """Run the gate step's shell with job results substituted the way
-        GitHub renders them and the lane outputs in its environment."""
+    def run_gate(self, results: dict[str, str], lanes: dict[str, str],
+                 event: str = "pull_request") -> subprocess.CompletedProcess:
+        """Run the gate's result check with job results substituted the way
+        GitHub renders them and the lane outputs and event in its
+        environment."""
         lines = job_block("gate").splitlines()
-        start = lines.index("        run: |") + 1
-        body = "\n".join(line[10:] for line in lines[start:] if line.startswith("          ") or not line)
+        check_at = lines.index("      - name: Check job results")
+        start = lines.index("        run: |", check_at) + 1
+        end = next(index for index in range(start, len(lines)) if lines[index].startswith("      - name: "))
+        body = "\n".join(line[10:] for line in lines[start:end] if line.startswith("          ") or not line)
         script = re.sub(
             r"\$\{\{ needs\.([a-z-]+)\.result \}\}",
             lambda match: results.get(match.group(1), "success"),
@@ -927,6 +1110,7 @@ class CiWorkflowTests(unittest.TestCase):
         )
         env = {key: value for key, value in os.environ.items() if not key.startswith("LANE_")}
         env.update({f"LANE_{lane.upper()}": value for lane, value in lanes.items()})
+        env["EVENT"] = event
         return subprocess.run(["bash", "-e", "-c", script], env=env, capture_output=True, text=True)
 
     def test_gate_accepts_a_skip_only_for_a_lane_classified_false(self):
@@ -957,6 +1141,19 @@ class CiWorkflowTests(unittest.TestCase):
             with self.subTest(case=name):
                 result = self.run_gate(results, lanes)
                 self.assertEqual(result.returncode, status, result.stdout + result.stderr)
+        # The pull-request-only jobs: skipped on a push or a dispatch (the
+        # root CI runs their tests there), required on a pull request.
+        pr_only_skipped = {job: "skipped" for job in PULL_REQUEST_ONLY_JOBS}
+        for event, status in (("push", 0), ("workflow_dispatch", 0), ("pull_request", 1)):
+            with self.subTest(event=event):
+                result = self.run_gate(pr_only_skipped, every, event)
+                self.assertEqual(result.returncode, status, result.stdout + result.stderr)
+        # Without a classification even a push may not skip them.
+        result = self.run_gate({**all_skipped, **pr_only_skipped}, {}, "push")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        # A pull-request-only job that failed fails a push too.
+        result = self.run_gate({"rust-unit": "failure"}, every, "push")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
 
     def test_every_job_builds_the_commit_its_event_names(self):
         """No dispatch input and no checkout ref can point a job at another
@@ -1011,10 +1208,11 @@ class CiWorkflowTests(unittest.TestCase):
         # Every other job waits for it and skips when Meta is not reached.
         workflow = load(CI_WORKFLOW)
         for name, job in workflow["jobs"].items():
-            if name in ("changes", "gate"):
+            if name in ("changes", "gate", "warm-cache"):
                 continue
             with self.subTest(job=name):
-                self.assertRegex(job["if"], r"^needs\.changes\.outputs\.[a-z_]+ == 'true'$")
+                only = re.escape(PULL_REQUEST_ONLY) if name in PULL_REQUEST_ONLY_JOBS else ""
+                self.assertRegex(job["if"], rf"^needs\.changes\.outputs\.[a-z_]+ == 'true'{only}$")
 
     def run_classify_step(self, base_classifier: str | None, *, head_classifier: str | None = None,
                           event: str = "pull_request", before: str = "parent") -> dict[str, str]:

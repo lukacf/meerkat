@@ -3,10 +3,15 @@
 
 Each lane is a group of jobs in Meta's CI workflow that read the same inputs
 (see LANE_JOBS). In the monorepo that workflow is the root's
-.github/workflows/meta-ci.yml, and the root CI (scripts/ci-cargo-lanes.mjs)
-plans Meta's Rust rows, so the rust, integration, voice and extension_state
-lanes have no job there; they stay lanes because a pull request's Rust change
-still leaves the other configurations to the push (see `deferred_lanes`).
+.github/workflows/meta-ci.yml. The root CI (scripts/ci-cargo-lanes.mjs) runs
+Meta's Clippy on a pull request and its default-feature tests and feature
+suites on the push, so the jobs that run those tests (the rust and
+integration lanes' test jobs, the voice and extension_state lanes' lib jobs)
+run on pull requests only (the gate accepts their skip on a push), while the
+no-default-features check, the examples build and the feature-gated
+integration targets of the voice and extension_state lanes run on every run
+that reaches their lane (see `deferred_lanes` for what a pull request's Rust
+change leaves to the push).
 Pushes, dispatches and an empty or unreadable diff run every lane, so main's
 run always covers every job. A pull request runs only the lanes its changed
 files reach and do not leave to the push:
@@ -79,12 +84,14 @@ from pathlib import Path
 from typing import Callable
 
 # The lanes, each named by the `changes` output its jobs test in meta-ci.yml.
-# The root CI runs the Rust lanes' clippy and tests, so they name no job here.
+# rust-unit, rust-conformance, rust-integration, rust-extension-state-lib and
+# rust-voice-lib run on pull requests only: the root CI runs those tests on
+# the push.
 LANE_JOBS = {
-    "rust": (),
-    "integration": (),
-    "voice": (),
-    "extension_state": (),
+    "rust": ("rust-unit", "rust-examples", "rust-conformance", "rust-features-check"),
+    "integration": ("rust-integration",),
+    "voice": ("rust-voice", "rust-voice-lib"),
+    "extension_state": ("rust-extension-state", "rust-extension-state-lib"),
     "python": ("test-python",),
     "console": ("console-backends", "console", "console-browser", "console-fixtures", "console-acceptance"),
     "console_perf": ("console-perf",),

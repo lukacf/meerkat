@@ -856,6 +856,57 @@ process.stdout.write(JSON.stringify(fixture[path]));
   assert.equal(budget.outputs.exec_path_seconds, "1081", "1046 s of the row, 30 s of classification, 5 s of stagger");
   assert.equal(budget.outputs.budget_verdict, "exec_over_budget");
 
+  // Meta CI's gate runs this same step (.github/workflows/meta-ci.yml), byte
+  // for byte, with its own job names, and names the jobs its lanes wait for
+  // besides the classification (LANE_UPSTREAMS): such a lane's execution
+  // path is its own run time plus the longest path among them, and its path
+  // queue that path's queue. This workflow sets no LANE_UPSTREAMS, so its
+  // paths are the classification's and the stagger job's, as above.
+  const metaWorkflow = readFileSync(resolve(root, ".github/workflows/meta-ci.yml"), "utf8");
+  assert.equal(
+    extractStepRun(metaWorkflow, "Enforce lane execution budget").trimEnd(),
+    budgetStep.trimEnd(),
+    "meta-ci.yml's gate runs ci.yml's budget step unchanged",
+  );
+  assert.equal(budgetEnv.LANE_UPSTREAMS, undefined, "ci.yml's lanes wait for no other lane");
+  const metaEnv = Object.fromEntries(
+    Object.entries(extractStepLiteralEnv(metaWorkflow, "Enforce lane execution budget"))
+      .map(([key, value]) => [key, value.replace(/^"(.*)"$/, "$1")]),
+  );
+  assert.equal(metaEnv.GATE_JOB_NAME, "Meta gate");
+  assert.equal(metaEnv.LANE_UPSTREAMS, "console=console-backends;console-browser*=console-backends");
+  // The backends waited 100 s for a runner and ran 500 s; the console job
+  // ran 400 s after them, a browser leg 300 s after a 63 s queue.
+  const metaRun = (consoleSeconds) => [
+    job(metaEnv.CLASSIFICATION_JOB_NAME, 0, 5, 35),
+    job("console-backends", 36, 136, 636),
+    job("console", 637, 640, 640 + consoleSeconds),
+    job("console-browser (3)", 637, 700, 1000),
+    job("test-typescript", 36, 40, 100),
+    { name: metaEnv.GATE_JOB_NAME, created_at: at(1500), started_at: at(1504), completed_at: null, conclusion: null },
+  ];
+  budget = runBudget([0], metaRun(400), metaEnv);
+  assert.equal(budget.status, 0, `a chain within the budget: ${budget.stdout}${budget.stderr}`);
+  assert.deepEqual(
+    budget.outputs,
+    {
+      exec_path_seconds: "930", terminal_seconds: "1040", terminal_excluding_queue_seconds: "932",
+      queue_seconds: "108", budget_verdict: "within_budget", guard_lanes_outside_budget: "[]",
+    },
+    `the console job's path holds the backends' and the classification's: ${budget.stdout}`,
+  );
+  assert.match(budget.stdout, /^\| console \| 1 \| 3 \| 400 \| 930 \| 1040 \| 932 \| success \|$/m, "the console job waits for the backends");
+  assert.match(budget.stdout, /^\| console-browser \(3\) \| 1 \| 63 \| 300 \| 830 \| 1000 \| 832 \| success \|$/m, "so does a browser leg");
+  assert.match(budget.stdout, /^\| test-typescript \| 1 \| 4 \| 60 \| 90 \| 100 \| 91 \| success \|$/m, "a lane that waits only for the classification");
+  budget = runBudget([0], metaRun(600), metaEnv);
+  assert.equal(budget.status, 1, `a chain over the budget fails: ${budget.stdout}`);
+  assert.equal(budget.outputs.exec_path_seconds, "1130", "600 s of the console job, 500 s of the backends, 30 s of classification");
+  assert.equal(budget.outputs.budget_verdict, "exec_over_budget");
+  // Without the upstream names the same run would measure the console job
+  // alone after the classification, and pass.
+  budget = runBudget([0], metaRun(600), { ...metaEnv, LANE_UPSTREAMS: "" });
+  assert.equal(budget.outputs.exec_path_seconds, "630");
+
   // An exact-profile lane the plan ran only because the change touched its
   // inputs or changed its definition is outside a pull request's budget:
   // its cold build alone exceeds it. The plan says why it ran

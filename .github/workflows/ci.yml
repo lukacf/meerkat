@@ -3724,6 +3724,48 @@ jobs:
               # budgeted.
               lane["exec_terminal"] = max(0, lane["terminal"] - lane["path_queued"])
 
+          # Lanes that also wait for other lanes (LANE_UPSTREAMS; this
+          # workflow's lanes wait for none and leave it unset; Meta CI, which
+          # runs this same step, sets it): "lane=upstream|upstream;..." by job
+          # name, where a name ending in "*" also matches a matrix job's legs
+          # ("name (...)"). Such a lane's execution path is its own run time
+          # plus the longest path among the lanes it waits for, whose own
+          # paths hold the classification's, and its path queue is that
+          # path's queue in the lane's attempt.
+          def named(pattern, name):
+              if pattern.endswith("*"):
+                  return name == pattern[:-1] or name.startswith(pattern[:-1] + " (")
+              return name == pattern
+
+          waits = []
+          for entry in os.environ.get("LANE_UPSTREAMS", "").split(";"):
+              waiter, _, upstreams = entry.partition("=")
+              upstreams = [name.strip() for name in upstreams.split("|") if name.strip()]
+              if waiter.strip() and upstreams:
+                  waits.append((waiter.strip(), upstreams))
+          for _ in range(len(lanes)):
+              extended = False
+              for lane in lanes:
+                  ahead = [
+                      other
+                      for waiter, upstreams in waits
+                      if named(waiter, lane["name"])
+                      for other in lanes
+                      if other is not lane and any(named(upstream, other["name"]) for upstream in upstreams)
+                  ]
+                  if not ahead:
+                      continue
+                  longest = max(ahead, key=lambda other: other["exec_path"])
+                  if lane["duration"] + longest["exec_path"] > lane["exec_path"]:
+                      lane["exec_path"] = lane["duration"] + longest["exec_path"]
+                      lane["path_queued"] = lane["queued"] + (
+                          longest["path_queued"] if longest["attempt"] == lane["attempt"] else 0
+                      )
+                      lane["exec_terminal"] = max(0, lane["terminal"] - lane["path_queued"])
+                      extended = True
+              if not extended:
+                  break
+
           # A lane the plan ran for its inputs or definition is outside the
           # budget only when it succeeded; failed or cancelled, it is
           # measured like any other.

@@ -56,9 +56,10 @@ npm --prefix sdk/typescript run validate
 make ci
 ```
 
-The Make aggregate is not the complete hosted-CI pipeline. Consult
-`.github/workflows/ci.yml` for the required console, voice, TypeScript, and
-other hosted gates.
+The Make aggregate is not the complete hosted-CI pipeline. Consult the
+monorepo's `.github/workflows/meta-ci.yml` (and the root CI, which runs
+Meta's Clippy and push-time tests) for the required console, voice,
+TypeScript, and other hosted gates.
 
 The pre-push hook runs only fast checks; CI owns clippy and the tests. Run
 the hook's manual stage for them locally (`pre-commit run --hook-stage manual

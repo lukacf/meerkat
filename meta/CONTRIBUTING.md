@@ -46,8 +46,9 @@ npm --prefix sdk/typescript run validate
 ```
 
 `make test-all` covers the local Rust, Python, and Flow Editor suites, not every
-required hosted-CI gate. See [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
-for the console, voice, TypeScript, and other required hosted checks.
+required hosted-CI gate. See the monorepo's
+[`.github/workflows/meta-ci.yml`](../.github/workflows/meta-ci.yml) for the
+console, voice, TypeScript, and other required hosted checks.
 
 ## Branch Conventions
 
@@ -78,18 +79,33 @@ pre-commit run --hook-stage manual cargo-clippy --from-ref origin/main --to-ref 
 pre-commit run --hook-stage manual cargo-test --from-ref origin/main --to-ref HEAD
 ```
 
-CI (`.github/workflows/ci.yml`) runs `fmt-lint`, `test-typescript` and `audit`
-on every pull request. Its other jobs form lanes, and a pull request runs only
-the lanes its changed files reach (`scripts/ci-changes.py`):
+In the monorepo Meta's CI is two workflows. The root CI
+(`.github/workflows/ci.yml`, planned by `scripts/ci-cargo-lanes.mjs`) runs
+Meta's Rust rows: rustfmt with the root's fmt check, Clippy on every pull
+request that changes Meta's crates, and on the push to main (or a release
+branch) the lib, bin and integration tests and the `openai-live` and
+`extension-state` feature suites; a pull request leaves those tests to the
+push because `meerkat-meta` compiles the `meerkat-mob` chain. Meta CI
+(`.github/workflows/meta-ci.yml`, aggregate check `Meta gate`) runs the rest
+on every pull request, push and dispatch that reaches Meta's paths
+(`scripts/ci-changes.py --monorepo`): `meta-checks`, `test-typescript` and
+lanes, of which a pull request runs only those its changed files reach:
 
-- A Rust change runs `clippy`, `test` and the two `test-integration` halves.
-  `test` is the only automatic run of the lib and bin tests: it lists them
-  first and fails if its filter leaves any out.
-- A change to the build configuration (`Cargo.toml`, `Cargo.lock`,
-  `rust-toolchain.toml`, `.cargo/`, `crates/meerkat-meta/Cargo.toml`) runs
-  every lane that compiles Rust.
+- A Rust change runs the `rust-unit` legs (the lib tests, one nextest
+  partition each), `rust-examples` (every example; on a pull request also
+  the bin tests and the `meta-extension-state` suite), `rust-conformance`
+  (the `meta-store-conformance` suite), the `rust-integration` shards (the
+  integration tests, by test target name) and `rust-features-check` (the
+  no-default-features check). `rust-unit`, `rust-conformance` and
+  `rust-integration` run on pull requests only, and so do the voice and
+  extension-state lanes' lib jobs: the root CI's push runs the same tests.
+  Each job compiles one configuration of `meerkat-meta`, so that every lane
+  fits the root CI's budget (1080 s of execution on a pull request).
+- A change to the build configuration (the root's `Cargo.toml`,
+  `Cargo.lock`, `rust-toolchain.toml`, `.cargo/`, and
+  `crates/meerkat-meta/Cargo.toml`) runs every lane that compiles Rust.
 - The voice and extension-state jobs, the Python SDK tests, the console jobs
-  and the flow editor job compile the same crate in other configurations. A
+  and the flow editor jobs compile the same crate in other configurations. A
   pull request leaves them to the push unless it changes one of their own
   inputs: code gated on the `openai-live` or `extension-state` feature, those
   features' modules and crate, the backend modules a lane drives end to end
@@ -101,13 +117,22 @@ the lanes its changed files reach (`scripts/ci-changes.py`):
   lists those crate files, and `scripts/test_ci_changes.py` fails on a read
   or embedded crate file it does not list. The `changes` job's log names the
   lanes a pull request left to the push.
-- Docs and the files only `fmt-lint` and `audit` read reach no lane.
+- Docs reach no lane.
 
-Pushes to main and dispatches run every lane, and a release tag requires a
-green run for its exact commit on main, so every lane gates every release. A
-lane a pull request left to the push reports its failures on main, after the
-merge. Other branches get CI through their pull request; dispatch the CI
-workflow on a branch for a full run without one.
+Pushes to main and release branches and dispatches run every lane, and a
+release tag requires a green run for its exact commit, so every lane gates
+every release. A lane a pull request left to the push reports its failures
+on main, after the merge. Other branches get CI through their pull request;
+dispatch the workflow on a branch for a full run without one.
+
+Meta CI has the root CI's time limit: on a pull request the lanes' execution
+path (each job's run time plus the jobs it waits for, the classification
+included; runner queue excluded) may take 1080 seconds and the
+push-to-terminal time without runner queue 1200; a push or a dispatch only
+reports them. The `Meta gate` runs the root CI's own budget step. Every job
+compiles Meta's crates only: Core's come from the root CI's sccache objects,
+which its main push rows and Meta CI's `warm-cache` job (on a push that
+reaches no Meta lane) keep current for Meta's configurations.
 
 ### Dependency builds for a Meerkat Core bump
 

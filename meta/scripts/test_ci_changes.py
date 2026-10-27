@@ -22,10 +22,13 @@ ci_changes = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(ci_changes)
 
 
-def classify_commit(base: dict[str, str], head: dict[str, str]) -> str:
+def classify_commit(base: dict[str, str], head: dict[str, str], *, monorepo: bool = False,
+                    event: str = "pull_request") -> str:
     """Run ci-changes.py as CI does, in a new repository whose HEAD commit
     turns the `base` tree into the `head` tree ({path: text}), so git
-    itself lists the changed paths. Returns the GITHUB_OUTPUT text."""
+    itself lists the changed paths. Returns the GITHUB_OUTPUT text. With
+    `monorepo`, the paths are the monorepo's and the script runs from meta/
+    with --monorepo, as meta-ci.yml runs it."""
     # A git hook exports GIT_DIR and GIT_INDEX_FILE; neither they nor the
     # caller's git configuration may reach the scratch repository.
     env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
@@ -49,9 +52,12 @@ def classify_commit(base: dict[str, str], head: dict[str, str]) -> str:
                 (repo / path).write_text(text, encoding="utf-8")
             git("add", "-A")
             git("commit", "-q", "-m", "tree")
+        mode = ["--monorepo"] if monorepo else []
+        workdir = repo / ci_changes.MONOREPO_ROOT if monorepo else repo
+        workdir.mkdir(parents=True, exist_ok=True)
         subprocess.run(
-            [sys.executable, str(SCRIPT), "--event", "pull_request", "--github-output", str(output)],
-            cwd=repo,
+            [sys.executable, str(SCRIPT), *mode, "--event", event, "--github-output", str(output)],
+            cwd=workdir,
             env=env,
             check=True,
             capture_output=True,
@@ -59,8 +65,10 @@ def classify_commit(base: dict[str, str], head: dict[str, str]) -> str:
         return output.read_text(encoding="utf-8")
 
 
-def expected_output(*lanes: str) -> str:
-    return "".join(f"{lane}={'true' if lane in lanes else 'false'}\n" for lane in ci_changes.LANES)
+def expected_output(*lanes: str, meta: bool | None = None) -> str:
+    """The GITHUB_OUTPUT lines for these lanes; `meta` adds the monorepo's line."""
+    lines = "".join(f"{lane}={'true' if lane in lanes else 'false'}\n" for lane in ci_changes.LANES)
+    return lines if meta is None else lines + f"meta={'true' if meta else 'false'}\n"
 
 
 EVERY_LANE = set(ci_changes.LANES)
@@ -593,11 +601,8 @@ class CiChangesTests(unittest.TestCase):
             "docs/rct/traceability.md",
             # src/mobpack.rs reads .claude/skills.
             ".claude/skills/meerkat-meta/SKILL.md",
-            # Every Rust job builds through it, and on a pull request first
-            # fetches the warmed dependency builds.
+            # Every Rust job builds through it.
             "scripts/repo-cargo",
-            "scripts/ci-warm-deps.py",
-            ".github/actions/fetch-warm-deps/action.yml",
             "scripts/nested/helper.py",
             # Unclassified files fail closed.
             "tests/memory-evals/README.md",
@@ -1040,6 +1045,138 @@ class CiChangesTests(unittest.TestCase):
         with contextlib.redirect_stdout(printed):
             ci_changes.main(["--event", "push", "crates/meerkat-meta/src/memory/steward_prompt_v0.md"])
         self.assertNotIn("left to the push", printed.getvalue())
+
+
+MONOREPO = ROOT.parent
+
+
+class MonorepoTests(unittest.TestCase):
+    """meta-ci.yml runs the classifier from meta/ on the monorepo's diff."""
+
+    @staticmethod
+    def classify(event, *paths):
+        return ci_changes.monorepo_classify(event, list(paths), no_gates)
+
+    def test_monorepo_paths_take_their_meta_names(self):
+        for path, name in (
+            ("meta/console/src/App.tsx", "console/src/App.tsx"),
+            ("meta/crates/meerkat-meta/src/lib.rs", "crates/meerkat-meta/src/lib.rs"),
+            ("meta/scripts/ci-changes.py", "scripts/ci-changes.py"),
+            ("meta/.github/workflows/release.yml", ".github/workflows/release.yml"),
+            # The root's build configuration, which Meta's builds read.
+            ("Cargo.toml", "Cargo.toml"),
+            ("Cargo.lock", "Cargo.lock"),
+            ("rust-toolchain.toml", "rust-toolchain.toml"),
+            (".cargo/config.toml", ".cargo/config.toml"),
+            # Meta's workflows, under the names of the ones they replaced.
+            (".github/workflows/meta-ci.yml", ".github/workflows/ci.yml"),
+            (".github/workflows/meta-e2e-live.yml", ".github/workflows/e2e-live.yml"),
+            # The root files every Rust job runs, marked.
+            ("scripts/repo-cargo", "//scripts/repo-cargo"),
+            (".github/actions/setup-sccache-ci/action.yml", "//.github/actions/setup-sccache-ci/action.yml"),
+            # Nothing else: Core, Connect, the root CI, its scripts and docs.
+            ("crates/meerkat-core/src/lib.rs", None),
+            ("connect/crates/meerkat-connect/src/main.rs", None),
+            (".github/workflows/ci.yml", None),
+            (".github/workflows/meta-release.yml", None),
+            ("scripts/ci-cargo-lanes.mjs", None),
+            ("docs/index.mdx", None),
+            ("Makefile", None),
+            ("metadata/notes.md", None),
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(ci_changes.meta_path(path), name)
+
+    def test_the_mapped_root_files_exist_and_shadow_no_meta_file(self):
+        for path in sorted(ci_changes.MONOREPO_JOB_FILES):
+            with self.subTest(path=path):
+                self.assertTrue((MONOREPO / path).is_file(), f"{path} names nothing at the monorepo's root")
+                self.assertEqual(ci_changes.path_lanes(ci_changes.meta_path(path)), ci_changes.EVERY_LANE)
+        for path, old in sorted(ci_changes.MONOREPO_WORKFLOWS.items()):
+            with self.subTest(path=path):
+                self.assertTrue((MONOREPO / path).is_file(), f"{path} names nothing at the monorepo's root")
+                self.assertFalse((ROOT / old).exists(), f"meta/{old} stays beside {path}, which replaced it")
+        # The root's build configuration keeps its names: Meta has none of
+        # its own any more.
+        for path in sorted(ci_changes.RUST_INPUT_FILES):
+            with self.subTest(path=path):
+                self.assertTrue((MONOREPO / path).is_file(), path)
+                self.assertFalse((ROOT / path).exists(), f"meta/{path} would share the root's name")
+        self.assertEqual([path for path in (ROOT / ".cargo").rglob("*") if path.is_file()], [])
+        # The moved workflows reach what their old copies reached.
+        self.assertEqual(ci_changes.path_lanes(".github/workflows/ci.yml"), ci_changes.EVERY_LANE)
+        self.assertEqual(ci_changes.path_lanes(".github/workflows/e2e-live.yml"), frozenset())
+
+    def test_monorepo_runs_reach_meta_only_through_its_paths(self):
+        nothing = (False, frozenset(), frozenset())
+        every = (True, ci_changes.EVERY_LANE, frozenset())
+        # Core, Connect or root CI changes alone reach nothing of Meta's.
+        for event in ("pull_request", "push"):
+            with self.subTest(event=event):
+                self.assertEqual(self.classify(event, "crates/meerkat-core/src/lib.rs",
+                                               ".github/workflows/ci.yml", "connect/docs/index.mdx"), nothing)
+        # Meta's paths are classified as before, under their Meta names.
+        meta, lanes, deferred = self.classify("pull_request", "meta/console/src/App.tsx",
+                                              "crates/meerkat-core/src/lib.rs")
+        self.assertEqual((meta, set(lanes), set(deferred)), (True, CONSOLE_LANES, set()))
+        meta, lanes, deferred = self.classify("pull_request", "meta/crates/meerkat-meta/src/memory/steward_prompt_v0.md")
+        self.assertEqual((meta, set(lanes), set(deferred)), (True, RUST_PR_LANES, set(ci_changes.RUST_DEFERRED_LANES)))
+        # A docs-only change of Meta's reaches Meta (its checks run) and no lane.
+        self.assertEqual(self.classify("pull_request", "meta/docs/guide.mdx"), (True, frozenset(), frozenset()))
+        # The root's build configuration is Meta's: the lanes that compile.
+        for path in ("Cargo.lock", "Cargo.toml", "rust-toolchain.toml", ".cargo/config.toml"):
+            with self.subTest(path=path):
+                self.assertEqual(self.classify("pull_request", path), (True, frozenset(RUST_LANES), frozenset()))
+        # Meta's workflow and the root files its jobs run reach every lane.
+        for path in (".github/workflows/meta-ci.yml", "scripts/repo-cargo",
+                     ".github/actions/setup-rust-ci/action.yml"):
+            with self.subTest(path=path):
+                self.assertEqual(self.classify("pull_request", path), every)
+        # A push that reaches Meta, a dispatch and an empty diff run every lane.
+        self.assertEqual(self.classify("push", "meta/docs/guide.mdx"), every)
+        self.assertEqual(self.classify("workflow_dispatch", "crates/meerkat-core/src/lib.rs"), every)
+        self.assertEqual(self.classify("pull_request"), every)
+        self.assertEqual(self.classify("push"), every)
+
+    def test_monorepo_main_writes_the_meta_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "output"
+            for paths in (["crates/meerkat-core/src/lib.rs"], ["meta/flow-editor/x.ts", "README.md"]):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    ci_changes.main(["--monorepo", "--event", "pull_request", "--github-output", str(out), *paths])
+            self.assertEqual(out.read_text(),
+                             expected_output(meta=False) + expected_output("flow_editor", "console", meta=True))
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            ci_changes.main(["--monorepo", "--event", "pull_request", "meta/console/x.tsx", "crates/a.rs", "docs/b.md"])
+        self.assertIn("console console_perf flow_editor: meta/console/x.tsx\n", printed.getvalue())
+        self.assertIn("outside Meta, no lane: 2 path(s)\n", printed.getvalue())
+        self.assertIn("meta=true\n", printed.getvalue())
+
+    def test_a_monorepo_commit_is_classified_from_meta(self):
+        """From git to verdict as meta-ci.yml runs it: the monorepo's diff,
+        the script run from meta/, a deleted source read from the base
+        commit's meta/."""
+        gated = '#[cfg(feature = "openai-live")]\nfn live() {}\n' * 4
+        core = {"crates/meerkat-core/src/lib.rs": "pub fn core() {}\n", "Cargo.toml": "[workspace]\n"}
+        # A Core change alone reaches nothing of Meta's, on a push too.
+        head = {**core, "crates/meerkat-core/src/lib.rs": "pub fn core() { }\n"}
+        self.assertEqual(classify_commit(core, head, monorepo=True), expected_output(meta=False))
+        self.assertEqual(classify_commit(core, head, monorepo=True, event="push"), expected_output(meta=False))
+        # Moving a gated Meta source out of meta/ runs its feature: the
+        # source is read from the base commit, under meta/.
+        base = {**core, "meta/crates/x/src/live.rs": gated}
+        head = {**core, "docs/live.rs": gated}
+        self.assertEqual(classify_commit(base, head, monorepo=True),
+                         expected_output(*RUST_PR_LANES, "voice", meta=True))
+        # A push that reaches Meta runs every lane.
+        head = {**core, "meta/crates/x/src/live.rs": gated + "fn more() {}\n"}
+        self.assertEqual(classify_commit(base, head, monorepo=True, event="push"),
+                         expected_output(*EVERY_LANE, meta=True))
+        # The root's lock is Meta's build configuration.
+        head = {**core, "Cargo.lock": "# lock\n"}
+        self.assertEqual(classify_commit(core, head, monorepo=True), expected_output(*RUST_LANES, meta=True))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1932,62 +1932,47 @@ class ReleaseCacheReuseTests(unittest.TestCase):
 
     def test_crate_verification_restores_the_exact_main_ci_dependency_build(self):
         """cargo package's verification build restores the meta-dev-bins
-        entry CI saved for the same commit, in a job that holds no secret.
+        entry, in a job that holds no secret, and restores no executable.
 
-        rust-cache keys on the shared key, the runner and the hashed
-        environment, and the cache paths follow cache-bin, so every one of
-        them must equal what test-python and flow-editor use in ci.yml, or
-        the restore silently misses.
+        In the monorepo no CI job saves that entry any more: Meta's CI
+        (meta-ci.yml at the monorepo's root) builds through the root CI's
+        sccache bucket and saves no rust-cache entry, so this restore finds
+        nothing, and GitHub runs no workflow under meta/.github; the root's
+        meta-release.yml replaces this one.
         """
-        ci_workflow = ROOT / ".github/workflows/ci.yml"
-        ci_source = ci_workflow.read_text()
-
-        def ci_job(name: str) -> str:
-            lines = ci_source.splitlines()
-            start = lines.index(f"  {name}:")
-            for offset, line in enumerate(lines[start + 1:], start=start + 1):
-                if re.fullmatch(r"  [A-Za-z_][A-Za-z0-9_-]*:", line):
-                    return "\n".join(lines[start:offset])
-            return "\n".join(lines[start:])
-
         verify = job_block("verify_crate_packages")
         cache = step_block("Restore the exact-main CI dependency build", "verify_crate_packages")
         self.assertEqual(scalar(cache, "shared-key", "          "), "meta-dev-bins")
         self.assertEqual(scalar(cache, "save-if", "          "), "false")
         self.assertEqual(scalar(cache, "cache-bin", "          "), "false")
         release_header = RELEASE_WORKFLOW.read_text().split("\njobs:\n", 1)[0]
-        ci_header = ci_source.split("\njobs:\n", 1)[0]
         release_env = {**hashed_env(release_header, "  "), **hashed_env(verify, "      ")}
         self.assertEqual(release_env["CARGO_TARGET_DIR"], "${{ github.workspace }}/target")
-        for name in ("test-python", "flow-editor"):
-            with self.subTest(ci_job=name):
-                block = ci_job(name)
-                self.assertIn("          shared-key: meta-dev-bins\n", block)
-                self.assertIn("          cache-bin: false\n", block)
-                self.assertEqual(
-                    {**hashed_env(ci_header, "  "), **hashed_env(block, "      ")}, release_env)
-                self.assertEqual(scalar(block, "runs-on", "    "), scalar(verify, "runs-on", "    "))
+        meta_ci = (ROOT.parent / ".github/workflows/meta-ci.yml").read_text()
+        self.assertNotIn("meta-dev-bins", meta_ci)
         self.assertIn("scripts/repo-cargo package -p meta-extension-state -p meerkat-meta --locked",
                       step_block("Verify the packaged crates build", "verify_crate_packages"))
         self.assertNotIn("secrets.", verify)
         self.assertNotIn("permissions:", verify)
 
     # Jobs that hold a secret or a write grant and still restore a cache, and
-    # why that cache is trusted. e2e-live restores without saving and without
-    # executables, and its provider secret reaches only the step that makes
-    # the real calls.
-    CACHE_HOLDER_ALLOWLIST = {
-        ("e2e-live.yml", "e2e-live"),
-    }
+    # why that cache is trusted. None: the live lane, which restored without
+    # saving, is the monorepo's meta-e2e-live.yml now and restores nothing.
+    CACHE_HOLDER_ALLOWLIST: set = set()
 
     def test_no_job_holding_a_secret_or_write_grant_restores_a_cache(self):
         """A cache entry can carry a planted executable or object, so no job
         in any workflow that holds a secret or a write permission (id-token,
         attestations, contents, actions or any other scope) may restore one,
         except the allowlisted jobs above. Publication verifies with
-        --no-verify only what the secret-free verification job built."""
+        --no-verify only what the secret-free verification job built. The
+        scan reads the workflows under meta/.github and Meta's live workflow
+        at the monorepo's root; meta-ci.yml, whose compile jobs hold the
+        workload identity of the root CI's sccache bucket, is
+        test_ci_workflow.py's."""
         holders_seen = set()
-        for workflow in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        relocated = [ROOT.parent / ".github/workflows/meta-e2e-live.yml"]
+        for workflow in sorted((ROOT / ".github/workflows").glob("*.yml")) + relocated:
             source = workflow.read_text()
             code_lines = [line for line in source.splitlines() if not line.strip().startswith("#")]
             header = "\n".join(code_lines).split("\njobs:\n", 1)[0]
@@ -2009,12 +1994,12 @@ class ReleaseCacheReuseTests(unittest.TestCase):
         # The scan sees the jobs it must (and the allowlist is no wider).
         for expected in (("release.yml", "publish_registries"), ("release.yml", "publish_sdk_packages"),
                          ("release.yml", "collect_candidate"), ("release.yml", "publish_github_release"),
-                         ("ci.yml", "drop-superseded-caches"), ("publish-docs.yml", "dispatch")):
+                         ("publish-docs.yml", "dispatch"), ("meta-e2e-live.yml", "e2e-live")):
             self.assertIn(expected, holders_seen)
         self.assertLessEqual(self.CACHE_HOLDER_ALLOWLIST, holders_seen)
-        e2e = (ROOT / ".github/workflows/e2e-live.yml").read_text()
+        e2e = (ROOT.parent / ".github/workflows/meta-e2e-live.yml").read_text()
         self.assertEqual(e2e.count("${{ secrets.ANTHROPIC_API_KEY }}"), 1)
-        self.assertIn("          save-if: false\n          cache-bin: false\n", e2e)
+        self.assertNotIn("rust-cache", e2e)
         self.assertIn("verify_crate_packages", job_needs("publish_registries"))
         self.assertIn("needs.verify_crate_packages.result == 'success'", job_condition("publish_registries"))
         for step in ("Publish extension document crate", "Publish Rust crate"):

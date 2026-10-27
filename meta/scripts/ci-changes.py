@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Decide which CI lanes a run needs.
 
-Each lane is a group of jobs in .github/workflows/ci.yml that read the same
-inputs (see LANE_JOBS). Pushes, dispatches and an empty or unreadable diff run
-every lane, so main's run, the evidence release.yml requires before a tag,
-always covers every job. A pull request runs only the lanes its changed files
-reach and do not leave to the push:
+Each lane is a group of jobs in Meta's CI workflow that read the same inputs
+(see LANE_JOBS). In the monorepo that workflow is the root's
+.github/workflows/meta-ci.yml, and the root CI (scripts/ci-cargo-lanes.mjs)
+plans Meta's Rust rows, so the rust, integration, voice and extension_state
+lanes have no job there; they stay lanes because a pull request's Rust change
+still leaves the other configurations to the push (see `deferred_lanes`).
+Pushes, dispatches and an empty or unreadable diff run every lane, so main's
+run always covers every job. A pull request runs only the lanes its changed
+files reach and do not leave to the push:
 
 - docs, top-level markdown, the non-CI workflows and the files only fmt-lint
   and audit read (see `skippable`) reach no lane;
@@ -27,8 +31,7 @@ backends, the flow editor binary) to the push, unless the change is one of
 their own inputs (see `deferred_lanes`): code a feature gates, a feature's own
 module or crate, a backend module the lane drives end to end, a file such an
 input embeds or loads (LANE_INPUTS), or the build configuration, which every
-lane reads. A deferred lane still gates the release, because release.yml
-refuses a tag until the push run of the exact commit on main is green. The
+lane reads. A deferred lane still runs on the push of the merge. The
 classifier prints the lanes a pull request deferred.
 
 An area may list fewer lanes only when no job outside them reads its files.
@@ -42,15 +45,30 @@ cannot silently skip the job it affects. It also checks that FEATURE_PATHS
 covers every module a feature gates, and that a file a lane's own input
 embeds or loads runs that lane.
 
-ci.yml runs the base commit's copy of this script, so a pull request never
-classifies itself with the classifier it changes.
+The workflow runs the base commit's copy of this script, so a pull request
+never classifies itself with the classifier it changes.
 
-Usage: ci-changes.py --event NAME [--github-output FILE] [PATH ...]
+In the monorepo (--monorepo, run from meta/) the diff is the whole
+repository's, and `meta_path` gives each path the name this classifier
+knows: a path under meta/ loses that prefix; the root's Cargo.toml,
+Cargo.lock, rust-toolchain.toml and .cargo/, which Meta's builds now read,
+keep their names, the build configuration Meta's own copies were; Meta's
+workflows, moved to the root as meta-*.yml, take their old names; and the
+root files every job that builds Rust runs (MONOREPO_JOB_FILES) reach every
+lane. No other path is Meta's: a pull request or push none of whose paths is
+Meta's needs no lane and prints `meta=false`, and the workflow exits early.
+Every other run prints `meta=true` and its lanes as above, a push every lane.
+Core's crates are not Meta's paths here: the root CI's downstream rows
+type-check Meta against a Core change, and Meta's suites run on the next
+run that reaches Meta.
+
+Usage: ci-changes.py --event NAME [--monorepo] [--github-output FILE] [PATH ...]
 Paths default to `git diff --no-renames --name-only -z HEAD^1 HEAD`, the
-pull request's own changes when HEAD is GitHub's merge commit for it. A
-rename counts as both of its paths, so moving a file the jobs read into
-docs/ still runs them. Prints and appends `<lane>=true|false` for every lane,
-in one write, to FILE.
+pull request's own changes when HEAD is GitHub's merge commit for it (in the
+monorepo also a push's, whose first parent the workflow checks is the ref's
+previous tip). A rename counts as both of its paths, so moving a file the
+jobs read into docs/ still runs them. Prints and appends `<lane>=true|false`
+for every lane, and in the monorepo `meta=true|false`, in one write, to FILE.
 """
 
 import argparse
@@ -60,16 +78,17 @@ import sys
 from pathlib import Path
 from typing import Callable
 
-# The lanes, each named by the `changes` output its jobs test in ci.yml.
+# The lanes, each named by the `changes` output its jobs test in meta-ci.yml.
+# The root CI runs the Rust lanes' clippy and tests, so they name no job here.
 LANE_JOBS = {
-    "rust": ("clippy", "test"),
-    "integration": ("test-integration",),
-    "voice": ("test-voice", "voice-clippy"),
-    "extension_state": ("test-extension-state", "extension-state-lint"),
+    "rust": (),
+    "integration": (),
+    "voice": (),
+    "extension_state": (),
     "python": ("test-python",),
-    "console": ("console", "console-browser", "console-fixtures", "console-acceptance"),
+    "console": ("console-backends", "console", "console-browser", "console-fixtures", "console-acceptance"),
     "console_perf": ("console-perf",),
-    "flow_editor": ("flow-editor",),
+    "flow_editor": ("flow-editor", "flow-editor-contracts"),
 }
 LANES = tuple(LANE_JOBS)
 EVERY_LANE = frozenset(LANES)
@@ -245,10 +264,47 @@ LANE_INPUTS = (
 
 # The classifier and its contract decide every other path's lanes.
 CLASSIFIER_FILES = frozenset({"scripts/ci-changes.py", "scripts/test_ci_changes.py"})
-# Every Rust job builds through the wrapper and, on a pull request, first
-# fetches the dependency builds warm-deps.yml warmed for its branch.
-RUST_JOB_FILES = frozenset({"scripts/repo-cargo", "scripts/ci-warm-deps.py",
-                            ".github/actions/fetch-warm-deps/action.yml"})
+# Every Rust job builds through the wrapper.
+RUST_JOB_FILES = frozenset({"scripts/repo-cargo"})
+
+# The monorepo (--monorepo): Meta's tree is the directory below.
+MONOREPO_ROOT = "meta/"
+# Meta's workflows at the monorepo's root, each named for the workflow it
+# replaced under meta/.github/workflows and classified as that one was. (The
+# installer's workflow stays under meta/.github, inert, for now.)
+MONOREPO_WORKFLOWS = {
+    ".github/workflows/meta-ci.yml": ".github/workflows/ci.yml",
+    ".github/workflows/meta-e2e-live.yml": ".github/workflows/e2e-live.yml",
+}
+# Root files every meta-ci.yml job that builds Rust runs: the root cargo
+# wrapper it builds through and the setup actions, with the script they run.
+# Like RUST_JOB_FILES they reach every lane; MONOREPO_MARK keeps their names
+# apart from Meta's files of the same names.
+MONOREPO_JOB_FILES = frozenset({
+    "scripts/repo-cargo",
+    "scripts/ci-pin-rust-toolchain-env",
+    ".github/actions/setup-rust-ci/action.yml",
+    ".github/actions/setup-sccache-ci/action.yml",
+})
+MONOREPO_MARK = "//"
+
+
+def meta_path(path: str) -> str | None:
+    """A monorepo path under the name this classifier knows, or None when no
+    Meta job reads it: Meta's own files without MONOREPO_ROOT; the root's
+    Cargo.toml, Cargo.lock, rust-toolchain.toml and .cargo/ under their own
+    names, the build configuration Meta's copies of them were before the
+    monorepo; Meta's root workflows under their old names; and the root job
+    files, marked."""
+    if path.startswith(MONOREPO_ROOT):
+        return path[len(MONOREPO_ROOT):]
+    if path in RUST_INPUT_FILES or path.startswith(BUILD_CONFIGURATION_PREFIXES):
+        return path
+    if path in MONOREPO_WORKFLOWS:
+        return MONOREPO_WORKFLOWS[path]
+    if path in MONOREPO_JOB_FILES:
+        return MONOREPO_MARK + path
+    return None
 
 
 def top_level_script(path: str) -> bool:
@@ -271,7 +327,7 @@ def rust_input(path: str) -> bool:
 
 def path_lanes(path: str) -> frozenset:
     """The lanes a change to this one path can reach."""
-    if path in CLASSIFIER_FILES or path in RUST_JOB_FILES:
+    if path in CLASSIFIER_FILES or path in RUST_JOB_FILES or path.startswith(MONOREPO_MARK):
         return EVERY_LANE
     if path in AREA_FILES:
         return AREA_FILES[path]
@@ -290,14 +346,16 @@ def path_lanes(path: str) -> frozenset:
 
 def read_changed_file(path: str) -> str | None:
     """A changed file's text in the checked-out tree, or in the base commit
-    when the change deleted it. None when neither can be read."""
+    when the change deleted it. None when neither can be read. Both read the
+    path from the working directory, Meta's root, which in the monorepo is a
+    directory below the repository's (hence the ./ in the git path)."""
     try:
         return Path(path).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         pass
     try:
         return subprocess.run(
-            ["git", "show", f"HEAD^1:{path}"], check=True, capture_output=True, text=True,
+            ["git", "show", f"HEAD^1:./{path}"], check=True, capture_output=True, text=True,
         ).stdout
     except (OSError, subprocess.CalledProcessError, UnicodeDecodeError):
         return None
@@ -349,15 +407,34 @@ def needs_full_run(event: str, paths: list[str],
     return needed_lanes(event, paths, read) == EVERY_LANE
 
 
+def monorepo_classify(event: str, paths: list[str],
+                      read: Callable[[str], str | None] = read_changed_file
+                      ) -> tuple[bool, frozenset, frozenset]:
+    """(whether the run reaches Meta, the lanes it needs, the lanes a pull
+    request leaves to the push) for monorepo paths. A pull request or push
+    none of whose paths is Meta's needs nothing; any other is classified on
+    its paths' Meta names, a push with every lane. Other events and an empty
+    or unreadable diff run every lane."""
+    if event not in ("pull_request", "push") or not paths:
+        return True, EVERY_LANE, frozenset()
+    names = [name for name in map(meta_path, paths) if name is not None]
+    if not names:
+        return False, frozenset(), frozenset()
+    lanes, deferred = classify(event, names, read)
+    return True, lanes, deferred
+
+
 def output_lines(lanes: frozenset) -> list[str]:
     return [f"{lane}={'true' if lane in lanes else 'false'}" for lane in LANES]
 
 
 def changed_paths() -> list[str]:
     # With rename detection git lists only a rename's destination, which
-    # hides the removal of its source. -z keeps unusual names unquoted.
+    # hides the removal of its source. -z keeps unusual names unquoted, and
+    # --no-relative names every path from the repository's root, also when
+    # the classifier runs in meta/.
     result = subprocess.run(
-        ["git", "diff", "--no-renames", "--name-only", "-z", "HEAD^1", "HEAD"],
+        ["git", "diff", "--no-renames", "--no-relative", "--name-only", "-z", "HEAD^1", "HEAD"],
         check=True,
         capture_output=True,
         text=True,
@@ -368,23 +445,37 @@ def changed_paths() -> list[str]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--event", required=True)
+    parser.add_argument("--monorepo", action="store_true",
+                        help="classify the monorepo's paths, from meta/, and print meta=true|false")
     parser.add_argument("--github-output")
     parser.add_argument("paths", nargs="*")
     args = parser.parse_args(argv)
     paths = args.paths
-    if not paths and args.event == "pull_request":
+    listed = ("pull_request", "push") if args.monorepo else ("pull_request",)
+    if not paths and args.event in listed:
         try:
             paths = changed_paths()
         except (OSError, subprocess.CalledProcessError, UnicodeDecodeError) as error:
             print(f"cannot list changed files ({error}); running every lane")
             paths = []
-    lanes, deferred = classify(args.event, paths)
-    for path in paths:
-        reached = path_lanes(path)
-        print(f"{' '.join(lane for lane in LANES if lane in reached) or 'no lane'}: {path}")
+    if args.monorepo:
+        meta, lanes, deferred = monorepo_classify(args.event, paths)
+        names = [meta_path(path) for path in paths]
+    else:
+        meta, (lanes, deferred) = True, classify(args.event, paths)
+        names = list(paths)
+    for path, name in zip(paths, names):
+        if name is not None:
+            reached = path_lanes(name)
+            print(f"{' '.join(lane for lane in LANES if lane in reached) or 'no lane'}: {path}")
+    outside = names.count(None)
+    if outside:
+        print(f"outside Meta, no lane: {outside} path(s)")
     if deferred:
         print(f"left to the push: {' '.join(lane for lane in LANES if lane in deferred)}")
     lines = output_lines(lanes)
+    if args.monorepo:
+        lines.append(f"meta={'true' if meta else 'false'}")
     print("\n".join(lines))
     if args.github_output:
         with open(args.github_output, "a", encoding="utf-8") as out:

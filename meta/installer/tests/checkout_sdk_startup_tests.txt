@@ -4,7 +4,7 @@
 # Meta SDK, not the Guide SDK the backend job installs.
 #
 # Every installer test file whose text matches the startup pattern in
-# scripts/test_forge_release.py (templates_v2/app.py, launch_host or
+# scripts/test_installer_release.py (templates_v2/app.py, launch_host or
 # application_startup) is listed first; that test fails when one is missing
 # or a listed file no longer matches. The extras after them are startup
 # owners the pattern does not match, each with its reason.

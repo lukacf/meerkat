@@ -28,7 +28,7 @@ SPEC.loader.exec_module(helper)
 SHA = "a" * 40
 OTHER_SHA = "b" * 40
 VERSION = "0.8.31"
-TAG = "v" + VERSION
+TAG = helper.TAG_PREFIX + VERSION
 REPO = helper.REPOSITORY
 RUN = 101
 TRAILING_RUN = 102
@@ -123,7 +123,7 @@ elif args[0] == "api":
 elif args[:2] == ["release", "create"]:
     if state.get("release"):
         fail("release already exists")
-    if "--verify-tag" not in args or "--draft" not in args:
+    if "--verify-tag" not in args or "--draft" not in args or "--latest=false" not in args:
         fail("unsafe release creation")
     state["release"] = {"id": 800, "tag_name": args[2], "draft": True,
                         "name": args[2], "body": "original metadata", "assets": []}
@@ -146,7 +146,7 @@ elif args[:2] == ["release", "upload"]:
         "local_file": str(destination)})
     state_path.write_text(json.dumps(state))
 elif args[:2] == ["release", "edit"]:
-    if args[3:] != ["--repo", "lukacf/meerkat-meta", "--draft=false"]:
+    if args[3:] != ["--repo", "lukacf/meerkat", "--draft=false", "--latest=false"]:
         fail("metadata mutation forbidden")
     state["release"]["draft"] = False
     state_path.write_text(json.dumps(state))
@@ -273,9 +273,9 @@ class CandidateProtocolTests(unittest.TestCase):
         if args[:2] == ("rev-parse", "--verify"):
             return SHA
         if args[0] == "show":
-            return f'[workspace.package]\nversion = "{VERSION}"\n'
+            return f'[package]\nname = "meerkat-meta"\nversion = "{VERSION}"\n'
         if args[0] == "ls-tree":
-            return "scripts/release-candidate.py\n" if self.protocol else "Cargo.toml\n"
+            return "meta/scripts/release-candidate.py\n" if self.protocol else "Cargo.toml\n"
         self.fail(f"unexpected git command: {args}")
 
     def run_info(self, *, ci=False):
@@ -368,7 +368,7 @@ class CandidateProtocolTests(unittest.TestCase):
 
         The run's artifact listing holds only that tier's targets, each
         archive attested by that run; collection, the manifest artifact and
-        the emitted selection follow release.yml's candidate jobs.
+        the emitted selection follow meta-release.yml's candidate jobs.
         """
         run = dict(self.run_info(), id=run_id)
         self.state["api"][helper.repo_endpoint(f"actions/runs/{run_id}")] = run
@@ -1240,7 +1240,7 @@ class CandidateProtocolTests(unittest.TestCase):
             (["statement", "predicateType"], "wrong"),
             (["statement", "predicate", "buildDefinition", "buildType"], "wrong"),
             (["statement", "predicate", "buildDefinition", "externalParameters", "workflow", "path"], "wrong"),
-            (["statement", "predicate", "buildDefinition", "externalParameters", "workflow", "ref"], "refs/tags/v0.8.31"),
+            (["statement", "predicate", "buildDefinition", "externalParameters", "workflow", "ref"], "refs/tags/" + TAG),
             (["statement", "predicate", "buildDefinition", "resolvedDependencies"],
              [{"uri": "wrong", "digest": {"gitCommit": SHA}}]),
             (["statement", "predicate", "buildDefinition", "internalParameters", "github", "event_name"], "push"),
@@ -1885,7 +1885,7 @@ class CandidateProtocolTests(unittest.TestCase):
         self.load()
         self.assertEqual(len(self.state["calls"]), 1)
         call = self.state["calls"][0]
-        self.assertEqual(call["args"], ["workflow", "run", "release.yml", "--repo", REPO, "--ref", "main", "--json"])
+        self.assertEqual(call["args"], ["workflow", "run", Path(helper.WORKFLOW).name, "--repo", REPO, "--ref", "main", "--json"])
         self.assertFalse(call["gh_token"])
         self.assertFalse(call["github_api_token"])
         self.assertEqual(call["inputs"]["source_sha"], SHA)
@@ -1972,7 +1972,7 @@ class CandidateProtocolTests(unittest.TestCase):
                 self.assertEqual(len(self.state["calls"]), before + 1)
                 call = self.state["calls"][-1]
                 self.assertEqual(call["args"],
-                                 ["workflow", "run", "release.yml", "--repo", REPO, "--ref", "main", "--json"])
+                                 ["workflow", "run", Path(helper.WORKFLOW).name, "--repo", REPO, "--ref", "main", "--json"])
                 self.assertEqual(call["inputs"]["release_mode"], mode)
                 self.assertEqual(call["inputs"]["publish_release_packages"], publish)
                 self.assertEqual(call["inputs"]["registry_dry_run"], dry)

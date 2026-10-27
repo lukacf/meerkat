@@ -30,13 +30,29 @@ class CratePublicationError(RuntimeError):
 
 
 def workspace_members() -> dict[str, dict]:
-    root = tomllib.loads((ROOT / "Cargo.toml").read_text())
-    members = root.get("workspace", {}).get("members", [])
+    """Meta's crates by name: the members of Meta's own workspace, or, in the
+    monorepo, where Meta has no manifest of its own, the members of the root
+    workspace that lie under Meta's directory (globs expanded as Cargo does)."""
+    base, prefix = ROOT, ""
+    if not (ROOT / "Cargo.toml").is_file():
+        base, prefix = ROOT.parent, f"{ROOT.name}/"
+    root = tomllib.loads((base / "Cargo.toml").read_text())
+    patterns = root.get("workspace", {}).get("members", [])
+    if not patterns:
+        raise CratePublicationError(f"{base / 'Cargo.toml'} declares no workspace members")
+    excluded = set(root.get("workspace", {}).get("exclude", []))
+    members = []
+    for pattern in patterns:
+        if not any(character in pattern for character in "*?["):
+            members.append(pattern)
+            continue
+        members += sorted(path.relative_to(base).as_posix() for path in base.glob(pattern) if path.is_dir())
+    members = [member for member in members if member.startswith(prefix) and member not in excluded]
     if not members:
-        raise CratePublicationError("root Cargo.toml declares no workspace members")
+        raise CratePublicationError(f"no workspace member lies under {prefix or 'the root'}")
     out = {}
     for member in members:
-        manifest_path = ROOT / member / "Cargo.toml"
+        manifest_path = base / member / "Cargo.toml"
         if not manifest_path.is_file():
             raise CratePublicationError(f"workspace member {member} has no Cargo.toml")
         manifest = tomllib.loads(manifest_path.read_text())

@@ -77,6 +77,11 @@ WORKFLOW = ".github/workflows/forge-release.yml"
 # This process's copy of it checks Forge's workflow instead; Meta's release
 # runs never load this script, so their copy keeps release.yml.
 rc.WORKFLOW = WORKFLOW
+# Meta's own releases moved to the monorepo (release-candidate.py names it);
+# this release still binds the standalone repository: its CI evidence
+# (forge.yml), evidence paths and release URLs are that repository's until
+# the installer release is ported.
+rc.REPOSITORY = "lukacf/meerkat-meta"
 
 require, ProtocolError = rc.require, rc.ProtocolError
 MAIN = rc.MAIN

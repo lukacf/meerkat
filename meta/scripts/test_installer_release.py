@@ -31,8 +31,16 @@ import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
+# Meta lives under meta/ in the monorepo; its CI workflows run from the
+# repository root (.github/workflows/meta-*.yml). The installer release
+# itself (forge-release.yml, forge-release.py) and the installer's CI
+# (forge.yml) stay under meta/.github and still bind the standalone
+# repository's layout until they are ported.
+REPO_ROOT = ROOT.parent
 WORKFLOW = ROOT / ".github/workflows/forge-release.yml"
 FORGE_CI = ROOT / ".github/workflows/forge.yml"
+META_CI = REPO_ROOT / ".github/workflows/meta-ci.yml"
+META_RELEASE = REPO_ROOT / ".github/workflows/meta-release.yml"
 
 
 def load(name, path):
@@ -302,8 +310,8 @@ class WorkflowShapeTests(unittest.TestCase):
 
     def test_every_action_is_pinned_like_the_rest_of_the_repository(self):
         pins = {}
-        for other in (".github/workflows/release.yml", ".github/workflows/ci.yml"):
-            for action, sha in re.findall(r"uses: ([\w./-]+)@([0-9a-f]{40}) #", (ROOT / other).read_text()):
+        for other in (META_RELEASE, META_CI):
+            for action, sha in re.findall(r"uses: ([\w./-]+)@([0-9a-f]{40}) #", other.read_text()):
                 pins.setdefault(action, set()).add(sha)
         uses = re.findall(r"^\s*(?:- )?uses: (\S+)(.*)$", text(), re.M)
         self.assertTrue(uses)
@@ -699,8 +707,8 @@ class WorkflowShapeTests(unittest.TestCase):
         self.assertIn("rerun all jobs, when the run must count", guide)
 
     def test_ci_runs_these_tests_and_meta_release_stays_separate(self):
-        self.assertIn("      - run: python3 scripts/test_forge_release.py\n", (ROOT / ".github/workflows/ci.yml").read_text())
-        self.assertNotIn("forge", (ROOT / ".github/workflows/release.yml").read_text().lower())
+        self.assertIn("      - run: python3 scripts/test_installer_release.py\n", META_CI.read_text())
+        self.assertNotIn("forge", META_RELEASE.read_text().lower())
         self.assertNotIn("forge", (ROOT / "scripts/release-candidate.py").read_text().lower())
 
     def test_the_ci_gate_and_collection_start_after_every_package_leg(self):
@@ -1880,9 +1888,11 @@ class PublishTests(unittest.TestCase):
 class RebindingTests(unittest.TestCase):
     def test_only_this_scripts_copy_of_release_candidate_checks_forge_release(self):
         self.assertEqual(forge.rc.WORKFLOW, ".github/workflows/forge-release.yml")
+        self.assertEqual(forge.rc.REPOSITORY, "lukacf/meerkat-meta")
         meta = load(f"release_candidate_{uuid.uuid4().hex}", ROOT / "scripts/release-candidate.py")
-        self.assertEqual(meta.WORKFLOW, ".github/workflows/release.yml")
-        self.assertEqual(release_tests.release_candidate.WORKFLOW, ".github/workflows/release.yml")
+        self.assertEqual(meta.WORKFLOW, ".github/workflows/meta-release.yml")
+        self.assertEqual(meta.REPOSITORY, "lukacf/meerkat")
+        self.assertEqual(release_tests.release_candidate.WORKFLOW, ".github/workflows/meta-release.yml")
 
     def test_verify_package_files_binds_the_checksum_and_the_attestation_ref(self):
         with fixture_directory() as directory:

@@ -976,7 +976,7 @@ def verify_published_proofs(folder, selected, sha, version, tag):
 
 def verify_flat_subset(folder, destination, tag, tier=None):
     destination.mkdir()
-    names = [*assets.expected_archive_names(tag[1:], tier), *assets.metadata_names(tier)]
+    names = [*assets.expected_archive_names(assets.normalized_version(tag)[1], tier), *assets.metadata_names(tier)]
     for name in names:
         require((folder / name).is_file(), f"missing published original asset: {name}")
         shutil.copyfile(folder / name, destination / name)

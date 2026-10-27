@@ -1,0 +1,785 @@
+name: Meta CI
+
+# Meta's CI in the monorepo, moved here from meta/.github/workflows/ci.yml for
+# the transition: it runs on every pull request, push and dispatch, exits
+# early when no path in Meta's scope changed, and reports one aggregate job,
+# `Meta gate`. The root CI (ci.yml, scripts/ci-cargo-lanes.mjs) plans Meta's
+# Rust rows: rustfmt (the root's fmt check), Clippy on the pull request, and
+# on the push the unit tests, the openai-live and extension-state feature
+# suites and the integration tests (closure-tests rows); cargo-deny runs in
+# the root's nightly sweep. This workflow keeps the rest:
+# the SDK suites, the console and flow editor suites, and Meta's Python and
+# script checks. Steps run in meta/; Cargo runs from the repository root
+# through ./scripts/repo-cargo for one package (-p meerkat-meta), never the
+# workspace, with the root CI's compile environment and sccache bucket, so
+# the dependency builds the root CI compiled are cache hits here.
+#
+# Jobs (each runs only when `changes` says Meta is reached; lane jobs only
+# when their lane is):
+#   changes               - classify the diff with the base commit's
+#                           meta/scripts/ci-changes.py --monorepo
+#   meta-checks           - Meta's Python and script contract checks
+#   test-typescript       - the TypeScript SDK suite
+#   test-python           - the Python SDK suite against a fresh rpc_gateway
+#   console-backends      - the five acceptance backends, built once for the
+#                           console and console-browser jobs
+#   console               - console contracts and the API, voice, memory and
+#                           workgraph suites
+#   console-browser (x6)  - the browser scenarios, --shard=i/6; leg 1 also
+#                           runs the native MCP Apps checks
+#   console-fixtures      - the customization fixtures and the acceptance
+#                           fixture's own tests
+#   console-acceptance    - the stock incident topology acceptance
+#   console-perf          - composer typing in a real browser (no Rust)
+#   flow-editor-contracts - the flow editor's source, projection and visual
+#                           contracts (no Rust)
+#   flow-editor           - the flow editor's browser checks against
+#                           meta_flow_editor
+#   gate                  - "Meta gate", the aggregate
+
+on:
+  push:
+    branches:
+      - main
+      - 'release/**'
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+  workflow_dispatch: {}
+
+# A newer push to a pull request cancels its older run. Every push and
+# dispatch runs to the end in a group of its own: a push that reaches Meta
+# is classified on its own diff alone (its first parent is the ref's previous
+# tip), so no later run covers a cancelled one's change.
+concurrency:
+  group: >-
+    ${{
+      github.event_name == 'pull_request' && format('meta-ci-pr-{0}', github.event.pull_request.number) ||
+      format('meta-ci-{0}-{1}-{2}', github.event_name, github.ref_name, github.sha)
+    }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+# The root CI's compile environment, value for value: rust-cache hashes the
+# CARGO*/RUST* variables into its key and sccache serves an object only to a
+# compile with the same inputs, so the registry entry and the objects the
+# root CI wrote are hits here only while these agree
+# (scripts/test_ci_workflow.py checks them against ci.yml). Debuginfo is off,
+# as there: a backend's panic keeps its message but not file:line.
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_HOME: /home/runner/.cargo
+  RUSTUP_TOOLCHAIN: 1.94.1
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  SCCACHE_ERROR_LOG: /home/runner/work/_temp/sccache.log
+  SCCACHE_LOG: info
+  SCCACHE_IDLE_TIMEOUT: "0"
+  RUST_LANE_ID: ci
+  SCCACHE_GCS_BUCKET_NAME: ${{ vars.MEERKAT_SCCACHE_GCS_BUCKET }}
+
+defaults:
+  run:
+    working-directory: meta
+
+jobs:
+  # A pull request runs the lanes its changed files reach (none for docs,
+  # only the console lanes for meta/console/, the other configurations of a
+  # Rust change left to the push), a push that reaches Meta and a dispatch
+  # run every lane, and a pull request or push that reaches nothing of
+  # Meta's runs none: meta=false, and every other job is skipped.
+  changes:
+    name: changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      rust: ${{ steps.classify.outputs.rust }}
+      integration: ${{ steps.classify.outputs.integration }}
+      voice: ${{ steps.classify.outputs.voice }}
+      extension_state: ${{ steps.classify.outputs.extension_state }}
+      python: ${{ steps.classify.outputs.python }}
+      console: ${{ steps.classify.outputs.console }}
+      console_perf: ${{ steps.classify.outputs.console_perf }}
+      flow_editor: ${{ steps.classify.outputs.flow_editor }}
+      meta: ${{ steps.classify.outputs.meta }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          # A pull request checks out GitHub's merge commit, whose first
+          # parent is the base; a push checks out its head, whose first
+          # parent is the ref's previous tip when the push added one commit
+          # (a merge). Either way the diff is the run's own change.
+          fetch-depth: 2
+          persist-credentials: false
+      - id: classify
+        # The base commit's classifier decides, so a pull request never
+        # classifies itself with the classifier it changes. Fails closed:
+        # if it errors, or prints no line for some lane (a base that
+        # predates --monorepo), every lane runs. A dispatch, and a push whose
+        # previous tip is not HEAD's first parent (several commits, a new
+        # ref), run every lane without asking it; a push it finds Meta's
+        # runs every lane whatever lanes it printed.
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          lanes="rust integration voice extension_state python console console_perf flow_editor meta"
+          every_lane() {
+            echo "$1: every lane runs"
+            for lane in ${lanes}; do
+              echo "${lane}=true" >> "${GITHUB_OUTPUT}"
+            done
+          }
+          if [[ "${EVENT}" != "pull_request" && "${EVENT}" != "push" ]]; then
+            every_lane "${EVENT}"
+            exit 0
+          fi
+          if [[ "${EVENT}" == "push" && "${BEFORE}" != "$(git rev-parse --verify --quiet HEAD^1)" ]]; then
+            every_lane "the push's previous tip ${BEFORE:-(none)} is not HEAD's first parent"
+            exit 0
+          fi
+          result="${RUNNER_TEMP}/lanes"
+          classified=false
+          if git show HEAD^1:meta/scripts/ci-changes.py > "${RUNNER_TEMP}/ci-changes.py" \
+              && python3 "${RUNNER_TEMP}/ci-changes.py" --monorepo --event "${EVENT}" --github-output "${result}"; then
+            classified=true
+            for lane in ${lanes}; do
+              grep -Eqx "${lane}=(true|false)" "${result}" || classified=false
+            done
+          fi
+          if [[ "${classified}" != true ]]; then
+            every_lane "the base classifier failed or has no lanes"
+          elif [[ "${EVENT}" == "push" ]] && grep -qx "meta=true" "${result}"; then
+            every_lane "a push that reaches Meta"
+          else
+            grep -Ex "(${lanes// /|})=(true|false)" "${result}" >> "${GITHUB_OUTPUT}"
+          fi
+
+  # The checks that compile nothing: the repository contract tests, the
+  # classifier and workflow contracts, version parity, publication and
+  # package lists, the decorator and memory gates. Cargo only reads metadata
+  # and package lists here.
+  meta-checks:
+    name: meta-checks
+    needs: changes
+    if: needs.changes.outputs.meta == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+      - run: python3 scripts/check-conflict-markers
+      - run: python3 scripts/test_check_conflict_markers.py
+      - run: scripts/verify-version-parity.sh
+      - run: python3 scripts/verify-runtime-options-reachable.py
+      - run: python3 scripts/verify-decorator-authority.py
+      - run: python3 scripts/verify-session-service-decorators.py
+      - run: python3 scripts/test_verify_session_service_decorators.py
+      - run: python3 scripts/test_ci_workflow.py
+      - run: python3 scripts/test_ci_changes.py
+      - run: python3 scripts/test_repo_cargo.py
+      - run: python3 scripts/test_pre_push_clippy.py
+      - run: python3 scripts/test_release_version_scripts.py
+      - run: python3 scripts/test_release_workflow.py
+      - run: python3 scripts/test_release_candidate.py
+      - run: python3 scripts/test_installer_release.py
+      - run: python3 scripts/test_verify_published_registries.py
+      - run: python3 scripts/test_verify_release_assets.py
+      - run: python3 scripts/verify-crate-publication.py
+      - run: python3 scripts/test_verify_crate_publication.py
+      - run: python3 scripts/verify-crate-package-files.py
+      - run: python3 scripts/test_verify_crate_package_files.py
+      - run: python3 scripts/test_memory_evals.py
+      - run: python3 scripts/test_verify_unit_test_filter.py
+      # The standalone continuity export scripts a 0.9.3 SDK-hosted
+      # deployment runs before it upgrades. Each verifies both golden files.
+      - run: python3 tools/continuity-export/test_continuity_export.py
+      - run: node --test tools/continuity-export/continuity-export.test.mjs
+      # The blob restore that follows a continuity mirror's session import.
+      - run: python3 tools/continuity-export/test_restore_blobs.py
+      - run: scripts/check-memory-bright-line
+      - run: scripts/memory-evals --check
+      # The export scripts' suites again on the oldest runtimes a 0.9.3 host
+      # may run them on, the 0.9.3 SDKs' floors: Python 3.10 and Node.js 18,
+      # and the blob restore's suite on the Python floor it states.
+      # Last in the job, since each setup step changes the python3 or node
+      # every later step runs.
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.10"
+      - run: python3 tools/continuity-export/test_continuity_export.py
+      - run: python3 tools/continuity-export/test_restore_blobs.py
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "18"
+      - run: node --test tools/continuity-export/continuity-export.test.mjs
+
+  # The TypeScript SDK suite: `validate` is typecheck, build and test in that
+  # order, because most of its tests import the built dist/, not src/.
+  test-typescript:
+    name: test-typescript
+    needs: changes
+    if: needs.changes.outputs.meta == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "20"
+      - run: npm --prefix sdk/typescript ci --silent --no-fund --no-audit
+      - run: npm --prefix sdk/typescript run validate --silent
+
+  test-python:
+    name: test-python
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      # The sccache bucket's workload identity, as in the root CI.
+      id-token: write
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+      - name: Setup mold linker
+        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+      - name: Restore the cargo registry
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          # The root CI's registry entry; this workflow saves none.
+          save-if: false
+          shared-key: ci-registry
+          cache-targets: "false"
+      - run: python -m pip install 'sdk/python[dev]'
+      # Gateway-backed structural tests materialize OpenAI profiles but never
+      # issue provider requests. Meerkat resolves auth during construction, so
+      # give those tests an explicit non-secret bootstrap credential instead of
+      # depending on repository secrets or silently skipping the gateway lane.
+      # make builds rpc_gateway through the root wrapper.
+      - run: make test-python CARGO=../scripts/repo-cargo
+        env:
+          OPENAI_API_KEY: meta-ci-bootstrap-only-not-a-secret
+
+  # The five acceptance backends, built once from freshly built console
+  # bundles (the backends embed crates/meerkat-meta/console-dist, which
+  # `run build` writes) and handed to the console and console-browser jobs
+  # as one archive (example-backend.cjs runs META_EXAMPLE_BIN_DIR's binaries
+  # and never falls back to cargo). Each browser leg built them itself
+  # before: 393 s of a 14.3-minute leg (run 38776842877).
+  console-backends:
+    name: console-backends
+    needs: changes
+    if: needs.changes.outputs.console == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: meta/console/package-lock.json
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+      - name: Setup mold linker
+        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+      - name: Restore the cargo registry
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: false
+          shared-key: ci-registry
+          cache-targets: "false"
+      - run: npm --prefix console ci --silent --no-fund --no-audit
+      - run: npm --prefix console run build --silent
+      - name: Build console acceptance backends
+        working-directory: .
+        run: ./scripts/repo-cargo build -p meerkat-meta --example library_mode_reference --example console_acceptance_fixture --example memory_console_reference --example workgraph_console_reference --example mcp_apps_gateway_fixture
+      # The artifact keeps no file mode; the archive keeps the binaries
+      # executable.
+      - name: Pack the backends
+        run: tar -C "${CARGO_TARGET_DIR}/debug/examples" -cf "${RUNNER_TEMP}/console-backends.tar" library_mode_reference console_acceptance_fixture memory_console_reference workgraph_console_reference mcp_apps_gateway_fixture
+      - name: Retain the backends
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          # One name per run: a rerun leg reads the backends of the run, and
+          # a rerun of this job replaces them.
+          name: console-backends
+          path: ${{ runner.temp }}/console-backends.tar
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
+
+  # The console lane's contract checks and its API, voice, memory and
+  # workgraph suites, on the shared backends.
+  console:
+    name: console
+    needs: [changes, console-backends]
+    if: needs.changes.outputs.console == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: meta/console/package-lock.json
+      - name: Fetch the console acceptance backends
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: console-backends
+          path: ${{ runner.temp }}/console-backends
+      - name: Unpack the console acceptance backends
+        run: |
+          bin_dir="${RUNNER_TEMP}/console-backends/bin"
+          mkdir -p "${bin_dir}"
+          tar -C "${bin_dir}" -xf "${RUNNER_TEMP}/console-backends/console-backends.tar"
+          echo "META_EXAMPLE_BIN_DIR=${bin_dir}" >> "${GITHUB_ENV}"
+      - run: npm --prefix console ci --silent --no-fund --no-audit
+      - run: npm --prefix console run phase0:types --silent
+      - run: npm --prefix console run contracts:console --silent
+      - run: npm --prefix console run contracts:conversation --silent
+      # Continuing a transcript derivation must equal deriving from scratch,
+      # checked on every adapter suite's frame sequences.
+      - run: npm --prefix console run contracts:timeline-incremental --silent
+      - run: npm --prefix console run typecheck:contracts --silent
+      - run: npm --prefix console run test:scenario-registry --silent
+      - run: npm --prefix console run e2e:api:list --silent
+      - run: npm --prefix console run e2e:browser:list --silent
+      - run: npm --prefix console run phase1:targets --silent
+      - run: npm --prefix console run headless:transport --silent
+      - run: npm --prefix console run topology:adapter --silent
+      - run: npm --prefix console run topology:components --silent
+      - run: npm --prefix console run components:reuse --silent
+      - run: npm --prefix console run embedded:freshness --silent
+      - run: npm --prefix console run build:acceptance --silent
+      - run: npm --prefix console exec -- playwright install --with-deps chromium
+      - run: node console/api-e2e.cjs
+      - run: node console/voice-e2e.cjs
+      # Validate paid-lane evidence and continuous silent audio without credentials.
+      - run: node console/voice-e2e-live.cjs --self-test
+      - run: node console/voice-e2e-live.cjs --self-test-audio
+      - run: node console/memory-e2e.cjs
+      - run: node console/workgraph-e2e.cjs
+      - name: Upload console evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: console-${{ github.run_id }}-${{ github.run_attempt }}
+          path: meta/output/playwright/console-acceptance/
+          if-no-files-found: error
+
+  # The browser scenarios against the shared backends and freshly built
+  # console bundles (the scenarios read console/dist). Six legs: the
+  # scenario registry deals each of browser-e2e's ~100 scenarios to exactly
+  # one --shard=i/n leg (console/scenario-registry.test.cjs). Dealt three
+  # ways, run 38776842877's scenarios took 135 s, 217 s and 222 s; six ways
+  # they take about half that, and with the backends built once a leg is
+  # setup (npm, bundles, Playwright: about 3 minutes) plus its share. Leg 1
+  # also runs the native MCP Apps checks (80 s).
+  console-browser:
+    name: console-browser
+    needs: [changes, console-backends]
+    if: needs.changes.outputs.console == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: meta/console/package-lock.json
+      - name: Fetch the console acceptance backends
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: console-backends
+          path: ${{ runner.temp }}/console-backends
+      - name: Unpack the console acceptance backends
+        run: |
+          bin_dir="${RUNNER_TEMP}/console-backends/bin"
+          mkdir -p "${bin_dir}"
+          tar -C "${bin_dir}" -xf "${RUNNER_TEMP}/console-backends/console-backends.tar"
+          echo "META_EXAMPLE_BIN_DIR=${bin_dir}" >> "${GITHUB_ENV}"
+      - run: npm --prefix console ci --silent --no-fund --no-audit
+      - run: npm --prefix console run build --silent
+      - run: npm --prefix console run build:acceptance --silent
+      - run: npm --prefix console exec -- playwright install --with-deps chromium
+      # The first two MCP Apps steps run the persistent rpc_gateway composition
+      # (mcp_apps_gateway_fixture): members come from the gateway's own member
+      # factories, whose MCP routers carry the stock connector call-context
+      # provider, so an MCP App resource-read regression there fails here.
+      - name: Native MCP Apps rendering and reload
+        if: matrix.shard == 1
+        timeout-minutes: 5
+        run: npm --prefix console run e2e:mcp-apps --silent
+        env:
+          META_BROWSER_EVIDENCE: ${{ github.workspace }}/meta/output/playwright/console-acceptance/mcp-apps
+      # The model remains held for more than the native HTTP action timeout.
+      # Three mounted Apps must keep polling through the same MCP connection.
+      - name: Native MCP Apps polling during an active model turn
+        if: matrix.shard == 1
+        timeout-minutes: 5
+        run: npm --prefix console run e2e:mcp-apps --silent
+        env:
+          META_MCP_APPS_LONG_POLL: "1"
+          META_BROWSER_EVIDENCE: ${{ github.workspace }}/meta/output/playwright/console-acceptance/mcp-apps
+      # The gateway lane spawns classic members. This one runs the same quick
+      # checks on console_acceptance_fixture, a UnifiedRuntime::builder() host
+      # whose identity-first members carry no call-context provider.
+      - name: Native MCP Apps on a builder host with identity-first members
+        if: matrix.shard == 1
+        timeout-minutes: 5
+        run: npm --prefix console run e2e:mcp-apps --silent
+        env:
+          META_MCP_APPS_BACKEND: builder
+          META_BROWSER_EVIDENCE: ${{ github.workspace }}/meta/output/playwright/console-acceptance/mcp-apps
+      - run: node console/browser-e2e.cjs --shard=${{ matrix.shard }}/6
+      - name: Upload console browser evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: console-browser-${{ github.run_id }}-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: meta/output/playwright/console-acceptance/
+          # Leg 1 always writes MCP Apps evidence; the others write only what
+          # their scenarios capture.
+          if-no-files-found: ${{ matrix.shard == 1 && 'error' || 'warn' }}
+
+  # Needs Rust but not Playwright: the customization fixtures bundle with
+  # esbuild, run `node --test`, then cargo test's
+  # console_customization_fixtures target, built here first with the
+  # acceptance fixture example's own tests through the root wrapper (the
+  # npm script's cargo test then finds both fresh).
+  console-fixtures:
+    name: console-fixtures
+    needs: changes
+    if: needs.changes.outputs.console == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: meta/console/package-lock.json
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+      - name: Setup mold linker
+        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+      - name: Restore the cargo registry
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: false
+          shared-key: ci-registry
+          cache-targets: "false"
+      - run: npm --prefix console ci --silent --no-fund --no-audit
+      - name: Build the console fixture tests
+        working-directory: .
+        run: ./scripts/repo-cargo test -p meerkat-meta --example console_acceptance_fixture --test console_customization_fixtures --no-run
+      # Meta's tests run on the 16 MiB thread stack Meta's product line sets
+      # (ci/products.json test_stack); the root's Cargo configuration gives 8.
+      - name: Console acceptance fixture unit tests
+        working-directory: .
+        env:
+          RUST_MIN_STACK: "16777216"
+        run: ./scripts/repo-cargo test -p meerkat-meta --example console_acceptance_fixture
+      - name: Console customization fixtures
+        env:
+          RUST_MIN_STACK: "16777216"
+        run: npm --prefix console run fixtures:console-customization --silent
+
+  # Needs Playwright (it captures screenshots) and its own two binaries,
+  # built here through the root wrapper; the pack's script runs them from
+  # META_EXAMPLE_BIN_DIR. The bundles are built first, as the script did
+  # before its own build, so the example embeds fresh ones.
+  console-acceptance:
+    name: console-acceptance
+    needs: changes
+    if: needs.changes.outputs.console == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: meta/console/package-lock.json
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+      - name: Setup mold linker
+        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+      - name: Restore the cargo registry
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: false
+          shared-key: ci-registry
+          cache-targets: "false"
+      - run: npm --prefix console ci --silent --no-fund --no-audit
+      - run: npm --prefix console exec -- playwright install --with-deps chromium
+      - run: npm --prefix console run build --silent
+      - name: Build the incident pack's binaries
+        working-directory: .
+        run: |
+          ./scripts/repo-cargo build -p meerkat-meta --example incident_command_center --bin mcp_fixture
+          bin_dir="${RUNNER_TEMP}/incident-bins"
+          mkdir -p "${bin_dir}"
+          ln -s "${CARGO_TARGET_DIR}/debug/examples/incident_command_center" "${CARGO_TARGET_DIR}/debug/mcp_fixture" "${bin_dir}/"
+          echo "META_EXAMPLE_BIN_DIR=${bin_dir}" >> "${GITHUB_ENV}"
+      - name: Stock incident topology acceptance
+        run: examples/001-incident-command-center-pack/topology_examples.sh
+      - name: Upload incident topology screenshots
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: incident-topology-${{ github.run_id }}-${{ github.run_attempt }}
+          path: meta/output/playwright/incident-topology-*.png
+          if-no-files-found: warn
+          retention-days: 7
+
+  # The composer typing check. It bundles its own host with esbuild and
+  # needs no Rust.
+  console-perf:
+    name: console-perf
+    needs: changes
+    if: needs.changes.outputs.console_perf == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: meta/console/package-lock.json
+      - run: npm --prefix console ci --silent --no-fund --no-audit
+      - run: npm --prefix console exec -- playwright install --with-deps chromium
+      # Real-browser composer typing with a full identity log and a
+      # FlowForensics-shaped session, idle and while a reply streams. jsdom
+      # has no style, layout or paint, so only a browser can see this
+      # regress. Fails only on runner-independent work counts (layout objects
+      # per keystroke, full derivations and turn renders per streamed token);
+      # wall-clock p95 is printed as advisory (META_TYPING_LAG_ENFORCE_TIMING=1
+      # makes it a failure for local perf work).
+      - run: npm --prefix console run perf:typing:browser --silent
+
+  # The flow editor's checks that need neither the binary nor a browser:
+  # the bundle freshness, typecheck, source, package-boundary, controller
+  # and visual contracts. Split from flow-editor, whose binary build is its
+  # critical path.
+  flow-editor-contracts:
+    name: flow-editor-contracts
+    needs: changes
+    if: needs.changes.outputs.flow_editor == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: meta/flow-editor/package-lock.json
+      - run: npm --prefix flow-editor ci --silent --no-fund --no-audit
+      - run: npm --prefix flow-editor run test:controller --silent
+      - run: npm --prefix flow-editor run test:visual-contract --silent
+
+  # The flow editor's rendered browser checks against the meta_flow_editor
+  # host (flow-editor/test/flow-editor-binary.cjs finds it under
+  # CARGO_TARGET_DIR).
+  flow-editor:
+    name: flow-editor
+    needs: changes
+    if: needs.changes.outputs.flow_editor == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: meta/flow-editor/package-lock.json
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+      - name: Setup mold linker
+        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+      - name: Restore the cargo registry
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: false
+          shared-key: ci-registry
+          cache-targets: "false"
+      - run: npm --prefix flow-editor ci --silent --no-fund --no-audit
+      - run: npm --prefix flow-editor exec -- playwright install --with-deps chromium
+      - name: Build the flow editor host
+        working-directory: .
+        run: ./scripts/repo-cargo build -p meerkat-meta --bin meta_flow_editor
+      - run: npm --prefix flow-editor run test:browser-source --silent
+      - run: npm --prefix flow-editor run test:browser-interactions --silent
+
+  gate:
+    name: Meta gate
+    if: always()
+    needs: [changes, meta-checks, test-typescript, test-python, console-backends, console, console-browser, console-fixtures, console-acceptance, console-perf, flow-editor-contracts, flow-editor]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    # No checkout here, so no meta/ to run in.
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Check job results
+        env:
+          LANE_META: ${{ needs.changes.outputs.meta }}
+          LANE_RUST: ${{ needs.changes.outputs.rust }}
+          LANE_INTEGRATION: ${{ needs.changes.outputs.integration }}
+          LANE_VOICE: ${{ needs.changes.outputs.voice }}
+          LANE_EXTENSION_STATE: ${{ needs.changes.outputs.extension_state }}
+          LANE_PYTHON: ${{ needs.changes.outputs.python }}
+          LANE_CONSOLE: ${{ needs.changes.outputs.console }}
+          LANE_CONSOLE_PERF: ${{ needs.changes.outputs.console_perf }}
+          LANE_FLOW_EDITOR: ${{ needs.changes.outputs.flow_editor }}
+        run: |
+          status=0
+          # check <job> <result> <required|lane>: a job in a lane (meta: every
+          # job that runs whenever Meta is reached) may be skipped only when
+          # `changes` set that lane to exactly "false", never when the
+          # classification is missing or failed.
+          check() {
+            local lane_value=""
+            if [[ "$3" != "required" ]]; then
+              local variable="LANE_${3^^}"
+              lane_value="${!variable-}"
+            fi
+            if [[ "$2" == "success" ]]; then
+              echo "  $1: success"
+            elif [[ "$3" != "required" && "$2" == "skipped" && "${lane_value}" == "false" ]]; then
+              echo "  $1: skipped (no change reaches the $3 lane)"
+            else
+              echo "  $1: $2"
+              status=1
+            fi
+          }
+          if [[ "${LANE_META}" == "false" ]]; then
+            echo "No path in Meta's scope changed; every Meta job is skipped."
+          fi
+          check changes "${{ needs.changes.result }}" required
+          check meta-checks "${{ needs.meta-checks.result }}" meta
+          check test-typescript "${{ needs.test-typescript.result }}" meta
+          check test-python "${{ needs.test-python.result }}" python
+          check console-backends "${{ needs.console-backends.result }}" console
+          check console "${{ needs.console.result }}" console
+          check console-browser "${{ needs.console-browser.result }}" console
+          check console-fixtures "${{ needs.console-fixtures.result }}" console
+          check console-acceptance "${{ needs.console-acceptance.result }}" console
+          check console-perf "${{ needs.console-perf.result }}" console_perf
+          check flow-editor-contracts "${{ needs.flow-editor-contracts.result }}" flow_editor
+          check flow-editor "${{ needs.flow-editor.result }}" flow_editor
+          if [[ "${status}" != 0 ]]; then
+            echo "One or more jobs failed, were cancelled, or were skipped without a classification that excludes their lane."
+            exit 1
+          fi

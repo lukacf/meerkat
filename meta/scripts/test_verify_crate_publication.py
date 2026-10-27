@@ -114,6 +114,33 @@ class CratePublicationGateTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("no `cargo publish -p NAME`", result.stderr)
 
+    def test_in_the_monorepo_only_metas_members_of_the_root_workspace_count(self):
+        # Meta under meta/ of a repository whose one workspace lists Meta's
+        # crates by glob beside Core's: Core's crate, neither published by
+        # Meta's release nor withheld, is not Meta's to declare.
+        self.tmp = tempfile.TemporaryDirectory()
+        repo = Path(self.tmp.name)
+        (repo / "Cargo.toml").write_text('[workspace]\nmembers = ["crates/core", "meta/crates/*"]\n')
+        for directory, manifest in {
+            "crates/core": '[package]\nname = "core"\nversion = "0.9.6"\n',
+            "meta/crates/alpha": '[package]\nname = "alpha"\nversion = "0.9.5"\n',
+            "meta/crates/beta": '[package]\nname = "beta"\nversion = "0.9.5"\npublish = false\n',
+        }.items():
+            (repo / directory).mkdir(parents=True)
+            (repo / directory / "Cargo.toml").write_text(manifest)
+        workflows = repo / "meta/.github/workflows"
+        workflows.mkdir(parents=True)
+        (workflows / "release.yml").write_text(PUBLISHES_ONE)
+        result = run_gate(repo / "meta")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("2 workspace member(s)", result.stdout)
+        # A Meta crate that declares neither still fails there.
+        (repo / "meta/crates/beta/Cargo.toml").write_text('[package]\nname = "beta"\nversion = "0.9.5"\n')
+        result = run_gate(repo / "meta")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("beta", result.stderr)
+        self.assertNotIn("core", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

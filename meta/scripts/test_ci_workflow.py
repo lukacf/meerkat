@@ -1,97 +1,86 @@
 #!/usr/bin/env python3
-"""Focused contracts for the pull-request CI workflow."""
+"""Focused contracts for Meta's CI workflows: the monorepo's
+.github/workflows/meta-ci.yml (pull requests, pushes, dispatch) and
+meta-e2e-live.yml, and the workflows still kept under meta/.github."""
 
-import fnmatch
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import tempfile
-import unittest
-import re
 import tomllib
+import unittest
 from pathlib import Path
 
 import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CI_WORKFLOW = ROOT / ".github/workflows/ci.yml"
-# dtolnay/rust-toolchain keeps one branch per toolchain, and each branch's
-# commit hard-codes its version, so a toolchain is pinned to its branch's
-# commit. A toolchain bump re-pins it here and in the workflows.
-RUST_TOOLCHAIN_ACTION = {"1.97.0": "f08ac54821369508305fcb9e0121ec6e30ae9ada"}
+MONOREPO = ROOT.parent
+WORKFLOWS = MONOREPO / ".github/workflows"
+CI_WORKFLOW = WORKFLOWS / "meta-ci.yml"
+E2E_LIVE_WORKFLOW = WORKFLOWS / "meta-e2e-live.yml"
+META_WORKFLOWS = (CI_WORKFLOW, E2E_LIVE_WORKFLOW)
+# The root CI, whose toolchain, compile environment, cache settings and
+# action pins meta-ci.yml shares.
+ROOT_CI_WORKFLOW = WORKFLOWS / "ci.yml"
+# The root CI job whose Rust setup meta-ci.yml's compile jobs copy: the root
+# toolchain, the sccache bucket, mold and the registry-only rust-cache.
+ROOT_RUST_JOB = "ratchets"
 _CI_CHANGES_SPEC = importlib.util.spec_from_file_location("ci_changes", ROOT / "scripts/ci-changes.py")
 ci_changes = importlib.util.module_from_spec(_CI_CHANGES_SPEC)
 _CI_CHANGES_SPEC.loader.exec_module(ci_changes)
 
-# The target kinds `cargo test` tests by default. Examples are only built,
-# and benches and build scripts are left out, unless a manifest sets their
-# test flag.
-TESTED_BY_DEFAULT = {"lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro", "bin", "test"}
-NOT_TESTED_BY_DEFAULT = {"example", "bench", "custom-build"}
+# The variables rust-cache hashes into its key.
+HASHED_ENV = re.compile(r"(?:CARGO|CC|CFLAGS|CXX|CMAKE|RUST)\w*")
+SETUP_RUST = "./.github/actions/setup-rust-ci"
+SETUP_SCCACHE = "./.github/actions/setup-sccache-ci"
 
 
-def cargo_workspace_members(root: Path) -> list[dict]:
-    """The workspace members as Cargo itself reads them: listed, glob and
-    implicit path members alike, with their targets in any valid TOML
-    spelling. `cargo metadata --no-deps` resolves nothing and needs no network."""
-    result = subprocess.run(
-        ["cargo", "metadata", "--no-deps", "--offline", "--format-version", "1"],
-        cwd=root,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    metadata = json.loads(result.stdout)
-    members = set(metadata["workspace_members"])
-    return [package for package in metadata["packages"] if package["id"] in members]
+def load(path: Path) -> dict:
+    return yaml.safe_load(path.read_text())
 
 
-def split_coverage_problems(packages: list[dict], patterns: list[str]) -> list[str]:
-    """Why the CI test jobs would not run what `cargo test` runs by default.
-
-    `test` runs --lib --bins and builds --examples, and each integration
-    half runs --test <pattern>. Their union is cargo's default selection
-    only while every target keeps its kind's default test flag and has no
-    required features, and every integration test target matches exactly
-    one pattern. Turning autotests off would silently drop the files under
-    tests/ from every run, so it is refused too.
-    """
-    problems = []
-    for package in packages:
-        manifest = tomllib.loads(Path(package["manifest_path"]).read_text())
-        if manifest.get("package", {}).get("autotests") is False:
-            problems.append(f"{package['name']}: autotests = false")
-        for target in package["targets"]:
-            kinds = set(target["kind"])
-            label = f"{package['name']} {'/'.join(target['kind'])} {target['name']}"
-            if kinds <= TESTED_BY_DEFAULT:
-                default = True
-            elif kinds <= NOT_TESTED_BY_DEFAULT:
-                default = False
-            else:
-                problems.append(f"{label}: unknown target kind")
-                continue
-            if target.get("test") is not default:
-                problems.append(f"{label}: test flag {target.get('test')}, default {default}")
-            if target.get("required-features"):
-                problems.append(f"{label}: required-features {target['required-features']}")
-            if kinds == {"test"}:
-                matched = [pattern for pattern in patterns if fnmatch.fnmatchcase(target["name"], pattern)]
-                if len(matched) != 1:
-                    problems.append(f"{label}: matches {matched}")
-    return problems
+def triggers(workflow: dict) -> dict:
+    # YAML 1.1 reads the bare key `on` as True.
+    return workflow.get("on", workflow.get(True))
 
 
-def job_block(name: str) -> str:
+def job_block(name: str, path: Path = CI_WORKFLOW) -> str:
     """Return exactly one top-level job, bounded by the next job header."""
-    lines = CI_WORKFLOW.read_text().splitlines()
+    lines = path.read_text().splitlines()
     start = lines.index(f"  {name}:")
     for offset, line in enumerate(lines[start + 1 :], start=start + 1):
         if line.startswith("  ") and not line.startswith("   ") and line.endswith(":"):
             return "\n".join(lines[start:offset])
     return "\n".join(lines[start:])
+
+
+def steps_of(job: dict) -> list[dict]:
+    return job.get("steps") or []
+
+
+def uses_of(step: dict) -> str:
+    return (step.get("uses") or "").split("@", 1)[0]
+
+
+def hashed(env: dict | None) -> dict:
+    return {key: str(value) for key, value in (env or {}).items() if HASHED_ENV.fullmatch(key)}
+
+
+def rust_jobs(workflow: dict) -> dict[str, dict]:
+    """The jobs that compile Rust: those that set up sccache."""
+    return {name: job for name, job in workflow["jobs"].items()
+            if any(uses_of(step) == SETUP_SCCACHE for step in steps_of(job))}
+
+
+def run_lines(workflow: dict):
+    """(job, step, line) for every line of every run step."""
+    for name, job in workflow["jobs"].items():
+        for step in steps_of(job):
+            for line in str(step.get("run") or "").splitlines():
+                yield name, step, line.strip()
 
 
 # A runner label that names its image. A -latest label moves to a new image on
@@ -105,17 +94,26 @@ MATRIX_RUNS_ON = "${{ matrix.runs-on }}"
 RELEASE_BUILD_MATRIX = "${{ fromJSON(needs.resolve_release.outputs.build_matrix) }}"
 
 
+def meta_workflow_files(root: Path) -> list[Path]:
+    """Meta's workflows in a tree: the ones under `root`'s .github, and when
+    `root` is Meta's directory in the monorepo, the root's meta-*.yml."""
+    found = sorted((root / ".github" / "workflows").glob("*.y*ml"))
+    if root == ROOT:
+        found += [path for path in META_WORKFLOWS if path.is_file()]
+    return found
+
+
 def runner_problems(root: Path) -> tuple[list[str], list[str]]:
     """Every workflow job's runner labels, read as YAML, and why any of them
     floats or cannot be read. A runs-on that is not one inline label (a block
     list, a flow list or a mapping) is refused, never skipped."""
     labels, problems = [], []
-    for path in sorted((root / ".github" / "workflows").glob("*.y*ml")):
+    for path in meta_workflow_files(root):
         workflow = yaml.safe_load(path.read_text()) or {}
         for name, job in (workflow.get("jobs") or {}).items():
             if not isinstance(job, dict) or "runs-on" not in job:
                 continue
-            where = f"{path.relative_to(root)} job {name}"
+            where = f"{path.name} job {name}"
             value = job["runs-on"]
             if not isinstance(value, str):
                 problems.append(f"{where}: runs-on is a {type(value).__name__} this check cannot read; "
@@ -157,16 +155,10 @@ DOCKER_URL = re.compile(r"docker://[^\s\"',)]+")
 BLOCK_SCALAR = re.compile(r"^(\s*)(-\s+)?[^\s#-][^#]*?:\s*[|>][-+0-9]*\s*$")
 # A Dockerfile FROM line's image, after any --platform style flags.
 FROM_LINE = re.compile(r"^\s*FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?\s*$", re.IGNORECASE)
-# Image references accepted without a digest, and why. The self-hosted CI
-# platform image lives in a private Artifact Registry repository that neither
-# Renovate nor this check can read; it is matched by registry, repository and
-# tag (any project).
-UNPINNED_IMAGES = {
-    re.compile(r"docker://europe-west1-docker\.pkg\.dev/[^/]+/meerkat-ci/meerkat-ci-rust:1\.94\.0"): (
-        "a private registry neither Renovate nor this check can read: its digest comes from someone "
-        "with read access to that registry"
-    ),
-}
+# Image references accepted without a digest, and why. None today: the one
+# exception, the self-hosted Bazel platform's private image, left with Meta's
+# Bazel files when Meta joined the monorepo's workspace.
+UNPINNED_IMAGES: dict[re.Pattern, str] = {}
 # The installer's launch templates and the installer test's frozen copy of
 # them. A user builds their own app from these, so they are not CI or release
 # images and Renovate does not manage them; their FROM lines stay as written.
@@ -228,21 +220,26 @@ def image_references(value: str) -> list[str] | None:
 
 
 def tracked_files(root: Path) -> list[str]:
-    """The repository's tracked files, or every file of a tree with no git."""
-    if (root / ".git").exists():
+    """The repository's tracked files below `root`, or every file of a tree
+    with no git."""
+    inside = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], cwd=root,
+                            capture_output=True, text=True)
+    if inside.returncode == 0 and inside.stdout.strip() == "true":
         listed = subprocess.run(["git", "ls-files", "-z"], cwd=root, check=True, capture_output=True, text=True)
         return [name for name in listed.stdout.split("\0") if name]
     return sorted(str(path.relative_to(root)) for path in root.rglob("*") if path.is_file())
 
 
 def image_problems(root: Path) -> tuple[list[tuple[str, str]], list[str]]:
-    """Every container image CI names, with where it is named, and why any of
-    them floats: a `container:` or `image:` value in a .github YAML file, a
-    `docker://` reference on any line of a .github file (a `uses:` action or
-    a run script), one in tools/bazel's BUILD, BUILD.bazel and .bzl files or
-    .bazelrc, and the FROM lines of every tracked Dockerfile or Containerfile
-    except the installer's launch templates (USER_TEMPLATE_DOCKERFILES). Each must carry
-    an @sha256: digest or be listed in UNPINNED_IMAGES."""
+    """Every container image Meta's CI names, with where it is named, and why
+    any of them floats: a `container:` or `image:` value in a .github YAML
+    file, a `docker://` reference on any line of a .github file (a `uses:`
+    action or a run script), one in tools/bazel's BUILD, BUILD.bazel and .bzl
+    files or .bazelrc, and the FROM lines of every tracked Dockerfile or
+    Containerfile except the installer's launch templates
+    (USER_TEMPLATE_DOCKERFILES). Each must carry an @sha256: digest or be
+    listed in UNPINNED_IMAGES. (The root's own workflows and Bazel files are
+    the root's scripts/ci-action-pins.mjs's.)"""
     found, problems = [], []
 
     def check(where: str, image: str) -> None:
@@ -250,7 +247,8 @@ def image_problems(root: Path) -> tuple[list[tuple[str, str]], list[str]]:
         if not DIGEST.search(image) and not any(pattern.fullmatch(image) for pattern in UNPINNED_IMAGES):
             problems.append(f"{where}: {image} names its image without an @sha256: digest")
 
-    for path in sorted(path for path in (root / ".github").rglob("*") if path.is_file()):
+    github = root / ".github"
+    for path in sorted(path for path in github.rglob("*") if path.is_file()) if github.is_dir() else []:
         text = path.read_text()
         if path.suffix in (".yml", ".yaml"):
             for number, line in yaml_lines(text):
@@ -267,8 +265,9 @@ def image_problems(root: Path) -> tuple[list[tuple[str, str]], list[str]]:
         for number, line in enumerate(text.split("\n"), 1):
             for image in DOCKER_URL.findall(without_comment(line)):
                 check(f"{path.relative_to(root)}:{number}", image)
-    bazel = sorted(path for path in (root / "tools" / "bazel").rglob("*")
-                   if path.name in ("BUILD.bazel", "BUILD") or path.suffix == ".bzl")
+    bazel_root = root / "tools" / "bazel"
+    bazel = sorted(path for path in bazel_root.rglob("*")
+                   if path.name in ("BUILD.bazel", "BUILD") or path.suffix == ".bzl") if bazel_root.is_dir() else []
     if (root / ".bazelrc").is_file():
         bazel.append(root / ".bazelrc")
     for path in bazel:
@@ -291,36 +290,103 @@ def image_problems(root: Path) -> tuple[list[tuple[str, str]], list[str]]:
 
 
 class CiWorkflowTests(unittest.TestCase):
-    def test_ci_and_release_use_the_repository_toolchain(self):
-        toolchain = tomllib.loads((ROOT / "rust-toolchain.toml").read_text())["toolchain"]
-        version = toolchain["channel"]
-        self.assertRegex(version, r"^\d+\.\d+\.\d+$")
-        for name in ("ci.yml", "release.yml", "e2e-live.yml"):
-            source = (ROOT / ".github/workflows" / name).read_text()
-            installs = re.findall(r"uses:\s*dtolnay/rust-toolchain@([0-9a-f]{40}) # (\S+)\n", source)
-            self.assertTrue(installs, f"{name} must install its build toolchain")
-            self.assertEqual(set(installs), {(RUST_TOOLCHAIN_ACTION[version], version)}, name)
-            self.assertEqual(len(installs), source.count("dtolnay/rust-toolchain@"), name)
+    def test_meta_ci_builds_with_the_root_toolchain_and_compile_environment(self):
+        """meta-ci.yml compiles with the root CI's toolchain, environment and
+        caches, so the dependency builds the root CI wrote to the sccache
+        bucket, and its registry entry, are hits: rust-cache hashes the
+        CARGO*/RUST* variables into its key and sccache serves an object only
+        to a compile with the same inputs. Rust comes from the root's setup
+        action alone, never from a toolchain action of its own."""
+        channel = tomllib.loads((MONOREPO / "rust-toolchain.toml").read_text())["toolchain"]["channel"]
+        meta, root = load(CI_WORKFLOW), load(ROOT_CI_WORKFLOW)
+        self.assertEqual(meta["env"]["RUSTUP_TOOLCHAIN"], channel)
+        self.assertEqual(hashed(meta["env"]), hashed(root["env"]))
+        self.assertEqual(meta["env"]["SCCACHE_GCS_BUCKET_NAME"], root["env"]["SCCACHE_GCS_BUCKET_NAME"])
+        reference = root["jobs"][ROOT_RUST_JOB]
+        reference_uses = [uses_of(step) for step in steps_of(reference)]
+        reference_sccache = next(step for step in steps_of(reference) if uses_of(step) == SETUP_SCCACHE)
+        reference_cache = next(step for step in steps_of(reference) if uses_of(step) == "Swatinem/rust-cache")
+        setup_order = [SETUP_RUST, SETUP_SCCACHE, "rui314/setup-mold", "Swatinem/rust-cache"]
+        self.assertEqual([use for use in reference_uses if use in setup_order], setup_order)
+        jobs = rust_jobs(meta)
+        self.assertEqual(sorted(jobs), sorted(["test-python", "console-backends", "console-fixtures",
+                                               "console-acceptance", "flow-editor"]))
+        for name, job in jobs.items():
+            with self.subTest(job=name):
+                self.assertEqual(hashed(job.get("env")), hashed(reference.get("env")))
+                uses = [uses_of(step) for step in steps_of(job)]
+                self.assertEqual([use for use in uses if use in setup_order], setup_order)
+                sccache = next(step for step in steps_of(job) if uses_of(step) == SETUP_SCCACHE)
+                self.assertEqual(sccache["with"], reference_sccache["with"])
+                cache = next(step for step in steps_of(job) if uses_of(step) == "Swatinem/rust-cache")
+                self.assertEqual(cache["with"]["shared-key"], reference_cache["with"]["shared-key"])
+                self.assertEqual(cache["with"]["cache-targets"], reference_cache["with"]["cache-targets"])
+                # The root CI's entry, restored and never saved here.
+                self.assertIs(cache["with"]["save-if"], False)
+        for path in META_WORKFLOWS:
+            source = path.read_text()
+            self.assertIsNone(re.search(r"(?m)^\s*-?\s*uses:\s*dtolnay/rust-toolchain", source), path.name)
+        # The other jobs that need Rust: the metadata checks and the live lane.
+        self.assertIn(SETUP_RUST, [uses_of(step) for step in steps_of(meta["jobs"]["meta-checks"])])
+        live = load(E2E_LIVE_WORKFLOW)["jobs"]["e2e-live"]
+        self.assertIn(SETUP_RUST, [uses_of(step) for step in steps_of(live)])
 
-    def test_every_external_action_is_pinned_to_a_full_commit_sha(self):
+    def test_cargo_runs_one_package_from_the_root_wrapper(self):
+        """Cargo runs from the repository's root through ./scripts/repo-cargo,
+        for meerkat-meta alone: a step in meta/ reaches it through make with
+        CARGO=../scripts/repo-cargo. No step names the workspace, so no Meta
+        job compiles Core's or Connect's packages, and the planner's product
+        rows stay the only workspace lanes."""
+        commands = []
+        for path in (CI_WORKFLOW, E2E_LIVE_WORKFLOW):
+            workflow = load(path)
+            default = ((workflow.get("defaults") or {}).get("run") or {}).get("working-directory")
+            self.assertEqual(default, "meta", path.name)
+            for _, step, line in run_lines(workflow):
+                self.assertNotIn("--workspace", line, path.name)
+                self.assertIsNone(re.search(r"(^|[\s;&|(])cargo\s", line), f"{path.name}: raw cargo in {line}")
+                if "repo-cargo" not in line:
+                    continue
+                commands.append(line)
+                if line.startswith("./scripts/repo-cargo "):
+                    self.assertEqual(step.get("working-directory"), ".", line)
+                    self.assertIn(" -p meerkat-meta ", f"{line} ", line)
+                else:
+                    self.assertRegex(line, r"^make (test-python|e2e-live) CARGO=\.\./scripts/repo-cargo$")
+        self.assertEqual(sum(line.startswith("make ") for line in commands), 2)
+        self.assertEqual(len(commands), 7, commands)
+
+    def test_every_external_action_is_pinned_and_takes_the_root_pins(self):
         """The repository's Actions policy refuses an action that is not
         pinned to a full-length commit SHA. Each pin names the ref it was taken
-        from in a trailing comment, and one ref pins one commit everywhere."""
-        pins = {}
-        for path in sorted((ROOT / ".github").rglob("*.y*ml")):
-            for number, line in enumerate(path.read_text().splitlines(), 1):
-                found = re.match(r"\s*(?:-\s+)?uses:\s*(\S+)(.*)$", line)
-                if not found or found.group(1).startswith(("./", "docker://")):
-                    continue
-                where = f"{path.relative_to(ROOT)}:{number}"
-                pinned = re.fullmatch(r"([\w.-]+/[\w./-]+)@([0-9a-f]{40})", found.group(1))
-                self.assertIsNotNone(pinned, f"{where}: {found.group(1)} is not pinned to a full commit SHA")
-                ref = re.fullmatch(r"\s+# (\S+)\s*", found.group(2))
-                self.assertIsNotNone(ref, f"{where}: the pin must name its ref in a trailing comment")
-                pins.setdefault((pinned.group(1), ref.group(1)), set()).add(pinned.group(2))
-        self.assertTrue(pins)
-        for (action, ref), shas in sorted(pins.items()):
+        from in a trailing comment, one ref pins one commit everywhere, and
+        Meta's root workflows take each action and ref the root's other
+        workflows and actions already pin."""
+
+        def pins_of(paths) -> dict[tuple[str, str], set[str]]:
+            pins = {}
+            for path in paths:
+                for number, line in enumerate(path.read_text().splitlines(), 1):
+                    found = re.match(r"\s*(?:-\s+)?uses:\s*(\S+)(.*)$", line)
+                    if not found or found.group(1).startswith(("./", "docker://")):
+                        continue
+                    where = f"{path.relative_to(MONOREPO)}:{number}"
+                    pinned = re.fullmatch(r"([\w.-]+/[\w./-]+)@([0-9a-f]{40})", found.group(1))
+                    self.assertIsNotNone(pinned, f"{where}: {found.group(1)} is not pinned to a full commit SHA")
+                    ref = re.fullmatch(r"\s+# (\S+)\s*", found.group(2))
+                    self.assertIsNotNone(ref, f"{where}: the pin must name its ref in a trailing comment")
+                    pins.setdefault((pinned.group(1), ref.group(1)), set()).add(pinned.group(2))
+            return pins
+
+        meta = pins_of(sorted((ROOT / ".github").rglob("*.y*ml")) + list(META_WORKFLOWS))
+        root = pins_of(sorted(path for path in (MONOREPO / ".github").rglob("*.y*ml") if path not in META_WORKFLOWS))
+        self.assertTrue(meta)
+        for (action, ref), shas in sorted(meta.items()):
             self.assertEqual(len(shas), 1, f"{action} {ref} is pinned to {sorted(shas)}")
+            if (action, ref) in root:
+                self.assertEqual(shas, root[(action, ref)], f"{action} {ref} differs from the root's pin")
+        for (action, ref), _ in sorted(pins_of(META_WORKFLOWS).items()):
+            self.assertIn((action, ref), root, f"{action} {ref}: take a pin the root's workflows use")
 
     def test_every_job_runs_on_a_pinned_runner_image(self):
         """Each workflow job names its runner image, read as YAML: a job's
@@ -350,12 +416,11 @@ class CiWorkflowTests(unittest.TestCase):
 
     def test_every_container_image_is_pinned_by_digest_under_renovate(self):
         """A container tag moves when its publisher pushes; the build
-        container fixes the release binaries' glibc floor and the Bazel
-        platforms pick the remote build image. Every image CI names carries
-        its digest, unless UNPINNED_IMAGES lists it with its reason:
-        image_problems reads job and service containers, docker://
-        references in .github and the Bazel platforms, and the FROM lines of
-        every tracked Dockerfile or Containerfile except the installer's launch templates,
+        container fixes the release binaries' glibc floor. Every image
+        Meta's CI names carries its digest, unless UNPINNED_IMAGES lists it
+        with its reason: image_problems reads job and service containers,
+        docker:// references in .github, and the FROM lines of every tracked
+        Dockerfile or Containerfile except the installer's launch templates,
         which users build their own apps from. renovate.json proposes new
         digests (never automerged) for every pinned one, and the release
         runbook compares them with Core's."""
@@ -377,7 +442,7 @@ class CiWorkflowTests(unittest.TestCase):
             self.assertIsNotNone(proposal, f"{where}: Renovate's digest manager cannot read {image}")
             self.assertEqual(proposal.group("currentDigest"), image.rsplit("@", 1)[1])
         self.assertEqual(sorted({where.rsplit(":", 1)[0] for where, _ in pinned}),
-                         [".github/workflows/release.yml", "tools/bazel/platforms/BUILD.bazel"], pinned)
+                         [".github/workflows/release.yml"], pinned)
         # Every exception still names an image CI uses, so a stale one fails.
         for pattern in UNPINNED_IMAGES:
             self.assertTrue(any(pattern.fullmatch(image) for _, image in found), pattern.pattern)
@@ -394,9 +459,7 @@ class CiWorkflowTests(unittest.TestCase):
                     "      - run: |\n          cat > values.yaml <<'VALUES'\n          image: example/app:1\n"
                     "          VALUES\n")
         bazel = ('platform(\n    exec_properties = {\n        "container-image": "docker://docker.io/library/'
-                 'buildpack-deps:22.04@sha256:' + "b" * 64 + '",\n    },\n)\n'
-                 'platform(\n    exec_properties = {\n        "container-image": "docker://europe-west1-docker.'
-                 'pkg.dev/example-project/meerkat-ci/meerkat-ci-rust:1.94.0",\n    },\n)\n')
+                 'buildpack-deps:22.04@sha256:' + "b" * 64 + '",\n    },\n)\n')
         template = "FROM rust:1.94-bookworm AS build\nFROM debian:bookworm-slim\n"
         clean = {
             ".github/workflows/ci.yml": workflow,
@@ -455,7 +518,8 @@ class CiWorkflowTests(unittest.TestCase):
         for case, (relative, text) in planted.items():
             with self.subTest(case=case):
                 problems = problems_of({**clean, relative: text})
-                self.assertTrue(any(problem.startswith(relative) for problem in problems), problems)
+                self.assertTrue(any(problem.startswith((relative, Path(relative).name)) for problem in problems),
+                                problems)
 
     def test_renovate_proposes_action_updates_like_core(self):
         """Actions run with the workflow token, OIDC and release secrets.
@@ -478,297 +542,87 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertFalse([rule for rule in rules if rule.get("automerge") is True])
         self.assertNotIn("automerge", renovate)
 
-    def test_rust_cache_covers_the_wrapper_target(self):
-        """rust-cache saves `<workspace>/target`; repo-cargo must build there.
-
-        Without an explicit CARGO_TARGET_DIR, scripts/repo-cargo builds under
-        ~/.cache, so every rust-cache step restored and saved a directory
-        nothing was built in. Nothing failed - jobs were only slow - so pin the
-        single workflow-wide target and refuse remaps that would split the two
-        paths again.
-        """
+    def test_meta_ci_holds_no_secret_and_grants_the_identity_only_to_compile_jobs(self):
+        """Pull request code runs here with the workflow token read-only. A
+        job gets the GCP workload identity (id-token) only to set up the
+        sccache bucket the root CI shares, the root CI's model; no job holds
+        a secret, and no checkout keeps the token."""
+        workflow = load(CI_WORKFLOW)
         source = CI_WORKFLOW.read_text()
-        header = source.split("\njobs:\n", 1)[0]
-        self.assertIn("\n  CARGO_TARGET_DIR: ${{ github.workspace }}/target\n", header)
-        self.assertEqual(len(re.findall(r"(?m)^\s+CARGO_TARGET_DIR:", source)), 1)
-        self.assertIsNone(re.search(r"(?m)^\s+(workspaces|cache-targets):", source))
+        self.assertEqual(workflow["permissions"], {"contents": "read"})
+        self.assertNotIn("secrets.", source)
+        for name, job in workflow["jobs"].items():
+            with self.subTest(job=name):
+                permissions = job.get("permissions")
+                if name in rust_jobs(workflow):
+                    self.assertEqual(permissions, {"contents": "read", "id-token": "write"})
+                else:
+                    self.assertIsNone(permissions)
+                for step in steps_of(job):
+                    if uses_of(step) == "actions/checkout":
+                        self.assertIs((step.get("with") or {}).get("persist-credentials"), False)
+                        self.assertNotIn("ref", step.get("with") or {})
+                        self.assertNotIn("repository", step.get("with") or {})
 
-    def test_rust_cache_saves_only_main_and_shares_identical_graphs(self):
-        """Cached build output makes each rust-cache entry about 1 GB.
-
-        Pull request entries are scoped to their own ref, so saving them only
-        evicts main's entries from the 20 GB repository cache. Jobs that
-        build the same dependency graph (same features, profile and
-        dev-dependency use) share one entry; every other job keeps its own.
-        """
-        expected = {
-            # The workspace lint keeps the key it had in fmt-lint, whose
-            # main entry holds its build; fmt-lint itself caches nothing.
-            "clippy": "fmt-lint",
-            "test": "test",
-            "test-integration": "test",
-            "test-extension-state": None,
-            "extension-state-lint": None,
-            "test-voice": None,
-            "voice-clippy": None,
-            "test-python": "meta-dev-bins",
-            "flow-editor": "meta-dev-bins",
-            "console": "meta-dev-examples",
-            "console-browser": "meta-dev-examples",
-            "console-fixtures": "meta-dev-examples",
-            "console-acceptance": "meta-dev-examples",
-        }
-        source = CI_WORKFLOW.read_text()
-        self.assertEqual(len(re.findall(r"uses: Swatinem/rust-cache@[0-9a-f]{40} # v2\n", source)), len(expected))
-        self.assertEqual(source.count("uses: Swatinem/rust-cache@"), len(expected))
-        hashed_env = re.compile(r"(?m)^      ((?:CARGO|CC|CFLAGS|CXX|CMAKE|RUST)\w*): (.*)$")
-        group_envs = {}
-        for name, shared_key in expected.items():
-            step = re.search(
-                r"- uses: Swatinem/rust-cache@[0-9a-f]{40} # v2\n((?: {8}.*\n)+)", job_block(name) + "\n"
-            )
-            self.assertIsNotNone(step, name)
-            settings = step.group(1)
-            self.assertIn("save-if: ${{ github.ref == 'refs/heads/main' }}", settings, name)
-            keys = re.findall(r"shared-key: (\S+)", settings)
-            self.assertEqual(keys, [shared_key] if shared_key else [], name)
-            if shared_key:
-                # rust-cache hashes the job environment into the key, so a
-                # group shares one entry only while its jobs agree on it.
-                # CARGO_INCREMENTAL is 0 in every job either way: the
-                # toolchain action and rust-cache both set it before the hash.
-                env = [e for e in hashed_env.findall(job_block(name)) if e != ("CARGO_INCREMENTAL", '"0"')]
-                group_envs.setdefault(shared_key, set()).add(tuple(env))
-            if (shared_key or "").startswith("meta-dev-"):
-                self.assertIn("      CARGO_PROFILE_DEV_DEBUG: line-tables-only\n", job_block(name), name)
-        for shared_key, envs in group_envs.items():
-            self.assertEqual(len(envs), 1, f"{shared_key}: {envs}")
-        header = source.split("\njobs:\n", 1)[0]
-        self.assertIn("\npermissions:\n  contents: read\n", header)
-        # Jobs that run pull request code stay read-only. Only the cleanup
-        # job may delete caches: it runs for pushes to main alone, after every
-        # job that saves a rust cache, and drops exactly their families.
-        # The Rust jobs only read actions, to fetch warmed dependency builds
-        # (scripts/test_ci_warm_deps.py pins those grants).
-        self.assertEqual(re.findall(r"(?m)^ +actions: write$", source), ["      actions: write"])
-        drop = job_block("drop-superseded-caches")
-        self.assertIn("    if: github.event_name == 'push' && github.ref == 'refs/heads/main'\n", drop)
-        self.assertIn("    continue-on-error: true\n", drop)
-        self.assertIn("    permissions:\n      actions: write\n      contents: read\n", drop)
-        needs = re.search(r"(?m)^    needs: \[(.*)\]$", drop).group(1).split(", ")
-        self.assertEqual(sorted(needs), sorted(expected))
-        families = []
-        for name, shared_key in expected.items():
-            if (shared_key or name) not in families:
-                families.append(shared_key or name)
-        actions = [line.strip() for line in drop.splitlines() if re.match(r" +(- )?(uses|run): ", line)]
-        self.assertEqual(len(actions), 2, actions)
-        self.assertRegex(actions[0], r"^- uses: actions/checkout@[0-9a-f]{40} # v4$")
-        self.assertEqual(actions[1], f"run: scripts/ci-drop-superseded-caches.sh {' '.join(families)}")
-        self.assertNotIn("drop-superseded-caches", job_block("gate"))
-        self.assertNotIn("steps.rust-cache", source)
-        self.assertIn("- run: python3 scripts/test_ci_drop_caches.py\n", job_block("fmt-lint"))
-
-    def test_workspace_nextest_preserves_all_failure_evidence(self):
-        """The workspace tests run as three jobs that together cover cargo's
-        default test selection: lib and bin unit tests in `test`, and the
-        integration tests in two `test-integration` halves split by target
-        name, one of which also builds the examples. All use the same filter
-        and --no-fail-fast. split_coverage_problems holds the conditions under
-        which that union is the default selection, on Cargo's own reading of
-        every workspace member."""
-        block = job_block("test-integration")
-        patterns = re.findall(r'(?m)^          - tests: "([^"]+)"$', block)
-        self.assertEqual(len(patterns), 2, patterns)
-        members = cargo_workspace_members(ROOT)
-        integration_tests = [t for package in members for t in package["targets"] if t["kind"] == ["test"]]
-        self.assertGreater(len(integration_tests), 100)
-        self.assertEqual(split_coverage_problems(members, patterns), [])
-        self.assertIn("    strategy:\n      fail-fast: false\n", block)
-        filter_ = "-E 'not test(converged_idle_gateway_consumes_near_zero_cpu)'"
-        expected = {
-            "test": f"scripts/repo-cargo nextest run --workspace --lib --bins {filter_} --no-fail-fast",
-            "test-integration": (
-                f"scripts/repo-cargo nextest run --workspace --test '${{{{ matrix.tests }}}}' {filter_} --no-fail-fast"
-            ),
-        }
-        for name, command in expected.items():
-            commands = [
-                line.strip()[len("- run: "):]
-                for line in job_block(name).splitlines()
-                if line.strip().startswith("- run: scripts/repo-cargo nextest run")
-            ]
-            self.assertEqual(commands, [command], name)
-            self.assertIn('CARGO_PROFILE_DEV_DEBUG: "0"', job_block(name))
-            # The test fixtures give their members and child gateways their
-            # own fake OpenAI key, so neither job sets one for the whole run.
-            self.assertNotIn("OPENAI_API_KEY", job_block(name), name)
-            # Every disk report runs last, whatever failed before it. The
-            # block ends at the next job, after the comments that precede it.
-            lines = job_block(name).splitlines()
-            while lines and (not lines[-1].strip() or lines[-1].lstrip().startswith("#")):
-                lines.pop()
-            self.assertEqual(lines[-3:], ["      - name: Report runner disk", "        if: always()",
-                                          "        run: df -h /"], name)
-        # The unit build fits the runner's free disk and reclaims nothing;
-        # the integration halves reclaim in the background, never on the
-        # critical path.
-        self.assertNotIn("rm -rf", job_block("test"))
-        reclaim = re.search(r"(?m)^      - name: Reclaim runner disk in the background\n        run: \|\n"
-                            r"((?:          .*\n)+)", block + "\n")
-        self.assertIsNotNone(reclaim)
-        self.assertRegex(reclaim.group(1), r"^          sudo -n nohup ionice -c2 -n7 bash -c 'rm -rf ")
-        self.assertRegex(reclaim.group(1), r"docker image prune -af' >/dev/null 2>&1 &\n          df -h /\n$")
-        self.assertLess(block.index("Reclaim runner disk in the background"), block.index("actions/checkout"))
-        # Exactly one half builds the examples.
-        self.assertEqual(block.count("            examples: true\n"), 1)
-        self.assertIn("      - if: matrix.examples\n        run: scripts/repo-cargo build --workspace --examples\n", block)
-        source = CI_WORKFLOW.read_text()
-        self.assertEqual(source.count("scripts/repo-cargo build --workspace --examples"), 1)
-        self.assertEqual(source.count("scripts/repo-cargo nextest run --workspace"), 2)
-
-    def test_the_unit_job_proves_its_filter_leaves_out_no_lib_or_bin_test(self):
-        """`test` is the only automatic run of the lib and bin tests, since
-        the pre-push unit gate is manual: a lib test its filter dropped once
-        ran in no CI job at all. Before the run it lists those tests with
-        the run's own filter, and scripts/verify-unit-test-filter.py fails
-        the job on any the filter leaves out."""
-        steps = [line.strip()[len("- run: "):] for line in job_block("test").splitlines()
-                 if line.strip().startswith("- run: ")]
-        run = [step for step in steps if step.startswith("scripts/repo-cargo nextest run")]
-        self.assertEqual(len(run), 1, steps)
-        filter_ = re.search(r"-E '[^']*'", run[0]).group(0)
-        listing = '"${RUNNER_TEMP}/unit-tests.json"'
-        self.assertEqual(steps, [
-            f"scripts/repo-cargo nextest list --workspace --lib --bins {filter_} --message-format json > {listing}",
-            f"python3 scripts/verify-unit-test-filter.py {listing}",
-            run[0],
-        ])
-        self.assertIn("- run: python3 scripts/test_verify_unit_test_filter.py\n", job_block("fmt-lint"))
-
-    def test_the_split_coverage_guard_reads_targets_as_cargo_does(self):
-        """Targets, test flags and autotests in any valid TOML spelling, and
-        glob or implicit path members, all reach the guard: it reads `cargo
-        metadata` and parses manifests as TOML, never the manifest text."""
-        package = '[package]\nname = "{}"\nversion = "0.0.0"\nedition = "2021"\n'
-        probe = package.format("guard-probe")
-        cases = {
-            "spaces inside the brackets": (
-                {
-                    "Cargo.toml": probe + '\n[[ test ]]\nname = "_extra_contract"\npath = "extra/contract.rs"\n\n[workspace]\n',
-                    "extra/contract.rs": "",
-                },
-                ["guard-probe test _extra_contract: matches []"],
-            ),
-            "quoted keys": (
-                {
-                    "Cargo.toml": probe + '\n[["test"]]\n"name" = "_quoted_contract"\n"path" = "extra/q.rs"\n\n[workspace]\n',
-                    "extra/q.rs": "",
-                },
-                ["guard-probe test _quoted_contract: matches []"],
-            ),
-            "an inline array of tables": (
-                {
-                    "Cargo.toml": 'test = [{ name = "_inline_contract", path = "extra/i.rs" }]\n\n' + probe + "\n[workspace]\n",
-                    "extra/i.rs": "",
-                },
-                ["guard-probe test _inline_contract: matches []"],
-            ),
-            "a quoted test flag on a bin": (
-                {
-                    "Cargo.toml": probe + '\n[[bin]]\nname = "probe"\n"test" = false\n\n[workspace]\n',
-                    "src/bin/probe.rs": "fn main() {}\n",
-                },
-                ["guard-probe bin probe: test flag False, default True"],
-            ),
-            "an inline test flag on an example": (
-                {
-                    "Cargo.toml": 'example = [{ name = "demo", test = true }]\n\n' + probe + "\n[workspace]\n",
-                    "examples/demo.rs": "fn main() {}\n",
-                },
-                ["guard-probe example demo: test flag True, default False"],
-            ),
-            "autotests off through dotted keys": (
-                {
-                    "Cargo.toml": (
-                        'package.name = "guard-probe"\npackage.version = "0.0.0"\npackage.edition = "2021"\n'
-                        "package.autotests = false\n\n[workspace]\n"
-                    ),
-                    "tests/alpha.rs": "",
-                },
-                ["guard-probe: autotests = false"],
-            ),
-            "a glob member": (
-                {
-                    "Cargo.toml": '[workspace]\nmembers = ["crates/*"]\nresolver = "2"\n',
-                    "crates/c/Cargo.toml": package.format("c"),
-                    "crates/c/src/lib.rs": "",
-                    "crates/c/tests/Upper.rs": "",
-                },
-                ["c test Upper: matches []"],
-            ),
-            "an implicit path member": (
-                {
-                    "Cargo.toml": '[workspace]\nmembers = ["a"]\nresolver = "2"\n',
-                    "a/Cargo.toml": package.format("a") + '\n[dependencies]\nb = { path = "../b" }\n',
-                    "a/src/lib.rs": "",
-                    "b/Cargo.toml": package.format("b"),
-                    "b/src/lib.rs": "",
-                    "b/tests/_hidden.rs": "",
-                },
-                ["b test _hidden: matches []"],
-            ),
-            "required features": (
-                {
-                    "Cargo.toml": probe + (
-                        '\n[features]\nslow = []\n\n[[test]]\nname = "gated"\npath = "extra/gated.rs"\n'
-                        'required-features = ["slow"]\n\n[workspace]\n'
-                    ),
-                    "extra/gated.rs": "",
-                },
-                ["guard-probe test gated: required-features ['slow']"],
-            ),
-            # Control: explicit and discovered targets the patterns cover pass.
-            "covered targets": (
-                {
-                    "Cargo.toml": probe + '\n[[test]]\nname = "middle"\npath = "extra/middle.rs"\n\n[workspace]\n',
-                    "extra/middle.rs": "",
-                    "tests/zeta.rs": "",
-                },
-                [],
-            ),
-        }
-        for case, (files, expected) in cases.items():
-            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
-                for relative, content in {"src/lib.rs": "", **files}.items():
-                    path = Path(tmp) / relative
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text(content)
-                members = cargo_workspace_members(Path(tmp))
-                self.assertEqual(split_coverage_problems(members, ["[a-i]*", "[j-z]*"]), expected)
+    def test_the_root_files_meta_ci_runs_reach_every_lane(self):
+        """A change to a root file every compile job runs (the setup actions,
+        the script they run, the root wrapper) runs every lane, as the
+        wrapper and the warm-dependency fetch did in Meta's own repository:
+        ci-changes.py's MONOREPO_JOB_FILES is exactly what meta-ci.yml uses."""
+        workflow = load(CI_WORKFLOW)
+        used = set()
+        for _, job in workflow["jobs"].items():
+            for step in steps_of(job):
+                use = step.get("uses") or ""
+                if use.startswith("./"):
+                    action = Path(use[2:]) / "action.yml"
+                    used.add(action.as_posix())
+                    text = (MONOREPO / action).read_text()
+                    for script in re.findall(r"/\.\./\.\./\.\./(scripts/[\w.-]+)", text):
+                        used.add(script)
+                for line in str(step.get("run") or "").splitlines():
+                    for script in re.findall(r"(?:^|[\s=])(?:\./|\.\./)(scripts/[\w.-]+)", line):
+                        if step.get("working-directory") == "." or "../scripts/" in line:
+                            used.add(script)
+        self.assertEqual(used, set(ci_changes.MONOREPO_JOB_FILES))
 
     def test_decorator_authority_gate_actually_runs_in_ci(self):
         """A structural gate nobody invokes is a control that cannot fail.
 
         `verify-decorator-authority.py` exists because a decorator omitting
         `request_attempt_authority` compiles clean, warns nothing, and stranded
-        72 identities downstream. If it is ever dropped from `fmt-lint` the
+        72 identities downstream. If it is ever dropped from `meta-checks` the
         defect class goes unwatched again with no other signal, so pin the
         invocation here rather than trusting that the file's presence means it
         runs.
         """
-        block = job_block("fmt-lint")
-        self.assertIn(
-            "- run: python3 scripts/verify-decorator-authority.py",
-            block,
-        )
+        self.assertIn("- run: python3 scripts/verify-decorator-authority.py", job_block("meta-checks"))
+
+    def test_meta_checks_run_every_contract_script_the_monorepo_keeps(self):
+        """meta-checks runs Meta's contract tests and checks in meta/, on every
+        run that reaches Meta: every scripts/test_*.py. The retired
+        warm-dependency and cache-cleanup jobs took their scripts with them,
+        and the Rust checks (rustfmt, unused dependencies, the Bazel graph)
+        are the root CI's."""
+        runs = [step["run"] for step in steps_of(load(CI_WORKFLOW)["jobs"]["meta-checks"]) if "run" in step]
+        for kept in ("python3 scripts/test_ci_workflow.py", "python3 scripts/test_ci_changes.py",
+                     "scripts/verify-version-parity.sh", "python3 scripts/verify-crate-publication.py",
+                     "python3 scripts/verify-crate-package-files.py", "scripts/check-memory-bright-line",
+                     "scripts/memory-evals --check"):
+            self.assertIn(kept, runs)
+        for retired in ("test_ci_warm_deps.py", "test_ci_drop_caches.py", "repo-cargo fmt",
+                        "repo-cargo machete", "generate-bazel-rust-builds"):
+            self.assertFalse([run for run in runs if retired in run], retired)
+        tests = {path.name for path in (ROOT / "scripts").glob("test_*.py")}
+        run_tests = {Path(run.split()[-1]).name for run in runs if run.startswith("python3 scripts/test_")}
+        self.assertEqual(tests - run_tests, set())
 
     def test_the_continuity_export_scripts_run_their_tests_in_ci(self):
         """The standalone continuity export scripts ship to hosts that run
         them once, before they upgrade, with no other check behind them;
         so does the blob restore beside them, which a restore from a
         continuity mirror runs once.
-        fmt-lint runs on every pull request and push; ci-changes.py lets
+        meta-checks runs on every run that reaches Meta; ci-changes.py lets
         their changes reach no lane on that promise. Each suite runs twice:
         on the runner's own Python and Node.js, and again, last in the job,
         on the oldest runtimes a 0.9.3 host may run them on, the 0.9.3 SDKs'
@@ -776,7 +630,7 @@ class CiWorkflowTests(unittest.TestCase):
         python_suite = "- run: python3 tools/continuity-export/test_continuity_export.py\n"
         restore_suite = "- run: python3 tools/continuity-export/test_restore_blobs.py\n"
         node_suite = "- run: node --test tools/continuity-export/continuity-export.test.mjs\n"
-        lines = job_block("fmt-lint").splitlines()
+        lines = job_block("meta-checks").splitlines()
         # job_block ends at the next job's header, below the comment above it.
         while lines and (not lines[-1].strip() or lines[-1].startswith("  #")):
             lines.pop()
@@ -787,41 +641,18 @@ class CiWorkflowTests(unittest.TestCase):
             '          python-version: "3\\.10"\n'
             f"      {re.escape(python_suite)}"
             f"      {re.escape(restore_suite)}"
-            "      - uses: actions/setup-node@[0-9a-f]{40} # v4\n"
+            "      - uses: actions/setup-node@[0-9a-f]{40} # v6\n"
             "        with:\n"
             '          node-version: "18"\n'
             f"      {re.escape(node_suite)}"
             r"\Z", steps)
-        self.assertIsNotNone(floor_rows, "fmt-lint must end with the suites on the floor runtimes")
+        self.assertIsNotNone(floor_rows, "meta-checks must end with the suites on the floor runtimes")
         before = steps[:floor_rows.start()]
         for suite in (python_suite, restore_suite, node_suite):
             self.assertEqual(before.count(suite), 1, suite)
         # The first runs use the runner's own runtimes.
         self.assertNotIn("actions/setup-python@", before)
         self.assertNotIn("actions/setup-node@", before)
-
-    def test_the_workspace_lint_runs_in_its_own_rust_lane_job(self):
-        """fmt-lint runs on every pull request and compiles nothing; the
-        workspace clippy runs once, in the clippy job, when a Rust change
-        reaches it, beside fmt-lint instead of after its contract tests."""
-        source = CI_WORKFLOW.read_text()
-        command = "- run: scripts/repo-cargo clippy --workspace --all-targets -- -D warnings\n"
-        self.assertEqual(source.count(command), 1)
-        lint = job_block("clippy")
-        self.assertIn(command, lint)
-        self.assertIn("    needs: changes\n    if: needs.changes.outputs.rust == 'true'\n", lint)
-        self.assertIn("          components: clippy\n", lint)
-        fmt_lint = "\n".join(line for line in job_block("fmt-lint").splitlines()
-                             if not line.strip().startswith("#"))
-        self.assertNotIn("needs:", fmt_lint)
-        self.assertNotIn(" if:", fmt_lint)
-        self.assertNotIn("repo-cargo clippy", fmt_lint)
-        self.assertIn("          components: rustfmt\n", fmt_lint)
-        self.assertNotIn("rust-cache", fmt_lint)
-        for kept in ("- run: scripts/repo-cargo fmt --all -- --check\n",
-                     "- run: node scripts/generate-bazel-rust-builds.mjs --check\n",
-                     "- run: scripts/repo-cargo machete --with-metadata\n"):
-            self.assertIn(kept, fmt_lint)
 
     def test_typescript_sdk_suite_actually_runs_in_ci(self):
         """705 TypeScript tests existed and gated nothing.
@@ -836,89 +667,16 @@ class CiWorkflowTests(unittest.TestCase):
         `validate` and not `test`: most of these tests import the built
         `dist/`, so `test` alone fails with ERR_MODULE_NOT_FOUND.
         """
-        block = job_block("test-typescript")
-        self.assertIn(
-            "- run: npm --prefix sdk/typescript run validate --silent",
-            block,
-        )
-
-    def test_extension_state_lint_and_tests_run_as_parallel_jobs(self):
-        """check and clippy only emit metadata; the tests need full builds.
-
-        Every command of the former serial job still runs exactly once,
-        split between the two jobs.
-        """
-        def runs(name):
-            return [
-                line.strip()[len("- run: "):]
-                for line in job_block(name).splitlines()
-                if line.strip().startswith("- run: ")
-            ]
-
-        self.assertEqual(
-            runs("extension-state-lint"),
-            [
-                "scripts/repo-cargo check -p meerkat-meta --locked --no-default-features",
-                "scripts/repo-cargo clippy -p meerkat-meta --locked --features "
-                "extension-state,announcement-test-faults,console-test-faults --lib "
-                "--test extension_state --test mob_announcements_delivery_process "
-                "--test mob_announcements_remote_process --test console_send_recovery_process "
-                "-- -D warnings",
-            ],
-        )
-        self.assertEqual(
-            runs("test-extension-state"),
-            [
-                "scripts/repo-cargo test -p meta-extension-state --locked",
-                "scripts/repo-cargo test -p meerkat-meta --locked --features "
-                "extension-state,announcement-test-faults,console-test-faults --lib "
-                "--test extension_state --test mob_announcements_delivery_process "
-                "--test mob_announcements_remote_process --test console_send_recovery_process "
-                "--no-run",
-                "scripts/repo-cargo test -p meerkat-meta --locked --features "
-                "extension-state,announcement-test-faults,console-test-faults "
-                "--test extension_state",
-                "scripts/repo-cargo test -p meerkat-meta --locked --features "
-                "extension-state,announcement-test-faults,console-test-faults "
-                "--test mob_announcements_delivery_process --test mob_announcements_remote_process "
-                "--test console_send_recovery_process",
-                "scripts/repo-cargo test -p meerkat-meta --locked --features "
-                "extension-state,announcement-test-faults,console-test-faults "
-                "--lib -- extension_ document_mcp_child_supply",
-            ],
-        )
-        for name in ("extension-state-lint", "test-extension-state"):
-            self.assertIn('CARGO_INCREMENTAL: "0"', job_block(name))
-            self.assertIn("CARGO_PROFILE_DEV_DEBUG: line-tables-only", job_block(name))
-
-    def test_extension_state_test_targets_build_together_before_they_run(self):
-        """The integration test and the --lib harness are separate compilations
-        of meerkat-meta; one `--no-run` invocation builds both in parallel, so
-        it must name every target the later meerkat-meta steps run, with the
-        same package, features and flags, and come before them."""
-        steps = [
-            line.strip()[len("- run: "):]
-            for line in job_block("test-extension-state").splitlines()
-            if line.strip().startswith("- run: scripts/repo-cargo test -p meerkat-meta ")
-        ]
-        build, *runs = steps
-        self.assertTrue(build.endswith(" --no-run"), build)
-        prefix = (
-            "scripts/repo-cargo test -p meerkat-meta --locked --features "
-            "extension-state,announcement-test-faults,console-test-faults "
-        )
-        self.assertTrue(all(step.startswith(prefix) for step in steps), steps)
-        built = set(re.findall(r"--(lib|test \S+)", build.split(" -- ")[0]))
-        ran = {target for step in runs for target in re.findall(r"--(lib|test \S+)", step.split(" -- ")[0])}
-        self.assertEqual(built, ran)
+        self.assertIn("- run: npm --prefix sdk/typescript run validate --silent", job_block("test-typescript"))
 
     def test_no_job_caps_build_parallelism(self):
-        """A CARGO_BUILD_JOBS cap throttled the dependency graph of the four
-        jobs that carried it. The dev-profile jobs run uncapped, like the
-        rest of the workflow."""
-        code = [line for line in CI_WORKFLOW.read_text().splitlines() if not line.strip().startswith("#")]
-        self.assertEqual([line for line in code if "CARGO_BUILD_JOBS" in line], [])
-        self.assertEqual([line for line in code if re.search(r"repo-cargo .*(\s-j\s*\d|--jobs)", line)], [])
+        """A CARGO_BUILD_JOBS cap throttled the dependency graph of the jobs
+        that carried it. Every job builds uncapped."""
+        for path in META_WORKFLOWS:
+            code = [line for line in path.read_text().splitlines() if not line.strip().startswith("#")]
+            self.assertEqual([line for line in code if "CARGO_BUILD_JOBS" in line], [], path.name)
+            self.assertEqual([line for line in code if re.search(r"repo-cargo .*(\s-j\s*\d|--jobs)", line)], [],
+                             path.name)
 
     def test_live_lanes_print_cargo_output_without_color_codes(self):
         """A run that holds a model provider's key is read by grep: its pass
@@ -926,9 +684,11 @@ class CiWorkflowTests(unittest.TestCase):
         CARGO_TERM_COLOR=always when nothing set it, so Cargo and nextest put
         color codes inside those lines, and a check for a passing summary
         failed a run whose rows had all passed. Each such workflow sets the
-        variable to never for all its jobs, and nothing sets color back."""
+        variable to never for all its jobs, and nothing sets color back. The
+        live lane restores no cache and no compiled object, so nothing it runs
+        beside the secret was built by another run."""
         live = []
-        for path in sorted((ROOT / ".github" / "workflows").glob("*.y*ml")):
+        for path in meta_workflow_files(ROOT):
             source = path.read_text()
             if not re.search(r"secrets\.(ANTHROPIC|OPENAI|GEMINI|GOOGLE)_API_KEY\b", source):
                 continue
@@ -940,65 +700,11 @@ class CiWorkflowTests(unittest.TestCase):
                 self.assertNotIn("CARGO_TERM_COLOR", job.get("env") or {}, f"{path.name} job {name}")
                 for step in job.get("steps") or []:
                     self.assertNotIn("CARGO_TERM_COLOR", step.get("env") or {}, f"{path.name} job {name}")
-        self.assertIn("e2e-live.yml", live)
-
-    def test_voice_feature_runs_real_host_tests_and_strict_lint(self):
-        block = job_block("test-voice")
-        self.assertIn("--locked --features openai-live", block)
-        self.assertIn("--test console_route_auth --test console_experience --test never_executed_persistence --test swarm_integration console_voice", block)
-        self.assertIn("gateway_openai_live_registration", block)
-        self.assertIn('CARGO_INCREMENTAL: "0"', block)
-        # The strict lint runs in parallel, in its own job, on the same features.
-        runs = [line for line in block.splitlines() if line.strip().startswith("- run:")]
-        self.assertFalse([line for line in runs if " clippy " in line], runs)
-        lint = job_block("voice-clippy")
-        self.assertEqual(
-            lint.count(
-                "- run: scripts/repo-cargo clippy -p meerkat-meta --locked --features openai-live "
-                "--lib --bin rpc_gateway --bin meta_gateway -- -D warnings\n"
-            ),
-            1,
-        )
-        self.assertIn('CARGO_INCREMENTAL: "0"', lint)
-
-    def test_voice_lane_runs_the_live_registration_test_from_the_library(self):
-        # src/bin/rpc_gateway.rs is a one-line wrapper around
-        # meerkat_meta::rpc_gateway::main(), and the registration test lives in
-        # the library module. A `--bin rpc_gateway` selector compiles the
-        # wrapper and runs zero tests, so the step passed without testing.
-        command = (
-            "scripts/repo-cargo test -p meerkat-meta --locked "
-            "--features openai-live --lib gateway_openai_live_registration"
-        )
-        block = job_block("test-voice")
-        self.assertEqual(block.count(f"- run: {command}\n"), 1)
-        self.assertNotIn("--bin rpc_gateway gateway_openai_live_registration", block)
-        wrapper = (ROOT / "crates/meerkat-meta/src/bin/rpc_gateway.rs").read_text()
-        self.assertNotIn("gateway_openai_live_registration", wrapper)
-        library = (ROOT / "crates/meerkat-meta/src/rpc_gateway.rs").read_text()
-        self.assertIn("fn gateway_openai_live_registration_is_explicit_and_strict()", library)
-
-    def test_voice_lane_selects_every_persistent_http_restart_case(self):
-        # Default workspace tests cannot see the feature-gated voice cases.
-        # Select their integration binary and shared filter in the existing
-        # voice lane, which already compiles the gateway with openai-live.
-        command = (
-            "scripts/repo-cargo test -p meerkat-meta --locked "
-            "--features openai-live --test meta_gateway_bootstrap "
-            "persistent_http_restarts"
-        )
-        block = job_block("test-voice")
-        self.assertEqual(block.count(f"- run: {command}\n"), 1)
-        source = (ROOT / "crates/meerkat-meta/tests/meta_gateway_bootstrap.rs").read_text()
-        self.assertEqual(
-            set(re.findall(r"fn (persistent_http_restarts_\w+)\(", source)),
-            {
-                "persistent_http_restarts_classic_without_voice",
-                "persistent_http_restarts_identity_without_voice",
-                "persistent_http_restarts_classic_with_voice",
-                "persistent_http_restarts_identity_with_voice",
-            },
-        )
+        self.assertIn("meta-e2e-live.yml", live)
+        e2e = E2E_LIVE_WORKFLOW.read_text()
+        self.assertEqual(e2e.count("${{ secrets.ANTHROPIC_API_KEY }}"), 1)
+        for cache in ("rust-cache", "actions/cache", "setup-sccache-ci", "cache:", "id-token"):
+            self.assertNotIn(cache, e2e)
 
     def test_console_checks_live_voice_evidence_without_paid_calls(self):
         block = job_block("console")
@@ -1006,20 +712,65 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertIn("node console/voice-e2e-live.cjs --self-test-audio\n", block)
         self.assertNotIn("run e2e:voice:live", block)
 
-    def test_console_fixture_unit_regressions_run_with_the_shared_backend_build(self):
-        block = job_block("console")
-        command = "scripts/repo-cargo test -p meerkat-meta --example console_acceptance_fixture"
-        self.assertEqual(block.count(command), 1)
-        self.assertLess(block.index("Build console acceptance backends"), block.index(command))
-        self.assertLess(block.index(command), block.index("node console/api-e2e.cjs"))
+    def test_console_backends_are_built_once_from_fresh_bundles(self):
+        """console-backends builds the five acceptance backends after `run
+        build` (they embed crates/meerkat-meta/console-dist), packs exactly
+        those five (an artifact keeps no file mode) and hands them to console
+        and every console-browser leg, which run them from
+        META_EXAMPLE_BIN_DIR and compile nothing."""
+        examples = ["library_mode_reference", "console_acceptance_fixture", "memory_console_reference",
+                    "workgraph_console_reference", "mcp_apps_gateway_fixture"]
+        workflow = load(CI_WORKFLOW)
+        backends = workflow["jobs"]["console-backends"]
+        runs = [step.get("run", "") for step in steps_of(backends)]
+        build = runs.index("./scripts/repo-cargo build -p meerkat-meta "
+                           + " ".join(f"--example {name}" for name in examples))
+        self.assertLess(runs.index("npm --prefix console run build --silent"), build)
+        pack = next(run for run in runs if run.startswith("tar "))
+        self.assertEqual(pack, 'tar -C "${CARGO_TARGET_DIR}/debug/examples" -cf "${RUNNER_TEMP}/console-backends.tar" '
+                         + " ".join(examples))
+        upload = next(step for step in steps_of(backends) if uses_of(step) == "actions/upload-artifact")
+        self.assertEqual(upload["with"]["name"], "console-backends")
+        self.assertIs(upload["with"]["overwrite"], True)
+        for name in ("console", "console-browser"):
+            with self.subTest(job=name):
+                job = workflow["jobs"][name]
+                self.assertEqual(job["needs"], ["changes", "console-backends"])
+                fetch = next(step for step in steps_of(job) if uses_of(step) == "actions/download-artifact")
+                self.assertEqual(fetch["with"]["name"], "console-backends")
+                unpack = next(step["run"] for step in steps_of(job) if "META_EXAMPLE_BIN_DIR" in step.get("run", ""))
+                self.assertIn('tar -C "${bin_dir}" -xf "${RUNNER_TEMP}/console-backends/console-backends.tar"', unpack)
+                self.assertNotIn("repo-cargo", job_block(name))
+                self.assertNotIn(SETUP_RUST, [uses_of(step) for step in steps_of(job)])
+
+    def test_console_fixture_unit_regressions_build_with_the_fixtures(self):
+        """The acceptance fixture example's own tests run in console-fixtures,
+        built in one --no-run with the customization fixtures (one
+        meerkat-meta library build for both), on Meta's 16 MiB test stack,
+        before the npm script's cargo test finds its target fresh."""
+        steps = steps_of(load(CI_WORKFLOW)["jobs"]["console-fixtures"])
+        runs = [step.get("run", "") for step in steps]
+        build = runs.index("./scripts/repo-cargo test -p meerkat-meta --example console_acceptance_fixture "
+                           "--test console_customization_fixtures --no-run")
+        unit = runs.index("./scripts/repo-cargo test -p meerkat-meta --example console_acceptance_fixture")
+        fixtures = runs.index("npm --prefix console run fixtures:console-customization --silent")
+        self.assertLess(build, unit)
+        self.assertLess(unit, fixtures)
+        for index in (unit, fixtures):
+            self.assertEqual(steps[index]["env"]["RUST_MIN_STACK"], "16777216")
+        products = json.loads((MONOREPO / "ci/products.json").read_text())["products"]
+        (meta,) = [product for product in products if product["name"] == "meta"]
+        self.assertEqual(meta["test_stack"], 16777216)
+        package = json.loads((ROOT / "console/package.json").read_text())
+        self.assertIn("scripts/repo-cargo test -p meerkat-meta --test console_customization_fixtures",
+                      package["scripts"]["fixtures:console-customization"])
+        self.assertEqual(CI_WORKFLOW.read_text().count("--example console_acceptance_fixture\n"), 1)
 
     def test_console_browser_and_perf_run_beside_console(self):
-        """The two longest console steps run in their own jobs, each exactly once.
-
-        perf:typing:browser bundles its own host and needs no Rust. The
-        browser scenarios need the acceptance backends and freshly built
-        console bundles, in that order.
-        """
+        """The two longest console steps run in their own jobs, each exactly
+        once: perf:typing:browser bundles its own host and needs no Rust; the
+        browser scenarios need the shared backends and freshly built console
+        bundles, in that order."""
         source = CI_WORKFLOW.read_text()
         for command, count in (
             ("- run: npm --prefix console run perf:typing:browser --silent\n", 1),
@@ -1036,30 +787,32 @@ class CiWorkflowTests(unittest.TestCase):
 
         browser = job_block("console-browser")
         order = [
+            "- name: Unpack the console acceptance backends\n",
             "- run: npm --prefix console run build --silent\n",
             "- run: npm --prefix console run build:acceptance --silent\n",
             "playwright install --with-deps chromium",
-            "- name: Build console acceptance backends\n",
             "- name: Native MCP Apps rendering and reload\n",
             "- name: Native MCP Apps polling during an active model turn\n",
             "- name: Native MCP Apps on a builder host with identity-first members\n",
-            "- run: node console/browser-e2e.cjs --shard=${{ matrix.shard }}/3\n",
-            "name: console-browser-${{ github.run_id }}-${{ matrix.shard }}\n",
+            "- run: node console/browser-e2e.cjs --shard=${{ matrix.shard }}/6\n",
+            "name: console-browser-${{ github.run_id }}-${{ matrix.shard }}-${{ github.run_attempt }}\n",
         ]
         positions = [browser.index(marker) for marker in order]
         self.assertEqual(positions, sorted(positions))
-        # Three legs, each dealt its own scenarios by the registry's
-        # --shard=i/3; the matrix and the shard count must agree. MCP Apps
-        # run once.
+        # Six legs, each dealt its own scenarios by the registry's
+        # --shard=i/6; the matrix and the shard count must agree. MCP Apps
+        # run once, in leg 1, on its evidence path under meta/.
         legs = re.search(r"(?m)^        shard: \[([0-9, ]+)\]$", browser).group(1).split(", ")
-        self.assertEqual(legs, [str(index) for index in range(1, 4)])
+        self.assertEqual(legs, [str(index) for index in range(1, 7)])
         self.assertIn(f"--shard=${{{{ matrix.shard }}}}/{len(legs)}\n", browser)
         self.assertIn("      fail-fast: false\n", browser)
         self.assertEqual(browser.count("        if: matrix.shard == 1\n"), 3)
+        self.assertEqual(browser.count("META_BROWSER_EVIDENCE: ${{ github.workspace }}/meta/output/playwright/"
+                                       "console-acceptance/mcp-apps\n"), 3)
+        self.assertIn("          path: meta/output/playwright/console-acceptance/\n", browser)
         # The gateway lanes take the default backend; only the builder lane
         # selects console_acceptance_fixture.
         self.assertEqual(browser.count("          META_MCP_APPS_BACKEND: builder\n"), 1)
-        self.assertIn("META_EXAMPLE_BIN_DIR=${target_dir}/debug/examples", browser)
 
         console = job_block("console")
         for kept in (
@@ -1068,77 +821,93 @@ class CiWorkflowTests(unittest.TestCase):
             "- run: node console/memory-e2e.cjs\n",
             "- run: node console/workgraph-e2e.cjs\n",
             "- run: npm --prefix console run embedded:freshness --silent\n",
-            "name: console-${{ github.run_id }}\n",
+            "name: console-${{ github.run_id }}-${{ github.run_attempt }}\n",
         ):
             self.assertIn(kept, console)
+
+    def test_the_acceptance_pack_runs_the_binaries_built_through_the_root_wrapper(self):
+        acceptance = job_block("console-acceptance")
+        order = [
+            "- run: npm --prefix console run build --silent\n",
+            "./scripts/repo-cargo build -p meerkat-meta --example incident_command_center --bin mcp_fixture\n",
+            'echo "META_EXAMPLE_BIN_DIR=${bin_dir}" >> "${GITHUB_ENV}"\n',
+            "run: examples/001-incident-command-center-pack/topology_examples.sh\n",
+        ]
+        positions = [acceptance.index(marker) for marker in order]
+        self.assertEqual(positions, sorted(positions))
+        script = (ROOT / "examples/001-incident-command-center-pack/topology_examples.sh").read_text()
+        self.assertIn("for required in incident_command_center mcp_fixture; do", script)
+
+    def test_the_flow_editor_jobs_split_its_make_target(self):
+        """flow-editor-contracts runs the checks that need neither the binary
+        nor a browser; flow-editor builds meta_flow_editor and runs the
+        rendered browser checks. Together they run exactly the npm scripts
+        `make test-flow-editor` runs."""
+        makefile = (ROOT / "Makefile").read_text()
+        target = re.search(r"(?m)^test-flow-editor:[^\n]*\n((?:\t[^\n]*\n)+)", makefile).group(1)
+        expected = re.findall(r"npm --prefix flow-editor run (\S+) --silent", target)
+        self.assertEqual(len(expected), 4)
+        jobs = {}
+        for name in ("flow-editor-contracts", "flow-editor"):
+            block = job_block(name)
+            jobs[name] = re.findall(r"- run: npm --prefix flow-editor run (\S+) --silent\n", block)
+        self.assertEqual(jobs["flow-editor-contracts"], ["test:controller", "test:visual-contract"])
+        self.assertEqual(jobs["flow-editor"], ["test:browser-source", "test:browser-interactions"])
+        self.assertEqual(sorted(jobs["flow-editor-contracts"] + jobs["flow-editor"]), sorted(expected))
+        contracts = job_block("flow-editor-contracts")
+        self.assertNotIn("repo-cargo", contracts)
+        self.assertNotIn("playwright", contracts)
+        browser = job_block("flow-editor")
+        self.assertLess(browser.index("./scripts/repo-cargo build -p meerkat-meta --bin meta_flow_editor\n"),
+                        browser.index("test:browser-source"))
 
     def test_gate_requires_every_job_it_lists(self):
         """A job absent from `gate` can fail without failing the check suite.
 
         `needs` alone does not gate: with `if: always()` the gate runs
         regardless, so a job missing from the result checks is advisory only.
+        Correspondence alone is not enough either: deleting a job from
+        `needs` and from the checks together keeps the two lists in agreement,
+        so the roster below is a floor, and the correspondence check runs on
+        top of it.
 
-        Correspondence ALONE is not enough, and this test asserted only that
-        until review caught it: deleting a job from `needs` and from the
-        checks together keeps the two lists in agreement, so the job goes on
-        running and gates nothing while this test stays green. The roster
-        below is therefore a floor - every gating job must be present - and the
-        correspondence check runs on top of it.
-
-        A job in a lane may be skipped only when `changes` set that lane to
-        exactly "false"; every such job is one the same lane output gates,
-        the lanes and their jobs are the ones scripts/ci-changes.py
-        classifies, and every other job must succeed.
+        A job may be skipped only when `changes` set its lane (or `meta`, for
+        the jobs every run that reaches Meta runs) to exactly "false"; the
+        lanes and their jobs are the ones scripts/ci-changes.py classifies,
+        and every other job must succeed.
         """
+        workflow = load(CI_WORKFLOW)
+        gate = workflow["jobs"]["gate"]
+        self.assertEqual(gate["name"], "Meta gate")
+        self.assertEqual(gate["if"], "always()")
         block = job_block("gate")
-        needs = block.split("needs: [", 1)[1].split("]", 1)[0]
-        listed = {name.strip() for name in needs.split(",")}
-
-        must_gate = {
-            "changes",
-            "fmt-lint",
-            "clippy",
-            "test",
-            "test-integration",
-            "test-extension-state",
-            "extension-state-lint",
-            "test-voice",
-            "voice-clippy",
-            "test-python",
-            "test-typescript",
-            "console",
-            "console-browser",
-            "console-perf",
-            "console-fixtures",
-            "console-acceptance",
-            "flow-editor",
-            "audit",
-        }
+        listed = set(gate["needs"])
+        must_gate = {"changes", "meta-checks", "test-typescript", "test-python", "console-backends", "console",
+                     "console-browser", "console-fixtures", "console-acceptance", "console-perf",
+                     "flow-editor-contracts", "flow-editor"}
         missing = must_gate - listed
-        self.assertFalse(
-            missing,
-            f"these jobs must gate the suite and are absent from `needs`: "
-            f"{sorted(missing)}. Removing a job from both lists keeps them "
-            f"consistent while silently making it advisory.",
-        )
+        self.assertFalse(missing, f"these jobs must gate the suite and are absent from `needs`: {sorted(missing)}")
+        self.assertEqual(listed | {"gate"}, set(workflow["jobs"]), "every job gates")
 
         checks = dict(re.findall(r'(?m)^\s+check ([a-z-]+) "\$\{\{ needs\.\1\.result \}\}" (required|[a-z_]+)$', block))
         self.assertEqual(set(checks), listed, "every job in `needs` is checked exactly by name")
         self.assertIn('"$3" != "required" && "$2" == "skipped" && "${lane_value}" == "false"', block)
         self.assertIn('local variable="LANE_${3^^}"', block)
-        for lane in ci_changes.LANES:
+        for lane in (*ci_changes.LANES, "meta"):
             self.assertIn(f"LANE_{lane.upper()}: ${{{{ needs.changes.outputs.{lane} }}}}\n", block)
         lanes = {}
         for name, mode in checks.items():
-            gate = re.findall(r"(?m)^    if: needs\.changes\.outputs\.([a-z_]+) == 'true'$", job_block(name))
+            condition = workflow["jobs"][name].get("if")
             if mode == "required":
-                self.assertEqual(gate, [], name)
+                self.assertIsNone(condition, name)
                 continue
-            self.assertEqual(gate, [mode], name)
-            self.assertIn("    needs: changes\n", job_block(name))
+            self.assertEqual(condition, f"needs.changes.outputs.{mode} == 'true'", name)
+            needs = workflow["jobs"][name]["needs"]
+            self.assertIn("changes", [needs] if isinstance(needs, str) else needs, name)
             lanes.setdefault(mode, set()).add(name)
+        self.assertEqual(lanes.pop("meta"), {"meta-checks", "test-typescript"})
         # The workflow's lanes are exactly the classifier's, job for job.
-        self.assertEqual(lanes, {lane: set(jobs) for lane, jobs in ci_changes.LANE_JOBS.items()})
+        self.assertEqual(lanes, {lane: set(jobs) for lane, jobs in ci_changes.LANE_JOBS.items() if jobs})
         self.assertEqual(checks["changes"], "required")
 
     def run_gate(self, results: dict[str, str], lanes: dict[str, str]) -> subprocess.CompletedProcess:
@@ -1157,27 +926,28 @@ class CiWorkflowTests(unittest.TestCase):
         return subprocess.run(["bash", "-e", "-c", script], env=env, capture_output=True, text=True)
 
     def test_gate_accepts_a_skip_only_for_a_lane_classified_false(self):
-        every = {lane: "true" for lane in ci_changes.LANES}
-        console_only = {lane: ("true" if lane in ("console", "console_perf", "flow_editor") else "false")
-                        for lane in ci_changes.LANES}
-        rust_jobs = {job: "skipped" for job in ci_changes.LANE_JOBS["rust"]}
+        names = (*ci_changes.LANES, "meta")
+        every = {lane: "true" for lane in names}
+        nothing = {lane: "false" for lane in names}
+        docs_only = {**nothing, "meta": "true"}
+        console_only = {**nothing, "meta": "true", "console": "true", "console_perf": "true", "flow_editor": "true"}
+        lane_jobs = {job for jobs in ci_changes.LANE_JOBS.values() for job in jobs}
+        all_skipped = {job: "skipped" for job in lane_jobs | {"meta-checks", "test-typescript"}}
+        lanes_skipped = {job: "skipped" for job in lane_jobs}
         cases = (
             ("all green", {}, every, 0),
-            ("rust lane skipped when classified false", rust_jobs | {"test-integration": "skipped",
-                                                                      "test-python": "skipped"}, console_only, 0),
-            ("a skipped job whose lane is true", {"test-voice": "skipped"}, every, 1),
-            ("a skipped job of a running lane", {"console-perf": "skipped"}, console_only, 1),
-            ("a failed job in a skipped lane", {"test": "failure"}, console_only, 1),
-            ("lanes missing: classification failed", rust_jobs, {}, 1),
-            ("lanes empty", rust_jobs, {lane: "" for lane in ci_changes.LANES}, 1),
-            ("a required job skipped", {"fmt-lint": "skipped"}, console_only, 1),
+            ("nothing of Meta's changed", all_skipped, nothing, 0),
+            ("a docs-only change of Meta's", lanes_skipped, docs_only, 0),
+            ("the python lane skipped when classified false", {"test-python": "skipped"}, console_only, 0),
+            ("meta-checks skipped while Meta is reached", {"meta-checks": "skipped"}, docs_only, 1),
+            ("the browser legs skipped behind failed backends",
+             {"console-backends": "failure", "console-browser": "skipped", "console": "skipped"}, every, 1),
+            ("a skipped job of a running lane", {"flow-editor-contracts": "skipped"}, console_only, 1),
+            ("a failed job in a skipped lane", {"test-python": "failure"}, console_only, 1),
+            ("lanes missing: classification failed", all_skipped, {}, 1),
+            ("lanes empty", all_skipped, {lane: "" for lane in names}, 1),
             ("changes failed", {"changes": "failure"}, every, 1),
-            ("feature lanes skipped when classified false",
-             {job: "skipped" for lane in ("voice", "extension_state") for job in ci_changes.LANE_JOBS[lane]},
-             {**every, "voice": "false", "extension_state": "false"}, 0),
-            ("a voice job skipped while its lane runs", {"voice-clippy": "skipped"},
-             {**every, "extension_state": "false"}, 1),
-            ("the workspace lint skipped while rust runs", {"clippy": "skipped"}, every, 1),
+            ("a cancelled leg", {"console-browser": "cancelled"}, every, 1),
         )
         for name, results, lanes, status in cases:
             with self.subTest(case=name):
@@ -1185,19 +955,20 @@ class CiWorkflowTests(unittest.TestCase):
                 self.assertEqual(result.returncode, status, result.stdout + result.stderr)
 
     def test_every_job_builds_the_commit_its_event_names(self):
-        """Main's caches are restored by later main runs, whose result is the
-        evidence release.yml accepts, so only main's own code may write them:
-        no dispatch input and no checkout ref can point a job at another
-        commit."""
+        """No dispatch input and no checkout ref can point a job at another
+        commit, and no step fetches or moves to one: reading the base
+        commit's classifier (git show) and its first parent's id (git
+        rev-parse) are the only git uses. Pushes run on main and the release
+        branches; any other branch gets this workflow through its pull
+        request (or a dispatch), with no path filter, so the required check
+        always reports."""
+        workflow = load(CI_WORKFLOW)
+        on = triggers(workflow)
+        self.assertEqual(on["push"], {"branches": ["main", "release/**"]})
+        self.assertNotIn("paths", on["pull_request"])
+        self.assertNotIn("paths-ignore", on["pull_request"])
+        self.assertEqual(on["workflow_dispatch"], {})
         source = CI_WORKFLOW.read_text()
-        triggers = source.split("\npermissions:", 1)[0]
-        self.assertIn("  workflow_dispatch:\n", triggers)
-        self.assertNotIn("inputs:", triggers)
-        # Branches get CI through their pull request (or a dispatch); only
-        # main's pushes run on push, so no branch runs every lane beside its
-        # own pull request run.
-        self.assertIn("  push:\n    branches: [main]\n  pull_request:\n", triggers)
-        # Any version or pinned SHA of the checkout action.
         uses = re.findall(r"(?m)^\s*-?\s*uses:\s*actions/checkout@\S+", source)
         checkouts = re.findall(r"(?m)^ *- uses: actions/checkout@\S+(?: #[^\n]*)?\n((?: {8,}.*\n)*)", source)
         self.assertTrue(uses)
@@ -1205,10 +976,9 @@ class CiWorkflowTests(unittest.TestCase):
         for settings in checkouts:
             self.assertNotIn("ref:", settings)
             self.assertNotIn("repository:", settings)
-        # Nor may a run step fetch or move to another commit; reading the
-        # base commit's classifier (git show) is the only git use.
         code = "\n".join(line for line in source.splitlines() if not line.strip().startswith("#"))
         self.assertEqual(re.findall(r"\bgit\s+(fetch|checkout|switch|reset|pull|clone|worktree|restore)\b", code), [])
+        self.assertEqual(sorted(set(re.findall(r"\bgit\s+([a-z-]+)", code))), ["rev-parse", "show"])
 
     def test_the_no_redirect_check_sees_every_checkout_and_git_use(self):
         probe = """
@@ -1222,23 +992,33 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertEqual(re.findall(r"\bgit\s+(fetch|checkout|switch|reset|pull|clone|worktree|restore)\b", probe),
                          ["fetch", "checkout"])
 
-    def test_changes_job_classifies_the_pull_request_and_fails_closed(self):
+    def test_changes_job_classifies_the_run_and_fails_closed(self):
         block = job_block("changes")
         self.assertIn("fetch-depth: 2", block)
-        # Every lane is an output.
+        # Every lane is an output, and so is meta.
         outputs = re.findall(r"(?m)^      ([a-z_]+): \$\{\{ steps\.classify\.outputs\.\1 \}\}$", block)
-        self.assertEqual(outputs, list(ci_changes.LANES))
-        self.assertIn(f'          lanes="{" ".join(ci_changes.LANES)}"\n', block)
-        self.assertIn("git show HEAD^1:scripts/ci-changes.py", block)
+        self.assertEqual(outputs, [*ci_changes.LANES, "meta"])
+        self.assertIn(f'          lanes="{" ".join(ci_changes.LANES)} meta"\n', block)
+        self.assertIn("git show HEAD^1:meta/scripts/ci-changes.py", block)
+        self.assertIn('--monorepo --event "${EVENT}"', block)
         self.assertNotIn("python3 scripts/ci-changes.py", block)
-        self.assertNotIn("if:", block)
-        self.assertIn("- run: python3 scripts/test_ci_changes.py\n", job_block("fmt-lint"))
+        self.assertNotIn("    if:", block)
+        self.assertIn("- run: python3 scripts/test_ci_changes.py\n", job_block("meta-checks"))
+        # Every other job waits for it and skips when Meta is not reached.
+        workflow = load(CI_WORKFLOW)
+        for name, job in workflow["jobs"].items():
+            if name in ("changes", "gate"):
+                continue
+            with self.subTest(job=name):
+                self.assertRegex(job["if"], r"^needs\.changes\.outputs\.[a-z_]+ == 'true'$")
 
     def run_classify_step(self, base_classifier: str | None, *, head_classifier: str | None = None,
-                          event: str = "pull_request") -> dict[str, str]:
-        """Run the classify step in a repository whose base commit holds
-        `base_classifier` (None: no classifier at all) and whose head may
-        change it; return the step's GITHUB_OUTPUT as a mapping."""
+                          event: str = "pull_request", before: str = "parent") -> dict[str, str]:
+        """Run the classify step in a monorepo whose base commit holds
+        `base_classifier` at meta/scripts/ci-changes.py (None: no classifier
+        at all) and whose head may change it, from meta/ as the workflow
+        does; return the step's GITHUB_OUTPUT as a mapping. `before` is the
+        push's previous tip: "parent" names HEAD's first parent."""
         lines = job_block("changes").splitlines()
         start = lines.index("      - id: classify")
         run = lines.index("        run: |", start)
@@ -1253,59 +1033,66 @@ class CiWorkflowTests(unittest.TestCase):
                    GIT_COMMITTER_NAME="ci", GIT_COMMITTER_EMAIL="ci@example.invalid")
         with tempfile.TemporaryDirectory() as tmp:
             repo, temp = Path(tmp) / "repo", Path(tmp) / "runner-temp"
-            repo.mkdir()
+            (repo / "meta/scripts").mkdir(parents=True)
             temp.mkdir()
             output = Path(tmp) / "output"
 
-            def git(*args):
-                subprocess.run(["git", *args], cwd=repo, env=env, check=True, capture_output=True)
+            def git(*args) -> str:
+                return subprocess.run(["git", *args], cwd=repo, env=env, check=True, capture_output=True,
+                                      text=True).stdout.strip()
 
             git("init", "-q")
-            (repo / "scripts").mkdir()
             for index, classifier in enumerate(
                     (base_classifier, head_classifier if head_classifier is not None else base_classifier)):
                 if classifier is not None:
-                    (repo / "scripts/ci-changes.py").write_text(classifier)
-                (repo / "touched.txt").write_text(f"commit {index}\n")
+                    (repo / "meta/scripts/ci-changes.py").write_text(classifier)
+                (repo / "meta/touched.txt").write_text(f"commit {index}\n")
                 git("add", "-A")
                 git("commit", "-q", "-m", "tree")
-            env.update(EVENT=event, RUNNER_TEMP=str(temp), GITHUB_OUTPUT=str(output))
-            subprocess.run(["bash", "-e", "-c", "\n".join(body)], cwd=repo, env=env, check=True,
+            previous = git("rev-parse", "HEAD^1") if before == "parent" else before
+            env.update(EVENT=event, BEFORE=previous, RUNNER_TEMP=str(temp), GITHUB_OUTPUT=str(output))
+            subprocess.run(["bash", "-e", "-c", "\n".join(body)], cwd=repo / "meta", env=env, check=True,
                            capture_output=True, text=True)
             return dict(line.split("=", 1) for line in output.read_text().splitlines())
 
     def test_the_base_commits_classifier_decides_and_fails_closed(self):
-        every = {lane: "true" for lane in ci_changes.LANES}
-        nothing_runs = ("import sys\nargs = sys.argv\nopen(args[args.index('--github-output') + 1], 'a')"
-                        ".write(''.join(f'{lane}=false\\n' for lane in "
-                        f"{list(ci_changes.LANES)!r}))\n")
-        # Pushes and dispatches run every lane even if a classifier says none.
-        for event in ("push", "workflow_dispatch", "schedule"):
-            with self.subTest(event=event):
-                self.assertEqual(self.run_classify_step(nothing_runs, event=event), every)
+        names = (*ci_changes.LANES, "meta")
+        every = {lane: "true" for lane in names}
+        nothing = {lane: "false" for lane in names}
 
         def printing(values: dict[str, str]) -> str:
             text = "".join(f"{key}={value}\\n" for key, value in values.items())
-            return ("import sys\nargs = sys.argv\nopen(args[args.index('--github-output') + 1], 'a')"
+            return ("import sys\nargs = sys.argv\nassert '--monorepo' in args\n"
+                    "open(args[args.index('--github-output') + 1], 'a')"
                     f".write('{text}')\n")
 
-        console_only = {lane: ("true" if lane == "console" else "false") for lane in ci_changes.LANES}
+        # A dispatch or schedule runs every lane even if a classifier says none.
+        for event in ("workflow_dispatch", "schedule"):
+            with self.subTest(event=event):
+                self.assertEqual(self.run_classify_step(printing(nothing), event=event), every)
+        console_only = {**nothing, "console": "true", "meta": "true"}
         self.assertEqual(self.run_classify_step(printing(console_only)), console_only)
         # The pull request's own classifier never decides its lanes.
-        nothing = {lane: "false" for lane in ci_changes.LANES}
         self.assertEqual(self.run_classify_step(printing(console_only), head_classifier=printing(nothing)),
                          console_only)
-        # The classifier before the voice and extension-state lanes printed
-        # the other six; a pull request on such a base runs every lane.
-        six = {lane: "false" for lane in ("rust", "integration", "python", "console", "console_perf",
-                                          "flow_editor")}
-        self.assertEqual(self.run_classify_step(printing(six)), every)
-        for case, base in (("predates the lanes", printing({"full": "false"})),
+        # Nothing of Meta's changed: meta=false and no lane, on a push too.
+        self.assertEqual(self.run_classify_step(printing(nothing)), nothing)
+        self.assertEqual(self.run_classify_step(printing(nothing), event="push"), nothing)
+        # A push that reaches Meta runs every lane, whatever lanes were printed.
+        self.assertEqual(self.run_classify_step(printing(console_only), event="push"), every)
+        # A push of several commits or of a new ref runs every lane unasked.
+        for before in ("0" * 40, "1" * 40, ""):
+            with self.subTest(before=before):
+                self.assertEqual(self.run_classify_step(printing(nothing), event="push", before=before), every)
+        # A classifier from before --monorepo prints no meta line: every lane.
+        lanes_only = {lane: "false" for lane in ci_changes.LANES}
+        for case, base in (("predates --monorepo", printing(lanes_only)),
                            ("misses a lane", printing({k: v for k, v in console_only.items() if k != "python"})),
                            ("fails", "raise SystemExit(3)\n"),
                            ("is absent", None)):
             with self.subTest(base=case):
                 self.assertEqual(self.run_classify_step(base), every)
+
 
 if __name__ == "__main__":
     unittest.main()

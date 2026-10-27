@@ -197,13 +197,13 @@ http_archive(
 )
 
 http_archive(
-    name = "rust_std_wasm32_unknown_unknown_1_94_0",
+    name = "rust_std_wasm32_unknown_unknown_1_97_0",
     build_file_content = '''
 filegroup(name = "rust_std", srcs = glob(["**/*"]), visibility = ["//visibility:public"])
 ''',
-    sha256 = "bc65af3c0bfa2e5b20e299358710a26ce33a3674c762a2a010bc383c5b7fc202",
-    strip_prefix = "rust-std-1.94.0-wasm32-unknown-unknown/rust-std-wasm32-unknown-unknown",
-    urls = ["https://static.rust-lang.org/dist/rust-std-1.94.0-wasm32-unknown-unknown.tar.xz"],
+    sha256 = "474f926f2ffb0ed5ff895db92b7d0b2d9c3acb75b6df3229b132db0822594509",
+    strip_prefix = "rust-std-1.97.0-wasm32-unknown-unknown/rust-std-wasm32-unknown-unknown",
+    urls = ["https://static.rust-lang.org/dist/rust-std-1.97.0-wasm32-unknown-unknown.tar.xz"],
 )
 
 buildbuddy = use_extension("@toolchains_buildbuddy//:extensions.bzl", "buildbuddy")
@@ -224,7 +224,62 @@ rust.toolchain(
         "x86_64-apple-darwin",
         "x86_64-pc-windows-msvc",
     ],
-    versions = ["1.94.0"],
+    # rules_rust 0.70.0 ships archive checksums up to Rust 1.95.0, so the
+    # 1.97.0 archives every registered toolchain may fetch (rustc, cargo,
+    # clippy, llvm-tools and rust-std per host triple, rust-std per extra
+    # target) are listed here, taken from
+    # https://static.rust-lang.org/dist/channel-rust-1.97.0.toml. Without them
+    # the toolchain repositories would download unverified. Regenerate them
+    # from the channel manifest whenever `versions` moves.
+    sha256s = {
+        "cargo-1.97.0-aarch64-apple-darwin.tar.xz": "ca46bbef082ff751c06807b29872b59c05296c3acd4da1a98fac6367bb8bb2c5",
+        "cargo-1.97.0-aarch64-pc-windows-msvc.tar.xz": "2d0c49f3063bc045a7a00648111eb8a6853bf773d9221b7dc4455fe4c1e362a0",
+        "cargo-1.97.0-aarch64-unknown-linux-gnu.tar.xz": "71f0457abe8fdf9fc048009f867acc27b21e25c8e06a1a3e9a12c637833b6aab",
+        "cargo-1.97.0-powerpc64le-unknown-linux-gnu.tar.xz": "15d4f6c5ef50add9064fc0bcd10347fca13ba6f7df14b509fd51dee97934ac83",
+        "cargo-1.97.0-s390x-unknown-linux-gnu.tar.xz": "29b7a08927a8b6fdc79b2e80cf5845dfebdb0b425937456b1207baf61c6ae0e0",
+        "cargo-1.97.0-x86_64-apple-darwin.tar.xz": "36bb6ad46346198ba26999de079e77ec6bef50899fdb23461290e5e53fae0e95",
+        "cargo-1.97.0-x86_64-pc-windows-msvc.tar.xz": "c20eac3f96be787b0a3d5be6204a37b921307b2573e0c1d8162a3d992fd186f6",
+        "cargo-1.97.0-x86_64-unknown-freebsd.tar.xz": "a51adea121b87a34a5f566158017609075dc414bc66c6921b8ddf6452b80a3c7",
+        "cargo-1.97.0-x86_64-unknown-linux-gnu.tar.xz": "5c5bc94af02797b699bb7d4e85b356192eab9fb50376053a1e6edf509fcf7129",
+        "clippy-1.97.0-aarch64-apple-darwin.tar.xz": "4c74f4390fb9381d28e0ccb06439c9dda9d5b293b3c25d4465e879eb42d70094",
+        "clippy-1.97.0-aarch64-pc-windows-msvc.tar.xz": "d44301963f581e4e732c76c191ef5e111fab2c63657f7cda6a613af332528c7e",
+        "clippy-1.97.0-aarch64-unknown-linux-gnu.tar.xz": "5c0be7373a456b684d7dcc34d8cc6a037f7149caf1668c527a59831f27ba1d6c",
+        "clippy-1.97.0-powerpc64le-unknown-linux-gnu.tar.xz": "49748d24e34060e4fa3beb48c16eca06511dad039b677d2a30a63cc4995c5765",
+        "clippy-1.97.0-s390x-unknown-linux-gnu.tar.xz": "ce1492cd40d932587e316cf639698fe2bc5b574675d7ec1a0b16e36a0a5ddc44",
+        "clippy-1.97.0-x86_64-apple-darwin.tar.xz": "712234b2b6116f68b24bc6720be1c168f2a3196a5ae47adde21bcfcb649329c9",
+        "clippy-1.97.0-x86_64-pc-windows-msvc.tar.xz": "d5a89f8449764d397077f2cde9db2cb569b629ed28a7e08eca2b04695ff2ad7e",
+        "clippy-1.97.0-x86_64-unknown-freebsd.tar.xz": "4c215cc994d471449b8acd6250d34c5d46f5b10afde554445f1eef7844f6c00d",
+        "clippy-1.97.0-x86_64-unknown-linux-gnu.tar.xz": "1f7bd64e545de3c1921dc68b4d1e6ceae034b0d8c40d66b795c04e946d4262c0",
+        "llvm-tools-1.97.0-aarch64-apple-darwin.tar.xz": "70abd5460151294f959de6f0bf4767a12827c710b8e8b0568706be60d1e0e7e5",
+        "llvm-tools-1.97.0-aarch64-pc-windows-msvc.tar.xz": "5280f88a7c97f84c8484f6a4803468be85563bce97d40da34dc2551e9a6c8675",
+        "llvm-tools-1.97.0-aarch64-unknown-linux-gnu.tar.xz": "0e620b0cf1c4e1c48282782273393dc4a01f7823a4a6cc08e4cace755211b245",
+        "llvm-tools-1.97.0-powerpc64le-unknown-linux-gnu.tar.xz": "9443fa0226a56b1847c923caf891f741c9ac0be39dc9d17e4d73272cccd18074",
+        "llvm-tools-1.97.0-s390x-unknown-linux-gnu.tar.xz": "3358f9b024610c9d618af4b7394018fe3033c97cc6223c7279ac2f55f5d65dc3",
+        "llvm-tools-1.97.0-x86_64-apple-darwin.tar.xz": "e8f7814a322d4e9ac748351a6d02c102667bd7894fcc075a4bde010717a71b64",
+        "llvm-tools-1.97.0-x86_64-pc-windows-msvc.tar.xz": "671b509ec2c9220916d25d8fd546e71efb552439f8e7ae75ce53208d9395dfb4",
+        "llvm-tools-1.97.0-x86_64-unknown-freebsd.tar.xz": "1b3f0e7cb81e723b809f1296e2cac6a1e7900b59ce69ae0ce46098995e3abd64",
+        "llvm-tools-1.97.0-x86_64-unknown-linux-gnu.tar.xz": "a847ff42fffb4cd8919c63238a7981d89789bb732e2b784c346347ed3d55bd95",
+        "rust-std-1.97.0-aarch64-apple-darwin.tar.xz": "df26b872f1bbcc5cd700eacb76231d6ba97aeda76ccd44f5b7de3db3757a38ee",
+        "rust-std-1.97.0-aarch64-pc-windows-msvc.tar.xz": "5fdcde257f4b60c92cafe6c8b4bcd39076db384d40eaaf3cce1860eb04da885b",
+        "rust-std-1.97.0-aarch64-unknown-linux-gnu.tar.xz": "b6a90dab26527f17e7e395e24b2d79976e30432c41feb073fe920d3b26b709a0",
+        "rust-std-1.97.0-powerpc64le-unknown-linux-gnu.tar.xz": "5243a1a6cd056a6ff573cdf2e025add2b5a0e302a8aaa078448c9015cd76ca38",
+        "rust-std-1.97.0-s390x-unknown-linux-gnu.tar.xz": "2e90dfd2ddda36357dbc29c77e82d5dba27c4bb03eff7a345574ea9d59f69339",
+        "rust-std-1.97.0-wasm32-unknown-unknown.tar.xz": "474f926f2ffb0ed5ff895db92b7d0b2d9c3acb75b6df3229b132db0822594509",
+        "rust-std-1.97.0-x86_64-apple-darwin.tar.xz": "ce81039d2bd2fea90517b5f20264eff0ec46f89829bb5c9fb776f1762f5f2338",
+        "rust-std-1.97.0-x86_64-pc-windows-msvc.tar.xz": "da2c160b962b98b1603eda2120e608bd74e0baf56962fc32a7b5ea56b6fd6211",
+        "rust-std-1.97.0-x86_64-unknown-freebsd.tar.xz": "9692391b7dea7bdddff328b5cdb9ffc418614ab2158414a03ca463e42d47c4df",
+        "rust-std-1.97.0-x86_64-unknown-linux-gnu.tar.xz": "0c43618128a7a6b96b0b04c04cf7b28dd52fb0991a74c9615fbd1a684ff88712",
+        "rustc-1.97.0-aarch64-apple-darwin.tar.xz": "53e339f16382bb348566f648d01775797e038fdd6bfc6ddd8859c5a0eac09f68",
+        "rustc-1.97.0-aarch64-pc-windows-msvc.tar.xz": "0f7cbfcea0e51c375966b8f29ba566b4001f9f4cbc0821617cf63c39af958882",
+        "rustc-1.97.0-aarch64-unknown-linux-gnu.tar.xz": "06a71688ee297515ebc6a815e42c779735c09423b0bed056e0896c80c7295399",
+        "rustc-1.97.0-powerpc64le-unknown-linux-gnu.tar.xz": "ffd61b3dd37632dad08438d1a828d6f02dff8bc7bf235fb3df283064455c063d",
+        "rustc-1.97.0-s390x-unknown-linux-gnu.tar.xz": "7fa1a77cd080646dd88338de04e3b6be9d3d51ff648b191d50da657bc1c1aa48",
+        "rustc-1.97.0-x86_64-apple-darwin.tar.xz": "c3c6f6cd95e4546306dfa4beb3cec23dedf10dd02e6e7d99b053bf418d453014",
+        "rustc-1.97.0-x86_64-pc-windows-msvc.tar.xz": "32f62b4162c729c080d0f5fddc8386ae6d160bd493016e850c1dba26aa20a196",
+        "rustc-1.97.0-x86_64-unknown-freebsd.tar.xz": "25dbd8fc8ab30a46663a7caf5f8332417cdebdeb77246fe686bc69d7da35e6c7",
+        "rustc-1.97.0-x86_64-unknown-linux-gnu.tar.xz": "0a8787303c88b018af61b5c53a0c7024d516d175e623eeab35a35eab11dbcad0",
+    },
+    versions = ["1.97.0"],
 )
 use_repo(rust, "rust_toolchains")
 register_toolchains("@rust_toolchains//:all")

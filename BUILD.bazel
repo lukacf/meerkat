@@ -307,7 +307,7 @@ sh_binary(
         "@rules_rust//rust/toolchain:current_rust_toolchain",
         "@rules_rust//rust/toolchain:current_rustc_files",
         "@rules_rust//rust/toolchain:current_rustc_lib_files",
-        "@rust_std_wasm32_unknown_unknown_1_94_0//:rust_std",
+        "@rust_std_wasm32_unknown_unknown_1_97_0//:rust_std",
     ],
 )
 
@@ -374,7 +374,7 @@ sh_test(
         "@rules_rust//rust/toolchain:current_rust_toolchain",
         "@rules_rust//rust/toolchain:current_rustc_files",
         "@rules_rust//rust/toolchain:current_rustc_lib_files",
-        "@rust_std_wasm32_unknown_unknown_1_94_0//:rust_std",
+        "@rust_std_wasm32_unknown_unknown_1_97_0//:rust_std",
         "@wasm_pack_darwin_arm64//:wasm-pack",
         "@wasm_pack_linux_x86_64//:wasm-pack",
         "//crates/meerkat-cli:cli_mobpack_live_smoke_test",
@@ -441,7 +441,7 @@ E2E_SMOKE_REMOTE_DATA = [
     "@rules_rust//rust/toolchain:current_rust_toolchain",
     "@rules_rust//rust/toolchain:current_rustc_files",
     "@rules_rust//rust/toolchain:current_rustc_lib_files",
-    "@rust_std_wasm32_unknown_unknown_1_94_0//:rust_std",
+    "@rust_std_wasm32_unknown_unknown_1_97_0//:rust_std",
     "@wasm_pack_darwin_arm64//:wasm-pack",
     "@wasm_pack_linux_x86_64//:wasm-pack",
     "//crates/meerkat-cli:cli_mobpack_live_smoke_test",

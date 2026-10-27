@@ -32,10 +32,15 @@ refresh a host or publish anything.
 The catalog covers PR statuses, review threads, changed files/commits, ordinary
 comments/reviews, bounded commit history, workflow runs/jobs, issue discovery,
 issue comments and PR discovery. `PullRequestChanges`, `WorkflowRunJobs` and
-`IssueComments` still repeat their final exact detail call. The pinned Connect
-replay guard rejects that call. Their final checks remain intact pending the
-owner's typed same-attempt fresh-observation API; these three programs cannot
-currently be presented as native-qualified. Issue hierarchy, repository metadata
+`IssueComments` request native read-only enforcement for their initial detail
+call and retain the opaque read observation returned by the real committed,
+joined result. After the intervening pages, the exact final detail read consumes
+that handle through `ReobserveRead`. No replacement arguments or requirement
+are supplied. A missing handle refuses; it never falls back to a normal duplicate
+call. The final body passes through the same parser checks and historical audit
+retention. Neither a parser result nor serialized history can provide a handle.
+This source integration is uncompiled and has no native acceptance result.
+Issue hierarchy, repository metadata
 and revision-bearing historical check support also remain separate inventory
 requirements.
 
@@ -52,7 +57,7 @@ ingestion. No data-export protocol or successful ingestion claim is added here.
 
 ## Dependency and verification limits
 
-The manifest pins Connect `57717be45b79ce47ffee384e52b43916d760c18a` and uses the
+The manifest pins Connect `193dcc298c7811b37eab0c396cbf73ebca1f3073` and uses the
 same Core development patch graph as that commit's native workspace. It stays
 separate from the pure serde-only GHE crate and the released Forge runtime.
 There is no lockfile or native build result yet. Formatting parses the source;
@@ -64,6 +69,15 @@ repeated `begin`. They remain unrun. The original owner must also exercise real
 committed-result delivery, target/context changes, parser errors and storage
 limits through the actual native engine. Tests must not fabricate
 `CommittedCollectionResult` or replace native authority with fixture structs.
+
+For each of the three programs with a final detail read, the existing owner
+must also prove an actual first read, intervening page and final reobservation:
+distinct native input/run/call identities with equal operation and arguments,
+both committed and joined, and a changed final body causing the parser's
+existing refusal. Missing handles, native classification refusal, cancellation,
+changed target/configuration, budget exhaustion and a consumed handle must not
+dispatch a replacement or leave a retryable cursor. These controls are pending
+on the existing native qualification lane; no native objects are fabricated here.
 
 The pure program crate's 105 passing controls remain independent evidence for
 its parser behavior. They do not prove this adapter, parent authentication,

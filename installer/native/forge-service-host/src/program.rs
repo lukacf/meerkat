@@ -2,11 +2,11 @@ use crate::{
     GheRepository, HistoricalObservation, HistoricalStore, ParsedHistory, ProgramLimits,
     ProgramSpec, catalog::Engine,
 };
-use forge_ghe_collections::{ProjectedBlock, projected_github_payload};
+use forge_ghe_collections::{ProjectedBlock, ReadCall, projected_github_payload};
 use meerkat_connect::{
     service_collection::{
         CollectionCall, CollectionCursor, CollectionProgram, CollectionStep, CollectionTarget,
-        CommittedCollectionResult, RequiredCollectionOperation,
+        CommittedCollectionResult, ReadObservation, RequiredCollectionOperation,
     },
     service_probe::ResourceAssessment,
 };
@@ -199,6 +199,22 @@ impl CollectionProgram for BoundGheProgram {
         } else {
             State::Ended
         };
+        let final_read = match &state {
+            State::Fresh(engine)
+                if matches!(
+                    &self.spec,
+                    ProgramSpec::PullRequestChanges { .. }
+                        | ProgramSpec::WorkflowRunJobs { .. }
+                        | ProgramSpec::IssueComments { .. }
+                ) =>
+            {
+                engine.next().cloned().map(|call| FinalRead {
+                    call,
+                    observation: None,
+                })
+            }
+            _ => None,
+        };
         Box::new(Cursor {
             binding: self.binding.clone(),
             history: self.history.clone(),
@@ -207,6 +223,7 @@ impl CollectionProgram for BoundGheProgram {
             context: None,
             observations: Vec::new(),
             bytes: 0,
+            final_read,
         })
     }
 }
@@ -223,17 +240,34 @@ struct Cursor {
     context: Option<Value>,
     observations: Vec<HistoricalObservation>,
     bytes: usize,
+    final_read: Option<FinalRead>,
 }
-fn next_call(engine: &Engine) -> Option<CollectionCall> {
+// Only an actual committed and joined first read can provide this handle.
+// It stays in the original cursor, never in the historical data or wire format.
+struct FinalRead {
+    call: ReadCall,
+    observation: Option<ReadObservation>,
+}
+impl FinalRead {
+    fn matches(&self, call: &ReadCall) -> bool {
+        self.call.operation() == call.operation() && self.call.arguments() == call.arguments()
+    }
+}
+fn next_call(engine: &Engine, read_only: bool) -> Option<CollectionCall> {
     let call = engine.next()?;
-    CollectionCall::new(call.operation().into(), call.arguments().clone()).ok()
+    let constructor = if read_only {
+        CollectionCall::read_only
+    } else {
+        CollectionCall::new
+    };
+    constructor(call.operation().into(), call.arguments().clone()).ok()
 }
 impl CollectionCursor for Cursor {
     fn begin(&mut self) -> CollectionStep {
         let State::Fresh(engine) = std::mem::replace(&mut self.state, State::Ended) else {
             return CollectionStep::Refuse;
         };
-        let Some(call) = next_call(&engine) else {
+        let Some(call) = next_call(&engine, self.final_read.is_some()) else {
             return CollectionStep::Refuse;
         };
         self.state = State::Waiting(engine);
@@ -295,6 +329,17 @@ impl CollectionCursor for Cursor {
         let Ok(data) = engine.observe(&call, payload.bytes()) else {
             return CollectionStep::Refuse;
         };
+        if self.observations.is_empty()
+            && let Some(final_read) = &mut self.final_read
+        {
+            if !final_read.matches(&call) {
+                return CollectionStep::Refuse;
+            }
+            let Some(observation) = result.read_observation() else {
+                return CollectionStep::Refuse;
+            };
+            final_read.observation = Some(observation);
+        }
         // The decoder borrows UTF-8 native strings, so this conversion cannot
         // create a replacement character or silently change result bytes.
         let Ok(text) = std::str::from_utf8(payload.bytes()) else {
@@ -325,11 +370,26 @@ impl CollectionCursor for Cursor {
                 CollectionStep::Refuse
             };
         }
-        let Some(next) = next_call(&engine) else {
+        let Some(pending) = engine.next() else {
             return CollectionStep::Refuse;
         };
+        let step = if let Some(final_read) = &mut self.final_read
+            && final_read.matches(pending)
+        {
+            // Take the original handle exactly once. No new call, altered
+            // arguments or replacement requirement can bypass a missing handle.
+            let Some(observation) = final_read.observation.take() else {
+                return CollectionStep::Refuse;
+            };
+            CollectionStep::ReobserveRead(observation)
+        } else {
+            let Some(next) = next_call(&engine, false) else {
+                return CollectionStep::Refuse;
+            };
+            CollectionStep::Call(next)
+        };
         self.state = State::Waiting(engine);
-        CollectionStep::Call(next)
+        step
     }
 }
 
@@ -572,6 +632,7 @@ mod tests {
             context: None,
             observations: Vec::new(),
             bytes: 0,
+            final_read: None,
         };
         assert!(matches!(c.begin(), CollectionStep::Call(_)));
         assert!(matches!(c.begin(), CollectionStep::Refuse));

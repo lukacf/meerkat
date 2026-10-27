@@ -12,7 +12,7 @@ publish = false
 
 [dependencies]
 forge-ghe-collections = { path = "../ghe-collections" }
-meerkat-connect = { git = "https://github.com/lukacf/meerkat-connect.git", rev = "57717be45b79ce47ffee384e52b43916d760c18a" }
+meerkat-connect = { git = "https://github.com/lukacf/meerkat-connect.git", rev = "193dcc298c7811b37eab0c396cbf73ebca1f3073" }
 meerkat-core = "=0.9.5"
 serde_json = "=1.0.151"
 

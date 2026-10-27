@@ -32,6 +32,24 @@
       "git_blob": "30005854aaf2cc583f26600925432ec4550ddeee",
       "sha256": "ffc7cb691392736f75cfba4d23e7043fb69f25efb854a4d66ac749e3dab58b35",
       "bytes": 152081
+    },
+    {
+      "path": "pkg/github/repositories.go",
+      "git_blob": "b884f4888db69c1b2d1faaa77119262c93e262ef",
+      "sha256": "55746dd86a7971b0a38358a06df15ff849963f6e8e7c2fb62e68cbe6f4c1f91c",
+      "bytes": 111464
+    },
+    {
+      "path": "pkg/github/__toolsnaps__/list_commits.snap",
+      "git_blob": "ddd55bac9122e3bc1b4abae2135d41b866df6e69",
+      "sha256": "72a89a08ee118ce162227d12eb52afd5d1d35de6be6f23144abdf3f993fc3a9e",
+      "bytes": 10375
+    },
+    {
+      "path": "pkg/github/__toolsnaps__/get_commit.snap",
+      "git_blob": "8aef83dbc5f6e856f55c0e1065c803912c06824c",
+      "sha256": "2c6a32da66dc511737e29471a0a8bb277e20af42831aec1371c9c0a28d3c67d3",
+      "bytes": 10051
     }
   ],
   "verification": "All file bytes match the pinned commit tree Git blob IDs. No upstream executable or authenticated provider request was run."

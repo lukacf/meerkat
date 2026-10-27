@@ -50,6 +50,15 @@ historical data, not the current effective approval decision. A returned
 coverage. The native adapter must verify actual unfiltered installed behavior
 before it can use that observation to qualify the source.
 
+`RepositoryHistory` resolves either an explicitly selected commit through
+`get_commit` or the first commit in a one-row default-branch `list_commits`
+response. Subsequent list calls retain that exact SHA and an explicit UTC window
+of at most seven days. It does not reread a moving branch or use local time.
+It pages until a short response, rejecting duplicate or foreign commit results
+and any changed call, filter, revision or time bound. Dates and messages remain
+provider data; no timestamp ordering or early date cutoff is assumed. The anchor
+is retained separately, including when no commits fall within the queried window.
+
 ## Pinned upstream behavior
 
 Contract: GitHub MCP server v2.0.3, source
@@ -58,6 +67,7 @@ Contract: GitHub MCP server v2.0.3, source
 - [PR read implementation](https://github.com/github/github-mcp-server/blob/b98d115bbb080e9555466a96656ec4df605aea21/pkg/github/pullrequests.go)
 - [Result types](https://github.com/github/github-mcp-server/blob/b98d115bbb080e9555466a96656ec4df605aea21/pkg/github/minimal_types.go)
 - [Ordinary comment implementation](https://github.com/github/github-mcp-server/blob/b98d115bbb080e9555466a96656ec4df605aea21/pkg/github/issues.go)
+- [Repository history implementation](https://github.com/github/github-mcp-server/blob/b98d115bbb080e9555466a96656ec4df605aea21/pkg/github/repositories.go)
 
 `get_status` fetches the PR head and requests combined statuses without pagination
 options. When `total_count` differs from the returned row count, this program
@@ -88,10 +98,17 @@ out intervening changes. The result remains a reported page set, not an atomic
 snapshot of that head. Patches are optional and may be absent or incomplete;
 listing every file does not establish a complete diff.
 
+The history program requests neither author/path filters nor field projection.
+The pinned `list_commits` method performs date filtering at the provider and
+returns commit metadata without parent links, files or status/check results.
+The result records the exact queried interval and retained anchor; it does not
+independently prove ancestry or date-filter semantics, current default-branch
+identity, complete diffs or historical CI coverage. Empty/malformed anchor
+results refuse; provider errors must be handled by the native adapter first.
+
 Remaining work includes the native bridge/adapter and the other required GHE
-collection programs: bounded repository history, workflow runs/jobs, and issues.
-Repository
-metadata and historical non-PR commit checks still need a supported source.
+collection programs: workflow runs/jobs and issues. Repository metadata and
+historical non-PR commit checks still need a supported source.
 These programs do not close those requirements or the overall shared ingestion
 outcome.
 

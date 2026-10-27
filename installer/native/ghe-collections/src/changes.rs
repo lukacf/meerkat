@@ -71,6 +71,7 @@ impl PullRequestChanges {
     ) -> Result<Self, Refusal> {
         let scope = PullRequestScope::new(host, owner, repo, pull_number)?;
         let call = ReadCall {
+            operation: "pull_request_read",
             arguments: json!({"method":"get","owner":owner,"repo":repo,"pullNumber":pull_number}),
         };
         Ok(Self {

@@ -83,6 +83,7 @@ impl PullRequestDiscussion {
             scope: PullRequestScope::new(host, owner, repo, pull_number)?,
             kind,
             phase: Phase::Initial(ReadCall {
+                operation: "pull_request_read",
                 arguments: json!({"method":"get","owner":owner,"repo":repo,"pullNumber":pull_number}),
             }),
             limits,

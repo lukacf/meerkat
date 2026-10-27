@@ -10,6 +10,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
+mod history;
+pub use history::{
+    HistoryAnchor, HistoryReadLimits, HistoryWindow, ReportedCommitHistory, RepositoryCommit,
+    RepositoryCommitInfo, RepositoryHistory,
+};
 mod changes;
 pub use changes::{
     ChangesReadLimits, CommitAuthor, PullRequestChanges, PullRequestCommit, PullRequestFile,
@@ -49,12 +54,13 @@ pub enum Refusal {
 
 #[derive(Debug, Clone)]
 pub struct ReadCall {
+    operation: &'static str,
     arguments: Value,
 }
 
 impl ReadCall {
     pub fn operation(&self) -> &'static str {
-        "pull_request_read"
+        self.operation
     }
 
     pub fn arguments(&self) -> &Value {
@@ -125,6 +131,7 @@ impl PullRequestStatuses {
         let scope = PullRequestScope::new(host, owner, repo, pull_number)?;
         Ok(Self {
             phase: Phase::PullRequest(ReadCall {
+                operation: "pull_request_read",
                 arguments: json!({"method": "get", "owner": owner, "repo": repo, "pullNumber": pull_number}),
             }),
             scope,

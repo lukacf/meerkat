@@ -66,6 +66,7 @@ impl PullRequestReviewThreads {
         Ok(Self {
             scope: PullRequestScope::new(host, owner, repo, pull_number)?,
             phase: Phase::PullRequest(ReadCall {
+                operation: "pull_request_read",
                 arguments: json!({"method":"get","owner":owner,"repo":repo,"pullNumber":pull_number}),
             }),
             limits,

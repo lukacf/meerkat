@@ -343,6 +343,20 @@ export const CLOSURE_TESTS_PER_ROW = 12;
 // test, and the coverage check credits the binary only when every partition
 // is planned.
 export const CANARY_TEST_GROUP = "downstream-cargo-canary";
+// Test binaries no hosted runner can judge, keyed package::test-target: their
+// assertion is calibrated on real hardware. The pre-push hook (a developer's
+// machine) runs them; the plan gives them no closure-tests row and names them,
+// with the reason, in `hosted_runner_excluded`, which the hook coverage check
+// accepts in place of a row.
+export const HOSTED_RUNNER_EXCLUDED_BINARIES = [
+  {
+    binary: "meerkat-meta::idle_cpu_gate",
+    reason:
+      "an absolute per-30-second CPU budget calibrated on real hardware: shared hosted runners read 3-4 s " +
+      "where real machines read 0.5-2 s, even scheduled alone (Meta's own CI left it out the same way; " +
+      "its release-gate protocol runs it)",
+  },
+];
 const CLOSURE_TEST_PROFILE = "ci-integration";
 const CLOSURE_LIB_PROFILE = "ci-unit";
 // Compile and link of one tests/*.rs binary, in cost units. Uncalibrated:
@@ -396,6 +410,11 @@ export const FEATURE_UNIT_SUITES = [
   // hand-built MeerkatMachine inputs broke silently when RegisterSession
   // gained initial_run_start_holds, because no lane enabled the feature.
   { package: "meerkat-machine-kernels", id: "test-oracle", features: ["test-oracle"] },
+  // Meta (meta/): the openai-live and extension-state code its default
+  // features compile out, which Meta's own CI tested in jobs of their own.
+  // Its rows carry Meta's test stack (ci/products.json).
+  { package: "meerkat-meta", id: "openai-live", features: ["openai-live"] },
+  { package: "meerkat-meta", id: "extension-state", features: ["extension-state", "announcement-test-faults", "console-test-faults"] },
 ];
 
 // Integration-test suites. Every unit lane runs `--lib --bins`, so a crate's
@@ -1781,7 +1800,7 @@ function countCanaryTests(source, prefix) {
 // b45c8e60: `--workspace --test ...` rows 472/472 and 380/380 units identical
 // to the hook's, `--workspace --lib` 572/572; package-scoped rows differed in
 // 31-39 units (dependency features), and so does `--workspace --exclude`.
-function hookParityRows({ scope, byName, unified, model, maxTestRows, nextestText, hook, libRowRunner, productOf = () => "core", productStack = () => null }) {
+function hookParityRows({ scope, byName, unified, model, maxTestRows, nextestText, hook, libRowRunner, productOf = () => "core", productStack = () => null, excluded = new Set() }) {
   const rows = [];
   const testTargets = (name) =>
     byName.get(name).targets.filter((target) => target.kind.length === 1 && target.kind[0] === "test");
@@ -1828,6 +1847,8 @@ function hookParityRows({ scope, byName, unified, model, maxTestRows, nextestTex
   for (const name of scope) {
     for (const target of testTargets(name)) {
       if (!hookBuilt(name, target) || !keep({ kind: "test", binary: target.name, package: name })) continue;
+      // A binary no hosted runner can judge gets no row (the plan names it).
+      if (excluded.has(`${name}::${target.name}`)) continue;
       if (!home.has(target.name)) home.set(target.name, name);
     }
   }
@@ -2311,7 +2332,7 @@ function plan(args) {
         throw new Error(`feature unit suite ${suite.package}[${suite.id}] names unknown feature ${feature}`);
       }
     }
-    return {
+    const row = {
       name: `${shortName(suite.package)}[${suite.id}]`,
       packages: [suite.package],
       features: [...suite.features],
@@ -2320,6 +2341,8 @@ function plan(args) {
       pull_request: suite.pullRequest !== false,
       ...(suite.rustMinStack ? { rust_min_stack: suite.rustMinStack } : {}),
     };
+    // A suite names its product; a product's suite runs on its test stack.
+    return withProduct(row, productOf.get(suite.package) ?? CORE);
   });
   // What a pull-request plan leaves to the push (see the header); the push
   // itself runs everything, and a release projection keeps its own plan.
@@ -2587,9 +2610,11 @@ function plan(args) {
     // suites run as archived lanes); with the unit lanes, those of a changed
     // package outside the heavy chain, but in a pull request only the suites
     // not marked `pullRequest: false`.
-    result.main_feature_unit_shards = result.core_changed
-      ? featureSuites.filter((suite) => !archivedPackages.has(suite.packages[0]))
-      : [];
+    // Without a Core change, the suites of the changed products' closure.
+    const mainUnitScopeSet = new Set(mainUnitScope);
+    result.main_feature_unit_shards = featureSuites.filter(
+      (suite) => !archivedPackages.has(suite.packages[0]) && mainUnitScopeSet.has(suite.packages[0]),
+    );
     const changedSuites = featureSuites.filter(
       (suite) => result.unit_packages.includes(suite.packages[0]) && !heavyChain.has(suite.packages[0]),
     );
@@ -2806,6 +2831,14 @@ function plan(args) {
   // the main and nightly unit lanes.
   result.lib_row_runner = args.libRowRunner || null;
   result.hook_retained_lanes = result.lib_row_runner ? [] : [hookLibLane(hook).label];
+  result.hosted_runner_excluded = HOSTED_RUNNER_EXCLUDED_BINARIES.filter(({ binary }) => {
+    const [name, test] = binary.split("::");
+    if (!byName.has(name)) throw new Error(`hosted-runner exclusion names unknown package ${name}`);
+    if (!byName.get(name).targets.some((target) => target.kind.includes("test") && target.name === test)) {
+      throw new Error(`hosted-runner exclusion names unknown test target ${binary}`);
+    }
+    return result.test_scope.includes(name);
+  });
   const rows = result.test_scope.length > 0
     ? hookParityRows({
       scope: result.test_scope,
@@ -2818,6 +2851,7 @@ function plan(args) {
       libRowRunner: result.lib_row_runner,
       productOf: (name) => productOf.get(name) ?? CORE,
       productStack: (product) => products.find((candidate) => candidate.name === product)?.testStack ?? null,
+      excluded: new Set(result.hosted_runner_excluded.map(({ binary }) => binary)),
     })
     : [];
   // A pull-request plan is checked against the rows its push runs.

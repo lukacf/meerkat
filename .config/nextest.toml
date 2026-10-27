@@ -506,3 +506,34 @@ retries = 2
 # smoke-fixes PR #285 — the lexically-orthogonal SWARM_MARKER_7F3X2A
 # marker + the fix in `crates/meerkat-openai/src/live.rs` obviated the need for
 # retry absorption on that scenario.
+
+# Meta (meta/, ci/products.json). Nextest reads only the workspace root's
+# configuration, so the overrides of meta/.config/nextest.toml live here (the
+# reasons for each stay in that file); the default profile's overrides apply
+# to every profile.
+#
+# Meta's runtime-heavy integration binaries boot real gateways or reference
+# runtimes and crash or time out under aggregate load while passing alone: at
+# most two run at once, each with two retries.
+[test-groups.meta-heavy-runtime]
+max-threads = 2
+
+[[profile.default.overrides]]
+filter = 'package(meerkat-meta) & (binary(routing_delivery) + binary(list_runs) + binary(list_flows_run_flow) + binary(mob_events_cursor_persistence) + binary(mob_events_query_ledger) + binary(mob_events_streaming) + binary(access_control) + binary(unified_console) + binary(repair_queue_carry) + binary(meta_gateway_bootstrap) + binary(gateway_concurrent_dispatch) + binary(gateway_schedule_lease_release) + binary(gateway_exit_reason))'
+test-group = 'meta-heavy-runtime'
+retries = 2
+
+# Meta's idle CPU gate measures real 30-second windows, so nothing runs beside
+# it. Hosted CI runners are no valid measurement environment for its budget:
+# the CI plan leaves its binary out (HOSTED_RUNNER_EXCLUDED_BINARIES in
+# scripts/ci-cargo-lanes.mjs), and local runs keep it armed.
+[[profile.default.overrides]]
+filter = 'package(meerkat-meta) & test(converged_idle_gateway_consumes_near_zero_cpu)'
+threads-required = "num-cpus"
+
+# Meta's tests size their own waits against a 300-second kill (one-minute
+# periods, five of them); a shorter profile bound would replace their
+# self-describing failures with a timeout that names nothing.
+[[profile.default.overrides]]
+filter = 'package(meerkat-meta) | package(meta-extension-state) | package(meta-store-conformance)'
+slow-timeout = { period = "60s", terminate-after = 5 }

@@ -2,33 +2,35 @@
 set -euo pipefail
 
 # usage: machine_verify_all_tlc_test.sh <xtask-bin> [--part <part>]
-#        machine_verify_all_tlc_test.sh --part audits-a|audits-b|audits-c
+#        machine_verify_all_tlc_test.sh --part audits-a|audits-b|audits-c|audits-d
 # The canonical TLC lane, split into parts so each fits a CI job limit:
 #   machine-verify  the bounded adaptive witness plus `machine-verify --all`
 #   audits-a        hand-written audit shard A
 #   audits-b        hand-written audit shard B
 #   audits-c        hand-written audit shard C
+#   audits-d        hand-written audit shard D
 #   all             every part (the default: `make machine-verify`, the
 #                   nightly bounded TLC job and the release gate)
-# Bazel runs the four parts as separate targets (machine_verify_all_tlc_test,
+# Bazel runs the five parts as separate targets (machine_verify_all_tlc_test,
 # machine_verify_audits_a_tlc_test, machine_verify_audits_b_tlc_test,
-# machine_verify_audits_c_tlc_test) so the BuildBuddy machine-authority lane
-# runs them in parallel; together they are exactly `all`.
+# machine_verify_audits_c_tlc_test, machine_verify_audits_d_tlc_test) so the
+# BuildBuddy machine-authority lane runs them in parallel; together they are
+# exactly `all`.
 # The audit shards never execute xtask, so they alone may omit its path.
 lane_part="all"
-if [[ "${1:-}" == "--part" && ( "${2:-}" == "audits-a" || "${2:-}" == "audits-b" || "${2:-}" == "audits-c" ) ]]; then
+if [[ "${1:-}" == "--part" && ( "${2:-}" == "audits-a" || "${2:-}" == "audits-b" || "${2:-}" == "audits-c" || "${2:-}" == "audits-d" ) ]]; then
   xtask_bin=""
   lane_part="$2"
 else
-  xtask_bin="${1:?xtask binary path is required (only --part audits-a|audits-b|audits-c may omit it)}"
+  xtask_bin="${1:?xtask binary path is required (only --part audits-a|audits-b|audits-c|audits-d may omit it)}"
   if [[ "${2:-}" == "--part" ]]; then
-    lane_part="${3:?--part needs machine-verify, audits-a, audits-b, audits-c or all}"
+    lane_part="${3:?--part needs machine-verify, audits-a, audits-b, audits-c, audits-d or all}"
   fi
 fi
 case "${lane_part}" in
-  machine-verify|audits-a|audits-b|audits-c|all) ;;
+  machine-verify|audits-a|audits-b|audits-c|audits-d|all) ;;
   *)
-    echo "error: unknown lane part '${lane_part}' (machine-verify, audits-a, audits-b, audits-c, all)" >&2
+    echo "error: unknown lane part '${lane_part}' (machine-verify, audits-a, audits-b, audits-c, audits-d, all)" >&2
     exit 2
     ;;
 esac
@@ -280,7 +282,7 @@ if [[ ! -x "${materialization_rollback_keep_audit}" ]]; then
   echo "error: materialization-rollback keep audit runner is missing from workspace runfiles: ${materialization_rollback_keep_audit}" >&2
   exit 1
 fi
-if run_part audits-c; then
+if run_part audits-d; then
   echo "running bounded materialization-rollback keep TLC audit"
   TLC_WORKERS="${tlc_workers}" "${materialization_rollback_keep_audit}" "${MATERIALIZATION_ROLLBACK_KEEP_AUDIT_MAX_STEPS:-50}" --mutants
 fi
@@ -304,7 +306,7 @@ if [[ ! -x "${live_result_barrier_audit}" ]]; then
   echo "error: live-context result barrier audit runner is missing from workspace runfiles: ${live_result_barrier_audit}" >&2
   exit 1
 fi
-if run_part audits-a; then
+if run_part audits-b; then
   echo "running bounded live-context result barrier TLC audit"
   TLC_WORKERS="${tlc_workers}" "${live_result_barrier_audit}" "${LIVE_CONTEXT_RESULT_BARRIER_AUDIT_MAX_STEPS:-21}" --mutants
 fi
@@ -409,7 +411,7 @@ if [[ ! -x "${peer_request_maps_audit}" ]]; then
   echo "error: peer request maps audit runner is missing from workspace runfiles: ${peer_request_maps_audit}" >&2
   exit 1
 fi
-if run_part audits-b; then
+if run_part audits-c; then
   echo "running bounded peer request maps TLC audit"
   TLC_WORKERS="${tlc_workers}" "${peer_request_maps_audit}" "${PEER_REQUEST_MAPS_AUDIT_MAX_STEPS:-8}" --mutants
 fi
@@ -419,7 +421,7 @@ if [[ ! -x "${mob_operator_grant_audit}" ]]; then
   echo "error: mob operator grant audit runner is missing from workspace runfiles: ${mob_operator_grant_audit}" >&2
   exit 1
 fi
-if run_part audits-a; then
+if run_part audits-d; then
   echo "running bounded mob operator grant TLC audit"
   TLC_WORKERS="${tlc_workers}" "${mob_operator_grant_audit}" "${MOB_OPERATOR_GRANT_AUDIT_MAX_STEPS:-5}" --mutants
 fi
@@ -494,7 +496,7 @@ if [[ ! -x "${member_lifecycle_audit}" ]]; then
   echo "error: member lifecycle audit runner is missing from workspace runfiles: ${member_lifecycle_audit}" >&2
   exit 1
 fi
-if run_part audits-b; then
+if run_part audits-d; then
   echo "running member lifecycle TLC audit"
   TLC_WORKERS="${tlc_workers}" "${member_lifecycle_audit}" --mutants
 fi
@@ -594,27 +596,26 @@ run_machine_verify() {
 # Shard assignment balances measured audit cost on hosted 4-vCPU CI runners
 # (4 TLC workers, default bounds), where each TLC run's JVM start and model
 # parse is most of a small audit. Hosted seconds per audit on pull-request
-# run 40167083875, with push run 40167079954 in brackets (its runners were
-# 1.2-1.6x slower):
-# audits-a = live unregister cleanup 298 (301), mob operator grant with
-# --mutants 218 (214), durable-tail recovery ownership with --mutants 178
-# (216), live-context outbox 153 (149), live-context result barrier with
-# --mutants 34 (35), live worker start after close 26 (26): about 905 s
-# (940 s);
-# audits-b = durable in-turn steer with its per-kind goal runs 427 (the job
-# timeout cut it off after 296), member lifecycle with --mutants 202 (250),
-# peer request maps with --mutants 92 (119), live delegation steer 34 (45),
-# durable-tail classification with --mutants 24 (34): about 780 s (about
-# 985 s, the steer audit estimated at 1.26x);
-# audits-c = materialization-rollback keep with --mutants 185 (237),
-# run-start hold 144 (243), live media health 104 (153), requeue-across-stop
-# 90 (131), live-context causal-tail batch with --mutants 74 (110),
-# generation high-water with --mutants 38 (55): about 635 s (930 s).
-# With the durable-tail recovery ownership and materialization-rollback keep
-# audits both in audits-b, that shard ran 1143 s on the pull request, past
-# the 1080 s execution budget, and hit the 20-minute job timeout on the
-# push. A new audit joins the lightest shard. Shard of the two audits the
-# `all` lane runs concurrently with machine-verify below:
+# run 40434437174 (three shards then: 942, 976 and 758 s of audits; the
+# slowest of 40 pull-request runs before it reached 1046 s, near the 1080 s
+# execution budget):
+# audits-a = live unregister cleanup 298, durable-tail recovery ownership
+# with --mutants 214, live-context outbox 158, live worker start after close
+# 25: about 695 s;
+# audits-b = durable in-turn steer with its per-kind goal runs 531, live
+# delegation steer 45, live-context result barrier with --mutants 34,
+# durable-tail classification with --mutants 34: about 644 s;
+# audits-c = run-start hold 193, live media health 123, peer request maps
+# with --mutants 119, requeue-across-stop 111, live-context causal-tail batch
+# with --mutants 91, generation high-water with --mutants 44: about 681 s;
+# audits-d = member lifecycle with --mutants 247, mob operator grant with
+# --mutants 213, materialization-rollback keep with --mutants 196: about
+# 656 s.
+# Keep the durable-tail recovery ownership and materialization-rollback keep
+# audits apart: together in one shard of three they ran 1143 s on a pull
+# request, past the 1080 s execution budget, and hit the 20-minute job
+# timeout on the push. A new audit joins the lightest shard. Shard of the two
+# audits the `all` lane runs concurrently with machine-verify below:
 durable_steer_shard="audits-b"
 live_context_outbox_shard="audits-a"
 

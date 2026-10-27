@@ -22,8 +22,10 @@ import {
   workspaceFeatures,
 } from "./ci-hook-coverage.mjs";
 import {
+  FEATURE_UNIT_SUITES,
   GOVERNANCE_DOC_PATTERNS,
   GUARD_LANE_INPUTS,
+  HOSTED_RUNNER_EXCLUDED_BINARIES,
   MOB_CHAIN_CLIPPY_HEADS,
   MOB_CHAIN_INVALIDATED,
   PARTITIONED_UNIT_PACKAGES,
@@ -3206,6 +3208,33 @@ for (const path of [
           [...plan.closure].sort(),
           `${label}: the main unit sweep covers the product's closure only`,
         );
+        // The feature suites of the closure's packages, and only those, each
+        // on its product's test stack.
+        assert.deepEqual(
+          plan.main_feature_unit_shards.map((row) => row.package_flags).sort(),
+          FEATURE_UNIT_SUITES.filter((suite) => plan.closure.includes(suite.package))
+            .map((suite) => `-p ${suite.package} --features ${suite.features.join(",")}`).sort(),
+          `${label}: the feature suites of the product's closure`,
+        );
+        for (const row of plan.main_feature_unit_shards) {
+          const owner = productOf(plan, row.packages[0]);
+          assert.equal(row.product, owner, `${label}: ${row.name} names its product`);
+          const stack = PRODUCTS.find((entry) => entry.name === owner)?.testStack ?? null;
+          if (stack) assert.equal(row.rust_min_stack, stack, `${label}: ${row.name} runs on ${owner}'s test stack`);
+        }
+        // A binary no hosted runner can judge gets no row and is named.
+        for (const { binary } of HOSTED_RUNNER_EXCLUDED_BINARIES) {
+          const inScope = plan.test_scope.includes(binary.split("::")[0]);
+          assert.equal(
+            plan.hosted_runner_excluded.some((entry) => entry.binary === binary),
+            inScope,
+            `${label}: ${binary} is named exactly when its package is in the test scope`,
+          );
+          assert.ok(
+            !plan.closure_test_rows.some((row) => row.binaries.includes(binary)),
+            `${label}: no closure-tests row runs ${binary}`,
+          );
+        }
         assert.equal(plan.deferred_to_push, null);
       } else {
         assert.equal(plan.deferred_to_push.governed_jsonl, false, `${label}: leaves no Core guard lane to the push`);

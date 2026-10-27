@@ -49,7 +49,123 @@ impl Binding {
     }
 }
 
-/// Exact selected configuration is supplied by protected application composition.
+/// Compiled intent composed before native commissioning. No installed account,
+/// connection or Ready object is available or cached at this stage.
+pub struct GheProgram {
+    source_id: String,
+    requirement_id: String,
+    resource: Value,
+    operations: BTreeSet<String>,
+    repository: GheRepository,
+    spec: ProgramSpec,
+    limits: ProgramLimits,
+    history: Arc<HistoricalStore>,
+}
+impl GheProgram {
+    pub fn new(
+        source_id: String,
+        requirement_id: String,
+        repository: GheRepository,
+        spec: ProgramSpec,
+        limits: ProgramLimits,
+        history: Arc<HistoricalStore>,
+    ) -> Result<Self, AdapterError> {
+        let name = |s: &str| !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control);
+        if !name(&source_id) || !name(&requirement_id) {
+            return Err(AdapterError::InvalidSelection);
+        }
+        spec.build(&repository, limits)
+            .map_err(|_| AdapterError::InvalidSelection)?;
+        let resource = spec.resource(&repository, limits);
+        if resource.to_string().len() > 4096 {
+            return Err(AdapterError::InvalidSelection);
+        }
+        Ok(Self {
+            source_id,
+            requirement_id,
+            resource,
+            operations: spec.operations().into_iter().collect(),
+            repository,
+            spec,
+            limits,
+            history,
+        })
+    }
+
+    pub fn requirement(self: &Arc<Self>) -> Result<RequiredCollectionOperation, AdapterError> {
+        let program: Arc<dyn CollectionProgram> = self.clone();
+        RequiredCollectionOperation::new(
+            self.requirement_id.clone(),
+            self.resource.clone(),
+            self.operations.iter().cloned().collect(),
+            program,
+        )
+        .map_err(|_| AdapterError::NativeContractRefused)
+    }
+
+    fn matches(&self, target: &CollectionTarget<'_>) -> bool {
+        self.source_id == target.source_id()
+            && self.requirement_id == target.required_operation_id()
+            && &self.resource == target.resource()
+            && &self.operations == target.raw_operation_ceiling()
+            && installation_matches(
+                target.installed_connection(),
+                &self.repository.host,
+                &self.operations,
+            )
+    }
+
+    // Called with the actual selected target only at start. The resulting
+    // binding belongs to that attempt; it never replaces the factory's intent.
+    fn bind(&self, installed: McpServerConfig) -> Result<BoundGheProgram, AdapterError> {
+        if !installation_matches(&installed, &self.repository.host, &self.operations) {
+            return Err(AdapterError::InvalidSelection);
+        }
+        Ok(BoundGheProgram {
+            binding: Arc::new(Binding {
+                source_id: self.source_id.clone(),
+                requirement_id: self.requirement_id.clone(),
+                resource: self.resource.clone(),
+                operations: self.operations.clone(),
+                installed,
+            }),
+            repository: self.repository.clone(),
+            spec: self.spec.clone(),
+            limits: self.limits,
+            history: self.history.clone(),
+        })
+    }
+}
+
+impl CollectionProgram for GheProgram {
+    fn accepts_target(&self, target: &CollectionTarget<'_>) -> bool {
+        self.matches(target)
+    }
+
+    fn start(&self, target: &CollectionTarget<'_>) -> Box<dyn CollectionCursor> {
+        // Recheck even when accepts_target previously succeeded. Only the real
+        // native target supplies this attempt's complete installed descriptor.
+        if self.matches(target)
+            && let Ok(bound) = self.bind(target.installed_connection().clone())
+        {
+            return bound.start(target);
+        }
+        Box::new(RefusedCursor)
+    }
+}
+
+struct RefusedCursor;
+impl CollectionCursor for RefusedCursor {
+    fn begin(&mut self) -> CollectionStep {
+        CollectionStep::Refuse
+    }
+
+    fn observe(&mut self, _: &CommittedCollectionResult<'_>) -> CollectionStep {
+        CollectionStep::Refuse
+    }
+}
+
+/// Exact selected configuration is captured from the actual native target.
 /// Equality preserves its account/endpoint expectations; it does not verify the
 /// account, executable bytes, credential continuity or caller. Those are native
 /// owners' responsibilities, and cannot be supplied by a JSON success flag.
@@ -70,34 +186,8 @@ impl BoundGheProgram {
         limits: ProgramLimits,
         history: Arc<HistoricalStore>,
     ) -> Result<Self, AdapterError> {
-        let name = |s: &str| !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control);
-        if !name(&source_id) || !name(&requirement_id) {
-            return Err(AdapterError::InvalidSelection);
-        }
-        // Build once to reject invalid selectors before any native admission.
-        spec.build(&repository, limits)
-            .map_err(|_| AdapterError::InvalidSelection)?;
-        let operations: BTreeSet<_> = spec.operations().into_iter().collect();
-        if !installation_matches(&installed, &repository.host, &operations) {
-            return Err(AdapterError::InvalidSelection);
-        }
-        let resource = spec.resource(&repository, limits);
-        if resource.to_string().len() > 4096 {
-            return Err(AdapterError::InvalidSelection);
-        }
-        Ok(Self {
-            binding: Arc::new(Binding {
-                source_id,
-                requirement_id,
-                resource,
-                operations,
-                installed,
-            }),
-            repository,
-            spec,
-            limits,
-            history,
-        })
+        GheProgram::new(source_id, requirement_id, repository, spec, limits, history)?
+            .bind(installed)
     }
     /// The caller composes this exact row into its original source. Neither the
     /// source ID nor the raw operation ceiling is merged or derived from prose.
@@ -470,6 +560,76 @@ mod tests {
         assert_eq!(p.binding.resource["host"], "ghe.example.test");
         assert_eq!(p.binding.installed, config());
         assert!(Arc::new(p).requirement().is_ok());
+    }
+    #[test]
+    fn intent_can_be_composed_without_an_installed_connection() {
+        let intent = Arc::new(
+            GheProgram::new(
+                "original-source".into(),
+                "original-requirement".into(),
+                repo(),
+                ProgramSpec::PullRequestStatuses {
+                    number: 17,
+                    head: None,
+                },
+                limits(),
+                Arc::new(HistoricalStore::default()),
+            )
+            .unwrap(),
+        );
+        assert!(intent.requirement().is_ok());
+        assert_eq!(intent.resource["selector"]["number"], 17);
+        assert_eq!(
+            intent.operations,
+            ["pull_request_read".into()].into_iter().collect()
+        );
+        assert!(
+            GheProgram::new(
+                "original-source".into(),
+                "original-requirement".into(),
+                repo(),
+                ProgramSpec::PullRequestStatuses {
+                    number: 0,
+                    head: None
+                },
+                limits(),
+                Arc::new(HistoricalStore::default()),
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn factory_bindings_retain_each_attempt_configuration_without_replacing_prior_binding() {
+        let intent = GheProgram::new(
+            "original-source".into(),
+            "original-requirement".into(),
+            repo(),
+            ProgramSpec::PullRequestStatuses {
+                number: 17,
+                head: None,
+            },
+            limits(),
+            Arc::new(HistoricalStore::default()),
+        )
+        .unwrap();
+        let first = intent.bind(config()).unwrap();
+        let mut second_config = config();
+        second_config.name = "another-native-selection".into();
+        second_config.connect_timeout_secs = Some(12);
+        let second = intent.bind(second_config.clone()).unwrap();
+        assert_eq!(first.binding.installed, config());
+        assert_eq!(second.binding.installed, second_config);
+        assert!(!Arc::ptr_eq(&first.binding, &second.binding));
+        let mut foreign = config();
+        stdio(&mut foreign).args[1] = "--gh-host=https://foreign.example.test".into();
+        assert!(intent.bind(foreign).is_err());
+        assert_eq!(first.binding.installed, config());
+        assert_eq!(second.binding.installed, second_config);
+        let mut refused = RefusedCursor;
+        assert!(matches!(refused.begin(), CollectionStep::Refuse));
+        assert!(matches!(refused.begin(), CollectionStep::Refuse));
+        // These are configuration-only controls. Real target admission and
+        // committed result delivery remain with the native owner's lane.
     }
     #[test]
     fn wrong_host_plain_environment_or_unbounded_toolsets_are_rejected() {

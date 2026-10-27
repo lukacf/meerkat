@@ -10,9 +10,17 @@ installed path, artifact identity or launcher command is assigned here.
 
 ## Current source
 
-`BoundGheProgram` derives one exact resource from a compiled `ProgramSpec`, its
-repository and finite limits. It preserves the caller's original source and
-requirement IDs. It compares every actual target's source, requirement, resource,
+`GheProgram` composes immutable selection intent before commissioning from a
+compiled `ProgramSpec`, its repository and finite limits. It creates a native
+requirement without an installed connection or account. Both `accepts_target`
+and `start` validate the actual target's IDs, resource, operation ceiling and
+endpoint/account/operation configuration. Each successful `start` captures the
+actual `CollectionTarget::installed_connection()` in a fresh `BoundGheProgram`;
+unsupported input produces only refusal. No installed configuration is
+reconstructed from mapping text or cached across attempts.
+
+`BoundGheProgram` preserves the caller's original source and requirement IDs.
+It compares every actual target's source, requirement, resource,
 raw operation ceiling and complete installed descriptor with that selection.
 The descriptor must name an absolute executable, the exact enterprise host,
 read-only mode, disabled default toolsets and an explicit matching native access
@@ -44,9 +52,9 @@ This source integration is uncompiled and has no native acceptance result.
 exact resource shape emitted by the catalog, including selector and budget
 fields. It runs the existing pure constructor checks and requires an exact
 resource round trip. Unknown or ignored fields, executable commands and native
-readiness flags are refused. This decodes selection intent only; protected
-composition must still supply the actual installed configuration, original
-caller and native final report. The protected entry source contract is now
+readiness flags are refused. This decodes selection intent only; the native
+owner still supplies the actual target, original caller and final report.
+The protected entry source contract is now
 available for integration, but this library has no executable entry yet.
 Repository metadata and revision-bearing historical check support remain separate inventory
 requirements.
@@ -60,7 +68,12 @@ after the completion callback and can refuse the overall source. Taking rows
 cannot substitute for that final native report, original cleanup ownership or
 credential-continuity evidence. The application must retain both the final
 native source report and these correlated historical data when composing actual
-ingestion. No data-export protocol or successful ingestion claim is added here.
+ingestion. Retain the report from the matching protocol7 SDK-validated collection
+event, including partial/failure reports. The request ID alone is not completion;
+`ProtectedServiceRun::join` proves owner close completion, not a source report or
+durable storage receipt. A native `ServiceCollectionFailure` also retains its
+actual reports and original error without proving delivery over a broken pipe.
+No data-export protocol or successful ingestion claim is added here.
 
 ## Dependency and verification limits
 
@@ -70,9 +83,13 @@ separate from the pure serde-only GHE crate and the released Forge runtime.
 There is no lockfile or native build result yet. Formatting parses the source;
 it does not typecheck the APIs, resolve the native graph or execute controls.
 
-Eight native-crate controls cover invalid target selectors, configuration
+Ten native-crate controls cover invalid target selectors, configuration
 and account declaration refusal, operation ceilings, the compiled catalog and
-closed resource decoder, and repeated `begin`. They remain unrun. The original owner must also exercise real
+closed resource decoder, factory composition without a configuration, separate
+attempt configuration retention, and repeated `begin`. They remain unrun.
+The original owner must also exercise real factory target rejection in both
+`accepts_target` and `start`, distinct starts with different installed descriptors,
+and refusal of changed targets within an existing cursor, as well as real
 committed-result delivery, target/context changes, parser errors and storage
 limits through the actual native engine. Tests must not fabricate
 `CommittedCollectionResult` or replace native authority with fixture structs.

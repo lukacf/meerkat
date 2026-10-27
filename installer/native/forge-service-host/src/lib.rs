@@ -6,4 +6,4 @@ mod program;
 
 pub use catalog::{GheRepository, ProgramLimits, ProgramSpec};
 pub use history::{HistoricalCollection, HistoricalObservation, HistoricalStore, ParsedHistory};
-pub use program::{AdapterError, BoundGheProgram};
+pub use program::{AdapterError, BoundGheProgram, GheProgram};

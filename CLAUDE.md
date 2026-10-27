@@ -561,7 +561,10 @@ and its CI must be green before a release tag (`require_ci_green`):
   planned. The plan
   fails when `scripts/ci-hook-coverage.mjs` finds a hook binary in scope
   without a row (other than a lib binary the plan leaves to those unit
-  lanes; a pull-request plan is checked against its push's rows): it
+  lanes, and a binary no hosted runner can judge,
+  `HOSTED_RUNNER_EXCLUDED_BINARIES`, which the plan names with its reason in
+  `hosted_runner_excluded`: Meta's idle CPU gate, whose budget is calibrated
+  on real hardware; a pull-request plan is checked against its push's rows): it
   reads the hook's lanes from `scripts/pre-push-unit.sh`, binds every line
   of the executing step that names a row input, the exported test-thread
   stack, the selection, nextest or the binary check (so none can reassign

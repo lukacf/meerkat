@@ -647,7 +647,16 @@ export function checkHookCoverage(plan, { metadata = readMetadata(), nextestText
   }
 
   const headKey = `HeadCanonical::${hc.package}::${hc.test}`;
-  const missing = [...expected.keys()].filter((key) => !covered.has(key)).sort();
+  // A binary no hosted runner can judge (HOSTED_RUNNER_EXCLUDED_BINARIES in
+  // scripts/ci-cargo-lanes.mjs) is named by the plan instead of run by a row.
+  const excludedKeys = new Set((plan.hosted_runner_excluded ?? []).map(({ binary }) => {
+    const [name, test] = String(binary).split("::");
+    return `${name}::test::${test}`;
+  }));
+  for (const key of excludedKeys) {
+    if (covered.has(key)) errors.push(`${key} is excluded from hosted runners but a row runs it (${covered.get(key)})`);
+  }
+  const missing = [...expected.keys()].filter((key) => !covered.has(key) && !excludedKeys.has(key)).sort();
   if (headCanonicalExpected && !headCanonical) missing.push(headKey);
   const byLane = {};
   for (const { lane } of [...expected.values(), ...retained.values()]) byLane[lane] = (byLane[lane] ?? 0) + 1;
@@ -662,7 +671,9 @@ export function checkHookCoverage(plan, { metadata = readMetadata(), nextestText
     map: Object.fromEntries([
       ...[...expected.keys(), ...retained.keys()].sort().map((key) => [
         key,
-        covered.get(key) ?? (retained.has(key) ? `unit lanes (main, nightly): ${retained.get(key).lane}` : null),
+        covered.get(key)
+          ?? (retained.has(key) ? `unit lanes (main, nightly): ${retained.get(key).lane}` : null)
+          ?? (excludedKeys.has(key) ? "no hosted runner (hosted_runner_excluded): the pre-push hook" : null),
       ]),
       ...(headCanonicalExpected ? [[headKey, headCanonical]] : []),
     ]),

@@ -19,8 +19,8 @@ pub use pull_requests::{
 };
 mod issues;
 pub use issues::{
-    IssueComments, IssueQuery, IssueReadLimits, IssueRecord, ReportedIssueComments, ReportedIssues,
-    RepositoryIssues,
+    IssueComments, IssueHierarchy, IssueParentReference, IssueQuery, IssueReadLimits, IssueRecord,
+    ReportedIssueComments, ReportedIssueHierarchy, ReportedIssues, RepositoryIssues,
 };
 mod actions;
 pub use actions::{

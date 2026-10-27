@@ -186,6 +186,19 @@ filtered-after-pagination implementation as ordinary PR comments, so a short
 page does not independently prove complete unfiltered coverage. Matching detail
 reads cannot rule out intervening edits. These remain reported page sets.
 
+`IssueHierarchy` reads direct parent and paged child relationships between two
+matching issue details. It requires explicit `has_parent` and `has_children`
+enrichment and, for children, the structural total. Missing enrichment refuses
+instead of becoming an empty hierarchy. A null parent with `has_parent=true`,
+or a filtered short child page that fails to reach the structural total, refuses.
+An exact multiple of 100 children requires an empty terminal page before the
+final detail reobservation. Canonical same-host issue links retain distinct
+cross-repository identities without scheduling any reads of those repositories.
+Optional database IDs remain optional and are checked for duplicates when present.
+Matching counts, state, update time and returned parent summaries detect observed
+changes, not an atomic snapshot or a complete transitive hierarchy. Capped
+closing-PR references and custom fields remain partial metadata.
+
 The pinned PR list supplies no total, discards pagination headers, skips nil
 rows and exposes no date filter. A short-page observation therefore does not
 independently prove exhaustive recent history or outstanding-work coverage.
@@ -203,7 +216,7 @@ outcome.
 Native compatibility is not established by the pure controls. Connect source
 `762c4f4a5fab6f3f2cbb7e4441ffebbaeb3217f6` rejects a repeated requirement,
 operation and canonical-argument digest before dispatch. `PullRequestChanges`,
-`WorkflowRunJobs` and `IssueComments` intentionally repeat their initial detail
+`WorkflowRunJobs`, `IssueComments` and `IssueHierarchy` intentionally repeat their initial detail
 read after paging, so that native engine cannot consume them unchanged. A
 supported fresh-observation contract is required. Final verification must not
 be removed or bypassed with dummy arguments, requirement relabeling or reused

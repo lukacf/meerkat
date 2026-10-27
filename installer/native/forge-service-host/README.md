@@ -31,8 +31,8 @@ refresh a host or publish anything.
 
 The catalog covers PR statuses, review threads, changed files/commits, ordinary
 comments/reviews, bounded commit history, workflow runs/jobs, issue discovery,
-issue comments and PR discovery. `PullRequestChanges`, `WorkflowRunJobs` and
-`IssueComments` request native read-only enforcement for their initial detail
+issue comments, direct issue hierarchy and PR discovery. `PullRequestChanges`,
+`WorkflowRunJobs`, `IssueComments` and `IssueHierarchy` request native read-only enforcement for their initial detail
 call and retain the opaque read observation returned by the real committed,
 joined result. After the intervening pages, the exact final detail read consumes
 that handle through `ReobserveRead`. No replacement arguments or requirement
@@ -40,8 +40,7 @@ are supplied. A missing handle refuses; it never falls back to a normal duplicat
 call. The final body passes through the same parser checks and historical audit
 retention. Neither a parser result nor serialized history can provide a handle.
 This source integration is uncompiled and has no native acceptance result.
-Issue hierarchy, repository metadata
-and revision-bearing historical check support also remain separate inventory
+Repository metadata and revision-bearing historical check support remain separate inventory
 requirements.
 
 `HistoricalStore` retains completed parser output together with each exact call,
@@ -70,7 +69,7 @@ committed-result delivery, target/context changes, parser errors and storage
 limits through the actual native engine. Tests must not fabricate
 `CommittedCollectionResult` or replace native authority with fixture structs.
 
-For each of the three programs with a final detail read, the existing owner
+For each of the four programs with a final detail read, the existing owner
 must also prove an actual first read, intervening page and final reobservation:
 distinct native input/run/call identities with equal operation and arguments,
 both committed and joined, and a changed final body causing the parser's
@@ -79,6 +78,6 @@ changed target/configuration, budget exhaustion and a consumed handle must not
 dispatch a replacement or leave a retryable cursor. These controls are pending
 on the existing native qualification lane; no native objects are fabricated here.
 
-The pure program crate's 105 passing controls remain independent evidence for
-its parser behavior. They do not prove this adapter, parent authentication,
+The pure program crate's retained 105 controls and 11 additional hierarchy
+controls remain independent evidence for its parser behavior. They do not prove this adapter, parent authentication,
 original pipe ownership, final retirement/cleanup or installed GHE ingestion.

@@ -7,6 +7,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod hierarchy;
+pub use hierarchy::{IssueHierarchy, IssueParentReference, ReportedIssueHierarchy};
+
 const PAGE_SIZE: usize = 100;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

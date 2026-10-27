@@ -14,6 +14,7 @@ pub enum HistoricalCollection {
     Jobs(ReportedWorkflowRunJobs),
     Issues(ReportedIssues),
     IssueComments(ReportedIssueComments),
+    IssueHierarchy(ReportedIssueHierarchy),
     PullRequests(ReportedPullRequests),
 }
 

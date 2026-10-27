@@ -206,6 +206,7 @@ impl CollectionProgram for BoundGheProgram {
                     ProgramSpec::PullRequestChanges { .. }
                         | ProgramSpec::WorkflowRunJobs { .. }
                         | ProgramSpec::IssueComments { .. }
+                        | ProgramSpec::IssueHierarchy { .. }
                 ) =>
             {
                 engine.next().cloned().map(|call| FinalRead {
@@ -608,6 +609,7 @@ mod tests {
                 query: IssueQuery::Open,
             },
             ProgramSpec::IssueComments { number: 17 },
+            ProgramSpec::IssueHierarchy { number: 17 },
             ProgramSpec::PullRequests {
                 query: PullRequestQuery::All,
             },

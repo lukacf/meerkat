@@ -50,6 +50,9 @@ pub enum ProgramSpec {
     IssueComments {
         number: u64,
     },
+    IssueHierarchy {
+        number: u64,
+    },
     PullRequests {
         query: PullRequestQuery,
     },
@@ -65,6 +68,7 @@ pub(crate) enum Engine {
     Jobs(WorkflowRunJobs),
     Issues(RepositoryIssues),
     Comments(IssueComments),
+    Hierarchy(IssueHierarchy),
     PullRequests(RepositoryPullRequests),
 }
 
@@ -87,6 +91,7 @@ impl ProgramSpec {
             Self::WorkflowRunJobs { .. } => "ghe.workflow_jobs.v1",
             Self::Issues { .. } => "ghe.issues.v1",
             Self::IssueComments { .. } => "ghe.issue_comments.v1",
+            Self::IssueHierarchy { .. } => "ghe.issue_hierarchy.v1",
             Self::PullRequests { .. } => "ghe.pull_requests.v1",
         }
     }
@@ -101,7 +106,7 @@ impl ProgramSpec {
             Self::WorkflowRuns => vec!["actions_list"],
             Self::WorkflowRunJobs { .. } => vec!["actions_get", "actions_list"],
             Self::Issues { .. } => vec!["list_issues"],
-            Self::IssueComments { .. } => vec!["issue_read"],
+            Self::IssueComments { .. } | Self::IssueHierarchy { .. } => vec!["issue_read"],
             Self::PullRequests { .. } => vec!["list_pull_requests"],
         }
         .into_iter()
@@ -114,7 +119,8 @@ impl ProgramSpec {
             | Self::PullRequestChanges { number, head } => json!({"number":number,"head":head}),
             Self::PullRequestThreads { number }
             | Self::PullRequestDiscussion { number, .. }
-            | Self::IssueComments { number } => json!({"number":number}),
+            | Self::IssueComments { number }
+            | Self::IssueHierarchy { number } => json!({"number":number}),
             Self::History { head, since, until } => {
                 json!({"head":head,"since":since,"until":until})
             }
@@ -228,6 +234,13 @@ impl ProgramSpec {
                 *number,
                 IssueReadLimits::new(limits.calls, limits.result_bytes)?,
             )?),
+            Self::IssueHierarchy { number } => Engine::Hierarchy(IssueHierarchy::new(
+                h,
+                o,
+                r,
+                *number,
+                IssueReadLimits::new(limits.calls, limits.result_bytes)?,
+            )?),
             Self::PullRequests { query } => Engine::PullRequests(RepositoryPullRequests::new(
                 h,
                 o,
@@ -251,6 +264,7 @@ impl Engine {
             Self::Jobs(r) => r.next_call(),
             Self::Issues(r) => r.next_call(),
             Self::Comments(r) => r.next_call(),
+            Self::Hierarchy(r) => r.next_call(),
             Self::PullRequests(r) => r.next_call(),
         }
     }
@@ -271,6 +285,7 @@ impl Engine {
             Self::Jobs(r) => r.observe(op, args, payload)?.map(H::Jobs),
             Self::Issues(r) => r.observe(op, args, payload)?.map(H::Issues),
             Self::Comments(r) => r.observe(op, args, payload)?.map(H::IssueComments),
+            Self::Hierarchy(r) => r.observe(op, args, payload)?.map(H::IssueHierarchy),
             Self::PullRequests(r) => r.observe(op, args, payload)?.map(H::PullRequests),
         })
     }

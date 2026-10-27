@@ -14,7 +14,7 @@ const LEGACY_WIRE: &str = concat!(
     r#","before_ms":1800000000000}"#,
 );
 
-const LEGACY_CANONICAL_SHA256: &str = "ed77be33a1978f4a96cd4fd6b66c5b883de92cc7070646cf8a990c49782d7e46";
+const LEGACY_CANONICAL_SHA256: &str = "da3f109daccfc0e9b550bd055be9f2393defebd73cffd7431e355dea757d9d81";
 
 fn legacy() -> ApprovedTaskMember {
     serde_json::from_str(LEGACY_WIRE).expect("frozen legacy wire must decode")

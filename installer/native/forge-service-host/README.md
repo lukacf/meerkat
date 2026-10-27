@@ -103,6 +103,24 @@ The root's lifetime filesystem isolation must cover this archival phase as well
 as native helpers; this code does not create that isolation or modify provider
 credential roots.
 
+`launchkit.service_collection_history.match_history` now supplies the Forge
+consumer's data-matching step. After the original SDK process join, the root
+owner reads the original bounded archive and passes those bytes (or `None` if
+absent), the original `ServiceSetupBinding`, a tuple of retained SDK
+`event.report` objects, and the original `ServiceSetupClose`. It compares the
+full binding/context, source/requirement/resource, operation, canonical argument
+digest and serialized native audit. It refuses duplicate rows, missing verified
+rows, changed native identities and unknown archive fields. Distinct native
+final reads with equal operation/arguments remain distinct observations.
+
+The result retains immutable parser data with the original reports and close
+object, including failed native reports and nonzero process exits. It neither
+opens a path nor reconstructs reports from JSON. It does not independently
+recompute the full native result digest from an extracted text payload or redo
+the Rust parser's interpretation. The original protected file and native report
+remain required evidence. Root custody, actual native acceptance and governed
+admission remain separate. The matching controls use synthetic SDK data only.
+
 ## Current source
 
 `GheProgram` composes immutable selection intent before commissioning from a

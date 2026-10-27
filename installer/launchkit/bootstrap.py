@@ -57,7 +57,11 @@ class SelectedGuideRuntime:
         object.__setattr__(self, "_gateway_pin", (self.gateway.path, self.gateway.sha256))
         route = deepcopy(self._model_route)
         if route is not None:
-            allowed = {"provider", "model", "auth_binding", "meerkat_config_path"}
+            if type(route) is dict and "auth_binding" in route:
+                # Core ignores this key in mob profiles. An explicit selection
+                # must reach the native member API before Forge can accept it.
+                raise GatewayInstallError("This guide runtime cannot apply an explicit auth binding.")
+            allowed = {"provider", "model", "meerkat_config_path"}
             if (type(route) is not dict or not {"provider", "model"} <= route.keys()
                     or not route.keys() <= allowed
                     or any(type(value) is not str or not value or len(value) > 4096

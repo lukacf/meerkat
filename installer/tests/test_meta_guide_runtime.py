@@ -1,5 +1,6 @@
 """Exercise Forge's selected guide binding without launching native processes."""
 import asyncio
+from dataclasses import replace
 import hashlib
 import json
 
@@ -19,7 +20,7 @@ def selected(tmp_path, monkeypatch):
     selection = bootstrap.SelectedGuideRuntime(
         ExactFile(gateway, hashlib.sha256(gateway.read_bytes()).hexdigest()),
         guide_sdk.SELECTED_VERSION, guide_sdk.SELECTED_VERSION, "a" * 40, "b" * 40,
-        {"provider": "openai", "model": "gpt-6.1-sol", "auth_binding": "fixture-host-route"},
+        {"provider": "openai", "model": "gpt-6.1-sol"},
     )
     monkeypatch.setattr(bootstrap, "_selected_guide_runtime", selection)
     return selection
@@ -39,7 +40,6 @@ def test_agent_builder_uses_original_gateway_and_model_binding(selected):
     route = guide_runtime.selected_model_configuration()
     assert guide_runtime.model_profile_lines("openai", "gpt-6.1-sol", route) == [
         'model = "gpt-6.1-sol"', 'provider = "openai"',
-        'auth_binding = "fixture-host-route"',
     ]
     route["model"] = "changed-fixture"
     assert selected.model_configuration["model"] == "gpt-6.1-sol"
@@ -49,6 +49,31 @@ def test_agent_builder_uses_original_gateway_and_model_binding(selected):
     with pytest.raises(CustodyError, match="^The retained caller file no longer matches its selected bytes\\.$"):
         guide_runtime.configure_builder(builder, selected)
     assert len(builder.calls) == 1, "changed gateway bytes must be rejected before builder admission"
+
+
+@pytest.mark.parametrize("binding", ["fixture-host-route", {"realm": "fixture", "binding": "host"}])
+def test_fresh_guide_refuses_an_auth_binding_the_selected_runtime_cannot_apply(selected, binding):
+    route = {**selected.model_configuration, "auth_binding": binding}
+    with pytest.raises(bootstrap.GatewayInstallError, match="cannot apply an explicit auth binding"):
+        replace(selected, _model_route=route)
+    assert bootstrap.selected_guide_runtime() is selected
+
+
+@pytest.mark.parametrize("binding", ["fixture-host-route", {"realm": "fixture", "binding": "host"}])
+def test_worker_restore_refuses_unsupported_auth_binding_before_admission(selected, monkeypatch, binding):
+    control = bootstrap.export_selected_guide_context()
+    control["model_configuration"]["auth_binding"] = binding
+    monkeypatch.setattr(bootstrap, "_selected_guide_runtime", None)
+    with pytest.raises(bootstrap.GatewayInstallError, match="cannot apply an explicit auth binding"):
+        bootstrap.restore_selected_guide_context(control)
+    assert bootstrap.selected_guide_runtime() is None
+
+
+@pytest.mark.parametrize("binding", ["fixture-host-route", {"realm": "fixture", "binding": "host"}])
+def test_profile_authoring_refuses_unsupported_auth_binding_instead_of_emitting_ignored_toml(binding):
+    route = {"provider": "openai", "model": "gpt-6.1-sol", "auth_binding": binding}
+    with pytest.raises(RuntimeError, match="cannot apply an explicit auth binding"):
+        guide_runtime.model_profile_lines(route["provider"], route["model"], route)
 
 
 def test_no_implicit_predecessor_runtime(monkeypatch):

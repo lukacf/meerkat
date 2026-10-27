@@ -11,7 +11,6 @@ import signal
 import sqlite3
 import sys
 import time
-import tomllib
 
 from .architect import _native_request, _schema
 from .blueprint import Blueprint
@@ -29,9 +28,8 @@ QUIET_SECONDS = 2
 def rehearsal_mob_toml(spec, selected=None):
     """Keep compiler roles, members, profiles and flows; mask execution grants."""
     selected = selected or selected_runtime()
+    selected.recheck()
     definition = mob_toml(spec, native_version=selected.version, guide_runtime=selected)
-    profiles = tomllib.loads(definition)["profiles"]
-    configuration = selected.model_configuration
     lines, in_tools = [], False
     for line in definition.splitlines():
         if line.startswith("["):
@@ -39,13 +37,6 @@ def rehearsal_mob_toml(spec, selected=None):
             lines.append(line)
             if in_tools:
                 lines.append("mob = false")
-            elif line.startswith("[profiles.") and line.endswith("]"):
-                profile = profiles.get(line[len("[profiles."):-1])
-                if (profile is not None and configuration is not None
-                        and configuration.get("auth_binding") is not None
-                        and (profile["provider"], profile["model"]) ==
-                            (configuration["provider"], configuration["model"])):
-                    lines.append("auth_binding = " + json.dumps(configuration["auth_binding"]))
             continue
         if in_tools and line.partition(" = ")[0] in {"builtins", "shell", "workgraph", "schedule"}:
             line = line.partition(" = ")[0] + " = false"

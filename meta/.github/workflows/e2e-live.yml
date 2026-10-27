@@ -1,0 +1,56 @@
+# Real-API end-to-end lane. Costs money and needs a provider secret, so it is
+# NOT part of PR CI: nightly plus manual dispatch. It FAILS when the secret is
+# absent rather than skipping, because a live lane that skips is a green check
+# that gates nothing. Add the repository secret ANTHROPIC_API_KEY to enable it.
+name: e2e-live
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: read
+
+# The lane's log is read by grep, so Cargo prints it without color codes:
+# dtolnay/rust-toolchain sets CARGO_TERM_COLOR=always only when it is unset,
+# and the codes then sit inside the summary lines a check looks for.
+env:
+  CARGO_TERM_COLOR: never
+
+concurrency:
+  group: e2e-live
+  cancel-in-progress: false
+
+jobs:
+  e2e-live:
+    name: e2e-live (real rpc_gateway, real Anthropic turns)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    # The provider secret reaches only the step that makes the real calls;
+    # every other step, and the cache restore, runs without it. The cache is
+    # restore-only and carries no executables, so nothing this job runs
+    # beside the secret was written by a run that held it.
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Refuse to run without the provider secret
+        env:
+          HAS_PROVIDER_SECRET: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+        run: |
+          if [ "${HAS_PROVIDER_SECRET}" != "true" ]; then
+            echo "::error::repository secret ANTHROPIC_API_KEY is not set; the real-API lane cannot run and will not pretend to" >&2
+            exit 1
+          fi
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@f08ac54821369508305fcb9e0121ec6e30ae9ada # 1.97.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: false
+          cache-bin: false
+      - run: python -m pip install 'sdk/python[dev]'
+      - name: Real-API end-to-end lane
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: make e2e-live

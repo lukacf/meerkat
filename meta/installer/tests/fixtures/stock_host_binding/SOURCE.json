@@ -1,0 +1,11 @@
+{
+  "original.py": {
+    "source": "release09-stock-console-20261010/forge-host-source/stock_host_source.py",
+    "sha256": "5e7fda5ec65eda1df26d198415feb86c2ce9e21935763a9a28659202012652c0"
+  },
+  "successor.py": {
+    "source": "forge-prepare-setup-owner-join-20261011/stock_host_source.py",
+    "sha256": "7f460c15e193972a4cd9f724796ab845bb699acdec5b7d75f4937f66880a764c"
+  },
+  "scope": "Exact public historical binding modules parsed as AST only; no import, host construction or runtime selection."
+}

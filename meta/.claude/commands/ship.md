@@ -1,0 +1,1 @@
+Commit all changes with a descriptive message, push the branch, and create a PR with `gh pr create`. Use a concise PR title and a short summary body with bullet points. If the branch doesn't exist on the remote yet, push with `-u origin`. If there's nothing to commit, say so.

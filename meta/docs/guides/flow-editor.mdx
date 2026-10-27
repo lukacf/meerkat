@@ -1,0 +1,348 @@
+---
+title: "Flow Editor"
+description: "Embedded visual mobpack authoring studio with Basic and Graph editing modes, server-authoritative drafts, rkat-backed validation, and gated host deploys."
+icon: "sitemap"
+---
+
+Meta ships a web-based Flow Editor for authoring mobpacks — flows, member definitions, tools, skills, and structured-output schemas — embedded directly in the Rust binaries via `include_str!`. The editor is a thin client: every edit round-trips through the mobpack-authoring JSON-RPC surface, and the server-rendered document is what you see.
+
+## Accessing the editor
+
+The editor has three hosting modes.
+
+### On a running runtime
+
+Every host that serves the reference app router - `meta_gateway`,
+`rpc_gateway`, and any embedding that calls
+`UnifiedRuntime::build_reference_app_router` - mounts the Flow Editor on the
+same listener as the console. The shipping gateways bind `127.0.0.1` on an
+available OS-selected port and report the concrete `http_base_url` during
+initialization. Append `/flow-editor` to that value:
+
+```
+http://127.0.0.1:<reported-port>/flow-editor
+```
+
+An embedding that serves the returned Axum router itself uses its own listener
+address instead.
+
+In this mode the authoring catalogs are runtime-backed: tools, skills, agent definitions, and flow registries reflect the live mob definition and loaded modules, and `meta/capabilities` reports `runtime_backed_catalogs: true`.
+
+Host deploys are off by default in this mode. Deploying with `execute: true`
+or validating with `rkat_validate: true` runs `rkat` on the gateway's host, so
+it needs a caller that an enforced access controller grants `mobpack.deploy`.
+A runtime without an enforced access controller refuses both unless the host
+opts in:
+
+| Host | Opt-in |
+|------|--------|
+| `meta_gateway` | `--allow-flow-editor-host-deploy` |
+| `rpc_gateway` | `--persistent --allow-flow-editor-host-deploy`; the SDK builders pass no launch flags, so an SDK host points its gateway path at a wrapper that adds the flag, or uses a transport with extra arguments (`extra_args` / `extraArgs`) |
+| Rust host | `UnifiedRuntimeBuilder::allow_flow_editor_host_deploy(true)` or `UnifiedRuntime::allow_flow_editor_host_deploy(true)` before building the router |
+
+The opt-in allows host deploys for every caller the route admits. On an open
+console bound to loopback that is every process on the host that can reach
+the port, whichever user runs it, so enable it only where every such process
+is trusted. Host access (the opt-in, or a `mobpack.deploy` grant) also lets a
+caller choose the draft store file and pack path skills that the skills
+catalog does not list (see [Host paths](#host-paths)). It never overrides an
+enforced access controller, which keeps deciding per caller. `meta_gateway` includes the opt-in in its resume
+fingerprint, so a launch never resumes a runtime started with the other
+setting.
+
+### Standalone binary
+
+For authoring without a runtime, run the dedicated binary:
+
+```bash
+./scripts/repo-cargo run -p meerkat-meta --bin meta_flow_editor
+# meta flow editor listening on http://127.0.0.1:4191/flow-editor
+```
+
+| Option | Purpose |
+|--------|---------|
+| `--listen HOST:PORT` | Bind address (default `127.0.0.1:4191`; also `META_FLOW_EDITOR_LISTEN_ADDR`) |
+| `--allow-host-deploy` | Opt in to host-mutating `rkat mob validate` and `rkat mob run` execution (also `META_FLOW_EDITOR_ALLOW_HOST_DEPLOY=1`) |
+
+Without `--allow-host-deploy`, the standalone server refuses
+`meta/mobpacks/deploy` with `execute: true` and points you at deploy planning
+or running `rkat mob run` manually. A validate request with
+`rkat_validate: true` is reduced to structural validation, so it cannot write
+an archive or spawn `rkat`. The standalone server handles at most 16 requests
+at once; the rest wait for a slot.
+
+### Library routers
+
+Embedders compose the same surfaces from `meerkat_meta` exports:
+
+```rust
+use meerkat_meta::flow_editor_router;
+
+let app = axum::Router::new().merge(flow_editor_router());
+```
+
+- `flow_editor_router()` - frontend + RPC, host mutation disabled
+- `flow_editor_router_with_host_deploy()` - same, with `rkat` validation and deploy execution enabled
+- `flow_editor_frontend_router()` / `flow_editor_rpc_router()` / `flow_editor_rpc_router_allowing_host_deploy()` - compose the shell and the RPC plane separately
+
+## Runtime contract
+
+The Flow Editor route plane deliberately serves only the editor shell and the mobpack-authoring methods; console runtime methods stay on the console RPC plane.
+
+| Route | Method | Response |
+|-------|--------|----------|
+| `/flow-editor` | GET | HTML page |
+| `/flow-editor/assets/react-globals.js` | GET | Vendored React bundle |
+| `/flow-editor/assets/flow-editor.js` | GET | Editor bundle (JavaScript) |
+| `/flow-editor/assets/flow-editor.css` | GET | Stylesheet (CSS) |
+| `/flow-editor/rpc` | POST | JSON-RPC 2.0 endpoint |
+
+`meta/capabilities` describes the surface: the method list, the auth mode, and `authoring_capabilities` with `host_mutation_allowed`, `deploy_execute_allowed`, and `runtime_backed_catalogs`. The editor reads these to decide which deploy affordances to render.
+
+The mobpack-authoring methods:
+
+| Method | Purpose |
+|--------|---------|
+| `meta/mobpacks/schema` | Authoring contract: editor view labels, mob/deploy settings defaults |
+| `meta/mobpacks/catalogs` | Aggregate catalogs and sample mobpacks |
+| `meta/tools/catalog` | Tool catalog |
+| `meta/skills/catalog` | Skill catalog |
+| `meta/agent_definitions/list` | Reusable agent definitions |
+| `meta/mobpacks/templates` | Starter templates |
+| `meta/mobpacks/list` / `get` / `create` / `save` / `delete` | Draft registry CRUD |
+| `meta/mobpacks/undo` / `redo` | Step the Meta-owned draft history (bounded snapshots the store records on save; Cmd+Z / Cmd+Shift+Z in the editor) |
+| `meta/mobpacks/apply_operation` | Apply one authoring operation to a document |
+| `meta/mobpacks/graph_projection` | Project a flow into graph nodes/edges |
+| `meta/mobpacks/graph_to_flow` | Sync graph edits back into the flow document |
+| `meta/mobpacks/validate` | Structural (and optional `rkat`) validation |
+| `meta/mobpacks/source` | Rendered source files (`meta/mob.toml`, …) without archive payload |
+| `meta/mobpacks/export` | `.mobpack` archive as base64 download |
+| `meta/mobpacks/import` | Import `.mobpack` / JSON / TOML (an archive may hold only regular files and may expand to at most 32 MiB and 4096 entries; its `meta/editor.json` and `meta/mob.toml` may each be at most 1 MiB and its `manifest.toml` at most 4 MiB; one import materializes at most 64 MiB, path skills filled in from archive members included) |
+| `meta/mobpacks/deploy_command` | Preview the exact `rkat mob run` command |
+| `meta/mobpacks/deploy` | Deploy plan, or host execution when `execute: true` |
+
+### SDK access
+
+The same authoring operations are exposed as typed wrappers in both gateway SDKs: `mobpackCreate` / `mobpackValidate` / `mobpackDeploy` and friends on the TypeScript `MobHandle`, and snake_case equivalents (`mobpack_create`, `mobpack_validate`, `mobpack_deploy`, …) in Python. That makes the full authoring loop — create, edit via `apply_operation`, validate, export, deploy — scriptable without the editor UI. See [TypeScript SDK](/sdks/typescript) and [Python SDK](/sdks/python).
+
+The authorization boundaries differ: standard gateway `MobHandle` wrappers use trusted host stdio RPC, not `/flow-editor/rpc`. The runtime HTTP route applies HTTP authentication and configured ABAC; standalone HTTP applies its host-deploy opt-in. These HTTP gates are not inherited by the SDK wrappers. Hosts exposing SDK authoring operations to untrusted callers must enforce their own admission policy.
+
+## Authoring model
+
+The editor starts in the mob library unless a deep link opens a mob. An opened mob has **FLOW**, **AGENTS**, and **SETTINGS** section tabs; the library has no section tabs. The top rail also carries the IMPORT, VALIDATE, PUBLISH, DEPLOY PLAN, and DEPLOY authoring actions.
+
+- **Basic mode** — a vertical step builder for the current flow.
+- **Graph mode** — an advanced canvas; node and edge edits sync through `graph_projection` / `graph_to_flow`.
+- **Agents view** - member definitions (identity, peer description, model, tools, schema references), skills, and a visual field-by-field schema editor for structured outputs. The peer description is the roster blurb other members see about this one (the `peers` tool and peer-added notifications); it is not the member's system prompt, which comes from the profile's `skills` and their inline or path content.
+- **Validation sheet** — opened by VALIDATE; shows passed/warning/blocking rows and hosts the deploy-plan and deploy-run buttons.
+- **Source preview** — renders the generated `mob.toml` and sibling source files via `meta/mobpacks/source`, without exporting an archive.
+- **Export / import** — PUBLISH exports the document and downloads it as a `.mobpack` archive; IMPORT accepts `.mobpack`, `.json`, and `.toml`.
+- **SETTINGS section** — editor tweaks plus mob settings (orchestrator wiring, backend, topology) and deploy settings (command, surface, trust policy, model, limits).
+
+Authoring is server-authoritative: the client never mutates the document locally. Every edit is sent as `meta/mobpacks/apply_operation`, and the editor re-renders from the document the server returns.
+
+Drafts autosave through `meta/mobpacks/save` into a host JSON store with optimistic revision guards (`expected_revision` / `draft_etag`). A guard conflict means a concurrent autosave already bumped the revision; the editor drops the stale save and re-persists the current draft. The store path resolves in order:
+
+1. `store_path` request parameter (over the Flow Editor HTTP route only for a caller with host access; see [Host paths](#host-paths))
+2. `META_FLOW_EDITOR_DRAFT_STORE` environment variable
+3. `$XDG_STATE_HOME/meerkat-meta/meerkat-meta-flow-editor-drafts.json`
+4. `~/.local/state/meerkat-meta/meerkat-meta-flow-editor-drafts.json`
+
+With none of these (no `META_FLOW_EDITOR_DRAFT_STORE`, and neither `XDG_STATE_HOME` nor `HOME` set) the draft methods refuse with `-32602` and `data: {"kind": "draft_store_unavailable", "reason": "gateway_home_unavailable"}`. The store is never kept in the OS temp directory, where another local user could create, link or read a file at a predictable path first. While the host has not adopted its predecessor (pre-0.9) gateway home, the draft methods refuse with the same kind and `reason` `predecessor_gateway_home` or `adoption_incomplete`.
+
+The store holds at most 256 drafts and 64 MiB. Every draft method reads and rewrites the whole store, so the caps bound what one call holds in memory as well as the disk the store takes. A new draft past the count, or a write that would grow the store file past 64 MiB, is refused with `-32602` and `data: {"kind": "draft_store_full", "limit": "drafts", "max_drafts": 256}` or `{"kind": "draft_store_full", "limit": "bytes", "max_bytes": 67108864, "required_bytes": ...}`, and writes nothing: delete drafts to make room. Undo and redo history yields first. Each draft keeps up to 25 undo and 25 redo snapshots, and before a write is refused the oldest of them go, of the drafts updated longest ago first and of the written draft last. Deletes always run. A store file past 128 MiB (one written before the caps) is not read: the draft methods refuse with `-32602` and `data: {"kind": "draft_store_unavailable", "reason": "store_too_large", ...}` until it is moved aside. The store is written readable only by its user, and directories it creates are readable only by that user.
+
+The draft store is shared by every caller of a Flow Editor route: one caller can fill it, and any caller can overwrite or delete any draft.
+
+Draft replies list the drafts as summaries: each draft's id, name, version,
+stage, description, revision and etag, without its document, archive or
+validation. `meta/mobpacks/get` returns a draft's document, and the reply of a
+write (`create`, `save`, `undo`, `redo`) carries the written draft whole. A
+draft id has at most 256 characters.
+
+## Validation and deploy
+
+`meta/mobpacks/validate` always runs Meta structural validation
+(`meerkat_mob::validate_definition` + `SpecValidator`). One validation
+reports at most 1000 diagnostics; past that it ends with a
+`diagnostics_truncated` diagnostic. It holds no more than those 1000 while it
+runs, so its memory does not grow with the number of problems a document
+has. Every method that takes a document
+(and import and draft save) refuses one whose skill content, summed over
+every skill entry, passes 16 MiB. A document with more than 1000 members,
+a member that lists more than 1024 tools (`too_many_member_tools`), more
+than 256 branches in one parallel or branch step, or more than 1024
+branches in its flow is refused before it is rendered, and the rendered
+`mob.toml`, `definition.json` and expected schema files are each refused
+past 16 MiB. A document whose graph has more than 2048 instances or more
+than 8192 edges is refused before anything derives a flow from its graph:
+validation fails with `too_many_graph_instances` or `too_many_graph_edges`,
+and `graph_to_flow`, export, deploy and every `apply_operation` but the
+deletes (`delete_flow_step`, `delete_graph_node`, `delete_graph_edge` and
+`delete_member`) refuse it with `-32602`. The deletes are let through so
+the document can be brought back under the caps; while its graph stays past
+them, deleting a node or an edge leaves the flow as it was. An operation
+that would push the graph past the caps, a flow operation that derives the
+graph again included, is refused. Setting
+`rkat_validate: true` requests a second, host-mutating phase: after structural
+validation passes, the server writes a rendered archive and spawns
+`rkat mob validate`. Only `meta/mobpacks/validate` has this phase:
+`meta/mobpacks/apply_operation` ignores `rkat_validate`.
+
+That second phase runs only when the surface and caller have host-mutation
+authority. The standalone server without `--allow-host-deploy` strips the
+request flag and returns structural validation only, and so does a runtime
+without an enforced access controller unless the host opted in with
+`--allow-flow-editor-host-deploy`. An ABAC-enabled runtime requires
+`mobpack.deploy`; without it the call is denied with error `-32030`.
+After admission, a missing `rkat` executable produces a warning row
+(`rkat mob validate skipped`) instead of failing the structural result.
+
+Deploys are plans by default. `meta/mobpacks/deploy` without `execute` returns the `rkat mob run …` argv plus a `plan_trace` the editor replays step by step; `meta/mobpacks/deploy_command` previews the exact shell command. Only with `execute: true` — and only when the surface allows it — does the server write the archive and run `rkat mob run` on the host. The run validates the input params, provisions the flow's members, blocks until the run is terminal, and prints the result envelope on stdout; the server parses that envelope and surfaces the flow's run output (status, run id, and the result payload) as deploy display rows, so the editor shows what the flow actually produced.
+
+RPC `input_params` values are forwarded as repeated `--param key=<json>` bindings. The deploy `prompt` setting supplies the fallback `--prompt=<text>` only when the generated input schema permits `prompt` (including packs without typed input parameters) and `input_params` has not already bound `prompt`. It does not override an explicit binding.
+
+HTTP host-mutation gates:
+
+- **Standalone binary** - `rkat_validate: true` and deploy `execute: true` both require `--allow-host-deploy` (or the env flag). Without it, validation stays structural and execute-deploy fails with a pointer to manual deploy.
+- **Runtime-mounted editor** - both host-mutating operations require the caller's `mobpack.deploy` grant when access control is enforced. Without an enforced access controller they are refused unless the host opted in (`--allow-flow-editor-host-deploy`, or `allow_flow_editor_host_deploy(true)` in Rust); a refused execute-deploy fails with `-32602` and validation stays structural.
+- **Runtime with a named credential store** - a runtime whose agents keep provider credentials in a store the host named (see [Provider credentials](/reference/configuration#provider-credentials)) refuses deploy `execute: true`, on its Flow Editor and on its own RPC, with `-32004` and `data.kind = "provider_credentials_not_carried"`, whatever grant or opt-in the caller has: the `rkat mob run` process would resolve provider credentials in the process default store instead. Deploy plans and validation still answer.
+
+## Access control
+
+On ABAC-enabled runtimes the Flow Editor RPC plane enforces the mobpack actions
+from the [access control](/concepts/access-control) layer. Pure authoring and
+structural validation require `mobpack.author`. Deploy with `execute: true` and
+validation with `rkat_validate: true` require `mobpack.deploy` instead because
+both write an archive and spawn a host process.
+
+`meta/capabilities` stays open - it only describes the method surface - but
+its `authoring_capabilities` advertisement intersects with the caller's grants.
+For callers without `mobpack.deploy`, `deploy_execute_allowed` and
+`host_mutation_allowed` are `false`, and the editor does not render the related
+host-mutation affordances. The advertisement is coarse: it reads `true` when
+any allow rule names `mobpack.deploy` for the caller, even if a deny rule or a
+resource selector refuses every call. Per-call enforcement remains
+authoritative, for host deploys and for host paths alike; denials surface as
+JSON-RPC error `-32030` with `data.kind = "access_denied"`.
+
+Without an enforced access controller there is no grant to evaluate, so a
+runtime-mounted editor treats every caller as lacking `mobpack.deploy`: it
+advertises `deploy_execute_allowed: false` and `host_mutation_allowed: false`
+and refuses host deploys, unless the host opted in with
+`--allow-flow-editor-host-deploy` (see [On a running runtime](#on-a-running-runtime)).
+
+The standalone binary is a token-less local tool: it binds `127.0.0.1` by default, there is no principal to evaluate, and `--allow-host-deploy` is the only deploy gate.
+
+### Host paths
+
+A request is the caller's input, so over the Flow Editor HTTP routes a caller
+without host access (no `mobpack.deploy` grant, no host deploy opt-in, no
+`--allow-host-deploy` on the standalone binary) cannot make the server touch a
+host path it names:
+
+- `store_path` is refused with `-32602` on every method. The draft store is
+  the host's: `META_FLOW_EDITOR_DRAFT_STORE` or the gateway home.
+- Draft replies (`create`, `save`, `list`, `get`, `undo`, `redo`, `delete`)
+  carry `store_path`, the store's host path, only to a caller with host
+  access, and the draft store's errors and refusals name no host path to any
+  other caller.
+- The catalogs name no host path to such a caller: each filesystem skill has
+  its path within its realm's directory, and the realm's directory is left
+  out. Deploy plans and `deploy_command` previews name the caller's own pack
+  path or the bare file name, and run `rkat`.
+- A path skill in a document (`skill_realms` entry with `source: "path"`) is
+  read only when `meta/skills/catalog` lists that file and the document names
+  it by the listed path, or by its path within its realm with the realm's
+  `realm_id`, as the catalogs name it to such a caller. A path within a realm
+  with a `..`, `.`, empty, drive or backslash component is refused before
+  anything is read. Any other path is a
+  `selected_skill_path_not_permitted` validation error, so source, export and
+  deploy refuse the document instead of packing the file.
+- A listed file counts only while its real path stays inside the skill
+  directory it was found in: a link from a skill directory to a file outside
+  it lists nothing. A catalog file with other hard links counts only when
+  another user owns it and it is world-readable, as in a Nix store or
+  another user's install; a hard link to a file the gateway's own user owns
+  does not count, including a package store that user owns (pnpm and uv
+  stores usually are). The server reads the file it opened, comparing the
+  opened file's device and inode, so a path swapped between the listing and
+  the read reaches no other file.
+- `meta/skills/catalog` marks each filesystem skill with
+  `readable_without_host_access`, and adds `read_refusal` with the reason
+  when a caller without host access cannot read it; selecting such a skill
+  fails validation with that reason.
+- `meta/skills/catalog` reads each filesystem skill's `SKILL.md` with
+  meerkat's skill parser, keyed by its directory name, and adds
+  `skill_refusal` when the parser refuses it: `kind` is
+  `invalid_skill_slug` (the directory name is not a skill slug) or
+  `skill_document_refused` (the document), and `error` is the parser's
+  message. meerkat's skill sources would not load such a skill, but it
+  stays deployable, because a mobpack hands a packed skill's text to the
+  member as it is; its entry has an empty description and no capabilities.
+- One request without host access reads at most 64 MiB of skill files in
+  total, however many skills name a file. A file larger than what is left
+  is refused before it is read, and once the budget is spent the request
+  resolves no further path skill.
+- On Windows, UNC and device paths (`\\server\share\...`, `\\?\UNC\...`,
+  `\\.\...`) are refused without host access, so a skills directory on a
+  network share needs host access.
+
+Host access is the caller's own per-call `mobpack.deploy` decision: a deny
+rule withholds it even when an allow rule such as `mobpack.*` also matches.
+Callers with host access, and the SDKs' stdio and in-process RPC, which are
+the host's own channels, may name such paths. A Rust host that calls the
+`meerkat_meta::mobpack` functions directly gets the same catalog-only reads
+unless it runs them under `meerkat_meta::with_host_path_skill_reads`.
+
+## Embedding
+
+Hosts drive the editor with deep-link query parameters and listen for lifecycle events.
+
+| Query parameter | Effect |
+|-----------------|--------|
+| `?open=<id>` | Open that library row (draft or runtime projection) straight into the FLOW section; an unknown id lands in the library with the standard failure sheet |
+| `?intent=new` | Land in the library with the NEW MOB modal open |
+| `?intent=new&template=<id>` | Same, with that template preselected (unknown ids fall back to Blank) |
+| `?embedded=1` | Hide the brand block and theme toggle — the host owns the chrome |
+
+After every successful create, registry save (autosave round-trips included), and execute deploy, the editor dispatches a window `CustomEvent` (named by `type`, payload in `detail`) and — when framed — a `window.parent.postMessage` with the same payload:
+
+```json
+{ "type": "meta-flow-editor:created", "id": "f_review_mob", "stage": "draft", "ok": true }
+```
+
+`type` is `meta-flow-editor:created` / `:saved` / `:deployed`; `ok` is `false` only on a `deployed` event whose execute round-trip did not deploy. The iframe-drawer pattern for hosts like the Meta console: "Add flow mob" opens an iframe at `/flow-editor?intent=new&embedded=1`, the host listens for `created` / `deployed` messages, then closes the drawer and refreshes its own registry view.
+
+## Development
+
+The editor frontend is split across three workspaces:
+
+- `flow-editor/` — the shell: the `src/app.tsx` entry, boot data, CSS, the esbuild pipeline (`build.cjs`), and the test lanes.
+- `packages/flow-editor-core/` — the headless controller plane (`@flow-editor-core`): framework-free projection/transition logic plus `createMetaFlowController`, which assembles the `window.MetaFlowController` facade the views call.
+- `packages/flow-editor-components/` — the React views (`@flow-editor-components`).
+
+`build.cjs` resolves the `@flow-editor-core` / `@flow-editor-components` aliases to the package sources and bundles `app.tsx` into a single `flow-editor.js` IIFE (React stays external, provided by `react-globals.js` as window globals). `npm run build` regenerates both `flow-editor/dist` and `crates/meerkat-meta/flow-editor-dist`, which the Rust crate embeds via `include_str!`; `node build.cjs --check` fails when the embedded dist is stale. The build writes `flow-editor.css` from `src/tokens.css` and `src/styles.css`, and puts the console's own Inter Tight and IBM Plex Mono fonts (`console/src/fonts`, inlined as `data:` URLs) where `tokens.css` imports them from Google Fonts, so the editor requests no font from another origin. A Content-Security-Policy in front of it that restricts fonts must allow `font-src data:`.
+
+```bash
+cd flow-editor
+npm run build   # rebuild dist + the embedded flow-editor-dist
+npm run dev     # static dev server at http://127.0.0.1:4190/flow-editor
+```
+
+The dev server serves `flow-editor/dist` and re-reads files on every request — rebuild after editing the shell or packages and refresh. Set `META_FLOW_EDITOR_RPC_URL` to a real `/flow-editor/rpc` endpoint to proxy RPC calls; without it, RPC requests return an explanatory error.
+
+```bash
+make test-flow-editor              # dist freshness, typecheck, source/boundary contracts, facade key parity, projection suite, visual + browser contracts
+make test-flow-editor-rkat         # live export/import checks against rkat mob inspect/validate
+make test-flow-editor-rkat-deploy  # live checks including rkat mob run
+```
+
+`npm run typecheck` covers both packages and the shell; `test/package-boundaries.test.cjs` keeps `@flow-editor-core` window/React/DOM-free and `@flow-editor-components` network-free; `test/controller-export-keys.test.cjs` pins the facade's ordinary and test-only exports against `test/controller-export-manifest.json`.
+
+## See also
+
+- [Access control](/concepts/access-control) — the `mobpack.author` / `mobpack.deploy` actions
+- [Console](/guides/console) — the runtime console served alongside the editor
+- [Unified runtime](/guides/unified-runtime) — how the reference app router is composed
+- [JSON-RPC API](/api/rpc) — protocol details

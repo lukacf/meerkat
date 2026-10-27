@@ -1,0 +1,10 @@
+# Internal architecture records and research evidence are kept in the repository,
+# but they are not part of the published product documentation surface.
+design/
+proposals/
+
+# Archived internal records keep that status. The archived plan page under
+# archive/plans/ stays published; these records were never part of the
+# published surface and do not become part of it by being archived.
+archive/design/
+archive/proposals/

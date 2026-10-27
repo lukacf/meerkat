@@ -1,0 +1,154 @@
+---
+title: "Governance"
+description: "Release candidate tracking, traceability matrix, validation, and governance state contracts."
+icon: "clipboard-check"
+---
+
+Meta includes governance validators for implementation-tracking documents.
+They check governance declarations, traceability row format, recognized
+statuses, and required evidence text. They do not discover every contract,
+verify the truth of status claims, or establish release completeness.
+
+## Governance state
+
+Governance documents declare their state on a `governance_state:` line.
+The validator currently accepts exactly this unquoted value:
+
+```yaml
+governance_state: realignment_in_progress
+```
+
+`validate_governance_state(file_name, content)` extracts the state from
+document text. The file name is a label for errors, not a path it reads:
+
+```rust
+use meerkat_meta::validate_governance_state;
+
+validate_governance_state("spec.yaml", "governance_state: realignment_in_progress\n")?;
+```
+
+## Traceability statuses
+
+Rows in a supplied traceability document declare a status from this strict
+set. These are the meanings claimed by the document's author, not facts the
+validator proves:
+
+| Status | Meaning |
+|--------|---------|
+| `TYPED` | Contract has Rust types defined |
+| `WIRED` | Types are connected to runtime paths |
+| `VALIDATED` | Integration tests pass |
+| `PROVISIONAL` | Implementation exists but awaiting full validation |
+| `MISSING` | Not yet implemented |
+| `DEFERRED` | Explicitly deferred to a future release |
+| `STUBBED` | Placeholder implementation for testing |
+
+### Validation
+
+```rust
+use meerkat_meta::validate_traceability_statuses;
+
+let traceability = r#"rows:
+  - status: TYPED
+    evidence: [crates/meerkat-meta/src/governance.rs]
+"#;
+validate_traceability_statuses(traceability)?;
+```
+
+The function accepts YAML document text as above or a Markdown table with
+`Status` and evidence/link columns. All row statuses must be in
+`STRICT_TRACEABILITY_STATUSES`. `TYPED`, `WIRED`, `VALIDATED`, and
+`PROVISIONAL` require non-placeholder evidence; `MISSING`, `DEFERRED`, and
+`STUBBED` do not. Evidence validation checks presence, not whether a
+referenced artifact exists or proves the status. Invalid input returns
+`GovernanceValidationError`.
+
+YAML input parses under YAML 1.2 rules: `yes`, `on` and `off` stay text,
+and `<<` is an ordinary key rather than a merge. The document is refused as
+`InvalidTraceabilityRow` when it has a custom tag, a key given twice in the
+same mapping, a null where text is expected (an empty list entry is a null), a
+`...` document end marker, nesting deeper than 64 levels, or 100 or more
+aliases that outnumber their anchors more than ten to one.
+
+## Baseline verification
+
+The optional source-baseline check scans a local Meerkat checkout for a
+selected historical checklist of source tokens. Supply the checkout
+explicitly, or set `MEERKAT_REPO`; there is no machine-specific default:
+
+```rust
+use meerkat_meta::{BaselineVerificationReport, verify_meerkat_baseline_symbols};
+use std::path::Path;
+
+let report: BaselineVerificationReport =
+    verify_meerkat_baseline_symbols(Some(Path::new("/path/to/meerkat")))?;
+```
+
+This is a heuristic source-token smoke check: even occurrences in comments
+can satisfy a checklist entry. It does not establish crate presence, exported
+API or signature correctness, or version compatibility. Use the pinned
+dependency manifests and compilation/tests for compatibility validation.
+
+### Required symbols
+
+`REQUIRED_MEERKAT_SYMBOLS` contains that selected historical checklist, not
+an exhaustive inventory of Meta's current dependency entry points. An
+unsatisfied checklist entry produces `BaselineVerificationError::MissingSymbols`.
+
+## Governance contracts
+
+`validate_governance_contracts(spec_yaml, plan_yaml, checklist_yaml,
+traceability_markdown)` validates four supplied document strings:
+
+1. The required `governance_state` in the spec, plan, and checklist texts
+2. The traceability document's row format, allowed statuses, and evidence
+   presence where required
+
+The standalone `governance_check` binary runs this same validation for CI.
+Neither invokes baseline verification, executes tests, nor checks that all
+features have traceability rows. Run `baseline_check` or
+`verify_meerkat_baseline_symbols` separately if that optional smoke check is
+desired; it is not a release-compatibility gate.
+
+## Governance validation errors
+
+| Error | Cause |
+|-------|-------|
+| `MissingGovernanceState { file }` | No `governance_state:` line in the named document |
+| `InvalidGovernanceState { file, found }` | The parsed value is not exactly `realignment_in_progress` |
+| `NoTraceabilityRows` | No traceability data rows were found |
+| `InvalidTraceabilityStatus { line, status }` | Row status is outside the strict set |
+| `MissingTraceabilityEvidence { line }` | A status requiring evidence has only missing/placeholder evidence |
+| `InvalidTraceabilityRow { line }` | Malformed or refused YAML input (see [Validation](#validation)) or a malformed Markdown row/header |
+
+For Markdown, `line` is a source line number. For parsed YAML rows it is the
+one-based row index; YAML parse failures report `line: 1`.
+
+Baseline verification uses a separate `BaselineVerificationError`:
+
+| Error | Cause |
+|-------|-------|
+| `RepoNotConfigured { env_var }` | No usable explicit repository path or environment setting |
+| `RepoMissing(path)` | The selected path does not exist |
+| `RepoUnreadable(path)` | The selected path is not a directory or cannot be scanned |
+| `MissingSymbols(report)` | The scan left unsatisfied checklist entries in `report.missing_symbols` |
+
+## CLI tools
+
+Meta's binaries include these validation and operational tools:
+
+| Binary | Purpose |
+|--------|---------|
+| `baseline_check` | Optional historical source-token smoke check |
+| `governance_check` | Validate governance state and traceability |
+| `meta_gateway` | JSON-RPC gateway |
+| `mcp_fixture` | MCP test fixture |
+
+Use the two check binaries in CI for their respective validation scopes;
+the gateway and fixture are operational/test tools, not governance validators.
+
+## See also
+
+- [Decisions](/reference/decisions) -- runtime policy enforcement
+- [Configuration](/reference/configuration) -- release metadata validation
+- [Architecture](/reference/architecture) -- crate structure

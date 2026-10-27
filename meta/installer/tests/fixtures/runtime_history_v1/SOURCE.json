@@ -1,0 +1,142 @@
+{
+  "files": {
+    "__init__.py": {
+      "bytes": 65,
+      "sha256": "b603a4bdaf5aca0051b748a6df24c149638df998000256c8f85a07511dc3f1ff"
+    },
+    "blueprint-limits.json": {
+      "bytes": 129,
+      "sha256": "9ab07cb7343e60dffef2e1a47e5025c8f0d7b7343fade90bbb206e0d84932454"
+    },
+    "blueprint.py": {
+      "bytes": 22430,
+      "sha256": "e79a42764878bffe6d84bbd47c8aefd71db9c15e3f6b55d181e6070f61505ed7"
+    },
+    "bootstrap.py": {
+      "bytes": 7867,
+      "sha256": "7abc05094d6d99f475a0d1ae7482499d4eeb43a217eb74e9e8621f3e6b139857"
+    },
+    "compiler.py": {
+      "bytes": 41972,
+      "sha256": "2856d90c007e383b4eb04a23c6b3be6e3993a6e06dedb1aec4ce33387f35551c"
+    },
+    "deployment_deadlines.py": {
+      "bytes": 1756,
+      "sha256": "2687bba02470681c97cfdc21aeafda1a0553bd2c4a7f15fb161803fb1b0a8210"
+    },
+    "design_knowledge.py": {
+      "bytes": 28176,
+      "sha256": "c6aec68f448d827c2e731c8158a66ed367034d3defe777b4676f902f98cd27ff"
+    },
+    "elephant_setup.py": {
+      "bytes": 8249,
+      "sha256": "a60940d3ac4b4b46c131b72258224f5020c6d0a4e0207543cd1db1e3749116f3"
+    },
+    "generator.py": {
+      "bytes": 17088,
+      "sha256": "79aed056d5af6fa9f838785a77d2ac738672d106ae127024b8dc91808767d286"
+    },
+    "native_definition_continuity.py": {
+      "bytes": 8585,
+      "sha256": "cb4739d653022b44828d027796cf08f937c0540e203375ce83317ca83b35bc0f"
+    },
+    "native_models.py": {
+      "bytes": 5436,
+      "sha256": "7d77f86ed47082039bf25c263b60ce4bbb960bf0e55ee381ec1d7dd3b3e5e1d1"
+    },
+    "planning_limits.py": {
+      "bytes": 469,
+      "sha256": "fc986781e79cf440d1a4c18b502e39453be1d8cf6ecfad142f33dce881e0bbc0"
+    },
+    "schema.py": {
+      "bytes": 4913,
+      "sha256": "d92b0a2ec2ed3a07b77fdacf3d30d2a0fe91401fdbc789ad4b2be9536002dc41"
+    },
+    "templates/app.py": {
+      "bytes": 10405,
+      "sha256": "f750c76ad13545babfce2951074a0b00378700765c30727cf109d1b194b907e3"
+    },
+    "templates/connectors.py": {
+      "bytes": 7811,
+      "sha256": "358f041367077c8e103317597ab6ce01f8f3464db042e802dd4ac18330b62b65"
+    },
+    "templates/deploy-gcp.sh": {
+      "bytes": 10372,
+      "sha256": "b5994e6ad82378ec63556ad5b0cd15baaa82760fc192c4e745c83424d420bdf2"
+    },
+    "templates/install-service.sh": {
+      "bytes": 317,
+      "sha256": "d267a84fc2cc4de3d63224601c5f4cdd53730de4e76a73278f8e4192ab1bcb95"
+    },
+    "templates/install.sh": {
+      "bytes": 960,
+      "sha256": "2181c73b0b181b14551424c435bae4970b5b5351c8020f6f31e0a0fd0a0a1ce9"
+    },
+    "templates/install_gateway.py": {
+      "bytes": 12121,
+      "sha256": "b3830fa39cb9fae196a4e447397a92e7ab580200c119235e72d2d7ab88f88a72"
+    },
+    "templates/setup.py": {
+      "bytes": 3572,
+      "sha256": "6a9f3873a2cfe8b3987329063b7ec034a2a27a6caae15eed5127380abcdc2e3c"
+    },
+    "templates/start.sh": {
+      "bytes": 188,
+      "sha256": "8384401c62d38903dd2685cb425f59106caa8c90d50af2cdb791f6ce1c69b7d1"
+    },
+    "templates/storage_setup.py": {
+      "bytes": 14315,
+      "sha256": "8d18ce9f0542af3b4b59224a5ff103020ea266a29a5ceeef51261523330df1f9"
+    },
+    "templates/telegram_bridge.py": {
+      "bytes": 8722,
+      "sha256": "1a3db631d320dcd63e363d4b2facdeb05e940cf8593b8f41529f797ed11db8d3"
+    },
+    "templates_elephant/Dockerfile": {
+      "bytes": 1118,
+      "sha256": "d5c2142d73d9707448a230f7ed44ced7cf4469b802e2a8d8f720a5f53199c3db"
+    },
+    "templates_elephant/README.md": {
+      "bytes": 4763,
+      "sha256": "6359e78de58952d17189748693beba5a3328e66b41ade5a7b0e4e3850e4baf2a"
+    },
+    "templates_elephant/manage.py": {
+      "bytes": 17831,
+      "sha256": "a32b3aee156be1e3aab5e65a5084d182304fd681ae31f71c865aa5e91e180c7a"
+    },
+    "templates_v2/app.py": {
+      "bytes": 47589,
+      "sha256": "c2dd6c1bb83de5adeb6498341d2ae3ca379f963e96dd84e2040f308cd9c75ad8"
+    },
+    "templates_v2/application_configuration.py": {
+      "bytes": 7741,
+      "sha256": "08ae62f84ba420665c6c2bae7786b6c7b42ee7166b31dccd51c2010c71752c81"
+    },
+    "templates_v2/console_auth.py": {
+      "bytes": 20830,
+      "sha256": "f599015c86320a22f73a4512f5b84c4fdbd381248167ccc6db87c2c671baa9fb"
+    },
+    "templates_v2/console_configuration.py": {
+      "bytes": 3321,
+      "sha256": "c7466967f62bd988654bcdb1743f52512724ed8bc72665b997c502a828ac7876"
+    },
+    "templates_v2/mcp_connections.py": {
+      "bytes": 15935,
+      "sha256": "104019e08576a797d3716bd466de8e52178014a4551f9980ef3a8846907db141"
+    },
+    "templates_v2/remote_operations.py": {
+      "bytes": 39041,
+      "sha256": "5b547afa613003a9519379aaaa8934afc40c4eb9fc4ff98522afc759e0fc59f9"
+    },
+    "templates_v2/setup.py": {
+      "bytes": 6628,
+      "sha256": "a10d8460c5f418985db46ec770d161ab8871ad1db0495f1ad4265698149c0b9f"
+    }
+  },
+  "kind": "original-historical-046-compiler-test-inputs",
+  "limits": "Original .46 compiler and complete public inputs. Inert generated test packages and mocked worker receipts remain synthetic contract coverage, not actual .46 native qualification. Genuine retained package provenance is separate.",
+  "modified": {
+    "design_knowledge.py": "Project and product names, and source paths, in FOUNDATIONS, PATTERNS, CAPABILITIES and SOURCES are replaced with neutral descriptions. COMMS_PROTOCOL, the only name the compiler imports from this file, is unchanged."
+  },
+  "source": "installer/.artifacts/tool-library-private-first-use-20261006T084506Z-86145aee/qualified-runtime/launch-r5/launchkit"
+}

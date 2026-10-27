@@ -1,0 +1,204 @@
+{
+  "mode": "apply",
+  "state_dir": "{state_dir}",
+  "fenced_databases": [
+    "{state_dir}/continuity.sqlite3",
+    "{state_dir}/council.sqlite3",
+    "{state_dir}/event_log.sqlite3",
+    "{state_dir}/meta/jobs.sqlite3",
+    "{state_dir}/meta_console.sqlite3",
+    "{state_dir}/meta_metadata.sqlite3",
+    "{state_dir}/mobs/realm_profiles.db",
+    "{state_dir}/runtime.sqlite",
+    "{state_dir}/schedule.sqlite",
+    "{state_dir}/workgraph.sqlite3"
+  ],
+  "ledger": [
+    {
+      "database": "{state_dir}/runtime.sqlite",
+      "domain": "runtime-store",
+      "before": 3,
+      "action": "report-only"
+    },
+    {
+      "database": "{state_dir}/runtime.sqlite",
+      "domain": "session-store",
+      "before": 5,
+      "action": "report-only"
+    },
+    {
+      "database": "{state_dir}/schedule.sqlite",
+      "domain": "schedule-store",
+      "before": 3,
+      "action": "report-only"
+    },
+    {
+      "database": "{state_dir}/workgraph.sqlite3",
+      "domain": "workgraph",
+      "before": 4,
+      "action": "report-only"
+    },
+    {
+      "database": "{state_dir}/continuity.sqlite3",
+      "domain": "meta-continuity",
+      "before": 1,
+      "after": 2,
+      "action": "stamped"
+    },
+    {
+      "database": "{state_dir}/meta_metadata.sqlite3",
+      "domain": "meta-metadata",
+      "before": 1,
+      "after": 1,
+      "action": "already-current"
+    },
+    {
+      "database": "{state_dir}/meta_console.sqlite3",
+      "domain": "meta-console",
+      "before": 3,
+      "after": 3,
+      "action": "already-current"
+    },
+    {
+      "database": "{state_dir}/meta/jobs.sqlite3",
+      "domain": "jobs",
+      "before": 4,
+      "after": 4,
+      "action": "already-current"
+    },
+    {
+      "database": "{state_dir}/mobs/realm_profiles.db",
+      "domain": "mob",
+      "before": 12,
+      "after": 12,
+      "action": "already-current"
+    }
+  ],
+  "renames": [],
+  "twins": [],
+  "head_canonical_backfill": {
+    "examined": 0,
+    "converted": [],
+    "vanished": [],
+    "reconverted": [],
+    "failures": [],
+    "skipped_unparseable": [],
+    "ledger_stamped": true,
+    "applied": true
+  },
+  "findings": [
+    {
+      "severity": "info",
+      "code": "maintenance-fence-lock",
+      "message": "maintenance-fence lock file (created by normal per-operation guards; held exclusively only during offline maintenance)",
+      "path": "{state_dir}/continuity.sqlite3.mfence"
+    },
+    {
+      "severity": "info",
+      "code": "maintenance-fence-lock",
+      "message": "presence lock file (held shared by connections kept open across operations; maintenance creates it next to every database it fences and holds it exclusively after the fence lock)",
+      "path": "{state_dir}/continuity.sqlite3.mpresence"
+    },
+    {
+      "severity": "info",
+      "code": "maintenance-fence-lock",
+      "message": "maintenance-fence lock file (created by normal per-operation guards; held exclusively only during offline maintenance)",
+      "path": "{state_dir}/council.sqlite3.mfence"
+    },
+    {
+      "severity": "info",
+      "code": "maintenance-fence-lock",
+      "message": "presence lock file (held shared by connections kept open across operations; maintenance creates it next to every database it fences and holds it exclusively after the fence lock)",
+      "path": "{state_dir}/council.sqlite3.mpresence"
+    },
+    {
+      "severity": "info",
+      "code": "maintenance-fence-lock",
+      "message": "maintenance-fence lock file (created by normal per-operation guards; held exclusively only during offline maintenance)",
+      "path": "{state_dir}/event_log.sqlite3.mfence"
+    },
+    {
+      "severity": "info",
+      "code": "maintenance-fence-lock",
+      "message": "presence lock file (held shared by connections kept open across operations; maintenance creates it next to every database it fences and holds it exclusively after the fence lock)",
+      "path": "{state_dir}/event_log.sqlite3.mpresence"
+    },
+    {
+      "severity": "info",
+      "code": "maintenance-fence-lock",
+      "message": "maintenance-fence lock file (created by normal per-operation guards; held exclusively only during offline maintenance)",
+      "path": "{state_dir}/meta_console.sqlite3.mfence"
+    },
+    {
+      "severity": "info",
+      "code": "maintenance-fence-lock",
+      "message": "presence lock file (held shared by connections kept open across operations; maintenance creates it next to every database it fences and holds it exclusively after the fence lock)",
+      "path": "{state_dir}/meta_console.sqlite3.mpresence"
+    },
+    {
+      "severity": "info",
+      "code": "maintenance-fence-lock",
+      "message": "maintenance-fence lock file (created by normal per-operation guards; held exclusively only during offline maintenance)",
+      "path": "{state_dir}/meta_metadata.sqlite3.mfence"
+    },
+    {
+      "severity": "info",
+      "code": "maintenance-fence-lock",
+      "message": "presence lock file (held shared by connections kept open across operations; maintenance creates it next to every database it fences and holds it exclusively after the fence lock)",
+      "path": "{state_dir}/meta_metadata.sqlite3.mpresence"
+    },
+    {
+      "severity": "info",
+      "code": "maintenance-fence-lock",
+      "message": "maintenance-fence lock file (created by normal per-operation guards; held exclusively only during offline maintenance)",
+      "path": "{state_dir}/runtime.sqlite.mfence"
+    },
+    {
+      "severity": "info",
+      "code": "maintenance-fence-lock",
+      "message": "presence lock file (held shared by connections kept open across operations; maintenance creates it next to every database it fences and holds it exclusively after the fence lock)",
+      "path": "{state_dir}/runtime.sqlite.mpresence"
+    },
+    {
+      "severity": "info",
+      "code": "maintenance-fence-lock",
+      "message": "maintenance-fence lock file (created by normal per-operation guards; held exclusively only during offline maintenance)",
+      "path": "{state_dir}/schedule.sqlite.mfence"
+    },
+    {
+      "severity": "info",
+      "code": "maintenance-fence-lock",
+      "message": "presence lock file (held shared by connections kept open across operations; maintenance creates it next to every database it fences and holds it exclusively after the fence lock)",
+      "path": "{state_dir}/schedule.sqlite.mpresence"
+    },
+    {
+      "severity": "info",
+      "code": "maintenance-fence-lock",
+      "message": "maintenance-fence lock file (created by normal per-operation guards; held exclusively only during offline maintenance)",
+      "path": "{state_dir}/workgraph.sqlite3.mfence"
+    },
+    {
+      "severity": "info",
+      "code": "maintenance-fence-lock",
+      "message": "presence lock file (held shared by connections kept open across operations; maintenance creates it next to every database it fences and holds it exclusively after the fence lock)",
+      "path": "{state_dir}/workgraph.sqlite3.mpresence"
+    },
+    {
+      "severity": "info",
+      "code": "maintenance-fence-lock",
+      "message": "maintenance-fence lock file (created by normal per-operation guards; held exclusively only during offline maintenance)",
+      "path": "{state_dir}/mobs/realm_profiles.db.mfence"
+    },
+    {
+      "severity": "info",
+      "code": "maintenance-fence-lock",
+      "message": "presence lock file (held shared by connections kept open across operations; maintenance creates it next to every database it fences and holds it exclusively after the fence lock)",
+      "path": "{state_dir}/mobs/realm_profiles.db.mpresence"
+    }
+  ],
+  "notes": [
+    "continuity database is below the head-canonical schema version (meta-continuity v2); --apply committed it under the exclusive maintenance fence \u2014 this bump is ONE-WAY: binaries older than this release refuse a stamped file at open (SchemaFromTheFuture). Back up continuity.* before applying.",
+    "sessions / runtime / schedule / workgraph are meerkat-owned stores: their ledgers are reported read-only here and converge through the owning meerkat store's next open (normal gateway boot)"
+  ],
+  "errors": []
+}

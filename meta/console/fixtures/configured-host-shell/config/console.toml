@@ -1,0 +1,87 @@
+title = "Configured Host Console"
+
+[brand]
+label = "Configured Host"
+logo_url = "/host/assets/logo.svg"
+logo_alt = "Configured Host"
+
+[appearance]
+default_theme = "dark"
+default_variant = "graphite"
+
+[environment]
+label = "staging"
+
+[layout]
+initial_preset = "two_columns"
+initial_control = "roster"
+initial_agent = "identity:lead"
+sidebar_collapsed = false
+
+[rail]
+visible = true
+collapsed = false
+active_preset_id = "alerts"
+empty_text = "No matching activity."
+
+[[rail.filter_presets]]
+id = "alerts"
+label = "Alerts"
+watched_only = true
+alert_levels = ["warning", "critical"]
+
+[sidebar]
+hidden_controls = ["gating"]
+
+[[sidebar.buttons]]
+id = "host-dashboard"
+label = "Dashboard"
+href = "/host/dashboard"
+target = "_self"
+icon_name = "layout-dashboard"
+
+[[sidebar.buttons]]
+id = "routing-control"
+label = "Routing"
+control = "routing"
+icon_name = "route"
+
+[agent_list]
+group_by = ["labels.console_section", "group", "role"]
+subgroup_by = ["labels.scope"]
+section_order = ["Pinned", "Projects", "Workers", "Other"]
+fallback_group = "Other"
+fallback_subgroup = "General"
+collapse_single_subgroup = false
+default_pinned_agent_ids = ["identity:lead", "member:worker-1"]
+
+[[agent_list.badges]]
+id = "scope"
+label = "Scope"
+field = "labels.scope"
+tone = "info"
+
+[[agent_list.sections]]
+name = "Projects"
+collapsed = false
+empty_title = "No projects"
+empty_text = "Project records are host-owned."
+
+[[agent_list.sections]]
+name = "Workers"
+collapsed = true
+empty_title = "No workers"
+empty_text = "Spawn workers from a Meta action."
+
+[actions]
+inspect_label = "Inspect"
+chat_label = "Chat"
+send_label = "Send"
+respawn_label = "Respawn"
+retire_label = "Retire"
+reset_label = "Reset"
+show_inspect = true
+show_chat = true
+show_respawn = false
+show_retire = true
+show_reset = false

@@ -1,0 +1,331 @@
+---
+title: "REST API"
+description: "HTTP endpoints for console access, experience metadata, module inspection, timeline replay, JSON-RPC ingress, and blobs."
+icon: "globe"
+---
+
+Meta serves a REST API over HTTP using Axum. The API provides console access, runtime inspection, timeline replay, JSON-RPC ingress, legacy console send compatibility, multipart upload/send, and blob retrieval.
+
+## Base URL
+
+```
+<http_base_url>
+```
+
+The console/admin `meta_gateway` and SDK-facing persistent `rpc_gateway`
+bind an available loopback port and report the exact `http_base_url` in their
+`meta/init` result. Use that value for every route on this page; do not
+assume port 8080. A Rust library host chooses its own listener and must supply
+that base URL to its clients.
+
+---
+
+## Console endpoints
+
+### `GET /console`
+
+Returns the admin console HTML page. The page is a self-contained single-page React application with no external dependencies.
+
+**Response:** `text/html`
+
+### `GET /console/assets/console-app.js`
+
+Returns the console React bundle as JavaScript.
+
+**Response:** `application/javascript`
+
+### `GET /console/assets/console-app.css`
+
+Returns the console stylesheet.
+
+**Response:** `text/css`
+
+---
+
+## JSON API endpoints
+
+### `GET /console/experience`
+
+Returns experience metadata describing the current runtime state. This is the primary data source for the console UI.
+
+**Response:**
+
+```json
+{
+  "agent_sidebar": {
+    "title": "Agents",
+    "live_snapshot": {
+      "agents": [
+        {
+          "agent_id": "agent-001",
+          "member_id": "lead-1",
+          "label": "Team Lead",
+          "kind": "autonomous_host"
+        }
+      ]
+    }
+  },
+  "activity_feed": { "title": "Activity" },
+  "chat_inspector": { "title": "Chat" },
+  "topology": {
+    "title": "Topology",
+    "live_snapshot": {
+      "nodes": [...],
+      "node_count": 5
+    }
+  },
+  "health_overview": {
+    "title": "Health",
+    "live_snapshot": {
+      "loaded_modules": ["router", "delivery", "memory"],
+      "loaded_module_count": 3,
+      "running": true
+    }
+  }
+}
+```
+
+When a Meerkat mob runtime is configured, the response includes live agent data from the mob. Without a mob runtime, only module-level information is returned. When console UI config is loaded, the response includes `console_config`, the view-level contract consumed by the bundled console.
+
+`health_overview.live_snapshot.running` is the mob owner's answer when the
+experience is read. A console served from the console aggregator answers for
+its registered runtimes: `true` only while every registered runtime's mob is
+creating or running, and `false` when at least one is not. Without a runtime
+that can answer (no live mob runtime, or an aggregator with no registered
+runtime), it is `null`, and the snapshot names it in an `unobserved` marker:
+`{"reason": "not_observed", "fields": ["running"]}`.
+
+An identity-first member's records take its session from the identity
+runtime, never from a walk made under an earlier identity binding. When the
+member's binding has moved (after a reset, retire or delete), a read collects
+the member again first and waits at most 2 s. Past that bound, the member's
+sidebar row answers with the identity runtime's session, the member's run
+`progress` and state `unknown`, and offers no send or retire. Each record of
+the member (the sidebar row, the `identity_status` and `health_overview`
+rows, and the topology node) withholds the other facts the earlier walk
+found and names them in an `unobserved` marker with reason
+`refresh_pending`, for example
+`{"reason": "refresh_pending", "fields": ["label", "role", "state", "wired_to", "addressable"]}`
+on the topology node. Access and visibility still decide on the last
+observed facts, so a label-scoped deny keeps such a member hidden.
+
+### `GET /console/modules`
+
+Returns the configured module IDs from `RuntimeDecisionState`. This response
+does not contain per-module health or startup state.
+
+**Response:**
+
+```json
+{
+  "contract_version": "0.5.0",
+  "modules": [
+    "router",
+    "delivery",
+    "memory"
+  ]
+}
+```
+
+### `GET /console/identities`
+
+Returns visibility-filtered identities from the console aggregator, including
+ordinary runtime/worker identities; an identity-first runtime is not required.
+Without a console aggregator, this route returns `404` with
+`error: "unavailable"`.
+
+**Response:** `{identities: ConsoleIdentityRecord[]}`. Each record carries
+`identity`, `display_name`, `runtime_key`, `runtime_member_id`, optional
+`session_id`, optional `member_id` (Core's mob member id of the identity's
+last binding, live or retired: the identity's roster member id, as Core's
+member tokens name it, which is Meta's comms-safe encoding of the identity and
+starts with `mk--` when the identity has a `:`; absent when Core holds no
+binding of the identity and on records of raw runtime members),
+`visibility`, `addressable`, `health`, `labels`, and
+`topology_peers` when non-empty. Use
+[`meta/console/inspect_identity`](/api/rpc#meta%2Fconsole%2Finspect_identity)
+for identity/peer inspection and `/console/experience` for affordances;
+neither identities nor inspection records contain an affordances field.
+
+### `GET /console/timeline`
+
+Returns console timeline frames from the Meta console log store. This endpoint is the REST equivalent of `meta/console/query_timeline`.
+
+<Accordion title="Query parameters">
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| `identity` | `string` | no | Restrict results to one console identity. |
+| `conversation_id` | `string` | no | Restrict results to one conversation. |
+| `mode` | `"since"` or `"recent"` | no | `since` scans forward after `after`; `recent` returns the latest visible frames in display order. Defaults to `since` for compatibility. |
+| `after` | `console:<seq>` | no | Exclusive lower cursor bound for continuation. |
+| `before` | `console:<seq>` | no | Exclusive upper cursor bound, primarily for older-history paging with `recent`. |
+| `limit` | `usize` | no | Visible frame limit, clamped by the server. |
+</Accordion>
+
+Response frames are visibility-filtered and returned in display order. `next_cursor` is safe to use as the next `after` cursor for `since` pagination; `latest_cursor` is the latest cursor for the target window and is useful for live continuation after a `recent` seed.
+
+```json
+{
+  "frames": [],
+  "next_cursor": "console:240",
+  "latest_cursor": "console:240",
+  "exhausted": false
+}
+```
+
+### `GET /console/timeline/stream`
+
+Streams timeline replay followed by live console frames (`text/event-stream`).
+It accepts the same query parameters as `GET /console/timeline`, but `limit`
+does not always bound the whole replay: `recent` produces one bounded seed,
+while anchored `since` drains all retained matching backlog in pages of up
+to `limit` frames. Without `after`, `since` switches to `recent`. A non-empty
+`Last-Event-ID` header overrides the URL's `after` parameter. See the
+[timeline SSE contract](/api/sse#console-timeline-stream) for event envelopes
+and snapshot markers.
+
+If the requested cursor can no longer be replayed, the route returns HTTP **409** with `{"error":"replay_unavailable"}` and cursor context. Clients should refetch a recent page and resume from `latest_cursor`.
+
+### `GET /console/identity/{identity}/stream`
+
+Identity-filtered convenience route for the same console timeline stream. It sets the `identity` filter from the path and accepts the remaining timeline query parameters.
+
+### `POST /console/send`
+
+Legacy console send route backed by the console aggregator. New clients should prefer `POST /console/rpc` with `meta/console/send`.
+
+### `POST /console/send/recover`
+
+REST twin of [`meta/console/recover_send`](/api/rpc):
+the body is `{identity, origin, idempotency_key}` and the caller is the
+request's authenticated principal. It runs the same gate as `/console/send`
+(read-only and `agent.send` refusals). A send the caller does not own, or
+never made, answers HTTP **404** with `{"error":"send_not_found"}`. A
+candidate launch (`runtime_options.mob_composition.authority =
+"candidate"`) settles no send and answers HTTP **409** with
+`{"error":"candidate_launch"}`, as `/console/send` does: recover the send on
+the authoritative launch.
+
+### `POST /console/rpc`
+
+JSON-RPC 2.0 endpoint for console and runtime operations.
+
+### `POST /console/rpc/multipart`
+
+Multipart JSON-RPC endpoint. Supported methods:
+
+| Method | Purpose |
+|--------|---------|
+| `meta/console/send` | Send console content with image upload placeholders. |
+| `meta/blob/upload` | Store a single blob/image and return a blob ID. |
+
+For `meta/blob/upload`, send a `payload` part containing this JSON-RPC
+request, plus exactly one binary part named `file:upload-1` with
+`Content-Type: image/png`:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "upload-1",
+  "method": "meta/blob/upload",
+  "params": {
+    "upload": {
+      "upload_id": "upload-1",
+      "type": "image_upload",
+      "media_type": "image/png"
+    }
+  }
+}
+```
+
+The upload fields may instead be directly in `params`. `part_name` is an
+alias for `upload_id`; both identify the suffix after `file:`, with
+`upload_id` taking precedence if both are present. `type` is optional and,
+when supplied as a string, must be `image_upload`. Optional `media_type`
+must match the file part's MIME type. Supported types are `image/png`,
+`image/jpeg`, `image/webp`, and `image/gif`, with a **25 MiB per-file** limit.
+The result contains `blob_id`, `media_type`, and `size` in bytes, not `url`
+or `content_type`. Fetch the bytes through `GET /blobs/{blob_id}`.
+Console sends with image placeholders remain subject to the multipart
+image-count and per-file byte limits.
+
+### `GET /blobs/{blob_id}`
+
+Returns blob/image content by ID when a blob store is configured.
+
+---
+
+## Authentication
+
+The reference router keeps its frontend shell and bootstrap assets public:
+
+- `/`, `/favicon.ico`, and `/healthz`
+- `/console`, `/console/`, and `/console/assets/*`
+- `/flow-editor`, `/flow-editor/`, and `/flow-editor/assets/*`
+
+When `ConsolePolicy.require_app_auth` is `true`, the console JSON, JSON-RPC,
+timeline, blob, Flow Editor RPC, and SSE surfaces require a valid JWT. Clients
+may use either a bearer header:
+
+```
+Authorization: Bearer eyJhbGciOiJSUzI1NiIs...
+```
+
+or an exact query parameter:
+
+```
+?auth_token=<url-encoded-token>
+```
+
+Query values are percent-decoded. URL-encode reserved characters such as `=`,
+`&`, `+`, and `%`. Prefer the header except for browser or SSE bootstrap cases.
+The token is validated against the fixed trusted OIDC snapshot and configured
+auth policy. See [authentication](/guides/authentication) for details.
+
+Meta's built-in console auth is bearer-token based and does not rely on
+cookies. Deployments that add cookie-backed console auth at a reverse proxy must
+also add CSRF/origin protection for mutating console routes.
+
+Set `ConsolePolicy.read_only` to `true` to serve the console in view-only mode.
+Read endpoints and streams remain available, while mutating JSON-RPC methods
+such as `meta/console/send`, `meta/blob/upload`, lifecycle controls, gating
+decisions, and metadata writes are omitted from `meta/capabilities` and return
+a read-only error if called directly.
+
+## Error responses
+
+API errors return standard HTTP status codes with a JSON body:
+
+```json
+{
+  "error": "unauthorized",
+  "message": "Email not in allowlist"
+}
+```
+
+| Status | Meaning |
+|--------|---------|
+| `200` | Success |
+| `400` | Bad request (invalid parameters) |
+| `401` | Unauthorized (missing or invalid token) |
+| `403` | Forbidden (read-only policy or insufficient access grants) |
+| `404` | Not found |
+| `409` | Console timeline replay unavailable or console-send conflict/refusal |
+| `429` | Console-send admission backlog full (`admission_backlog_full`) |
+| `500` | Internal server error |
+| `503` | Console-send actor probe unhealthy or reload refused |
+| `504` | Console-send admission or reload timed out |
+
+Structured `/console/send` admission failures carry `{error, message, data}`:
+`429` uses `admission_backlog_full`, `503` uses `actor_probe_unhealthy` or
+`reload_refused`, and `504` uses `admission_timeout` or `reload_timed_out`.
+Preserve `data` when reporting these failures; a timeout does not by itself
+establish execution fate or retryability. These REST status mappings are
+distinct from the JSON-RPC policy codes documented in the
+[RPC reference](/api/rpc#meta-specific-error-codes).
+
+## See also
+
+- [JSON-RPC](/api/rpc) -- full programmatic API
+- [SSE API](/api/sse) -- event streaming protocol
+- [Console guide](/guides/console) -- admin console details

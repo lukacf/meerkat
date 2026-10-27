@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "meta-forge"
+version = "0.3.0"
+description = "Meta Forge: agent-guided creation and deployment of Meerkat systems"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn>=0.34,<1",
+  "meerkat-meta==0.9.3",
+  "httpx>=0.28,<1",
+  "mcp==1.30.0",
+  "jsonschema>=4.26,<5",
+  "tinycss2==1.5.1",
+  "python-multipart>=0.0.20,<1",
+  "pypdf==6.1.1",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10", "pytest-asyncio>=0.24,<2", "meerkat-mobkit==0.8.42"]
+
+[tool.setuptools.packages.find]
+include = ["launchkit*"]
+
+[tool.setuptools.package-data]
+launchkit = ["*.json", "visualization_references/*", "templates/**/*", "templates_v2/**/*", "templates_elephant/**/*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

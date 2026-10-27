@@ -1,0 +1,247 @@
+---
+title: "Quickstart"
+description: "Start a Meta application runtime with a matching gateway and SDK, then add agents and the console."
+icon: "rocket"
+---
+
+This guide starts with the Meta application runtime. If you only need to run an
+agent or a mob, [Core's quickstart](https://docs.rkat.ai/quickstart) is enough.
+[Component choice](https://docs.rkat.ai/ecosystem) explains the optional pieces.
+
+## Prepare a matching SDK and gateway
+
+<Note>
+Python and TypeScript clients need a compatible gateway executable. The source
+path below builds the gateway and SDK from the same checkout. For a packaged
+installation, use the instructions and checksums supplied with your release.
+</Note>
+
+From this source checkout, with Rust 1.94+ and Python 3.10+:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -e ./sdk/python
+./scripts/repo-cargo build -p meerkat-meta --bin rpc_gateway --locked
+./scripts/repo-cargo --print-env
+```
+
+The final command prints `CARGO_TARGET_DIR`. The built gateway is its
+`debug/rpc_gateway` executable. Pass that absolute path to `.gateway(...)` in
+the examples below. Run Python snippets in an async entry point; the
+[repository README](https://github.com/lukacf/meerkat-meta#start-a-local-runtime)
+has a complete `asyncio.run` example that reads status and shuts down cleanly.
+
+When native release archives are available, use `rpc_gateway` from the matching
+`meta-rpc-gateway-<version>-<target>` archive and install the matching
+`meerkat-meta` Python package or `@rkat/meta-sdk` TypeScript package. Follow that
+release's platform and checksum instructions. Linux x86_64 and aarch64 and macOS
+arm64 archives are published with the release, listed in `index.json` and
+`checksums.sha256`; macOS x86_64 and Windows archives may arrive later, listed in
+`index-trailing.json` and `checksums-trailing.sha256`. Rust hosts use the
+`meerkat-meta` crate directly:
+
+```toml
+[dependencies]
+meerkat-meta = "0.9.5"
+```
+
+## Bootstrap a runtime
+
+The fastest way to get a running system is `start_meta_runtime`. It takes a
+module configuration, agent event stream, and a startup timeout. Host-supplied
+modules are optional, so this runnable baseline starts with an empty module and
+discovery list.
+
+<Tabs>
+  <Tab title="Rust">
+    ```rust
+    use meerkat_meta::{
+        start_meta_runtime, DiscoverySpec, EventEnvelope, MetaConfig,
+        UnifiedEvent,
+    };
+    use std::time::Duration;
+
+    let config = MetaConfig {
+        modules: vec![],
+        discovery: DiscoverySpec {
+            namespace: "my-app".to_string(),
+            modules: vec![],
+        },
+        pre_spawn: vec![],
+    };
+
+    let agent_events: Vec<EventEnvelope<UnifiedEvent>> = vec![];
+    let timeout = Duration::from_secs(30);
+
+    let mut runtime = start_meta_runtime(config, agent_events, timeout)?;
+    println!("Loaded modules: {:?}", runtime.loaded_modules());
+
+    for event in &runtime.merged_events {
+        println!("{} [{}] {:?}", event.event_id, event.source, event.event);
+    }
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    import { Meta } from "@rkat/meta-sdk";
+
+    const rt = await Meta.builder()
+      .persistentState(".meta/state")
+      .gateway("/path/to/rpc_gateway")
+      .build();
+
+    const status = await rt.mobHandle().status();
+    console.log("Runtime status:", status.running);
+    await rt.shutdown();
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    from meerkat_meta import Meta
+
+    async with await Meta.builder().gateway("/path/to/rpc_gateway").build() as rt:
+        handle = rt.mob_handle()
+        status = await handle.status()
+        print("Running:", status.running)
+        print("Modules:", status.loaded_modules)
+    ```
+  </Tab>
+</Tabs>
+
+## Use the unified runtime
+
+For production deployments that combine a Meerkat mob with Meta modules, use the `UnifiedRuntime` builder:
+
+```rust
+use meerkat_meta::UnifiedRuntime;
+
+let runtime = UnifiedRuntime::builder()
+    .mob_spec(mob_spec)
+    .module_config(module_config)
+    .timeout(Duration::from_secs(30))
+    .build()
+    .await?;
+```
+
+The unified runtime bootstraps both systems, merges their event streams, and manages the combined lifecycle. See the [unified runtime guide](/guides/unified-runtime) for details.
+
+## Open the console
+
+Once the runtime is serving HTTP, open the admin console at:
+
+```
+<http_base_url>/console
+```
+
+The bundled gateways bind an available loopback port and return the exact
+`http_base_url` in the initialization result. A library host may choose its own
+address.
+
+For an SDK-launched `rpc_gateway`, protected console APIs are **auth-closed by
+default**: without configured auth, the gateway trusts no signing key. Configure
+`.auth(...)` and the matching bearer-token or authenticated-proxy handling
+described in [Authentication](/guides/authentication). Alternatively, for a
+loopback-only or authenticated-proxy-protected demo, explicitly add
+`.console_auth_required(False)` in Python or `.consoleAuthRequired(false)` in
+TypeScript before `.build()`. These are deliberate opt-outs, not production
+defaults. Keep the runtime alive while browsing; the status-only examples above
+shut it down when finished, and a console host should retain that cleanup on exit.
+
+The console shows the agent sidebar, conversation workspace, signals rail, topology, logs, and health overview. The bundled app seeds from REST, sends through JSON-RPC, and tails replayable timeline frames over SSE.
+
+## Keep agents available across sessions
+
+For durable agent identities, use a roster and the identity-first API. The
+following sketch shows how a personal agent connects to a triage agent;
+`MOB_TOML` supplies their profiles as described in [roster](/concepts/roster):
+
+```python
+from meerkat_meta import Meta
+from meerkat_meta.identity_first_models import DurableAgentSpec, ManagedPeerEdge
+
+# Define your roster
+class MyRoster:
+    async def roster(self, context):
+        return [
+            DurableAgentSpec(identity="identity:person", profile="personal", addressability="addressable"),
+            DurableAgentSpec(identity="triage:main", profile="triage", addressability="internal_only"),
+        ]
+
+class MyTopology:
+    async def compute_edges(self, target_identities, context):
+        return [ManagedPeerEdge(a="identity:person", b="triage:main")]
+
+# Boot the runtime
+rt = await (
+    Meta.builder()
+    .mob_inline(MOB_TOML)
+    .persistent_state("./state")
+    .roster(MyRoster())
+    .topology_provider(MyTopology())
+    .gateway("./rpc_gateway")
+    .build()
+)
+
+# Use identity-scoped handles
+triage = rt.agent("triage:main")
+personal = rt.agent("identity:person")
+
+# On turn_driven members (runtime_mode = "turn_driven"), send_and_wait /
+# dispatch_and_wait wait for the turn they started, by its turn ticket, and
+# return that turn's own output. On autonomous_host members (the default
+# mode) the delivery still happens once, but the turn cannot be tracked: the
+# call waits identity-wide with a TurnTrackingUnavailableWarning, and
+# dispatch_text_and_wait_outcome(...).attributed is False because another
+# delivery can satisfy that wait. Never wait by comparing output text: an
+# agent may answer the same thing twice.
+output = await triage.dispatch_text_and_wait(
+    "New event from connector", origin="connector", timeout=60,
+)
+
+await personal.send_and_wait("What's happening today?", timeout=60)
+```
+
+<Note>
+**Profiles are templates; members are declared.** The `[profiles.*]` tables in
+`MOB_TOML` produce no members on their own: the identities your roster returns
+(or `ensure_member` names) are the only members that exist, and nothing spawns
+one member per profile for you. Both SDKs pass a typed `RosterContext` to the
+roster callback: Python exposes `context.mob_definition` and
+`context.previous_identities`; TypeScript exposes `context.mobDefinition` and
+`context.previousIdentities`. The stock gateway supplies its compiled mob
+definition, so a profile-shaped roster can derive members from that definition's
+profiles. Custom or older hosts may omit the definition (`None`/`null`), and
+missing prior identities default to an empty list. See
+[Profiles are templates](/concepts/roster#profiles-are-templates-and-members-are-declared).
+
+The prior-identity list is call-site-dependent, not an authoritative membership
+snapshot on every callback. Topology-query and edge-reconciliation snapshots
+supply registered identities; bootstrap, full roster refresh/reconcile, and
+reset-time spec adoption currently pass an empty list. An empty list does not
+establish that no identities are registered.
+
+If the definition declares `[wiring]` (`auto_wire_orchestrator` or
+`role_wiring`), call `rt.mob_handle().reconcile_edges()` after boot and after
+each `rt.reconcile()`; `ensure_member` reconciles on its own. Pin
+`runtime_mode = "turn_driven"` on profiles that back addressable identities:
+meerkat defaults to `autonomous_host`, which runs a kickoff turn at spawn and
+skips ambient per-turn recall for generic SDK/work delivery. Non-steer local
+canonical console-human input can carry configured typed injected context even
+for `autonomous_host`; that exception does not cover arbitrary external
+bindings. See [Runtime modes](/concepts/roster#runtime-modes).
+</Note>
+
+Use `respawn()` for non-destructive recovery that keeps continuity, and `reset()` only when the app intentionally wants a destructive new generation and session.
+
+If you change a durable identity's role in the roster, its resume fails closed
+until that boot declares the migration with `.role_migrations([...])`. See the
+[Python SDK](/sdks/python) page for the builder form and
+[Configuration](/reference/configuration#member-role-migrations) for the init
+parameter.
+
+## What's next
+
+- [Modules](/concepts/modules) -- how the module system works
+- [Events](/concepts/events) -- the unified event model
+- [Operational subsystems](/concepts/gating) - gating, delivery, durable scheduling, memory
+- [Architecture](/reference/architecture) -- internal design and crate structure

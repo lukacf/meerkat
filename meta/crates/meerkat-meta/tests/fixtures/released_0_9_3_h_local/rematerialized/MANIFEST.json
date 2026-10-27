@@ -1,0 +1,382 @@
+{
+  "committed_sessions": {
+    "01a154d9-b570-7252-8fb1-0a3695eb0e01": {
+      "blob_sha256": "row-sha256:973fc8235ad23722fc9b0b45a0d1fdac36df5b91a8da037ef48d18c16630bfc8",
+      "compacted_markers": 0,
+      "compaction_cadence": {
+        "session_boundary_index": 1
+      },
+      "continuity_head": true,
+      "messages": 3,
+      "messages_sha256": "573620ca2bd249328d100406c06b3ee2096ea3e22fcde5467b46560fcfe60f57",
+      "record_identity": "agent:hl-01",
+      "rewrite_prefix_authority": null,
+      "runtime_id": "rt:session:01a154d9-b570-7252-8fb1-0a3695eb0e01",
+      "snapshot_messages": 1,
+      "snapshot_messages_sha256": "8b7eed34b7f4dc09e45bba8d16b93d939545a20e59d9b8f70896b876ed9bc0bf",
+      "store_revision": 3,
+      "strand_messages": 3,
+      "transcript_history": null
+    },
+    "01a154d9-b572-7c00-959e-914b8dff3889": {
+      "blob_sha256": "row-sha256:23629f06b9c7256fdf49419131cee783214c06010c6140c7c8ecd1c046d24157",
+      "compacted_markers": 0,
+      "compaction_cadence": {
+        "session_boundary_index": 1
+      },
+      "continuity_head": false,
+      "messages": 3,
+      "messages_sha256": "56dd52ee74f1ad867e7dff9b9740949f27f865c65cddaacdba394645b9db6d06",
+      "record_identity": null,
+      "rewrite_prefix_authority": null,
+      "runtime_id": "rt:session:01a154d9-b572-7c00-959e-914b8dff3889",
+      "snapshot_messages": null,
+      "snapshot_messages_sha256": null,
+      "store_revision": 3,
+      "strand_messages": 0,
+      "transcript_history": null
+    },
+    "01a154d9-bb43-79f3-b4cc-c901ec2e8d0f": {
+      "blob_sha256": "row-sha256:a20a563e0fe124a72ed19f6f3607f190547b61fdbf1c7b2d180c8ca9e1d8d850",
+      "compacted_markers": 0,
+      "compaction_cadence": {
+        "session_boundary_index": 0
+      },
+      "continuity_head": false,
+      "messages": 1,
+      "messages_sha256": "541c1c80352a1f6b8e1f45a5aedb988c48840f95ec29cbebdc1b564d6bd466be",
+      "record_identity": "agent:hl-02",
+      "rewrite_prefix_authority": null,
+      "runtime_id": "rt:session:01a154d9-bb43-79f3-b4cc-c901ec2e8d0f",
+      "snapshot_messages": 1,
+      "snapshot_messages_sha256": "541c1c80352a1f6b8e1f45a5aedb988c48840f95ec29cbebdc1b564d6bd466be",
+      "store_revision": 1,
+      "strand_messages": 0,
+      "transcript_history": null
+    },
+    "01a154d9-bb45-7401-a149-a3065631c2c4": {
+      "blob_sha256": "row-sha256:7ec1ffd3361229ed16b5a759dfe063a28076a137fdaaf136b771381710f8df93",
+      "compacted_markers": 0,
+      "compaction_cadence": {
+        "session_boundary_index": 0
+      },
+      "continuity_head": false,
+      "messages": 1,
+      "messages_sha256": "9ce7244f2e12028cecfb9dfeea8f65416f8ad61f43bb233e58c4fdc9b8058445",
+      "record_identity": "agent:hl-03",
+      "rewrite_prefix_authority": null,
+      "runtime_id": "rt:session:01a154d9-bb45-7401-a149-a3065631c2c4",
+      "snapshot_messages": 1,
+      "snapshot_messages_sha256": "9ce7244f2e12028cecfb9dfeea8f65416f8ad61f43bb233e58c4fdc9b8058445",
+      "store_revision": 1,
+      "strand_messages": 0,
+      "transcript_history": null
+    }
+  },
+  "corpus": "meta-0.9.3 H-local production-shaped state directory (#306 A1, G1)",
+  "empty_dirs": [
+    "blobs"
+  ],
+  "files": {
+    "state": [
+      {
+        "bytes": 4096,
+        "path": "continuity.sqlite3",
+        "sha256": "edbee11a2e909b4413b8e2265b665c0f156aaba120e5c715a11d8fc30ba789d7"
+      },
+      {
+        "bytes": 32768,
+        "path": "continuity.sqlite3-shm",
+        "sha256": "1c43242fb2db9ef4c731172dba86c0bf08e0caafaae2cbe942c5dd81ca686447"
+      },
+      {
+        "bytes": 449112,
+        "path": "continuity.sqlite3-wal",
+        "sha256": "131ca5c5cd78d9a850c1fcc2be2529cdd1eecd464259e9e3207ac5694bd8b371"
+      },
+      {
+        "bytes": 0,
+        "path": "continuity.sqlite3.mfence",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 286720,
+        "path": "council.sqlite3",
+        "sha256": "119af1c8aea8c495d6856cd6667bbd7e890744ff6bdbbb66f19f7156866485e8"
+      },
+      {
+        "bytes": 0,
+        "path": "council.sqlite3.mfence",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 294912,
+        "path": "event_log.sqlite3",
+        "sha256": "960c0478463917edf24108bb44083a830db6fabfda86380674e63dea28f25665"
+      },
+      {
+        "bytes": 32768,
+        "path": "event_log.sqlite3-shm",
+        "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb"
+      },
+      {
+        "bytes": 0,
+        "path": "event_log.sqlite3-wal",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 1530,
+        "path": "event_log.sqlite3.composition.json",
+        "sha256": "772aa9eee5fc380fd6f19f3e7a1416a889df109384e065608760c10dfc6197b9"
+      },
+      {
+        "bytes": 0,
+        "path": "event_log.sqlite3.mfence",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 73728,
+        "path": "meta_console.sqlite3",
+        "sha256": "6fb6a98bcf2e580c5c67cadd5eeaad801c4d72295ba6cbbe9f6d00f85ae17a18"
+      },
+      {
+        "bytes": 32768,
+        "path": "meta_console.sqlite3-shm",
+        "sha256": "e5692c893ae922bb9627c3e7e1fe54419d05e2eb5ce005cf6b3057cabbecc730"
+      },
+      {
+        "bytes": 28872,
+        "path": "meta_console.sqlite3-wal",
+        "sha256": "3efb5e7b6a2c959d4f5bb6706841c522f583ad07a894f01938bf42b761cbf7cf"
+      },
+      {
+        "bytes": 0,
+        "path": "meta_console.sqlite3.mfence",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 20480,
+        "path": "meta_metadata.sqlite3",
+        "sha256": "e40b7bb784a08bbe4f540e1ad445850dd6f2c17f4bf3597b286c31393177be23"
+      },
+      {
+        "bytes": 0,
+        "path": "meta_metadata.sqlite3.mfence",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 331776,
+        "path": "runtime.sqlite",
+        "sha256": "fb08ed03ea0c90fc64a3224af8524f24517a73eb29d3f8cba42ff2a54b47de59"
+      },
+      {
+        "bytes": 0,
+        "path": "runtime.sqlite.execution-custody",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 0,
+        "path": "runtime.sqlite.execution-custody-admission",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 0,
+        "path": "runtime.sqlite.mfence",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 77824,
+        "path": "schedule.sqlite",
+        "sha256": "73344e24e51fbd6166e692d1793b8d4b4899f0b0fd659e0af27cebd76cd62acf"
+      },
+      {
+        "bytes": 0,
+        "path": "schedule.sqlite.mfence",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 118784,
+        "path": "workgraph.sqlite3",
+        "sha256": "b877952a5a1ef5debd35fbdbef3d63e43204f30d13bf5c8c3f7e891e70bbef15"
+      },
+      {
+        "bytes": 32768,
+        "path": "workgraph.sqlite3-shm",
+        "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb"
+      },
+      {
+        "bytes": 0,
+        "path": "workgraph.sqlite3-wal",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 0,
+        "path": "workgraph.sqlite3.mfence",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 40960,
+        "path": "meta/jobs.sqlite3",
+        "sha256": "337b748a2b398ae229c8c3e9b4c0cf009e1c03afce5d294160252778217d2fbb"
+      },
+      {
+        "bytes": 0,
+        "path": "meta/jobs.sqlite3.mfence",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 0,
+        "path": "mobs/child-mobs.lock",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 286720,
+        "path": "mobs/realm_profiles.db",
+        "sha256": "119af1c8aea8c495d6856cd6667bbd7e890744ff6bdbbb66f19f7156866485e8"
+      },
+      {
+        "bytes": 0,
+        "path": "mobs/realm_profiles.db.mfence",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    ]
+  },
+  "generated_at": "2026-10-19T15:48:38Z",
+  "identities": {
+    "agent:hl-01": {
+      "final_status": {
+        "agent_runtime_id": "rt:agent:hl-01:0",
+        "boot": 3,
+        "generation": 0,
+        "session_id": "01a154d9-b570-7252-8fb1-0a3695eb0e01",
+        "state": "active"
+      },
+      "sessions_seen": [
+        "01a154d9-b570-7252-8fb1-0a3695eb0e01"
+      ]
+    },
+    "agent:hl-02": {
+      "final_status": {
+        "agent_runtime_id": "rt:agent:hl-02:0",
+        "boot": 3,
+        "generation": 0,
+        "session_id": "01a154d9-bb43-79f3-b4cc-c901ec2e8d0f",
+        "state": "active"
+      },
+      "sessions_seen": [
+        "01a154d9-b572-7c00-959e-914b8dff3889",
+        "01a154d9-bb43-79f3-b4cc-c901ec2e8d0f"
+      ]
+    },
+    "agent:hl-03": {
+      "final_status": {
+        "agent_runtime_id": "rt:agent:hl-03:0",
+        "boot": 3,
+        "generation": 0,
+        "session_id": "01a154d9-bb45-7401-a149-a3065631c2c4",
+        "state": "active"
+      },
+      "sessions_seen": [
+        "01a154d9-bb45-7401-a149-a3065631c2c4"
+      ]
+    }
+  },
+  "mob_id": "hl-corpus-mob",
+  "omitted_from_state": {
+    "peer_key.ed25519": "gateway peer key (key material); an installation without host pairings mints a new one on boot"
+  },
+  "packed": [],
+  "producer": {
+    "binary": "rpc_gateway",
+    "binary_sha256": "757519ed1210d16d865e2e37de3fba098a1cca6ccba6a7e1dc646963fb04a335",
+    "compaction": {
+      "auto_compact_threshold": 50000,
+      "not_overridden_093_defaults": {
+        "history_retained_rewrites": 4,
+        "min_turns_between_compactions": 3
+      },
+      "recent_turn_budget": 1,
+      "reported_prompt_tokens": 60000,
+      "trigger": "a user message carrying [ct:<key>] reports a cost above the threshold once"
+    },
+    "driver": "mint_released_0_9_3_h_local_rematerialized.py",
+    "driver_sha256": "f52b403a4ed088d776c6607c1134f1b180cd362f1c192e59b7ff0111a88c756f",
+    "model": "loopback chat-completions fake; reply 'corpus reply N'",
+    "release_asset": "meta-rpc-gateway-0.9.3-x86_64-unknown-linux-gnu.tar.gz",
+    "release_asset_sha256": "b416df1ba5648ca3ed849dec2692f664c37b0e7277232a6d2421ac53961a18b0"
+  },
+  "profile": "specialist",
+  "refusals": [],
+  "rematerialized": [
+    {
+      "continuity_head": false,
+      "how": "materialized again after delete_identity",
+      "identity": "agent:hl-02",
+      "messages": 1,
+      "previous_messages": 3,
+      "previous_runtime_only": true,
+      "previous_session_id": "01a154d9-b572-7c00-959e-914b8dff3889",
+      "previous_store_revision": 3,
+      "record_binds": true,
+      "session_id": "01a154d9-bb43-79f3-b4cc-c901ec2e8d0f",
+      "snapshot_equals_body": true,
+      "snapshot_messages": 1,
+      "store_revision": 1,
+      "strand_messages": 0
+    },
+    {
+      "continuity_head": false,
+      "how": "first materialization",
+      "identity": "agent:hl-03",
+      "messages": 1,
+      "record_binds": true,
+      "session_id": "01a154d9-bb45-7401-a149-a3065631c2c4",
+      "snapshot_equals_body": true,
+      "snapshot_messages": 1,
+      "store_revision": 1,
+      "strand_messages": 0
+    }
+  ],
+  "restart_probe_093": {
+    "started": true
+  },
+  "rosters": {
+    "1": [
+      "agent:hl-01",
+      "agent:hl-02"
+    ],
+    "2": [
+      "agent:hl-01",
+      "agent:hl-02"
+    ],
+    "3": [
+      "agent:hl-01",
+      "agent:hl-02",
+      "agent:hl-03"
+    ]
+  },
+  "shutdowns": {
+    "1": {
+      "killed": false,
+      "result": {
+        "runtime_cleanup_completed": true,
+        "shutdown": true
+      }
+    },
+    "2": {
+      "killed": false,
+      "result": {
+        "runtime_cleanup_completed": true,
+        "shutdown": true
+      }
+    },
+    "3": {
+      "killed": false,
+      "result": {
+        "runtime_cleanup_completed": true,
+        "shutdown": true
+      }
+    }
+  },
+  "variant": "rematerialized"
+}

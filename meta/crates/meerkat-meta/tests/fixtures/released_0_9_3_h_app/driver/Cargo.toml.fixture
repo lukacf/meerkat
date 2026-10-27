@@ -1,0 +1,28 @@
+[package]
+name = "s2-mint-093"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Mints Meta 0.9.3 embedded-builder state directories (#306 shape S2). Every
+# meerkat crate is pinned to the released 0.9.3 on crates.io; never point this
+# at a path or git dependency.
+[dependencies]
+meerkat-meta = "=0.9.3"
+meerkat = "=0.9.3"
+meerkat-core = "=0.9.3"
+meerkat-client = "=0.9.3"
+meerkat-mob = "=0.9.3"
+meerkat-models = "=0.9.3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+async-trait = "0.1"
+async-stream = "0.3"
+futures = "0.3"
+serde_json = "1"
+
+[profile.dev]
+debug = 0
+
+# A workspace of its own, so that a copy restored inside another workspace's
+# tree still builds alone.
+[workspace]

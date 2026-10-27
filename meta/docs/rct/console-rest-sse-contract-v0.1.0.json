@@ -1,0 +1,44 @@
+{
+  "contract_version": "0.1.0",
+  "version_pin": "v0.1.0",
+  "surfaces": {
+    "rest": {
+      "experience": {
+        "method": "GET",
+        "path": "/console/experience",
+        "response": {
+          "required_top_level_fields": [
+            "contract_version",
+            "base_panel",
+            "agent_sidebar",
+            "activity_feed",
+            "chat_inspector",
+            "topology",
+            "health_overview"
+          ]
+        }
+      },
+      "modules": {
+        "method": "GET",
+        "path": "/console/modules",
+        "response": {
+          "required_top_level_fields": [
+            "contract_version",
+            "modules"
+          ]
+        }
+      }
+    },
+    "sse": {
+      "agent_events": {
+        "method": "POST",
+        "path": "/interactions/stream"
+      },
+      "mob_events": {
+        "method": "GET",
+        "path": "/mob/events"
+      },
+      "activity_feed_keep_alive_event": "keep-alive"
+    }
+  }
+}

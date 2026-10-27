@@ -1,0 +1,1325 @@
+---
+title: "Python SDK"
+description: "Meta Python SDK — typed builder API, async runtime, and streaming events."
+icon: "python"
+---
+
+The Meta Python SDK provides a typed host API for launching and operating
+Meerkat mobs through the SDK-facing gateway. Apps own policy. Meerkat and
+`meerkat-mob` remain authoritative for agent execution, identity, membership,
+lifecycle, and wiring; Meta packages gateway startup, provider adapters,
+operational modules, persistence projections, and operator surfaces.
+
+## Installation
+
+```bash
+pip install meerkat-meta
+```
+
+<Note>
+  The wheel is client-only and does not contain `rpc_gateway`. Download
+  `meta-rpc-gateway-<version>-<target>.tar.gz` for Unix or macOS, or
+  `meta-rpc-gateway-<version>-<target>.zip` for Windows, and extract its
+  `rpc_gateway` binary (`rpc_gateway.exe` on Windows). Alternatively, follow the
+  [source-build instructions](/quickstart#prepare-a-matching-sdk-and-gateway). Pass that binary's path to
+  `.gateway(...)`. Linux x86_64 and aarch64 and macOS arm64 archives are
+  published with the release and listed in `index.json` and `checksums.sha256`;
+  macOS x86_64 and Windows archives may arrive later, listed in
+  `index-trailing.json` and `checksums-trailing.sha256`.
+</Note>
+
+## Quick start
+
+In a fresh project directory, create `config/mob.toml`:
+
+```toml
+[mob]
+id = "python-quickstart"
+
+[profiles.worker]
+model = "gpt-5.5"
+runtime_mode = "turn_driven"
+
+[profiles.worker.tools]
+comms = true
+```
+
+Set `OPENAI_API_KEY` in your environment for the model above, or choose a
+supported model and its matching provider credentials. Run the following
+script from that project directory, replacing `/path/to/rpc_gateway` with
+the binary you installed. Profiles are templates, not pre-created members,
+so the example explicitly creates an ephemeral worker before sending.
+
+<Warning>
+  This example disables console and SSE authentication for a local demo on
+  the gateway's default loopback-only listener. Do not expose it to a shared
+  network. See [Authentication](/guides/authentication) and
+  [Deployment](/guides/deployment) for authenticated hosting. The Python
+  subscription helpers below do not forward bearer tokens; configuring
+  `.auth(...)` alone does not authenticate those SSE requests.
+</Warning>
+
+```python
+import asyncio
+from meerkat_meta import Meta
+
+async def main():
+    async with await (
+        Meta.builder()
+        .mob("config/mob.toml")
+        .gateway("/path/to/rpc_gateway")
+        .console_auth_required(False)
+        .build()
+    ) as rt:
+        handle = rt.mob_handle()
+
+        # Send a message (comms)
+        await handle.ensure_member("agent-1", "worker")
+        await handle.send("agent-1", "Hello")
+
+        # Watch what happens (observation)
+        async for event in handle.subscribe_agent("agent-1"):
+            print(event.event_type, event.event)
+
+asyncio.run(main())
+```
+
+## Durable detached tools
+
+Declare long-running host work explicitly instead of holding
+`callback/call_tool` open:
+
+```python
+from meerkat_meta import DetachedJobExecution, DetachedJobResult
+
+async def run_scan(ctx):
+    await ctx.progress(1, "scan started")
+    # ctx.arguments is the persisted non-secret specification.
+    # ctx.credentials is resolved for this committed attempt only.
+    result_ref = await perform_scan(ctx.arguments, ctx.credentials)
+    return DetachedJobResult(result_ref)
+
+class AppAgentBuilder:
+    async def build_agent(self, options):
+        options.register_tool(
+            "security_scan",
+            lambda args: {"error": "detached owner required"},
+            description="Run a durable security scan",
+            execution=DetachedJobExecution(
+                runner="example.security_scan",
+                version="v1",
+                restart_class="checkpoint_resumable",
+                idempotency_scope="interaction_and_arguments",
+                submission_timeout_ms=30_000,
+                credential_scopes=("unifi.read",),
+                handler=run_scan,
+            ),
+        )
+
+runtime = await (
+    Meta.builder()
+    .persistent_state("state/meta")
+    .job_credentials(resolve_profile_credentials)
+    .session_service(AppAgentBuilder())
+    .gateway("/path/to/rpc_gateway")
+    .build()
+)
+
+job = await runtime.jobs.get(job_id)
+await runtime.jobs.cancel(job_id)
+```
+
+The gateway durably accepts the job and returns a receipt; host work then runs
+outside the agent turn. Start, reconcile, and cancel are short control-plane
+callbacks subject to the 120-second public contract (the Python host and wire
+margins are 125 and 130 seconds). On reconnect, Meta offers the exact
+committed attempt, fence, lease, checkpoint, and runner handle. Reopening does
+not mint a new fence; only a machine-authorized claim or retry can do that.
+Resolved credentials are attempt-local and never enter durable job state.
+
+## Identity-First API
+
+For apps with durable agent identities, the identity-first API provides durable lifecycle management.
+Agents are addressed by stable identities (`identity:alice`, `triage:main`), not member IDs.
+
+```python
+from meerkat_meta import Meta, TurnOutputStatus
+from meerkat_meta.identity_first_models import DispatchInput, DurableAgentSpec, ManagedPeerEdge
+
+# Boot with roster provider
+rt = await (
+    Meta.builder()
+    .mob_inline(MOB_TOML)                 # or .mob("mob.toml")
+    .persistent_state(state_dir)
+    .agent_memory()                       # optional: durable per-agent memory
+    .roster(my_roster)                    # provides DurableAgentSpec list
+    .topology_provider(my_topology)       # optional: managed edges
+    .agent_customizer(my_customizer)      # optional: per-identity prompts
+    .gateway("./rpc_gateway")
+    .build()
+)
+
+# Identity-scoped agent handles
+triage = rt.agent("triage:main")
+alice = rt.agent("identity:alice")
+
+# Delivery
+await alice.send("Hello")                                          # Addressable only
+await triage.dispatch_text("School closed", origin="connector")   # Any identity
+
+# On a turn_driven member (runtime_mode = "turn_driven"): send, then wait for
+# THAT turn and return its own output. The send carries a turn ticket, so
+# another delivery to the identity (a peer message, a scheduled turn, a fork
+# completion wake) cannot satisfy the wait. On an autonomous_host member (the
+# default mode) the send is still delivered once, but the turn cannot be
+# tracked: the call waits identity-wide with a TurnTrackingUnavailableWarning,
+# and send_and_wait_outcome(...).attributed is False (the text may be another
+# turn's). require_attribution=True raises instead.
+answer = await alice.send_and_wait("Hello", timeout=90)
+
+# The same, in two steps: track the turn, then wait on its ticket.
+sent = await alice.send("Hello", track_turn=True)
+if sent.turn_ticket is not None:
+    turn = await alice.wait_for_turn(sent.turn_ticket, timeout=90)
+    if turn.output_status is TurnOutputStatus.TEXT:
+        answer = turn.output  # turn.output_truncated says whether it was cut
+elif sent.turn_unavailable is not None:
+    # e.g. "autonomous_host"; delivered is False only for "not_delivered"
+    print("untracked:", sent.turn_unavailable.code, sent.turn_unavailable.delivered)
+else:
+    print("untracked: the gateway predates turn tickets")
+
+# Observation (no mob_handle, no member IDs needed)
+inspection = await triage.inspect()   # output_preview, completion_cursor, peers
+cursor = await triage.completion_cursor()  # cursor only; never reads the member session
+output = await triage.wait_for_output(timeout=90)   # any output, including an earlier turn's
+await rt.wait_until_ready(["triage:main", "identity:alice"])
+
+# Status
+status = await alice.status()          # state, session_id, generation, labels
+
+# Lifecycle
+await alice.reset()                    # Destructive: new generation, new session
+await rt.agent("domain:calendar").respawn()  # Non-destructive recovery
+await rt.reconcile()                  # In-process roster reconciliation
+```
+
+`send_and_wait`, `dispatch_and_wait` and `dispatch_text_and_wait` are
+per-admission: the runtime mints a turn ticket for the delivery and keeps the
+admitted turn's own completion handle under it, and the wait reads
+`meta/turn_result` for that ticket, which reports that turn's own output
+from its committed run result. A failed turn raises `TurnFailedError`, and a
+ticket the gateway does not know (for example after a gateway restart) raises
+`TurnUnknownError`. Text cut at the 256 KiB bound emits
+`TurnOutputTruncatedWarning`; a turn that completed without output of its own
+(the runtime folded it into a run in progress, or deduplicated it) returns
+`None` with `TurnOutputUnavailableWarning`. `wait_for_turn` returns the typed
+`TurnResult` (`output_status`, `output`, `output_truncated`) instead.
+
+`send_and_wait_outcome`, `dispatch_and_wait_outcome` and
+`dispatch_text_and_wait_outcome` take the same arguments and return the typed
+`AwaitedTurn`: `text`, `attributed` (whether the text provably belongs to this
+delivery's turn), `admission`, `ticket`, `output_status` and `untracked_code`.
+The plain methods return its `text`.
+
+The delivery happens exactly once and the call never resends. Every failure
+after admission carries the send/dispatch result as `admission`, so the
+caller keeps the receipt instead of redispatching the work:
+
+- No turn ticket (any delivered `turn_unavailable.code`, below, or a gateway
+  that predates turn tickets): the call waits on the identity-wide completion
+  cursor and emits `TurnTrackingUnavailableWarning` naming the code. That
+  result is NOT attributed: another delivery's completion can satisfy the
+  wait, and the text is the session's latest output. The outcome's
+  `attributed` is `False` and `untracked_code` carries the code.
+  `require_attribution=True` raises `TurnTrackingUnavailableError` (with
+  `code` and `reason`) in every untracked case instead.
+- The exact-ticket wait fails for a transport or RPC reason (for example
+  `observation_lane_saturated`): only that ticket's observation is retried,
+  with bounded backoff, until `timeout`; then
+  `PostAdmissionObservationError` carries `admission`, `ticket` and the last
+  failure as `__cause__`. Read the turn later with `wait_for_turn(ticket)`.
+- Every other error after admission keeps its type and carries `admission`
+  (and `ticket`, `None` when untracked): `TurnFailedError`,
+  `TurnUnknownError`, `WaitEndedError`, the identity-wide wait's
+  missing-baseline, superseded-incarnation and live-alias `RuntimeError`s, the
+  persistent transport's plain `RuntimeError` on a response timeout or closed
+  stdout, a caller's `asyncio.CancelledError` (the same instance,
+  re-raised), and an SDK warning a caller escalated with
+  `filterwarnings("error")`. A wait still pending at `timeout` raises
+  `TurnWaitTimeoutError`, a `TimeoutError` that also carries `admission` and
+  `ticket`. The one exception is a custom exception type that rejects
+  attribute assignment, which cannot carry the fields and still propagates
+  unchanged.
+
+The typed `turn_unavailable.code` says why a turn could not be tracked. Every
+code but `not_delivered` means the delivery still happened, exactly once:
+
+- `autonomous_host`: the member runs in `autonomous_host` mode (the default),
+  read from the runtime's live roster entry, so a profile or override changed
+  without a respawn does not count until the member respawns. The runtime
+  reports no per-turn completion for autonomous inbox delivery, so on these
+  members a per-admission wait is unavailable.
+- `runtime_refused`: the runtime refused per-turn completion for the member's
+  live mode for another reason.
+- `externally_bound`, `host_human_input`, `bridge_cannot_report_output`.
+- A gateway that predates turn tickets returns no `turn_unavailable` at all.
+
+`not_delivered` means nothing was delivered (no session bridge or no bound
+runtime), so the call raises `TurnNotDeliveredError` instead of waiting
+(nothing ran, so a retry is safe). `session_rotated` means a re-dispatch
+landed on a different session after a repair or respawn and ran as its own
+turn. Run a member with
+`runtime_mode = "turn_driven"` for per-admission results.
+
+Do not mix ticket waits and cursor waits on one identity: a ticket can settle
+before the identity health monitor counts the same turn on the cursor, so a
+later `wait_for_output(after=baseline)` can be satisfied by an earlier
+`send_and_wait` turn.
+
+`wait_for_completion(baseline)` and `wait_for_output(after=cursor)` remain
+identity-wide primitives: any completion on the identity after the baseline
+satisfies them, and the returned `output_preview` is the session's latest
+output, not necessarily a specific send's answer. Use `wait_for_turn(ticket)`
+or `wait_for_output(turn=ticket)` to wait for one specific turn.
+
+The recommended completion barrier is `track_turn=True` plus
+`wait_for_turn(ticket)` (or `send_and_wait`): it reads only the ticket ledger.
+Every wait is server-side and event-driven: `wait_for_turn` is one
+`meta/wait_for_turn` request, and the identity-wide waits
+(`wait_for_completion`, `wait_for_output(after=...)`, `rt.wait_until_ready`)
+are one `meta/wait_for_completion` request each. The gateway answers when
+the ticket settles or a completion is recorded, so nothing polls, and the
+member's output is read once, at completion. `timeout` is only the deadline;
+`poll_interval` applies only against a gateway that predates the server-side
+waits. `completion_cursor()` is a one-shot cursor read that never touches the
+member session. `inspect()` does read the member session, so do not poll it.
+
+A wait that ends before a completion (a failed or cancelled run, a broken,
+retiring or deleted identity, or gateway shutdown) raises the typed
+`WaitEndedError`, whose `outcome` names why; only the deadline raises
+`TimeoutError`.
+
+### DurableAgentSpec fields
+
+The roster provider returns one `DurableAgentSpec` per identity. The SDK
+serializes the shared wire shape that Rust deserializes: `identity`, `profile`,
+`addressability`, `labels`, and `additional_instructions` are always included,
+even at their defaults. Optional fields whose value is `None` are omitted,
+including unset `runtime_mode_override` and `initial_message`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `identity` | `str` | Stable identity (`triage:main`); no whitespace or `/` |
+| `profile` | `str` | Profile name from mob.toml `[profiles.*]` |
+| `addressability` | `str` | `addressable` (default) or `internal_only` |
+| `display_name` | `str`, optional | Human-facing name |
+| `labels` | `dict[str, str]` | Member labels |
+| `context` | `Any`, optional | Opaque host context handed to the customizer |
+| `additional_instructions` | `list[str]` | Appended to the profile's system prompt |
+| `placement` | `str`, optional | Exact Meerkat host ref; never degrades to local |
+| `runtime_mode_override` | `str`, optional | `autonomous_host` or `turn_driven`. `None` defers to the profile's `runtime_mode`, whose meerkat default is `autonomous_host`. Ambient per-turn memory requires `turn_driven` (see the [configuration reference](/reference/configuration)) |
+| `initial_message` | `str` or `list[ContentBlock]`, optional | First turn a fresh `autonomous_host` member runs on (Rust `ContentInput`: text or content blocks). `None` leaves meerkat's fallback spawn prompt in place |
+
+```python
+DurableAgentSpec(
+    identity="archivist:main",
+    profile="archivist",
+    runtime_mode_override="turn_driven",      # pin this identity regardless of the profile default
+    initial_message="Index yesterday's mail.", # or [TextBlock(...), ImageBlock(...)]
+)
+```
+
+### Roster provider context
+
+The gateway calls `roster(context)` with a typed `RosterContext`
+(`meerkat_meta.identity_first_models.RosterContext`), a one-to-one mirror of
+the Rust struct:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `mob_definition` | `dict \| None` | The booted mob's compiled definition as JSON (`id`, `profiles`, ...). Always present behind the bundled `rpc_gateway`; `None` only for in-process Rust embedders and test harnesses that resolve a roster without a mob definition. |
+| `previous_identities` | `list[str]` | Call-site-dependent prior-identity context, not an authoritative membership snapshot on every callback. Topology queries and edge reconciliation supply currently registered identities. Bootstrap, full roster refresh/reconcile, and reset-time spec adoption currently pass an empty list; an empty list does not imply that no identities are registered. |
+
+```python
+class MyRoster:
+    async def roster(self, context):
+        mob_id = (context.mob_definition or {}).get("id")
+        known = set(context.previous_identities)
+        ...
+```
+
+### DispatchInput convenience constructors
+
+```python
+DispatchInput.system("text")
+DispatchInput.connector("event from slack", correlation_id="msg-1")
+DispatchInput.scheduler("nightly sync")
+```
+
+### Scope-bound dispatch
+
+A host that must never admit a delivery to a session other than the one it
+recorded captures the identity's scope from `status()`, persists it, and
+dispatches against it. A moved scope raises `StaleScopeError` with nothing
+submitted; a lost reply is recovered from the scope's original session.
+
+```python
+from meerkat_meta import DeliveryScope, ScopedRecoveryState, StaleScopeError
+
+status = await runtime.status("domain:calendar")
+scope = status.delivery_scope            # None: see status.delivery_scope_unavailable
+saved = scope.to_dict()                  # persist byte-exact before dispatching
+
+try:
+    result = await runtime.dispatch_text(
+        "domain:calendar", "occurrence 42",
+        idempotency_key="occ-42", correlation_id=correlation,
+        expected_scope=DeliveryScope.from_dict(saved),
+    )
+    result.receipt.stage                 # "ingress_accepted": not a durable-input claim
+except StaleScopeError as error:
+    error.mismatch                       # which atom moved; nothing was submitted
+
+recovery = await runtime.recover_delivery(
+    "domain:calendar", DeliveryScope.from_dict(saved),
+    idempotency_key="occ-42", correlation_id=correlation,
+)
+if recovery.state is ScopedRecoveryState.ABSENT:
+    ...                                  # a point-in-time miss, never permission to retry
+```
+
+`expected_scope` needs both `idempotency_key` and `correlation_id`, does not
+combine with `track_turn`, and applies no delivery preparation. A scope with
+an unknown `version` raises `ContractMismatchError` from
+`DeliveryScope.from_dict`; in `status()` it leaves `delivery_scope` `None` and
+the rest of the status usable. `recover_delivery` returns `ScopedRecovery`
+with `state` `ABSENT`, `IN_FLIGHT` (`durable_witness`), `COMPLETED`
+(`output_status`, `output`), `FAILED`, `TERMINAL_WITHOUT_RUN`, `BROKEN` or
+`UNRESOLVED` (`cause`); a state this SDK does not know reads as `UNRESOLVED`,
+never `ABSENT`. See [Scope-bound dispatch](/api/rpc#scope-bound-dispatch).
+
+## Mob-Level API
+
+For direct mob-member operations (discovery-based), the mob handle API is still available.
+
+The app-facing surface has three categories. Each is a distinct concern — no method crosses categories.
+
+### Comms — deliver work to agents
+
+```python
+result = await handle.send("agent-1", "Review PR #42")
+print(result.accepted, result.member_id, result.session_id)
+```
+
+Returns a `SendMessageResult` with `accepted`, `member_id`, and `session_id` fields.
+The message enters the agent's inbox and is processed by the host loop.
+
+### Observation — watch what's happening
+
+```python
+# Stream one agent's events
+async for event in handle.subscribe_agent("agent-1"):
+    print(event.event_type, event.event)
+
+# Stream mob-wide events (all agents)
+async for event in handle.subscribe_mob():
+    print(event.member_id, event.event)
+```
+
+Observation is independent of delivery. Subscribe before or after sending — the stream is continuous.
+
+### Structural mob events — durable observability
+
+`MobHandle.query_mob_events()` and `subscribe_mob_events()` project
+every current Meerkat `MobEventKind` into a typed envelope
+preserving `mob_id`, `run_id`, `step_id`, `agent_identity`, and the
+full payload.
+
+```python
+from meerkat_meta import EventQuery, MobEventsStaleError
+
+# Latest 256 matching events
+events = await handle.query_mob_events(EventQuery(
+    event_types=["flow_started", "flow_completed"],
+    mob_id="home",
+))
+for e in events:
+    print(e.cursor, e.kind, e.run_id, e.data)
+
+# Resume from a checkpointed cursor
+try:
+    new_events = await handle.query_mob_events(EventQuery(
+        after_seq=last_seen_cursor,
+    ))
+except MobEventsStaleError as exc:
+    # Cursor is past the current frontier — rewind.
+    new_events = await handle.query_mob_events(EventQuery(
+        after_seq=exc.latest_cursor,
+    ))
+```
+
+`MobStructuralEvent.cursor` is the **meerkat ledger cursor** —
+durable across meta gateway restarts when the runtime is built
+with `.persistent_state(path)`. Checkpoint a cursor and resume by
+passing it as `after_seq` on the next call.
+
+### Flow runs
+
+```python
+# All runs across all flows
+runs = await handle.list_runs()
+
+# Filter to one flow
+runs = await handle.list_runs(flow_id="onboarding")
+
+for run in runs:
+    print(run.run_id, run.status, len(run.step_ledger))
+```
+
+Returns `MobRun` carrying the full meerkat ledger projection
+(`step_ledger`, `failure_ledger`, `frames` keyed by frame id, `loops`
+keyed by loop id, `loop_iteration_ledger`, `flow_state`,
+`activation_params`, `schema_version`, etc.).
+
+### Control plane — manage the runtime
+
+```python
+# Inspect runtime state
+status = await handle.status()
+print(status.running, status.loaded_modules)
+
+# Ensure an EPHEMERAL worker exists (spawn if missing). Durable members
+# (per-user agents, coordinators) belong on the identity plane instead —
+# see "new user first contact" below.
+snapshot = await handle.ensure_member("scratch-worker-7", role="worker")
+print(snapshot.agent_identity, snapshot.state)
+
+# Find members by label
+members = await handle.find_members("owner", "user-123")
+
+# Reconcile the named modules (routing, delivery). This does not touch the
+# roster; identity roster reconciliation is rt.reconcile().
+result = await handle.reconcile(["routing", "delivery"])
+
+# Call an MCP tool on a loaded module
+result = await handle.call_tool("gmail", "gmail_search", {"query": "is:unread"})
+
+# Or bind a module for repeated calls
+gmail = handle.tool_caller("google-workspace")
+messages = await gmail("gmail_search", query="is:unread")
+```
+
+`ensure_member()` and `find_members()` both return typed `MemberSnapshot` objects
+(single and `list[MemberSnapshot]` respectively).
+
+### Roster — inspect and manage members
+
+```python
+# List the full roster
+members = await handle.list_members()
+for m in members:
+    print(f"{m.agent_identity}: {m.state} ({m.role})")
+
+# Inspect a specific member
+snapshot = await handle.get_member("agent-1")
+
+# Member lifecycle
+await handle.retire_member("agent-1")
+await handle.respawn_member("agent-1")
+
+# Non-destructive cold reload (same session, same generation) and the
+# in-process health read that works while the actor loop is stalled
+health = await handle.member_health("agent-1")
+if health.last_delivery_error and health.last_delivery_error["class"] == "reload_required":
+    outcome = await handle.reload_member("agent-1")
+    assert outcome.disposition in ("discarded", "not_degraded")
+```
+
+| Method | Return type | Description |
+|--------|-------------|-------------|
+| `list_members()` | `list[MemberSnapshot]` | List all members in the roster |
+| `get_member(member_id)` | `MemberSnapshot` | Get a single member by ID |
+| `retire_member(member_id)` | `None` | Retire a member (graceful shutdown) |
+| `respawn_member(member_id)` | `None` | Respawn a previously retired member (identity-first: resets the identity onto a fresh session) |
+| `reload_member(member_id)` | `MemberReloadResult` | Non-destructive cold reload: same identity, same durable session, same generation (identity-first only) |
+| `member_health(member_id)` | `MemberHealth` | Lifecycle and delivery health from in-process reads; carries `actor_loop`, `open_stall_id`, and `last_delivery_error` |
+| `reconcile_edges()` | `ReconcileEdgesReport` | Converge mob.toml `[wiring]` (`auto_wire_orchestrator`, `role_wiring`) on the live roster. Needed after `runtime.reconcile()` or an identity-first boot only when the definition declares such wiring; `ensure_member` already runs it, and with no declared wiring the report is empty |
+
+`MemberSnapshot` exposes `agent_identity`, `role`, `state`, `wired_to`, and
+`labels`. Known state strings are exported from the top-level package as
+`MEMBER_STATE_ACTIVE`, `MEMBER_STATE_RETIRING`, `MEMBER_STATE_BROKEN`,
+`MEMBER_STATE_COMPLETED`, and `MEMBER_STATE_UNKNOWN`. The underlying Rust
+status enum is non-exhaustive, so consumers should tolerate future state
+strings.
+
+### Common pattern: new user first contact
+
+Per-user agents are **durable** members, so stand them up on the identity
+plane — declare them through your roster provider and reconcile — rather
+than `ensure_member`-ing them into the mob roster. Identity-plane members
+resume their session across restarts (Core keeps it); mob-plane members do
+not.
+
+```python
+# Slack DM from a new user — add the identity to your roster source,
+# reconcile, then deliver by identity.
+my_roster.add_identity(f"personal:{user_id}", profile="personal",
+                       labels={"owner": user_id})
+await runtime.reconcile()
+result = await runtime.send(f"personal:{user_id}", slack_message)
+async for event in runtime.mob_handle().subscribe_agent(f"personal:{user_id}"):
+    forward_to_slack(event)
+```
+
+Reserve `ensure_member` for **ephemeral workers** (helpers a parent spawns
+and an idle-retire label reaps) — the worker plane. See the
+[identity-first doctrine](https://github.com/lukacf/meerkat-meta/blob/main/docs/design/identity-first-doctrine.md).
+
+## Builder pattern
+
+```python
+from meerkat_meta import Meta
+
+rt = await (
+    Meta.builder()
+    .mob("config/mob.toml")
+    .session_service(my_builder)
+    .roster(my_roster)
+    .gateway("./rpc_gateway")
+    .build()
+)
+```
+
+### Builder methods
+
+| Method | Description |
+|--------|-------------|
+| `.mob(path)` | Path to mob TOML config |
+| `.mob_inline(toml_str)` | Inline mob TOML string (no temp file) |
+| `.meerkat_config(path)` | Meerkat host `config.toml` forwarded as `runtime_options.meerkat_config_path`, the only door for the `[self_hosted]` and `[realm]` tables Meerkat keeps out of `mob.toml` (a host-config `[models]` table reaches the factory too, but a profile's `model` must be catalogued, provider-annotated or defined under `mob.toml`'s own `[models.<id>]` to pass the init model check); a missing, malformed or non-validating file refuses init rather than building agents from the default config, and a top-level `[self_hosted]` or `[realm]` table inside `mob.toml` is refused at init with a message naming this option. TypeScript twin `meerkatConfig(path)`. See [Self-hosted models and the Meerkat host config](/reference/configuration#self-hosted-models-and-the-meerkat-host-config) |
+| `.provider_credentials_root(path)` | Provider credentials directory forwarded as `runtime_options.provider_credentials_root`: every agent the gateway builds resolves and persists provider logins and tokens there instead of the process default `<config dir>/meerkat/credentials`, which every process of the OS user shares. Absolute: the gateway opens it once at init, creating it when missing, and a relative path or a root it cannot open refuses init, never falling back to the default. Give each user their own root, and pass the same root on every reopen of that user's state; a host moving off a per-process `XDG_CONFIG_HOME=<C>` passes `<C>/meerkat/credentials` to keep existing logins. See [Provider credentials](/reference/configuration#provider-credentials) |
+| `.persistent_state(path)` | Enable persistent state at path |
+| `.roster(provider)` | Identity-first roster provider |
+| `.topology_provider(provider)` | Identity-first topology provider |
+| `.agent_customizer(customizer)` | Identity-first agent customizer (`customize_build(context, spec, draft)`; see [Per-profile tools](#session-agent-builder-and-per-profile-tools)) |
+| `.on_error(callback)` | Error hook. Receives every runtime `ErrorEvent` (`category`, `message`, `context`) the gateway forwards as the `meta/on_error` notification; sync or async, fire-and-forget. Without a callback the events reach only the gateway's normal log sink: ERROR for failures, INFO for `actor_loop_recovered` and `mob_announcement_escalation_resolved`, subject to configured tracing filters and stderr handling (see [Error hook and logging](/guides/unified-runtime#error-hook-and-logging)). `ErrorEvent.is_resolution` is true for those two, a failure ending rather than starting |
+| `.identity_bootstrap_mode(mode)` | Eager, lazy, or bounded background-warm identity materialization; requires `.roster(...)` |
+| `.role_migrations(declarations)` | Authorize durable member role migrations for THIS boot. Takes an iterable of `RoleMigrationDeclaration` dataclasses or equivalent `identity` / `from_role` dicts, validating either form; a conflicting pair for one identity raises `ValueError`, an identical repeat is accepted, and leaving the setter unused emits no `role_migrations` init-params key at all |
+| `.session_service(builder)` | Session agent builder |
+| `.gating(path)` | Gating config path (`config/gating.toml` is discovered when present). An empty path raises `ValueError`: it no longer switches gating off. To keep gating off, do not call it and keep nothing at `config/gating.toml` under the working directory |
+| `.routing(path)` | Routing config path |
+| `.event_log(config)` | Operational event log declaration (`event_log.memory()` / `event_log.null()`) |
+| `.runtime_store(config)` | Explicit ephemeral runtime-store declaration (`runtime_store.memory()`) |
+| `.memory(config)` | Memory configuration |
+| `.agent_memory(config=True, **options)` | Durable identity-scoped agent memory |
+| `.auth(config)` | Auth configuration |
+| `.console_auth_required(required)` | Set `runtime_options.console_require_app_auth`; `False` is the explicit opt-out from the fail-closed console default (see [Console access](#console-access)) |
+| `.console_read_only(read_only=True)` | View-only console: mutating console RPCs are denied and omitted from capabilities |
+| `.console_fetch_timeout_ms(ms)` | Bundled-console JSON fetch timeout override (positive integer) |
+| `.console_config(path)` | Console UI TOML (`ConsoleUiConfig`) forwarded as `runtime_options.console_config_path` |
+| `.fork_instruction_policy(policy)` | What a fork of a member with activated instructions does with them, forwarded as `runtime_options.fork_instruction_policy`: `"require_explicit_activation"` (the default when unset), `"reactivate_inherited"` or `"refuse"`. Another value raises `ValueError`. See [Fork instruction policy](/reference/configuration#fork-instruction-policy) |
+| `.mob_announcements(config=True)` | Enable [mob announcements](#mob-announcements): sends `runtime_options.mob_announcements`, `{"enabled": true}` for `True` and a mapping unchanged (batch, retention and limit options; see [Configuration](/reference/configuration#mob-announcements)). Needs `.persistent_state(...)` and `.roster(...)` |
+| `.gateway(bin_path)` | Path to rpc_gateway binary |
+| `.modules(specs)` | Module specifications |
+| `.build()` | Build and connect the runtime |
+
+A member forked with `fork_off`, a delegation fork or a council does not run
+the instructions its source activated (`meta/member_activate_instruction`,
+skill bodies activated that way included) unless the gateway's fork instruction
+policy says so. Under the default, such a fork is refused with
+`fork_instruction_refused` before anything is committed. To let forks carry
+their source's activations, opt in at boot:
+
+```python
+runtime = await (
+    Meta.builder()
+    .mob("config/mob.toml")
+    .fork_instruction_policy("reactivate_inherited")
+    .build()
+)
+```
+
+The setting applies to every fork of the gateway's mob and cannot be chosen
+per fork. Read [what `reactivate_inherited` trusts](/reference/configuration#what-reactivate_inherited-trusts)
+before you enable it.
+
+Boot-time membership is declared, never derived: a member exists only once a
+`.roster(provider)` names it (identity plane) or `ensure_member` creates it
+(worker plane); `[profiles.*]` in mob.toml are role templates and spawn
+nothing on their own. The former `.discovery(callback)` and
+`.pre_spawn(callback)` builder methods were removed: they stored the callback
+and never transmitted it, so no boot spawn ever came from them.
+
+Identities and their sessions live in Core's stores under
+`.persistent_state(path)`: Core's mob machine holds each identity's session
+and generation, and a host supplies no continuity storage and holds no
+leases. The external identity providers of Meta 0.9.3 are removed; see
+[Upgrading to Meta 0.9.4](/guides/upgrading-to-0-9-4) to move a deployment
+that used them.
+
+A durable member whose role changed refuses to resume with
+`MobError::MemberRoleMigrationRequired` until the host declares the migration.
+`.role_migrations([...])` is that declaration: it emits a top-level
+`role_migrations` init param, not a `runtime_options` field, and the authority
+lasts exactly one boot because nothing persists it. Meerkat re-verifies the
+declared `from_role` against durable state and refuses with
+`MobError::MemberRoleMigrationRejected` on mismatch, and ignores the declaration
+entirely once the roles already agree, so a declaration left in place after the
+migration landed is inert. It arms only where an identity plane exists; on
+`rpc_gateway` that means alongside `.roster(...)`. See
+[roster and member lifecycle](/concepts/roster#role-migration).
+
+Every explicit `.identity_bootstrap_mode(...)` call declares identity-first
+intent and requires `.roster(...)`, including explicit eager mode. Omitting the
+setter keeps a gateway without a roster on the classic path; a configured
+roster with no explicit mode retains eager materialization.
+
+Gateway memory config accepts `{backend: "local_json"}` with an optional
+`health_check_endpoint` (`memory.local_json(...)`), the only backend. The
+predecessor's backend helper was removed in 0.9 with no alias, and the gateway
+refuses its backend value at init.
+`memory(stores=...)` is intentionally rejected because the Rust gateway does not
+accept store lists in `meta/init`. JWT auth is the gateway-supported auth mode;
+Google/OIDC helpers are not accepted by gateway init today.
+
+Agent memory is configured with `.agent_memory()` and requires
+`.persistent_state(path)` plus an identity roster when using the bundled gateway
+store. Options include `realm`, `selection`, `max_entries`,
+`recall_timeout_ms`, `recall_failure_policy`, and `instruction_header`; the SDK
+serializes them to the gateway wire contract. Automatic injection defaults to a
+500 ms timeout and skips the memory block if recall fails.
+
+**Storage durability declarations.** The gateway is fail-closed about
+durable storage: a store that cannot open is a startup error, never a
+silent in-memory fallback. The `config.runtime_store` and
+`config.event_log` modules produce the explicit declarations:
+
+```python
+from meerkat_meta import Meta
+from meerkat_meta.config import event_log, runtime_store
+
+runtime = await (
+    Meta.builder()
+    .mob("config/mob.toml")
+    .persistent_state("state/meta")
+    # Declare an in-memory runtime store (sessions do not survive restart).
+    .runtime_store(runtime_store.memory())
+    # Declare a bounded queryable in-process event log — or event_log.null().
+    .event_log(event_log.memory(batch_size=64))
+    .gateway("/path/to/rpc_gateway")
+    .build()
+)
+```
+
+The resolved picture is the typed storage census: `StatusResult.storage` /
+`CapabilitiesResult.storage` parse the gateway's `storage` object into
+`StorageSummary` (blob durability, the H2 incremental probe, and the
+per-slot `StorageSlotSummary` census with `domain`, `durability_class`,
+`resolution`, `backend`, `degraded`, `detail`). A fail-closed startup
+refusal — file-name twins, a store that failed to open — surfaces as the
+typed `StorageResolutionError` (code `-32014`,
+`STORAGE_RESOLUTION_CODE`), not a `TransportError`; its message names the
+remediation (`meta/storage/doctor`, or the explicit ephemeral
+declaration). Blob-store durability has no wire declaration today — it is
+declared by Rust embedders via `ephemeral_blobs(true)` /
+`binary_blob_store(...)` and reported read-only in the census.
+
+A composition provenance refusal surfaces as the typed
+`CompositionProvenanceError` (code `-32019`, `COMPOSITION_PROVENANCE_CODE`).
+The gateway raises it when the persistent mob storage's recorded composition
+cannot be proven to match this launch, for example a `mob.toml` edited since
+the persistent mob storage was created. Its `kind` names the refusal
+(`"divergent"`, `"created_by_rehearsal"`, the manifest kinds, and
+`"candidate_divergent"` from gateways launched as a candidate) and `fields`
+lists the diverged definition fields as dotted paths, so a host can show what
+changed without parsing the message. Revert the edit, or move the stored
+definition with `declare_spec_update(expected_revision=...)`:
+
+```python
+from meerkat_meta import CompositionProvenanceError
+
+try:
+    runtime = await builder.build()
+except CompositionProvenanceError as err:
+    if err.kind == "divergent":
+        print("mob.toml differs from the stored definition in", err.fields)
+    raise
+```
+
+The comparison is over the parsed definition, so a profile key the TOML parse
+warns about and ignores (for example `tools.mob_tasks` in a config written for
+an earlier release) is never one of the `fields`: removing it to act on the
+warning, or adding it, does not cause this refusal.
+
+### Console access
+
+The bundled console is fail-closed. Without `.auth(...)` the gateway's
+decision state trusts no signing key, and because `require_app_auth` defaults
+to `true` every console request is refused with 401; the gateway logs a
+startup warning naming this. Opening the console is an explicit builder call:
+
+```python
+runtime = await (
+    Meta.builder()
+    .mob("config/mob.toml")
+    .gateway("./rpc_gateway")
+    .console_auth_required(False)  # explicit opt-out: local console, no identity provider
+    .console_config("config/console.toml")
+    .build()
+)
+```
+
+Use `.console_auth_required(False)` only behind a loopback bind or a reverse
+proxy that authenticates; for anything shared, configure `.auth(...)` instead.
+Earlier SDKs had no setter and hosts overrode
+`MetaRuntime._build_init_params` to inject `console_require_app_auth` or
+`console_config_path`; both now have builder methods and the override is no
+longer needed.
+
+The gateway binds `127.0.0.1` on an ephemeral port by default. To publish it
+from another container, `.http_listen("0.0.0.0:8080")` together with either
+`.auth(...)` or the explicit `.allow_remote()` acknowledgement, and
+`.http_public_base_url(...)` to advertise the proxy's address (read back as
+`runtime.rust_http_public_base_url`; `runtime.rust_http_base_url` stays the
+same-host form the SDK itself dials). A non-loopback bind without either is
+refused at init. See [Deployment](/guides/deployment).
+
+## Runtime lifecycle
+
+```python
+# Context manager (recommended)
+async with await Meta.builder().mob("mob.toml").gateway("./rpc_gateway").build() as rt:
+    handle = rt.mob_handle()
+    # ...
+
+# Explicit lifecycle
+rt = await Meta.builder().mob("mob.toml").gateway("./rpc_gateway").build()
+try:
+    handle = rt.mob_handle()
+    # ...
+finally:
+    await rt.shutdown()
+```
+
+### Startup: no built-in total deadline
+
+`connect()` (and `build()`) runs `meta/init` as accepted-then-settled. The
+gateway accepts the init at once, reports each startup phase, and then
+settles it `ready` or `failed`. The SDK has **no built-in total deadline** for
+that wait. Startup legitimately includes provider callbacks (each bounded at
+130 s by the gateway) and the native identity restore, which is
+deliberately unbounded and can run for minutes on a large roster. Any fixed
+SDK timer would sooner or later abort a healthy restore. A 60 s timeout still
+bounds the wait for the `accepted` answer, and for an older gateway's single
+init response. A host whose gateway answers init late can raise it with
+`Meta.builder().gateway_init_timeout(seconds)` (a positive finite number of
+seconds). That bounds a slow host startup; it does not fix one. It applies only
+to the `meta/init` request: ordinary RPCs and provider callback deadlines
+keep their own timeouts.
+
+The wait ends only when one of these happens:
+
+- the init settles `ready` (connected);
+- the init settles `failed`. You get the typed error, for example
+  `StorageResolutionError`, with `err.data["durable_effects"]`: `"none"` when
+  nothing durable was touched, otherwise `"possible"`;
+- the gateway exits, or the transport reader fails. You get
+  `InitOutcomeUnknownError`;
+- your own deadline runs out. Set it with
+  `Meta.builder().init_deadline(seconds)`, and running out also raises
+  `InitOutcomeUnknownError`;
+- your task is cancelled.
+
+`InitOutcomeUnknownError` carries `init_id`, `last_phase` (the last
+`meta/init_progress` phase seen, such as `"roster"` or `"restore"`) and
+`reason`. That makes a stuck or interrupted init diagnosable. The gateway may
+already have changed native state, so the SDK never retries it automatically
+and asks the gateway to shut down.
+
+Provider callbacks that run during startup (roster, topology, session
+builder, customizer) must not call ordinary runtime RPCs on the same
+runtime. Ordinary dispatch starts only after init settles, and the
+gateway refuses an earlier request at once with `InitInProgressError`
+(`-32018`, exported as `INIT_IN_PROGRESS_CODE`).
+
+## Gateway logging (stderr)
+
+The persistent gateway reports tracing lines, panic hooks, and storage
+migration progress on its stderr. By default the SDK **inherits** the host
+process's stderr, so those lines are visible where your application logs.
+Two environment variables adjust this:
+
+| Variable | Effect |
+|----------|--------|
+| `META_GATEWAY_STDERR_FILE=<path>` | Append gateway stderr to a file |
+| `META_GATEWAY_STDERR=devnull` | Discard gateway stderr entirely |
+
+Discarding is the legacy pre-0.8.9 default and is not recommended: it hides
+panic output and makes a slow-but-working storage migration indistinguishable
+from a hang.
+
+## Session agent builder and per-profile tools
+
+`build_agent` runs once per member build on the worker plane (fresh spawn or
+resume). The gateway pre-fills `SessionBuildOptions` before it calls you:
+
+| Field | Pre-filled with |
+|-------|-----------------|
+| `profile_name` | The spawn's role, taken from the member's `profile_name` (else `role`) label that meerkat stamps from the mob-member binding |
+| `labels` | The member's peer labels merged with the request labels |
+| `app_context` | The host context attached to the spawn, if any |
+| `session_id` | The spawn's `session_id` label when it carries one, else the resumed session's id |
+| `resume_session_id` | The resumed session's id on a resume; `None` on a mint |
+| `fork_source` | On a fork child's builds (meerkat 0.8.45+), a `ForkBuildSource`: the source member (`source_member.mob_id`, `.role`, and `.member`, Meta's encoded roster id) and the source session it was forked from (`source_session_id`); `None` otherwise |
+| `fork_source_identity` | On a fork child's builds, the source's durable identity (for example `domain:calendar`), the key to resolve the source's grants by; `None` otherwise |
+
+meerkat sets the fork lineage on the build that seats a durable fork
+(`fork_off` children, `fork_member` children, local council participants) and
+on every later rebuild of that member, so a builder can build the child as its
+source. The child's own `labels` and `session_id` still name the child; they
+never carry the source's `agent_identity`. The lineage is receive-only: it is
+not sent back, and the gateway ignores it in a build response.
+
+Read `profile_name`, do not assign it. There is no way to select a profile
+from `build_agent`: the gateway applies only `additional_instructions` (mint
+builds only; on a resume they are ignored with a warning, because a resume
+inherits the persisted prompt state), `labels`, `resume_session_id`, and the
+registered `tools` from what you return, and ignores a host-set
+`profile_name`. Per-profile tools are therefore
+one builder that branches on the pre-filled value:
+
+```python
+from meerkat_meta import SessionAgentBuilder, SessionBuildOptions
+
+class MyBuilder(SessionAgentBuilder):
+    async def build_agent(self, options: SessionBuildOptions) -> None:
+        # options.profile_name arrives pre-filled from the spawn role.
+        options.register_tool("calendar_lookup", my_calendar_handler)
+        if options.profile_name == "security":
+            options.register_tool(
+                "unifi_scan",
+                my_scan_handler,
+                description="Scan the UniFi controller",
+                input_schema={"type": "object", "properties": {"site": {"type": "string"}}},
+            )
+
+runtime = await (
+    Meta.builder()
+    .mob("config/mob.toml")
+    .session_service(MyBuilder())
+    .gateway("./rpc_gateway")
+    .build()
+)
+```
+
+`.session_service(builder)` is the public setter; `build()` connects and
+registers the builder on the callback dispatcher for you. `MetaBuilder._config`
+and `MetaRuntime._dispatcher` are internal and change without notice. The
+builder must be set before `build()`: `meta/init` tells the gateway whether a
+session builder exists, so there is no post-connect registration.
+
+### Identity-first equivalent: `customize_build`
+
+On the identity plane the same hook is `AgentCustomizer.customize_build`,
+registered with the public `.agent_customizer(customizer)`. It runs when an
+identity is actually built or re-materialized, including fresh creation and
+cold restore/resume. An already-active converged identity is reused without
+customization; lazy registration defers the hook until materialization.
+Do not use reconciliation to refresh an already-active identity's tool
+handlers. The hook receives the durable spec (so `spec.profile` is the profile
+name), and registers tools on the draft:
+
+```python
+from meerkat_meta import (
+    AgentBuildContext,
+    AgentBuildDraft,
+    AgentCustomizerProtocol,
+    DurableAgentSpec,
+)
+
+class MyCustomizer(AgentCustomizerProtocol):
+    async def customize_build(
+        self,
+        context: AgentBuildContext,
+        spec: DurableAgentSpec,
+        draft: AgentBuildDraft,
+    ) -> None:
+        # context.identity, context.active_peers, context.managed_edges are read-only.
+        if spec.profile == "security":
+            draft.register_tool("unifi_scan", my_scan_handler, description="Scan the UniFi controller")
+        draft.additional_instructions.append(f"Your wired peers: {', '.join(context.active_peers)}")
+```
+
+`draft` also carries `model`, `system_prompt`, `additional_instructions`,
+`labels`, `app_context`, and `provider_params`. A tool registered here rides
+the same `callback/call_tool` dispatch as `build_agent` tools.
+
+Each identity member has one stable tool dispatcher for its whole life, and
+every `customize_build` publishes its tools into it. The tool list and the
+handler scope that serves it always change together. The tools therefore
+follow the member through every rebuild: a gateway restart, a member that is
+adopted instead of respawned, a respawn, and delivery-time repair. On a
+restart Meta runs `customize_build` for each roster identity before the mob
+is restored, so every restored member starts with its tools. They are listed by
+`meta/identity/resolved_tools` before any turn, and a run that starts at
+activation (a queued input, a kickoff) sees them. A gateway that stopped
+uncleanly left its mob running, so its restart restores the members while it
+builds the mob, before that call: each one starts no run until the call has
+published its tools. A restored member whose identity the roster no longer
+lists starts no run either, until the roster retires it (a host-adopted
+identity's member, which the roster never retires, is not held). The
+materialization
+that follows runs `customize_build`
+again and republishes. On a persistent gateway each roster identity reports
+`customizer_tools_pending` (with the reason) in its identity status until its
+tools are published; if that early call fails, the failure is logged for the
+identity, and the member advertises no customizer tools until its
+materialization publishes them. A tool
+from an earlier build that the latest build no longer declares is refused,
+never routed to stale handlers.
+
+Customizer tools belong to roster identities only. Helpers, forks,
+flow-provisioned members, and members spawned under their own ids never get
+them; use profile tools or the session builder's per-spawn tools for those.
+A raw spawn that reuses a roster identity's member id does get that
+identity's current tools.
+
+### Provider parameters (`provider_params`)
+
+`AgentBuildDraft.provider_params` mirrors meerkat's `ProviderParamsOverride`:
+the shared sampling knobs at the top level and the provider-specific knobs
+nested under `provider_tag`, which is tagged by `provider`. Anthropic prompt
+caching is one such knob. With no profile or request override, the pinned Meerkat
+dependency defaults to `automatic` on Anthropic API, Vertex, and Foundry, and to
+`disabled` on Bedrock and Copilot. Bedrock and Copilot do not support request-wide
+automatic caching and reject an explicit `automatic` policy. On a supported
+backend, this example explicitly selects automatic caching with a one-hour TTL:
+
+```python
+draft.provider_params = {
+    "provider_tag": {
+        "provider": "anthropic",
+        "cache_control": "automatic",   # disabled | automatic | system_prefix | system_and_conversation
+        "cache_ttl": "1h",              # 5m | 1h; effective only with a cache_control policy
+    },
+}
+```
+
+To opt out per agent, set `provider_tag.cache_control` to `"disabled"` and omit
+`cache_ttl`.
+
+The flat form `{"cache_control": "automatic"}` is refused: both
+`ProviderParamsOverride` and the provider tags deny unknown fields, so the
+gateway rejects the returned draft instead of dropping the knob. Knobs the
+draft leaves unset are filled from the profile's own `provider_params`, and a
+`provider_tag` from a different provider family than the profile's own tag is a
+typed merge error, not a silent union. A declared `provider_params` also reaches resumed
+sessions (the bridge masks it into `resume_overrides`); it requires an inline
+definition profile to carry it, so an identity bound to a realm-reference
+profile fails the build with a message naming the realm profile as the place
+to declare it.
+
+## Mob announcements
+
+With mob announcements enabled (`.mob_announcements()` on a persistent,
+identity-first launch), `MobHandle` wraps every `meta/mob_announcements/*`
+method. Results are frozen dataclasses; every state, phase, status, outcome,
+action and kind is a plain string, so a newer gateway's value passes
+through. The declarations you write (a source's identity, observation,
+audience, routes, ...) are dicts in wire form. Optional parameters are sent
+only when set.
+
+| Method | Wire method | Returns |
+|--------|-------------|---------|
+| `announce(source_key, topics, body, *, mob_id=None, correlation_id=None, causes=None)` | `announce` | `AnnounceResult` (`announcement`, `replayed`, `captured`) |
+| `announcement_get(mob_id, source_key)` | `get` | `Announcement` or `None` |
+| `announcement_subscription_put(operation_id, subscription_id, member, topics, *, mobs=None, start=None, expected_revision=None, delivery=None)` | `subscriptions/put` | `AnnouncementSubscription` (`delivery` and `await_handling` when set) |
+| `announcement_role_template_put(operation_id, template_id, members, topics, *, mobs=None, expected_revision=None, delivery=None)` | `subscriptions/put` with `members` | `AnnouncementRoleTemplate` (`delivery` and `await_handling` when set) |
+| `announcement_subscription_pause` / `_resume` / `_cancel(operation_id, subscription_id, expected_revision)` | `subscriptions/{pause,resume,cancel}` | `AnnouncementSubscriptionChange` (`subscription`, `unresolved_batches`; for a role template `template` and `children`) |
+| `announcement_subscription_get(subscription_id)` | `subscriptions/get` | `AnnouncementSubscriptionView` (`subscription`, `marker`, `backlog`, and `template` for a role template's id) |
+| `announcement_subscription_list(*, member=None, after=None, limit=None)` | `subscriptions/list` | `list[AnnouncementSubscription]` |
+| `announcement_delivery_list(*, member=None, subscription_id=None, after=None, limit=None)` | `deliveries/list` | `list[AnnouncementBatch]` (each with its `handling`) |
+| `announcement_delivery_observe(batch_id)` / `announcement_delivery_reconcile(batch_id)` | `deliveries/{observe,reconcile}` | `AnnouncementDeliveryObservation` (with `handling`) |
+| `announcement_delivery_redeliver(operation_id, batch_id)` / `announcement_delivery_dismiss(operation_id, batch_id)` | `deliveries/{redeliver,dismiss}` | `AnnouncementBatchHandling` |
+| `announcement_source_put(operation_id, source_id, identity, observation, topics, audience, **options)` | `sources/put` | `AnnouncementSourcePutResult` (`source`, `affected_subscriptions`, `delivery_readiness`) |
+| `announcement_source_pause` / `_resume` / `_end(operation_id, source_id, expected_revision, *, mob_id=None)` | `sources/{pause,resume,end}` | `AnnouncementSource` (`_resume` also takes `rebaseline`) |
+| `announcement_source_get(source_id, *, mob_id=None, include_streams=None)` | `sources/get` | `AnnouncementSourceView` (`source`, `None` when absent, and `streams`) |
+| `announcement_source_list(*, mob_id=None, after=None, state=None, limit=None, escalated=None)` | `sources/list` | `list[AnnouncementSource]` |
+| `announcement_source_advance(operation_id, source_id, expected_revision, expected_version, principal, next_cursor, **options)` | `sources/advance` | `SourceAdvanceResult` (`source`, `replayed`, `items`, `streams`) |
+| `announcement_source_record_failure(operation_id, source_id, expected_revision, expected_version, principal, failure, *, mob_id=None)` | `sources/record_failure` | `AnnouncementSource` |
+| `announcement_audit_list(*, mob_id=None, source_id=None, member=None, action=None, after=None, limit=None)` | `audit/list` | `list[AnnouncementAuditEntry]` |
+| `announcement_member_get(member)` | `members/get` | `AnnouncementMemberView` (`member`, `backlog`, `marker`, `escalations`, `handling`) |
+| `announcement_member_list(*, after=None, limit=None, escalated=None)` | `members/list` | `list[AnnouncementMemberView]` |
+| `announcement_escalations_list(*, after=None, limit=None, open=None)` | `escalations/list` | `AnnouncementEscalationsPage` (`next`, and `events`, or `escalations` with `open=True`) |
+| `announcement_declarations_apply(declarations=None, *, revision=None)` | `declarations/apply` | `AnnouncementDeclarationsView` (`revision`, `digest`, `records`) |
+| `announcement_declarations_get()` | `declarations/get` | `AnnouncementDeclarationsView` |
+
+A `member` is `{"mob_id": ..., "identity": ...}` or an `AnnouncementMember`.
+The [method reference](/api/rpc#mob-announcement-sources) describes every
+field. A collector step reads the source, then advances it from the
+position it read; a step that lost a race raises with the current position:
+
+```python
+from meerkat_meta import (
+    SourceStaleRevisionError,
+    SourceVersionConflictError,
+    supports_announcement_sources,
+)
+
+handle = runtime.mob_handle()
+if not supports_announcement_sources(await handle.capabilities()):
+    raise RuntimeError("this gateway does not serve announcement sources")
+
+source = (await handle.announcement_source_get("mail")).source
+if source is None:
+    raise RuntimeError("declare the source first")
+items, next_cursor = read_provider(source.cursor.token)  # your adapter
+try:
+    step = await handle.announcement_source_advance(
+        f"{run_id}:v{source.cursor.version}",
+        "mail",
+        source.revision,
+        source.cursor.version,
+        principal,
+        next_cursor,
+        items=items,
+        observed={"kind": "delta"},
+    )
+except (SourceStaleRevisionError, SourceVersionConflictError):
+    pass  # another step or a configuration change moved the source: read it again
+```
+
+The refusals are typed: `MobAnnouncementsUnavailableError` (`-32044`),
+`AnnouncementConflictError` (`-32045`; `SourceStaleRevisionError` and
+`SourceVersionConflictError` carry the source's `current_version`, `cursor`
+and revision), `AnnouncementFrontierError` (`-32046`),
+`AnnouncementRefusedError` (`-32047`) and `AnnouncementNotFoundError`
+(`-32048`), each with the refusal's `kind` (a kind this SDK does not know
+keeps its code's class). A source method on a gateway without sources raises
+`RpcError` `-32601` with "Meta does not support sources" in its message.
+`CapabilitiesResult.mob_announcements` (`MobAnnouncementsCapability`) reads
+`meta/capabilities.mob_announcements`, `None` when they are disabled.
+
+A batch's `handling` and an observation's `handling`
+(`AnnouncementBatchHandling`: `state`, `cause`, `redelivered`, `held`,
+`dismissed`, `read_at_ms`) say what became of the turn
+([Delivery handling](/api/rpc#delivery-handling)). Each is `None` until
+the batch is admitted. A batch that holds nothing for an operator refuses
+`announcement_delivery_redeliver` and `announcement_delivery_dismiss` with
+`AnnouncementRefusedError` `not_held`. An `AnnouncementAuditEntry` for a
+plain announcement has `source_id` and `generation` `None`.
+
+Escalations ([Mob announcement health](/api/rpc#mob-announcement-health))
+reach `.on_error(callback)` as `mob_announcement_escalated` and
+`mob_announcement_escalation_resolved`, each with its event `cursor` in
+`context`. After a reconnect, read the events you missed:
+
+```python
+page = await handle.announcement_escalations_list(after=last_cursor)
+for event in page.events or ():
+    record(event.escalation_id, event.event, event.cause)  # your own
+last_cursor = page.next
+```
+
+`StatusResult.mob_announcements` (`MobAnnouncementsStatus`: `sources`,
+`members`, `handling`, `open_escalations`, `last_event_cursor`) reads
+`meta/status.mob_announcements`. It is `None` when mob announcements are
+disabled or their database could not be read. A source's
+`AnnouncementSourceHealth` adds `escalations`, `quiet_monitoring`,
+`empty_coverage_monitoring` and `runner_scheduled_here`. Each
+`AnnouncementEscalation` keeps its `cause` and its `subject` (a dict, with
+its kind as `subject_kind`) as sent.
+
+A role template ([Role templates](/api/rpc#role-templates)) subscribes
+every member of a mob with a role:
+
+```python
+template = await handle.announcement_role_template_put(
+    "op-reviewers", "reviewers", {"mob_id": "mob-a", "role": "reviewer"}, ["ops.alert"])
+change = await handle.announcement_subscription_pause("op-pause", "reviewers", template.revision)
+assert change.subscription is None and change.template.state == "paused"
+```
+
+The subscription verbs answer a template with its `children`, and
+`announcement_subscription_get` reads it as `template`.
+`announcement_declarations_apply(declarations)` applies declared sources
+and subscriptions in wire form, with `revision` defaulting to
+`declarations["revision"]` ([Mob announcement declarations](/api/rpc#mob-announcement-declarations)).
+Called without declarations, it asks a gateway with a declarations
+sidecar to read the file again. Each
+`AnnouncementDeclarationRecord` keeps its `kind`, `status` and
+`collection` as strings, with `refusal_kind` and `delivery_kind` read
+from their objects. The refusals `declaration_rollback`,
+`declaration_digest_conflict`, `role_template_limit` and
+`subscription_id_taken` are `AnnouncementRefusedError`s with their data.
+The builder passes `declarations` or `declarations_path` in
+`mob_announcements({...})` unchanged.
+
+## Error hierarchy
+
+All SDK errors inherit from `MetaError`:
+
+```python
+from meerkat_meta.errors import (
+    MetaError,           # Base exception
+    TransportError,        # Transport layer failures
+    RpcError,              # JSON-RPC error responses
+    NotConnectedError,     # No active runtime connection
+    CapabilityUnavailableError,  # Requested capability unavailable
+    ContractMismatchError,       # SDK/runtime version mismatch
+    StorageResolutionError,      # Fail-closed storage refusal at init (-32014)
+    CompositionProvenanceError,  # Mob composition provenance refusal at init (-32019): .kind, .fields
+    InitOutcomeUnknownError,     # Init written, settlement never arrived (native state may have changed)
+    TransportReaderFailedError,  # The transport reader stopped; no response can arrive
+    GatewayChildEndedError,      # The gateway child ended and takes no more requests (.reason, .exit_code); a TransportReaderFailedError
+    IdentityUnresumableError,          # Core cannot resume the identity (-32051, final): .reason, .remedy
+    IdentityHistoryUnavailableError,   # Core's history of the identity cannot be read now (-32052, retryable)
+    IdentityHostAdoptedError,          # A host adopted the identity, so Meta's verbs leave it alone (-32053)
+    IdentityWakeHeldError,             # The wake is held until an operator acts (-32603): .kind names the hold
+    MobAnnouncementsUnavailableError,  # Mob announcements are not enabled (-32044)
+    AnnouncementConflictError,         # Conflict or stale request (-32045): .kind
+    SourceStaleRevisionError,          # A source's revision moved (-32045): .current_revision, .current_version, .generation, .cursor
+    SourceVersionConflictError,        # A source's cursor version moved (-32045): .current_version, .cursor, .state, .revision
+    AnnouncementFrontierError,         # Start frontier outside a mob's announcements (-32046): .kind
+    AnnouncementRefusedError,          # Typed mob announcement refusal (-32047): .kind
+    AnnouncementNotFoundError,         # Unknown subscription, delivery, source or mob (-32048): .kind
+)
+```
+
+## Advanced API
+
+These methods are available for power users and module-system internals.
+Most apps should use `send`, `subscribe_agent`/`subscribe_mob`, and `status`/`reconcile` instead.
+
+| Method | Return type | Description |
+|--------|-------------|-------------|
+| `spawn(spec: DiscoverySpec)` | `SpawnResult` | Spawn a member from a discovery spec |
+| `spawn_member(module_id)` | `SpawnResult` | Spawn a member by module ID |
+| `capabilities()` | `CapabilitiesResult` | List available RPC methods |
+| `schedule_tools()` | `ScheduleToolsResult` | Meerkat's durable schedule tool definitions ([`meta/schedule/tools`](/api/rpc#meta%2Fschedule%2Ftools)) |
+| `subscribe_events(scope, ...)` | `SubscribeResult` | Low-level event subscription |
+| `resolve_routing(recipient)` | `RoutingResolution` | Resolve delivery routing |
+| `send_delivery(...)` | `DeliveryResult` | Send via delivery module |
+| `list_routes()` | `list[RuntimeRouteResult]` | List all registered routes |
+| `add_route(...)` | `RuntimeRouteResult` | Register a new route |
+| `delete_route(route_key)` | `RuntimeRouteResult` | Remove a route by key |
+| `delivery_history(...)` | `DeliveryHistoryResult` | Query past delivery records |
+| `gating_evaluate(...)` | `GatingEvaluateResult` | Evaluate a gating rule |
+| `gating_pending()` | `list[GatingPendingEntry]` | List pending gating decisions |
+| `gating_decide(...)` | `GatingDecisionResult` | Submit a gating decision |
+| `gating_audit(limit)` | `list[GatingAuditEntry]` | Retrieve gating audit log |
+| `memory_query(filters)` | `MemoryQueryResult` | Query the assertion ledger by `entity`, `topic`, and `store` filters |
+| `remember_agent_memory(identity, ...)` | `AgentMemoryRecord` | Persist durable memory for an identity |
+| `recall_agent_memory(identity, ...)` | `list[AgentMemoryRecord]` | Recall identity-scoped durable memory |
+| `forget_agent_memory(identity, memory_id)` | `AgentMemoryForgetResult` | Delete identity-scoped durable memory |
+| `memory_stores()` | `list[MemoryStoreInfo]` | List available memory stores |
+| `memory_index(...)` | `MemoryIndexResult` | Index an operational memory assertion |
+
+`gating_decide()` preserves the owner's recorded `approver_id`, `outcome`,
+`decided_at_ms`, `reason`, and `next_pending_id`. Older responses that omit these
+fields leave them as `None`; an absent or unrecognized outcome must not be treated
+as permission. Escalation returns `pending_approval` with a successor
+`next_pending_id`. The SDK makes no automatic follow-up request.
+
+Approval records a decision and does not execute the action. These methods expose
+[Meta gating](/concepts/gating); native retained-action consent and model-review
+configuration are separate contracts.
+
+## Mobpack authoring
+
+`MobHandle` wraps the full Flow Editor authoring surface (`meta/mobpacks/*`) with snake_case typed methods — `mobpack_templates`, `mobpack_catalogs`, `mobpack_validate`, `mobpack_source`, `mobpack_export`, `mobpack_import`, `mobpack_list`, `mobpack_get`, `mobpack_create`, `mobpack_save`, `mobpack_delete`, `mobpack_undo`, `mobpack_redo`, `mobpack_apply_operation`, `mobpack_deploy_command`, and `mobpack_deploy`. The same wrappers exist on the SDK's typed JSON-RPC clients.
+
+```python
+import base64
+
+# Create a draft from the blank template, validate, export
+draft = await handle.mobpack_create(template="blank", name="support-bot")
+document = draft.row.document
+
+validation = await handle.mobpack_validate(document)
+print(validation.ok, len(validation.display_rows))
+
+pack = await handle.mobpack_export(document)
+archive = base64.b64decode(pack.content_base64)  # pack.filename, pack.media_type
+```
+
+`mobpack_deploy(document, execute=True)` writes the archive and runs `rkat mob run` on the host — gated by the surface's advertised `authoring_capabilities` and, on ABAC-enforced runtimes, the caller's `mobpack.deploy` grant. See the [Flow Editor guide](/guides/flow-editor).
+
+## Public surface exports
+
+Everything below is importable directly from `meerkat_meta`:
+
+```python
+from meerkat_meta import (
+    # Builder + Runtime
+    Meta, MetaBuilder, MetaRuntime,
+    # Data models
+    DiscoverySpec, PreSpawnData, SessionBuildOptions, SessionQuery,
+    # Agent builder
+    SessionAgentBuilder,
+    # Errors
+    MetaError, TransportError, RpcError,
+    MobEventsStaleError, MOB_EVENTS_STALE_CURSOR_CODE,
+    StorageResolutionError, STORAGE_RESOLUTION_CODE,
+    CompositionProvenanceError, COMPOSITION_PROVENANCE_CODE,
+    NotConnectedError, CapabilityUnavailableError, ContractMismatchError,
+    # Typed results
+    StatusResult, CapabilitiesResult, ReconcileResult,
+    StorageSummary, StorageSlotSummary,
+    SpawnResult, SpawnMemberResult,
+    SendMessageResult, SubscribeResult,
+    KeepAliveConfig, EventEnvelope,
+    RoutingResolution, DeliveryResult,
+    # Roster
+    MemberSnapshot,
+    MEMBER_STATE_ACTIVE, MEMBER_STATE_RETIRING, MEMBER_STATE_BROKEN,
+    MEMBER_STATE_COMPLETED, MEMBER_STATE_UNKNOWN,
+    # Routing & delivery
+    RuntimeRouteResult, DeliveryHistoryResult,
+    # Gating
+    GatingEvaluateResult, GatingDecisionResult,
+    GatingAuditEntry, GatingPendingEntry, GatingOrigin,
+    # Memory
+    MemoryQueryResult, MemoryStoreInfo, MemoryIndexResult,
+    AgentMemoryRecord, AgentMemoryRecallResult, AgentMemoryForgetResult,
+    # Events
+    MobEvent, AgentEvent, EventStream,
+    # Structural mob events + flow runs
+    MobStructuralEvent, MobRun, MobRunStatus,
+    StepRecord, FailureRecord, FrameRecord, LoopRecord, LoopIterationRecord,
+    # Mob announcements
+    Announcement, AnnounceResult, Announcer, AnnouncementRef, AnnouncementMember,
+    AnnouncementSubscription, AnnouncementSubscriptionChange,
+    AnnouncementRoleSelector, AnnouncementRoleTemplate,
+    AnnouncementDeclarationRecord, AnnouncementDeclarationsView,
+    AnnouncementSubscriptionView, AnnouncementSuspendMarker,
+    AnnouncementBatch, AnnouncementBatchItem, AnnouncementBatchHandling,
+    AnnouncementDeliveryObservation,
+    AnnouncementSource, AnnouncementSourceIdentity, AnnouncementSourceRoute,
+    AnnouncementSourceCursor, AnnouncementSourceRunner, AnnouncementSourceHealth,
+    AnnouncementSourcePutResult, AnnouncementSourceStream, AnnouncementSourceView,
+    SourceAdvanceResult, SourceItemOutcome, SourceStreamPhase,
+    AnnouncementAuditEntry, MobAnnouncementsCapability, MobAnnouncementsStatus,
+    AnnouncementMemberView, AnnouncementMemberBacklog, AnnouncementMemberHandling,
+    AnnouncementEscalation, AnnouncementEscalationEvent, AnnouncementEscalationsPage,
+    supports_announcement_sources, MOB_ANNOUNCEMENT_SOURCES_V1,
+    MobAnnouncementsUnavailableError, AnnouncementConflictError,
+    SourceStaleRevisionError, SourceVersionConflictError,
+    AnnouncementFrontierError, AnnouncementRefusedError, AnnouncementNotFoundError,
+    MOB_ANNOUNCEMENTS_UNAVAILABLE_CODE, ANNOUNCEMENT_CONFLICT_CODE,
+    ANNOUNCEMENT_FRONTIER_CODE, ANNOUNCEMENT_REFUSED_CODE, ANNOUNCEMENT_NOT_FOUND_CODE,
+    # Config modules
+    auth, event_log, memory, runtime_store,
+)
+```
+
+Module authoring helpers (`ModuleSpec`, `define_module`, etc.) live in `meerkat_meta.helpers` — not top-level.
+
+## See also
+
+- [JSON-RPC API](/api/rpc) — full method reference
+- [SSE API](/api/sse) — event streaming protocol
+- [Modules](/concepts/modules) — module configuration and lifecycle
+- [Rust SDK](/sdks/rust) — primary Rust interface
+- [TypeScript SDK](/sdks/typescript) — TypeScript equivalent

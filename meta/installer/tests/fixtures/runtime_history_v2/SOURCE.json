@@ -1,0 +1,434 @@
+{
+  "archive": {
+    "bytes": 514460,
+    "path": "public-sources.zip",
+    "sha256": "73a4cf7249aa3a351b2baf7a99be8a4cb46462f540a0df22a0e016e9b17e5f7b"
+  },
+  "files": {
+    "launchkit/__init__.py": {
+      "bytes": 75,
+      "sha256": "6c9691158d5464c3b4b8801b6c9f9950c9812edb1a76f23e869a586b566fa404"
+    },
+    "launchkit/application_access.py": {
+      "bytes": 5377,
+      "sha256": "a939b1128eddf5c8637c0ec5a9df7ef27d1af475e26ab1f88e75adc0f27f650e"
+    },
+    "launchkit/application_experiences.py": {
+      "bytes": 11096,
+      "sha256": "fc5af1add4e9e14697f9efb83d847d38a64361125132bccfcdc6c5fc4d37c49b"
+    },
+    "launchkit/application_first_use.py": {
+      "bytes": 7656,
+      "sha256": "c0971bbaad2062bfbe1d6645fc0129ecae1b53524f82bbc1c025e77ee130fe56"
+    },
+    "launchkit/artifact_binding.py": {
+      "bytes": 3439,
+      "sha256": "a9e3de97cf710a939900fea39dec0391c6230d2b6a32d979923b575c1cdfedc0"
+    },
+    "launchkit/blueprint-limits.json": {
+      "bytes": 129,
+      "sha256": "9ab07cb7343e60dffef2e1a47e5025c8f0d7b7343fade90bbb206e0d84932454"
+    },
+    "launchkit/blueprint.py": {
+      "bytes": 22430,
+      "sha256": "e79a42764878bffe6d84bbd47c8aefd71db9c15e3f6b55d181e6070f61505ed7"
+    },
+    "launchkit/bootstrap.py": {
+      "bytes": 8321,
+      "sha256": "86a6dfa524267ea7c63e092752f6e599828f50edda125d7028feda724bd5afee"
+    },
+    "launchkit/checker_runtime.py": {
+      "bytes": 10068,
+      "sha256": "deeed36488d011aecfe5ab321763518ec9b52baf37369e057b8f12a43d10ac84"
+    },
+    "launchkit/compiler.py": {
+      "bytes": 58562,
+      "sha256": "4af758fb0b6a46768005055ae014e1e123d77c2ad1ae032802b0d63253179bf9"
+    },
+    "launchkit/deployment.py": {
+      "bytes": 138892,
+      "sha256": "3cd9ca6c4d018a8c54cfcd1a92eb52de50f4b97ffec8834ea8afa652de843706"
+    },
+    "launchkit/deployment_cache.py": {
+      "bytes": 4339,
+      "sha256": "83603bca183d6dafdd29d9ebc1d11d4cec1c3183dfbec360226a9a5255f53749"
+    },
+    "launchkit/deployment_deadlines.py": {
+      "bytes": 1755,
+      "sha256": "7f7c51b9ea450c2840c96e02d4a0319fd6e4e84fc79e2e0b1e6f5594d2c6d7ba"
+    },
+    "launchkit/deployment_evidence.py": {
+      "bytes": 7954,
+      "sha256": "b2914b4c8356eb31524fd4ad1edcc34db5a361159ab99081552f8426a9058468"
+    },
+    "launchkit/deployment_experiences.py": {
+      "bytes": 3110,
+      "sha256": "50f88de835f977fa7a7f84e7d6e8790d3806e4af8997065ba8bf5bfdb8cb3177"
+    },
+    "launchkit/deployment_ports.py": {
+      "bytes": 3400,
+      "sha256": "503c51b5a70f98c843c54b95f1fa1f7cc960e7eac31574382896423ef2f1489b"
+    },
+    "launchkit/deployment_service.py": {
+      "bytes": 49439,
+      "sha256": "0fe32f7cf41d539ba0e79f00c17d46b6c8ba1bee128090ca3d4de9899a622ef0"
+    },
+    "launchkit/deployment_sources.py": {
+      "bytes": 6793,
+      "sha256": "4b6be43d71ada0cbd189bbeaa6634b15ac8dec3cf6d499560a6488ef3e5ecbfc"
+    },
+    "launchkit/deployment_supervisor.py": {
+      "bytes": 38902,
+      "sha256": "43df3322cb9cbd45a53f327785d54ef99d04f91225a9f3e5edaff430277b1441"
+    },
+    "launchkit/deployment_updates.py": {
+      "bytes": 111718,
+      "sha256": "d8b5cf42f2fefc1cc5f38cb406ad6ab9e20b551c769a2478789d046f0fde5990"
+    },
+    "launchkit/deployment_worker.py": {
+      "bytes": 77383,
+      "sha256": "19f8652dd121147a29590989b106af615ff901c15f6a2dfb88fa3702017c8851"
+    },
+    "launchkit/design_knowledge.py": {
+      "bytes": 27948,
+      "sha256": "35fdeab2da831e1e0a2cd8cbcf82e46d544391507005d7179d16575d3876ef24"
+    },
+    "launchkit/distribution.py": {
+      "bytes": 20080,
+      "sha256": "4c796b1bb2c68dc3be091108e199e35ba4a379ced1b6c799f673b84b6a4876d6"
+    },
+    "launchkit/dom_check.py": {
+      "bytes": 31085,
+      "sha256": "813658cba2deca5d31987bb771e29cdffcb94be65af25d48f777548aad2b9235"
+    },
+    "launchkit/elephant_setup.py": {
+      "bytes": 8249,
+      "sha256": "a60940d3ac4b4b46c131b72258224f5020c6d0a4e0207543cd1db1e3749116f3"
+    },
+    "launchkit/gcp_transport.py": {
+      "bytes": 12491,
+      "sha256": "f06a317b469d5aaae4c3b04d72627c162b93a6bae74b1aa9420b423dba973890"
+    },
+    "launchkit/generator.py": {
+      "bytes": 17586,
+      "sha256": "ef56a89a8769c3109a2bc8344b1597dc649579fcae75878aabcf050433547630"
+    },
+    "launchkit/guide_models.py": {
+      "bytes": 16800,
+      "sha256": "e1f30a0eba8d3f5e4595d85c5036c70a88f7dd8d4337b6be8d42799265627199"
+    },
+    "launchkit/implementation_workspace.py": {
+      "bytes": 75560,
+      "sha256": "9b8547dd49032fc739bc288b0ebd1654f1e3ab996b076fc541b7a09a4256fe39"
+    },
+    "launchkit/installed_feedback.py": {
+      "bytes": 32822,
+      "sha256": "024dc5573a793a425d0a7403c140e5ae6eb4c319992da83de09f3675b7500c54"
+    },
+    "launchkit/linux_sandbox.py": {
+      "bytes": 13146,
+      "sha256": "9eea79f5d23b641ce91c8525cb2b607f8cb12b89a8c447c56a5c8041608744b5"
+    },
+    "launchkit/native_definition_continuity.py": {
+      "bytes": 8948,
+      "sha256": "0db926ba2ba6f2d8666ec93cb80980a8e4795807a6dcbbd1a5c9e0f14204141a"
+    },
+    "launchkit/native_models.py": {
+      "bytes": 5501,
+      "sha256": "3b3e9525bb99ef3b5d160a93f97e10febccd61244fc1d9f3c3a4427ca36c1340"
+    },
+    "launchkit/planning_limits.py": {
+      "bytes": 469,
+      "sha256": "fc986781e79cf440d1a4c18b502e39453be1d8cf6ecfad142f33dce881e0bbc0"
+    },
+    "launchkit/projects.py": {
+      "bytes": 3791,
+      "sha256": "69cbf114792fcdeaf4cc66f495937e1f180f6519806a2bc961f9d5202f8fb5f3"
+    },
+    "launchkit/remote_browser_access.py": {
+      "bytes": 31986,
+      "sha256": "2af2d803b855fb5964fc703ef2385f91e6121d6a6033ba64e74ef2a9ea6b7349"
+    },
+    "launchkit/remote_deployment.py": {
+      "bytes": 56340,
+      "sha256": "c6e362d429ce26b3b8838ae8d4b240e32f77a089879a0f08b36fbd465cf5f97e"
+    },
+    "launchkit/remote_destination.py": {
+      "bytes": 96119,
+      "sha256": "d9666278b5598d599e48b921c14bf7cbce5b06b858d44ebe48d5f3f48f8629da"
+    },
+    "launchkit/remote_installed_feedback.py": {
+      "bytes": 18010,
+      "sha256": "99531a51ce70a85c46c829e12e0a12227ba9ecbe553f64b64e3e27a71a0f1855"
+    },
+    "launchkit/remote_interface_bundle.py": {
+      "bytes": 1022,
+      "sha256": "42faac4f77a950451497bee921cf6423160045b4196e199ddaf61ccef6b1e0d5"
+    },
+    "launchkit/runtime_candidates.py": {
+      "bytes": 25540,
+      "sha256": "e9c7b2012a2105db579b2e4fbfa922027583b0c615215f90c1252722d183beb3"
+    },
+    "launchkit/runtime_dependencies.py": {
+      "bytes": 30095,
+      "sha256": "eed282bf85bbf4e67f192e1d50fb173197318e4be9d365119f831d4f1686fdd9"
+    },
+    "launchkit/runtime_selection.py": {
+      "bytes": 4738,
+      "sha256": "65ac6992f9836aeab909184b98ec1e4f852cbe4805de19c654d1631d675a38f6"
+    },
+    "launchkit/schema.py": {
+      "bytes": 4913,
+      "sha256": "d92b0a2ec2ed3a07b77fdacf3d30d2a0fe91401fdbc789ad4b2be9536002dc41"
+    },
+    "launchkit/ssh_browser_access.py": {
+      "bytes": 19662,
+      "sha256": "536b6b0ff3866f597ee2cc78d3ac0ab5f68e199f04ce745d42afcfe076fba174"
+    },
+    "launchkit/ssh_transport.py": {
+      "bytes": 18266,
+      "sha256": "8eb51d12fbdba1580fb90c3269e32c0d6df80f3105fee09152c7a4e2522dff04"
+    },
+    "launchkit/templates/app.py": {
+      "bytes": 10405,
+      "sha256": "f750c76ad13545babfce2951074a0b00378700765c30727cf109d1b194b907e3"
+    },
+    "launchkit/templates/candidate_gateway_overlay.py": {
+      "bytes": 1174,
+      "sha256": "f904bd51ab261018bc016402555ff86daa2834b910da2a49b91480c1cbeaae3d"
+    },
+    "launchkit/templates/connectors.py": {
+      "bytes": 7808,
+      "sha256": "5ee981ebbf3a036e5bd68e00b58cd025ea190c7119fda722c904d72e44039b79"
+    },
+    "launchkit/templates/deploy-gcp.sh": {
+      "bytes": 10372,
+      "sha256": "b5994e6ad82378ec63556ad5b0cd15baaa82760fc192c4e745c83424d420bdf2"
+    },
+    "launchkit/templates/install-service.sh": {
+      "bytes": 317,
+      "sha256": "d267a84fc2cc4de3d63224601c5f4cdd53730de4e76a73278f8e4192ab1bcb95"
+    },
+    "launchkit/templates/install.sh": {
+      "bytes": 960,
+      "sha256": "2181c73b0b181b14551424c435bae4970b5b5351c8020f6f31e0a0fd0a0a1ce9"
+    },
+    "launchkit/templates/install_candidate.py": {
+      "bytes": 24734,
+      "sha256": "3637f8c212bfaeb842020a704b649b36e9b4657d5ed41decd191d2e263636685"
+    },
+    "launchkit/templates/install_gateway.py": {
+      "bytes": 12118,
+      "sha256": "d711ef4bd9d55b4fe9620aeb0ef936d418d352a2e1c141f9aaca34ad74b02e1c"
+    },
+    "launchkit/templates/setup.py": {
+      "bytes": 3572,
+      "sha256": "6a9f3873a2cfe8b3987329063b7ec034a2a27a6caae15eed5127380abcdc2e3c"
+    },
+    "launchkit/templates/start.sh": {
+      "bytes": 188,
+      "sha256": "8384401c62d38903dd2685cb425f59106caa8c90d50af2cdb791f6ce1c69b7d1"
+    },
+    "launchkit/templates/storage_setup.py": {
+      "bytes": 14456,
+      "sha256": "9b3e648d945a2d69e60842f473941f81742448b9ccfe35801393b704d1e3c40e"
+    },
+    "launchkit/templates_elephant/Dockerfile": {
+      "bytes": 1118,
+      "sha256": "d5c2142d73d9707448a230f7ed44ced7cf4469b802e2a8d8f720a5f53199c3db"
+    },
+    "launchkit/templates_elephant/README.md": {
+      "bytes": 4763,
+      "sha256": "6359e78de58952d17189748693beba5a3328e66b41ade5a7b0e4e3850e4baf2a"
+    },
+    "launchkit/templates_elephant/manage.py": {
+      "bytes": 17831,
+      "sha256": "a32b3aee156be1e3aab5e65a5084d182304fd681ae31f71c865aa5e91e180c7a"
+    },
+    "launchkit/templates_v2/app.py": {
+      "bytes": 57391,
+      "sha256": "ba0f768bbbc0f37748217c903b0a4aa46db593ad7ef742aac928797b901ad967"
+    },
+    "launchkit/templates_v2/application_configuration.py": {
+      "bytes": 7741,
+      "sha256": "08ae62f84ba420665c6c2bae7786b6c7b42ee7166b31dccd51c2010c71752c81"
+    },
+    "launchkit/templates_v2/console_auth.py": {
+      "bytes": 56112,
+      "sha256": "345dbb5e22376eb52f7e3d8b0b8e1eac272f77fb2d2da5711c1444667cb9328f"
+    },
+    "launchkit/templates_v2/console_binding.py": {
+      "bytes": 6688,
+      "sha256": "f1c2b054304a51fdafc2b5cac9a4f8325dcde103fbf02d60a6f3047035f913f8"
+    },
+    "launchkit/templates_v2/console_configuration.py": {
+      "bytes": 3321,
+      "sha256": "c7466967f62bd988654bcdb1743f52512724ed8bc72665b997c502a828ac7876"
+    },
+    "launchkit/templates_v2/console_connect.py": {
+      "bytes": 54589,
+      "sha256": "9c317e80a9b92b3a452a820da89186785d63f1a33e09d696d321f1f5147a06a6"
+    },
+    "launchkit/templates_v2/console_presentation.py": {
+      "bytes": 6448,
+      "sha256": "7d2062fb5c320e33b57464f899caf5acadaf1391c9567a421bba9a576b8dc4e9"
+    },
+    "launchkit/templates_v2/console_setup.css": {
+      "bytes": 8274,
+      "sha256": "9b56b3295e7d8cae7982dd400e517bdc181aeec12569ad8f55784d9799811963"
+    },
+    "launchkit/templates_v2/console_setup.mjs": {
+      "bytes": 41136,
+      "sha256": "f1301e18f169058279812aad38c26d870b87dc2abcb6429bc0a0dc78d33b4fd7"
+    },
+    "launchkit/templates_v2/console_shell.css": {
+      "bytes": 4322,
+      "sha256": "30d917c9da64988728b6ededec64520815f51e434e37f2d37eb32a7412b9ce02"
+    },
+    "launchkit/templates_v2/console_shell.mjs": {
+      "bytes": 9072,
+      "sha256": "2b67011e16934af5576e669eeb6c4ee167486844bb2960650b67857c8289361a"
+    },
+    "launchkit/templates_v2/console_shell.py": {
+      "bytes": 3642,
+      "sha256": "e75e3a3bce5e9b0e5ac2dba32f2b5718d8dd94cf70a2795fd2429a52e63afeb4"
+    },
+    "launchkit/templates_v2/mcp_connections.py": {
+      "bytes": 15935,
+      "sha256": "104019e08576a797d3716bd466de8e52178014a4551f9980ef3a8846907db141"
+    },
+    "launchkit/templates_v2/remote_operations.py": {
+      "bytes": 39039,
+      "sha256": "f201cbb559921c056a182b78d511fbd86e7f72dcc8a6846d36cf68e88d73819d"
+    },
+    "launchkit/templates_v2/setup.py": {
+      "bytes": 6628,
+      "sha256": "a10d8460c5f418985db46ec770d161ab8871ad1db0495f1ad4265698149c0b9f"
+    },
+    "launchkit/templates_v2/toolkit-ui/LICENSE-APACHE": {
+      "bytes": 10295,
+      "sha256": "3a0ffd02ca79c2a687921b0f5d8094f2f6a7058a4c01775d1351ea6514fcd180"
+    },
+    "launchkit/templates_v2/toolkit-ui/LICENSE-MIT": {
+      "bytes": 1081,
+      "sha256": "b45d1f632f83aeb359da8e2b8716ad72591ec7267a489fdda39989c618d65a0f"
+    },
+    "launchkit/templates_v2/toolkit-ui/THIRD_PARTY_NOTICES.md": {
+      "bytes": 8198,
+      "sha256": "771cdf3f5afe86da5fead3d9e837d382e760fcf8c1e060bc6cf3835378af740b"
+    },
+    "launchkit/templates_v2/toolkit-ui/index.d.ts": {
+      "bytes": 300,
+      "sha256": "189a56273ee0a08825fc3a48ae5d1961517491286487e18d3e7fae8303e5af33"
+    },
+    "launchkit/templates_v2/toolkit-ui/index.js": {
+      "bytes": 112,
+      "sha256": "114daaab72d18df9b362af9fac1e0c35e4fc5a6e15d5ce52d59098eab907047b"
+    },
+    "launchkit/templates_v2/toolkit-ui/model.d.ts": {
+      "bytes": 7034,
+      "sha256": "43478afa36c38fe9c7d4a0177cb564a2ed75c986c1ad31c0d5a3ac8c96be6702"
+    },
+    "launchkit/templates_v2/toolkit-ui/model.js": {
+      "bytes": 11,
+      "sha256": "8e609bb71c20b858c77f0e9f90bb1319db8477b13f9f965f1a1e18524bf50881"
+    },
+    "launchkit/templates_v2/toolkit-ui/package.json": {
+      "bytes": 246,
+      "sha256": "83e9457a098ab1d3567b8edb1da72b3ac2286fc1da7cfa95ab68eb1a6a36857a"
+    },
+    "launchkit/templates_v2/toolkit-ui/projection.d.ts": {
+      "bytes": 128,
+      "sha256": "7c8887f6eae0018d7088d0f4b7a0680a2cc391e5687ba56bdf6d086d993ebe4f"
+    },
+    "launchkit/templates_v2/toolkit-ui/projection.js": {
+      "bytes": 10152,
+      "sha256": "e6390021bf7c3491c003aa007fdc190d082042fea3c59aa5ec942abd014a225d"
+    },
+    "launchkit/templates_v2/toolkit-ui/setup-conversation.d.ts": {
+      "bytes": 900,
+      "sha256": "bba75c5de04a5522adc623b1cf44dc39c2a89c562044706c12027aa66b44fa7d"
+    },
+    "launchkit/templates_v2/toolkit-ui/setup-conversation.js": {
+      "bytes": 14599,
+      "sha256": "9da5c1c6e0dd07258970d5758f9c47f58d255033f57766786e292c1b51fe381c"
+    },
+    "launchkit/templates_v2/toolkit-ui/setup-markdown.d.ts": {
+      "bytes": 329,
+      "sha256": "d26fea3335b17be2e05b5628f0af9e26fcb11052cb2bf18e1d961c4190de9b65"
+    },
+    "launchkit/templates_v2/toolkit-ui/setup-markdown.js": {
+      "bytes": 6749,
+      "sha256": "5bb95eba3e26c6585cff2ecf61f18f5f14ef1e8d21d62e813535254ec573c203"
+    },
+    "launchkit/templates_v2/toolkit-ui/setup-model.d.ts": {
+      "bytes": 2249,
+      "sha256": "313b0f252ae13b85201af451826e9e649f3876a264e4762283db8cc92686f55c"
+    },
+    "launchkit/templates_v2/toolkit-ui/setup-model.js": {
+      "bytes": 954,
+      "sha256": "40aad313183a0455ac1e5048ec7a7300aace2e9a5a68d418e8ab6c69c31079f8"
+    },
+    "launchkit/templates_v2/toolkit-ui/style.css": {
+      "bytes": 4300,
+      "sha256": "f0ac4e309ba203551eb4e3d6aaaa9295b8ce3e08e6e0b0da8da28d3cae628eec"
+    },
+    "launchkit/templates_v2/toolkit-ui/vendor/entities/LICENSE": {
+      "bytes": 1260,
+      "sha256": "cb992345949ccd6e8394b2cd6c465f7b897c864f845937dbf64e8997f389e164"
+    },
+    "launchkit/templates_v2/toolkit-ui/vendor/entities/decode-codepoint.js": {
+      "bytes": 2369,
+      "sha256": "6922ff1576a7e6ecee74f85f0a77ad2fc65de8d3d35fbb4c1212e1ff8688bb86"
+    },
+    "launchkit/templates_v2/toolkit-ui/vendor/entities/decode.js": {
+      "bytes": 49350,
+      "sha256": "4ee2c7d8aa8381caf18140561e41305d27d79964ac502ae330944874a1f9ccb8"
+    },
+    "launchkit/templates_v2/toolkit-ui/vendor/entities/generated/decode-data-html.js": {
+      "bytes": 18767,
+      "sha256": "931c0fb2e5dce3e26ed9298f887e49eebd8107688eb64b31468ba606b2fc41bd"
+    },
+    "launchkit/templates_v2/toolkit-ui/vendor/entities/generated/decode-data-xml.js": {
+      "bytes": 287,
+      "sha256": "60747b3d149db527462f0d79101d426e3ced0c9bf6aeeee0f10d2b90d169b1b1"
+    },
+    "launchkit/templates_v2/toolkit-ui/vendor/entities/internal/bin-trie-flags.js": {
+      "bytes": 2805,
+      "sha256": "0f57ac7050b8af6781afaf516ba3dbc566379e12d2586c82e214d99938f1328c"
+    },
+    "launchkit/templates_v2/toolkit-ui/vendor/entities/internal/decode-shared.js": {
+      "bytes": 8211,
+      "sha256": "073fc4e93326d83212262f098064d2728d4eb4ddf40ecb533904ab319725bbe0"
+    },
+    "launchkit/templates_v2/toolkit-ui/vendor/entities/package.json": {
+      "bytes": 2590,
+      "sha256": "b6ff1175be0fa103f032d52e42af95d95c674e3cba08d93670cc8944697bcc42"
+    },
+    "launchkit/templates_v2/toolkit-ui/vendor/marked/LICENSE": {
+      "bytes": 2942,
+      "sha256": "8e3a3f82f59a60958f56ca08f445647c32a4733dc7ca6c2c46f6eb898471ab9c"
+    },
+    "launchkit/templates_v2/toolkit-ui/vendor/marked/marked.esm.js": {
+      "bytes": 46306,
+      "sha256": "db9e8a2f07a084f68a5e40e258b69755af894f9df4ec47e06e7f9a309584871f"
+    },
+    "launchkit/templates_v2/toolkit-ui/vendor/marked/package.json": {
+      "bytes": 3406,
+      "sha256": "26747b3d020e4c4acbf325e4c1638d697c375e155a91f86bbbb2dceeb24d5863"
+    },
+    "launchkit/templates_v2/toolkit-ui/view.d.ts": {
+      "bytes": 709,
+      "sha256": "bfc5fd2ae3ba21f8c821c4b57e5235dbd55ff1e44244a0157127a29d16702310"
+    },
+    "launchkit/templates_v2/toolkit-ui/view.js": {
+      "bytes": 35296,
+      "sha256": "76277b5b30552216b1ce47717d272cac84c8da450c59f2c7ad029b26759e8529"
+    }
+  },
+  "kind": "original-v2-public-source-closed-history-test-inputs",
+  "limits": "Exact retained public v2 reader/compiler inputs. Generated closed-history packages, proofs and receipts are synthetic unit controls, not an actual installed receipt or native runtime qualification.",
+  "source": "installer/.artifacts/forge-runtime-history-v2-20261009/revision-1/workspace/installer",
+  "source_proof": "installer/.artifacts/forge-runtime-history-v2-20261009/revision-1/inventory-and-source-proof.json",
+  "source_proof_sha256": "23db12c4209acec2b6ef40be0fbb2f535349aa459491b9b4a38baf15942aea2a"
+}

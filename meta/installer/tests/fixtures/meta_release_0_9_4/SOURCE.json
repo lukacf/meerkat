@@ -1,0 +1,61 @@
+{
+  "assets": {
+    "checksums-trailing.sha256": {
+      "bytes": 678,
+      "sha256": "a82889481a4fdd1b127a747dc60006249851f50d6b9c0fae7be26a5e0d314dcd"
+    },
+    "checksums.sha256": {
+      "bytes": 1053,
+      "sha256": "4b071ba2d154ac395e4833df75e5c040e237bda93cc7735b3c1ab3f6faf940f6"
+    },
+    "index-trailing.json": {
+      "bytes": 455,
+      "sha256": "df6c35b1690dca25230c7c1eea2caa81bfd5d9cdf1ce17b4b32e49ac33aa40f5"
+    },
+    "index.json": {
+      "bytes": 640,
+      "sha256": "65b17730b9eec364641789eb499538dbea471546d26599563026a442e6511111"
+    }
+  },
+  "binaries": {
+    "x86_64-unknown-linux-gnu": {
+      "meta_gateway": 482301648,
+      "rpc_gateway": 494330944
+    }
+  },
+  "release": "https://github.com/lukacf/meerkat-meta/releases/tag/v0.9.4",
+  "storage_reports": {
+    "cases": {
+      "boot-apply": "the same directory, --apply",
+      "boot-dry": "after one first boot of the 0.9.4 runtime (rpc_gateway, meerkat-meta 0.9.4), dry run",
+      "boot-dry2": "the same directory after --apply, dry run",
+      "empty-dry": "a new empty state directory, dry run",
+      "predecessor-dry": "a directory holding an empty mobkit_metadata.sqlite3, dry run"
+    },
+    "command": "meta_gateway storage-migrate --state-dir {state_dir} --json [--apply]",
+    "normalized": "the recorded state directory replaced by {state_dir}; re-serialized as indented JSON with ASCII escapes",
+    "recorded": {
+      "boot-apply": {
+        "exit_code": 0,
+        "sha256": "d4a7fbdd7956d6c70eef87353c189dfafc225882ee20a0a5f19717da2408056e"
+      },
+      "boot-dry": {
+        "exit_code": 0,
+        "sha256": "97fbb33d428771b32f8a9683509f2a6330185f527ed4383187fdeb833e2b976d"
+      },
+      "boot-dry2": {
+        "exit_code": 0,
+        "sha256": "dc0dc71857b660ef403a611d80a580eab998289803d028be1917a2bb1f23044b"
+      },
+      "empty-dry": {
+        "exit_code": 0,
+        "sha256": "9a06c1accd482da83c72453c233985eaccc17ba52e0e0c0c9433cf7048de033c"
+      },
+      "predecessor-dry": {
+        "exit_code": 1,
+        "sha256": "c25adad12f29803f4c954f5bcc90843fc01d3d31f108be58b2b59834cb367264"
+      }
+    },
+    "tool": "meta_gateway 0.9.4 x86_64-unknown-linux-gnu from meta-gateway-0.9.4-x86_64-unknown-linux-gnu.tar.gz"
+  }
+}

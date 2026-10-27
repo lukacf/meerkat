@@ -1,0 +1,1994 @@
+{
+  "schema_version": 1,
+  "kind": "forge-release-inputs",
+  "guide": {
+    "version": "0.9.3",
+    "core_version": "0.9.3",
+    "meta_source": "3b0073a834b93725c20cfa97bbd6db099348ece6",
+    "core_source": "d21cd3ef1d0fdefa43f826464802702149decdee"
+  },
+  "targets": {
+    "linux-x86_64": {
+      "files": {
+        "product/linux-x86_64/RUNTIME-SELECTION.json": {
+          "url": "https://github.com/lukacf/meerkat-connect/releases/download/v0.9.4/meerkat-connect-0.9.4-source.tar.gz",
+          "archive_size": 7319250,
+          "archive_sha256": "eb16437060a1836d70e7484e58f985499230fbea277d3c80003809ef1df63479",
+          "member": "meerkat-connect-0.9.4/release-evidence/linux-x86_64/RUNTIME-SELECTION.json",
+          "size": 24483,
+          "sha256": "a661596842c9ac7d61506ac547dd01747409c3ee80862301d0dfee21ece6f94c"
+        },
+        "product/linux-x86_64/assembly.json": {
+          "url": "https://github.com/lukacf/meerkat-connect/releases/download/v0.9.4/meerkat-connect-0.9.4-source.tar.gz",
+          "archive_size": 7319250,
+          "archive_sha256": "eb16437060a1836d70e7484e58f985499230fbea277d3c80003809ef1df63479",
+          "member": "meerkat-connect-0.9.4/release-evidence/linux-x86_64/assembly.json",
+          "size": 2210,
+          "sha256": "3a1c953df441058eba19901bf87c0359efbca1f9e893de508c4257c7b974796e"
+        },
+        "product/linux-x86_64/build-record.json": {
+          "url": "https://github.com/lukacf/meerkat-connect/releases/download/v0.9.4/meerkat-connect-0.9.4-source.tar.gz",
+          "archive_size": 7319250,
+          "archive_sha256": "eb16437060a1836d70e7484e58f985499230fbea277d3c80003809ef1df63479",
+          "member": "meerkat-connect-0.9.4/release-evidence/linux-x86_64/build-record.json",
+          "size": 2155,
+          "sha256": "4b3f1022ae9fcc338ae22665795900c4f63798ad8e61416a067157dbbd0ed976"
+        },
+        "product/linux-x86_64/dependency-requirements.txt": {
+          "url": "https://github.com/lukacf/meerkat-connect/releases/download/v0.9.4/meerkat-connect-0.9.4-source.tar.gz",
+          "archive_size": 7319250,
+          "archive_sha256": "eb16437060a1836d70e7484e58f985499230fbea277d3c80003809ef1df63479",
+          "member": "meerkat-connect-0.9.4/release-evidence/linux-x86_64/dependency-requirements.txt",
+          "size": 3310,
+          "sha256": "cfd2cfbdf3f87d43ee4a87442fa47521b5c2ac51086a0d62364b56196e7725b9"
+        },
+        "product/linux-x86_64/gateway-verification.json": {
+          "url": "https://github.com/lukacf/meerkat-connect/releases/download/v0.9.4/meerkat-connect-0.9.4-source.tar.gz",
+          "archive_size": 7319250,
+          "archive_sha256": "eb16437060a1836d70e7484e58f985499230fbea277d3c80003809ef1df63479",
+          "member": "meerkat-connect-0.9.4/release-evidence/linux-x86_64/gateway-verification.json",
+          "size": 55362,
+          "sha256": "24deea9dd77621e8fe2843bb72b1df976cc267973139d73425e6119acd393cd9"
+        },
+        "product/linux-x86_64/meerkat-connect-gateway-0.9.4-linux-x86_64.tar.gz.sha256": {
+          "url": "https://github.com/lukacf/meerkat-connect/releases/download/v0.9.4/meerkat-connect-0.9.4-source.tar.gz",
+          "archive_size": 7319250,
+          "archive_sha256": "eb16437060a1836d70e7484e58f985499230fbea277d3c80003809ef1df63479",
+          "member": "meerkat-connect-0.9.4/release-evidence/linux-x86_64/meerkat-connect-gateway-0.9.4-linux-x86_64.tar.gz.sha256",
+          "size": 116,
+          "sha256": "6ced34d0f345e2e28490f9b32e093e81d3df40df49e0bb392a1f935146e365e4"
+        },
+        "product/linux-x86_64/model-catalog.json": {
+          "url": "https://github.com/lukacf/meerkat-connect/releases/download/v0.9.4/meerkat-connect-0.9.4-source.tar.gz",
+          "archive_size": 7319250,
+          "archive_sha256": "eb16437060a1836d70e7484e58f985499230fbea277d3c80003809ef1df63479",
+          "member": "meerkat-connect-0.9.4/release-evidence/linux-x86_64/model-catalog.json",
+          "size": 58834,
+          "sha256": "d7a231bc179786b711f1b5a66e90e025fcf1f858f396be9320e58f367c3071ee"
+        },
+        "product/linux-x86_64/resource-build-record.json": {
+          "url": "https://github.com/lukacf/meerkat-connect/releases/download/v0.9.4/meerkat-connect-0.9.4-source.tar.gz",
+          "archive_size": 7319250,
+          "archive_sha256": "eb16437060a1836d70e7484e58f985499230fbea277d3c80003809ef1df63479",
+          "member": "meerkat-connect-0.9.4/release-evidence/linux-x86_64/resource-build-record.json",
+          "size": 4292,
+          "sha256": "f2959065789b4dc140a68410068a98bb2fa192d20b102a9a34ea000aa71e2d2c"
+        },
+        "product/linux-x86_64/source-manifest.json": {
+          "url": "https://github.com/lukacf/meerkat-connect/releases/download/v0.9.4/meerkat-connect-0.9.4-source.tar.gz",
+          "archive_size": 7319250,
+          "archive_sha256": "eb16437060a1836d70e7484e58f985499230fbea277d3c80003809ef1df63479",
+          "member": "meerkat-connect-0.9.4/release-evidence/linux-x86_64/source-manifest.json",
+          "size": 567947,
+          "sha256": "671f671e6833c9e4734eb324eb9cdc1ad3ae656954519a05919497a308228c74"
+        },
+        "product/linux-x86_64/meerkat_meta-0.9.4-py3-none-any.whl": {
+          "url": "https://files.pythonhosted.org/packages/5e/88/6f7d8d0ecb4be349b34b1f533f3a6d4f3b3cd2862fd5238b21fa6298c1fe/meerkat_meta-0.9.4-py3-none-any.whl",
+          "size": 167745,
+          "sha256": "46cc44eb3e05a4bd9fb2ec630c06f2e3c62548184b7f6c81101f042d8e11a659"
+        },
+        "product/linux-x86_64/meerkat_toolkit-0.9.4-py3-none-any.whl": {
+          "url": "https://github.com/lukacf/meerkat-connect/releases/download/v0.9.4/meerkat_toolkit-0.9.4-py3-none-any.whl",
+          "size": 447778,
+          "sha256": "a499fbf4d62ee335e5b3b978f4e1f85cc62fcf188c2c5f2c31f74a5bc0336e27"
+        },
+        "product/linux-x86_64/dependencies/annotated_doc-0.0.5-py3-none-any.whl": {
+          "sha256": "117bac03a25ede5df5440e855b32d556049ca169ead221505badf432fed4b101",
+          "size": 5302,
+          "url": "https://files.pythonhosted.org/packages/3e/30/e900b21425a860e195f32e37657aa1f7c7f2b1bfb26f03ca209b90933c06/annotated_doc-0.0.5-py3-none-any.whl"
+        },
+        "product/linux-x86_64/dependencies/annotated_types-0.8.0-py3-none-any.whl": {
+          "sha256": "f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0",
+          "size": 13427,
+          "url": "https://files.pythonhosted.org/packages/99/91/8acff4f5e50511b911bbccb72b8628a49c68ce14148cd9f6431094859a90/annotated_types-0.8.0-py3-none-any.whl"
+        },
+        "product/linux-x86_64/dependencies/anyio-4.15.1-py3-none-any.whl": {
+          "sha256": "6152fdbbf9a77fdec97731721bebf7c4c44f7c29b424b0065826173efc7ed101",
+          "size": 132079,
+          "url": "https://files.pythonhosted.org/packages/12/b8/4bd346e22b28902df4d651910f5242c28d84e4a5c2435ca5c3f797ed7e2e/anyio-4.15.1-py3-none-any.whl"
+        },
+        "product/linux-x86_64/dependencies/attrs-26.1.0-py3-none-any.whl": {
+          "sha256": "c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309",
+          "size": 67548,
+          "url": "https://files.pythonhosted.org/packages/64/b4/17d4b0b2a2dc85a6df63d1157e028ed19f90d4cd97c36717afef2bc2f395/attrs-26.1.0-py3-none-any.whl"
+        },
+        "product/linux-x86_64/dependencies/certifi-2026.7.22-py3-none-any.whl": {
+          "sha256": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775",
+          "size": 136983,
+          "url": "https://files.pythonhosted.org/packages/0b/a7/71ac2cff56fec219ed242bb11b8efb69fcc4bec75db06fb7bfe35de520e6/certifi-2026.7.22-py3-none-any.whl"
+        },
+        "product/linux-x86_64/dependencies/cffi-2.1.1-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl": {
+          "sha256": "34e261f78cb6ceaaa36f42f2613f4380d94d9c759a9c73c769ee6e0247364632",
+          "size": 217807,
+          "url": "https://files.pythonhosted.org/packages/f7/a4/4399daaf8f7dfee9d7c3327fdb0426ee041cc63edc358b93911ceb2bfc7a/cffi-2.1.1-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl"
+        },
+        "product/linux-x86_64/dependencies/click-8.5.0-py3-none-any.whl": {
+          "sha256": "255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360",
+          "size": 125251,
+          "url": "https://files.pythonhosted.org/packages/58/50/6c0d534c5f134586a8e1ba4e330569e32f057e33372ae556463212fb4cd3/click-8.5.0-py3-none-any.whl"
+        },
+        "product/linux-x86_64/dependencies/cryptography-50.0.1-cp311-abi3-manylinux_2_34_x86_64.whl": {
+          "sha256": "51afcfceb15597cf2635068e4ac9a56b2abde622edde17f37d85fd7b5306497a",
+          "size": 4746230,
+          "url": "https://files.pythonhosted.org/packages/85/66/6ccca4722987ddedaa7fc9c3f4708af7431f5535666c174350830888c6b7/cryptography-50.0.1-cp311-abi3-manylinux_2_34_x86_64.whl"
+        },
+        "product/linux-x86_64/dependencies/fastapi-0.141.1-py3-none-any.whl": {
+          "sha256": "bfb91aa2d334c61cb35ba9a116fc123b3d3df31640b801cf57a7a78ec3f603b3",
+          "size": 131954,
+          "url": "https://files.pythonhosted.org/packages/cb/03/10388a42375ee7e4ac9b94eb2c5c569c8b5795e377e701c9ac3ad63de890/fastapi-0.141.1-py3-none-any.whl"
+        },
+        "product/linux-x86_64/dependencies/h11-0.16.0-py3-none-any.whl": {
+          "sha256": "63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86",
+          "size": 37515,
+          "url": "https://files.pythonhosted.org/packages/04/4b/29cac41a4d98d144bf5f6d33995617b185d14b22401f75ca86f384e87ff1/h11-0.16.0-py3-none-any.whl"
+        },
+        "product/linux-x86_64/dependencies/httpcore-1.0.9-py3-none-any.whl": {
+          "sha256": "2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55",
+          "size": 78784,
+          "url": "https://files.pythonhosted.org/packages/7e/f5/f66802a942d491edb555dd61e3a9961140fd64c90bce1eafd741609d334d/httpcore-1.0.9-py3-none-any.whl"
+        },
+        "product/linux-x86_64/dependencies/httpx-0.28.1-py3-none-any.whl": {
+          "sha256": "d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad",
+          "size": 73517,
+          "url": "https://files.pythonhosted.org/packages/2a/39/e50c7c3a983047577ee07d2a9e53faf5a69493943ec3f6a384bdc792deb2/httpx-0.28.1-py3-none-any.whl"
+        },
+        "product/linux-x86_64/dependencies/httpx_sse-0.4.3-py3-none-any.whl": {
+          "sha256": "0ac1c9fe3c0afad2e0ebb25a934a59f4c7823b60792691f779fad2c5568830fc",
+          "size": 8960,
+          "url": "https://files.pythonhosted.org/packages/d2/fd/6668e5aec43ab844de6fc74927e155a3b37bf40d7c3790e49fc0406b6578/httpx_sse-0.4.3-py3-none-any.whl"
+        },
+        "product/linux-x86_64/dependencies/idna-3.20-py3-none-any.whl": {
+          "sha256": "ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c",
+          "size": 69583,
+          "url": "https://files.pythonhosted.org/packages/58/a2/bb081bab032533a855d44de1d56f8e8426114ff1ba5d1f07a438a0a654f8/idna-3.20-py3-none-any.whl"
+        },
+        "product/linux-x86_64/dependencies/jsonschema-4.26.0-py3-none-any.whl": {
+          "sha256": "d489f15263b8d200f8387e64b4c3a75f06629559fb73deb8fdfb525f2dab50ce",
+          "size": 90630,
+          "url": "https://files.pythonhosted.org/packages/69/90/f63fb5873511e014207a475e2bb4e8b2e570d655b00ac19a9a0ca0a385ee/jsonschema-4.26.0-py3-none-any.whl"
+        },
+        "product/linux-x86_64/dependencies/jsonschema_specifications-2025.9.1-py3-none-any.whl": {
+          "sha256": "98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe",
+          "size": 18437,
+          "url": "https://files.pythonhosted.org/packages/41/45/1a4ed80516f02155c51f51e8cedb3c1902296743db0bbc66608a0db2814f/jsonschema_specifications-2025.9.1-py3-none-any.whl"
+        },
+        "product/linux-x86_64/dependencies/mcp-1.30.0-py3-none-any.whl": {
+          "sha256": "666edb5009503e1047c9d60346a756f94b261f05cc2625f23d41c728ffc484d0",
+          "size": 234581,
+          "url": "https://files.pythonhosted.org/packages/f5/f4/e58bc33317c92a0203664daaf00bf6f41166cc0149e5d6870a03f7cd004a/mcp-1.30.0-py3-none-any.whl"
+        },
+        "product/linux-x86_64/dependencies/pycparser-3.0-py3-none-any.whl": {
+          "sha256": "b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992",
+          "size": 48172,
+          "url": "https://files.pythonhosted.org/packages/0c/c3/44f3fbbfa403ea2a7c779186dc20772604442dde72947e7d01069cbe98e3/pycparser-3.0-py3-none-any.whl"
+        },
+        "product/linux-x86_64/dependencies/pydantic-2.13.5-py3-none-any.whl": {
+          "sha256": "346a034f080da3755d8e9cb5e00e8b07de1d39e4f6e2c87d8ab7cafa0b269a73",
+          "size": 472589,
+          "url": "https://files.pythonhosted.org/packages/eb/47/c95ffc2009878c7aac0c5e08528022dcb885933252a88b5f170058014464/pydantic-2.13.5-py3-none-any.whl"
+        },
+        "product/linux-x86_64/dependencies/pydantic_core-2.46.5-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl": {
+          "sha256": "49776eab08766a08dfff7012f8b422dcd7e25e43b316eedf0477c24fcfa84b7c",
+          "size": 2062091,
+          "url": "https://files.pythonhosted.org/packages/cf/bc/3fa2d76b83162820a17da7f645b28d1cba99fc8e1e5fc6517067ec450fa1/pydantic_core-2.46.5-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+        },
+        "product/linux-x86_64/dependencies/pydantic_settings-2.15.0-py3-none-any.whl": {
+          "sha256": "0ba092c291c94baceb5eff768aa0d56400a457585bc0175925a5a5510303da42",
+          "size": 69413,
+          "url": "https://files.pythonhosted.org/packages/30/a4/2bffa9f8e804325a09867f0e9d30795c80ea9f8d62560bd1b6ad6220eb2f/pydantic_settings-2.15.0-py3-none-any.whl"
+        },
+        "product/linux-x86_64/dependencies/pyjwt-2.15.0-py3-none-any.whl": {
+          "sha256": "7a3742debf6b879e912dbb9819ceec1594be812452b78c5f2e2dfc56564954f8",
+          "size": 33680,
+          "url": "https://files.pythonhosted.org/packages/e8/55/40e45bf052ee8ee12a4dfd785519660f8effa7b065442b91646ec6828619/pyjwt-2.15.0-py3-none-any.whl"
+        },
+        "product/linux-x86_64/dependencies/pypdf-6.1.1-py3-none-any.whl": {
+          "sha256": "7781f99493208a37a7d4275601d883e19af24e62a525c25844d22157c2e4cde7",
+          "size": 323455,
+          "url": "https://files.pythonhosted.org/packages/07/ed/adae13756d9dabdddee483fc7712905bb5585fbf6e922b1a19aca3a29cd1/pypdf-6.1.1-py3-none-any.whl"
+        },
+        "product/linux-x86_64/dependencies/python_dotenv-1.2.3-py3-none-any.whl": {
+          "sha256": "904552145e8bfed22162c09dab1c2b9b54fefa7b23ba780f4f26ca0316b0f0d9",
+          "size": 22780,
+          "url": "https://files.pythonhosted.org/packages/0d/17/c5c6b53ddc18f297992099b3d9ec16c855c0ccc83263a21fe4d1c625ec6c/python_dotenv-1.2.3-py3-none-any.whl"
+        },
+        "product/linux-x86_64/dependencies/python_multipart-0.0.32-py3-none-any.whl": {
+          "sha256": "ff6d3f776f16878c894e52e107296ffc890e913c611b1a4ec6c44e2821fe2e23",
+          "size": 30042,
+          "url": "https://files.pythonhosted.org/packages/e1/04/e8135ebd1ad02c56ec633277529b2602ff99ff634be76cdba5744cf554fd/python_multipart-0.0.32-py3-none-any.whl"
+        },
+        "product/linux-x86_64/dependencies/referencing-0.37.0-py3-none-any.whl": {
+          "sha256": "381329a9f99628c9069361716891d34ad94af76e461dcb0335825aecc7692231",
+          "size": 26766,
+          "url": "https://files.pythonhosted.org/packages/2c/58/ca301544e1fa93ed4f80d724bf5b194f6e4b945841c5bfd555878eea9fcb/referencing-0.37.0-py3-none-any.whl"
+        },
+        "product/linux-x86_64/dependencies/rpds_py-2026.6.3-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl": {
+          "sha256": "9c1255b302953c86a486b81d330d5ee1d5bd937691ce271b6be0ef0e299eaab7",
+          "size": 371315,
+          "url": "https://files.pythonhosted.org/packages/5e/19/7e98f468bd50346faff5b10e5297374b443bfdddacc8e9fbc65984539597/rpds_py-2026.6.3-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+        },
+        "product/linux-x86_64/dependencies/sse_starlette-3.4.11-py3-none-any.whl": {
+          "sha256": "c7b2244bdff016fe7f64e10075e89a3e6bbf899649cc89b0fe884b5545042453",
+          "size": 17122,
+          "url": "https://files.pythonhosted.org/packages/98/6a/2ba3ed4a69babf3afdddf7d8314a48d87562c0a442206bbc2a1b50d5efc0/sse_starlette-3.4.11-py3-none-any.whl"
+        },
+        "product/linux-x86_64/dependencies/starlette-1.7.0-py3-none-any.whl": {
+          "sha256": "67f8e99895493dd2911a03f11314af6ceebeae4e704bb9f43dfc6a9db151c93e",
+          "size": 78980,
+          "url": "https://files.pythonhosted.org/packages/4e/d6/1ec1b290f9e0fb067899b61e1d37a30c923068bad260b216dbe37a7d2967/starlette-1.7.0-py3-none-any.whl"
+        },
+        "product/linux-x86_64/dependencies/tinycss2-1.5.1-py3-none-any.whl": {
+          "sha256": "3415ba0f5839c062696996998176c4a3751d18b7edaaeeb658c9ce21ec150661",
+          "size": 28404,
+          "url": "https://files.pythonhosted.org/packages/60/45/c7b5c3168458db837e8ceab06dc77824e18202679d0463f0e8f002143a97/tinycss2-1.5.1-py3-none-any.whl"
+        },
+        "product/linux-x86_64/dependencies/typing_extensions-4.16.0-py3-none-any.whl": {
+          "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8",
+          "size": 45571,
+          "url": "https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl"
+        },
+        "product/linux-x86_64/dependencies/typing_inspection-0.4.4-py3-none-any.whl": {
+          "sha256": "65b8397ba37ccbce054456aaccddfc91e6e3083c92824df348d96ca832f3f147",
+          "size": 14750,
+          "url": "https://files.pythonhosted.org/packages/67/81/4add07e5172b7ac40d8ed5ff580409a7801a4fe26d529bdd915401dabfbe/typing_inspection-0.4.4-py3-none-any.whl"
+        },
+        "product/linux-x86_64/dependencies/uvicorn-0.54.0-py3-none-any.whl": {
+          "sha256": "505bdb0f318731d45f1f712071fc781a8981f6847a31c902c9f5e652d4f67faf",
+          "size": 87427,
+          "url": "https://files.pythonhosted.org/packages/38/0c/b54a4fdd7f90a3af8b02ebc9ce6712c2c208b7926a2f7bad95c33ebbe943/uvicorn-0.54.0-py3-none-any.whl"
+        },
+        "product/linux-x86_64/dependencies/webencodings-0.5.1-py2.py3-none-any.whl": {
+          "sha256": "a0af1213f3c2226497a97e2b3aa01a7e4bee4f403f95be16fc9acd2947514a78",
+          "size": 11774,
+          "url": "https://files.pythonhosted.org/packages/f4/24/2a3e3df732393fed8b3ebf2ec078f05546de641fe1b667ee316ec1dcf3b7/webencodings-0.5.1-py2.py3-none-any.whl"
+        },
+        "product/linux-x86_64/meerkat-connect-gateway-0.9.4-linux-x86_64.tar.gz": {
+          "url": "https://github.com/lukacf/meerkat-connect/releases/download/v0.9.4/meerkat-connect-gateway-0.9.4-linux-x86_64.tar.gz",
+          "size": 452368324,
+          "sha256": "237d029d8c163accd3e42f656adfa6c4c21a2cfcc97a6c4e6820ff51af968759"
+        },
+        "guide/rpc_gateway": {
+          "url": "https://github.com/lukacf/meerkat-meta/releases/download/v0.9.3/meta-rpc-gateway-0.9.3-x86_64-unknown-linux-gnu.tar.gz",
+          "archive_size": 101221673,
+          "archive_sha256": "b416df1ba5648ca3ed849dec2692f664c37b0e7277232a6d2421ac53961a18b0",
+          "member": "rpc_gateway",
+          "size": 479374128,
+          "sha256": "757519ed1210d16d865e2e37de3fba098a1cca6ccba6a7e1dc646963fb04a335"
+        },
+        "ordinary/rpc_gateway": {
+          "url": "https://github.com/lukacf/meerkat-meta/releases/download/v0.9.4/meta-rpc-gateway-0.9.4-x86_64-unknown-linux-gnu.tar.gz",
+          "archive_size": 106098031,
+          "archive_sha256": "2713c2fceddba62d22f81dbb0e0ee6ef82b716cd0ad15de8c1acf4b5ec455f39",
+          "member": "rpc_gateway",
+          "size": 494330944,
+          "sha256": "998f34433a2835459deca0f005eff8aa34297f2b29a75d4953fc01bac1bfb092"
+        }
+      },
+      "selection": {
+        "artifact_root": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts",
+        "assembly": {
+          "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/assembly.json",
+          "sha256": "3a1c953df441058eba19901bf87c0359efbca1f9e893de508c4257c7b974796e",
+          "size": 2210
+        },
+        "dependency_requirements": {
+          "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/dependency-requirements.txt",
+          "sha256": "cfd2cfbdf3f87d43ee4a87442fa47521b5c2ac51086a0d62364b56196e7725b9",
+          "size": 3310
+        },
+        "dependency_wheels": [
+          {
+            "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/dependencies/annotated_doc-0.0.5-py3-none-any.whl",
+            "sha256": "117bac03a25ede5df5440e855b32d556049ca169ead221505badf432fed4b101",
+            "size": 5302
+          },
+          {
+            "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/dependencies/annotated_types-0.8.0-py3-none-any.whl",
+            "sha256": "f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0",
+            "size": 13427
+          },
+          {
+            "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/dependencies/anyio-4.15.1-py3-none-any.whl",
+            "sha256": "6152fdbbf9a77fdec97731721bebf7c4c44f7c29b424b0065826173efc7ed101",
+            "size": 132079
+          },
+          {
+            "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/dependencies/attrs-26.1.0-py3-none-any.whl",
+            "sha256": "c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309",
+            "size": 67548
+          },
+          {
+            "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/dependencies/certifi-2026.7.22-py3-none-any.whl",
+            "sha256": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775",
+            "size": 136983
+          },
+          {
+            "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/dependencies/cffi-2.1.1-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+            "sha256": "34e261f78cb6ceaaa36f42f2613f4380d94d9c759a9c73c769ee6e0247364632",
+            "size": 217807
+          },
+          {
+            "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/dependencies/click-8.5.0-py3-none-any.whl",
+            "sha256": "255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360",
+            "size": 125251
+          },
+          {
+            "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/dependencies/cryptography-50.0.1-cp311-abi3-manylinux_2_34_x86_64.whl",
+            "sha256": "51afcfceb15597cf2635068e4ac9a56b2abde622edde17f37d85fd7b5306497a",
+            "size": 4746230
+          },
+          {
+            "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/dependencies/fastapi-0.141.1-py3-none-any.whl",
+            "sha256": "bfb91aa2d334c61cb35ba9a116fc123b3d3df31640b801cf57a7a78ec3f603b3",
+            "size": 131954
+          },
+          {
+            "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/dependencies/h11-0.16.0-py3-none-any.whl",
+            "sha256": "63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86",
+            "size": 37515
+          },
+          {
+            "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/dependencies/httpcore-1.0.9-py3-none-any.whl",
+            "sha256": "2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55",
+            "size": 78784
+          },
+          {
+            "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/dependencies/httpx-0.28.1-py3-none-any.whl",
+            "sha256": "d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad",
+            "size": 73517
+          },
+          {
+            "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/dependencies/httpx_sse-0.4.3-py3-none-any.whl",
+            "sha256": "0ac1c9fe3c0afad2e0ebb25a934a59f4c7823b60792691f779fad2c5568830fc",
+            "size": 8960
+          },
+          {
+            "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/dependencies/idna-3.20-py3-none-any.whl",
+            "sha256": "ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c",
+            "size": 69583
+          },
+          {
+            "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/dependencies/jsonschema-4.26.0-py3-none-any.whl",
+            "sha256": "d489f15263b8d200f8387e64b4c3a75f06629559fb73deb8fdfb525f2dab50ce",
+            "size": 90630
+          },
+          {
+            "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/dependencies/jsonschema_specifications-2025.9.1-py3-none-any.whl",
+            "sha256": "98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe",
+            "size": 18437
+          },
+          {
+            "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/dependencies/mcp-1.30.0-py3-none-any.whl",
+            "sha256": "666edb5009503e1047c9d60346a756f94b261f05cc2625f23d41c728ffc484d0",
+            "size": 234581
+          },
+          {
+            "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/dependencies/pycparser-3.0-py3-none-any.whl",
+            "sha256": "b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992",
+            "size": 48172
+          },
+          {
+            "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/dependencies/pydantic-2.13.5-py3-none-any.whl",
+            "sha256": "346a034f080da3755d8e9cb5e00e8b07de1d39e4f6e2c87d8ab7cafa0b269a73",
+            "size": 472589
+          },
+          {
+            "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/dependencies/pydantic_core-2.46.5-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+            "sha256": "49776eab08766a08dfff7012f8b422dcd7e25e43b316eedf0477c24fcfa84b7c",
+            "size": 2062091
+          },
+          {
+            "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/dependencies/pydantic_settings-2.15.0-py3-none-any.whl",
+            "sha256": "0ba092c291c94baceb5eff768aa0d56400a457585bc0175925a5a5510303da42",
+            "size": 69413
+          },
+          {
+            "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/dependencies/pyjwt-2.15.0-py3-none-any.whl",
+            "sha256": "7a3742debf6b879e912dbb9819ceec1594be812452b78c5f2e2dfc56564954f8",
+            "size": 33680
+          },
+          {
+            "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/dependencies/pypdf-6.1.1-py3-none-any.whl",
+            "sha256": "7781f99493208a37a7d4275601d883e19af24e62a525c25844d22157c2e4cde7",
+            "size": 323455
+          },
+          {
+            "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/dependencies/python_dotenv-1.2.3-py3-none-any.whl",
+            "sha256": "904552145e8bfed22162c09dab1c2b9b54fefa7b23ba780f4f26ca0316b0f0d9",
+            "size": 22780
+          },
+          {
+            "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/dependencies/python_multipart-0.0.32-py3-none-any.whl",
+            "sha256": "ff6d3f776f16878c894e52e107296ffc890e913c611b1a4ec6c44e2821fe2e23",
+            "size": 30042
+          },
+          {
+            "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/dependencies/referencing-0.37.0-py3-none-any.whl",
+            "sha256": "381329a9f99628c9069361716891d34ad94af76e461dcb0335825aecc7692231",
+            "size": 26766
+          },
+          {
+            "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/dependencies/rpds_py-2026.6.3-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+            "sha256": "9c1255b302953c86a486b81d330d5ee1d5bd937691ce271b6be0ef0e299eaab7",
+            "size": 371315
+          },
+          {
+            "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/dependencies/sse_starlette-3.4.11-py3-none-any.whl",
+            "sha256": "c7b2244bdff016fe7f64e10075e89a3e6bbf899649cc89b0fe884b5545042453",
+            "size": 17122
+          },
+          {
+            "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/dependencies/starlette-1.7.0-py3-none-any.whl",
+            "sha256": "67f8e99895493dd2911a03f11314af6ceebeae4e704bb9f43dfc6a9db151c93e",
+            "size": 78980
+          },
+          {
+            "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/dependencies/tinycss2-1.5.1-py3-none-any.whl",
+            "sha256": "3415ba0f5839c062696996998176c4a3751d18b7edaaeeb658c9ce21ec150661",
+            "size": 28404
+          },
+          {
+            "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/dependencies/typing_extensions-4.16.0-py3-none-any.whl",
+            "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8",
+            "size": 45571
+          },
+          {
+            "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/dependencies/typing_inspection-0.4.4-py3-none-any.whl",
+            "sha256": "65b8397ba37ccbce054456aaccddfc91e6e3083c92824df348d96ca832f3f147",
+            "size": 14750
+          },
+          {
+            "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/dependencies/uvicorn-0.54.0-py3-none-any.whl",
+            "sha256": "505bdb0f318731d45f1f712071fc781a8981f6847a31c902c9f5e652d4f67faf",
+            "size": 87427
+          },
+          {
+            "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/dependencies/webencodings-0.5.1-py2.py3-none-any.whl",
+            "sha256": "a0af1213f3c2226497a97e2b3aa01a7e4bee4f403f95be16fc9acd2947514a78",
+            "size": 11774
+          }
+        ],
+        "format": "forge-meta-toolkit-runtime-selection-v1",
+        "meta": {
+          "distribution": "meerkat-meta",
+          "metadata": [
+            [
+              "METADATA",
+              "78842e268a7f02faf95d04a02517f1eb5d0dba2bf84a3f5a175341dd2b53584e",
+              1181
+            ],
+            [
+              "WHEEL",
+              "98e75747d0b7c0c568bfb71263c3d8f970b3a374a6996087bc642be5cb09a1aa",
+              91
+            ],
+            [
+              "top_level.txt",
+              "34321e38059e8fe17b6dd8c4fb20179aeea56eced05081ed2ffdca2493466374",
+              13
+            ]
+          ],
+          "sha256": "46cc44eb3e05a4bd9fb2ec630c06f2e3c62548184b7f6c81101f042d8e11a659",
+          "size": 167745,
+          "source_payload": [
+            [
+              "meerkat_meta/__init__.py",
+              "b9ee2296d731148a34fdfa023e73297df06d4fdd7d2355bc7aa7ab2e1971b789",
+              15244
+            ],
+            [
+              "meerkat_meta/_client.py",
+              "b0588c9149f579cec95d33c44c6d6a0b746132fa5c3cf75efeaade84316825bc",
+              49783
+            ],
+            [
+              "meerkat_meta/_sse.py",
+              "0b81ec220cea51c180ce41d78f033e723d4d28f740a99df1ec09bf244d778fc1",
+              3517
+            ],
+            [
+              "meerkat_meta/_transport.py",
+              "ad3dce0ce3b5c743d5ade8ff41dac38e16b68587e0e71e7494d47e68a6fa943c",
+              64581
+            ],
+            [
+              "meerkat_meta/agent_builder.py",
+              "1872b0042cbb9706bb029c2d47c9ac4f57f21cec36ea9bf221aa3d5c7401460a",
+              30832
+            ],
+            [
+              "meerkat_meta/builder.py",
+              "7b582e48c1d65f43b5df1f82deb44f5e988b596df09806baf947a8992dc53c20",
+              52738
+            ],
+            [
+              "meerkat_meta/config/__init__.py",
+              "25b463b9b89c05c835506e52659739ce4d0cf7b07deb5dcca4b07c5f8849127c",
+              159
+            ],
+            [
+              "meerkat_meta/config/auth.py",
+              "94935d171073087b9a50788314dc5dbf4bdd7d7450f2553182099c3293c123f4",
+              1341
+            ],
+            [
+              "meerkat_meta/config/event_log.py",
+              "93f5710c5ee0d6e189736bda13a3e44c97e15b00f2537276437a9b48bf89d75f",
+              2740
+            ],
+            [
+              "meerkat_meta/config/memory.py",
+              "e99140478c3b2c9ae7d59c59f7e0d80d8c0eb0f4b1c2bb15deb30f36c1d75770",
+              1114
+            ],
+            [
+              "meerkat_meta/config/runtime_store.py",
+              "6a7f0818eee4afd8509ed56613d7a0ce9361e5b3386e078239c83194b3d59c7e",
+              1354
+            ],
+            [
+              "meerkat_meta/errors.py",
+              "8a39ea84503666fa164ddd6f6bfbf7adb8674d89ed069b1dd3d4e455311b21dd",
+              38299
+            ],
+            [
+              "meerkat_meta/events.py",
+              "ce71880a5df33138a268c33845152c474c7bccaff6d75adf697c5c3113ea4663",
+              10351
+            ],
+            [
+              "meerkat_meta/helpers.py",
+              "d15308c55f40c191f721e7195d362485a052025b2197f71879c25a6d0839bdbd",
+              4578
+            ],
+            [
+              "meerkat_meta/identity_first_models.py",
+              "2a1e0fd0401d587d53b46eb0b625d58fa6d7d01c65c16a1197a9251324efe4e2",
+              70376
+            ],
+            [
+              "meerkat_meta/identity_first_providers.py",
+              "bc7bc3b7176e691cbdaf90a8636b6b532ac6f7bab31b34889aa811ba6469b3ce",
+              1180
+            ],
+            [
+              "meerkat_meta/jobs.py",
+              "cff904907680d84434e91dd9fc3f642a03a633c03b38619f08a90e8b2abd1b86",
+              9736
+            ],
+            [
+              "meerkat_meta/live.py",
+              "a8bd0e64d52f4b1ae6c62965cc2d58972febccb006af66e4191654dc01a715c6",
+              31631
+            ],
+            [
+              "meerkat_meta/models.py",
+              "9cd6c57c54717d6058b9360b58ce26d75d83ae8686bf48bcfd476c03fd34a0d4",
+              15056
+            ],
+            [
+              "meerkat_meta/py.typed",
+              "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              0
+            ],
+            [
+              "meerkat_meta/runtime.py",
+              "6aa1cec1760612af614ea616072fb25d1d8070c8ff4b415f29c8b52b35d647af",
+              229991
+            ],
+            [
+              "meerkat_meta/tool_content.py",
+              "6ab3e7111abbfe9f3b2cf1d389b9a60ecff887504ffff72c1c470ce55430d37c",
+              2816
+            ],
+            [
+              "meerkat_meta/types.py",
+              "fafaec6813b32b67f0eee67c0291100f18ce09f2a63e70d4f82807b4efb0334f",
+              90997
+            ]
+          ],
+          "version": "0.9.4"
+        },
+        "meta_wheel": {
+          "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/meerkat_meta-0.9.4-py3-none-any.whl",
+          "sha256": "46cc44eb3e05a4bd9fb2ec630c06f2e3c62548184b7f6c81101f042d8e11a659",
+          "size": 167745
+        },
+        "model_catalog": {
+          "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/model-catalog.json",
+          "sha256": "d7a231bc179786b711f1b5a66e90e025fcf1f858f396be9320e58f367c3071ee",
+          "size": 58834
+        },
+        "source_manifest": {
+          "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/source-manifest.json",
+          "sha256": "671f671e6833c9e4734eb324eb9cdc1ad3ae656954519a05919497a308228c74",
+          "size": 567947
+        },
+        "target": "linux-x86_64",
+        "toolkit": {
+          "distribution": "meerkat-toolkit",
+          "metadata": [
+            [
+              "METADATA",
+              "b070d10db0c2ebef518045eb71425288416265e9fa7255858b1b9751550bc856",
+              3671
+            ],
+            [
+              "WHEEL",
+              "98e75747d0b7c0c568bfb71263c3d8f970b3a374a6996087bc642be5cb09a1aa",
+              91
+            ],
+            [
+              "licenses/EXTENSIONS.md",
+              "4730b663711a358073b3fafaf3179e9f15e691079fe3438b3833d1ced502f5ae",
+              6416
+            ],
+            [
+              "licenses/FRONTEND.md",
+              "b5899c1420229e57dc46f6429dfe23bcd1a4338f41e96d458c941fc8cd262397",
+              36670
+            ],
+            [
+              "licenses/GMAIL.md",
+              "28a0664dbaf719a005a63a76abf52455f51d4f9a44f378514b2e5e38f324ddcf",
+              17562
+            ],
+            [
+              "licenses/HOMECORE-LIVE.md",
+              "66d2f398fc3628b9392ebd0026da360a183901408888755b69f6b6441959a7e3",
+              6946
+            ],
+            [
+              "licenses/LICENSE-APACHE",
+              "3a0ffd02ca79c2a687921b0f5d8094f2f6a7058a4c01775d1351ea6514fcd180",
+              10295
+            ],
+            [
+              "licenses/LICENSE-Agno",
+              "ced3370bfb5fecbf9f0f0d60644b2579869bc786a8fafb75bdf8a58d31cad69c",
+              11344
+            ],
+            [
+              "licenses/LICENSE-HomeCore",
+              "60f0da549301528f6bebf3ba6412609e3edc84f8a7a6baa4d26e35d1296b86ed",
+              4254
+            ],
+            [
+              "licenses/LICENSE-MIT",
+              "b45d1f632f83aeb359da8e2b8716ad72591ec7267a489fdda39989c618d65a0f",
+              1081
+            ],
+            [
+              "licenses/TELEGRAM.md",
+              "584314ac4e7fe6ceb4bfa534485ef3449c2ddd70bb3cfe24e48c0e68e7e25473",
+              19846
+            ],
+            [
+              "licenses/THIRD_PARTY_NOTICES.md",
+              "b24053c10c92e8bb125523bf686efb4cf1bfa86f51f0a5e7f1ee237068b8add4",
+              29091
+            ],
+            [
+              "top_level.txt",
+              "1268af4bbd6081e790f1e8fff4e1e5b163c8153b587a7168db696f5dbb1d42cf",
+              16
+            ]
+          ],
+          "sha256": "a499fbf4d62ee335e5b3b978f4e1f85cc62fcf188c2c5f2c31f74a5bc0336e27",
+          "size": 447778,
+          "source_payload": [
+            [
+              "meerkat_toolkit/__init__.py",
+              "210984ce11972f64f9eaad7109bfecd156cf2c0047d085fc7ee804d8b5159362",
+              48
+            ],
+            [
+              "meerkat_toolkit/_extension_wheels.py",
+              "33bcee838b89d7b573c29cf759b771bb22cccba0eecb50c01fbcbc8b7231a8ad",
+              19180
+            ],
+            [
+              "meerkat_toolkit/adapters/CONFIGURATION-GUIDES.json",
+              "f4d2f823af1b60fd183c0233c515e09a2f3b073c585233aa6bfb3cbf1769623c",
+              96496
+            ],
+            [
+              "meerkat_toolkit/adapters/PROFILE-GUIDE.md",
+              "c172dea1111ea36a3a4f7e9767c90a55b2e573c1bf69f5afe373f9fb21c07500",
+              121954
+            ],
+            [
+              "meerkat_toolkit/adapters/__init__.py",
+              "15829a41d8aa328b5d2a3f72b9d33191c0c4c120130b27ac80bc46c14157b42c",
+              150
+            ],
+            [
+              "meerkat_toolkit/adapters/_connector_call.py",
+              "68e12751749e24e8b1116085b8b2e190c9a24184efe528ec27108e1c1a66e67a",
+              9986
+            ],
+            [
+              "meerkat_toolkit/adapters/_mcp_admission.py",
+              "7b4c928dd79756e77c758a2cc5bff69c28bdbf699ad071702625c7fddc13e0b4",
+              3020
+            ],
+            [
+              "meerkat_toolkit/adapters/agno.py",
+              "290058efd092ae46e660b85cf67ceb2a3e0594cf8b3bc4dd2525c5c482f41f09",
+              11628
+            ],
+            [
+              "meerkat_toolkit/adapters/agno_guidance.py",
+              "0013510c2ab7d141171ded0163bf3220db51c2f90c7b17223505ad2137a8a5b3",
+              72116
+            ],
+            [
+              "meerkat_toolkit/adapters/agno_mcp.py",
+              "85ef445f7732406c4522c46be636fc2af503781b68d08b87cdbee5370a08bc5d",
+              14113
+            ],
+            [
+              "meerkat_toolkit/adapters/agno_profiles.py",
+              "c3dbb6141bf97cf95dcc6ac09da8be0e0609f653d49440ba12b3ce75215184cb",
+              56138
+            ],
+            [
+              "meerkat_toolkit/adapters/agno_transports.py",
+              "427ca6fb1ae37d661dbe8a5d0f6ab55936e7cd866840fdfa778ee46dcb211985",
+              111461
+            ],
+            [
+              "meerkat_toolkit/adapters/gmail_composition.py",
+              "2d951abe4068fa26b8da6dfda4a351080be9f2bfbf54070f1b27862a2ec4a514",
+              7364
+            ],
+            [
+              "meerkat_toolkit/adapters/services_config.py",
+              "3951885f12c90b953e6d7e9c5bf2e5600305430cb01ad049aa64c2d52c3755bc",
+              53002
+            ],
+            [
+              "meerkat_toolkit/adapters/services_mcp.py",
+              "5ecd3370384b023c4728385fad4a9fcca7ac61252d954c2af7b1f4405bb35f85",
+              26757
+            ],
+            [
+              "meerkat_toolkit/application_runtime.py",
+              "8227ea69196aaac16804ebb2ef2c75ecbd6d61c61d96735dd3a82aa0299d7739",
+              8353
+            ],
+            [
+              "meerkat_toolkit/application_update.py",
+              "13d3425da57b6e0252f7c352c616b10817ade303277388dab6c85cce4dfd2cf5",
+              3138
+            ],
+            [
+              "meerkat_toolkit/auth/__init__.py",
+              "52f6ec379d6a43438ceab06585c9340f948aef13c566f6ef49e82beaf85e8edd",
+              81
+            ],
+            [
+              "meerkat_toolkit/auth/google_oauth.py",
+              "e6d8961d9ac986c08afc371e1e30967a4a6b871d76858af5ea5e488e79f5df2a",
+              29876
+            ],
+            [
+              "meerkat_toolkit/auth/slack_oauth.py",
+              "609a77c7eed29318f51f6dbc8ef6fbcb16398fa13392aec1a230b56e093400c0",
+              23729
+            ],
+            [
+              "meerkat_toolkit/catalog.py",
+              "ca77ab76e011f918020595ca73405eb3162300bbf8bbea1843823bb3a70cda42",
+              2774
+            ],
+            [
+              "meerkat_toolkit/compose.py",
+              "6bd686d0d2690cb6f6b1c473b99c600fd49ec95cff89f647ae499fc2ba5d6821",
+              122010
+            ],
+            [
+              "meerkat_toolkit/connector_auth.py",
+              "3a7c98e6907a57afc9aa09eb7abc82fdbe9bebd5f42095ef4a4409d22bd7cf90",
+              20790
+            ],
+            [
+              "meerkat_toolkit/connector_auth_host.py",
+              "a24d7a8db459072076005d66f9c7dfe4845c5af98c307bf4a38516d63d15c0e9",
+              11386
+            ],
+            [
+              "meerkat_toolkit/connectors/__init__.py",
+              "97cc4f4edefb055424fcb8645574c209e2a97453cd49f466141818bf66da3b63",
+              77
+            ],
+            [
+              "meerkat_toolkit/connectors/_google_errors.py",
+              "a644a36f260ca638716492bc0861924f57ff72c90ed623f9903c44883d543c9e",
+              2958
+            ],
+            [
+              "meerkat_toolkit/connectors/_httpx_stream.py",
+              "02650971d60a748fd9cbcce8404a0b34c04327c46d1133620d68df57866f5d91",
+              5423
+            ],
+            [
+              "meerkat_toolkit/connectors/gmail.py",
+              "966625e647fba23d84187f59d69af41eee4b6d86ab08a6fc936673b2ccf6ec2f",
+              26985
+            ],
+            [
+              "meerkat_toolkit/connectors/gmail_content.py",
+              "00ae3aa251216d4a99fd9bccc29a57b2a125611b32c8e5ecd7d46c0c908e0f44",
+              11950
+            ],
+            [
+              "meerkat_toolkit/connectors/gmail_message.py",
+              "8e55535e0cdb86cb684fcdd590ad7a8af385a25d3ec64037cb6259540e022adc",
+              16025
+            ],
+            [
+              "meerkat_toolkit/connectors/google_calendar.py",
+              "7fedc314b6c1446239bce686359fd6a93268fca2ba35dfb2676093a759d35367",
+              20433
+            ],
+            [
+              "meerkat_toolkit/connectors/google_drive.py",
+              "f13f2416d9bceb3b4073dd1758725463fc7a6e492a49f13ffdcbab8eb1b10a8e",
+              30262
+            ],
+            [
+              "meerkat_toolkit/connectors/home_assistant.py",
+              "ed7381f7fc0ed2f5240a95b2a259e2c956ae49b36b41d38378b8e7ae5d616f72",
+              19687
+            ],
+            [
+              "meerkat_toolkit/connectors/slack.py",
+              "2b4bdf260ee3f71aae1d67549715c2f3e44b2f33b407afd75fccaac3800a2eb9",
+              49678
+            ],
+            [
+              "meerkat_toolkit/data/frontend_catalog.json",
+              "6e55963e80110b223a001dca01919458ed65c35d5aa9f39f36fd38b12f771172",
+              17509
+            ],
+            [
+              "meerkat_toolkit/data/frontend_catalog.sha256",
+              "57544c07c9550f9929086b6e3dad35f5b4f5212298b63cc082352e64f901f7ed",
+              65
+            ],
+            [
+              "meerkat_toolkit/extension_artifacts.py",
+              "dcda4ff9493a2067ae20d18cf561edb944842422f196209214f60f836f4e2dd3",
+              15591
+            ],
+            [
+              "meerkat_toolkit/frontend/__init__.py",
+              "0b41cb7a7b69b0532a4d2c0246378534599bc494cb7f289680490659ed19868b",
+              454
+            ],
+            [
+              "meerkat_toolkit/frontend/egress.py",
+              "399e5f3a3d8d4bc13281270d0f8a205c0a0ef94432d2837a44efe1ffdae16db5",
+              122485
+            ],
+            [
+              "meerkat_toolkit/frontend/homecore_live.py",
+              "69bf6efea4cbf413637dccf95bb70edcbfa840d20db90a37c42a0b1b6184af7b",
+              12007
+            ],
+            [
+              "meerkat_toolkit/frontend/inbox.py",
+              "ec4dedf1fa8ceefed3ae36a9ce2347d1994b358c0a97e0599d6390f65d844161",
+              57391
+            ],
+            [
+              "meerkat_toolkit/frontend/sender.py",
+              "51b2f60556ae7ee5d19313366f7d6a4c99552e8aace69dd384211e356c1be4e3",
+              19684
+            ],
+            [
+              "meerkat_toolkit/frontend/slack.py",
+              "173ac17955cfd43a38303516062a580b7c7719a5b7ef59b3d4456ccfc64f75e5",
+              21061
+            ],
+            [
+              "meerkat_toolkit/frontend/telegram.py",
+              "165f9aa8cc361e4799cee1b54b8bbf3156bdb1c762b9135758fd493805f4f94b",
+              27425
+            ],
+            [
+              "meerkat_toolkit/frontend/telegram_adapter.py",
+              "4c9a94076a7d0743e705e9a2c8dc7ee1e20b26a5821e9e03ee9adb615048c14c",
+              29585
+            ],
+            [
+              "meerkat_toolkit/host_control.py",
+              "af3d34f7786d181ecebefc3943f53f5fcb021750098677b556220a43feb2ef4f",
+              104352
+            ],
+            [
+              "meerkat_toolkit/host_services.py",
+              "84d8d1c77131ea43329219f6b743d7942d16e5b57ed5effa093558b7deb83520",
+              2986
+            ],
+            [
+              "meerkat_toolkit/httpx_client.py",
+              "8c5ace5805c6c3ecdb5ecfe05d1e8101eb9a2097f282145eb256167e273c7902",
+              788
+            ],
+            [
+              "meerkat_toolkit/mcp_auth.py",
+              "10949830c4e70a3885c6dae48aa5420c4aa534d6f8cd2be019ac8ba11d6edb5d",
+              29049
+            ]
+          ],
+          "version": "0.9.4"
+        },
+        "toolkit_wheel": {
+          "path": "/home/luka/.cache/rust-workspaces/connect-094-build-target/work-215aac0a/artifacts/meerkat_toolkit-0.9.4-py3-none-any.whl",
+          "sha256": "a499fbf4d62ee335e5b3b978f4e1f85cc62fcf188c2c5f2c31f74a5bc0336e27",
+          "size": 447778
+        }
+      },
+      "paths": {
+        "artifact_root": "product/linux-x86_64",
+        "assembly": "product/linux-x86_64/assembly.json",
+        "source_manifest": "product/linux-x86_64/source-manifest.json",
+        "meta_wheel": "product/linux-x86_64/meerkat_meta-0.9.4-py3-none-any.whl",
+        "toolkit_wheel": "product/linux-x86_64/meerkat_toolkit-0.9.4-py3-none-any.whl",
+        "dependency_requirements": "product/linux-x86_64/dependency-requirements.txt",
+        "model_catalog": "product/linux-x86_64/model-catalog.json",
+        "dependency_wheels": [
+          "product/linux-x86_64/dependencies/annotated_doc-0.0.5-py3-none-any.whl",
+          "product/linux-x86_64/dependencies/annotated_types-0.8.0-py3-none-any.whl",
+          "product/linux-x86_64/dependencies/anyio-4.15.1-py3-none-any.whl",
+          "product/linux-x86_64/dependencies/attrs-26.1.0-py3-none-any.whl",
+          "product/linux-x86_64/dependencies/certifi-2026.7.22-py3-none-any.whl",
+          "product/linux-x86_64/dependencies/cffi-2.1.1-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+          "product/linux-x86_64/dependencies/click-8.5.0-py3-none-any.whl",
+          "product/linux-x86_64/dependencies/cryptography-50.0.1-cp311-abi3-manylinux_2_34_x86_64.whl",
+          "product/linux-x86_64/dependencies/fastapi-0.141.1-py3-none-any.whl",
+          "product/linux-x86_64/dependencies/h11-0.16.0-py3-none-any.whl",
+          "product/linux-x86_64/dependencies/httpcore-1.0.9-py3-none-any.whl",
+          "product/linux-x86_64/dependencies/httpx-0.28.1-py3-none-any.whl",
+          "product/linux-x86_64/dependencies/httpx_sse-0.4.3-py3-none-any.whl",
+          "product/linux-x86_64/dependencies/idna-3.20-py3-none-any.whl",
+          "product/linux-x86_64/dependencies/jsonschema-4.26.0-py3-none-any.whl",
+          "product/linux-x86_64/dependencies/jsonschema_specifications-2025.9.1-py3-none-any.whl",
+          "product/linux-x86_64/dependencies/mcp-1.30.0-py3-none-any.whl",
+          "product/linux-x86_64/dependencies/pycparser-3.0-py3-none-any.whl",
+          "product/linux-x86_64/dependencies/pydantic-2.13.5-py3-none-any.whl",
+          "product/linux-x86_64/dependencies/pydantic_core-2.46.5-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+          "product/linux-x86_64/dependencies/pydantic_settings-2.15.0-py3-none-any.whl",
+          "product/linux-x86_64/dependencies/pyjwt-2.15.0-py3-none-any.whl",
+          "product/linux-x86_64/dependencies/pypdf-6.1.1-py3-none-any.whl",
+          "product/linux-x86_64/dependencies/python_dotenv-1.2.3-py3-none-any.whl",
+          "product/linux-x86_64/dependencies/python_multipart-0.0.32-py3-none-any.whl",
+          "product/linux-x86_64/dependencies/referencing-0.37.0-py3-none-any.whl",
+          "product/linux-x86_64/dependencies/rpds_py-2026.6.3-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+          "product/linux-x86_64/dependencies/sse_starlette-3.4.11-py3-none-any.whl",
+          "product/linux-x86_64/dependencies/starlette-1.7.0-py3-none-any.whl",
+          "product/linux-x86_64/dependencies/tinycss2-1.5.1-py3-none-any.whl",
+          "product/linux-x86_64/dependencies/typing_extensions-4.16.0-py3-none-any.whl",
+          "product/linux-x86_64/dependencies/typing_inspection-0.4.4-py3-none-any.whl",
+          "product/linux-x86_64/dependencies/uvicorn-0.54.0-py3-none-any.whl",
+          "product/linux-x86_64/dependencies/webencodings-0.5.1-py2.py3-none-any.whl"
+        ]
+      },
+      "gateway": "guide/rpc_gateway",
+      "ordinary_gateway": "ordinary/rpc_gateway"
+    },
+    "macos-arm64": {
+      "files": {
+        "product/macos-arm64/RUNTIME-SELECTION.json": {
+          "url": "https://github.com/lukacf/meerkat-connect/releases/download/v0.9.4/meerkat-connect-0.9.4-source.tar.gz",
+          "archive_size": 7319250,
+          "archive_sha256": "eb16437060a1836d70e7484e58f985499230fbea277d3c80003809ef1df63479",
+          "member": "meerkat-connect-0.9.4/release-evidence/macos-arm64/RUNTIME-SELECTION.json",
+          "size": 24444,
+          "sha256": "a9c6a24627b934d415e512a6574b855b78b04b35cf9b58383bb47d0f94f5c1c7"
+        },
+        "product/macos-arm64/assembly.json": {
+          "url": "https://github.com/lukacf/meerkat-connect/releases/download/v0.9.4/meerkat-connect-0.9.4-source.tar.gz",
+          "archive_size": 7319250,
+          "archive_sha256": "eb16437060a1836d70e7484e58f985499230fbea277d3c80003809ef1df63479",
+          "member": "meerkat-connect-0.9.4/release-evidence/macos-arm64/assembly.json",
+          "size": 2207,
+          "sha256": "117abd6deeefbc505fdcb0316799407451f660c4f4bce0f977d563948d125dd4"
+        },
+        "product/macos-arm64/build-record.json": {
+          "url": "https://github.com/lukacf/meerkat-connect/releases/download/v0.9.4/meerkat-connect-0.9.4-source.tar.gz",
+          "archive_size": 7319250,
+          "archive_sha256": "eb16437060a1836d70e7484e58f985499230fbea277d3c80003809ef1df63479",
+          "member": "meerkat-connect-0.9.4/release-evidence/macos-arm64/build-record.json",
+          "size": 2849,
+          "sha256": "20f1caa6e05df7ed602a8658ad31a2b6d2b92efa35348fbe72b119d3ac9e1b11"
+        },
+        "product/macos-arm64/dependency-requirements.txt": {
+          "url": "https://github.com/lukacf/meerkat-connect/releases/download/v0.9.4/meerkat-connect-0.9.4-source.tar.gz",
+          "archive_size": 7319250,
+          "archive_sha256": "eb16437060a1836d70e7484e58f985499230fbea277d3c80003809ef1df63479",
+          "member": "meerkat-connect-0.9.4/release-evidence/macos-arm64/dependency-requirements.txt",
+          "size": 3310,
+          "sha256": "c65b11f8161ac456280bbecee6b59f56bcdea13be819e72daca6aac746aee731"
+        },
+        "product/macos-arm64/gateway-verification.json": {
+          "url": "https://github.com/lukacf/meerkat-connect/releases/download/v0.9.4/meerkat-connect-0.9.4-source.tar.gz",
+          "archive_size": 7319250,
+          "archive_sha256": "eb16437060a1836d70e7484e58f985499230fbea277d3c80003809ef1df63479",
+          "member": "meerkat-connect-0.9.4/release-evidence/macos-arm64/gateway-verification.json",
+          "size": 54734,
+          "sha256": "415c63cd89d6d4d9f5f42c49d2e8960526c246af19275bb3812eb8a6152f0b04"
+        },
+        "product/macos-arm64/meerkat-connect-gateway-0.9.4-macos-arm64.tar.gz.sha256": {
+          "url": "https://github.com/lukacf/meerkat-connect/releases/download/v0.9.4/meerkat-connect-0.9.4-source.tar.gz",
+          "archive_size": 7319250,
+          "archive_sha256": "eb16437060a1836d70e7484e58f985499230fbea277d3c80003809ef1df63479",
+          "member": "meerkat-connect-0.9.4/release-evidence/macos-arm64/meerkat-connect-gateway-0.9.4-macos-arm64.tar.gz.sha256",
+          "size": 115,
+          "sha256": "644d6d9ccf7f582e237fffea731dfe6f8853ffa464a729bed2f98552b0b00e46"
+        },
+        "product/macos-arm64/model-catalog.json": {
+          "url": "https://github.com/lukacf/meerkat-connect/releases/download/v0.9.4/meerkat-connect-0.9.4-source.tar.gz",
+          "archive_size": 7319250,
+          "archive_sha256": "eb16437060a1836d70e7484e58f985499230fbea277d3c80003809ef1df63479",
+          "member": "meerkat-connect-0.9.4/release-evidence/macos-arm64/model-catalog.json",
+          "size": 58834,
+          "sha256": "d7a231bc179786b711f1b5a66e90e025fcf1f858f396be9320e58f367c3071ee"
+        },
+        "product/macos-arm64/resource-build-record.json": {
+          "url": "https://github.com/lukacf/meerkat-connect/releases/download/v0.9.4/meerkat-connect-0.9.4-source.tar.gz",
+          "archive_size": 7319250,
+          "archive_sha256": "eb16437060a1836d70e7484e58f985499230fbea277d3c80003809ef1df63479",
+          "member": "meerkat-connect-0.9.4/release-evidence/macos-arm64/resource-build-record.json",
+          "size": 4143,
+          "sha256": "3f6308487cc78e4952752f8532383869ee899434671ddc933a8d53d297a6a130"
+        },
+        "product/macos-arm64/source-manifest.json": {
+          "url": "https://github.com/lukacf/meerkat-connect/releases/download/v0.9.4/meerkat-connect-0.9.4-source.tar.gz",
+          "archive_size": 7319250,
+          "archive_sha256": "eb16437060a1836d70e7484e58f985499230fbea277d3c80003809ef1df63479",
+          "member": "meerkat-connect-0.9.4/release-evidence/macos-arm64/source-manifest.json",
+          "size": 567613,
+          "sha256": "8ac75027e4d851ec9e85ce05973de80a3eeead9ccc0d0ac97124fbad248fe273"
+        },
+        "product/macos-arm64/meerkat_meta-0.9.4-py3-none-any.whl": {
+          "url": "https://files.pythonhosted.org/packages/5e/88/6f7d8d0ecb4be349b34b1f533f3a6d4f3b3cd2862fd5238b21fa6298c1fe/meerkat_meta-0.9.4-py3-none-any.whl",
+          "size": 167745,
+          "sha256": "46cc44eb3e05a4bd9fb2ec630c06f2e3c62548184b7f6c81101f042d8e11a659"
+        },
+        "product/macos-arm64/meerkat_toolkit-0.9.4-py3-none-any.whl": {
+          "url": "https://github.com/lukacf/meerkat-connect/releases/download/v0.9.4/meerkat_toolkit-0.9.4-py3-none-any.whl",
+          "size": 447778,
+          "sha256": "a499fbf4d62ee335e5b3b978f4e1f85cc62fcf188c2c5f2c31f74a5bc0336e27"
+        },
+        "product/macos-arm64/dependencies/annotated_doc-0.0.5-py3-none-any.whl": {
+          "sha256": "117bac03a25ede5df5440e855b32d556049ca169ead221505badf432fed4b101",
+          "size": 5302,
+          "url": "https://files.pythonhosted.org/packages/3e/30/e900b21425a860e195f32e37657aa1f7c7f2b1bfb26f03ca209b90933c06/annotated_doc-0.0.5-py3-none-any.whl"
+        },
+        "product/macos-arm64/dependencies/annotated_types-0.8.0-py3-none-any.whl": {
+          "sha256": "f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0",
+          "size": 13427,
+          "url": "https://files.pythonhosted.org/packages/99/91/8acff4f5e50511b911bbccb72b8628a49c68ce14148cd9f6431094859a90/annotated_types-0.8.0-py3-none-any.whl"
+        },
+        "product/macos-arm64/dependencies/anyio-4.15.1-py3-none-any.whl": {
+          "sha256": "6152fdbbf9a77fdec97731721bebf7c4c44f7c29b424b0065826173efc7ed101",
+          "size": 132079,
+          "url": "https://files.pythonhosted.org/packages/12/b8/4bd346e22b28902df4d651910f5242c28d84e4a5c2435ca5c3f797ed7e2e/anyio-4.15.1-py3-none-any.whl"
+        },
+        "product/macos-arm64/dependencies/attrs-26.1.0-py3-none-any.whl": {
+          "sha256": "c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309",
+          "size": 67548,
+          "url": "https://files.pythonhosted.org/packages/64/b4/17d4b0b2a2dc85a6df63d1157e028ed19f90d4cd97c36717afef2bc2f395/attrs-26.1.0-py3-none-any.whl"
+        },
+        "product/macos-arm64/dependencies/certifi-2026.7.22-py3-none-any.whl": {
+          "sha256": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775",
+          "size": 136983,
+          "url": "https://files.pythonhosted.org/packages/0b/a7/71ac2cff56fec219ed242bb11b8efb69fcc4bec75db06fb7bfe35de520e6/certifi-2026.7.22-py3-none-any.whl"
+        },
+        "product/macos-arm64/dependencies/cffi-2.1.1-cp311-cp311-macosx_11_0_arm64.whl": {
+          "url": "https://files.pythonhosted.org/packages/cd/95/31b535a9f0220ae9f357de4a08d57ce89cb417653c2fd9f075f50822a388/cffi-2.1.1-cp311-cp311-macosx_11_0_arm64.whl",
+          "size": 184168,
+          "sha256": "398aff33cee2767e3e781d2554c54bd0dff386bb437581e0d8011fde1a942ec1"
+        },
+        "product/macos-arm64/dependencies/click-8.5.0-py3-none-any.whl": {
+          "sha256": "255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360",
+          "size": 125251,
+          "url": "https://files.pythonhosted.org/packages/58/50/6c0d534c5f134586a8e1ba4e330569e32f057e33372ae556463212fb4cd3/click-8.5.0-py3-none-any.whl"
+        },
+        "product/macos-arm64/dependencies/cryptography-50.0.1-cp311-abi3-macosx_11_0_arm64.whl": {
+          "url": "https://files.pythonhosted.org/packages/ba/19/797e2aaac9df6a66f1550f49979dc1b1e39ecd2077501c30efa81e8d5d67/cryptography-50.0.1-cp311-abi3-macosx_11_0_arm64.whl",
+          "size": 4010153,
+          "sha256": "b8f852c65863251b9e3a1b8c150ce21e59b522dbb6a7d4bc80e680d38388e986"
+        },
+        "product/macos-arm64/dependencies/fastapi-0.141.1-py3-none-any.whl": {
+          "sha256": "bfb91aa2d334c61cb35ba9a116fc123b3d3df31640b801cf57a7a78ec3f603b3",
+          "size": 131954,
+          "url": "https://files.pythonhosted.org/packages/cb/03/10388a42375ee7e4ac9b94eb2c5c569c8b5795e377e701c9ac3ad63de890/fastapi-0.141.1-py3-none-any.whl"
+        },
+        "product/macos-arm64/dependencies/h11-0.16.0-py3-none-any.whl": {
+          "sha256": "63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86",
+          "size": 37515,
+          "url": "https://files.pythonhosted.org/packages/04/4b/29cac41a4d98d144bf5f6d33995617b185d14b22401f75ca86f384e87ff1/h11-0.16.0-py3-none-any.whl"
+        },
+        "product/macos-arm64/dependencies/httpcore-1.0.9-py3-none-any.whl": {
+          "sha256": "2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55",
+          "size": 78784,
+          "url": "https://files.pythonhosted.org/packages/7e/f5/f66802a942d491edb555dd61e3a9961140fd64c90bce1eafd741609d334d/httpcore-1.0.9-py3-none-any.whl"
+        },
+        "product/macos-arm64/dependencies/httpx-0.28.1-py3-none-any.whl": {
+          "sha256": "d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad",
+          "size": 73517,
+          "url": "https://files.pythonhosted.org/packages/2a/39/e50c7c3a983047577ee07d2a9e53faf5a69493943ec3f6a384bdc792deb2/httpx-0.28.1-py3-none-any.whl"
+        },
+        "product/macos-arm64/dependencies/httpx_sse-0.4.3-py3-none-any.whl": {
+          "sha256": "0ac1c9fe3c0afad2e0ebb25a934a59f4c7823b60792691f779fad2c5568830fc",
+          "size": 8960,
+          "url": "https://files.pythonhosted.org/packages/d2/fd/6668e5aec43ab844de6fc74927e155a3b37bf40d7c3790e49fc0406b6578/httpx_sse-0.4.3-py3-none-any.whl"
+        },
+        "product/macos-arm64/dependencies/idna-3.20-py3-none-any.whl": {
+          "sha256": "ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c",
+          "size": 69583,
+          "url": "https://files.pythonhosted.org/packages/58/a2/bb081bab032533a855d44de1d56f8e8426114ff1ba5d1f07a438a0a654f8/idna-3.20-py3-none-any.whl"
+        },
+        "product/macos-arm64/dependencies/jsonschema-4.26.0-py3-none-any.whl": {
+          "sha256": "d489f15263b8d200f8387e64b4c3a75f06629559fb73deb8fdfb525f2dab50ce",
+          "size": 90630,
+          "url": "https://files.pythonhosted.org/packages/69/90/f63fb5873511e014207a475e2bb4e8b2e570d655b00ac19a9a0ca0a385ee/jsonschema-4.26.0-py3-none-any.whl"
+        },
+        "product/macos-arm64/dependencies/jsonschema_specifications-2025.9.1-py3-none-any.whl": {
+          "sha256": "98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe",
+          "size": 18437,
+          "url": "https://files.pythonhosted.org/packages/41/45/1a4ed80516f02155c51f51e8cedb3c1902296743db0bbc66608a0db2814f/jsonschema_specifications-2025.9.1-py3-none-any.whl"
+        },
+        "product/macos-arm64/dependencies/mcp-1.30.0-py3-none-any.whl": {
+          "sha256": "666edb5009503e1047c9d60346a756f94b261f05cc2625f23d41c728ffc484d0",
+          "size": 234581,
+          "url": "https://files.pythonhosted.org/packages/f5/f4/e58bc33317c92a0203664daaf00bf6f41166cc0149e5d6870a03f7cd004a/mcp-1.30.0-py3-none-any.whl"
+        },
+        "product/macos-arm64/dependencies/pycparser-3.0-py3-none-any.whl": {
+          "sha256": "b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992",
+          "size": 48172,
+          "url": "https://files.pythonhosted.org/packages/0c/c3/44f3fbbfa403ea2a7c779186dc20772604442dde72947e7d01069cbe98e3/pycparser-3.0-py3-none-any.whl"
+        },
+        "product/macos-arm64/dependencies/pydantic-2.13.5-py3-none-any.whl": {
+          "sha256": "346a034f080da3755d8e9cb5e00e8b07de1d39e4f6e2c87d8ab7cafa0b269a73",
+          "size": 472589,
+          "url": "https://files.pythonhosted.org/packages/eb/47/c95ffc2009878c7aac0c5e08528022dcb885933252a88b5f170058014464/pydantic-2.13.5-py3-none-any.whl"
+        },
+        "product/macos-arm64/dependencies/pydantic_core-2.46.5-cp311-cp311-macosx_11_0_arm64.whl": {
+          "url": "https://files.pythonhosted.org/packages/0c/18/b70da8300e292df4099684ea11b1958043580d2f50d2dc8bf7e542bdd84a/pydantic_core-2.46.5-cp311-cp311-macosx_11_0_arm64.whl",
+          "size": 1921751,
+          "sha256": "d625a186a65201c23a9e3b8ed9c47e90a026e03256608cc91851c6709096844f"
+        },
+        "product/macos-arm64/dependencies/pydantic_settings-2.15.0-py3-none-any.whl": {
+          "sha256": "0ba092c291c94baceb5eff768aa0d56400a457585bc0175925a5a5510303da42",
+          "size": 69413,
+          "url": "https://files.pythonhosted.org/packages/30/a4/2bffa9f8e804325a09867f0e9d30795c80ea9f8d62560bd1b6ad6220eb2f/pydantic_settings-2.15.0-py3-none-any.whl"
+        },
+        "product/macos-arm64/dependencies/pyjwt-2.15.0-py3-none-any.whl": {
+          "sha256": "7a3742debf6b879e912dbb9819ceec1594be812452b78c5f2e2dfc56564954f8",
+          "size": 33680,
+          "url": "https://files.pythonhosted.org/packages/e8/55/40e45bf052ee8ee12a4dfd785519660f8effa7b065442b91646ec6828619/pyjwt-2.15.0-py3-none-any.whl"
+        },
+        "product/macos-arm64/dependencies/pypdf-6.1.1-py3-none-any.whl": {
+          "sha256": "7781f99493208a37a7d4275601d883e19af24e62a525c25844d22157c2e4cde7",
+          "size": 323455,
+          "url": "https://files.pythonhosted.org/packages/07/ed/adae13756d9dabdddee483fc7712905bb5585fbf6e922b1a19aca3a29cd1/pypdf-6.1.1-py3-none-any.whl"
+        },
+        "product/macos-arm64/dependencies/python_dotenv-1.2.3-py3-none-any.whl": {
+          "sha256": "904552145e8bfed22162c09dab1c2b9b54fefa7b23ba780f4f26ca0316b0f0d9",
+          "size": 22780,
+          "url": "https://files.pythonhosted.org/packages/0d/17/c5c6b53ddc18f297992099b3d9ec16c855c0ccc83263a21fe4d1c625ec6c/python_dotenv-1.2.3-py3-none-any.whl"
+        },
+        "product/macos-arm64/dependencies/python_multipart-0.0.32-py3-none-any.whl": {
+          "sha256": "ff6d3f776f16878c894e52e107296ffc890e913c611b1a4ec6c44e2821fe2e23",
+          "size": 30042,
+          "url": "https://files.pythonhosted.org/packages/e1/04/e8135ebd1ad02c56ec633277529b2602ff99ff634be76cdba5744cf554fd/python_multipart-0.0.32-py3-none-any.whl"
+        },
+        "product/macos-arm64/dependencies/referencing-0.37.0-py3-none-any.whl": {
+          "sha256": "381329a9f99628c9069361716891d34ad94af76e461dcb0335825aecc7692231",
+          "size": 26766,
+          "url": "https://files.pythonhosted.org/packages/2c/58/ca301544e1fa93ed4f80d724bf5b194f6e4b945841c5bfd555878eea9fcb/referencing-0.37.0-py3-none-any.whl"
+        },
+        "product/macos-arm64/dependencies/rpds_py-2026.6.3-cp311-cp311-macosx_11_0_arm64.whl": {
+          "url": "https://files.pythonhosted.org/packages/4d/dc/323d08583c0832911768663d1944f0107fcd4088704858d84b5e06d105a0/rpds_py-2026.6.3-cp311-cp311-macosx_11_0_arm64.whl",
+          "size": 345513,
+          "sha256": "db08f45aecde626498fb3df07bcf6d2ec040af42e859a4f5040d79c200342911"
+        },
+        "product/macos-arm64/dependencies/sse_starlette-3.4.11-py3-none-any.whl": {
+          "sha256": "c7b2244bdff016fe7f64e10075e89a3e6bbf899649cc89b0fe884b5545042453",
+          "size": 17122,
+          "url": "https://files.pythonhosted.org/packages/98/6a/2ba3ed4a69babf3afdddf7d8314a48d87562c0a442206bbc2a1b50d5efc0/sse_starlette-3.4.11-py3-none-any.whl"
+        },
+        "product/macos-arm64/dependencies/starlette-1.7.0-py3-none-any.whl": {
+          "sha256": "67f8e99895493dd2911a03f11314af6ceebeae4e704bb9f43dfc6a9db151c93e",
+          "size": 78980,
+          "url": "https://files.pythonhosted.org/packages/4e/d6/1ec1b290f9e0fb067899b61e1d37a30c923068bad260b216dbe37a7d2967/starlette-1.7.0-py3-none-any.whl"
+        },
+        "product/macos-arm64/dependencies/tinycss2-1.5.1-py3-none-any.whl": {
+          "sha256": "3415ba0f5839c062696996998176c4a3751d18b7edaaeeb658c9ce21ec150661",
+          "size": 28404,
+          "url": "https://files.pythonhosted.org/packages/60/45/c7b5c3168458db837e8ceab06dc77824e18202679d0463f0e8f002143a97/tinycss2-1.5.1-py3-none-any.whl"
+        },
+        "product/macos-arm64/dependencies/typing_extensions-4.16.0-py3-none-any.whl": {
+          "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8",
+          "size": 45571,
+          "url": "https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl"
+        },
+        "product/macos-arm64/dependencies/typing_inspection-0.4.4-py3-none-any.whl": {
+          "sha256": "65b8397ba37ccbce054456aaccddfc91e6e3083c92824df348d96ca832f3f147",
+          "size": 14750,
+          "url": "https://files.pythonhosted.org/packages/67/81/4add07e5172b7ac40d8ed5ff580409a7801a4fe26d529bdd915401dabfbe/typing_inspection-0.4.4-py3-none-any.whl"
+        },
+        "product/macos-arm64/dependencies/uvicorn-0.54.0-py3-none-any.whl": {
+          "sha256": "505bdb0f318731d45f1f712071fc781a8981f6847a31c902c9f5e652d4f67faf",
+          "size": 87427,
+          "url": "https://files.pythonhosted.org/packages/38/0c/b54a4fdd7f90a3af8b02ebc9ce6712c2c208b7926a2f7bad95c33ebbe943/uvicorn-0.54.0-py3-none-any.whl"
+        },
+        "product/macos-arm64/dependencies/webencodings-0.5.1-py2.py3-none-any.whl": {
+          "sha256": "a0af1213f3c2226497a97e2b3aa01a7e4bee4f403f95be16fc9acd2947514a78",
+          "size": 11774,
+          "url": "https://files.pythonhosted.org/packages/f4/24/2a3e3df732393fed8b3ebf2ec078f05546de641fe1b667ee316ec1dcf3b7/webencodings-0.5.1-py2.py3-none-any.whl"
+        },
+        "product/macos-arm64/meerkat-connect-gateway-0.9.4-macos-arm64.tar.gz": {
+          "url": "https://github.com/lukacf/meerkat-connect/releases/download/v0.9.4/meerkat-connect-gateway-0.9.4-macos-arm64.tar.gz",
+          "size": 402962808,
+          "sha256": "703fde68595ca1eceeab63d12717ee5bbd08f90f793d4d43827181bbe040d848"
+        },
+        "guide/rpc_gateway": {
+          "url": "https://github.com/lukacf/meerkat-meta/releases/download/v0.9.3/meta-rpc-gateway-0.9.3-aarch64-apple-darwin.tar.gz",
+          "archive_size": 99826737,
+          "archive_sha256": "9d629dd8dd3a71eb89a364f495fa765b3d7384b60d349694c44e82dfd19f120b",
+          "member": "rpc_gateway",
+          "size": 444200416,
+          "sha256": "a4937118c9db9400f5345c8d50dabea9502ecc11af4eb4781d9c6288b1de2162"
+        },
+        "ordinary/rpc_gateway": {
+          "url": "https://github.com/lukacf/meerkat-meta/releases/download/v0.9.4/meta-rpc-gateway-0.9.4-aarch64-apple-darwin.tar.gz",
+          "archive_size": 104778533,
+          "archive_sha256": "99dc3c621868126e3e1de977e5dec11ccb1666e6bb1dd3eb92d2c90203847893",
+          "member": "rpc_gateway",
+          "size": 458434640,
+          "sha256": "b603b8104ef41a536c878b33589639d5d8cd6d64e79b9faba7cf3408ba3fa049"
+        }
+      },
+      "selection": {
+        "artifact_root": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts",
+        "assembly": {
+          "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/assembly.json",
+          "sha256": "117abd6deeefbc505fdcb0316799407451f660c4f4bce0f977d563948d125dd4",
+          "size": 2207
+        },
+        "dependency_requirements": {
+          "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/dependency-requirements.txt",
+          "sha256": "c65b11f8161ac456280bbecee6b59f56bcdea13be819e72daca6aac746aee731",
+          "size": 3310
+        },
+        "dependency_wheels": [
+          {
+            "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/dependencies/annotated_doc-0.0.5-py3-none-any.whl",
+            "sha256": "117bac03a25ede5df5440e855b32d556049ca169ead221505badf432fed4b101",
+            "size": 5302
+          },
+          {
+            "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/dependencies/annotated_types-0.8.0-py3-none-any.whl",
+            "sha256": "f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0",
+            "size": 13427
+          },
+          {
+            "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/dependencies/anyio-4.15.1-py3-none-any.whl",
+            "sha256": "6152fdbbf9a77fdec97731721bebf7c4c44f7c29b424b0065826173efc7ed101",
+            "size": 132079
+          },
+          {
+            "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/dependencies/attrs-26.1.0-py3-none-any.whl",
+            "sha256": "c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309",
+            "size": 67548
+          },
+          {
+            "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/dependencies/certifi-2026.7.22-py3-none-any.whl",
+            "sha256": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775",
+            "size": 136983
+          },
+          {
+            "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/dependencies/cffi-2.1.1-cp311-cp311-macosx_11_0_arm64.whl",
+            "sha256": "398aff33cee2767e3e781d2554c54bd0dff386bb437581e0d8011fde1a942ec1",
+            "size": 184168
+          },
+          {
+            "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/dependencies/click-8.5.0-py3-none-any.whl",
+            "sha256": "255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360",
+            "size": 125251
+          },
+          {
+            "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/dependencies/cryptography-50.0.1-cp311-abi3-macosx_11_0_arm64.whl",
+            "sha256": "b8f852c65863251b9e3a1b8c150ce21e59b522dbb6a7d4bc80e680d38388e986",
+            "size": 4010153
+          },
+          {
+            "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/dependencies/fastapi-0.141.1-py3-none-any.whl",
+            "sha256": "bfb91aa2d334c61cb35ba9a116fc123b3d3df31640b801cf57a7a78ec3f603b3",
+            "size": 131954
+          },
+          {
+            "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/dependencies/h11-0.16.0-py3-none-any.whl",
+            "sha256": "63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86",
+            "size": 37515
+          },
+          {
+            "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/dependencies/httpcore-1.0.9-py3-none-any.whl",
+            "sha256": "2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55",
+            "size": 78784
+          },
+          {
+            "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/dependencies/httpx-0.28.1-py3-none-any.whl",
+            "sha256": "d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad",
+            "size": 73517
+          },
+          {
+            "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/dependencies/httpx_sse-0.4.3-py3-none-any.whl",
+            "sha256": "0ac1c9fe3c0afad2e0ebb25a934a59f4c7823b60792691f779fad2c5568830fc",
+            "size": 8960
+          },
+          {
+            "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/dependencies/idna-3.20-py3-none-any.whl",
+            "sha256": "ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c",
+            "size": 69583
+          },
+          {
+            "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/dependencies/jsonschema-4.26.0-py3-none-any.whl",
+            "sha256": "d489f15263b8d200f8387e64b4c3a75f06629559fb73deb8fdfb525f2dab50ce",
+            "size": 90630
+          },
+          {
+            "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/dependencies/jsonschema_specifications-2025.9.1-py3-none-any.whl",
+            "sha256": "98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe",
+            "size": 18437
+          },
+          {
+            "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/dependencies/mcp-1.30.0-py3-none-any.whl",
+            "sha256": "666edb5009503e1047c9d60346a756f94b261f05cc2625f23d41c728ffc484d0",
+            "size": 234581
+          },
+          {
+            "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/dependencies/pycparser-3.0-py3-none-any.whl",
+            "sha256": "b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992",
+            "size": 48172
+          },
+          {
+            "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/dependencies/pydantic-2.13.5-py3-none-any.whl",
+            "sha256": "346a034f080da3755d8e9cb5e00e8b07de1d39e4f6e2c87d8ab7cafa0b269a73",
+            "size": 472589
+          },
+          {
+            "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/dependencies/pydantic_core-2.46.5-cp311-cp311-macosx_11_0_arm64.whl",
+            "sha256": "d625a186a65201c23a9e3b8ed9c47e90a026e03256608cc91851c6709096844f",
+            "size": 1921751
+          },
+          {
+            "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/dependencies/pydantic_settings-2.15.0-py3-none-any.whl",
+            "sha256": "0ba092c291c94baceb5eff768aa0d56400a457585bc0175925a5a5510303da42",
+            "size": 69413
+          },
+          {
+            "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/dependencies/pyjwt-2.15.0-py3-none-any.whl",
+            "sha256": "7a3742debf6b879e912dbb9819ceec1594be812452b78c5f2e2dfc56564954f8",
+            "size": 33680
+          },
+          {
+            "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/dependencies/pypdf-6.1.1-py3-none-any.whl",
+            "sha256": "7781f99493208a37a7d4275601d883e19af24e62a525c25844d22157c2e4cde7",
+            "size": 323455
+          },
+          {
+            "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/dependencies/python_dotenv-1.2.3-py3-none-any.whl",
+            "sha256": "904552145e8bfed22162c09dab1c2b9b54fefa7b23ba780f4f26ca0316b0f0d9",
+            "size": 22780
+          },
+          {
+            "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/dependencies/python_multipart-0.0.32-py3-none-any.whl",
+            "sha256": "ff6d3f776f16878c894e52e107296ffc890e913c611b1a4ec6c44e2821fe2e23",
+            "size": 30042
+          },
+          {
+            "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/dependencies/referencing-0.37.0-py3-none-any.whl",
+            "sha256": "381329a9f99628c9069361716891d34ad94af76e461dcb0335825aecc7692231",
+            "size": 26766
+          },
+          {
+            "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/dependencies/rpds_py-2026.6.3-cp311-cp311-macosx_11_0_arm64.whl",
+            "sha256": "db08f45aecde626498fb3df07bcf6d2ec040af42e859a4f5040d79c200342911",
+            "size": 345513
+          },
+          {
+            "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/dependencies/sse_starlette-3.4.11-py3-none-any.whl",
+            "sha256": "c7b2244bdff016fe7f64e10075e89a3e6bbf899649cc89b0fe884b5545042453",
+            "size": 17122
+          },
+          {
+            "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/dependencies/starlette-1.7.0-py3-none-any.whl",
+            "sha256": "67f8e99895493dd2911a03f11314af6ceebeae4e704bb9f43dfc6a9db151c93e",
+            "size": 78980
+          },
+          {
+            "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/dependencies/tinycss2-1.5.1-py3-none-any.whl",
+            "sha256": "3415ba0f5839c062696996998176c4a3751d18b7edaaeeb658c9ce21ec150661",
+            "size": 28404
+          },
+          {
+            "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/dependencies/typing_extensions-4.16.0-py3-none-any.whl",
+            "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8",
+            "size": 45571
+          },
+          {
+            "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/dependencies/typing_inspection-0.4.4-py3-none-any.whl",
+            "sha256": "65b8397ba37ccbce054456aaccddfc91e6e3083c92824df348d96ca832f3f147",
+            "size": 14750
+          },
+          {
+            "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/dependencies/uvicorn-0.54.0-py3-none-any.whl",
+            "sha256": "505bdb0f318731d45f1f712071fc781a8981f6847a31c902c9f5e652d4f67faf",
+            "size": 87427
+          },
+          {
+            "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/dependencies/webencodings-0.5.1-py2.py3-none-any.whl",
+            "sha256": "a0af1213f3c2226497a97e2b3aa01a7e4bee4f403f95be16fc9acd2947514a78",
+            "size": 11774
+          }
+        ],
+        "format": "forge-meta-toolkit-runtime-selection-v1",
+        "meta": {
+          "distribution": "meerkat-meta",
+          "metadata": [
+            [
+              "METADATA",
+              "78842e268a7f02faf95d04a02517f1eb5d0dba2bf84a3f5a175341dd2b53584e",
+              1181
+            ],
+            [
+              "WHEEL",
+              "98e75747d0b7c0c568bfb71263c3d8f970b3a374a6996087bc642be5cb09a1aa",
+              91
+            ],
+            [
+              "top_level.txt",
+              "34321e38059e8fe17b6dd8c4fb20179aeea56eced05081ed2ffdca2493466374",
+              13
+            ]
+          ],
+          "sha256": "46cc44eb3e05a4bd9fb2ec630c06f2e3c62548184b7f6c81101f042d8e11a659",
+          "size": 167745,
+          "source_payload": [
+            [
+              "meerkat_meta/__init__.py",
+              "b9ee2296d731148a34fdfa023e73297df06d4fdd7d2355bc7aa7ab2e1971b789",
+              15244
+            ],
+            [
+              "meerkat_meta/_client.py",
+              "b0588c9149f579cec95d33c44c6d6a0b746132fa5c3cf75efeaade84316825bc",
+              49783
+            ],
+            [
+              "meerkat_meta/_sse.py",
+              "0b81ec220cea51c180ce41d78f033e723d4d28f740a99df1ec09bf244d778fc1",
+              3517
+            ],
+            [
+              "meerkat_meta/_transport.py",
+              "ad3dce0ce3b5c743d5ade8ff41dac38e16b68587e0e71e7494d47e68a6fa943c",
+              64581
+            ],
+            [
+              "meerkat_meta/agent_builder.py",
+              "1872b0042cbb9706bb029c2d47c9ac4f57f21cec36ea9bf221aa3d5c7401460a",
+              30832
+            ],
+            [
+              "meerkat_meta/builder.py",
+              "7b582e48c1d65f43b5df1f82deb44f5e988b596df09806baf947a8992dc53c20",
+              52738
+            ],
+            [
+              "meerkat_meta/config/__init__.py",
+              "25b463b9b89c05c835506e52659739ce4d0cf7b07deb5dcca4b07c5f8849127c",
+              159
+            ],
+            [
+              "meerkat_meta/config/auth.py",
+              "94935d171073087b9a50788314dc5dbf4bdd7d7450f2553182099c3293c123f4",
+              1341
+            ],
+            [
+              "meerkat_meta/config/event_log.py",
+              "93f5710c5ee0d6e189736bda13a3e44c97e15b00f2537276437a9b48bf89d75f",
+              2740
+            ],
+            [
+              "meerkat_meta/config/memory.py",
+              "e99140478c3b2c9ae7d59c59f7e0d80d8c0eb0f4b1c2bb15deb30f36c1d75770",
+              1114
+            ],
+            [
+              "meerkat_meta/config/runtime_store.py",
+              "6a7f0818eee4afd8509ed56613d7a0ce9361e5b3386e078239c83194b3d59c7e",
+              1354
+            ],
+            [
+              "meerkat_meta/errors.py",
+              "8a39ea84503666fa164ddd6f6bfbf7adb8674d89ed069b1dd3d4e455311b21dd",
+              38299
+            ],
+            [
+              "meerkat_meta/events.py",
+              "ce71880a5df33138a268c33845152c474c7bccaff6d75adf697c5c3113ea4663",
+              10351
+            ],
+            [
+              "meerkat_meta/helpers.py",
+              "d15308c55f40c191f721e7195d362485a052025b2197f71879c25a6d0839bdbd",
+              4578
+            ],
+            [
+              "meerkat_meta/identity_first_models.py",
+              "2a1e0fd0401d587d53b46eb0b625d58fa6d7d01c65c16a1197a9251324efe4e2",
+              70376
+            ],
+            [
+              "meerkat_meta/identity_first_providers.py",
+              "bc7bc3b7176e691cbdaf90a8636b6b532ac6f7bab31b34889aa811ba6469b3ce",
+              1180
+            ],
+            [
+              "meerkat_meta/jobs.py",
+              "cff904907680d84434e91dd9fc3f642a03a633c03b38619f08a90e8b2abd1b86",
+              9736
+            ],
+            [
+              "meerkat_meta/live.py",
+              "a8bd0e64d52f4b1ae6c62965cc2d58972febccb006af66e4191654dc01a715c6",
+              31631
+            ],
+            [
+              "meerkat_meta/models.py",
+              "9cd6c57c54717d6058b9360b58ce26d75d83ae8686bf48bcfd476c03fd34a0d4",
+              15056
+            ],
+            [
+              "meerkat_meta/py.typed",
+              "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              0
+            ],
+            [
+              "meerkat_meta/runtime.py",
+              "6aa1cec1760612af614ea616072fb25d1d8070c8ff4b415f29c8b52b35d647af",
+              229991
+            ],
+            [
+              "meerkat_meta/tool_content.py",
+              "6ab3e7111abbfe9f3b2cf1d389b9a60ecff887504ffff72c1c470ce55430d37c",
+              2816
+            ],
+            [
+              "meerkat_meta/types.py",
+              "fafaec6813b32b67f0eee67c0291100f18ce09f2a63e70d4f82807b4efb0334f",
+              90997
+            ]
+          ],
+          "version": "0.9.4"
+        },
+        "meta_wheel": {
+          "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/meerkat_meta-0.9.4-py3-none-any.whl",
+          "sha256": "46cc44eb3e05a4bd9fb2ec630c06f2e3c62548184b7f6c81101f042d8e11a659",
+          "size": 167745
+        },
+        "model_catalog": {
+          "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/model-catalog.json",
+          "sha256": "d7a231bc179786b711f1b5a66e90e025fcf1f858f396be9320e58f367c3071ee",
+          "size": 58834
+        },
+        "source_manifest": {
+          "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/source-manifest.json",
+          "sha256": "8ac75027e4d851ec9e85ce05973de80a3eeead9ccc0d0ac97124fbad248fe273",
+          "size": 567613
+        },
+        "target": "macos-arm64",
+        "toolkit": {
+          "distribution": "meerkat-toolkit",
+          "metadata": [
+            [
+              "METADATA",
+              "b070d10db0c2ebef518045eb71425288416265e9fa7255858b1b9751550bc856",
+              3671
+            ],
+            [
+              "WHEEL",
+              "98e75747d0b7c0c568bfb71263c3d8f970b3a374a6996087bc642be5cb09a1aa",
+              91
+            ],
+            [
+              "licenses/EXTENSIONS.md",
+              "4730b663711a358073b3fafaf3179e9f15e691079fe3438b3833d1ced502f5ae",
+              6416
+            ],
+            [
+              "licenses/FRONTEND.md",
+              "b5899c1420229e57dc46f6429dfe23bcd1a4338f41e96d458c941fc8cd262397",
+              36670
+            ],
+            [
+              "licenses/GMAIL.md",
+              "28a0664dbaf719a005a63a76abf52455f51d4f9a44f378514b2e5e38f324ddcf",
+              17562
+            ],
+            [
+              "licenses/HOMECORE-LIVE.md",
+              "66d2f398fc3628b9392ebd0026da360a183901408888755b69f6b6441959a7e3",
+              6946
+            ],
+            [
+              "licenses/LICENSE-APACHE",
+              "3a0ffd02ca79c2a687921b0f5d8094f2f6a7058a4c01775d1351ea6514fcd180",
+              10295
+            ],
+            [
+              "licenses/LICENSE-Agno",
+              "ced3370bfb5fecbf9f0f0d60644b2579869bc786a8fafb75bdf8a58d31cad69c",
+              11344
+            ],
+            [
+              "licenses/LICENSE-HomeCore",
+              "60f0da549301528f6bebf3ba6412609e3edc84f8a7a6baa4d26e35d1296b86ed",
+              4254
+            ],
+            [
+              "licenses/LICENSE-MIT",
+              "b45d1f632f83aeb359da8e2b8716ad72591ec7267a489fdda39989c618d65a0f",
+              1081
+            ],
+            [
+              "licenses/TELEGRAM.md",
+              "584314ac4e7fe6ceb4bfa534485ef3449c2ddd70bb3cfe24e48c0e68e7e25473",
+              19846
+            ],
+            [
+              "licenses/THIRD_PARTY_NOTICES.md",
+              "b24053c10c92e8bb125523bf686efb4cf1bfa86f51f0a5e7f1ee237068b8add4",
+              29091
+            ],
+            [
+              "top_level.txt",
+              "1268af4bbd6081e790f1e8fff4e1e5b163c8153b587a7168db696f5dbb1d42cf",
+              16
+            ]
+          ],
+          "sha256": "a499fbf4d62ee335e5b3b978f4e1f85cc62fcf188c2c5f2c31f74a5bc0336e27",
+          "size": 447778,
+          "source_payload": [
+            [
+              "meerkat_toolkit/__init__.py",
+              "210984ce11972f64f9eaad7109bfecd156cf2c0047d085fc7ee804d8b5159362",
+              48
+            ],
+            [
+              "meerkat_toolkit/_extension_wheels.py",
+              "33bcee838b89d7b573c29cf759b771bb22cccba0eecb50c01fbcbc8b7231a8ad",
+              19180
+            ],
+            [
+              "meerkat_toolkit/adapters/CONFIGURATION-GUIDES.json",
+              "f4d2f823af1b60fd183c0233c515e09a2f3b073c585233aa6bfb3cbf1769623c",
+              96496
+            ],
+            [
+              "meerkat_toolkit/adapters/PROFILE-GUIDE.md",
+              "c172dea1111ea36a3a4f7e9767c90a55b2e573c1bf69f5afe373f9fb21c07500",
+              121954
+            ],
+            [
+              "meerkat_toolkit/adapters/__init__.py",
+              "15829a41d8aa328b5d2a3f72b9d33191c0c4c120130b27ac80bc46c14157b42c",
+              150
+            ],
+            [
+              "meerkat_toolkit/adapters/_connector_call.py",
+              "68e12751749e24e8b1116085b8b2e190c9a24184efe528ec27108e1c1a66e67a",
+              9986
+            ],
+            [
+              "meerkat_toolkit/adapters/_mcp_admission.py",
+              "7b4c928dd79756e77c758a2cc5bff69c28bdbf699ad071702625c7fddc13e0b4",
+              3020
+            ],
+            [
+              "meerkat_toolkit/adapters/agno.py",
+              "290058efd092ae46e660b85cf67ceb2a3e0594cf8b3bc4dd2525c5c482f41f09",
+              11628
+            ],
+            [
+              "meerkat_toolkit/adapters/agno_guidance.py",
+              "0013510c2ab7d141171ded0163bf3220db51c2f90c7b17223505ad2137a8a5b3",
+              72116
+            ],
+            [
+              "meerkat_toolkit/adapters/agno_mcp.py",
+              "85ef445f7732406c4522c46be636fc2af503781b68d08b87cdbee5370a08bc5d",
+              14113
+            ],
+            [
+              "meerkat_toolkit/adapters/agno_profiles.py",
+              "c3dbb6141bf97cf95dcc6ac09da8be0e0609f653d49440ba12b3ce75215184cb",
+              56138
+            ],
+            [
+              "meerkat_toolkit/adapters/agno_transports.py",
+              "427ca6fb1ae37d661dbe8a5d0f6ab55936e7cd866840fdfa778ee46dcb211985",
+              111461
+            ],
+            [
+              "meerkat_toolkit/adapters/gmail_composition.py",
+              "2d951abe4068fa26b8da6dfda4a351080be9f2bfbf54070f1b27862a2ec4a514",
+              7364
+            ],
+            [
+              "meerkat_toolkit/adapters/services_config.py",
+              "3951885f12c90b953e6d7e9c5bf2e5600305430cb01ad049aa64c2d52c3755bc",
+              53002
+            ],
+            [
+              "meerkat_toolkit/adapters/services_mcp.py",
+              "5ecd3370384b023c4728385fad4a9fcca7ac61252d954c2af7b1f4405bb35f85",
+              26757
+            ],
+            [
+              "meerkat_toolkit/application_runtime.py",
+              "8227ea69196aaac16804ebb2ef2c75ecbd6d61c61d96735dd3a82aa0299d7739",
+              8353
+            ],
+            [
+              "meerkat_toolkit/application_update.py",
+              "13d3425da57b6e0252f7c352c616b10817ade303277388dab6c85cce4dfd2cf5",
+              3138
+            ],
+            [
+              "meerkat_toolkit/auth/__init__.py",
+              "52f6ec379d6a43438ceab06585c9340f948aef13c566f6ef49e82beaf85e8edd",
+              81
+            ],
+            [
+              "meerkat_toolkit/auth/google_oauth.py",
+              "e6d8961d9ac986c08afc371e1e30967a4a6b871d76858af5ea5e488e79f5df2a",
+              29876
+            ],
+            [
+              "meerkat_toolkit/auth/slack_oauth.py",
+              "609a77c7eed29318f51f6dbc8ef6fbcb16398fa13392aec1a230b56e093400c0",
+              23729
+            ],
+            [
+              "meerkat_toolkit/catalog.py",
+              "ca77ab76e011f918020595ca73405eb3162300bbf8bbea1843823bb3a70cda42",
+              2774
+            ],
+            [
+              "meerkat_toolkit/compose.py",
+              "6bd686d0d2690cb6f6b1c473b99c600fd49ec95cff89f647ae499fc2ba5d6821",
+              122010
+            ],
+            [
+              "meerkat_toolkit/connector_auth.py",
+              "3a7c98e6907a57afc9aa09eb7abc82fdbe9bebd5f42095ef4a4409d22bd7cf90",
+              20790
+            ],
+            [
+              "meerkat_toolkit/connector_auth_host.py",
+              "a24d7a8db459072076005d66f9c7dfe4845c5af98c307bf4a38516d63d15c0e9",
+              11386
+            ],
+            [
+              "meerkat_toolkit/connectors/__init__.py",
+              "97cc4f4edefb055424fcb8645574c209e2a97453cd49f466141818bf66da3b63",
+              77
+            ],
+            [
+              "meerkat_toolkit/connectors/_google_errors.py",
+              "a644a36f260ca638716492bc0861924f57ff72c90ed623f9903c44883d543c9e",
+              2958
+            ],
+            [
+              "meerkat_toolkit/connectors/_httpx_stream.py",
+              "02650971d60a748fd9cbcce8404a0b34c04327c46d1133620d68df57866f5d91",
+              5423
+            ],
+            [
+              "meerkat_toolkit/connectors/gmail.py",
+              "966625e647fba23d84187f59d69af41eee4b6d86ab08a6fc936673b2ccf6ec2f",
+              26985
+            ],
+            [
+              "meerkat_toolkit/connectors/gmail_content.py",
+              "00ae3aa251216d4a99fd9bccc29a57b2a125611b32c8e5ecd7d46c0c908e0f44",
+              11950
+            ],
+            [
+              "meerkat_toolkit/connectors/gmail_message.py",
+              "8e55535e0cdb86cb684fcdd590ad7a8af385a25d3ec64037cb6259540e022adc",
+              16025
+            ],
+            [
+              "meerkat_toolkit/connectors/google_calendar.py",
+              "7fedc314b6c1446239bce686359fd6a93268fca2ba35dfb2676093a759d35367",
+              20433
+            ],
+            [
+              "meerkat_toolkit/connectors/google_drive.py",
+              "f13f2416d9bceb3b4073dd1758725463fc7a6e492a49f13ffdcbab8eb1b10a8e",
+              30262
+            ],
+            [
+              "meerkat_toolkit/connectors/home_assistant.py",
+              "ed7381f7fc0ed2f5240a95b2a259e2c956ae49b36b41d38378b8e7ae5d616f72",
+              19687
+            ],
+            [
+              "meerkat_toolkit/connectors/slack.py",
+              "2b4bdf260ee3f71aae1d67549715c2f3e44b2f33b407afd75fccaac3800a2eb9",
+              49678
+            ],
+            [
+              "meerkat_toolkit/data/frontend_catalog.json",
+              "6e55963e80110b223a001dca01919458ed65c35d5aa9f39f36fd38b12f771172",
+              17509
+            ],
+            [
+              "meerkat_toolkit/data/frontend_catalog.sha256",
+              "57544c07c9550f9929086b6e3dad35f5b4f5212298b63cc082352e64f901f7ed",
+              65
+            ],
+            [
+              "meerkat_toolkit/extension_artifacts.py",
+              "dcda4ff9493a2067ae20d18cf561edb944842422f196209214f60f836f4e2dd3",
+              15591
+            ],
+            [
+              "meerkat_toolkit/frontend/__init__.py",
+              "0b41cb7a7b69b0532a4d2c0246378534599bc494cb7f289680490659ed19868b",
+              454
+            ],
+            [
+              "meerkat_toolkit/frontend/egress.py",
+              "399e5f3a3d8d4bc13281270d0f8a205c0a0ef94432d2837a44efe1ffdae16db5",
+              122485
+            ],
+            [
+              "meerkat_toolkit/frontend/homecore_live.py",
+              "69bf6efea4cbf413637dccf95bb70edcbfa840d20db90a37c42a0b1b6184af7b",
+              12007
+            ],
+            [
+              "meerkat_toolkit/frontend/inbox.py",
+              "ec4dedf1fa8ceefed3ae36a9ce2347d1994b358c0a97e0599d6390f65d844161",
+              57391
+            ],
+            [
+              "meerkat_toolkit/frontend/sender.py",
+              "51b2f60556ae7ee5d19313366f7d6a4c99552e8aace69dd384211e356c1be4e3",
+              19684
+            ],
+            [
+              "meerkat_toolkit/frontend/slack.py",
+              "173ac17955cfd43a38303516062a580b7c7719a5b7ef59b3d4456ccfc64f75e5",
+              21061
+            ],
+            [
+              "meerkat_toolkit/frontend/telegram.py",
+              "165f9aa8cc361e4799cee1b54b8bbf3156bdb1c762b9135758fd493805f4f94b",
+              27425
+            ],
+            [
+              "meerkat_toolkit/frontend/telegram_adapter.py",
+              "4c9a94076a7d0743e705e9a2c8dc7ee1e20b26a5821e9e03ee9adb615048c14c",
+              29585
+            ],
+            [
+              "meerkat_toolkit/host_control.py",
+              "af3d34f7786d181ecebefc3943f53f5fcb021750098677b556220a43feb2ef4f",
+              104352
+            ],
+            [
+              "meerkat_toolkit/host_services.py",
+              "84d8d1c77131ea43329219f6b743d7942d16e5b57ed5effa093558b7deb83520",
+              2986
+            ],
+            [
+              "meerkat_toolkit/httpx_client.py",
+              "8c5ace5805c6c3ecdb5ecfe05d1e8101eb9a2097f282145eb256167e273c7902",
+              788
+            ],
+            [
+              "meerkat_toolkit/mcp_auth.py",
+              "10949830c4e70a3885c6dae48aa5420c4aa534d6f8cd2be019ac8ba11d6edb5d",
+              29049
+            ]
+          ],
+          "version": "0.9.4"
+        },
+        "toolkit_wheel": {
+          "path": "/private/tmp/connect-094-macos-release-inputs-jzltadiq/gateway-product-r3/artifacts/meerkat_toolkit-0.9.4-py3-none-any.whl",
+          "sha256": "a499fbf4d62ee335e5b3b978f4e1f85cc62fcf188c2c5f2c31f74a5bc0336e27",
+          "size": 447778
+        }
+      },
+      "paths": {
+        "artifact_root": "product/macos-arm64",
+        "assembly": "product/macos-arm64/assembly.json",
+        "source_manifest": "product/macos-arm64/source-manifest.json",
+        "meta_wheel": "product/macos-arm64/meerkat_meta-0.9.4-py3-none-any.whl",
+        "toolkit_wheel": "product/macos-arm64/meerkat_toolkit-0.9.4-py3-none-any.whl",
+        "dependency_requirements": "product/macos-arm64/dependency-requirements.txt",
+        "model_catalog": "product/macos-arm64/model-catalog.json",
+        "dependency_wheels": [
+          "product/macos-arm64/dependencies/annotated_doc-0.0.5-py3-none-any.whl",
+          "product/macos-arm64/dependencies/annotated_types-0.8.0-py3-none-any.whl",
+          "product/macos-arm64/dependencies/anyio-4.15.1-py3-none-any.whl",
+          "product/macos-arm64/dependencies/attrs-26.1.0-py3-none-any.whl",
+          "product/macos-arm64/dependencies/certifi-2026.7.22-py3-none-any.whl",
+          "product/macos-arm64/dependencies/cffi-2.1.1-cp311-cp311-macosx_11_0_arm64.whl",
+          "product/macos-arm64/dependencies/click-8.5.0-py3-none-any.whl",
+          "product/macos-arm64/dependencies/cryptography-50.0.1-cp311-abi3-macosx_11_0_arm64.whl",
+          "product/macos-arm64/dependencies/fastapi-0.141.1-py3-none-any.whl",
+          "product/macos-arm64/dependencies/h11-0.16.0-py3-none-any.whl",
+          "product/macos-arm64/dependencies/httpcore-1.0.9-py3-none-any.whl",
+          "product/macos-arm64/dependencies/httpx-0.28.1-py3-none-any.whl",
+          "product/macos-arm64/dependencies/httpx_sse-0.4.3-py3-none-any.whl",
+          "product/macos-arm64/dependencies/idna-3.20-py3-none-any.whl",
+          "product/macos-arm64/dependencies/jsonschema-4.26.0-py3-none-any.whl",
+          "product/macos-arm64/dependencies/jsonschema_specifications-2025.9.1-py3-none-any.whl",
+          "product/macos-arm64/dependencies/mcp-1.30.0-py3-none-any.whl",
+          "product/macos-arm64/dependencies/pycparser-3.0-py3-none-any.whl",
+          "product/macos-arm64/dependencies/pydantic-2.13.5-py3-none-any.whl",
+          "product/macos-arm64/dependencies/pydantic_core-2.46.5-cp311-cp311-macosx_11_0_arm64.whl",
+          "product/macos-arm64/dependencies/pydantic_settings-2.15.0-py3-none-any.whl",
+          "product/macos-arm64/dependencies/pyjwt-2.15.0-py3-none-any.whl",
+          "product/macos-arm64/dependencies/pypdf-6.1.1-py3-none-any.whl",
+          "product/macos-arm64/dependencies/python_dotenv-1.2.3-py3-none-any.whl",
+          "product/macos-arm64/dependencies/python_multipart-0.0.32-py3-none-any.whl",
+          "product/macos-arm64/dependencies/referencing-0.37.0-py3-none-any.whl",
+          "product/macos-arm64/dependencies/rpds_py-2026.6.3-cp311-cp311-macosx_11_0_arm64.whl",
+          "product/macos-arm64/dependencies/sse_starlette-3.4.11-py3-none-any.whl",
+          "product/macos-arm64/dependencies/starlette-1.7.0-py3-none-any.whl",
+          "product/macos-arm64/dependencies/tinycss2-1.5.1-py3-none-any.whl",
+          "product/macos-arm64/dependencies/typing_extensions-4.16.0-py3-none-any.whl",
+          "product/macos-arm64/dependencies/typing_inspection-0.4.4-py3-none-any.whl",
+          "product/macos-arm64/dependencies/uvicorn-0.54.0-py3-none-any.whl",
+          "product/macos-arm64/dependencies/webencodings-0.5.1-py2.py3-none-any.whl"
+        ]
+      },
+      "gateway": "guide/rpc_gateway",
+      "ordinary_gateway": "ordinary/rpc_gateway"
+    }
+  }
+}

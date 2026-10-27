@@ -1,0 +1,699 @@
+---
+title: "TypeScript SDK"
+description: "TypeScript SDK for Meta with type-safe contracts, parity tests, and ESM/CommonJS support."
+icon: "js"
+---
+
+The TypeScript SDK (`@rkat/meta-sdk`) provides type-safe access to the Meta JSON-RPC gateway from Node.js.
+
+## Installation
+
+```bash
+npm install @rkat/meta-sdk
+```
+
+<Note>
+  The npm package is client-only and does not contain `rpc_gateway`. Download
+  `meta-rpc-gateway-<version>-<target>.tar.gz` for Unix or macOS, or
+  `meta-rpc-gateway-<version>-<target>.zip` for Windows, and extract its
+  `rpc_gateway` binary (`rpc_gateway.exe` on Windows). Alternatively, follow the
+  [source-build instructions](/quickstart#prepare-a-matching-sdk-and-gateway). Pass that binary's path to
+  `.gateway(...)`. Linux x86_64 and aarch64 and macOS arm64 archives are
+  published with the release and listed in `index.json` and `checksums.sha256`;
+  macOS x86_64 and Windows archives may arrive later, listed in
+  `index-trailing.json` and `checksums-trailing.sha256`.
+</Note>
+
+## Quick start
+
+```typescript
+import { Meta, memory } from "@rkat/meta-sdk";
+
+const rt = await Meta.builder()
+  .mob("config/mob.toml")
+  .memory(memory.localJson())
+  .persistentState(".meta/state")
+  .consoleConfig("config/console.toml")
+  .gateway("/path/to/rpc_gateway")
+  .build();
+
+const handle = rt.mobHandle();
+const status = await handle.status();
+console.log("Running:", status.running);
+
+const results = await handle.memoryQuery({
+  entity: "identity:ops",
+  topic: "deployment",
+  store: "knowledge_graph",
+});
+
+```
+
+## Fork instruction policy
+
+A member forked with `fork_off`, a delegation fork or a council does not run
+the instructions its source activated (`meta/member_activate_instruction`,
+skill bodies activated that way included) unless the gateway's fork instruction
+policy says so. Under the default, `"require_explicit_activation"`, such a fork
+is refused with `fork_instruction_refused` before anything is committed. Set
+the policy on the builder; it is sent as
+`runtime_options.fork_instruction_policy`:
+
+```typescript
+import { Meta } from "@rkat/meta-sdk";
+
+const rt = await Meta.builder()
+  .mob("config/mob.toml")
+  .forkInstructionPolicy("reactivate_inherited")
+  .build();
+```
+
+`forkInstructionPolicy` takes a `ForkInstructionPolicy`:
+`"require_explicit_activation"`, `"reactivate_inherited"` or `"refuse"`;
+another value throws `RangeError`. Unset, nothing is sent and the gateway
+default applies. The setting applies to every fork of the gateway's mob and
+cannot be chosen per fork. See
+[Fork instruction policy](/reference/configuration#fork-instruction-policy)
+for what each value does and what `reactivate_inherited` trusts.
+
+## Waiting for a turn
+
+The recommended completion barrier is a tracked delivery plus its ticket:
+`sendAndWait(identity, content)`, or `send(identity, content, { trackTurn:
+true })` followed by `waitForTurn(identity, result.turnTicket)`. It reads only
+the ticket ledger and returns that turn's own output.
+
+`sendAndWaitOutcome` and `dispatchAndWaitOutcome` resolve the typed
+`AwaitedTurn` (`text`, `attributed`, `admission`, `ticket`, `outputStatus`,
+`untrackedCode`); `sendAndWait` / `dispatchAndWait` resolve its `text`. When
+the delivery returns no ticket (any delivered `turnUnavailable.code`, such
+as `autonomous_host`, the default mode, or a gateway predating turn tickets),
+the call waits on the identity-wide completion cursor with a
+`TurnTrackingUnavailableWarning` naming the code: `attributed` is `false`
+because another delivery's turn may have produced the text, and
+`untrackedCode` carries the code. `requireAttribution: true` throws
+`TurnTrackingUnavailableError` (carrying `admission`) in every untracked case
+instead. `not_delivered` (nothing ran) throws `TurnNotDeliveredError`.
+
+The delivery is never repeated. A transport or RPC failure of the
+exact-ticket wait is retried for that ticket only until `timeoutMs`, then
+throws `PostAdmissionObservationError` with `admission`, `ticket` and the
+last failure as `cause`. Every error an `*AndWait` call throws after
+admission keeps its type and carries `admission` (and `ticket`, `null` when
+untracked): `TurnFailedError`, `TurnUnknownError`, `WaitEndedError`,
+`TurnWaitTimeoutError` (a turn still pending at the deadline), and on the
+identity-wide wait its deadline, missing-baseline and superseded-incarnation
+errors and a raw transport error. A tracked `WaitEndedError` carries the
+top-level `ticket` too. The one exception is a thrown value that cannot carry
+fields (a non-object, or a frozen object thrown by custom code), which still
+propagates unchanged.
+
+`waitForCompletion(identity, baseline)` and `waitUntilReady(identities)` are
+identity-wide: any completion on the identity satisfies them.
+
+Every wait is server-side and event-driven: `waitForTurn` is one
+`meta/wait_for_turn` request, and `waitForCompletion` / `waitUntilReady` are
+one `meta/wait_for_completion` request per identity. The gateway answers
+when the ticket settles or a completion is recorded, so nothing polls, and the
+member's output is read once, at completion. `timeoutMs` is only the deadline;
+`pollIntervalMs` applies only against a gateway that predates the server-side
+waits. `completionCursor(identity)` is a one-shot cursor read that never
+touches the member session. `inspectIdentity` does read the member session, so
+do not poll it.
+
+A wait that ends before a completion (a failed or cancelled run, a broken,
+retiring or deleted identity, or gateway shutdown) rejects with the typed
+`WaitEndedError`, whose `outcome` names why.
+
+## Scope-bound dispatch
+
+Capture the identity's scope from `status()`, persist it, and dispatch
+against it. A moved scope throws `StaleScopeError` with nothing submitted; a
+lost reply is recovered from the scope's original session.
+
+```typescript
+import { deliveryScopeToDict, parseDeliveryScope, StaleScopeError } from "@rkat/meta-sdk";
+
+const status = await runtime.status("domain:calendar");
+if (!status.deliveryScope) throw new Error(status.deliveryScopeUnavailable?.reason);
+const saved = deliveryScopeToDict(status.deliveryScope); // persist byte-exact
+
+try {
+  const { receipt } = await runtime.dispatch(
+    "domain:calendar",
+    { content: "occurrence 42", origin: "system", idempotencyKey: "occ-42", correlationId },
+    { expectedScope: parseDeliveryScope(saved) },
+  );
+  receipt.stage; // "ingress_accepted": not a durable-input claim
+} catch (error) {
+  if (error instanceof StaleScopeError) error.mismatch; // nothing was submitted
+}
+
+const recovery = await runtime.recoverDelivery("domain:calendar", parseDeliveryScope(saved), {
+  idempotencyKey: "occ-42",
+  correlationId,
+});
+// recovery.state: "absent" is a point-in-time miss, never permission to retry
+```
+
+`expectedScope` needs both keys, does not combine with `trackTurn`, and
+applies no delivery preparation. `parseDeliveryScope` throws
+`ContractMismatchError` for an unknown scope `version`; `status()` then
+leaves `deliveryScope` `null` and the rest usable. An unknown recovery state
+reads as `unresolved`, never `absent`. See
+[Scope-bound dispatch](/api/rpc#scope-bound-dispatch).
+
+## Durable detached tools
+
+Long-running host work must declare detached execution rather than keeping a
+tool callback open:
+
+```typescript
+import { DetachedJobExecution, DetachedJobResult, Meta } from "@rkat/meta-sdk";
+
+const runtime = await Meta.builder()
+  .persistentState("state/meta")
+  .jobCredentials(resolveProfileCredentials)
+  .sessionService({
+    async buildAgent(draft) {
+      draft.registerTool(
+        "security_scan",
+        async () => ({ error: "detached owner required" }),
+        {
+          description: "Run a durable security scan",
+          execution: new DetachedJobExecution({
+            runner: "example.security_scan",
+            version: "v1",
+            restartClass: "checkpoint_resumable",
+            idempotencyScope: "interaction_and_arguments",
+            submissionTimeoutMs: 30_000,
+            credentialScopes: ["unifi.read"],
+            handler: async (ctx) => {
+              await ctx.progress(1, "scan started");
+              const resultRef = await performScan(ctx.arguments, ctx.credentials);
+              return new DetachedJobResult(resultRef);
+            },
+          }),
+        },
+      );
+    },
+  })
+  .gateway("/path/to/rpc_gateway")
+  .build();
+
+const job = await runtime.jobs.get(jobId);
+await runtime.jobs.cancel(jobId);
+```
+
+The gateway durably accepts the job and returns a receipt; host work runs
+outside the agent turn. Start, reconcile, and cancel remain short callbacks
+inside the 120-second public contract (125-second host and 130-second wire
+margins). Reconnect offers the exact committed attempt, fence, lease,
+checkpoint, and runner handle. Reopening never mints a fence; only a
+machine-authorized claim or retry does. Credentials are resolved per attempt
+and never serialized into durable job state.
+
+For identity-first builds with a `rosterProvider`, `.agentMemory()` enables optional identity-scoped hot memory injection from `<persistentState>/agent-memory` with contextual recall by default. Options include `realm`, `selection`, `maxEntries`, `recallTimeoutMs`, `recallFailurePolicy`, and `instructionHeader`; automatic injection defaults to a 500 ms timeout and skips the memory block if recall fails. Write records with `handle.rememberAgentMemory(identity, { title, body, tags, realm })`, read them with `handle.recallAgentMemory(identity, { realm, selection, queryText, queryTerms, maxEntries })`, and delete them with `handle.forgetAgentMemory(identity, memoryId, { realm })`; new records are available on the next identity-first send and during later materialize/resume/respawn/reset flows. Forgetting a record removes it from future recall/injection, but does not erase text already delivered into an active model context.
+
+## Type definitions
+
+The SDK exports camelCase result types. Its wire parsers translate snake_case
+gateway JSON into these shapes:
+
+```typescript
+export interface EventEnvelope {
+  readonly eventId: string;
+  readonly source: string;
+  readonly timestampMs: number;
+  readonly event: unknown;
+}
+
+export interface UnifiedAgentEvent {
+  readonly kind: "agent";
+  readonly agentId: string;
+  readonly eventType: string;
+  readonly payload?: Record<string, unknown> | null;
+}
+
+export interface UnifiedModuleEvent {
+  readonly kind: "module";
+  readonly module: string;
+  readonly eventType: string;
+  readonly payload: Record<string, unknown>;
+}
+
+export type UnifiedEvent = UnifiedAgentEvent | UnifiedModuleEvent;
+```
+
+`handle.gatingDecide(...)` returns the decision plus `approverId`, `outcome`,
+`decidedAtMs`, `reason`, and `nextPendingId`. These added fields are optional for
+compatibility with existing TypeScript objects; parsed responses use `null` when
+a field is absent or malformed. Unknown outcome strings are preserved.
+`nextPendingId` identifies an escalation successor; the SDK does not automatically
+retry or execute the action. See [Gating](/concepts/gating) for decision semantics.
+
+`ModuleConfig` is not a public TypeScript SDK export. Pass module declaration
+objects to `.modules(...)`, whose public parameter type is `unknown[]`.
+
+An identity-first `RosterProvider.roster(context)` receives a typed
+`RosterContext`, a one-to-one mirror of the Rust struct the gateway sends
+under `params.context`:
+
+```typescript
+export interface RosterContext {
+  /**
+   * The booted mob's compiled definition as JSON (`id`, `profiles`, ...).
+   * Always present behind the bundled `rpc_gateway`; `null` only for in-process
+   * Rust embedders and test harnesses that resolve a roster without one.
+   */
+  readonly mobDefinition: Record<string, unknown> | null;
+  /**
+   * Call-site-dependent prior-identity context, not an authoritative membership
+   * snapshot on every callback. Topology queries and edge reconciliation supply
+   * currently registered identities. Bootstrap, full roster refresh/reconcile,
+   * and reset-time spec adoption currently pass an empty list; an empty list
+   * does not imply that no identities are registered.
+   */
+  readonly previousIdentities: readonly string[];
+}
+```
+
+## Mob announcements
+
+`Meta.builder().mobAnnouncements()` sends `runtime_options.mob_announcements`
+(`{enabled: true}`; pass an object for the batch, retention and limit
+options, sent unchanged; see
+[Configuration](/reference/configuration#mob-announcements)). On a
+persistent, identity-first launch, `MobHandle` then wraps every
+`meta/mob_announcements/*` method. Results are readonly camelCase types whose
+states, phases, statuses, outcomes, actions and kinds are open unions
+(`| (string & {})`), so a newer gateway's value passes through. Option
+objects are camelCase; the declarations you write (a source's identity,
+observation, audience, routes, ...) are wire objects, sent as given.
+Unset options are not sent.
+
+| Method | Wire method | Resolves |
+|--------|-------------|----------|
+| `announce(sourceKey, topics, body, { mobId?, correlationId?, causes? })` | `announce` | `AnnounceResult` |
+| `announcementGet(mobId, sourceKey)` | `get` | `Announcement \| null` |
+| `announcementSubscriptionPut(operationId, subscriptionId, member, topics, { mobs?, start?, expectedRevision?, delivery? })` | `subscriptions/put` | `AnnouncementSubscription` (`delivery` and `awaitHandling` when set) |
+| `announcementRoleTemplatePut(operationId, templateId, members, topics, { mobs?, expectedRevision?, delivery? })` | `subscriptions/put` with `members` | `AnnouncementRoleTemplate` (`delivery` and `awaitHandling` when set) |
+| `announcementSubscriptionPause` / `Resume` / `Cancel(operationId, subscriptionId, expectedRevision)` | `subscriptions/{pause,resume,cancel}` | `AnnouncementSubscriptionChange` (for a role template `template` and `children`) |
+| `announcementSubscriptionGet(subscriptionId)` | `subscriptions/get` | `AnnouncementSubscriptionView` (`template` for a role template's id) |
+| `announcementSubscriptionList({ member?, after?, limit? })` | `subscriptions/list` | `AnnouncementSubscription[]` |
+| `announcementDeliveryList({ member?, subscriptionId?, after?, limit? })` | `deliveries/list` | `AnnouncementBatch[]` (each with its `handling`) |
+| `announcementDeliveryObserve(batchId)` / `announcementDeliveryReconcile(batchId)` | `deliveries/{observe,reconcile}` | `AnnouncementDeliveryObservation` (with `handling`) |
+| `announcementDeliveryRedeliver(operationId, batchId)` / `announcementDeliveryDismiss(operationId, batchId)` | `deliveries/{redeliver,dismiss}` | `AnnouncementBatchHandling` |
+| `announcementSourcePut(operationId, sourceId, identity, observation, topics, audience, options?)` | `sources/put` | `AnnouncementSourcePutResult` |
+| `announcementSourcePause` / `Resume` / `End(operationId, sourceId, expectedRevision, { mobId? })` | `sources/{pause,resume,end}` | `AnnouncementSource` (`Resume` also takes `rebaseline`) |
+| `announcementSourceGet(sourceId, { mobId?, includeStreams? })` | `sources/get` | `AnnouncementSourceView` (`source` `null` when absent) |
+| `announcementSourceList({ mobId?, after?, state?, limit?, escalated? })` | `sources/list` | `AnnouncementSource[]` |
+| `announcementSourceAdvance(operationId, sourceId, expectedRevision, expectedVersion, principal, nextCursor, options?)` | `sources/advance` | `SourceAdvanceResult` |
+| `announcementSourceRecordFailure(operationId, sourceId, expectedRevision, expectedVersion, principal, failure, { mobId? })` | `sources/record_failure` | `AnnouncementSource` |
+| `announcementAuditList({ mobId?, sourceId?, member?, action?, after?, limit? })` | `audit/list` | `AnnouncementAuditEntry[]` |
+| `announcementMemberGet(member)` | `members/get` | `AnnouncementMemberView` (with `handling`) |
+| `announcementMemberList({ after?, limit?, escalated? })` | `members/list` | `AnnouncementMemberView[]` |
+| `announcementEscalationsList({ after?, limit?, open? })` | `escalations/list` | `AnnouncementEscalationsPage` (`next`, and `events`, or `escalations` with `open: true`) |
+| `announcementDeclarationsApply(declarations?, { revision? })` | `declarations/apply` | `AnnouncementDeclarationsView` (`revision`, `digest`, `records`) |
+| `announcementDeclarationsGet()` | `declarations/get` | `AnnouncementDeclarationsView` |
+
+A `member` is a parsed `AnnouncementMember` or the wire form
+`{ mob_id, identity }`. The [method reference](/api/rpc#mob-announcement-sources)
+describes every field. A collector step reads the source, then advances it
+from the position it read; a step that lost a race throws with the current
+position:
+
+```typescript
+import {
+  SourceStaleRevisionError,
+  SourceVersionConflictError,
+  supportsAnnouncementSources,
+} from "@rkat/meta-sdk";
+
+const handle = runtime.mobHandle();
+if (!supportsAnnouncementSources(await handle.capabilities())) {
+  throw new Error("this gateway does not serve announcement sources");
+}
+const { source } = await handle.announcementSourceGet("mail");
+if (source === null) throw new Error("declare the source first");
+const { items, nextCursor } = await readProvider(source.cursor.token); // your adapter
+try {
+  await handle.announcementSourceAdvance(
+    `${runId}:v${source.cursor.version}`,
+    "mail",
+    source.revision,
+    source.cursor.version,
+    principal,
+    nextCursor,
+    { items, observed: { kind: "delta" } },
+  );
+} catch (err) {
+  if (!(err instanceof SourceStaleRevisionError || err instanceof SourceVersionConflictError)) {
+    throw err;
+  }
+  // another step or a configuration change moved the source: read it again
+}
+```
+
+The refusals are typed: `MobAnnouncementsUnavailableError` (`-32044`),
+`AnnouncementConflictError` (`-32045`; `SourceStaleRevisionError` and
+`SourceVersionConflictError` carry the source's `currentVersion`, `cursor`
+and revision), `AnnouncementFrontierError` (`-32046`),
+`AnnouncementRefusedError` (`-32047`) and `AnnouncementNotFoundError`
+(`-32048`), each with the refusal's `kind` (a kind this SDK does not know
+keeps its code's class). `parseAnnouncementRpcError(code, message, ...)` is
+the reifier the runtime uses. A source method on a gateway without sources
+rejects with an `RpcError` `-32601` whose message says "Meta does not
+support sources". `CapabilitiesResult.mobAnnouncements` reads
+`meta/capabilities.mob_announcements`, `null` when they are disabled.
+
+A batch's `handling` and an observation's `handling`
+(`AnnouncementBatchHandling`: `state`, `cause`, `redelivered`, `held`,
+`dismissed`, `readAtMs`) say what became of the turn
+([Delivery handling](/api/rpc#delivery-handling)). Each is `null` until
+the batch is admitted. A batch that holds nothing for an operator
+rejects `announcementDeliveryRedeliver` and
+`announcementDeliveryDismiss` with `AnnouncementRefusedError` `not_held`.
+An `AnnouncementAuditEntry` for a plain announcement has `sourceId` and
+`generation` `null`.
+
+Escalations ([Mob announcement health](/api/rpc#mob-announcement-health))
+reach `.onError(callback)` as `mob_announcement_escalated` and
+`mob_announcement_escalation_resolved`, each with its event `cursor` in
+`context`. After a reconnect, read the events you missed:
+
+```typescript
+const page = await handle.announcementEscalationsList({ after: lastCursor });
+for (const event of page.events ?? []) {
+  record(event.escalationId, event.event, event.cause); // your own
+}
+lastCursor = page.next;
+```
+
+`StatusResult.mobAnnouncements` (`MobAnnouncementsStatus`: `sources`,
+`members`, `handling`, `openEscalations`, `lastEventCursor`) reads
+`meta/status.mob_announcements`. It is absent when mob announcements are
+disabled, and `null` when their database could not be read. A source's
+`health` adds
+`escalations`, `quietMonitoring`, `emptyCoverageMonitoring` and
+`runnerScheduledHere`. Each `AnnouncementEscalation` keeps its `cause` and
+its `subject` (a wire object, with its kind as `subjectKind`) as sent.
+
+A role template ([Role templates](/api/rpc#role-templates)) subscribes
+every member of a mob with a role:
+
+```typescript
+const template = await handle.announcementRoleTemplatePut(
+  "op-reviewers",
+  "reviewers",
+  { mob_id: "mob-a", role: "reviewer" },
+  ["ops.alert"],
+);
+const change = await handle.announcementSubscriptionPause("op-pause", "reviewers", template.revision);
+// change.subscription is null; change.template and change.children carry the template
+```
+
+The subscription verbs answer a template with its `children`, and
+`announcementSubscriptionGet` reads it as `template`.
+`announcementDeclarationsApply(declarations)` applies declared sources and
+subscriptions in wire form, with `revision` defaulting to
+`declarations.revision` ([Mob announcement declarations](/api/rpc#mob-announcement-declarations)).
+Called without declarations, it asks a gateway with a declarations sidecar
+to read the file again. Each `AnnouncementDeclarationRecord` keeps its
+`kind`, `status` and `collection` as open unions, with `refusalKind` and
+`deliveryKind` read from their objects. The refusals
+`declaration_rollback`, `declaration_digest_conflict`,
+`role_template_limit` and `subscription_id_taken` are
+`AnnouncementRefusedError`s with their data. The builder passes
+`declarations` or `declarations_path` in `mobAnnouncements({...})`
+unchanged.
+
+## Module support
+
+The SDK supports both ESM and CommonJS:
+
+```typescript
+// ESM
+import { Meta } from "@rkat/meta-sdk";
+
+// CommonJS
+const { Meta } = require("@rkat/meta-sdk");
+```
+
+### Cross-module identity check
+
+Because dual CJS+ESM packaging, vitest module isolation, and
+hoisted-vs-nested monorepos can ship two distinct `RpcError`
+constructors in the same process, **prefer the structural type guards
+over `instanceof`**:
+
+```typescript
+import { isRpcError, isMobEventsStaleError } from "@rkat/meta-sdk";
+
+try {
+  await handle.queryMobEvents({ afterSeq: cursor });
+} catch (err) {
+  if (isMobEventsStaleError(err)) {
+    // err.afterCursor, err.latestCursor available
+  } else if (isRpcError(err)) {
+    console.error(`RPC ${err.method} failed: ${err.code}`);
+  } else {
+    throw err;
+  }
+}
+```
+
+## Structural mob events + flow runs
+
+Both APIs return the full meerkat ledger projection:
+
+```typescript
+import { isMobEventsStaleError } from "@rkat/meta-sdk";
+
+const events = await handle.queryMobEvents({
+  eventTypes: ["flow_started", "flow_completed"],
+  mobId: "home",
+});
+for (const e of events) {
+  console.log(e.cursor, e.kind, e.runId, e.data);
+}
+
+// MobStructuralEvent.cursor is the meerkat ledger cursor — durable
+// across meta restarts on persistent_state builds. Resume by
+// passing the highest-seen cursor as afterSeq.
+try {
+  const more = await handle.queryMobEvents({ afterSeq: lastCursor });
+} catch (err) {
+  if (isMobEventsStaleError(err)) {
+    // Rewind to err.latestCursor and reconnect.
+  }
+}
+
+// Flow runs with the full ledger projection
+const runs = await handle.listRuns(); // or handle.listRuns("flow-id")
+for (const run of runs) {
+  console.log(run.runId, run.status, run.stepLedger.length);
+}
+```
+
+## Mobpack authoring
+
+`MobHandle` wraps the full Flow Editor authoring surface (`meta/mobpacks/*`) with typed methods: `mobpackTemplates`, `mobpackCatalogs`, `mobpackValidate`, `mobpackSource`, `mobpackExport`, `mobpackImport`, `mobpackList`, `mobpackGet`, `mobpackCreate`, `mobpackSave`, `mobpackDelete`, `mobpackUndo`, `mobpackRedo`, `mobpackApplyOperation`, `mobpackDeployCommand`, and `mobpackDeploy`.
+
+```typescript
+// Create a draft from the blank template, validate, export
+const draft = await handle.mobpackCreate({ template: "blank", name: "support-bot" });
+const document = draft.row.document;
+
+const validation = await handle.mobpackValidate(document);
+console.log(validation.ok, validation.displayRows.length);
+
+const pack = await handle.mobpackExport(document);
+const archive = Buffer.from(pack.contentBase64, "base64"); // pack.filename, pack.mediaType
+```
+
+`mobpackDeploy(document, true)` sends `execute: true`, which writes the archive and runs `rkat mob run` on the host — gated by the surface's advertised `authoring_capabilities` and, on ABAC-enforced runtimes, the caller's `mobpack.deploy` grant. See the [Flow Editor guide](/guides/flow-editor).
+
+## Rust parity notes
+
+The TypeScript SDK targets the JSON-RPC gateway. Rust also exposes lower-level native builder options for in-process embedding; those remain Rust-native and are not mirrored one-for-one in the gateway SDKs.
+
+Identities and their sessions live in Core's stores under `persistentState(path)`: Core's mob machine holds each identity's session and generation, and a host supplies no continuity storage and holds no leases. The external identity providers of Meta 0.9.3 are removed; see [Upgrading to Meta 0.9.4](/guides/upgrading-to-0-9-4) to move a deployment that used them.
+
+Raw gateway memory config accepts `{ backend: "local_json", health_check_endpoint: url }`, with `health_check_endpoint` optional; `local_json` is the only backend. The TypeScript helper is `memory.localJson({ healthCheckEndpoint: url })`; it translates that option to the snake_case wire key. The predecessor's backend helper was removed in 0.9 with no alias, and the gateway refuses its backend value at init. Gateway auth config supports JWT validation; Google/OIDC helpers are model objects, not accepted by `meta/init` today.
+
+The builder exposes no `roleMigrations(...)` setter and sends no `role_migrations` init param, so a TypeScript host cannot authorize a role-migrating resume: a durable member whose role changed keeps refusing to resume with `MobError::MemberRoleMigrationRequired`. Declaring the migration currently requires the Python builder's `.role_migrations([...])` or a hand-built `meta/init` payload; see the [configuration reference](/reference/configuration#member-role-migrations).
+
+The builder forwards `consoleConfig(path)` as `runtime_options.console_config_path`, which lets the bundled console consume the same `console_config` contract projected by `/console/experience`. The console default is fail-closed: with neither `auth(...)` nor `consoleAuthRequired(false)` the gateway trusts no signing key and refuses every console request with 401 (it logs a startup warning naming this). `consoleAuthRequired(false)` is the explicit opt-out; use it only for a local or host-protected console. The Python twin is `.console_auth_required(False)`.
+
+`DurableAgentSpec` carries the two per-identity knobs the Rust type deserializes: `runtimeModeOverride` (`"autonomous_host"` or `"turn_driven"`; `null` defers to the profile's `runtime_mode`, whose meerkat default is `autonomous_host`) and `initialMessage` (the first turn a fresh `autonomous_host` member runs on: a string or `DispatchContentBlock[]`, Rust `ContentInput`; `null` leaves meerkat's fallback spawn prompt). Both are omitted from the roster payload when unset. `durableAgentSpecToDict` and `parseDurableAgentSpec` translate them (`runtime_mode_override`, `initial_message`). The Python twins are `runtime_mode_override` and `initial_message` on `DurableAgentSpec`.
+
+The gateway binds `127.0.0.1` on an ephemeral port by default. `httpListen("0.0.0.0:8080")`, `allowRemote()` and `httpPublicBaseUrl(url)` are the exposure knobs (`runtime_options.http_listen`, `allow_remote`, `http_public_base_url`): a non-loopback bind is refused at init unless `auth(...)` enforces console auth or `allowRemote()` acknowledges the exposure, and the advertised base is read back as `runtime.rustHttpPublicBaseUrl` while `runtime.rustHttpBaseUrl` stays the same-host form the SDK itself dials. See [Deployment](/guides/deployment).
+
+`meerkatConfig(path)` forwards a Meerkat host `config.toml` as `runtime_options.meerkat_config_path`, the only door for the `[self_hosted]` and `[realm]` tables Meerkat keeps out of `mob.toml` (a host-config `[models]` table reaches the factory too, but a profile's `model` must be catalogued, provider-annotated or defined under `mob.toml`'s own `[models.<id>]` to pass the init model check); a missing, malformed or non-validating file refuses init rather than building agents from the default config, and a top-level `[self_hosted]` or `[realm]` table inside `mob.toml` is refused at init with a message naming this option. The Python twin is `.meerkat_config(path)`. See [Self-hosted models and the Meerkat host config](/reference/configuration#self-hosted-models-and-the-meerkat-host-config).
+
+`providerCredentialsRoot(path)` forwards a provider credentials directory as `runtime_options.provider_credentials_root`: every agent the gateway builds resolves and persists provider logins and tokens there instead of the process default `<config dir>/meerkat/credentials`, which every process of the OS user shares. The path is absolute: the gateway opens it once at init, creating it when missing, and a relative path or a root it cannot open refuses init rather than falling back to the default. Give each user their own root, and pass the same root on every reopen of that user's state; a host moving off a per-process `XDG_CONFIG_HOME=<C>` passes `<C>/meerkat/credentials` to keep existing logins. See [Provider credentials](/reference/configuration#provider-credentials).
+
+## Storage durability declarations
+
+The gateway is fail-closed about durable storage: a store that cannot open
+is a startup error, never a silent in-memory fallback. The `runtimeStore`
+and `eventLog` config modules produce the explicit declarations:
+
+```typescript
+import { Meta, eventLog, runtimeStore } from "@rkat/meta-sdk";
+
+const runtime = await Meta.builder()
+  .mob("config/mob.toml")
+  .persistentState("state/meta")
+  // Declare an in-memory runtime store (sessions do not survive restart).
+  .runtimeStore(runtimeStore.memory())
+  // Declare a bounded queryable in-process event log — or eventLog.nullStore().
+  .eventLog(eventLog.memory({ batchSize: 64 }))
+  .gateway("/path/to/rpc_gateway")
+  .build();
+```
+
+The resolved picture is the typed storage census: `StatusResult.storage` /
+`CapabilitiesResult.storage` parse the gateway's `storage` object into
+`StorageSummary` (blob durability, the H2 incremental probe, and the
+per-slot `StorageSlotSummary` census with `domain`, `durabilityClass`,
+`resolution`, `backend`, `degraded`, `detail`); apply `parseStorageSummary`
+to the raw `storage` record of `meta/storage/doctor`. A fail-closed
+startup refusal — file-name twins, a store that failed to open — surfaces
+as the typed `StorageResolutionError` (code `-32014`,
+`STORAGE_RESOLUTION_CODE`), not a `TransportError`; its message names the
+remediation (`meta/storage/doctor`, or the explicit ephemeral
+declaration). Blob-store durability has no wire declaration today — it is
+declared by Rust embedders via `ephemeral_blobs(true)` /
+`binary_blob_store(...)` and reported read-only in the census.
+
+A composition provenance refusal surfaces as the typed
+`CompositionProvenanceError` (code `-32019`, `COMPOSITION_PROVENANCE_CODE`).
+The gateway raises it when the persistent mob storage's recorded composition
+cannot be proven to match this launch, for example a `mob.toml` edited since
+the persistent mob storage was created. Its `kind` names the refusal
+(`"divergent"`, `"created_by_rehearsal"`, the manifest kinds, and
+`"candidate_divergent"` from gateways launched as a candidate) and `fields`
+lists the diverged definition fields as dotted paths, so a host can show what
+changed without parsing the message:
+
+```typescript
+import { CompositionProvenanceError } from "@rkat/meta-sdk";
+
+try {
+  const runtime = await builder.build();
+} catch (err) {
+  if (err instanceof CompositionProvenanceError && err.kind === "divergent") {
+    console.error("mob.toml differs from the stored definition in", err.fields);
+  }
+  throw err;
+}
+```
+
+The comparison is over the parsed definition, so a profile key the TOML parse
+warns about and ignores (for example `tools.mob_tasks` in a config written for
+an earlier release) is never one of the `fields`: removing it to act on the
+warning, or adding it, does not cause this refusal.
+
+## Gateway logging (stderr)
+
+The persistent gateway reports tracing lines, panic hooks, and storage
+migration progress on its stderr. By default the SDK **inherits** the host
+process's stderr, so those lines are visible where your application logs.
+Two environment variables adjust this (same shape as the Python SDK):
+
+| Variable | Effect |
+|----------|--------|
+| `META_GATEWAY_STDERR_FILE=<path>` | Append gateway stderr to a file |
+| `META_GATEWAY_STDERR=devnull` | Discard gateway stderr entirely |
+
+Discarding is the legacy pre-0.8.9 default and is not recommended: it hides
+panic output and makes a slow-but-working storage migration indistinguishable
+from a hang.
+
+### Error hook (`onError`)
+
+| Builder call | Effect |
+|--------------|--------|
+| `.onError(callback)` | Registers an `ErrorCallback` (`(event: ErrorEvent) => void`, or a promise of it). The gateway forwards every runtime `ErrorEvent` as the `meta/on_error` notification; the SDK parses it into `{ category, message, context }` and awaits your callback. |
+
+`category` is one of the `ErrorCategory` constants (`spawn_failure`,
+`reconcile_incomplete`, `checkpoint_failure`,
+`compaction_persistence_rejected`, `actor_loop_stalled`,
+`actor_loop_recovered`, `actor_loop_terminated`, `host_loop_crash`, `rediscover_failure`,
+`event_log_flush_failure`, `identity_materialization_failure`,
+`mob_stop_proceeded_without_interrupt`, `retired_member_release_failed`,
+`mob_announcement_escalated`, `mob_announcement_escalation_resolved`). The SDK source constants are kept
+in lockstep with the Rust enum by `tests/sdk_error_category_parity.rs`;
+`context` carries the variant's fields (`member_id`, `error`, and so on).
+`actor_loop_terminated` is a terminal actor failure requiring a process restart,
+not a recovery notification like `actor_loop_recovered`. The hook is
+fire-and-forget: a rejected promise is swallowed, and with no callback registered the
+notification is dropped. The gateway's own stderr line for the same event
+(ERROR, or INFO for `actor_loop_recovered` and
+`mob_announcement_escalation_resolved`) is written either way, so the hook
+adds alerting, not logging. Use `isResolutionErrorEvent(event)` to tell a
+failure ending (`actor_loop_recovered`,
+`mob_announcement_escalation_resolved`) from one starting before paging on
+it. The Python
+twin is `.on_error(callback)`.
+
+## Startup: no built-in total deadline
+
+`connect()` runs `meta/init` as accepted-then-settled. The gateway accepts
+the init at once, reports each startup phase, and then settles it `ready` or
+`failed`. The SDK has **no built-in total deadline** for that wait. Startup
+legitimately includes provider callbacks (each bounded at 130 s by the
+gateway) and the native identity restore, which is deliberately unbounded
+and can run for minutes on a large roster. Any fixed SDK timer
+would sooner or later abort a healthy restore. `gatewayTimeoutMs` still
+bounds the wait for the `accepted` answer, and for an older gateway's single
+init response.
+
+The wait ends only when one of these happens:
+
+- the init settles `ready` (connected);
+- the init settles `failed`. You get the typed error, for example
+  `StorageResolutionError`, with `err.data.durable_effects`: `"none"` when
+  nothing durable was touched, otherwise `"possible"`;
+- the gateway exits, or the transport reader fails. You get
+  `InitOutcomeUnknownError`;
+- your own deadline runs out. Set it with
+  `Meta.builder().initDeadline(ms)`, and running out also throws
+  `InitOutcomeUnknownError`.
+
+`InitOutcomeUnknownError` carries `initId`, `lastPhase` (the last
+`meta/init_progress` phase seen, such as `"roster"` or `"restore"`) and
+`reason`. That makes a stuck or interrupted init diagnosable. The gateway may
+already have changed native state, so the SDK never retries it automatically
+and asks the gateway to shut down.
+
+Provider callbacks that run during startup must not call ordinary runtime
+RPCs on the same runtime. Ordinary dispatch starts only after init settles,
+and the gateway refuses an earlier request at once with `InitInProgressError`
+(`-32018`, exported as `INIT_IN_PROGRESS_CODE`).
+
+## HTTP transport timeout
+
+`createJsonRpcHttpTransport` defaults to a 60-second timeout (via
+`AbortController`) so a server that accepts but never replies cannot
+hang the caller's `await` forever. Override per-call:
+
+```typescript
+import { createJsonRpcHttpTransport } from "@rkat/meta-sdk";
+
+const transport = createJsonRpcHttpTransport(endpoint, {
+  timeoutMs: 5_000,
+});
+```
+
+## Contract parity
+
+The TypeScript SDK includes parity tests that validate type definitions against the Rust core. This ensures the SDK stays in sync with the runtime API across releases.
+
+## See also
+
+- [JSON-RPC API](/api/rpc) -- full method reference
+- [Rust SDK](/sdks/rust) -- primary Rust interface
+- [Python SDK](/sdks/python) -- Python equivalent

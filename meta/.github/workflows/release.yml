@@ -1,0 +1,1057 @@
+name: Release
+# Meta release protocol: tags validate only. Publication requires an explicit
+# accepted-artifact selection through `make release-promote`.
+#
+# Candidates come in two tiers (scripts/verify-release-assets.py
+# TIER_TARGETS). A candidate run builds one tier from the merged commit:
+# `make release-candidate SOURCE_SHA=... TIER=core` for Linux x86_64 and
+# aarch64 and macOS arm64, `TIER=trailing` for macOS x86_64 and Windows.
+# Promotion publishes the core selection with the registries; the trailing
+# selection is added to the published release later by add-only assets-mode
+# recovery, so the slower legs never hold up the release.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_mode:
+        description: "existing: validate/registry retry; candidate: build only; promote: accepted bytes; assets: add-only recovery"
+        required: false
+        default: existing
+        type: choice
+        options: [existing, candidate, promote, assets]
+      source_sha:
+        description: "Candidate only: exact merged-main release commit (must equal dispatch SHA)"
+        required: false
+        default: ""
+        type: string
+      artifact_selection:
+        description: "Promotion/recovery only: explicit versioned immutable artifact selection JSON"
+        required: false
+        default: ""
+        type: string
+      publish_release_packages:
+        description: "Publish Rust/Python/TypeScript artifacts to registries"
+        required: false
+        default: false
+        type: boolean
+      registry_dry_run:
+        description: "Nonpublishing rehearsal: no GitHub, registry, or docs writes"
+        required: false
+        default: false
+        type: boolean
+      release_tag:
+        description: "Explicit existing tag for promotion or registry/asset recovery"
+        required: false
+        default: ""
+        type: string
+      candidate_tier:
+        description: "Candidate only: core (Linux x86_64/aarch64, macOS arm64) or trailing (macOS x86_64, Windows)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  # `actions: read` lets require_ci_green list ci.yml runs. A permissions block
+  # sets every unlisted scope to none, so omitting it makes the gate fail closed
+  # on an API 403 rather than on a real red - a refusal for the wrong reason.
+  actions: read
+  contents: read
+
+concurrency:
+  # Candidate runs are independent. Every dispatch that may write the same
+  # release is serialized; tag events never write and need no release lock.
+  group: meta-release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag != '' && inputs.release_tag || github.run_id }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Required GitHub Actions secrets for full release:
+#   CARGO_REGISTRY_TOKEN  - crates.io API token
+#   PYPI_API_TOKEN        - PyPI API token able to upload meerkat-meta (the first
+#                           upload of a new project needs an account-scoped
+#                           token; narrow it to a project token afterwards)
+#   NPM_TOKEN             - npm access token (scoped to @rkat org)
+#   DOCS_PUBLISH_TOKEN    - fine-grained token with Contents: write on lukacf/meerkat;
+#                           used only to dispatch the docs-owner workflow
+
+jobs:
+  resolve_release:
+    name: Resolve protocol and immutable source
+    runs-on: ubuntu-24.04
+    outputs:
+      mode: ${{ steps.resolve.outputs.mode }}
+      sha: ${{ steps.resolve.outputs.sha }}
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      publish_packages: ${{ steps.resolve.outputs.publish_packages }}
+      dry_run: ${{ steps.resolve.outputs.dry_run }}
+      ci_bypass: ${{ steps.resolve.outputs.ci_bypass }}
+      tier: ${{ steps.resolve.outputs.tier }}
+      build_matrix: ${{ steps.resolve.outputs.build_matrix }}
+    steps:
+      - name: Checkout immutable workflow tools
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+
+      - name: Resolve release mode and source
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_MODE: ${{ inputs.release_mode }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          ARTIFACT_SELECTION: ${{ inputs.artifact_selection }}
+          PUBLISH_RELEASE_PACKAGES: ${{ inputs.publish_release_packages }}
+          REGISTRY_DRY_RUN: ${{ inputs.registry_dry_run }}
+          RELEASE_TIER: ${{ inputs.candidate_tier }}
+        run: python3 scripts/release-candidate.py resolve
+
+  # Meta's release path had no CI gate at all: release_validate had no `needs`,
+  # so a tag on any commit published without anyone checking that commit was ever
+  # green. Tonight (v0.8.26) the check was done by hand. This refuses instead.
+  #
+  # It REFUSES rather than WAITS. The release goal is tag-to-registries from an
+  # already-merged-green exact-main, so a poll would only ever burn the budget on
+  # a precondition that should already hold. Waiting would also convert "this
+  # commit was never verified" into "this is taking a while", which is the wrong
+  # thing to be patient about.
+  #
+  # A candidate's build legs start as soon as the release commit is on main,
+  # beside its exact-main CI run, so the two overlap instead of queueing. The
+  # gate then runs once every leg has succeeded, before anything is
+  # validated, collected or attested as a candidate, and still refuses: a
+  # candidate whose CI is not green by then binds nothing, and a new candidate
+  # run is dispatched once it is. Every other mode checks before its first job.
+  #
+  # So only the candidate manifest's attestation implies green exact-main CI.
+  # Each leg attests its archives before this gate runs; a leg attestation
+  # names the source and run, not CI. Promotion and recovery start from the
+  # manifest, whose collection refused unless CI was green, and verify the
+  # leg attestations under it.
+  require_ci_green:
+    name: Require green exact-main CI
+    needs: [resolve_release, build_binaries]
+    if: >-
+      !cancelled() &&
+      needs.resolve_release.result == 'success' &&
+      ((needs.resolve_release.outputs.mode == 'candidate' &&
+        needs.build_binaries.result == 'success') ||
+       (needs.resolve_release.outputs.mode != 'candidate' &&
+        needs.build_binaries.result == 'skipped'))
+    runs-on: ubuntu-24.04
+    outputs:
+      run_id: ${{ steps.ci_run.outputs.run_id }}
+      run_attempt: ${{ steps.ci_run.outputs.run_attempt }}
+    steps:
+      - name: Refuse unless exact-main CI is already green for this commit
+        id: ci_run
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          RELEASE_SHA: ${{ needs.resolve_release.outputs.sha }}
+          CI_BYPASS: ${{ needs.resolve_release.outputs.ci_bypass }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const ref = process.env.RELEASE_SHA;
+
+            // Only the resolver's explicit existing/no-tag/package-dry-run
+            // lane can bypass CI. Candidate and promotion never qualify.
+            if (process.env.CI_BYPASS === "true") {
+              core.info(
+                "Dry-run dispatch with no release_tag: nothing is published, " +
+                  "so there is no publication to gate. Skipping the CI check."
+              );
+              return;
+            }
+
+            // No pagination: the head_sha filter bounds this to attempts on a
+            // single commit, which is 1-3 runs. If that ever stops being true,
+            // page it rather than trusting a truncated first page.
+            const { data } = await github.rest.actions.listWorkflowRuns({
+              owner,
+              repo,
+              workflow_id: "ci.yml",
+              branch: "main",
+              event: "push",
+              head_sha: ref,
+              per_page: 100,
+            });
+
+            // Re-filter client-side. The API treats these as hints, and a run
+            // from another branch or event answers a different question than
+            // "was this exact commit green on main".
+            const runs = data.workflow_runs.filter(
+              (run) =>
+                run.head_sha === ref &&
+                run.head_branch === "main" &&
+                run.event === "push"
+            );
+
+            if (runs.length === 0) {
+              core.setFailed(
+                `No exact-main CI run exists for release commit ${ref}.\n` +
+                  `A tag is not evidence. Push this commit to main, let ci.yml ` +
+                  `run to a green terminal state, then re-run this release.`
+              );
+              return;
+            }
+
+            core.info(
+              runs
+                .map((run) => `CI attempt ${run.run_attempt}: ${run.status}/${run.conclusion || "pending"} (${run.html_url})`)
+                .join("\n")
+            );
+
+            const success = runs.find(
+              (run) => run.status === "completed" && run.conclusion === "success"
+            );
+            if (!success) {
+              core.setFailed(
+                `Release commit ${ref} has ${runs.length} exact-main CI run(s), ` +
+                  `none completed successfully. Fix the red or wait for the ` +
+                  `in-flight run to finish, then re-run this release. Do not ` +
+                  `re-run CI to obtain a second opinion on the same tree.`
+              );
+              return;
+            }
+
+            core.info(`Release commit ${ref} has green exact-main CI: ${success.html_url}`);
+            core.setOutput("run_id", String(success.id));
+            core.setOutput("run_attempt", String(success.run_attempt));
+
+  # Every job that depends on the CI gate, directly or through another job,
+  # names each of its needs' results under !cancelled(). GitHub's status
+  # functions, including the implicit success() of a condition that has none,
+  # read every ancestor job, not only the declared needs. build_binaries is
+  # skipped outside candidate mode and is an ancestor of all of these through
+  # require_ci_green, so a condition without a status function skips them in
+  # promote, assets and existing mode even when every declared need succeeded
+  # (v0.9.2 promotion run 38983785773 ran nothing after the CI gate). The
+  # status function is !cancelled(), not always(): always() still starts a job
+  # whose needs succeeded after the run was cancelled, so a cancelled
+  # promotion could go on to publish.
+  release_validate:
+    name: Validate release state
+    needs: [resolve_release, require_ci_green]
+    if: >-
+      !cancelled() &&
+      needs.resolve_release.result == 'success' &&
+      needs.require_ci_green.result == 'success' &&
+      needs.resolve_release.outputs.mode != 'tag'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.resolve_release.outputs.sha }}
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@f08ac54821369508305fcb9e0121ec6e30ae9ada # 1.97.0
+
+      - name: Install Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: console/package-lock.json
+
+      # No rust cache: the v0.9.2 runs restored none of this job's entries
+      # ("No cache found"), whose keys change with every Cargo.lock.
+      - name: Install console dependencies
+        run: npm --prefix console ci --silent --no-fund --no-audit
+
+      - name: Verify embedded console bundle freshness
+        run: npm --prefix console run embedded:freshness --silent
+
+      - name: Verify version parity
+        run: make verify-version-parity
+
+      - name: Check formatting
+        run: make fmt-check
+
+  build_binaries:
+    name: Build gateway binaries (${{ matrix.target }})
+    # No CI or validation gate here: the legs overlap the exact-main CI run,
+    # and require_ci_green and release_validate run before collection.
+    needs: [resolve_release]
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      needs.resolve_release.outputs.mode == 'candidate'
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    # Migrated off the self-hosted BuildBuddy/GCP infra to GitHub-hosted runners
+    # (mirrors meerkat's release build): each target builds natively on its own
+    # runner with plain cargo — no bazel, no BuildBuddy, no self-hosted runner.
+    runs-on: ${{ matrix.runs-on }}
+    # A Linux GNU binary's glibc floor is whatever glibc it was linked
+    # against. Built directly on ubuntu-latest (then 24.04, glibc 2.39),
+    # the v0.8.30 gateways carried a hard GLIBC_2.39 version requirement
+    # (pidfd_spawnp/pidfd_getpid) and refused to load on Debian bookworm
+    # (2.36), Ubuntu 22.04 (2.35) and bullseye (2.31), and nothing read the
+    # produced binary to notice. Building inside buildpack-deps:bullseye pins
+    # the floor at 2.31, the same image and floor meerkat's release lane
+    # ships, and scripts/check-linux-release-binary-portability.sh refuses
+    # any binary above it before packaging. Non-Linux matrix entries get no
+    # container. The image is pinned by digest, the one Core's release lane
+    # pins; renovate.json proposes a new digest for review, never automerged.
+    container: ${{ contains(matrix.target, 'unknown-linux-gnu') && 'docker.io/library/buildpack-deps:bullseye@sha256:30d62be8c0d1960899261429cd3960bccffbd075f324adae967c79f410bde24f' || '' }}
+    strategy:
+      fail-fast: false
+      # The candidate tier's legs only (release-candidate.py BUILD_LEGS):
+      # core is x86_64 and aarch64 Linux and arm64 macOS; trailing is x86_64
+      # macOS, cross-compiled on the free arm64 macos-15 label (the free
+      # Intel label took 128 minutes in run 38719226636 against 53 for the
+      # arm64 leg; the billed large label refuses to start once the Actions
+      # spending limit is reached, which failed candidate run 38521788616),
+      # and Windows. "Verify macOS binary architecture" reads every produced
+      # binary before anything is signed or packaged.
+      matrix: ${{ fromJSON(needs.resolve_release.outputs.build_matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.resolve_release.outputs.sha }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@f08ac54821369508305fcb9e0121ec6e30ae9ada # 1.97.0
+        with:
+          targets: ${{ matrix.target }}
+
+      # The legs build without a rust cache: no leg of the v0.9.2 release
+      # restored an entry ("No cache found" on all five), because the keys
+      # change with every Cargo.lock, yet the saved entries took 5.1 GB of
+      # the repository's cache budget. A leg that holds signing secrets also
+      # restores nothing it did not build.
+
+      # Meerkat 0.8.40's `openai-live` path pulls `opus` -> `audiopus_sys`,
+      # whose build script falls back to compiling bundled Opus with CMake when
+      # no system libopus is found (true on every runner here). The Bullseye
+      # container ships no cmake at all, and installing it from Bullseye apt
+      # failed twice on 2026-09-18 when bullseye-security's pool dropped a
+      # dependency the CDN-cached index still listed (404 on both arches), so
+      # the container gets a pinned Kitware CMake 3.x tarball verified by
+      # sha256 instead. CMake 4 rejects bundled Opus's 3.1 minimum, hence 3.x.
+      # actions/checkout marks the workspace safe for the host user, and the
+      # container user differs, so plain cargo's first git query otherwise
+      # fails with "detected dubious ownership".
+      - name: Prepare Linux release container
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+          cmake_version_pin="3.31.12"
+          case "$(uname -m)" in
+            x86_64)
+              cmake_arch="linux-x86_64"
+              cmake_sha256="0dc2e9a6860f06bf10bd8fadc03e35d9eeb4df46e33763a7e480e987758f385c"
+              ;;
+            aarch64)
+              cmake_arch="linux-aarch64"
+              cmake_sha256="83f8fd91d2038a56556e1400390fcfe42f79602940c494f6c6f1cdae7f9e7f40"
+              ;;
+            *)
+              echo "Linux release container has no pinned CMake for $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+          cmake_tarball="cmake-${cmake_version_pin}-${cmake_arch}.tar.gz"
+          curl --fail --location --retry 5 --retry-delay 5 --silent --show-error \
+            --output "/tmp/${cmake_tarball}" \
+            "https://github.com/Kitware/CMake/releases/download/v${cmake_version_pin}/${cmake_tarball}"
+          echo "${cmake_sha256}  /tmp/${cmake_tarball}" | sha256sum --check --strict
+          mkdir -p /opt/cmake
+          tar --extract --gzip --file "/tmp/${cmake_tarball}" --directory /opt/cmake --strip-components=1
+          echo "/opt/cmake/bin" >> "${GITHUB_PATH}"
+          cmake_version="$(/opt/cmake/bin/cmake --version | awk 'NR == 1 { print $3 }')"
+          case "${cmake_version}" in
+            3.*) ;;
+            *)
+              echo "Linux release container requires CMake 3.x, found ${cmake_version}" >&2
+              exit 1
+              ;;
+          esac
+          echo "Linux release container CMake: ${cmake_version} (${cmake_arch})"
+
+      - name: Apply release build profile overrides
+        shell: bash
+        # These established build-profile overrides are part of candidate
+        # production, before attestation/acceptance; promotion never rebuilds.
+        run: |
+          set -euo pipefail
+          for crate in meerkat-core meerkat-runtime meerkat-mob meerkat-live; do
+            if ! grep -q "profile.release.package.${crate}]" Cargo.toml; then
+              printf '\n[profile.release.package.%s]\nopt-level = 0\n' "$crate" >> Cargo.toml
+              echo "injected opt-0 profile for ${crate}"
+            fi
+          done
+
+      - name: Build gateway binaries
+        shell: bash
+        env:
+          CARGO_TARGET_DIR: target
+          # Bound rustc parallelism: the meerkat mega-crates (meerkat-mob,
+          # meerkat-runtime, meerkat-meta lib) each drive LLVM into multiple
+          # GB; at default -j on 16 GB hosted runners the Windows leg dies
+          # with "rustc-LLVM ERROR: out of memory" and the Linux legs get
+          # OOM-killed (surfacing as "runner received a shutdown signal",
+          # exit 143) — v0.7.22's first matrix run lost 3/5 legs to this.
+          CARGO_BUILD_JOBS: "2"
+          # The bundled Opus that audiopus_sys compiles declares
+          # cmake_minimum_required(VERSION 3.1). The macOS and Windows runners
+          # carry CMake 4, which refuses anything below 3.5 unless this floor
+          # is supplied; cmake >= 3.31 reads it from the environment and the
+          # cmake crate passes the environment through. Harmless on the 3.x
+          # Linux lane.
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+        run: |
+          set -euo pipefail
+          # Build BOTH gateways for this target with plain cargo. (The repo-cargo
+          # wrapper redirects CARGO_TARGET_DIR for dev-worktree isolation; a clean
+          # release runner wants the predictable ./target path.) rpc_gateway is the
+          # SDK stdin-RPC gateway; meta_gateway is the console/HTTP one — SDK
+          # users need rpc_gateway, so both ship.
+          # --locked: the binaries we ship must be built from the SAME
+          # dependency set the audit lane checked. Without it cargo is
+          # permitted to resolve differently from the committed lock, so a
+          # green `cargo deny` would be a measurement of the source while the
+          # published artifact carried something else. RUSTSEC-2026-0258 made
+          # that distinction concrete: adopters running a prebuilt gateway are
+          # exposed by what is IN THE BINARY, not by what the lock says.
+          cargo build -p meerkat-meta --bin meta_gateway --bin rpc_gateway --bin meta_repair \
+            --features openai-live --locked --release --target "${{ matrix.target }}"
+
+      # The gate reads the produced binary, not the build environment: a
+      # container or toolchain change that raised the floor would otherwise
+      # publish silently, which is exactly how the ubuntu-latest builds shipped
+      # through v0.8.30. Every binary the build step produces is checked, and
+      # the step fails closed before anything is packaged, attested or
+      # uploaded. scripts/test_release_workflow.py runs this body against the
+      # build step's --bin list, so a binary added there without a line here
+      # fails CI rather than shipping unchecked.
+      - name: Check Linux binary portability
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          ./scripts/check-linux-release-binary-portability.sh \
+            "target/${TARGET}/release/meta_gateway" \
+            "target/${TARGET}/release/rpc_gateway" \
+            "target/${TARGET}/release/meta_repair"
+
+      # Both macOS legs run on the arm64 macos-15 label, and the x86_64 leg
+      # cross-compiles, so a build that silently produced host (arm64) code
+      # would otherwise be signed and shipped as x86_64. lipo decides; file
+      # must agree. Every binary the build step produces is checked, and
+      # scripts/test_release_workflow.py runs this body against that --bin
+      # list.
+      - name: Verify macOS binary architecture
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          case "${TARGET}" in
+            aarch64-apple-darwin) expected="arm64" ;;
+            x86_64-apple-darwin) expected="x86_64" ;;
+            *)
+              echo "::error::no expected Mach-O architecture for ${TARGET}" >&2
+              exit 1
+              ;;
+          esac
+          # Absolute paths: no cached or PATH-planted tool decides.
+          lipo=/usr/bin/lipo
+          file=/usr/bin/file
+          # file's two spellings: "Mach-O 64-bit executable x86_64" (macOS)
+          # and "Mach-O 64-bit x86_64 executable, flags:..." (libmagic 5.4x).
+          file_pattern="^Mach-O 64-bit (executable ${expected}|${expected} executable)([^A-Za-z0-9_]|$)"
+          for bin in meta_gateway rpc_gateway meta_repair; do
+            path="target/${TARGET}/release/${bin}"
+            archs="$("${lipo}" -archs "${path}")"
+            description="$("${file}" -b "${path}")"
+            echo "${path}: lipo '${archs}'; file '${description}'"
+            if [[ "${archs}" != "${expected}" ]]; then
+              echo "::error::${path} contains '${archs}', expected exactly '${expected}'" >&2
+              exit 1
+            fi
+            if [[ ! "${description}" =~ ${file_pattern} ]]; then
+              echo "::error::${path} is '${description}', expected a Mach-O 64-bit ${expected} executable" >&2
+              exit 1
+            fi
+          done
+          # The bundled C libraries the build scripts configured and compiled
+          # (Opus through CMake, ring and SQLite through cc) must target the
+          # same architecture; a host-architecture archive would fail the link
+          # or, worse, be ignored. Record each one's architecture.
+          build="target/${TARGET}/release/build"
+          for library in "audiopus_sys-*/out/lib/libopus.a" "ring-*/out/libring_core_*.a" \
+                         "libsqlite3-sys-*/out/libsqlite3.a"; do
+            matches=(${build}/${library})
+            if [[ "${#matches[@]}" -eq 0 ]]; then
+              echo "::error::no ${library} under ${build}" >&2
+              exit 1
+            fi
+            for archive in "${matches[@]}"; do
+              archs="$("${lipo}" -archs "${archive}")"
+              echo "${archive}: configured for '${archs}'"
+              if [[ "${archs}" != "${expected}" ]]; then
+                echo "::error::${archive} contains '${archs}', expected exactly '${expected}'" >&2
+                exit 1
+              fi
+            done
+          done
+
+      # The cross-compiled x86_64 leg runs its gateways under Rosetta, the
+      # arm64 leg natively: each must load and report this release's version.
+      - name: Smoke-run macOS gateways
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.resolve_release.outputs.version }}
+        run: |
+          set -euo pipefail
+          run=()
+          if [[ "${TARGET}" == "x86_64-apple-darwin" ]]; then
+            if ! /usr/bin/arch -x86_64 /usr/bin/true 2>/dev/null; then
+              sudo /usr/sbin/softwareupdate --install-rosetta --agree-to-license
+            fi
+            run=(/usr/bin/arch -x86_64)
+          fi
+          for bin in meta_gateway rpc_gateway; do
+            # ${run[@]+...}: an empty array under set -u, also in bash 3.2.
+            output="$(${run[@]+"${run[@]}"} "target/${TARGET}/release/${bin}" --version)"
+            echo "${bin}: ${output}"
+            if [[ "${output}" != "${bin} ${VERSION} "* ]]; then
+              echo "::error::${bin} --version printed '${output}', expected '${bin} ${VERSION} ...'" >&2
+              exit 1
+            fi
+          done
+
+      - name: Ad-hoc codesign macOS binaries
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for bin in meta_gateway rpc_gateway meta_repair; do
+            /usr/bin/codesign --force --sign - "target/${{ matrix.target }}/release/${bin}"
+          done
+
+      - name: Package artifacts
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.resolve_release.outputs.version }}
+          ARCHIVE_EXT: ${{ matrix.archive_ext }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # cargo bin name -> published archive prefix
+          BINS=("meta_gateway:meta-gateway" "rpc_gateway:meta-rpc-gateway" "meta_repair:meta-repair")
+          for entry in "${BINS[@]}"; do
+            bin="${entry%%:*}"; prefix="${entry##*:}"
+            if [[ "${RUNNER_OS}" == "Windows" ]]; then
+              src="target/${TARGET}/release/${bin}.exe"
+            else
+              src="target/${TARGET}/release/${bin}"
+            fi
+            if [[ ! -f "$src" ]]; then
+              echo "::error::missing expected binary at $src" >&2
+              exit 1
+            fi
+            artifact="${prefix}-${VERSION}-${TARGET}.${ARCHIVE_EXT}"
+            if [[ "$ARCHIVE_EXT" == "zip" ]]; then
+              7z a -tzip "dist/${artifact}" "$(cygpath -w "$src")" >/dev/null
+            else
+              tar -czf "dist/${artifact}" -C "$(dirname "$src")" "$(basename "$src")"
+            fi
+            if [[ ! -s "dist/${artifact}" ]]; then
+              echo "::error::archive dist/${artifact} missing or empty" >&2
+              exit 1
+            fi
+            echo "packaged dist/${artifact}"
+          done
+
+      # Binaries carry provenance naming the commit they were built from. The
+      # release path consumes that digest: a tag whose object differs from an
+      # artifact's sourceRepositoryDigest publishes bytes the tag does not name,
+      # and every job still reads green. meerkat v0.8.30 shipped that way - its
+      # Linux x86 archives were built from main two commits past the tag - and
+      # the divergence was only visible because the attestation recorded it.
+      - name: Attest build provenance
+        id: provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
+        with:
+          subject-path: dist/*
+
+      - name: Retain original provenance bundle
+        shell: bash
+        env:
+          BUNDLE_PATH: ${{ steps.provenance.outputs.bundle-path }}
+        run: cp "$BUNDLE_PATH" dist/provenance.jsonl
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: meta-gateway-binaries-${{ matrix.target }}-${{ github.run_attempt }}
+          path: dist/*
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 90
+
+  collect_candidate:
+    name: Bind immutable candidate artifacts
+    needs: [resolve_release, require_ci_green, release_validate, build_binaries]
+    if: >-
+      !cancelled() &&
+      github.event_name == 'workflow_dispatch' &&
+      needs.resolve_release.result == 'success' &&
+      needs.require_ci_green.result == 'success' &&
+      needs.release_validate.result == 'success' &&
+      needs.build_binaries.result == 'success' &&
+      needs.resolve_release.outputs.mode == 'candidate'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_MODE: ${{ needs.resolve_release.outputs.mode }}
+      RELEASE_SHA: ${{ needs.resolve_release.outputs.sha }}
+      RELEASE_VERSION: ${{ needs.resolve_release.outputs.version }}
+      RELEASE_TAG: ${{ needs.resolve_release.outputs.tag }}
+      RELEASE_TIER: ${{ needs.resolve_release.outputs.tier }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.resolve_release.outputs.sha }}
+          fetch-depth: 0
+
+      - name: Collect verified original artifacts
+        env:
+          CI_RUN_ID: ${{ needs.require_ci_green.outputs.run_id }}
+          CI_RUN_ATTEMPT: ${{ needs.require_ci_green.outputs.run_attempt }}
+        run: |
+          python3 scripts/release-candidate.py collect --output-dir candidate \
+            --ci-run-id "$CI_RUN_ID" --ci-run-attempt "$CI_RUN_ATTEMPT" --tier "$RELEASE_TIER"
+
+      # The core manifest is candidate-manifest.json; the trailing one is
+      # candidate-manifest-trailing.json, its name on the release.
+      - name: Attest candidate manifest
+        id: provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
+        with:
+          subject-path: candidate/candidate-manifest*.json
+
+      - name: Retain manifest provenance bundle
+        env:
+          BUNDLE_PATH: ${{ steps.provenance.outputs.bundle-path }}
+        run: cp "$BUNDLE_PATH" candidate/provenance.jsonl
+
+      - name: Upload immutable candidate manifest
+        id: manifest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: meta-candidate-manifest-${{ github.run_attempt }}
+          path: candidate/*
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 90
+
+      - name: Emit explicit acceptance selection
+        env:
+          ARTIFACT_ID: ${{ steps.manifest.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.manifest.outputs.artifact-digest }}
+        run: |
+          manifest="candidate/candidate-manifest.json"
+          if [[ "$RELEASE_TIER" != "core" ]]; then
+            manifest="candidate/candidate-manifest-${RELEASE_TIER}.json"
+          fi
+          python3 scripts/release-candidate.py selection \
+            --manifest-file "$manifest" \
+            --artifact-id "$ARTIFACT_ID" --artifact-digest "$ARTIFACT_DIGEST"
+
+  verify_release_assets:
+    name: Verify selected or published original bytes
+    needs: [resolve_release, release_validate]
+    if: >-
+      !cancelled() &&
+      github.event_name == 'workflow_dispatch' &&
+      needs.resolve_release.result == 'success' &&
+      needs.release_validate.result == 'success' &&
+      (needs.resolve_release.outputs.mode == 'promote' ||
+       (needs.resolve_release.outputs.mode == 'existing' &&
+        needs.resolve_release.outputs.publish_packages == 'true' &&
+        needs.resolve_release.outputs.dry_run == 'false'))
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_MODE: ${{ needs.resolve_release.outputs.mode }}
+      RELEASE_SHA: ${{ needs.resolve_release.outputs.sha }}
+      RELEASE_VERSION: ${{ needs.resolve_release.outputs.version }}
+      RELEASE_TAG: ${{ needs.resolve_release.outputs.tag }}
+      ARTIFACT_SELECTION: ${{ inputs.artifact_selection }}
+      REGISTRY_DRY_RUN: ${{ needs.resolve_release.outputs.dry_run }}
+    steps:
+      - name: Checkout immutable source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.resolve_release.outputs.sha }}
+          fetch-depth: 0
+      - name: Checkout immutable workflow tools
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .release-tools
+      - name: Verify selected candidate
+        if: needs.resolve_release.outputs.mode == 'promote'
+        run: python3 .release-tools/scripts/release-candidate.py stage --output-dir release-assets --proof-dir release-proofs
+      - name: Verify existing published assets without writes
+        if: needs.resolve_release.outputs.mode == 'existing'
+        run: python3 .release-tools/scripts/release-candidate.py verify-published
+
+  publish_github_release:
+    name: Add original release assets without replacement
+    needs: [resolve_release, release_validate, verify_release_assets]
+    if: >-
+      !cancelled() &&
+      github.event_name == 'workflow_dispatch' &&
+      needs.resolve_release.result == 'success' &&
+      needs.release_validate.result == 'success' &&
+      needs.resolve_release.outputs.dry_run == 'false' &&
+      ((needs.resolve_release.outputs.mode == 'promote' &&
+        needs.verify_release_assets.result == 'success') ||
+       (needs.resolve_release.outputs.mode == 'assets' &&
+        needs.resolve_release.outputs.publish_packages == 'false'))
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_MODE: ${{ needs.resolve_release.outputs.mode }}
+      RELEASE_SHA: ${{ needs.resolve_release.outputs.sha }}
+      RELEASE_VERSION: ${{ needs.resolve_release.outputs.version }}
+      RELEASE_TAG: ${{ needs.resolve_release.outputs.tag }}
+      ARTIFACT_SELECTION: ${{ inputs.artifact_selection }}
+      REGISTRY_DRY_RUN: ${{ needs.resolve_release.outputs.dry_run }}
+    steps:
+      - name: Checkout immutable source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.resolve_release.outputs.sha }}
+          fetch-depth: 0
+      - name: Checkout immutable workflow tools
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .release-tools
+      - name: Reverify original candidate before publication
+        if: needs.resolve_release.outputs.mode == 'promote'
+        run: python3 .release-tools/scripts/release-candidate.py stage --output-dir release-assets --proof-dir release-proofs
+      - name: Publish exact original archives
+        if: needs.resolve_release.outputs.mode == 'promote'
+        run: python3 .release-tools/scripts/release-candidate.py publish --assets-dir release-assets --proof-dir release-proofs
+      - name: Recover explicitly selected missing original assets
+        if: needs.resolve_release.outputs.mode == 'assets'
+        run: python3 .release-tools/scripts/release-candidate.py recover
+
+  publish_sdk_packages:
+    name: Publish SDK packages
+    # A real registry upload requires the already-public exact binary set.
+    # Promotion verifies accepted bytes; registry-only retry reads existing
+    # release assets without ever invoking their publisher.
+    if: >-
+      !cancelled() &&
+      github.event_name == 'workflow_dispatch' &&
+      needs.resolve_release.result == 'success' &&
+      needs.release_validate.result == 'success' &&
+      needs.resolve_release.outputs.publish_packages == 'true' &&
+      ((needs.resolve_release.outputs.mode == 'existing' &&
+        (needs.resolve_release.outputs.dry_run == 'true' ||
+         needs.verify_release_assets.result == 'success')) ||
+       (needs.resolve_release.outputs.mode == 'promote' &&
+        needs.verify_release_assets.result == 'success' &&
+        (needs.resolve_release.outputs.dry_run == 'true' ||
+         needs.publish_github_release.result == 'success')))
+    needs: [resolve_release, release_validate, verify_release_assets, publish_github_release]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.resolve_release.outputs.sha }}
+
+      - name: Install Python + Node tooling
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+
+      - name: Publish Python SDK
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        working-directory: sdk/python
+        run: |
+          set -euo pipefail
+          DRY_RUN="${{ needs.resolve_release.outputs.dry_run }}"
+          python -m pip install --upgrade build twine
+          rm -rf dist
+          python -m build
+          python -m twine check dist/*
+          if [[ "$DRY_RUN" == "true" ]]; then
+            echo "Python SDK dry-run: skipping upload"
+          else
+            python -m twine upload --skip-existing dist/*
+          fi
+
+      - name: Publish TypeScript SDK
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        working-directory: sdk/typescript
+        run: |
+          set -euo pipefail
+          DRY_RUN="${{ needs.resolve_release.outputs.dry_run }}"
+          npm install --ignore-scripts
+          npm config set //registry.npmjs.org/:_authToken "$NODE_AUTH_TOKEN"
+          npm run build
+          if [[ "$DRY_RUN" == "true" ]]; then
+            npm publish --access public --dry-run
+          else
+            PACKAGE_NAME=$(node -p "require('./package.json').name")
+            PACKAGE_VERSION=$(node -p "require('./package.json').version")
+            PACKAGE_SPEC="${PACKAGE_NAME}@${PACKAGE_VERSION}"
+            VIEW_STDERR=$(mktemp)
+            trap 'rm -f "$VIEW_STDERR"' EXIT
+
+            if PUBLISHED_VERSION=$(npm view "$PACKAGE_SPEC" version --registry=https://registry.npmjs.org/ 2>"$VIEW_STDERR"); then
+              if [[ "$PUBLISHED_VERSION" != "$PACKAGE_VERSION" ]]; then
+                echo "::error::npm returned unexpected version '$PUBLISHED_VERSION' for exact package spec '$PACKAGE_SPEC'." >&2
+                exit 1
+              fi
+              echo "  $PACKAGE_SPEC: already published, skipping"
+            else
+              VIEW_STATUS=$?
+              if grep -Eq '(^|[[:space:]])E404([[:space:]]|$)' "$VIEW_STDERR"; then
+                echo "Publishing $PACKAGE_SPEC to npm"
+                npm publish --access public
+              else
+                cat "$VIEW_STDERR" >&2
+                exit "$VIEW_STATUS"
+              fi
+            fi
+          fi
+
+
+  # cargo publish's verification is a full dev build of the packaged crates
+  # (27 of promotion run 38568276468's 32 minutes, cold). It runs here, with
+  # the dependency build that main CI saved for the same commit (the
+  # meta-dev-bins entry of test-python and flow-editor; rust-cache hashes
+  # the target directory, debuginfo level and cache-bin setting into the
+  # entry, so they match those jobs) and with no secret at all.
+  # publish_registries then publishes the same checkout with --no-verify,
+  # holding the token but restoring no cache, so no cached file runs beside
+  # the token. This job never saves. The restore makes its "packages build"
+  # verdict only as trustworthy as main CI's cache, but a poisoned entry
+  # cannot ship: publish_registries packages again from source, refuses bytes
+  # that differ from the sha256 recorded here, and alone holds the secret.
+  verify_crate_packages:
+    name: Verify crate packages
+    needs: [resolve_release, release_validate]
+    if: >-
+      !cancelled() &&
+      github.event_name == 'workflow_dispatch' &&
+      needs.resolve_release.result == 'success' &&
+      needs.release_validate.result == 'success' &&
+      needs.resolve_release.outputs.publish_packages == 'true' &&
+      (needs.resolve_release.outputs.mode == 'existing' ||
+       needs.resolve_release.outputs.mode == 'promote')
+    runs-on: ubuntu-24.04
+    outputs:
+      extension_sha256: ${{ steps.crates.outputs.extension_sha256 }}
+      meta_sha256: ${{ steps.crates.outputs.meta_sha256 }}
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.resolve_release.outputs.sha }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@f08ac54821369508305fcb9e0121ec6e30ae9ada # 1.97.0
+
+      - name: Restore the exact-main CI dependency build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: meta-dev-bins
+          save-if: false
+          cache-bin: false
+
+      # Packages both crates and builds each from its packaged sources;
+      # meerkat-meta resolves the packaged meta-extension-state, so an
+      # unpublished new version of it verifies too.
+      - name: Verify the packaged crates build
+        run: scripts/repo-cargo package -p meta-extension-state -p meerkat-meta --locked
+
+      # cargo package is byte-reproducible for a commit, so these checksums
+      # name the bytes that were just verified. publish_registries packages
+      # again and must match them before it uploads, and the readback
+      # requires crates.io to serve exactly them.
+      - name: Record the verified crate checksums
+        id: crates
+        env:
+          VERSION: ${{ needs.resolve_release.outputs.version }}
+        run: |
+          set -euo pipefail
+          for pair in "extension_sha256:meta-extension-state" "meta_sha256:meerkat-meta"; do
+            output="${pair%%:*}"; crate="${pair##*:}"
+            sum="$(sha256sum "${CARGO_TARGET_DIR}/package/${crate}-${VERSION}.crate" | cut -d' ' -f1)"
+            echo "${crate}-${VERSION}.crate: ${sum}"
+            echo "${output}=${sum}" >> "${GITHUB_OUTPUT}"
+          done
+
+  publish_registries:
+    name: Publish crate + SDK packages
+    # The crates publish after the SDK job whether it succeeded or failed, so
+    # one refused SDK registry cannot strand them. A skipped or cancelled SDK
+    # job still stops them, and the final all-registry readback still fails
+    # the run while any registry lacks the exact version.
+    if: >-
+      !cancelled() &&
+      github.event_name == 'workflow_dispatch' &&
+      needs.resolve_release.result == 'success' &&
+      needs.release_validate.result == 'success' &&
+      needs.verify_crate_packages.result == 'success' &&
+      needs.resolve_release.outputs.publish_packages == 'true' &&
+      ((needs.resolve_release.outputs.mode == 'existing' &&
+        (needs.resolve_release.outputs.dry_run == 'true' ||
+         needs.verify_release_assets.result == 'success')) ||
+       (needs.resolve_release.outputs.mode == 'promote' &&
+        needs.verify_release_assets.result == 'success' &&
+        (needs.resolve_release.outputs.dry_run == 'true' ||
+         needs.publish_github_release.result == 'success'))) &&
+      (needs.publish_sdk_packages.result == 'success' ||
+       needs.publish_sdk_packages.result == 'failure')
+    needs: [resolve_release, release_validate, verify_release_assets, publish_github_release, publish_sdk_packages, verify_crate_packages]
+    runs-on: ubuntu-24.04
+    # Holds CARGO_REGISTRY_TOKEN, so it restores no cache: verify_crate_packages
+    # already built the packaged crates, and --no-verify publishes the same
+    # checkout without compiling anything here. The crate bytes are bound to
+    # the verified ones: packaged again and compared before any upload, and
+    # compared on crates.io by the readback, also when a version was
+    # already published by an earlier attempt.
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      RELEASE_VERSION: ${{ needs.resolve_release.outputs.version }}
+      VERIFIED_EXTENSION_SHA256: ${{ needs.verify_crate_packages.outputs.extension_sha256 }}
+      VERIFIED_META_SHA256: ${{ needs.verify_crate_packages.outputs.meta_sha256 }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.resolve_release.outputs.sha }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@f08ac54821369508305fcb9e0121ec6e30ae9ada # 1.97.0
+
+      - name: Install Python tooling
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Bind the crates to the verified bytes
+        run: |
+          set -euo pipefail
+          scripts/repo-cargo package -p meta-extension-state -p meerkat-meta --locked --no-verify
+          for pair in "meta-extension-state:${VERIFIED_EXTENSION_SHA256}" "meerkat-meta:${VERIFIED_META_SHA256}"; do
+            crate="${pair%%:*}"; verified="${pair##*:}"
+            if [[ ! "${verified}" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "::error::no verified checksum for ${crate}" >&2
+              exit 1
+            fi
+            actual="$(sha256sum "${CARGO_TARGET_DIR}/package/${crate}-${RELEASE_VERSION}.crate" | cut -d' ' -f1)"
+            if [[ "${actual}" != "${verified}" ]]; then
+              echo "::error::${crate} now packages to ${actual}, not the verified ${verified}" >&2
+              exit 1
+            fi
+            echo "${crate}: ${actual} (verified)"
+          done
+      - name: Publish extension document crate
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          DRY_RUN="${{ needs.resolve_release.outputs.dry_run }}"
+          if [[ "$DRY_RUN" == "true" ]]; then
+            echo "Running cargo publish in dry-run mode"
+            scripts/repo-cargo publish -p meta-extension-state --locked --no-verify --dry-run
+          else
+            echo "Publishing meta-extension-state to crates.io"
+            output=$(scripts/repo-cargo publish -p meta-extension-state --locked --no-verify 2>&1) && true
+            rc=$?
+            if [[ $rc -eq 0 ]]; then
+              echo "  meta-extension-state: published"
+            elif echo "$output" | grep -q "already exists\|already uploaded"; then
+              python scripts/verify-published-registries.py --version "$RELEASE_VERSION" --only-crates \
+                --crate-sha256 "meta-extension-state=${VERIFIED_EXTENSION_SHA256}"
+              echo "  meta-extension-state: already published with the verified bytes, skipping"
+            else
+              echo "$output" >&2
+              exit $rc
+            fi
+          fi
+
+      - name: Publish Rust crate
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          DRY_RUN="${{ needs.resolve_release.outputs.dry_run }}"
+          if [[ "$DRY_RUN" == "true" ]]; then
+            echo "Running cargo publish in dry-run mode"
+            scripts/repo-cargo publish -p meerkat-meta --locked --no-verify --dry-run
+          else
+            echo "Publishing meerkat-meta to crates.io"
+            output=$(scripts/repo-cargo publish -p meerkat-meta --locked --no-verify 2>&1) && true
+            rc=$?
+            if [[ $rc -eq 0 ]]; then
+              echo "  meerkat-meta: published"
+            elif echo "$output" | grep -q "already exists\|already uploaded"; then
+              python scripts/verify-published-registries.py --version "$RELEASE_VERSION" --only-crates \
+                --crate-sha256 "meerkat-meta=${VERIFIED_META_SHA256}"
+              echo "  meerkat-meta: already published with the verified bytes, skipping"
+            else
+              echo "$output" >&2
+              exit $rc
+            fi
+          fi
+
+      - name: Verify exact packages are public on every registry
+        if: needs.resolve_release.outputs.dry_run == 'false'
+        run: |
+          set -euo pipefail
+          VERSION=$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          python scripts/verify-published-registries.py --version "$VERSION" \
+            --crate-sha256 "meta-extension-state=${VERIFIED_EXTENSION_SHA256}" \
+            --crate-sha256 "meerkat-meta=${VERIFIED_META_SHA256}"

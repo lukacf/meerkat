@@ -1,0 +1,18 @@
+name: Fetch warm dependencies
+description: >-
+  On a pull request from this repository, extract this job's dependency
+  builds from the newest successful warm-deps dispatch on the head branch
+  (scripts/ci-warm-deps.py). Any miss, failure or run past five minutes
+  prints one line and the job builds as it always did; the step never fails.
+runs:
+  using: composite
+  steps:
+    - if: github.event_name == 'pull_request'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: >-
+        timeout -k 10 300 python3 scripts/ci-warm-deps.py fetch
+        || echo "warm dependencies: none (the fetch failed or ran past 5 minutes)"

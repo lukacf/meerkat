@@ -1,0 +1,283 @@
+---
+title: "Mob announcements"
+description: "Announce a development to a mob and deliver it, in bounded batches, to the members that subscribed to its topics."
+icon: "bullhorn"
+---
+
+Mob announcements carry developments to the members that asked for them. The
+host, or a member through its tools, announces a development to a mob. Every
+member subscription that names that mob and one of the announcement's topics
+captures it, and each subscriber receives what it is owed in bounded batches.
+Each batch is one Meerkat host continuation keyed by its batch id.
+Announcements also come from [sources](#sources): a collector that observes
+an external system, such as a mailbox or a calendar, reports what changed,
+and each change becomes one announcement.
+
+Mob announcements are optional, and a persistent, identity-first host
+enables them the same way on every surface: `rpc_gateway` with
+`runtime_options.mob_announcements = {"enabled": true}`, `meta_gateway` with
+its `mob_announcements` init param, and a Rust host with
+`UnifiedRuntimeBuilder::mob_announcements`. Each refuses a configuration it
+cannot compose before it builds anything. The batch, retention and limit
+options are in [Configuration](/reference/configuration). Without them,
+nothing opens the announcement database (`mob_announcements.sqlite3`), and
+the methods answer `mob_announcements_unavailable`.
+
+The console serves the same methods on `/console/rpc`. Every one of them,
+the reads included, needs the `runtime.admin` grant, and a read-only console
+refuses the ones that change state.
+
+## Announcements
+
+An announcement belongs to one mob hosted on the gateway, and its source key
+identifies it within that mob. Announcing the same key with the same content
+again replays the first announcement; the same key with other content is
+refused as a conflict. An announcement names its topics and its body, and can
+carry a correlation id and the announcements that caused it. Batch bodies
+quote each announcement and name its mob and its announcer.
+
+## Subscriptions
+
+A subscription belongs to one member, `{mob_id, identity}`, and names the
+topics it wants from the mobs it names (the gateway's own mob by default). It
+captures announcements from now on, or from a frontier of per-mob sequence
+numbers. Pause, resume and cancel name the revision they expect, so a stale
+caller is refused instead of overwriting a newer change.
+
+A subscriber can be:
+
+- a registered identity of the gateway's mob that the gateway's runtime serves;
+- a member of another mob hosted on the gateway, such as a mob a member
+  created, subscribed by the host by its plain roster id;
+- a member of a mob on a peer gateway, reached through
+  [keyed inject](/concepts/access-control#keyed-inject) when this gateway's
+  contact directory files that mob with a pinned key and this gateway holds a
+  signing key.
+
+Members announce and subscribe for themselves through the `mob_announcements`
+tool bundle (`mob_announce` and `mob_subscription`) when their profile lists
+it in `tools.rust_bundles`. A member of a mob a member created gets them only
+under the host's `member_tools_in_child_mobs` ceiling, by naming
+`mob_announcements` in its own profile's `tools.bundles`. A member announces
+into its own mob as itself and manages only its own subscriptions. It may name
+its own mob and the mobs above and below it among the mobs members created,
+never a sibling's. Each call is attributed to exactly one member or refused,
+within per-member limits.
+
+## Delivery
+
+- An announcement is captured for every matching subscription in the same
+  transaction that records it.
+- A lost acknowledgment is reconciled from the native status, without a second
+  submission. A batch is submitted again only after a signed answer that
+  nothing was committed.
+- A delivery stranded on a retired incarnation moves to a successor batch that
+  names its predecessor.
+- What waited past the retention window for a delivery that never started
+  expires, and the member's next batch reports it as a gap. A batch whose
+  outcome, or whose admission, was never confirmed settles without being
+  submitted again, and the next batch reports its announcements as not
+  confirmed.
+- Reading a batch shows the native status and the admitted input's runtime
+  state. Admission is not processing: the input's state says what the
+  runtime did with it.
+- Meta also reads what became of each admitted batch's turn: `handled`,
+  `handled_unverified` (consumed, with no receipt that says how),
+  `unhandled` with its cause, or `unknown`.
+- A policy decides what happens to the items of an unhandled turn. They
+  can be redelivered first in the member's next batch, under a notice
+  that says what happened. They can be held for an operator. Or the
+  outcome is only reported. Source items are redelivered by default, at
+  most twice, and plain announcements are reported, as before.
+- Processing is at least once. A turn interrupted after partial progress
+  (a cancelled run, a retired member, a stop that ends the turn) is
+  unhandled even when its batch, or part of what the turn did, already
+  reached the member's transcript. When the policy redelivers its items,
+  they come again under the notice that what the turn started may already
+  have happened, at most twice per item; the hold policy keeps them for an
+  operator instead.
+- An operator redelivers or dismisses what a batch holds.
+
+## When a subscription ends
+
+A subscription ends, with a typed reason, only on a final fact:
+
+- every mob it named was destroyed;
+- for a member of another mob hosted here, that mob was destroyed, created
+  again, completed or reset after the subscription was made;
+- a peer gateway answered, signed, that its member departed. No gateway of
+  this release records a final fact that a member left, so none gives that
+  answer yet.
+
+A member that is not registered, or not served where its deliveries go, ends
+nothing: it may be registered or served again. Neither does a member that
+left this gateway, is governed, or has no live incarnation. Its deliveries
+wait, and the subscription's `marker` says why and on what evidence (a
+verified signed answer, an unverified one, or this gateway's own fact). Its
+owed batches expire after the retention window, and `subscriptions/cancel`
+ends a subscription whose member is not coming back.
+
+## Sources
+
+A source is a durable record in one mob for one external scope that a
+collector observes: a mailbox, a calendar, a channel. The host declares it
+with `sources/put` and names the provider, the account the collector reads
+as (the source's principal), the scope, the topics it owns, who may receive
+its items (its audience) and how they reach them (its routes). A collector,
+which the host runs or schedules, reads the provider from the source's
+cursor and reports each step with `sources/advance`: the items it observed
+and the next cursor, in one transaction. Meta derives each item's source key
+from the source's principal and scope and the item's stream, id, version and
+change, and announces it as `{"kind": "source", "source_id": ...}`. Every
+version of an item, and its deletion, is its own announcement; the same
+version collected again replays instead of announcing twice, and other
+content under the same key is recorded as a conflict and never stops the
+source.
+
+Announcements carry each observed change once to each subscribed member. An
+agent that also polls the provider through its own tools sees the same items
+again; give such agents either announcements or polling for a scope, not
+both. Forwarding by a triage agent is the agent's judgement within the
+forward audience. Announcement bodies are references or summaries: the full
+content lives in the app's own index or another store and is fetched under
+the reader's own authority. Announcements are retained 7 days and are not a
+search index or a store. Audience labels are set when a member is spawned
+and change only by a respawn. Widening a forward audience trusts the triage
+agent's redaction.
+
+### Collecting
+
+- Each step names the source revision and the cursor version it read. A
+  configuration change between the read and the step moves the revision,
+  and the step is refused with the source's current position
+  (`stale_revision`); another collector's step that committed first moves
+  the version (`source_version_conflict`). Neither commits anything, and
+  the collector reads `sources/get` and starts again from there.
+- Each step carries an operation id. Retrying the same id with the same
+  request returns the original answer (`replayed`), so a lost response is
+  safe to retry; a step built from another read takes a new id.
+- The cursor token is the adapter's own: Meta stores it as given, never
+  parses or logs it, and returns it only from `sources/get` and in the data
+  of the refusals above.
+- A failure the collector cannot get past is reported with
+  `sources/record_failure`, fenced the same way, and counts in the source's
+  health.
+- A paused source takes no step and keeps its cursor. Ending a source ends
+  its generation; declaring it again starts the next generation from a
+  fresh baseline, and the ended generation's topics stay reserved to its
+  source id.
+
+### Onboarding
+
+A new source first takes the provider's position without announcing its
+history (`baselining`), or announces a bounded history first
+(`backfilling`, at most 1,000 items); it is `live` once the final page of
+that read commits. Streams, the containers inside one scope such as one
+calendar of an account, onboard the same way. When the provider cannot
+continue from the cursor, a step that rebaselines records a gap and
+announces one gap notice on the source's topics, so subscribers learn that
+changes may be missing between two times instead of receiving a flood.
+
+### Who receives source items
+
+A source owns its topics in its mob: another source cannot claim them, and a
+plain announce on one is refused. Its audience grants name members, roles
+or labels of the roster, and a member outside it can neither subscribe to
+those topics nor receive their items. Its routes say how members reach the
+items: a direct route lets members subscribe to its topics, and a triage
+route hands them to one triage member, which may announce on the route's
+forward topics to the forward audience. One member is never reachable both
+ways for one source, and the members that own a live conversation on the
+source's scope are never recipients.
+
+Coverage is checked when a member subscribes, when an item is captured,
+when its batch is sealed and immediately before every native submission.
+An item whose member no longer passes is held, never sealed or dropped,
+and is released only by a fresh check: held items are rechecked at least
+every 5 minutes; an unreadable roster decides nothing; on a peer route a
+failing last check waits out the quiet window, then reads status before
+cancelling. Items held past the retention window expire without a gap line
+to their member. On a gateway whose runtimes are not governed, the last
+check before submission is the last point Meta controls: a revocation after
+Meerkat committed a batch into the member's inbox is not recalled, and
+`audit/list` counts it as `delivered_across_revocation`. Every refusal, withholding, hold, release
+and expiry is a counted audit entry.
+
+### Detecting support
+
+A gateway that serves sources lists `mob_announcements.sources.v1` in
+`meta/capabilities.feature_capabilities`, and its `mob_announcements`
+object says whether deliveries can reach members locally. A gateway that
+serves mob announcements without sources lists their methods but not that
+capability, and an older one answers the source methods as unknown
+methods. The SDKs' `supports_announcement_sources` (Python) and
+`supportsAnnouncementSources` (TypeScript) read the capability.
+
+## Declarations
+
+A host can keep its sources and subscriptions as declarations instead of
+putting each one: in its options, inline or as a packaged sidecar file, or
+applied at runtime with `declarations/apply`. A declaration names a
+revision. Meta applies a higher one and refuses a lower one, reconciles at
+startup before it starts delivering, and changes only the records a
+declaration made, so records made at runtime and an operator's pause, end
+or cancel stand. What the runtime refuses for now, such as a member that
+has not registered yet, waits as pending and is retried;
+`declarations/get` shows each declared record as applied, pending,
+suppressed or left.
+
+A subscription can name every member of a mob with a role instead of one
+member: a role template. Each member with the role gets its own child
+subscription at the first announcement the template matches, so members
+spawned later are covered, and a member that loses the role stops
+capturing at once and still receives what it was owed.
+
+## Health and escalations
+
+A source or member that needs a person's attention raises an escalation. An
+escalation is a durable record, and only one is open per cause and subject.
+
+- A source escalates when its collections keep failing, when it stops
+  advancing because its collector is not running, and when it reports a gap
+  or a conflict. If its health policy opts in, it also escalates when it
+  stays quiet or its snapshots stay empty.
+- A member escalates when its deliveries have waited for an hour, when its
+  batches report gaps, and when items are held because its coverage changed.
+  It also escalates when it holds items for an operator after an unhandled
+  turn, and when its turns keep ending with no receipt that says how.
+- A declared record that stays pending escalates as well.
+
+An escalation stays open while its condition holds. While it is open, it is
+notified again every day by default, and it resolves when the condition
+ends.
+
+The host hears of every raise, notification and resolution through its
+`meta/on_error` hook. After a reconnect, `escalations/list` reads the events
+it missed, from its last cursor. Agents hear of escalations on the reserved
+topic `mob_announcements.health`. A member that subscribes to it receives:
+
+- the escalations of the sources whose audience covers it;
+- the member escalations, when the host's `health_audience` covers it.
+
+Several reads show the same state:
+
+- `members/get` and `members/list` read a member's backlog, holds, suspend
+  marker and open escalations.
+- A source's health reads its open escalations and whether this gateway
+  schedules its runner.
+- `meta/status` counts them.
+
+## See also
+
+- [Mob announcement methods](/api/rpc#mob-announcements-optional) - methods,
+  fields, batch states and typed errors
+- [Mob announcement sources](/api/rpc#mob-announcement-sources) - source
+  methods, the item key rule, onboarding and the audit
+- [Mob announcement declarations](/api/rpc#mob-announcement-declarations) -
+  declarations, role templates and their statuses
+- [Mob announcement health](/api/rpc#mob-announcement-health) - escalations,
+  their causes and events, member reads and the status object
+- [Configuration](/reference/configuration) - `runtime_options.mob_announcements`,
+  `control_request_window_ms` and `serve_keyed_inject`
+- [Access control](/concepts/access-control#keyed-inject) - keyed inject grants
+  and signing

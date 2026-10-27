@@ -1,0 +1,128 @@
+{
+  "explanation": "Existing diagnostics present at original HEAD as verified by outputs-only compiler host reading git show HEAD source. Exact signatures and counts are allowed only to establish a gate against new errors; this is not a clean full-project typecheck. Remove entries when correcting the corresponding debt.",
+  "compiler": "5.9.3",
+  "strict": false,
+  "sourceHead": "0071edb7abd21d57573c7cb02560f0af7bbfba1d",
+  "diagnostics": [
+    {
+      "file": "console/src/ConsoleApp.tsx",
+      "code": 2353,
+      "message": "Object literal may only specify known properties, and 'version' does not exist in type 'WorkGraphPanelData | (() => WorkGraphPanelData)'.",
+      "count": 1
+    },
+    {
+      "file": "console/src/lib/adapters.ts",
+      "code": 2352,
+      "message": "Conversion of type 'ConversationRichBlock' to type 'Record<string, unknown>' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first.\n  Type 'ConversationRichThinkingBlock' is not comparable to type 'Record<string, unknown>'.\n    Index signature for type 'string' is missing in type 'ConversationRichThinkingBlock'.",
+      "count": 1
+    },
+    {
+      "file": "console/src/lib/adapters.ts",
+      "code": 2352,
+      "message": "Conversion of type 'ConversationRichBlock[]' to type 'Record<string, unknown>[]' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first.\n  Type 'ConversationRichBlock' is not comparable to type 'Record<string, unknown>'.\n    Type 'ConversationRichThinkingBlock' is not comparable to type 'Record<string, unknown>'.\n      Index signature for type 'string' is missing in type 'ConversationRichThinkingBlock'.",
+      "count": 1
+    },
+    {
+      "file": "console/src/lib/adapters.ts",
+      "code": 2339,
+      "message": "Property 'blocks' does not exist on type 'ConversationTimelineEntry'.\n  Property 'blocks' does not exist on type 'ConversationSummaryEntry'.",
+      "count": 1
+    },
+    {
+      "file": "console/src/lib/agents.ts",
+      "code": 2339,
+      "message": "Property 'session_id' does not exist on type 'IdentityStatusRow'.",
+      "count": 3
+    },
+    {
+      "file": "console/src/lib/headless.ts",
+      "code": 2339,
+      "message": "Property 'identity' does not exist on type 'MetaIdentityChatTarget | HostWorkbenchTarget<unknown>'.\n  Property 'identity' does not exist on type 'HostWorkbenchTarget<unknown>'.",
+      "count": 1
+    },
+    {
+      "file": "console/src/lib/headless.ts",
+      "code": 2339,
+      "message": "Property 'identity' does not exist on type 'MetaIdentityChatTarget | MetaIdentityInspectTarget | HostWorkbenchTarget<unknown>'.\n  Property 'identity' does not exist on type 'HostWorkbenchTarget<unknown>'.",
+      "count": 1
+    },
+    {
+      "file": "console/src/lib/topology.ts",
+      "code": 2352,
+      "message": "Conversion of type '{ [k: string]: TopologyActionCapability; }' to type 'TopologyMutationCapabilities' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first.\n  Type '{ [k: string]: TopologyActionCapability; }' is missing the following properties from type 'TopologyMutationCapabilities': connect, disconnect, reconnect",
+      "count": 1
+    },
+    {
+      "file": "console/src/lib/use-voice-controller.ts",
+      "code": 2741,
+      "message": "Property 'liveSpeech' is missing in type '{ phase: \"idle\"; target: null; microphoneMuted: false; speakerMuted: false; error: null; notice: null; }' but required in type 'VoiceSessionSnapshot'.",
+      "count": 1
+    },
+    {
+      "file": "console/src/panels/ChatPane.tsx",
+      "code": 2339,
+      "message": "Property 'variant' does not exist on type 'ConversationMessageEntry | ConversationFlowRunEntry'.\n  Property 'variant' does not exist on type 'ConversationFlowRunEntry'.",
+      "count": 2
+    },
+    {
+      "file": "console/src/panels/ChatPane.tsx",
+      "code": 2339,
+      "message": "Property 'runtimeEvent' does not exist on type 'ConversationMessageEntry | ConversationFlowRunEntry'.\n  Property 'runtimeEvent' does not exist on type 'ConversationFlowRunEntry'.",
+      "count": 3
+    },
+    {
+      "file": "console/src/panels/ChatPane.tsx",
+      "code": 2339,
+      "message": "Property 'text' does not exist on type 'ConversationMessageEntry | ConversationFlowRunEntry'.\n  Property 'text' does not exist on type 'ConversationFlowRunEntry'.",
+      "count": 2
+    },
+    {
+      "file": "console/src/panels/ChatPane.tsx",
+      "code": 2339,
+      "message": "Property 'blocks' does not exist on type 'ConversationMessageEntry | ConversationFlowRunEntry'.\n  Property 'blocks' does not exist on type 'ConversationFlowRunEntry'.",
+      "count": 5
+    },
+    {
+      "file": "console/src/panels/MemoryPanel.tsx",
+      "code": 2304,
+      "message": "Cannot find name 'MemoryScopeOverview'.",
+      "count": 10
+    },
+    {
+      "file": "console/src/panels/MetaDock.tsx",
+      "code": 2339,
+      "message": "Property 'id' does not exist on type 'ConsoleDockNode'.\n  Property 'id' does not exist on type 'ConsoleDockPanelNode'.",
+      "count": 1
+    },
+    {
+      "file": "console/src/panels/Sidebar.tsx",
+      "code": 2677,
+      "message": "A type predicate's type must be assignable to its parameter's type.\n  Type '{ id: string; label: string; value: string; tone?: string; }' is not assignable to type '{ id: string; label: string; value: string; tone: string; }'.\n    Property 'tone' is optional in type '{ id: string; label: string; value: string; tone?: string; }' but required in type '{ id: string; label: string; value: string; tone: string; }'.",
+      "count": 1
+    },
+    {
+      "file": "console/src/panels/Sidebar.tsx",
+      "code": 2339,
+      "message": "Property 'children' does not exist on type 'SidebarNavigationNode'.\n  Property 'children' does not exist on type 'ConsoleNavigationItem<SidebarVirtualRow>'.",
+      "count": 1
+    },
+    {
+      "file": "console/src/types.ts",
+      "code": 2300,
+      "message": "Duplicate identifier 'session_id'.",
+      "count": 2
+    },
+    {
+      "file": "packages/console-components/src/topology/dense-graph-map.tsx",
+      "code": 2339,
+      "message": "Property 'name' does not exist on type '{ name: string; x: number; y: number; count: number; colour: string; } | { x: number; y: number; count: number; }'.\n  Property 'name' does not exist on type '{ x: number; y: number; count: number; }'.",
+      "count": 1
+    },
+    {
+      "file": "packages/console-core/src/control-plane.ts",
+      "code": 2322,
+      "message": "Type 'unknown' is not assignable to type '\"elevated\" | \"critical\"'.",
+      "count": 1
+    }
+  ]
+}

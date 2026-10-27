@@ -1,0 +1,13 @@
+{
+  "mode": "dry_run",
+  "state_dir": "{state_dir}",
+  "fenced_databases": [],
+  "ledger": [],
+  "renames": [],
+  "twins": [],
+  "findings": [],
+  "notes": [],
+  "errors": [
+    "the state directory {state_dir} holds predecessor (pre-0.9) state ({state_dir}/mobkit_metadata.sqlite3); refusing to open renamed stores beside it - stop every process using this installation, then carry it over once with `meta_gateway storage-adopt-predecessor --state-dir {state_dir} --apply`"
+  ]
+}

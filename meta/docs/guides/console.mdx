@@ -1,0 +1,1104 @@
+---
+title: "Console"
+description: "Embedded Meta console with configurable branding, grouped roster, chat workspace, timeline replay, signals, logs, and operator controls."
+icon: "desktop"
+---
+
+Meta ships a web-based operator console through its HTTP composition. The
+console/admin `meta_gateway` serves it directly. A persistent, SDK-driven
+`rpc_gateway` also mounts the console routes, but the two binaries are not
+interchangeable: SDK hosts drive `rpc_gateway` over stdio, while
+`meta_gateway` accepts its init handshake and then serves console/admin HTTP.
+The console provides real-time visibility into agents, conversations, events,
+logs, approvals, and recovery actions. The stock shell is built from shared
+`@console-core` and `@console-components` packages, while app-specific policy
+stays in runtime config and host code.
+
+## Accessing the console
+
+Once the runtime is serving HTTP, open the console at:
+
+```
+<http_base_url>/console
+```
+
+Both gateway binaries bind an available loopback port and report the exact
+`http_base_url` in their init result. A Rust library host chooses its own bind
+address. `http://localhost:8080/console` is correct only when your host or
+reverse proxy explicitly publishes Meta there.
+
+The HTML, JavaScript, and CSS are compiled into the binary via `include_str!`, so no build step is required at deployment time. The stock CSS carries its fonts, Inter Tight and IBM Plex Mono (SIL Open Font License 1.1), inline as `data:` URLs, so the console requests no font from another origin and looks the same on a host without internet access. A Content-Security-Policy in front of the console that restricts fonts must allow `font-src data:`.
+
+For development with instant hot-reload, see the [development workflow](#development-workflow), including the current Vite proxy limitations:
+
+```bash
+cd console
+npm run dev    # starts Vite at http://localhost:5199 with proxy to gateway
+```
+
+## Developer custom panels
+
+Products embedding Console can add panels directly to its sidebar. A panel is
+trusted application code and is independent of MCP Apps inline widgets.
+
+```tsx
+const customPanels = [{
+  id: "inventory/overview",
+  title: "Inventory",
+  mount(element, context, signal) {
+    element.textContent = "Product inventory";
+    return { dispose() { element.replaceChildren(); } };
+  },
+}];
+createConsoleApp(root, { baseUrl: "/console", customPanels });
+// Or: <ConsoleApp baseUrl="/console" customPanels={customPanels} />
+```
+
+A mount owns its container and may mount React, Vue or another framework inside
+it. Return `dispose()` to release resources, and optionally `update(context)`
+to receive context changes without remounting. The host aborts the mount's signal
+on disposal. A failing panel shows a local fallback while stock views remain
+available. Keep the registration array stable across React renders.
+
+For the stock served bundle, list developer-hosted modules at the top level of
+`console.toml`. Each module's default export is an array of panel definitions:
+
+```toml
+panel_modules = ["/panels/inventory.js"]
+```
+
+The application or reverse proxy serves the module with a JavaScript MIME type
+on the Console origin. Relative paths resolve against `baseUrl`. Realm overlays
+can replace the list, including `panel_modules = []`. Reload after changing it.
+This is a frontend loading option; tools do not supply these modules. The
+application host owns module integrity and should serve versioned, audited assets.
+
+Each panel needs a unique namespaced `id`, a `title`, and a `mount` function.
+Console adds its sidebar button and pane-menu entry and owns tabs, splits and
+layout restoration. Removing a registration leaves a restored unavailable
+placeholder. It does not execute missing code or call a tool.
+
+`ConsolePanelContext` supplies `baseUrl`, `experience`, `readOnly`, the host's
+`authority`, current `selection`, and the panel's pinned `conversation`. Use
+`openPanel(id, { intent: "split_right" })` for another registered developer panel.
+Optional `instanceKey`, JSON `params`, and a pure `validateParams` function allow
+multiple instances. Layout storage contains selectors only: never put private
+results or secrets in panel parameters. Set `followSelection: true` to follow the
+selected conversation instead of pinning it. Context and pending requests are
+discarded when the host authority changes. Layout keys include the authority
+and principal scope; opening and restoring conversation
+panels checks current visibility.
+
+Panels can use `context.request({ path, method, body }, signal)`. The default
+service uses same-origin authenticated requests, rejects redirects, blocks
+non-GET operations in view-only mode, and never retries a request. It sends
+`X-Console-Authority` and `X-Console-Conversation` as URI-encoded JSON locators.
+These headers are not authorization proof: the application must derive the viewer
+from its authenticated session and enforce access on every request. Panels are
+trusted application code, so browser checks do not replace server policy.
+
+Embedded hosts may inject `panelService(request, scope, signal)` to use their
+existing application service, forwarding the scope locators through its own
+authenticated API. The host still applies view-only and lifetime
+checks. The request scope includes the original panel conversation, not whichever
+conversation happens to be focused later.
+
+See `examples/console-extensions` for a module and local stock Console preview.
+
+## Inline MCP Apps
+
+Inline widgets use the [MCP Apps standard](https://github.com/modelcontextprotocol/ext-apps/blob/main/specification/2026-01-26/apps.mdx).
+An MCP server supplies tool metadata, a `ui://` HTML resource, and the original
+tool result. No panel module or Console-specific app manifest is needed.
+
+Enable the stock host in `config/console.toml`:
+
+```toml
+mcp_apps_sandbox_url = "http://127.0.0.1:5001/sandbox.html"
+```
+
+Run the sandbox on a separate origin, with the exact Console origin allowed:
+
+```sh
+MCP_APPS_HOST_ORIGIN=http://127.0.0.1:5000 MCP_APPS_SANDBOX_PORT=5001 npm --prefix console run mcp-apps:sandbox
+```
+
+Both gateway binaries embed the sandbox proxy, so a released gateway is all
+you need to run it outside a source checkout. Have the gateway write it into a
+directory, then start it with Node.js. It uses only the standard library, so
+it needs no `npm install`:
+
+```sh
+meta_gateway --write-mcp-apps-sandbox ./mcp-apps-sandbox   # or rpc_gateway
+MCP_APPS_HOST_ORIGIN=http://127.0.0.1:5000 MCP_APPS_SANDBOX_PORT=5001 node ./mcp-apps-sandbox/mcp-apps-sandbox.cjs
+```
+
+`--write-mcp-apps-sandbox <dir>` writes two files, creating the directory and
+replacing earlier copies, prints each file's SHA-256 and path, and exits
+without starting a gateway:
+
+| Written file | Repository source |
+| --- | --- |
+| `<dir>/mcp-apps-sandbox.cjs` | `console/mcp-apps-sandbox.cjs` |
+| `<dir>/src/mcp-apps/sandbox.js` | `console/src/mcp-apps/sandbox.js` |
+
+The proxy loads `src/mcp-apps/sandbox.js` relative to its own file. The two
+files and the Console embedded in the gateway share an internal sandbox
+protocol, so write them again from the new binary whenever you upgrade the
+gateway. The Python package and the npm package do not include the proxy.
+
+Gateways before 0.9.2 do not embed the proxy. For those, copy the two
+repository files from the release tag that matches your gateway into one
+directory, keeping the layout above, and check your copies against these
+SHA-256 digests (identical for 0.9.0 and 0.9.1):
+
+| File | SHA-256 |
+| --- | --- |
+| `console/mcp-apps-sandbox.cjs` | `157fed890922c4c3fe7c9b7a6319455f0604e9c789818f9c38d45bc115a98ad6` |
+| `console/src/mcp-apps/sandbox.js` | `4e3592ba5b8bf198322126ccb27919a8d4c4c1976a198f9c497c16833f6c3024` |
+
+The originating member profile selects its MCP servers through
+`tools.mcp_servers`, or uses its existing host tool provider. Global server
+configuration alone does not grant every member access to those tools.
+The bundled gateways enable native MCP Apps negotiation when this sandbox URL
+is configured. Rust library hosts opt in with `UnifiedRuntime::builder().mcp_apps(true)`
+and set `ConsolePolicy.ui.mcp_apps_sandbox_url` on their Console policy.
+Hosts that create their own external MCP connections must also negotiate the
+standard UI extension, for example with `McpAppsClientServiceFactory`; this
+cannot be added after a connection's handshake.
+Headless hosts omit the capability. An unavailable widget retains its ordinary
+text tool result.
+
+The host retains the original tool, arguments, complete result and available UI
+resource with the canonical session. The declared HTML is preloaded before tool
+execution; the app receives invocation inputs and results through MCP Apps
+messages. Reopening a retained view never repeats
+its original tool call or waits for the current agent turn. The resolved
+`canCallTools` capability describes access to the live host action surface;
+actual calls still require fresh native admission and the original connection.
+During a continuing model turn, an actor- and run-bound native observation
+exposes accepted tool results for display without changing committed history.
+Completed-run replay uses the runtime's committed session. These observations
+carry no action authority. UI-only `_meta` is excluded from model requests and the
+public transcript. Timeline frames carry locators, not private HTML or metadata.
+Every lookup rechecks the authenticated viewer and session ownership. Uncached
+resource reads and app actions also require `agent.send`, an editable Console
+and the original live MCP connection with negotiated MCP Apps; replacing or
+retiring it cannot silently redirect an old widget. View-only users can read
+the exact retained renderer without fresh member-credential IO. Disabling the
+sandbox URL also disables the Console's app HTTP operations.
+
+Tool visibility follows `_meta.ui.visibility`: omitted permits model and app,
+`["model"]` permits only the model, `["app"]` permits only the app, and `[]`
+permits neither. A model-only launch tool can still own a view. App actions use
+fresh native authorization, pre- and post-tool hooks and normal execution
+policy, including review when required. A post-hook refusal withholds the result
+while preserving already settled effects. View-only users cannot invoke them.
+
+App resource reads and tool execution can proceed while the model turn is still
+running. A response with no session effects or hook notices does not wait for
+that turn or trigger a session save, so several mounted widgets can poll for
+fresh data. If the call produces session effects or hook notices, the native
+actor applies and persists them before publishing the response; this settlement
+can wait for the active turn. This distinction follows the actual execution
+outcome, not a tool's `readOnlyHint`. Each request still requires fresh admission
+and the original actor and MCP connection.
+
+The current host profile supports inline rendering, resource reads and tool
+calls. It does not advertise conversation handoff, model-context updates,
+external links or downloads. The sandbox restricts fetches and frames through
+CSP and denies sensitive browser permissions. It rejects CSP grants covering
+configured Console hostnames. Browser support limits network containment:
+Chromium 140 ignores the emitted standard `webrtc 'block'` directive. Navigation
+retirement is best-effort lifecycle handling, with every fresh action still
+subject to native admission. Serve the sandbox without Console cookies or
+application APIs; production hosts should use a dedicated HTTPS origin.
+
+An ordinary MCP App can render a versioned generated document from its result
+data today. The app supplies the renderer; the runtime does not impose a
+component language. Keep generated content inside the app sandbox, separate
+from trusted developer panels, and route external actions through the same
+native admission path. Streaming updates and conversation handoff require their
+own explicit lifecycle and provenance contracts when added.
+
+## Runtime contract
+
+The bundled console uses a small set of stable protocol surfaces:
+
+| Surface | Purpose |
+|---------|---------|
+| `GET /console/experience` | Initial runtime snapshot, affordances, topology, health, and `console_config`. |
+| `GET /console/modules` | Configured module-ID summary. |
+| `GET /console/identities` | Identity-first list and inspection summary. |
+| `GET /console/timeline` | Replayable console frames for initial load and older-history paging. |
+| `GET /console/timeline/stream` | Bounded replay followed by live timeline frames. |
+| `GET /console/identity/{identity}/stream` | Identity-filtered timeline stream convenience route. |
+| `POST /console/mcp-apps/{resolve,read-resource,call-tool}` | Authenticated operations bound to the originating tool invocation. |
+| `POST /console/rpc` | JSON-RPC 2.0 endpoint for console commands. |
+| `POST /console/rpc/multipart` | Multipart JSON-RPC for image send/upload. |
+| `GET /blobs/{blob_id}` | Blob/image retrieval for rendered media. |
+
+`/console/modules` returns IDs from `RuntimeDecisionState.modules`. It is a configuration inventory, not confirmation of successful startup, current liveness, or health.
+
+The console contract version is `0.5.0` in `console/src/lib/contract.ts` and `docs/rct/console-rest-sse-contract-v0.5.0.json`. The runtime JSON-RPC contract is separately versioned by `META_CONTRACT_VERSION`.
+
+Gateway custody also differs. `rpc_gateway` installs a SQLite console timeline
+store only when its init request configures `persistent_state`; long-lived
+`--persistent` process mode alone does not make the timeline durable. Without
+persistent state, its timeline stays in memory. The console-only
+`meta_gateway` also keeps its timeline in memory. Do not infer timeline
+durability from the presence of the same browser shell and route names.
+
+## Layout
+
+The console uses a configurable workbench layout built on the shared `ConsoleWorkbench` component:
+
+```
+┌─────────────┬──────────────────────────┬────────────────┐
+│  Sidebar    │  Dock (chat panels)      │  Activity Rail │
+│  (agents)   │  ┌────┐ ┌────┐          │  (events)      │
+│             │  │tab1│ │tab2│  +        │                │
+│  + Spawn    │  ├────┴─┴────┴──────────┤│  Events        │
+│  ↻ Reconcile│  │                      ││  • text_delta  │
+│             │  │   Conversation        ││  • run_started │
+│  Agents + ≡ │  │                      ││  • ...         │
+│  ┌ Domain 3 │  │   [Message Billing]  ││                │
+│  │ Billing  │  │   ↑                  ││                │
+│  │ Delivery │  │                      ││                │
+│  │ Support  │  │  To: Billing  lead   ││                │
+│  ├ Internal │  └──────────────────────┘│                │
+│  │ Gate     │                          │                │
+│  └ Coord. 2 │                          │                │
+│    Router   │                          │                │
+│    Triage   │                          │                │
+└─────────────┴──────────────────────────┴────────────────┘
+```
+
+### Sidebar - controls and roster
+
+The left column is navigation. It can show stock controls such as topology, roster, logs, health, and approvals, plus app-defined buttons. Clicking an agent opens chat; details and profile-style data belong in roster surfaces.
+
+Agents can be grouped by configured selectors. The default useful pattern is labels first, then structural fallbacks:
+
+```toml
+[agent_list]
+group_by = ["labels.console_group", "labels.group", "role"]
+subgroup_by = ["labels.org", "labels.realm"]
+section_order = ["Personal", "Initiatives", "Internal"]
+fallback_group = "Agents"
+fallback_subgroup = "Other"
+default_pinned_agent_ids = ["identity:ops-lead"]
+collapse_single_subgroup = true
+```
+
+A sidebar button can open a stock `control`, link to an `href`, or dock an operator `panel`. A `panel` is a same-origin path (one leading `/`, at most 2048 UTF-8 bytes, no whitespace, control characters or backslashes, and no `.` or `..` segment in any spelling, `%2e` included) that the console shows in a docked frame. The path is used exactly as written; surrounding whitespace is refused, not trimmed. It cannot be combined with `control` or `href`; an invalid button is dropped.
+
+<Warning>
+An operator panel is trusted code, not an isolated frame. A same-origin page runs with the viewing operator's console session and can do anything that operator can do in the console. Configure only pages you would trust with that session. The path comes only from static operator configuration, and the console reads it from the current configuration whenever the panel opens.
+</Warning>
+
+The console and flow editor documents are served with `Content-Security-Policy: frame-ancestors 'self'`, so only their own origin can frame them. A deployment that frames the console from another origin must change before Meta 0.9; same-origin framing (for example behind a reverse proxy on the console's origin) and top-level use are unaffected. A panel page that a reverse proxy serves outside the gateway must send its own framing policy; the gateway's header does not cover responses it does not serve.
+
+Operator panels depend on a few host constraints:
+
+- The console sets no `frame-src` restriction, so same-origin panel paths stay framable. A host's own same-origin review page can be configured as a panel.
+- The panel frame is not sandboxed, so a host page's form posts keep their real `Origin`. A sandbox without `allow-same-origin` would send `Origin: null` and break same-origin form admission.
+- A page served with `frame-ancestors 'none'`, such as a secret-entry page, cannot be framed and must not be configured as a panel.
+
+Each agent row shows:
+- Agent display name and member ID
+- Status badge (active, running, idle)
+- Pin action; pinned agents persist in local storage after the first user interaction
+
+Non-addressable agents (e.g., Gate, Health Monitor) appear dimmed and cannot be messaged.
+
+An identity-first agent whose identity binding moved (after a reset, retire or
+delete), and that the console could not collect again within 2 s, has state
+unknown and offers no send or retire until a later read collects it. Its
+records carry an `unobserved` marker with reason `refresh_pending` (see
+[`GET /console/experience`](/api/rest#get-%2Fconsole%2Fexperience)). The
+topbar shows the mob as unknown, with an amber dot, when the health snapshot
+does not say whether the mob runs; a stopped mob's dot is red.
+
+### Approvals
+
+Open **Approvals** from the sidebar or **Needs you** to inspect current requests.
+Expand **Complete request details** before deciding. Stale or unavailable approval
+data does not mean there are no pending requests; use **Refresh approvals** to
+reload it. Read-only consoles cannot submit decisions.
+
+| Tab | What it shows |
+| --- | --- |
+| Pending | Current requests with Approve, Reject, and Escalate controls when decisions are available. |
+| Auto | Recorded `evaluated` events whose outcome is `allowed` or `allowed_with_audit`. |
+| Audit | Read-only records with the requesting actor, event, decision, approver, and outcome when supplied. |
+| Policies | A placeholder; policy details and editing are not available in this console. |
+
+Audit tiers display the recorded `r0`, `r1`, `r2`, or `r3`; missing or unrecognized
+tiers display as unknown. The current Meta R2 path normally allows with audit.
+It does not run the proposed native model reviewer. An approval record does not
+confirm execution: the caller remains responsible for enforcing the returned
+outcome and carrying out any permitted action. See [Gating](/concepts/gating) for
+current tier, timeout, and decision behavior.
+
+The stock console submits decisions with `approver_id: "console-ops-lead"`. There
+is no approver selector in this inbox. A request pinned to a different approver
+needs a host-provided approval surface that authenticates and maps the approver.
+
+Configure action tiers through the host's gating configuration. For SDK-launched
+stdio gateways, see [`gating_config_path`](/reference/configuration#sdk-and-gateway-runtime-options).
+That option does not configure unrelated HTTP or library entrypoints.
+
+### Dock — Chat panels
+
+The center area is a multi-panel tabbed workspace. Each panel contains a `ConversationPane` with a `ConsoleComposer`.
+
+**Tab strip** at the top:
+- Click a tab to switch panels
+- `+` to create a new empty tab
+- `×` to close a tab
+
+**Split panels** — click the split controls (← → ↑ ↓, visible on hover) to divide a panel. This lets you chat with multiple agents side-by-side.
+
+**Composer** at the bottom of each panel:
+- Textarea with "Message {agent}..." placeholder
+- Send button (↑) — also supports Enter to send, Shift+Enter for newline
+- Footer shows: target agent, member ID, profile, and status
+
+### Local action feedback
+
+When a host supplies a recognized native refusal or audit fact, the Console
+shows feedback for the affected action. A permitted sibling or later reply
+can still appear in the same run.
+
+| Card | Meaning |
+|------|---------|
+| Action refused | The action was refused under the current authorization, so it did not run. The host does not say why: a policy denial, an authorization that changed after the action was prepared, and request details the authorization could not evaluate all arrive as the same refusal, so the card names no cause. |
+| Action could not start | Required process confinement was refused before the action ran. The card retains the exact typed cause. |
+| Action blocked by hook | A pre-tool hook explicitly denied this call. Its typed hook reason remains distinct from operation permission. |
+| Hook could not start | A pre-tool hook failed to launch. This is infrastructure feedback, without an invented permission or confinement cause. |
+| Audit update unavailable | Recording the action's outcome failed. Its actual result is unchanged; this notice does not justify repeating the action. |
+
+Custom workspace hosts should retain `ConversationMessageEntry.operationFeedback`
+when transforming shared timeline entries. The reusable `ConversationTranscript`
+renders this metadata automatically. A custom renderer can display its `title`,
+`detail` and supplied `toolCallId` or `operationId`; preserve those identifiers
+verbatim. The shared projection classifies supported typed payloads, rather than
+interpreting arbitrary tool messages as decisions.
+
+Cards cover recognized current typed payloads. An unknown cause or malformed
+payload does not acquire a permission or confinement classification. Unrecognized
+tool results use the ordinary tool-result display and may show raw output; no
+dedicated fallback card is promised for every event. A missing card is not a permission decision or evidence
+of success. Preserve unfamiliar payloads in the host's authorized diagnostics.
+
+Keep run state attached to the controller's runtime lifecycle events. A local
+feedback card does not end a run. Rendering these cards does not configure
+native authorization, process confinement or durable audit; the host supplies
+those runtime capabilities separately.
+
+### Voice conversations
+
+When the gateway has an authenticated OpenAI Live configuration, a blue
+waveform button appears beside Send. Voice is not offered without OpenAI
+authentication, in a view-only console, or for an agent you cannot message.
+Microphone access requires HTTPS or localhost and your browser's permission.
+Source builds must enable the `openai-live` Cargo feature. Public GPT Live
+requires a compatible OpenAI API-key binding; a ChatGPT OAuth login alone
+does not enable this feature.
+
+Voice is an explicit gateway registration, not a setting in `console.toml`.
+For `meta_gateway`, supply `console_voice` in the init parameters alongside
+your `auth_config` and enable `persistent_sessions`:
+
+```json
+{
+  "persistent_sessions": true,
+  "console_voice": {
+    "principal": "alice@example.com",
+    "realm": "ops",
+    "auth_binding": { "realm": "ops", "binding": "openai" },
+    "voice": "marin",
+    "summary": { "model": "gpt-5.4-mini", "max_input_bytes": 65536, "max_output_bytes": 4096 }
+  }
+}
+```
+
+The optional `summary` block bounds the concurrent context summary (see
+"Context preparation" below). Every field is optional: `model` defaults to
+the background agent's own text model, `max_input_bytes` to 65536 (64 KiB)
+and `max_output_bytes` to 4096 (4 KiB); zero is rejected. The input bound
+degrades rather than fails: when the newest message alone exceeds it (a
+large tool result, say), that one whole message is summarised; only
+Meerkat's 4 MiB capture ceiling refuses a snapshot outright. In Rust the
+same knobs are `PublicLiveRegistration.summary` (`ConsoleVoiceSummaryConfig`);
+the SDK builders take them on `OpenAiLiveGatewayConfig`:
+
+```ts
+gateway.consoleVoice({
+  principal: "alice@example.com", realm: "ops",
+  authBinding: { realm: "ops", binding: "openai" }, voice: "marin",
+  summary: { model: "gpt-5.4-mini", maxInputBytes: 65536, maxOutputBytes: 4096 },
+});
+```
+
+```python
+gateway.console_voice(OpenAiLiveGatewayConfig(
+    principal="alice@example.com", realm="ops",
+    auth_binding=LiveAuthBindingRef(realm="ops", binding="openai"), voice="marin",
+    summary=OpenAiLiveSummaryConfig(model="gpt-5.4-mini", max_input_bytes=65536, max_output_bytes=4096),
+))
+```
+
+The binding must already be configured in the gateway's Meerkat host config.
+The principal must match the authenticated console subject. For an SDK-driven
+`rpc_gateway`, place the same `console_voice` registration under
+`runtime_options` and use the gateway's persistent session configuration.
+The SDK builders expose this as `.consoleVoice(config)` in TypeScript and
+`.console_voice(config)` in Python, using `OpenAiLiveGatewayConfig`.
+A Rust host that embeds `UnifiedRuntime` through its builder registers the
+same thing with `.console_voice(PublicLiveRegistration)` (plus `.live(...)`
+for the external channel) and serves
+`build_reference_app_router_with_live(decisions)`; the decision state must
+require app auth, for example `parse_console_auth_config` with
+`provider: "oidc"` for a Google-fronted console. See the Unified Runtime guide.
+Credentials stay on the server. The console checks readiness for the selected
+agent before offering voice and checks it again before microphone capture;
+registration or model availability alone does not enable the button.
+
+Click the waveform button to start a `gpt-live-1` conversation with the
+selected agent as its background agent. Audio connects without waiting for a
+summary of that agent's context; it does not change the background agent's text model.
+The voice strip above the composer names the voice agent and shows separate
+waveforms for your microphone and the live model's audio.
+
+The microphone is requested during the click, alongside the gateway readiness
+check (**Allow microphone access**); a negative readiness releases it again
+without opening a channel. Startup then distinguishes **Starting voice** from
+**Connecting audio**. As soon as the microphone is open the primary status reads
+**Listening, you can talk**; nothing about context gates it. Context
+preparation is a secondary hint beside that status: **Context arriving** while
+the initial summary is read, generated, and sent (the tooltip names the stage),
+then **Context supplied** once the provider acknowledged it, which does not
+mean the model has recalled or spoken it. Context failures stay visible
+without disabling the connected audio; a failed status read is shown separately
+and retried.
+
+Context preparation is a separate, tool-free summary request using the background
+agent's credentials; it does not change that agent's model or reasoning
+settings. It reads the most recent 64 KiB of the serialized transcript (older
+turns are dropped whole; a size bound, not a content heuristic; a newest
+message larger than the window is kept whole), asks for
+compact notes rather than replayed logs, uses low or disabled OpenAI reasoning
+where the model catalog supports it, and caps the result at 4 KiB. The public
+GPT Live transport delivers the summary in UTF-8 fragments of at most 500
+bytes, each waiting for its own provider receipt, so the 4 KiB cap bounds
+delivery at nine fragments; the prompt itself aims for about 200 words. The
+summary model defaults to the background agent's own model because Meerkat's
+catalog exposes a support tier, not a speed tier; set `summary.model` to a
+faster model on the same provider when the agent's model is slow to first
+token. A produced summary is cached per member, keyed by the source session's
+transcript cursor and a digest of the exact summarised window, so reopening
+voice on an unchanged transcript reuses it without another model call. The
+defaults come from measurement: with the previous 4 MiB input and 16 KiB
+output bounds a 40-turn session took 4 to 6 seconds to summarise; the 64 KiB
+window keeps that cost flat as histories grow. Meerkat orders the captured
+history and newer conversation updates, and cancels or fences context work
+when the call closes or changes. A context job from an old call cannot update
+a replacement call.
+
+The microphone and speaker controls are independent. Muting speakers silences
+local playback, not the conversation; the model's output waveform continues
+to show incoming audio. End the conversation with the close button.
+
+Voice stays with its original agent when you select another chat, switch
+tabs, or open an operator panel. Starting voice on another agent ends the
+previous voice conversation before opening the new one. Text composers remain
+usable throughout, including for the agent currently in voice mode.
+
+A gateway may also register `live: true` beside `console_voice` so an external
+client (for example an embodiment daemon opening `meta/live/open` over
+`{base}/live/ws`) shares the same live host. The two take turns: the newest
+engagement wins. When the external client opens a channel, the console call
+ends with "Voice moved to the external live channel", and readiness for the
+console reports `available: false` with `reason: "external_live_active"` and
+the holder until that channel closes. Starting voice again from the console
+takes the path back and closes the external channel with a typed
+`superseded_by_console_voice` reason.
+
+With GPT Live client delegation, typed messages go to the background agent;
+the composer labels that destination during voice. Its canonical context and
+results are mirrored into the voice conversation. This follows
+[OpenAI's typed-input contract](https://developers.openai.com/api/docs/guides/live-delegation#accept-typed-input):
+typed text is user data for the backend, not a live-model instruction or a
+native spoken turn. Chats with other agents do not change the voice target.
+For local session-backed agents, console messages use explicit conversational
+user admission, preserving the console interaction identity in canonical
+history. Internal events and recalled memory are not relabeled as human input.
+
+Voice ends automatically after **15 minutes of silence**, not after 15
+minutes of total call time. Text messages do not extend that audio inactivity
+window. Ending voice or closing the console releases the browser's microphone
+and playback resources. The close button immediately mutes microphone
+transmission and playback, retaining the muted WebRTC transport for up to five
+seconds while the server finalizes. Transport and capture resources are then
+released even if finalization fails; an unconfirmed close remains retryable.
+If Meerkat provides a recovery connection, the console
+reconnects to the same voice agent without changing your mute settings;
+unrecoverable audio connection loss ends voice.
+
+#### Voice acceptance tests
+
+The offline browser lane uses real local WebRTC peers without paid provider
+calls. The opt-in live lane starts a separate authenticated console and uses
+real `gpt-live-1`, real `gpt-5.5` background/peer calls, and original synthetic
+speech fixtures instead of capturing a person's microphone:
+
+```bash
+npm --prefix console run e2e:voice
+node console/voice-e2e-live.cjs --self-test
+
+# Requires OPENAI_API_KEY; this lane makes billed OpenAI calls.
+npm --prefix console run build
+npm --prefix console run e2e:voice:live
+```
+
+The live runner builds the voice-enabled gateway through `scripts/repo-cargo`.
+Set `META_VOICE_GATEWAY_BIN` to an already-built current gateway to reuse it.
+Missing credentials fail the selected live lane; they do not produce a skip
+that looks like a passing acceptance run. The runner does not use an existing
+console or record microphone input.
+
+Coverage includes spoken requests, typed-value recall, peer results arriving
+after an initial answer, and close/reopen while background work remains pending.
+Expected native transcript content must have fresh non-silent audio nearby;
+packets, old audio peaks, or mirrored voice text masquerading as a background
+answer are not sufficient. Late ordinary background facts may reach the new
+voice conversation through current canonical context, but old receipts must
+not control it.
+
+The public API does not expose pending canonical-mirror acknowledgements.
+Exact close while an append awaits its provider acknowledgement is therefore
+covered separately by deterministic Meerkat owner tests. The paid console lane
+does not infer that hidden state from an unfinished background task.
+
+The optional summary-latency benchmark makes three billed `gpt-5.5` calls and
+checks a five-second summary budget while retaining exact context values:
+
+```bash
+./scripts/repo-cargo test -p meerkat-meta --features openai-live --lib \
+  console_voice_summary_live_latency_and_context_retention -- --ignored --nocapture
+```
+
+### Signals rail - event feed
+
+The right column shows user-meaningful signals: requests, assistant replies, peer messages, image events, relevant tool activity, and alert levels. Low-level transport envelopes, scaffold prompts, raw checksum tokens, and raw tool metadata are filtered out before reaching the user-facing view.
+
+### WorkGraph panel - Tree and Graph views
+
+The WorkGraph panel (sidebar nav entry, visible when the runtime wires a WorkGraph service) reads `meta/workgraph/snapshot` and offers two views of the same data via the Tree | Graph toggle in the panel head. Tree is the default: an indented item list with claim/close actions plus the attention-binding and recent-event sections. Graph draws a read-only layered DAG - roots leftmost, one column per parent-edge depth, solid arrows into parents, dashed amber `blocks` edges, node borders/dots in the item-status palette (pulsing blue in progress, green completed, red failed, amber blocked, struck-through cancelled). Drag to pan, wheel to zoom, Fit resets, clicking a node shows its id/status/owner detail underneath. The view caps at 200 nodes and reports the overflow; all mutations stay in the tree and attention sections.
+
+## Agent grouping
+
+Agents are grouped in the sidebar by `console_config.agent_list`. Selectors support `labels.<key>`, `label:<key>`, raw label keys, and direct fields such as `group`, `subgroup`, `role`, `kind`, `identity`, `member_id`, and `agent_id`.
+
+Prefer mob member labels for domain-specific grouping:
+
+```rust
+use std::collections::BTreeMap;
+
+use meerkat_mob::ids::AgentIdentity;
+use meerkat_mob::{ProfileName, SpawnMemberSpec};
+
+fn labels(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+    pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+}
+
+SpawnMemberSpec::new(
+    ProfileName::from("lead"),
+    AgentIdentity::from("domain:billing"),
+)
+    .with_labels(labels(&[
+        ("display_name", "Billing"),
+        ("console_group", "Domain"),
+        ("org", "Payments"),
+    ]));
+```
+
+### Well-known labels
+
+| Label | Purpose |
+|-------|---------|
+| `display_name` | Human-readable name shown in the sidebar (overrides member_id) |
+| `console_group` | Recommended domain grouping selector for the stock console |
+| `group` | Legacy/sidebar group fallback |
+| `org` / `realm` | Common subgroup selectors |
+| `addressable` | Set `"false"` to hide send-message actions for internal agents |
+| `singleton` | Set `"true"` to prevent agent retirement |
+
+## Console configuration
+
+The stock console can be shaped by `config/console.toml` in the conventional workspace layout. `meta_gateway` loads that file automatically; `rpc_gateway` accepts `runtime_options.console_config_path`, and the TypeScript builder exposes `.consoleConfig("config/console.toml")`.
+
+The parsed config is projected through `GET /console/experience` as `console_config`.
+
+```toml
+title = "Ops"
+
+[brand]
+label = "Ops Console"
+logo_url = "/assets/ops.svg"
+logo_alt = "Ops"
+
+[appearance]
+default_theme = "dark"
+default_variant = "graphite"
+
+[environment]
+label = "prod"
+
+[layout]
+initial_preset = "two_columns"
+initial_control = "roster"
+initial_agent = "identity:ops-lead"
+sidebar_collapsed = false
+
+[rail]
+visible = true
+collapsed = false
+active_preset_id = "critical"
+empty_text = "No meaningful signals yet."
+
+[[rail.filter_presets]]
+id = "critical"
+label = "Critical"
+alert_levels = ["critical"]
+
+[sidebar]
+visible_controls = ["topology", "roster", "logs", "health"]
+hidden_controls = []
+
+[[sidebar.buttons]]
+id = "ops-board"
+label = "Ops Board"
+href = "https://example.test/ops"
+target = "_blank"
+icon_name = "external-link"
+
+[[sidebar.buttons]]
+id = "reviews"
+label = "Reviews"
+panel = "/host/reviews"
+
+[agent_list]
+group_by = ["labels.console_group", "labels.group", "role"]
+subgroup_by = ["labels.org", "labels.realm"]
+section_order = ["Personal", "Initiatives", "Internal"]
+fallback_group = "Agents"
+fallback_subgroup = "Other"
+default_pinned_agent_ids = ["identity:ops-lead"]
+collapse_single_subgroup = true
+
+[[agent_list.badges]]
+id = "org"
+label = "Org"
+field = "labels.org"
+tone = "info"
+
+[[agent_list.sections]]
+name = "Initiatives"
+collapsed = false
+empty_title = "No initiatives"
+empty_text = "Create one in Linear."
+
+[actions]
+inspect_label = "Profile"
+chat_label = "Open chat"
+send_label = "Send to agent"
+respawn_label = "Respawn"
+retire_label = "Retire"
+reset_label = "Reset"
+show_reset = false
+
+[realms.ops]
+title = "Ops"
+
+[realms.ops.agent_list]
+subgroup_by = ["labels.org"]
+```
+
+Keep this config view-level. It should decide presentation, ordering, visibility, labels, defaults, and links. It should not decide runtime authorization, routing, or whether an agent exists.
+
+## CSS customization
+
+The console uses the shared `@console-components` stylesheet with `--cc-*` CSS custom properties. Override these on a wrapper element with `data-cc-theme="dark"` (or `"light"`).
+
+### Key tokens
+
+| Token | Stock console host default | Purpose |
+|-------|---------|---------|
+| `--cc-workbench-sidebar-width` | `260px` | Sidebar column width |
+| `--cc-workbench-activity-width` | `300px` | Activity rail column width |
+| `--cc-sidebar-safe-top` | `6px` | Top padding in the sidebar |
+| `--cc-sidebar-pad-left` | `0` | Left padding in the sidebar |
+| `--cc-sidebar-pad-right` | `0` | Right padding in the sidebar |
+| `--cc-content-width` | `768px` | Max width for conversation content |
+| `--cc-composer-width` | `784px` | Max width for the composer |
+| `--cc-window-scale` | `1` | DPI scaling factor |
+
+### Theming
+
+Without configuration or saved preferences, the stock console defaults to light mode and the Rams variant. `console_config.appearance` can supply different defaults; saved user preferences take precedence. Shared-component hosts select light or dark mode with `data-cc-theme="light"` or `"dark"` on their `.cc-theme-scope` root.
+
+The visible console canvas and sidebar surfaces use theme/variant tokens rather than fixed colors. For example, `#131316` is the graphite-dark canvas color, not a universal body background. The shared stylesheet's fallback sidebar safe-top and left/right padding are `10px` and `12px`/`12px`; the stock host overrides them with the values in the table.
+
+## Resizable panels
+
+Both the sidebar and activity rail are resizable by dragging the edge dividers:
+
+- **Sidebar divider** — drag the right edge of the sidebar (min 180px, max 420px)
+- **Activity rail divider** — drag the left edge of the activity rail (min 200px, max 480px)
+
+The resizers use pointer capture for smooth dragging and show a subtle glow line on hover.
+
+## Experience metadata
+
+The console fetches its initial state from `GET /console/experience`, which returns agent data, topology, and health information. The key field for the sidebar is `agent_sidebar.live_snapshot.agents`:
+
+```typescript
+interface ConsoleAgent {
+  agent_id: string;
+  member_id: string;
+  label: string;
+  kind: string;           // "mob_agent" or "module_agent"
+  profile?: string;
+  state?: string;
+  group?: string;         // sidebar grouping
+  addressable?: boolean;
+  affordances?: {
+    can_send_message?: boolean;
+    can_retire?: boolean;
+    can_respawn?: boolean;
+    runtime_mode?: string;
+  };
+  labels?: Record<string, string>;
+}
+```
+
+Identity-first status and inspect payloads use lowercase wire enums for addressability:
+`"addressable"` and `"internal_only"`.
+
+## Messaging protocol
+
+<Steps>
+  <Step title="Seed the timeline">
+    Panels load recent visible frames with `GET /console/timeline?identity=identity:alice&mode=recent&limit=...`. Older history is paged with `before`; live continuation uses `latest_cursor`.
+  </Step>
+  <Step title="Send message">
+    Identity-addressed panels call `meta/console/send` through `POST /console/rpc`:
+    ```json
+    {
+      "identity": "identity:alice",
+      "content": "What is on my calendar tomorrow?",
+      "origin": "console:panel-1",
+      "origin_kind": "operator",
+      "idempotency_key": "panel-1:3f9c1c2e-6f7a-4c1b-9d2e-0b1a2c3d4e5f",
+      "handling_mode": "queue"
+    }
+    ```
+    Returns `{ "interaction_id": "...", "identity": "..." }`.
+
+    `origin` is the caller's free-form identifier for audit and routing.
+    `origin_kind` is optional and typed: `operator`, `operator_probe`,
+    `connector`, `scheduler`, `policy`, `flow` or `system`. It is stored on
+    the `user_input` frame, and the transcript labels the turn from it
+    ("Operator", "Operator probe", "Scheduled turn", ...). Any other value
+    is refused. Automated checks such as release-gate probes should send
+    `operator_probe`; the stock console sends `operator`. A declared
+    `origin_kind` is part of the idempotent request, so a retry must repeat it.
+
+    `idempotency_key` must be unique per send; the stock console mints one
+    UUID per send. An idempotent retry reuses the same key in the same
+    caller/runtime/identity/origin namespace with identical content and
+    effective `handling_mode` (default `queue`). The caller is the
+    authenticated principal (anonymous callers of an open console share one
+    local account), so another user's identical key is a different send. An
+    open console without an access controller does not resolve tokens, so all
+    of its callers share that one account; isolating users needs
+    `require_app_auth` or an access controller.
+    The original acceptance is returned and the turn is not run again. Changed
+    content or handling mode in that namespace is rejected with HTTP `409` /
+    JSON-RPC `-32009 idempotency_conflict`. A different identity or origin is
+    a different send namespace, not a guaranteed replay.
+
+    A retry of a send the gateway accepted but stopped before submitting is
+    dispatched then, once, into the session the send recorded; a retry of a
+    send the runtime already admitted only settles it. `meta/console/recover_send`
+    (`POST /console/send/recover`) reports a send's status and what the runtime
+    holds for it, for the caller's own sends only.
+
+    `skill_refs` is optional: typed, source-pinned skills selected for this
+    turn (`[{"kind": "structured", "source_uuid": "...", "skill_name": "..."}]`,
+    the same shape as meerkat `turn/start`). The addressed member resolves
+    them natively and commits a durable `SkillContext`; the console never
+    renders skill bodies into the message. A nonempty selection is part of the
+    idempotent request: a replay must repeat the same selection in the same
+    order, and a changed selection under the same key is
+    `-32009 idempotency_conflict`. Only local session-backed members accept a
+    selection.
+
+    The legacy `POST /console/send` route still exists for compatibility. New console clients should prefer JSON-RPC.
+  </Step>
+  <Step title="Receive response frames">
+    The timeline stream delivers canonical console frames:
+    ```
+    id: console:241
+    event: console_frame
+    data: {"type":"console_frame","frame":{"id":"frame-1","cursor":"console:241","dedupe_key":"example:frame-1","timestamp_ms":1750000000000,"runtime_key":"example","identity":"identity:alice","kind":"text_delta","status":"delivered","frame_version":1,"payload":{"text":"done"},"source":{"kind":"console_event"},"interaction_id":"example-interaction"}}
+    ```
+    This is the SSE wire envelope: `type` wraps a `frame` with `kind` and
+    `payload`. The frontend normalizes these into its internal `event`/`data`
+    representation; that normalized object is not the SSE wire shape.
+
+    Correlate a send with its terminal by `interaction_id` on frames whose
+    `source.kind` is `console_event`. Session-history backfill re-emits past
+    turns as frames with `source.kind = "session_history"`; they carry the
+    persisted interaction id of the turn they replay and are never fresh
+    completions, so clients MUST exclude them from live turn handling (the
+    rule is stated with the frame shape under `meta/console/query_timeline`
+    in the [JSON-RPC reference](/api/rpc)).
+
+    If a requested cursor is no longer replayable, the stream returns `409 replay_unavailable`; refetch a recent page and resume from its `latest_cursor`.
+  </Step>
+</Steps>
+
+## Console routes
+
+| Route | Method | Response |
+|-------|--------|----------|
+| `/console` | GET | HTML page |
+| `/console/assets/console-app.js` | GET | React bundle (JavaScript) |
+| `/console/assets/console-app.css` | GET | Stylesheet (CSS) |
+| `/console/experience` | GET | Experience metadata (JSON) |
+| `/console/modules` | GET | Configured module IDs (JSON), not startup/liveness/health confirmation |
+| `/console/identities` | GET | Identity-first records |
+| `/console/timeline` | GET | Replayable console timeline page |
+| `/console/timeline/stream` | GET | Timeline SSE replay and live continuation |
+| `/console/identity/{identity}/stream` | GET | Identity-filtered timeline SSE |
+| `/console/send` | POST | Legacy console send |
+| `/console/rpc` | POST | JSON-RPC 2.0 endpoint |
+| `/console/rpc/multipart` | POST | Multipart JSON-RPC for images/blobs |
+| `/blobs/{blob_id}` | GET | Blob/image retrieval |
+
+Primary RPC methods on `/console/rpc`:
+
+- `meta/console/send` - identity-addressed console send
+- `meta/console/query_timeline` - timeline replay query
+- `meta/console/list_identities` and `meta/console/inspect_identity` - identity-first inspection
+- `meta/blob/upload` - multipart blob upload
+- `meta/reload_member` - non-destructive cold reload of one identity's live
+  member (same session, same generation); the repair for a member whose sends
+  fail with the reload-required class. Gated by the `agent.respawn` action.
+  `meta/member_health` is the matching read (`agent.view`): lifecycle
+  state, last delivery error class, and the actor-loop probe verdict with the
+  open `stall_id`, from in-process reads that answer during a stall.
+- `meta/retire`, `meta/respawn`, `meta/reset`, and `meta/reset_all` -
+  operator lifecycle actions. `reset_all` resets every identity the identity
+  runtime knows (generation advance, one `identity_reset` lifecycle frame
+  each, listed under `reset`) and retires only members with no registered
+  identity, such as raw delegates (listed under `retired_delegates`); a
+  registered identity on a runtime without a session bridge fails the
+  preflight with `identity_reset_requires_session_bridge` and nothing is
+  touched. Registered identities are classified by lifecycle state first: a
+  `retiring` identity is leaving the fleet and appears in no list, and a
+  registered identity with no live member (`dormant` before its first send,
+  `broken` after a failed materialize) is listed under `failed` with
+  `kind: identity_not_resettable_in_state` and its `state`, because a reset
+  is the bridge's successor transition and needs a live member to replace;
+  the identities beside it are still reset, and the call answers `-32000`
+  with the full body in `error.data`
+- `meta/send_message` - legacy member-addressed send path
+- `meta/topology/query`, `meta/topology/plan`, `meta/topology/apply`,
+  `meta/topology/operation/get`, and `meta/topology/audit/query` - optional,
+  revisioned connection management and separately permissioned durable audit
+
+The identity routes take the durable identity or its current generated
+runtime id, `rt:<identity>:<generation>`. After a reset, the predecessor's
+runtime id is refused with `-32000` and `error.data.kind`
+`stale_identity_runtime_binding`, naming the current binding
+(`registered_runtime_member_id`, `registered_session_id`). A hidden identity's
+runtime id answers `identity_hidden_by_policy`, and a runtime id of an
+identity the runtime does not know answers `identity not found`.
+`meta/console/inspect_identity` refuses a stale runtime id the same way
+before it looks the identity up in the console aggregator.
+
+Topology management is opt-in at the runtime. With the default disabled
+policy, the stock console remains a passive topology viewer and does not show
+the Connections tab. Read-only mode exposes searchable connection state with
+server-provided denial reasons. Editable mode offers only pairwise actions
+authorized for both endpoints; bulk controls appear only when a host supplies
+an explicitly bounded action and the runtime advertises `topology.bulk`.
+
+The reusable `TopologyPanel` keeps the authority-local and bilateral CAS
+contracts distinct. Stock JSON-RPC hosts supply the scalar query `revision`.
+Same-process coordinator hosts also supply the exact
+`authority_revisions` map as `authorityRevisions`; mutation callbacks receive
+that map as `expectedAuthorityRevisions` and must pass it to the bilateral
+coordinator as `expected_revisions`. Cross-authority hosts must never collapse
+that map to the scalar local revision or route the intent through the local
+JSON-RPC adapter. They may use `topologyAuthorityRevisionToken` as the
+component's scalar view token when the coordinator snapshot has no scalar
+revision, but never as the coordinator CAS value.
+
+Editable mode requires a durable runtime state path; Meta fails closed
+rather than accepting reconnect/suppression intent that would disappear on
+restart:
+
+```rust
+use meerkat_meta::{TopologyControlMode, TopologyControlPolicy, UnifiedRuntime};
+
+let runtime = UnifiedRuntime::builder()
+    .definition_path("config/mob.toml")
+    .persistent_state(".meta/state")
+    .topology_control(TopologyControlPolicy {
+        mode: TopologyControlMode::Editable,
+        allow_bulk: false,
+        max_batch_size: 1,
+        allow_cross_authority: false,
+        ..TopologyControlPolicy::default()
+    })?
+    .build()
+    .await?;
+```
+
+## Authentication
+
+Coarse console access is governed by `ConsolePolicy`:
+
+```rust
+ConsolePolicy {
+    require_app_auth: true,   // the default; set false only for local development
+    read_only: false,         // set true for view-only deployments
+    ..ConsolePolicy::default()
+}
+```
+
+`require_app_auth` defaults to `true`. The SDK builders expose the opt-out as
+`consoleAuthRequired(false)` (TypeScript) and `console_auth_required(False)`
+(Python); `rpc_gateway` reads it as `runtime_options.console_require_app_auth`.
+
+When `require_app_auth` is `true`, protected console JSON, RPC, blob, and stream
+requests are checked against the `AuthPolicy`. The shell, static assets, and
+`/healthz` remain public. See [authentication](/guides/authentication) for the
+exact HTTP surface boundary.
+
+When `read_only` is `true`, the console can inspect identities, timelines,
+logs, and topology, but chat sends, uploads, lifecycle controls, and other write
+RPCs are denied server-side.
+
+For per-principal and per-agent authorization, install Meta's optional
+`AccessController` from `config/access.toml` or the runtime builder. When
+enabled, its ABAC policy is deny-by-default with deny-overrides across console
+REST, JSON-RPC, and SSE. JSON-RPC denials use code `-32030` with
+`data.kind = "access_denied"`; REST and SSE return HTTP 403. `mob.observe`
+authorizes mob-level observation but does not grant `agent.view` for every
+agent. To observe everything, a principal needs both `mob.observe` and an
+applicable `agent.view` grant.
+
+In **Console access**, open **Groups** and choose **Inspect access** beside a
+member to prefill that exact subject in **Preview**. Select an action and
+optional agent, then choose **Evaluate** to ask the access controller. The
+shortcut does not evaluate automatically or change policy, and remains
+available to authorized administrators on a read-only connection. A preview is
+an observation, not permission for a later action or a native tool grant.
+
+Upstream hosts that already know a user's ACL can also force the stock console UI
+into view-only mode without changing Meta auth: set
+`window.__META_CONSOLE_READ_ONLY__ = true` before loading the console bundle,
+or append `?console_read_only=true` (also accepted:
+`meta_console_read_only=true` or `view_only=true`) to the console URL. This is
+a frontend-only affordance for per-user UX; direct RPC calls are still governed
+by the server-side `ConsolePolicy.read_only` setting.
+
+Console mutation endpoints assume non-ambient credentials: pass bearer tokens
+explicitly in the `Authorization` header or `auth_token` query parameter for
+SSE/browser bootstrap cases. If a host proxy converts console auth into cookies
+or another browser-ambient credential, that host must add origin and CSRF
+protection before exposing mutation routes such as `/console/rpc`,
+`/console/rpc/multipart`, or `/console/send`.
+
+## Build system
+
+The console has two build modes:
+
+| Mode | Tool | Format | Use case |
+|------|------|--------|----------|
+| Production | esbuild | IIFE (browser) + CJS (library) | Embedded in Rust binary |
+| Development | Vite | ESM with HMR | Instant hot-reload at localhost:5199 |
+
+The production build resolves `@console-core` and `@console-components` as local workspace packages via esbuild aliases. The browser bundle and CSS are embedded in the gateway binary.
+
+### Development workflow
+
+```bash
+# Terminal 1: start the gateway
+META_REF_ADDR=127.0.0.1:63220 META_REF_HTTP_MODE=serve \
+  ./scripts/repo-cargo run -p meerkat-meta --example library_mode_reference
+
+# Terminal 2: start the Vite dev server (proxies API calls to gateway)
+cd console && npm run dev
+```
+
+The checked-in Vite proxy targets port `63220`, but currently omits
+`/console/timeline` (including `/stream`), `/console/identities`, and `/blobs`.
+Full-contract development through Vite requires adding proxy entries for
+those paths to the same backend. Alternatively, use the embedded console at
+`http://127.0.0.1:63220/console` for full-contract validation; rebuild the
+production console assets and Rust host to test frontend changes there.
+
+When using Vite, edits in `console/src/` or `packages/` appear instantly in the browser.
+
+## Architecture
+
+```
+packages/
+├── console-core/         # Types, state management, reducers (framework-agnostic)
+│   └── src/
+│       ├── conversation.ts   # Message types, timeline grouping
+│       ├── dock.ts           # Multi-panel state, presets, actions
+│       ├── sidebar.ts        # Block → section → item hierarchy
+│       ├── activity.ts       # Roster, pulse, feed panel types
+│       ├── composer.ts       # Composer view state, toolbar items
+│       └── rich-content.ts   # Markdown → rich block parser
+│
+├── console-components/   # React components + CSS (portable, no app imports)
+│   └── src/
+│       ├── workbench/        # 3-column grid layout
+│       ├── sidebar/          # Hierarchical agent sidebar
+│       ├── dock/             # Tabbed multi-panel with splits
+│       ├── conversation/     # Message transcript + empty state
+│       ├── composer/         # Frosted glass input shell
+│       ├── activity/         # Activity rail with roster/pulse/feed
+│       └── styles/           # CSS tokens, themes, per-domain stylesheets
+│
+console/
+├── src/
+│   ├── ConsoleApp.tsx        # Main app: wires shared components + data
+│   ├── lib/adapters.ts       # Meta data → console-core view states
+│   ├── lib/network.ts        # RPC, SSE, fetch helpers
+│   ├── lib/agents.ts         # Agent normalization
+│   ├── icon.tsx              # SVG sprite sheet + Icon renderer
+│   ├── console-host.css      # Meta-specific overrides + global styles
+│   └── types.ts              # ConsoleAgent, ConsoleFrame, etc.
+├── build.cjs                 # esbuild production build
+├── vite.config.ts            # Vite dev server config
+└── smoke.cjs                 # JSDOM smoke test
+```
+
+The shared packages (`console-core` and `console-components`) avoid app-store and Electron/Desktop-bridge coupling. `console-components` owns presentation; `console-core` includes a Meta HTTP/SSE transport using web APIs and a controller that accepts injected host transports. These are private workspace packages, not independently published npm API promises.
+
+## See also
+
+- [Unified runtime](/guides/unified-runtime) — how the console is composed with the runtime
+- [SSE API](/api/sse) — protocol details
+- [Authentication](/guides/authentication) — console access control

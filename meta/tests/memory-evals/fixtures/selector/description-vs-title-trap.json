@@ -1,0 +1,35 @@
+{
+  "name": "description-vs-title-trap",
+  "manifest": [
+    {
+      "id": "mem-020",
+      "kind": "Gotcha",
+      "title": "Two gateway binaries ship in meta",
+      "description": "Matters when an SDK client hangs silently on connect: the SDK must launch rpc_gateway, not meta_gateway (console/HTTP, no stdin loop). Check --version to tell them apart.",
+      "age_days": 80,
+      "rank": 5
+    },
+    {
+      "id": "mem-021",
+      "kind": "Fact",
+      "title": "SDK client hangs are logged under transport.connect",
+      "description": "Matters only when tuning log verbosity for the transport layer during load tests.",
+      "age_days": 15,
+      "rank": null
+    },
+    {
+      "id": "mem-022",
+      "kind": "Preference",
+      "title": "Operator wants gateway restarts announced in the ops channel",
+      "description": "Matters when actually restarting a production gateway process, not when debugging local ones.",
+      "age_days": 45,
+      "rank": 9
+    }
+  ],
+  "turn_text": "The Python SDK client just hangs forever on connect with no error. Any idea what is going on?",
+  "expected": {
+    "must_select": ["mem-020"],
+    "must_not_select": ["mem-021"]
+  },
+  "notes": "Description-vs-title trap: mem-021's title lexically mirrors the turn ('SDK client hangs') but its description says it only matters for log tuning; mem-020's title shares almost no words with the turn yet its description names this exact failure mode. A term-overlap scorer picks wrong; judging descriptions picks right."
+}

@@ -1,0 +1,91 @@
+---
+title: "Scheduling"
+description: "Durable schedule ownership, occurrence claims, firing, and target delivery."
+icon: "clock"
+---
+
+Meta uses Meerkat's durable `ScheduleService` as its only scheduling
+authority. Schedule definitions live in the schedule store, every firing is
+claimed as an occurrence, and the firing host records the outcome before it
+advances.
+
+<Warning>
+The stateless `meta/scheduling/evaluate` and
+`meta/scheduling/dispatch` methods were removed in contract 0.5.0.
+`runtime_options.scheduling_files` is also rejected. Static TOML evaluation
+never owned durable firing authority.
+</Warning>
+
+## Enable schedule tools
+
+Enable schedule tools on the member profile:
+
+```toml
+[profiles.operator.tools]
+schedule = true
+```
+
+The gateway binds the member's
+`meerkat_schedule_{create,get,list,update,pause,resume,delete,occurrences}`
+tools and the firing host to the same `ScheduleService` and store.
+
+To read those tools' definitions (names, descriptions and JSON input schemas)
+from a running gateway, call
+[`meta/schedule/tools`](/api/rpc#meta%2Fschedule%2Ftools), or
+`MobHandle.schedule_tools()` in Python and `MobHandle.scheduleTools()` in
+TypeScript. It returns Meerkat's base definitions without touching the
+schedule store. Inside a member's session, `meerkat_schedule_create` and
+`meerkat_schedule_update` also accept a `current_session` session target.
+
+## Durable ownership
+
+A persistent gateway stores schedules under its state directory. The firing
+pipeline has four parts:
+
+1. `ScheduleService` owns definitions and occurrence state.
+2. The schedule host resolves due occurrences.
+3. The host claims each occurrence before target delivery.
+4. The terminal firing result is written back to the same store.
+
+This makes restart recovery and duplicate suppression properties of the
+schedule domain itself. Callers do not poll a tick oracle or keep a second
+schedule registry.
+
+## Targets
+
+Schedules can target:
+
+- a session
+- a mob member
+- a named host runnable
+
+Python applications register deterministic host runnables with
+`MetaBuilder.host_runnables(...)` and handle
+`callback/schedule_fire` through `MetaRuntime.on_schedule_fire(...)`.
+The callback is delivery for a durable occurrence, not a substitute scheduler.
+
+## Rust embedding
+
+Rust embedders can supply a schedule store and attach both schedule tools and
+the firing host through `meerkat_meta::schedule_wiring`. Keep those two
+surfaces on one `ScheduleService`; using separate stores would split
+authoring from firing authority.
+
+## Migration from static scheduling
+
+1. Remove `.scheduling(...)` from Python and TypeScript builders.
+2. Remove `runtime_options.scheduling_files`.
+3. Create schedules through the `meerkat_schedule_create` tool or
+   `ScheduleService`.
+4. Bind deterministic application work as a host runnable when needed.
+5. Inspect occurrences through `meerkat_schedule_occurrences`.
+
+Unknown `runtime_options.scheduling_files` fails `meta/init` with
+`-32602`. Calls to either removed `meta/scheduling/*` method return the
+standard `-32601` method-not-found error.
+
+## See also
+
+- [Rust SDK](/sdks/rust) - library-mode composition
+- [Python SDK](/sdks/python) - host-runnable callbacks
+- [RPC API](/api/rpc) - current contract 0.5.0

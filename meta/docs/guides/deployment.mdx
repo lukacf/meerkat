@@ -1,0 +1,416 @@
+---
+title: "Deployment"
+description: "Why the gateways bind loopback, how to publish them behind a reverse proxy or across containers, and the fail-closed rule for non-loopback binds."
+icon: "server"
+---
+
+Both bundled gateways, the console/admin `meta_gateway` and the SDK-facing
+`rpc_gateway`, bind `127.0.0.1` on an ephemeral port unless the launch selects
+another address. This page explains the posture, the three shipped ways to
+publish a gateway, and the exposure gate a non-loopback bind has to pass.
+
+## Why loopback is the default
+
+Everything a gateway serves over HTTP hangs off one listener: the bundled
+console, console JSON-RPC, blobs, SSE event streams, and (when enabled) the
+live WebSocket transport. `meta_gateway` serves its protected console
+surfaces **open by default when top-level `auth_config` is absent**. Supplying
+that init parameter installs the shared JWT/OIDC configuration and requires
+app auth on those surfaces. `rpc_gateway` is fail-closed by default: it trusts
+no signing key and refuses protected console requests until the host passes
+`runtime_options.auth_config` or explicitly opts out with
+`runtime_options.console_require_app_auth = false`. Without gateway auth,
+loopback or an authenticating front proxy must provide the access boundary.
+See [Authentication](/guides/authentication) for the shared auth shape.
+
+Loopback is therefore a security posture, not an oversight. The SDK process that
+spawns a gateway shares its network namespace and reads the exact
+`http_base_url` from the `meta/init` result, so nothing on the host needs a
+fixed or public port.
+
+## Publishing a gateway
+
+### Same host or same network namespace: proxy to `http_base_url`
+
+The pattern the shipped hosts use. The SDK runtime exposes the base URL after
+`connect()` (`runtime.rust_http_base_url` in Python, `runtime.rustHttpBaseUrl`
+in TypeScript); the host's own web server proxies `/console` and the routes it
+wants to publish to that base and authenticates in front. Works for a process
+on the same machine, a Kubernetes sidecar in the same pod, or a Docker
+container started with `--network container:<gateway>`. The port is ephemeral,
+so read it at runtime rather than configuring it.
+
+`meta_gateway` additionally records `http_base_url` in its runtime registry
+under the gateway state directory, so a same-host proxy can discover a resumed
+runtime without holding the init handshake.
+
+### Separate containers: bind a non-loopback address
+
+A reverse proxy in another container on a bridge network cannot reach
+`127.0.0.1` inside the gateway's container. For that topology bind the listener
+on the container's interface and let the gate below decide whether the bind is
+allowed:
+
+<Tabs>
+  <Tab title="Python (rpc_gateway)">
+```python
+runtime = await (
+    Meta.builder()
+    .mob("config/mob.toml")
+    .gateway("./rpc_gateway")
+    .http_listen("0.0.0.0:8080")               # runtime_options.http_listen
+    .http_public_base_url("https://mob.example.com")  # reported, never bound
+    .allow_remote()                            # exposure acknowledgement
+    .console_auth_required(False)              # or .auth(...) to enforce auth instead
+    .build()
+)
+print(runtime.rust_http_base_url)         # http://127.0.0.1:8080 (same-host form)
+print(runtime.rust_http_public_base_url)  # https://mob.example.com
+```
+  </Tab>
+  <Tab title="TypeScript (rpc_gateway)">
+```typescript
+const runtime = await Meta.builder()
+  .mob("config/mob.toml")
+  .gateway("./rpc_gateway")
+  .httpListen("0.0.0.0:8080")
+  .httpPublicBaseUrl("https://mob.example.com")
+  .allowRemote()
+  .consoleAuthRequired(false)
+  .build();
+console.log(runtime.rustHttpBaseUrl);        // http://127.0.0.1:8080
+console.log(runtime.rustHttpPublicBaseUrl);  // https://mob.example.com
+```
+  </Tab>
+  <Tab title="meta_gateway">
+```bash
+# Launch flags (or META_HTTP_LISTEN_ADDR / META_HTTP_ALLOW_REMOTE=1):
+meta_gateway --http-listen 0.0.0.0:8080 --allow-remote
+```
+```json
+// or in the meta/init params, which win over flags and environment:
+{ "http_listen": "0.0.0.0:8080", "allow_remote": true,
+  "http_public_base_url": "https://mob.example.com" }
+```
+  </Tab>
+  <Tab title="Raw meta/init (rpc_gateway)">
+```json
+{ "runtime_options": {
+    "http_listen": "0.0.0.0:8080",
+    "http_public_base_url": "https://mob.example.com",
+    "allow_remote": true } }
+```
+  </Tab>
+</Tabs>
+
+`http_listen` takes an IP literal and port (`0.0.0.0:8080`, `[::]:8080`,
+`192.168.0.10:8080`); hostnames are refused so the bind cannot resolve
+differently on the next host. `HOST:0` still asks the kernel for a port.
+
+The init result then carries two base URLs:
+
+| Field | Value | Use it for |
+|-------|-------|------------|
+| `http_base_url` | The same-host form, preserving the bound port and address family: `0.0.0.0:PORT` becomes `http://127.0.0.1:PORT`; `[::]:PORT` becomes `http://[::1]:PORT`. Concrete bound addresses are unchanged | The SDK's own SSE, multipart and console RPC calls; same-host proxies |
+| `http_public_base_url` | Exactly the `http_public_base_url` the launch declared, trailing `/` removed; `null` when none was declared | Links handed to browsers and off-host clients; the base a proxy in another container publishes |
+
+The public base is advertised, never bound: it is the operator's statement of
+how clients reach the proxy in front of the gateway. The Python runtime exposes
+it as `rust_http_public_base_url` (falling back to the same-host base when
+none was declared) and TypeScript as `rustHttpPublicBaseUrl`.
+
+### Rust library host: serve the router on your own listener
+
+`UnifiedRuntime::run(listener, decisions, shutdown)` and `::serve(listener,
+decisions)` accept any `TcpListener`, and `GatewayHttpBinding::bind(addr)` is
+the shared admission type the binaries use. `examples/library_mode_reference.rs`
+(`META_REF_ADDR`) is the template. A library host owns its own exposure
+decision; run `validate_http_bind_policy` if you want the same gate.
+
+## The exposure gate: auth or acknowledgement
+
+The shared gate refuses a non-loopback `http_listen` at init, before any runtime
+is bootstrapped, unless one of two things is true in its admission-time state:
+
+1. **The console enforces app auth.** `require_app_auth` is on AND the trusted
+   JWKS carries at least one key, which is what `auth_config` (Python
+   `.auth(...)`, TypeScript `.auth(...)`) produces. The listener then carries
+   its own access boundary. Note that the fail-closed default, `require_app_auth`
+   with an empty key set, does not count: refusing everyone protects the
+   listener but authenticates nobody, and is not a deployment anyone intends.
+2. **The launch acknowledges the exposure with `allow_remote`.** This is the
+   same word and the same rule as `--allow-remote` on `rkat-rpc --tcp` and
+   `rkat mob host --listen-tcp` in Meerkat: an explicit transport-exposure
+   opt-in, not an auth mechanism. Pass it only when an authenticating proxy
+   fronts the listener.
+
+`rpc_gateway` applies its `runtime_options.auth_config` before this check.
+`meta_gateway` accepts the same JWT/OIDC shape as top-level `auth_config`,
+but its earlier exposure gate currently uses the open default decision state,
+not the later auth overlay used by the HTTP router. On that binary a
+non-loopback bind therefore still requires `allow_remote` (init param,
+`--allow-remote`, or `META_HTTP_ALLOW_REMOTE=1`), even when auth is configured.
+On both binaries a refused bind answers `meta/init` with a `-32602` error on
+the request id whose message names the address and every way out.
+
+The listener is bound right behind the gate, before any bootstrap. A fixed
+`http_listen` port makes "address already in use" a realistic init failure,
+and it is answered the same way: `-32603` on the request id naming the
+address, with nothing built behind it (no runtime, no session store, and no
+schedule executor lease that a process exit would leave held for its full
+duration).
+
+At serving startup, every admitted non-loopback listener logs one WARN line on
+stderr naming the bound address and the final serving auth posture. On
+`meta_gateway` this includes any configured `auth_config` overlay, unlike the
+open decision state used by its earlier exposure gate. It cannot be silenced
+below WARN by the default filter.
+
+## Reading schedule watchdog diagnostics
+
+Both gateways install a resident watchdog that probes every 60 seconds when
+persistent schedule-service inputs are available. Ephemeral launches and
+launches whose schedule store is unavailable do not install it. An immediate
+boot probe runs after the firing host successfully starts; if host startup
+fails, startup logs that failure and the resident watchdog still runs.
+
+Only Pending occurrences more than 120 seconds overdue under an authoritative
+Active parent contribute to a firing-pipeline stall, its count, and its oldest
+due time. A boot backlog logs WARN; a new or changed periodic stall logs ERROR,
+with a WARN heartbeat every ten unchanged polls.
+
+Paused and Deleted parents can retain Pending occurrences without a firing
+fault. The DEBUG `schedule overdue pending parent attribution` record reports
+separate `active`, `paused`, `deleted`, and `unresolved` counts; the probe does
+not modify those rows. Enable `meerkat_meta::schedule_wiring=debug` in
+`RUST_LOG` to see these buckets.
+
+Missing parent evidence or failed/poisoned reads log **observation incomplete**
+at ERROR, including at boot, rather than claiming health or attributing a
+stall to inactive work. A mixed report retains unresolved evidence alongside
+any known active backlog. Executor owner and fencing-token observations explain
+an active backlog only; they never grant firing authority.
+
+## Building with `openai-live`: link the system Opus
+
+The `openai-live` feature pulls Meerkat's WebRTC transport, whose `opus`
+dependency builds bundled Opus with CMake when `pkg-config` finds no system
+library. Install the system library in the build stage so the build links it
+and never runs CMake (which also avoids the CMake 4 incompatibility of the
+bundled sources):
+
+```dockerfile
+# build stage
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libopus-dev pkg-config \
+ && rm -rf /var/lib/apt/lists/*
+
+# runtime stage (dynamic link)
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libopus0 \
+ && rm -rf /var/lib/apt/lists/*
+```
+
+For a static link with no runtime package, set `OPUS_STATIC=1` in the build
+stage alongside `libopus-dev`.
+
+## Docker sketch
+
+```yaml
+services:
+  meta:
+    image: your-host-image
+    command: ["python", "-m", "your_host"]   # builder: .http_listen("0.0.0.0:8080").allow_remote()
+    expose: ["8080"]
+  proxy:
+    image: nginx
+    ports: ["443:443"]
+    # nginx authenticates, then proxy_pass http://meta:8080;
+```
+
+The host image runs the SDK and the gateway together (the SDK spawns the
+gateway over stdio and reaches it at `http_base_url`); only the proxy is
+published. If the proxy instead shares the gateway's network namespace, keep
+the loopback default and proxy to `http_base_url`.
+
+## Worker threads and thread limits
+
+`rpc_gateway`, `meta_gateway` and `meta_flow_editor` start one Tokio worker
+thread per available CPU, as `std::thread::available_parallelism` counts them:
+a cpuset or a cgroup CPU quota (`docker run --cpus`, a Kubernetes CPU limit)
+lowers the count, a pids limit does not. `RKAT_WORKER_THREADS=<n>` sets the
+count, as it does for the Meerkat host binaries; when it is unset, Tokio's own
+`TOKIO_WORKER_THREADS` is read in its place. A value that is not a whole
+number of at least 1 is refused at startup rather than guessed at. A Rust host
+that builds its own runtime can apply the same setting with
+`meerkat_runtime::host_stack::worker_threads_from_env()`.
+
+A container's pids limit (`docker run --pids-limit`, the cgroup's `pids.max`)
+and `RLIMIT_NPROC` count threads as well as processes. A gateway started on a
+host with more CPUs than its limit allows cannot start one worker per CPU, so
+set the worker count well below the limit, for example
+`docker run --pids-limit 256 -e RKAT_WORKER_THREADS=8 ...`. Leave headroom for
+Tokio's blocking pool, MCP stdio servers and shell commands, which count
+against the same limit.
+
+## Resume behaviour (`meta_gateway`)
+
+The HTTP listen address and the advertised `http_public_base_url` are both
+part of the runtime resume fingerprint, like `--control-listen`. Relaunching
+with a different `http_listen` or a different (or newly dropped)
+`http_public_base_url` creates a runtime with the values you declared instead
+of silently reporting a live runtime started with other ones; with a fixed
+port that new runtime cannot bind while the old one still holds the port, and
+init says so. A resumed launch (same fingerprint) reports the `http_base_url`
+and `http_public_base_url` the live runtime was started with, which are by
+construction the ones you declared.
+
+## Repairing a refused durable session
+
+A member whose committed WholeBlob document fails meerkat's audited-endpoint
+guard (`SessionError::WholeBlobAuditedEndpointDivergence`) is parked with a
+typed `session_repair_required` hold instead of retrying: it shows as
+`needs_repair` in the console and on `meta/member_health`, and the hold
+carries the two exact `rkat` commands for the runtime store this gateway
+opened. Both gateways derive that scope from their own storage composition,
+never from a guess:
+
+- the default persistent launch opens `<state_dir>/runtime.sqlite`, so the
+  commands are `rkat session repair-wholeblob <session_id> --runtime-store
+  <state_dir>/runtime.sqlite --json` (diagnose) and the same with
+  `--apply --json` (repair; add `--accept-shorter` only when the diagnose
+  report says the live transcript is shorter than the audited endpoint);
+- a composite storage provider's meerkat-level realm renders as
+  `rkat --state-root <state_dir> --realm meta session repair-wholeblob
+  <session_id> ...`;
+- an in-memory or declared-ephemeral runtime store has no document to repair,
+  so no scope is derived and the commands keep explicit `<state-root>` /
+  `<realm>` placeholders.
+
+Stop nothing: the member is already parked. Run the diagnose command, then
+the apply command, then `meta/reload_member` on the identity; the same
+verb, with no extra flag, resumes the same session and generation and clears
+the hold.
+
+## Reading a gateway exit
+
+Both gateways log on stderr, through `tracing`, at the default filter (no
+`RUST_LOG` needed). When the run loop ends, the binary writes one INFO line
+naming which branch ended it, runs the graceful shutdown sequence, then writes
+a closing bookend:
+
+```text
+INFO rpc_gateway: rpc_gateway dispatch loop ended; running graceful shutdown reason=signal signal=SIGTERM
+INFO rpc_gateway: rpc_gateway shutdown complete; exiting reason=signal signal=SIGTERM
+```
+
+`reason=` is one of these tokens; `signal=` (`SIGINT` or `SIGTERM`) is present
+only when the reason is `signal`.
+
+| Binary | `reason=` | Meaning |
+|--------|-----------|---------|
+| `rpc_gateway` | `stdin_closed` | The launching process closed the gateway's stdin (EOF) or the read failed; the reader logs which just before. Exiting on EOF is by design: the SDK that owned the pipe is gone. |
+| `rpc_gateway` | `signal` | SIGINT or SIGTERM arrived while stdin was still open. |
+| `rpc_gateway` | `sdk_shutdown_handshake` | The SDK's `meta/shutdown` handshake asked for an orderly stop. |
+| `meta_gateway` | `signal` | SIGINT or SIGTERM. |
+| `meta_gateway` | `http_server_ended` | The HTTP server task ended on its own. A clean end proceeds to graceful shutdown; an abnormal one is also logged at ERROR and the process exits 1. |
+| `meta_gateway` | `stdin_guard_ended` | Not expected: the stdin guard parks forever after EOF. Named so it can never be silently absorbed. |
+
+`meta_gateway` does not exit on stdin EOF. It logs `stdin closed by the
+launching process; meta_gateway keeps serving HTTP until SIGINT or SIGTERM`
+and stays up, so a later exit is attributed to what actually ended it. After a
+signal it exits once shutdown completes whether or not stdin is still open (a
+terminal, or a parent holding the pipe); both gateways exit explicitly on that
+path because tokio's stdin read cannot be cancelled.
+
+Panics are reported through the same stream at ERROR, with `thread`, `file`,
+`line`, `column` and `payload` fields, before the standard panic message
+(`RUST_BACKTRACE` still works). A panic on a tokio worker unwinds one task and
+the process keeps running, so this line may be the only record of one.
+
+How to read a gateway that is gone:
+
+- The "loop ended" line is present with `reason=signal`: a supervisor or
+  operator stopped it. Check who sent the signal (container stop, health check
+  timing out during a long console operation, `kill`).
+- `reason=stdin_closed` on `rpc_gateway`: the SDK host process exited or closed
+  the pipe; look at the host first.
+- The "loop ended" line is present but the bookend is not: the shutdown
+  sequence wedged or the process was killed during it.
+- Neither line, but a `panic` ERROR: a crash; the line names the source
+  location.
+- No line at all: the process was killed from outside (SIGKILL, an OOM kill,
+  a stack overflow) or aborted. The exit status names which; `137` is SIGKILL,
+  `139` is a segfault or stack overflow, `134` is an abort.
+
+## WorkGraph realms for mob members
+
+Meerkat builds every mob member in the realm `mob.<mob_id>` and rescopes the
+WorkGraph service the gateway hands the mob runtime to that realm, so a member
+resolves its attention bindings there and nowhere else. The gateway's own
+WorkGraph service is scoped to the same realm at construction, which is why a
+goal bound to a member from the console or the RPC surface lands where the
+member reads it.
+
+Two consequences matter to an operator:
+
+- A goal, binding or reassignment whose target names a member of another mob
+  (an explicit `owner` key of the form `mob/<other>/agent/<identity>`) is
+  refused with JSON-RPC `-32602` and `data.kind =
+  "attention_target_realm_mismatch"`. It is not stored anywhere. Create that
+  work through the other mob's own runtime.
+- Bindings written before this rule existed are moved at bootstrap. A child
+  mob spawned by an agent tool used to share the parent runtime's service
+  unscoped, so a goal bound to a child-mob member lived in the parent realm
+  and the child member found it there; it no longer does. On every bootstrap
+  the runtime scans its realm for active or paused bindings whose owner key
+  names another mob, re-creates each in that mob's realm over the same store
+  (title, description, mode, policies, priority, labels, timing fields,
+  external and evidence refs, delegated authority, projection policy and the
+  paused state carried; edges of the original item are not), and cancels the
+  original goal, which stops its binding. A second bootstrap finds nothing to
+  move. `meta/capabilities` reports the run under `workgraph_realm_migration`
+  (`mode`, `scanned_bindings`, `skipped_terminal`, `migrated[]` with the old
+  and new binding and item ids, and an `outcome` that records a failed scan or
+  write instead of aborting the launch). Library hosts choose the mode with
+  `MobBootstrapSpec::with_workgraph_realm_migration` (`apply`, `dry_run`,
+  `off`).
+
+## Blob ids are not meerkat content blob ids
+
+A Meta blob store applies one of two digest recipes depending on how an
+object enters it. Images that arrive through meerkat's `BlobStore` face
+(`Base64BlobStoreAdapter::put_image`, used by the gateway, the unified runtime
+and the console voice host) and images uploaded through the console
+(`meta/blob/upload`, multipart `image_upload` placeholders) are addressed
+with meerkat's `content_blob_id`, `sha256(canonical_media_type || 0x00 ||
+base64_text)` over the base64 form, so meerkat's read-back verification
+(durable fork preflight, realtime image hydration) accepts them. Objects
+written through Meta's native `BinaryBlobStore::put_bytes` (non-image
+`meta/blob/*` objects), and image blobs written by Meta builds that
+predate this rule, carry Meta's own address, `sha256(media_type || 0x00 ||
+raw_bytes)` over the decoded bytes (`crates/meerkat-meta/src/blob_store.rs`,
+`compute_blob_id`). Both render as `sha256:<64 hex digits>`, so the same PNG
+under the two recipes carries two visually indistinguishable ids. The store
+resolves both forms through both faces, so references written before the rule
+keep hydrating; still, compare ids only within one recipe. When meerkat's
+read-back verification meets an image reference whose meerkat content address
+differs, it asks the store through `BlobStore::attest_address`;
+`Base64BlobStoreAdapter` recomputes Meta's own recipe over the returned
+payload and attests only an exact match. The attestation covers the media
+type stored beside the bytes, not the media type a transcript block declares
+for the reference; binding the two is the caller's side of the check. A
+durable fork of a transcript that holds such a reference then stores the image
+under its meerkat content address and points the child at it, leaving the
+source transcript and object in place, and realtime history hydration accepts
+the reference. The side by side
+recipe, provenance rules and the planned unification are documented in the
+meerkat storage operations runbook under "Blob digests in meerkat and Meta".
+
+## See also
+
+- [Configuration](/reference/configuration): the `http_listen`,
+  `http_public_base_url` and `allow_remote` rows
+- [Authentication](/guides/authentication): configuring `auth_config`
+- [Console](/guides/console): the console surface these binds publish
+- [Unified runtime](/guides/unified-runtime): `GatewayHttpBinding` in a library host

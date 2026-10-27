@@ -1,0 +1,86 @@
+.toolkit-view {
+  --toolkit-ink: #182a30;
+  --toolkit-muted: #42545d;
+  --toolkit-line: #c6d3d7;
+  color: var(--toolkit-ink);
+  font: 1rem/1.55 system-ui, sans-serif;
+  max-width: 80rem;
+  margin: auto;
+  padding: clamp(1rem, 3vw, 2.5rem);
+  background: #f4f7f8;
+}
+.toolkit-view *, .toolkit-view *::before, .toolkit-view *::after { box-sizing: border-box; }
+.toolkit-view h2 { margin: 1.8rem 0 .8rem; font-size: 1.5rem; }
+.toolkit-view h3 { margin: 0 0 .5rem; font-size: 1.15rem; }
+.toolkit-view p { margin: .45rem 0; }
+.toolkit-card {
+  padding: 1.25rem;
+  border: 1px solid var(--toolkit-line);
+  border-radius: .75rem;
+  background: white;
+  margin-bottom: 1rem;
+  overflow-wrap: anywhere;
+}
+.toolkit-card .toolkit-card { margin-top: 1rem; background: #fafcfc; }
+.toolkit-view dl { margin: .8rem 0; }
+.toolkit-view dl > div { display: grid; grid-template-columns: minmax(9rem, 1fr) 3fr; gap: .65rem; margin: .4rem 0; }
+.toolkit-view dt { font-weight: 650; }
+.toolkit-view dd { margin: 0; }
+.toolkit-view button, .toolkit-view summary { font: inherit; cursor: pointer; }
+.toolkit-view button {
+  border: 1px solid #577780;
+  color: #103d47;
+  background: #fff;
+  border-radius: .4rem;
+  padding: .55rem .8rem;
+  min-height: 2.75rem;
+}
+.toolkit-view button:hover:not(:disabled):not([aria-disabled="true"]) { background: #e5f0f1; }
+.toolkit-view button:disabled { color: #53666b; background: #edf1f2; cursor: default; }
+.toolkit-view :focus-visible { outline: 3px solid #005f80; outline-offset: 3px; }
+.toolkit-controls { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: 1rem; }
+.toolkit-controls > div { display: flex; flex-direction: column; gap: .3rem; max-width: 30rem; }
+.toolkit-controls span { font-size: .9rem; color: var(--toolkit-muted); }
+.toolkit-catalog-filters { display: flex; flex-wrap: wrap; gap: 1rem; margin: 1rem 0; }
+.toolkit-catalog-filters label { display: flex; flex-direction: column; gap: .3rem; font-weight: 650; }
+.toolkit-catalog-filters input, .toolkit-catalog-filters select {
+  font: inherit;
+  color: inherit;
+  background: #fff;
+  border: 1px solid #577780;
+  border-radius: .4rem;
+  padding: .55rem .8rem;
+  min-height: 2.75rem;
+  max-width: 100%;
+}
+.toolkit-view button[aria-disabled="true"] { color: #53666b; background: #edf1f2; cursor: default; }
+.toolkit-view [hidden] { display: none; }
+.toolkit-status { font-weight: 600; }
+.toolkit-status-ready { color: #175834; }
+.toolkit-status-pending { color: #365b70; }
+.toolkit-status-attention { color: #8a3e15; }
+.toolkit-status-inactive { color: #4a5559; }
+.toolkit-destination strong, .toolkit-destination code { display: block; unicode-bidi: isolate; direction: ltr; }
+.toolkit-view details { margin-top: 1rem; }
+.toolkit-view pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .9rem; }
+.toolkit-conversation > ol { list-style: none; padding: 0; }
+.toolkit-conversation > ol > li { margin: 1rem 0; }
+.toolkit-conversation .toolkit-plain-message { white-space: pre-wrap; }
+.toolkit-markdown { overflow-wrap: anywhere; }
+.toolkit-markdown h3, .toolkit-markdown h4, .toolkit-markdown h5, .toolkit-markdown h6 { margin: 1rem 0 .4rem; }
+.toolkit-markdown ul, .toolkit-markdown ol { padding-left: 1.6rem; }
+.toolkit-markdown li { margin: .25rem 0; }
+.toolkit-markdown blockquote { margin: .7rem 0; padding-left: 1rem; border-left: 3px solid var(--toolkit-line); }
+.toolkit-markdown code { font-family: ui-monospace, monospace; background: #e5edf0; border-radius: .2rem; padding: .1rem .2rem; }
+.toolkit-markdown pre { padding: .7rem; background: #e5edf0; }
+.toolkit-markdown pre code { padding: 0; }
+.toolkit-markdown table { display: block; overflow-x: auto; border-collapse: collapse; max-width: 100%; }
+.toolkit-markdown th, .toolkit-markdown td { border: 1px solid var(--toolkit-line); padding: .4rem .6rem; }
+.toolkit-markdown a { color: #005f80; text-decoration: underline; }
+.toolkit-conversation label { display: flex; flex-direction: column; gap: .4rem; }
+.toolkit-conversation textarea { font: inherit; padding: .7rem; resize: vertical; width: 100%; border: 1px solid #577780; border-radius: .4rem; }
+@media (max-width: 38rem) {
+  .toolkit-view dl > div { display: block; }
+  .toolkit-view dd { margin: .15rem 0 .65rem; }
+  .toolkit-controls, .toolkit-controls > div { width: 100%; }
+}

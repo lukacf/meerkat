@@ -1,0 +1,25 @@
+{
+  "name": "distiller-noop-chitchat",
+  "transcript": [
+    { "role": "user", "text": "morning! how's it going?" },
+    { "role": "assistant", "text": "Good morning! All quiet — no pending tasks from yesterday. What would you like to work on?" },
+    { "role": "user", "text": "nothing yet, just checking in. maybe later we'll look at the dashboard" },
+    { "role": "assistant", "text": "Sounds good — I'll be here when you're ready." }
+  ],
+  "existing_manifest": [
+    {
+      "id": "mem-001",
+      "kind": "Preference",
+      "title": "Operator prefers terse status updates",
+      "description": "Matters when reporting progress: keep it to one or two lines.",
+      "age_days": 12,
+      "rank": 2
+    }
+  ],
+  "tombstones": [],
+  "taint": { "session_tainted": false },
+  "expected": {
+    "noop": true
+  },
+  "notes": "No-op preferred (§8.4 doctrine rule 1): pure chit-chat with a vague 'maybe later' — nothing durable, no operator correction, no confirmed fact. 'Maybe we'll look at the dashboard' is not an open loop (no commitment, no resolution condition). The correct output is an empty op list."
+}

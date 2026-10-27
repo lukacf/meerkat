@@ -1,0 +1,61 @@
+{
+  "manifest_version": 1,
+  "created_by_mobkit": "0.8.26",
+  "definition": {
+    "id": "adoption-fixture-planners",
+    "orchestrator": null,
+    "profiles": {
+      "planner": {
+        "model": "gpt-5.5",
+        "provider": "openai",
+        "self_hosted_server_id": null,
+        "image_generation_provider": null,
+        "auto_compact_threshold": null,
+        "resume_overrides": [
+          "model",
+          "provider"
+        ],
+        "skills": [],
+        "tools": {
+          "builtins": false,
+          "shell": false,
+          "comms": true,
+          "memory": false,
+          "workgraph": false,
+          "mob": false,
+          "schedule": false,
+          "image_generation": false,
+          "read_only": false,
+          "mcp": [],
+          "mcp_servers": [],
+          "rust_bundles": []
+        },
+        "peer_description": "",
+        "external_addressable": true,
+        "backend": null,
+        "runtime_mode": "turn_driven",
+        "max_inline_peer_notifications": null,
+        "output_schema": null,
+        "provider_params": null
+      }
+    },
+    "models": {},
+    "image_generation_provider": null,
+    "wiring": {
+      "auto_wire_orchestrator": false,
+      "role_wiring": []
+    },
+    "skills": {},
+    "backend": {
+      "default": "session",
+      "external": null
+    },
+    "flows": {},
+    "topology": null,
+    "supervisor": null,
+    "limits": null,
+    "spawn_policy": null,
+    "event_router": null
+  },
+  "created_by_authority": "authoritative"
+}

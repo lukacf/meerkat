@@ -1,0 +1,30 @@
+{
+  "name": "distiller-operator-correction",
+  "transcript": [
+    { "role": "user", "text": "run the test suite" },
+    { "role": "assistant", "text": "Running `cargo nextest run --workspace` now." },
+    { "role": "tool results", "text": "error: could not acquire lock on package cache" },
+    { "role": "user", "text": "no — never run raw cargo in this repo. Always go through ./scripts/repo-cargo, it isolates CARGO_HOME per worktree. Raw cargo fights other checkouts for the lock." },
+    { "role": "assistant", "text": "Understood — using ./scripts/repo-cargo nextest run --workspace instead." },
+    { "role": "tool results", "text": "Summary: 412 tests run: 412 passed" }
+  ],
+  "existing_manifest": [
+    {
+      "id": "mem-010",
+      "kind": "Fact",
+      "title": "Test suite lives under nextest",
+      "description": "Matters when choosing a test runner: the repo standard is cargo-nextest.",
+      "age_days": 30,
+      "rank": 4
+    }
+  ],
+  "tombstones": [],
+  "taint": { "session_tainted": false },
+  "expected": {
+    "proposals": {
+      "must_contain": ["repo-cargo"],
+      "must_not_contain": ["412 passed"]
+    }
+  },
+  "notes": "Operator corrections are the highest-signal evidence (§8.4 doctrine rule 2): the operator overrode the assistant's tool choice with a rule and a reason. A good distillate quotes the correction near-verbatim ('never run raw cargo... always ./scripts/repo-cargo') with epistemic operator_said. The transient test outcome (412 passed) is NOT durable memory."
+}

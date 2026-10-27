@@ -1,0 +1,76 @@
+Meta 0.9.3 H-local production-shaped state directory (synthetic) for #306 A1/G1
+Produced 2026-10-19T15:48:38Z by mint_released_0_9_3_h_local_rematerialized.py
+
+PRODUCER
+  release asset: meta-rpc-gateway-0.9.3-x86_64-unknown-linux-gnu.tar.gz sha256 b416df1ba5648ca3ed849dec2692f664c37b0e7277232a6d2421ac53961a18b0
+  binary: rpc_gateway sha256 757519ed1210d16d865e2e37de3fba098a1cca6ccba6a7e1dc646963fb04a335
+  driver: mint_released_0_9_3_h_local_rematerialized.py sha256 f52b403a4ed088d776c6607c1134f1b180cd362f1c192e59b7ff0111a88c756f
+  model: loopback chat-completions fake; reply 'corpus reply N'
+  compaction: {"auto_compact_threshold": 50000, "not_overridden_093_defaults": {"history_retained_rewrites": 4, "min_turns_between_compactions": 3}, "recent_turn_budget": 1, "reported_prompt_tokens": 60000, "trigger": "a user message carrying [ct:<key>] reports a cost above the threshold once"}
+
+VARIANT rematerialized
+
+RUNS (runs/bootN = the state directory copied after boot N ended; ./state = runs/boot3 without the omitted files)
+  boot1: roster of 2: agent:hl-01 .. agent:hl-02; clean shutdown
+  boot2: roster of 2: agent:hl-01 .. agent:hl-02; clean shutdown
+  boot3: roster of 3: agent:hl-01 .. agent:hl-03; clean shutdown
+  omitted from ./state: peer_key.ed25519 (gateway peer key (key material); an installation without host pairings mints a new one on boot)
+  empty directories in ./state (git does not keep them): blobs
+
+IDENTITIES (sessions seen in order; final status)
+  agent:hl-01: sessions 1 ['01a154d9-b570-7252-8fb1-0a3695eb0e01']; final active session 01a154d9-b570-7252-8fb1-0a3695eb0e01 generation 0 (boot 3)
+  agent:hl-02: sessions 2 ['01a154d9-b572-7c00-959e-914b8dff3889', '01a154d9-bb43-79f3-b4cc-c901ec2e8d0f']; final active session 01a154d9-bb43-79f3-b4cc-c901ec2e8d0f generation 0 (boot 3)
+  agent:hl-03: sessions 1 ['01a154d9-bb45-7401-a149-a3065631c2c4']; final active session 01a154d9-bb45-7401-a149-a3065631c2c4 generation 0 (boot 3)
+
+0.9.3 RESTART PROBE (the 0.9.3 gateway started once more on a copy of ./state)
+  started True
+
+0.9.3 REFUSALS RECORDED BY THE DRIVER (boot op identity: code message)
+
+COMMITTED SESSIONS (runtime.sqlite WholeBlob authority, WAL included)
+  01a154d9-b570-7252-8fb1-0a3695eb0e01: revision 3 messages 3 compacted_markers 0 continuity head True strand messages 3 snapshot messages 1 record of agent:hl-01 messages_sha256 573620ca2bd249328d100406c06b3ee2096ea3e22fcde5467b46560fcfe60f57
+  01a154d9-b572-7c00-959e-914b8dff3889: revision 3 messages 3 compacted_markers 0 continuity head False strand messages 0 snapshot messages None record of None messages_sha256 56dd52ee74f1ad867e7dff9b9740949f27f865c65cddaacdba394645b9db6d06
+  01a154d9-bb43-79f3-b4cc-c901ec2e8d0f: revision 1 messages 1 compacted_markers 0 continuity head False strand messages 0 snapshot messages 1 record of agent:hl-02 messages_sha256 541c1c80352a1f6b8e1f45a5aedb988c48840f95ec29cbebdc1b564d6bd466be
+  01a154d9-bb45-7401-a149-a3065631c2c4: revision 1 messages 1 compacted_markers 0 continuity head False strand messages 0 snapshot messages 1 record of agent:hl-03 messages_sha256 9ce7244f2e12028cecfb9dfeea8f65416f8ad61f43bb233e58c4fdc9b8058445
+
+SESSIONS BOUND WITHOUT A CONTINUITY HEAD (no turn since they were materialized)
+  agent:hl-02 (materialized again after delete_identity) session 01a154d9-bb43-79f3-b4cc-c901ec2e8d0f: 1 message at revision 1; continuity head False, strand messages 0, snapshot messages 1 (equal to the body: True), record binds True
+    pre-delete session 01a154d9-b572-7c00-959e-914b8dff3889: 3 messages at revision 3, runtime-only True, bound to nothing
+  agent:hl-03 (first materialization) session 01a154d9-bb45-7401-a149-a3065631c2c4: 1 message at revision 1; continuity head False, strand messages 0, snapshot messages 1 (equal to the body: True), record binds True
+
+PACKED (stored gzip-compressed under the repository's per-file limit; inflate before use)
+  none
+
+FILES (sha256 bytes path; the raw bytes, after inflating the packed files)
+edbee11a2e909b4413b8e2265b665c0f156aaba120e5c715a11d8fc30ba789d7 4096 ./state/continuity.sqlite3
+1c43242fb2db9ef4c731172dba86c0bf08e0caafaae2cbe942c5dd81ca686447 32768 ./state/continuity.sqlite3-shm
+131ca5c5cd78d9a850c1fcc2be2529cdd1eecd464259e9e3207ac5694bd8b371 449112 ./state/continuity.sqlite3-wal
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/continuity.sqlite3.mfence
+119af1c8aea8c495d6856cd6667bbd7e890744ff6bdbbb66f19f7156866485e8 286720 ./state/council.sqlite3
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/council.sqlite3.mfence
+960c0478463917edf24108bb44083a830db6fabfda86380674e63dea28f25665 294912 ./state/event_log.sqlite3
+fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb 32768 ./state/event_log.sqlite3-shm
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/event_log.sqlite3-wal
+772aa9eee5fc380fd6f19f3e7a1416a889df109384e065608760c10dfc6197b9 1530 ./state/event_log.sqlite3.composition.json
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/event_log.sqlite3.mfence
+6fb6a98bcf2e580c5c67cadd5eeaad801c4d72295ba6cbbe9f6d00f85ae17a18 73728 ./state/meta_console.sqlite3
+e5692c893ae922bb9627c3e7e1fe54419d05e2eb5ce005cf6b3057cabbecc730 32768 ./state/meta_console.sqlite3-shm
+3efb5e7b6a2c959d4f5bb6706841c522f583ad07a894f01938bf42b761cbf7cf 28872 ./state/meta_console.sqlite3-wal
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/meta_console.sqlite3.mfence
+e40b7bb784a08bbe4f540e1ad445850dd6f2c17f4bf3597b286c31393177be23 20480 ./state/meta_metadata.sqlite3
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/meta_metadata.sqlite3.mfence
+fb08ed03ea0c90fc64a3224af8524f24517a73eb29d3f8cba42ff2a54b47de59 331776 ./state/runtime.sqlite
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/runtime.sqlite.execution-custody
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/runtime.sqlite.execution-custody-admission
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/runtime.sqlite.mfence
+73344e24e51fbd6166e692d1793b8d4b4899f0b0fd659e0af27cebd76cd62acf 77824 ./state/schedule.sqlite
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/schedule.sqlite.mfence
+b877952a5a1ef5debd35fbdbef3d63e43204f30d13bf5c8c3f7e891e70bbef15 118784 ./state/workgraph.sqlite3
+fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb 32768 ./state/workgraph.sqlite3-shm
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/workgraph.sqlite3-wal
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/workgraph.sqlite3.mfence
+337b748a2b398ae229c8c3e9b4c0cf009e1c03afce5d294160252778217d2fbb 40960 ./state/meta/jobs.sqlite3
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/meta/jobs.sqlite3.mfence
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/mobs/child-mobs.lock
+119af1c8aea8c495d6856cd6667bbd7e890744ff6bdbbb66f19f7156866485e8 286720 ./state/mobs/realm_profiles.db
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/mobs/realm_profiles.db.mfence

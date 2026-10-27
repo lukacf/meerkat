@@ -1,0 +1,35 @@
+{
+  "name": "gotcha-vs-reference",
+  "manifest": [
+    {
+      "id": "mem-040",
+      "kind": "Gotcha",
+      "title": "Console dedup collapses repeated identical assistant replies",
+      "description": "Matters when changing console timeline rendering or investigating missing messages: identical live/history twins share no id and get over-culled; the real fix is upstream in meerkat transcript persistence.",
+      "age_days": 35,
+      "rank": 3
+    },
+    {
+      "id": "mem-041",
+      "kind": "Reference",
+      "title": "Console timeline scalability plan",
+      "description": "Matters when planning large-scale timeline pagination or virtualization work: design doc at docs/archive/design/console-timeline-scalability-plan-2026-05.md.",
+      "age_days": 70,
+      "rank": null
+    },
+    {
+      "id": "mem-042",
+      "kind": "OpenLoop",
+      "title": "Add agent/mob from console is parked",
+      "description": "Matters when someone proposes console-side mob creation: the work is parked until the flow-editor PR merges; check its status first.",
+      "age_days": 50,
+      "rank": 10
+    }
+  ],
+  "turn_text": "A user reports that some assistant messages vanish from the console timeline after a refresh. Investigate.",
+  "expected": {
+    "must_select": ["mem-040"],
+    "must_not_select": ["mem-042"]
+  },
+  "notes": "Gotcha-vs-reference distinction: both mem-040 and mem-041 are console-timeline records, but the gotcha names this exact symptom while the reference is a planning doc for different work. mem-041 is left as don't-care; a strict selector skips it, and the fixture only hard-fails selecting the parked open loop."
+}

@@ -1,0 +1,103 @@
+Meta 0.9.3 H-local production-shaped state directory (synthetic) for #306 A1/G1
+Produced 2026-10-19T10:37:28Z by mint_released_0_9_3_h_local.py
+
+PRODUCER
+  release asset: meta-rpc-gateway-0.9.3-x86_64-unknown-linux-gnu.tar.gz sha256 b416df1ba5648ca3ed849dec2692f664c37b0e7277232a6d2421ac53961a18b0
+  binary: rpc_gateway sha256 757519ed1210d16d865e2e37de3fba098a1cca6ccba6a7e1dc646963fb04a335
+  driver: mint_released_0_9_3_h_local.py sha256 f913b7dce234a488161559485e8256f9245cfce9bde32cdaeb21056b6cea918f
+  model: loopback chat-completions fake; reply 'corpus reply N'
+  compaction: {"auto_compact_threshold": 50000, "recent_turn_budget": 1, "trigger": "a user message carrying [ct:<key>] reports a cost above the threshold once"}
+
+VARIANT stuck
+
+RUNS (runs/bootN = the state directory copied after boot N ended; ./state = runs/boot2 without the omitted files)
+  boot1: roster of 18: agent:hl-01 .. agent:hl-18; clean shutdown
+  boot2: roster of 17: agent:hl-01 .. agent:hl-17; clean shutdown
+  omitted from ./state: peer_key.ed25519 (gateway peer key (key material); an installation without host pairings mints a new one on boot)
+  empty directories in ./state (git does not keep them): blobs
+
+IDENTITIES (sessions seen in order; final status)
+  agent:hl-01: sessions 1 ['01a153bc-a744-7a11-9237-832a0c854261']; final active session 01a153bc-a744-7a11-9237-832a0c854261 generation 0 (boot 2)
+  agent:hl-02: sessions 1 ['01a153bc-a749-7362-afe4-07633d7d7892']; final active session 01a153bc-a749-7362-afe4-07633d7d7892 generation 0 (boot 2)
+  agent:hl-03: sessions 1 ['01a153bc-a747-7643-be10-57f925ea32ae']; final active session 01a153bc-a747-7643-be10-57f925ea32ae generation 0 (boot 2)
+  agent:hl-04: sessions 1 ['01a153bc-a745-7833-aae5-50a62c482ec1']; final active session 01a153bc-a745-7833-aae5-50a62c482ec1 generation 0 (boot 2)
+  agent:hl-05: sessions 1 ['01a153bc-a843-70d2-8bfa-d0242d01798d']; final active session 01a153bc-a843-70d2-8bfa-d0242d01798d generation 0 (boot 2)
+  agent:hl-06: sessions 2 ['01a153bc-a863-7d40-b1a2-74046703bdb3', '01a153bc-b5b1-76d2-bc26-9ee6c093b6b5']; final active session 01a153bc-b5b1-76d2-bc26-9ee6c093b6b5 generation 1 (boot 2)
+  agent:hl-07: sessions 2 ['01a153bc-a870-7a70-aac3-5cbb99d218dc', '01a153bc-b760-75a2-bd64-f38d47ac58d4']; final active session 01a153bc-b760-75a2-bd64-f38d47ac58d4 generation 0 (boot 2)
+  agent:hl-08: sessions 1 ['01a153bc-a878-7232-89be-25624be049cd']; final active session 01a153bc-a878-7232-89be-25624be049cd generation 0 (boot 2)
+  agent:hl-09: sessions 3 ['01a153bc-a919-7ef3-8efe-037687a211e1', '01a153bc-cfb8-7991-a38b-aeafd7a203de', '01a153bc-d120-7ee1-abaf-ee4155a87b84']; final active session 01a153bc-a919-7ef3-8efe-037687a211e1 generation 0 (boot 2)
+  agent:hl-10: sessions 1 ['01a153bc-a91a-77d3-8f81-3db0fbe49491']; final active session 01a153bc-a91a-77d3-8f81-3db0fbe49491 generation 0 (boot 2)
+  agent:hl-11: sessions 1 ['01a153bc-a91c-7f01-9e76-d36ce473a053']; final broken session 01a153bc-a91c-7f01-9e76-d36ce473a053 generation 0 (boot 2)
+  agent:hl-12: sessions 1 ['01a153bc-a921-76e3-9c83-7c0175bea507']; final active session 01a153bc-a921-76e3-9c83-7c0175bea507 generation 0 (boot 2)
+  agent:hl-13: sessions 1 ['01a153bc-a9bc-7a42-96d4-ee322b59fabe']; final active session 01a153bc-a9bc-7a42-96d4-ee322b59fabe generation 0 (boot 2)
+  agent:hl-14: sessions 1 ['01a153bc-a9bd-7152-9cdc-a5ab126cba2d']; final active session 01a153bc-a9bd-7152-9cdc-a5ab126cba2d generation 0 (boot 2)
+  agent:hl-15: sessions 1 ['01a153bc-a9c9-7d52-9c17-8aa59ae21903']; final active session 01a153bc-a9c9-7d52-9c17-8aa59ae21903 generation 0 (boot 2)
+  agent:hl-16: sessions 1 ['01a153bc-a9cb-75c2-8993-64faa7fd35fb']; final active session 01a153bc-a9cb-75c2-8993-64faa7fd35fb generation 0 (boot 2)
+  agent:hl-17: sessions 1 ['01a153bc-aa78-7c62-a90c-c27c341317fa']; final active session 01a153bc-aa78-7c62-a90c-c27c341317fa generation 0 (boot 2)
+  agent:hl-18: sessions 1 ['01a153bc-aa86-7cf0-aee2-c32b5ff536ab']; final broken session 01a153bc-aa86-7cf0-aee2-c32b5ff536ab generation None (boot 2)
+
+0.9.3 RESTART PROBE (the 0.9.3 gateway started once more on a copy of ./state)
+  started False; -32603 identity-first bootstrap failed: internal: activating the prepared mob after registering continuity owners: mob actor command channel closed
+
+0.9.3 REFUSALS RECORDED BY THE DRIVER (boot op identity: code message)
+  boot1 turn_refused agent:hl-04: -32603 identity agent:hl-04 embodiment was rejected: bridge resume_session rejected (identity degraded, durable session preserved for reconcile retry): session bridge resume rejected (Other): resume spawn: session error: agent error: Internal error: runtime session control snapshot persistence failed: Store write failed: durable session projection after runtime boundary commit: Internal error: continuity
+  boot2 meta/compact_member agent:hl-11: -32000 identity agent:hl-11 embodiment was rejected: bridge resume_session rejected (identity degraded, durable session preserved for reconcile retry): session bridge resume rejected (Other): resume spawn: session error: agent error: Internal error: runtime session control snapshot persistence failed: Store write failed: durable session projection after runtime boundary commit: Internal error: continuity
+
+COMMITTED SESSIONS (runtime.sqlite WholeBlob authority, WAL included)
+  01a153bc-a744-7a11-9237-832a0c854261: revision 8 messages 4 compacted_markers 1 messages_sha256 3be7bea0244fa8ba2a3bf46e95a33ce750a4c844d6b195f079ac8b71b05bc0e6
+  01a153bc-a745-7833-aae5-50a62c482ec1: revision 5 messages 7 compacted_markers 0 messages_sha256 4127fa0c0f2105889a21e955bd6ada7cfd4e2f20dac78ed6ba970fd33c30a170
+  01a153bc-a747-7643-be10-57f925ea32ae: revision 5 messages 4 compacted_markers 1 messages_sha256 b04a96c6b554f9ad8ef629e28421492f9a9129f68b19b7954d89fb436fa28e1d
+  01a153bc-a749-7362-afe4-07633d7d7892: revision 5 messages 4 compacted_markers 1 messages_sha256 850706c2938963d5abadee42d85b354c294a1c4bb733deefbfc4c1f9f6359110
+  01a153bc-a843-70d2-8bfa-d0242d01798d: revision 3 messages 3 compacted_markers 0 messages_sha256 c007ba985cfd53ea6b4f6b5c94f1cbafe71ed2b9f727c965bcb9ce6d49c266cc
+  01a153bc-a863-7d40-b1a2-74046703bdb3: revision 2 messages 3 compacted_markers 0 messages_sha256 0d8e96a570ff4331a4e4832fb50545c43de98f37a412310d66f2e1400b50dbbb
+  01a153bc-a870-7a70-aac3-5cbb99d218dc: revision 2 messages 3 compacted_markers 0 messages_sha256 3ca7c2097604c3fbd6e6e53ec71841f564ba006a47eac6619a83064d7ddf329d
+  01a153bc-a878-7232-89be-25624be049cd: revision 5 messages 4 compacted_markers 1 messages_sha256 6a5f558781589187e84cef3acbab2e176051fe991e65665980d45d4f3ec39d91
+  01a153bc-a919-7ef3-8efe-037687a211e1: revision 3 messages 3 compacted_markers 0 messages_sha256 037a0a6856700be8d2c94051c3af04c927727b8210398303776ee820de13f1ff
+  01a153bc-a91a-77d3-8f81-3db0fbe49491: revision 4 messages 5 compacted_markers 0 messages_sha256 0aaa2193d183fe0e9d4c2dc58c656866af4144e74a4d14259e1601293a88fff6
+  01a153bc-a91c-7f01-9e76-d36ce473a053: revision 5 messages 5 compacted_markers 0 messages_sha256 48f2124116bf30600cad632c779e429e03a6cc000c323aa8e3003b0c0810b69d
+  01a153bc-a921-76e3-9c83-7c0175bea507: revision 3 messages 3 compacted_markers 0 messages_sha256 f7b6afc0df70763afb6ba29a6d20c44b437477d918c0ec942edf3cfd4b08a728
+  01a153bc-a9bc-7a42-96d4-ee322b59fabe: revision 3 messages 3 compacted_markers 0 messages_sha256 d02f77454675ea830ce7aaf3128c5d47e5ae6250bf8f6f15c35e0f25b503adbd
+  01a153bc-a9bd-7152-9cdc-a5ab126cba2d: revision 3 messages 3 compacted_markers 0 messages_sha256 d07be134f90debae92485dfb4aae5ce11157012ba0a2eca234412c1a0e66c9a3
+  01a153bc-a9c9-7d52-9c17-8aa59ae21903: revision 3 messages 3 compacted_markers 0 messages_sha256 18e7128a99341722841932a628bb1322cb747d30c337eca8bdfd114232eab78c
+  01a153bc-a9cb-75c2-8993-64faa7fd35fb: revision 3 messages 3 compacted_markers 0 messages_sha256 69bcba66095ce36b62f631cf0c98e5e39b5a9ae4df307781b18b77a874e4023c
+  01a153bc-aa78-7c62-a90c-c27c341317fa: revision 3 messages 3 compacted_markers 0 messages_sha256 c814945797c3898870d24f402261c6f486589c0b448ea0187babc83c9ce57f34
+  01a153bc-aa86-7cf0-aee2-c32b5ff536ab: revision 3 messages 3 compacted_markers 0 messages_sha256 6e9caed26515b4172eafaa359ebc1d7fe95849021c068643f51c1eb25e02ef5a
+  01a153bc-b5b1-76d2-bc26-9ee6c093b6b5: revision 4 messages 5 compacted_markers 0 messages_sha256 faea6905857d810c09c598846f28d64a4313236a77128c13a896ee001bb686a0
+  01a153bc-b760-75a2-bd64-f38d47ac58d4: revision 4 messages 5 compacted_markers 0 messages_sha256 0a8d090ee60fba7d3edb00e39d9975cdcf8e575e5562bf7e1cd667590eeb57be
+  01a153bc-cfb8-7991-a38b-aeafd7a203de: revision 2 messages 3 compacted_markers 0 messages_sha256 084c855e0fb3072ce400297df1a2fdb6fc3ce6f461872a507e99c175624d947b
+  01a153bc-d120-7ee1-abaf-ee4155a87b84: revision 2 messages 3 compacted_markers 0 messages_sha256 04e93ba29ca22de05ffeecd505f59014ab12e3377464fe684cbb905b9657d43f
+
+PACKED (stored gzip-compressed under the repository's per-file limit; inflate before use)
+  ./state/continuity.sqlite3-wal.gz -> ./state/continuity.sqlite3-wal (3617392 bytes, sha256 3e02c7af79170cf76795f0b88ad29e606f818f9d7b13c7d64dca6886597a2f34)
+
+FILES (sha256 bytes path; the raw bytes, after inflating the packed files)
+edbee11a2e909b4413b8e2265b665c0f156aaba120e5c715a11d8fc30ba789d7 4096 ./state/continuity.sqlite3
+5f9e0a6e8819b7d1372d2e493f5e7e6261617554e2db3674fd8c835d67a2cad0 32768 ./state/continuity.sqlite3-shm
+3e02c7af79170cf76795f0b88ad29e606f818f9d7b13c7d64dca6886597a2f34 3617392 ./state/continuity.sqlite3-wal
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/continuity.sqlite3.mfence
+119af1c8aea8c495d6856cd6667bbd7e890744ff6bdbbb66f19f7156866485e8 286720 ./state/council.sqlite3
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/council.sqlite3.mfence
+92249e33b608c64cc7b76aeb647f02bc2168587b105411b4f50a46f02bb7b6be 327680 ./state/event_log.sqlite3
+fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb 32768 ./state/event_log.sqlite3-shm
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/event_log.sqlite3-wal
+772aa9eee5fc380fd6f19f3e7a1416a889df109384e065608760c10dfc6197b9 1530 ./state/event_log.sqlite3.composition.json
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/event_log.sqlite3.mfence
+26623f66653b53f3c2266b902760adac2c95b541876d0fe8210ee69d7446030a 552960 ./state/meta_console.sqlite3
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/meta_console.sqlite3.mfence
+d93440d37fe8d114f6faf08d2d9378502c418a7bcc9bbb2e99824dd8d65b523f 20480 ./state/meta_metadata.sqlite3
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/meta_metadata.sqlite3.mfence
+7d3d709fcff39085f6d4acfee6d8d769c5965f9d50fb326bb8863caa9003af2e 765952 ./state/runtime.sqlite
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/runtime.sqlite.execution-custody
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/runtime.sqlite.execution-custody-admission
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/runtime.sqlite.mfence
+a3ba0c2715e60d9dceb1d6d272797be3ddaf4ea5a4a3baf8539e63a0ee6d7809 77824 ./state/schedule.sqlite
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/schedule.sqlite.mfence
+b877952a5a1ef5debd35fbdbef3d63e43204f30d13bf5c8c3f7e891e70bbef15 118784 ./state/workgraph.sqlite3
+fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb 32768 ./state/workgraph.sqlite3-shm
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/workgraph.sqlite3-wal
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/workgraph.sqlite3.mfence
+337b748a2b398ae229c8c3e9b4c0cf009e1c03afce5d294160252778217d2fbb 40960 ./state/meta/jobs.sqlite3
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/meta/jobs.sqlite3.mfence
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/mobs/child-mobs.lock
+119af1c8aea8c495d6856cd6667bbd7e890744ff6bdbbb66f19f7156866485e8 286720 ./state/mobs/realm_profiles.db
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/mobs/realm_profiles.db.mfence

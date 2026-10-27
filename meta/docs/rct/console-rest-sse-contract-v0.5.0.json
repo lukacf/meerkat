@@ -1,0 +1,2242 @@
+{
+  "contract_version": "0.5.0",
+  "version_pin": "v0.5.0",
+  "spec_source": {
+    "checked_contract": "docs/rct/console-rest-sse-contract-v0.5.0.json",
+    "previous_contract": "docs/rct/console-rest-sse-contract-v0.4.0.json",
+    "note": "This checked-in JSON file is the canonical contract source for v0.5.0; .rct planning files are not required inputs for this release gate."
+  },
+  "type_refs": {
+    "experience": "TYPE-005",
+    "identity_status_row": "TYPE-006",
+    "activity_filter_preset": "TYPE-012",
+    "console_frame": "TYPE-020",
+    "console_timeline_query": "TYPE-021",
+    "console_send_request": "TYPE-022",
+    "console_timeline_accepted": "TYPE-023",
+    "console_interaction_rejected_error": "TYPE-019",
+    "console_capabilities": "TYPE-024",
+    "console_multipart_upload": "TYPE-025",
+    "console_blob_reference": "TYPE-026"
+  },
+  "breaking_changes": [],
+  "surfaces": {
+    "rest": {
+      "experience": {
+        "method": "GET",
+        "path": "/console/experience",
+        "response": {
+          "type_ref": "TYPE-005",
+          "required_top_level_fields": [
+            "contract_version",
+            "runtime_capabilities",
+            "base_panel",
+            "agent_sidebar",
+            "activity_feed",
+            "chat_inspector",
+            "topology",
+            "health_overview",
+            "flows",
+            "session_history"
+          ]
+        },
+        "errors": [
+          {
+            "status": 401,
+            "shape": {
+              "error": "unauthorized",
+              "reason": "string"
+            }
+          }
+        ]
+      },
+      "modules": {
+        "method": "GET",
+        "path": "/console/modules",
+        "response": {
+          "required_top_level_fields": [
+            "contract_version",
+            "modules"
+          ]
+        },
+        "errors": [
+          {
+            "status": 401,
+            "shape": {
+              "error": "unauthorized",
+              "reason": "string"
+            }
+          }
+        ]
+      },
+      "identities": {
+        "method": "GET",
+        "path": "/console/identities",
+        "status": "legacy_compat",
+        "replacement_rpc_method": "meta/console/list_identities",
+        "response": {
+          "required_top_level_fields": [
+            "identities"
+          ]
+        },
+        "errors": [
+          {
+            "status": 401,
+            "shape": {
+              "error": "unauthorized",
+              "message": "console identities require a valid auth token"
+            }
+          },
+          {
+            "status": 404,
+            "shape": {
+              "error": "unavailable",
+              "message": "console aggregator unavailable"
+            }
+          },
+          {
+            "status": 500,
+            "shape": {
+              "error": "internal_error",
+              "message": "string"
+            }
+          }
+        ]
+      },
+      "timeline": {
+        "method": "GET",
+        "path": "/console/timeline",
+        "query_optional_fields": [
+          "identity",
+          "conversation_id",
+          "after",
+          "before",
+          "mode",
+          "limit"
+        ],
+        "response": {
+          "required_top_level_fields": [
+            "frames"
+          ],
+          "optional_top_level_fields": [
+            "next_cursor",
+            "latest_cursor",
+            "exhausted",
+            "available"
+          ],
+          "mode_values": [
+            "since",
+            "recent"
+          ]
+        },
+        "errors": [
+          {
+            "status": 401,
+            "shape": {
+              "error": "unauthorized",
+              "message": "console timeline requires a valid auth token"
+            }
+          },
+          {
+            "status": 404,
+            "shape": {
+              "error": "unavailable",
+              "message": "console aggregator unavailable"
+            }
+          },
+          {
+            "status": 409,
+            "shape": {
+              "error": "replay_unavailable",
+              "message": "string"
+            }
+          }
+        ]
+      },
+      "legacy_send": {
+        "method": "POST",
+        "path": "/console/send",
+        "status": "legacy_compat",
+        "replacement_rpc_method": "meta/console/send",
+        "request": {
+          "type_ref": "TYPE-022",
+          "required_fields": [
+            "identity",
+            "content",
+            "origin",
+            "idempotency_key"
+          ],
+          "optional_fields": [
+            "handling_mode",
+            "origin_kind",
+            "skill_refs"
+          ],
+          "validation": "origin and idempotency_key must be non-empty after trimming. origin_kind, when present, is one of operator, operator_probe, connector, scheduler, policy, flow, system; any other value is refused. Missing-field HTTP extraction errors are distinct from JSON-RPC invalid-params responses. skill_refs, when present, is a list of typed structured skill refs ({kind: structured, source_uuid, skill_name}); a nonempty selection is part of the idempotency fingerprint, so a replay must repeat the same selection in the same order."
+        },
+        "success": {
+          "type_ref": "TYPE-023"
+        },
+        "errors": [
+          {
+            "status": 401,
+            "shape": {
+              "error": "unauthorized",
+              "message": "console send requires a valid auth token"
+            }
+          },
+          {
+            "status": 403,
+            "shape": {
+              "error": "read_only|access_denied",
+              "message": "string"
+            }
+          },
+          {
+            "status": 400,
+            "shape": {
+              "error": "invalid_request",
+              "message": "string"
+            }
+          },
+          {
+            "status": 404,
+            "shape": {
+              "error": "unknown_identity",
+              "message": "string"
+            }
+          },
+          {
+            "status": 404,
+            "shape": {
+              "error": "unavailable",
+              "message": "console aggregator unavailable"
+            }
+          },
+          {
+            "status": 409,
+            "shape": {
+              "error": "ambiguous_live_identity_alias|not_addressable|retired|idempotency_conflict|candidate_launch",
+              "message": "string"
+            }
+          },
+          {
+            "status": 409,
+            "shape": {
+              "error": "host_human_input_refused",
+              "message": "string",
+              "data": "structured owner refusal"
+            }
+          },
+          {
+            "status": 429,
+            "shape": {
+              "error": "admission_backlog_full",
+              "message": "string",
+              "data": {
+                "kind": "mob_member_admission_backlog_full",
+                "depth": "integer"
+              }
+            }
+          },
+          {
+            "status": 503,
+            "shape": {
+              "error": "actor_probe_unhealthy|reload_refused",
+              "message": "string",
+              "data": "structured actor-probe observation or {kind: mob_member_reload_refused}"
+            }
+          },
+          {
+            "status": 504,
+            "shape": {
+              "error": "admission_timeout|reload_timed_out",
+              "message": "string",
+              "data": "structured timeout observation, including kind and any owner-provided stage"
+            },
+            "note": "A timeout observation alone does not establish execution fate or retryability; preserve the structured data."
+          },
+          {
+            "status": 500,
+            "shape": {
+              "error": "internal_error",
+              "message": "string"
+            }
+          }
+        ]
+      },
+      "send_recover": {
+        "method": "POST",
+        "path": "/console/send/recover",
+        "rpc_twin": "meta/console/recover_send",
+        "request": {
+          "required_fields": [
+            "identity",
+            "origin",
+            "idempotency_key"
+          ],
+          "validation": "Only identity, origin and idempotency_key are accepted; any other field, including an interaction or frame id, is refused. Each must be non-empty after trimming. The caller is the request's authenticated principal, never a field, and only that caller's sends are found."
+        },
+        "success": {
+          "type_ref": "TYPE-023",
+          "native_state_values": [
+            "admitted",
+            "absent",
+            "unknown"
+          ],
+          "note": "The send's acceptance as meta/console/send answers it (TYPE-023), with its status as it is now, plus native: what the runtime holds for the send in the session it recorded ({state: admitted, input_id, and phase when known}, {state: absent} or {state: unknown, cause}). A send the evidence shows admitted but not yet settled is settled delivered first, unless this process is still dispatching it, which is left to that dispatch. Nothing is dispatched."
+        },
+        "errors": [
+          {
+            "status": 401,
+            "shape": {
+              "error": "unauthorized",
+              "message": "console send recovery requires a valid auth token"
+            }
+          },
+          {
+            "status": 403,
+            "shape": {
+              "error": "read_only|access_denied",
+              "message": "string"
+            }
+          },
+          {
+            "status": 400,
+            "shape": {
+              "error": "invalid_request",
+              "message": "string"
+            }
+          },
+          {
+            "status": 404,
+            "shape": {
+              "error": "send_not_found",
+              "message": "no console send of yours has this idempotency key"
+            },
+            "note": "Answered alike for a key the caller never used and for a key another caller used."
+          },
+          {
+            "status": 404,
+            "shape": {
+              "error": "unavailable",
+              "message": "console aggregator unavailable"
+            }
+          },
+          {
+            "status": 409,
+            "shape": {
+              "error": "candidate_launch",
+              "message": "string"
+            },
+            "note": "A candidate launch (runtime_options.mob_composition.authority = candidate) settles no console send; recover it on the authoritative launch."
+          },
+          {
+            "status": 500,
+            "shape": {
+              "error": "internal_error",
+              "message": "string"
+            }
+          }
+        ]
+      },
+      "blob": {
+        "method": "GET",
+        "path_template": "/blobs/{blob_id}",
+        "path_prefix": "/blobs/",
+        "response": {
+          "type_ref": "TYPE-026",
+          "body": "binary_or_redirect",
+          "required_path_params": [
+            "blob_id"
+          ]
+        },
+        "errors": [
+          {
+            "status": 401,
+            "shape": {
+              "error": "unauthorized"
+            }
+          },
+          {
+            "status": 400,
+            "shape": {
+              "error": "invalid_blob_id"
+            }
+          },
+          {
+            "status": 404,
+            "shape": {
+              "error": "blob_store_unavailable|blob_not_found"
+            }
+          },
+          {
+            "status": 500,
+            "shape": {
+              "error": "string"
+            }
+          }
+        ]
+      },
+      "mcp_apps_resolve": {
+        "method": "POST",
+        "path": "/console/mcp-apps/resolve",
+        "request": {
+          "required_fields": [
+            "identity",
+            "sessionId",
+            "toolCallId"
+          ],
+          "validation": "Unknown fields are refused. identity, sessionId and toolCallId must identify the original native invocation. Malformed JSON extraction errors are distinct from operation refusals."
+        },
+        "response": {
+          "required_top_level_fields": [
+            "tool",
+            "arguments",
+            "result",
+            "resource",
+            "canCallTools"
+          ]
+        },
+        "admission": "Requires enabled effective MCP Apps and sandbox configuration. Retained invocation and renderer; requires current viewer and member/session access. canCallTools describes the host action surface, not permission for a particular tool.",
+        "cache_control": "HTTP 200 responses and HTTP 403 operation refusals use no-store.",
+        "privacy": "Host-only metadata is delivered only to the authorized App view; it is excluded from model input and public transcripts.",
+        "errors": [
+          {
+            "status": 401,
+            "shape": {
+              "error": "unauthorized",
+              "message": "Console app access requires authorization"
+            }
+          },
+          {
+            "status": 403,
+            "shape": {
+              "error": "mcp_app_unavailable",
+              "message": "This tool app is unavailable for the current viewer or member"
+            }
+          }
+        ]
+      },
+      "mcp_apps_read_resource": {
+        "method": "POST",
+        "path": "/console/mcp-apps/read-resource",
+        "request": {
+          "required_fields": [
+            "identity",
+            "sessionId",
+            "toolCallId",
+            "uri"
+          ],
+          "validation": "Unknown fields are refused. identity, sessionId and toolCallId must identify the original native invocation. Malformed JSON extraction errors are distinct from operation refusals."
+        },
+        "response": {
+          "protocol": "MCP ReadResourceResult"
+        },
+        "admission": "Requires enabled effective MCP Apps and sandbox configuration. The exact retained renderer may be read with view permission. A cache miss requires agent.send, an editable Console, fresh native admission and the original negotiated MCP connection.",
+        "cache_control": "HTTP 200 responses and HTTP 403 operation refusals use no-store.",
+        "privacy": "Host-only metadata is delivered only to the authorized App view; it is excluded from model input and public transcripts.",
+        "errors": [
+          {
+            "status": 401,
+            "shape": {
+              "error": "unauthorized",
+              "message": "Console app access requires authorization"
+            }
+          },
+          {
+            "status": 403,
+            "shape": {
+              "error": "mcp_app_unavailable",
+              "message": "This tool app is unavailable for the current viewer or member"
+            }
+          }
+        ]
+      },
+      "mcp_apps_call_tool": {
+        "method": "POST",
+        "path": "/console/mcp-apps/call-tool",
+        "request": {
+          "required_fields": [
+            "identity",
+            "sessionId",
+            "toolCallId",
+            "name",
+            "arguments"
+          ],
+          "validation": "Unknown fields are refused. identity, sessionId and toolCallId must identify the original native invocation. Malformed JSON extraction errors are distinct from operation refusals."
+        },
+        "response": {
+          "protocol": "MCP CallToolResult"
+        },
+        "admission": "Requires enabled effective MCP Apps and sandbox configuration, agent.send, an editable Console, fresh native authorization and pre/post-tool hooks, current app tool visibility and the original negotiated MCP connection.",
+        "cache_control": "HTTP 200 responses and HTTP 403 operation refusals use no-store.",
+        "privacy": "Host-only metadata is delivered only to the authorized App view; it is excluded from model input and public transcripts.",
+        "errors": [
+          {
+            "status": 401,
+            "shape": {
+              "error": "unauthorized",
+              "message": "Console app access requires authorization"
+            }
+          },
+          {
+            "status": 403,
+            "shape": {
+              "error": "mcp_app_unavailable",
+              "message": "This tool app is unavailable for the current viewer or member"
+            }
+          },
+          {
+            "status": 409,
+            "shape": {
+              "error": "candidate_launch",
+              "message": "string"
+            },
+            "note": "A candidate launch (runtime_options.mob_composition.authority = candidate) calls no member's tool; resolving and reading an app stay open."
+          }
+        ]
+      }
+    },
+    "rpc": {
+      "policy_errors": {
+        "read_only": {
+          "status": 200,
+          "code": -32010,
+          "message": "console is read-only",
+          "data": {
+            "kind": "read_only"
+          },
+          "applicability": "HTTP console methods classified as mutating, including multipart send/upload. This is not the structural mob-events stale-cursor meaning of -32010; discriminate by method and data."
+        },
+        "access_denied": {
+          "status": 200,
+          "code": -32030,
+          "message": "string",
+          "data": {
+            "kind": "access_denied"
+          },
+          "applicability": "Applicable ABAC action gates and access-administration checks. Additional denial context may be present. Some reads filter results instead of refusing the whole request; this is not an unconditional error on every method."
+        },
+        "candidate_launch": {
+          "status": 200,
+          "code": -32047,
+          "message": "string",
+          "data": {
+            "kind": "candidate_launch"
+          },
+          "applicability": "A runtime-backed console of a candidate launch (runtime_options.mob_composition.authority = candidate) refuses, before anything is read or written, the methods that retire, respawn or reset a member, recompute the roster or rewire members (meta/retire, meta/retire_member, meta/respawn, meta/respawn_member, meta/reset, meta/reset_all, meta/delete_identity, meta/reconcile_identity and meta/topology/apply; meta/reconcile_edges answers a dry run flagged applied: false instead), meta/gating/decide, the ones that create a session (meta/ensure_member, meta/spawn_helper, meta/fork_helper and meta/attach_existing_session), the ones that admit member input or act on a member's runs (among them meta/console/send, including multipart, meta/console/voice/open, meta/console/recover_send, meta/run_flow, meta/reload_member, meta/stop_member_run and meta/force_cancel_member), the member declaration mutations (mob/adopt_member_identity_declaration and mob/apply_member_tool_declaration), and the operator mutations: the WorkGraph writes, meta/memory/quarantine/decide, the agent memory writes, the label sets and deletes, the access policy writes, meta/console/revoke_sessions, meta/blob/upload, meta/cancel_flow, the live channel verbs, a mobpack deploy with execute or a validation with rkat_validate, and a draft write (meta/mobpacks/create, save, delete, undo and redo) except to a store file the caller names outside the state directory and the gateway home that is not the store META_FLOW_EDITOR_DRAFT_STORE names. Reads still answer."
+        }
+      },
+      "policy_error_inventory": "policy_error_refs supplement each endpoint or method's local errors array. Endpoint references are conditional on the dispatched method, not all requests.",
+      "console_rpc_endpoint": {
+        "method": "POST",
+        "path": "/console/rpc",
+        "protocol": "JSON-RPC 2.0",
+        "policy_error_refs": [
+          "#/surfaces/rpc/policy_errors/read_only",
+          "#/surfaces/rpc/policy_errors/access_denied",
+          "#/surfaces/rpc/policy_errors/candidate_launch"
+        ],
+        "errors": [
+          {
+            "status": 200,
+            "codes": [
+              -32600
+            ]
+          },
+          {
+            "status": 401,
+            "codes": [
+              -32600
+            ]
+          }
+        ]
+      },
+      "console_multipart_rpc_endpoint": {
+        "method": "POST",
+        "path": "/console/rpc/multipart",
+        "protocol": "multipart JSON-RPC 2.0",
+        "policy_error_refs": [
+          "#/surfaces/rpc/policy_errors/read_only",
+          "#/surfaces/rpc/policy_errors/access_denied",
+          "#/surfaces/rpc/policy_errors/candidate_launch"
+        ],
+        "policy_note": "Both supported methods are read-only gated. The agent.send ABAC gate applies to meta/console/send, not standalone meta/blob/upload.",
+        "request": {
+          "type_ref": "TYPE-025",
+          "required_parts": [
+            "payload"
+          ],
+          "file_part_prefix": "file:"
+        },
+        "errors": [
+          {
+            "status": 401,
+            "codes": [
+              -32600
+            ]
+          },
+          {
+            "status": 400,
+            "codes": [
+              -32602
+            ]
+          },
+          {
+            "status": 200,
+            "codes": [
+              -32600,
+              -32602
+            ]
+          }
+        ]
+      },
+      "methods": {
+        "meta/capabilities": {
+          "success": {
+            "type_ref": "TYPE-024",
+            "required_fields": [
+              "methods"
+            ],
+            "optional_fields": [
+              "runtime_capabilities",
+              "method_capabilities"
+            ]
+          }
+        },
+        "meta/console/send": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "type_ref": "TYPE-022",
+            "required_fields": [
+              "identity",
+              "content",
+              "origin",
+              "idempotency_key"
+            ],
+            "optional_fields": [
+              "handling_mode",
+              "origin_kind",
+              "skill_refs"
+            ],
+            "validation": "origin and idempotency_key must be non-empty after trimming. origin_kind, when present, is one of operator, operator_probe, connector, scheduler, policy, flow, system; any other value is refused. skill_refs, when present, is a list of typed structured skill refs ({kind: structured, source_uuid, skill_name}); a nonempty selection is part of the idempotency fingerprint, so a replay must repeat the same selection in the same order."
+          },
+          "success": {
+            "type_ref": "TYPE-023"
+          },
+          "errors": [
+            {
+              "type_ref": "TYPE-019",
+              "codes": [
+                -32001,
+                -32002,
+                -32004,
+                -32009,
+                -32000,
+                -32602
+              ]
+            }
+          ]
+        },
+        "meta/console/recover_send": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "required_fields": [
+              "identity",
+              "origin",
+              "idempotency_key"
+            ],
+            "validation": "Only identity, origin and idempotency_key are accepted; any other field, including an interaction or frame id, is refused. Each must be non-empty after trimming. The caller is the request's authenticated principal, never a field, and only that caller's sends are found."
+          },
+          "success": {
+            "type_ref": "TYPE-023",
+            "native_state_values": [
+              "admitted",
+              "absent",
+              "unknown"
+            ],
+            "note": "The send's acceptance as meta/console/send answers it (TYPE-023), with its status as it is now, plus native: what the runtime holds for the send in the session it recorded ({state: admitted, input_id, and phase when known}, {state: absent} or {state: unknown, cause}). A send the evidence shows admitted but not yet settled is settled delivered first, unless this process is still dispatching it, which is left to that dispatch. Nothing is dispatched."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32001
+              ],
+              "data": {
+                "kind": "send_not_found"
+              },
+              "note": "Answered alike for a key the caller never used and for a key another caller used."
+            },
+            {
+              "codes": [
+                -32602,
+                -32004,
+                -32000
+              ]
+            }
+          ]
+        },
+        "meta/console/list_identities": {
+          "success": {
+            "required_fields": [
+              "identities"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32004,
+                -32000
+              ]
+            }
+          ]
+        },
+        "meta/console/inspect_identity": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "required_fields": [
+              "identity"
+            ]
+          },
+          "success": {
+            "body": "identity_inspection_or_null"
+          },
+          "errors": [
+            {
+              "codes": [
+                -32001,
+                -32004,
+                -32602,
+                -32000
+              ]
+            }
+          ]
+        },
+        "meta/console/query_timeline": {
+          "request": {
+            "type_ref": "TYPE-021"
+          },
+          "success": {
+            "required_fields": [
+              "frames"
+            ],
+            "optional_fields": [
+              "next_cursor",
+              "latest_cursor",
+              "exhausted",
+              "available"
+            ],
+            "request_optional_fields": [
+              "identity",
+              "conversation_id",
+              "after",
+              "before",
+              "mode",
+              "limit"
+            ],
+            "mode_values": [
+              "since",
+              "recent"
+            ]
+          },
+          "errors": [
+            {
+              "type_ref": "TYPE-019",
+              "codes": [
+                -32004,
+                -32013,
+                -32602
+              ]
+            }
+          ]
+        },
+        "meta/blob/upload": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only"
+          ],
+          "request": {
+            "type_ref": "TYPE-025",
+            "transport": "multipart",
+            "fields_location": "params.upload when present, otherwise params",
+            "required_one_of": [
+              "upload_id",
+              "part_name"
+            ],
+            "optional_fields": [
+              "type",
+              "media_type"
+            ],
+            "validation": "upload_id or part_name must be a non-empty string after trimming, identifying the suffix after file:. upload_id takes precedence when both exist. If type is supplied as a string it must be image_upload; media_type, when supplied as a string, must equal the file part's MIME type.",
+            "multipart": {
+              "payload_part": "JSON-RPC request with method meta/blob/upload",
+              "file_part": "Exactly one file:<upload_id-or-part_name> part matching the selected identifier",
+              "media_types": [
+                "image/png",
+                "image/jpeg",
+                "image/webp",
+                "image/gif"
+              ],
+              "max_file_bytes": 26214400
+            }
+          },
+          "success": {
+            "type_ref": "TYPE-026",
+            "required_fields": [
+              "blob_id",
+              "media_type",
+              "size"
+            ],
+            "size_unit": "bytes"
+          },
+          "errors": [
+            {
+              "status": 401,
+              "codes": [
+                -32600
+              ]
+            },
+            {
+              "status": 400,
+              "codes": [
+                -32602
+              ]
+            },
+            {
+              "status": 200,
+              "codes": [
+                -32600,
+                -32602
+              ]
+            },
+            {
+              "status": 404,
+              "codes": [
+                -32600
+              ]
+            },
+            {
+              "status": 500,
+              "codes": [
+                -32000
+              ]
+            }
+          ]
+        },
+        "meta/retire": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "required_fields": [
+              "identity"
+            ]
+          },
+          "success": {
+            "body": "identity_lifecycle_result"
+          },
+          "errors": [
+            {
+              "codes": [
+                -32001,
+                -32004,
+                -32602,
+                -32000
+              ]
+            }
+          ]
+        },
+        "meta/respawn": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "required_fields": [
+              "identity"
+            ]
+          },
+          "success": {
+            "body": "identity_lifecycle_result"
+          },
+          "errors": [
+            {
+              "codes": [
+                -32001,
+                -32004,
+                -32602,
+                -32000
+              ]
+            }
+          ]
+        },
+        "meta/reset": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "required_fields": [
+              "identity"
+            ]
+          },
+          "success": {
+            "body": "identity_lifecycle_result"
+          },
+          "errors": [
+            {
+              "codes": [
+                -32001,
+                -32004,
+                -32602,
+                -32000
+              ]
+            }
+          ]
+        },
+        "meta/stop_member_run": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "required_fields": [
+              "member_id",
+              "run_id",
+              "reason"
+            ],
+            "note": "run_id is the member run's UUID from its run_started event (identity.run_id). A stale run_id is the typed not_current receipt, never an interrupt."
+          },
+          "success": {
+            "body": "member_run_stop_result",
+            "required_fields": [
+              "member_id",
+              "receipt"
+            ],
+            "note": "receipt is meerkat's WireRunStopReceipt, tagged by outcome: stopped { run_id, contributors }, not_current { run_id, current_run_id? } or not_stoppable { run_id, state }."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32001,
+                -32004,
+                -32602,
+                -32000
+              ],
+              "note": "Mob refusals (unknown member, unsupported member mode, host refusal) carry meerkat's typed code and structured data."
+            }
+          ]
+        },
+        "meta/routing/routes/list": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "success": {
+            "body": "routing_routes_response",
+            "required_fields": [
+              "routes"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32004,
+                -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/delivery/history": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "optional_fields": [
+              "limit"
+            ],
+            "defaults": {
+              "limit": 50
+            },
+            "note": "HTTP returns a bounded snapshot without cursor pagination. SDK/stdin additionally accepts recipient/sink filters and defaults limit to 20."
+          },
+          "success": {
+            "body": "delivery_history_response",
+            "required_fields": [
+              "deliveries"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32004,
+                -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/gating/pending": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "success": {
+            "required_fields": [
+              "pending"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32004,
+                -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/gating/audit": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "optional_fields": [
+              "limit"
+            ]
+          },
+          "success": {
+            "required_fields": [
+              "entries"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32004,
+                -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/gating/decide": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied",
+            "#/surfaces/rpc/policy_errors/candidate_launch"
+          ],
+          "request": {
+            "required_fields": [
+              "pending_id",
+              "decision"
+            ],
+            "optional_fields": [
+              "approver_id",
+              "reason"
+            ],
+            "conditional_required_fields": {
+              "approver_id": "Required only when HTTP has no resolved principal; otherwise the principal is used regardless of the supplied approver_id."
+            },
+            "decision_values": [
+              "approve",
+              "reject",
+              "escalate",
+              "deny"
+            ],
+            "note": "deny is an HTTP compatibility alias for reject. SDK/stdin requires approver_id and accepts only approve/reject/escalate."
+          },
+          "success": {
+            "body": "gating_decision_result"
+          },
+          "errors": [
+            {
+              "codes": [
+                -32004,
+                -32602,
+                -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/access/status": {
+          "success": {
+            "required_fields": [
+              "available",
+              "enabled",
+              "actions"
+            ],
+            "optional_fields": [
+              "owner_instance",
+              "conditional_mutations"
+            ],
+            "note": "owner_instance and conditional_mutations (\"checked_v1\") are present only for a caller who can administer access on an owner that supports checked writes."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/access/get": {
+          "success": {
+            "required_fields": [
+              "config",
+              "revision"
+            ],
+            "optional_fields": [
+              "owner_instance",
+              "conditional_mutations"
+            ],
+            "note": "owner_instance and conditional_mutations (\"checked_v1\") are present only for a caller who can administer access on an owner that supports checked writes."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32030,
+                -32004,
+                -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/access/set": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "required_fields": [
+              "config"
+            ],
+            "fields_location": "params.checked_v1 for a checked write, together with owner_instance and expected_revision; otherwise params",
+            "note": "A checked write sends only params.checked_v1. A mixed, malformed or unknown checked envelope fails with -32602 and never falls back to the unchecked write."
+          },
+          "success": {
+            "required_fields": [
+              "revision"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32030,
+                -32004,
+                -32009,
+                -32602,
+                -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/access/enable": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "required_fields": [
+              "enabled"
+            ],
+            "fields_location": "params.checked_v1 for a checked write, together with owner_instance and expected_revision; otherwise params",
+            "note": "A checked write sends only params.checked_v1. A mixed, malformed or unknown checked envelope fails with -32602 and never falls back to the unchecked write."
+          },
+          "success": {
+            "required_fields": [
+              "revision"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32030,
+                -32004,
+                -32009,
+                -32602,
+                -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/access/rules/upsert": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "required_fields": [
+              "rule"
+            ],
+            "fields_location": "params.checked_v1 for a checked write, together with owner_instance and expected_revision; otherwise params",
+            "note": "A checked write sends only params.checked_v1. A mixed, malformed or unknown checked envelope fails with -32602 and never falls back to the unchecked write."
+          },
+          "success": {
+            "required_fields": [
+              "revision"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32030,
+                -32004,
+                -32009,
+                -32602,
+                -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/access/rules/delete": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "required_fields": [
+              "id"
+            ],
+            "fields_location": "params.checked_v1 for a checked write, together with owner_instance and expected_revision; otherwise params",
+            "note": "A checked write sends only params.checked_v1. A mixed, malformed or unknown checked envelope fails with -32602 and never falls back to the unchecked write."
+          },
+          "success": {
+            "required_fields": [
+              "revision"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32030,
+                -32004,
+                -32009,
+                -32602,
+                -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/access/groups/set": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "required_fields": [
+              "name",
+              "group"
+            ],
+            "fields_location": "params.checked_v1 for a checked write, together with owner_instance and expected_revision; otherwise params",
+            "note": "A checked write sends only params.checked_v1. A mixed, malformed or unknown checked envelope fails with -32602 and never falls back to the unchecked write."
+          },
+          "success": {
+            "required_fields": [
+              "revision"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32030,
+                -32004,
+                -32009,
+                -32602,
+                -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/access/groups/delete": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "required_fields": [
+              "name"
+            ],
+            "fields_location": "params.checked_v1 for a checked write, together with owner_instance and expected_revision; otherwise params",
+            "note": "A checked write sends only params.checked_v1. A mixed, malformed or unknown checked envelope fails with -32602 and never falls back to the unchecked write."
+          },
+          "success": {
+            "required_fields": [
+              "revision"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32030,
+                -32004,
+                -32009,
+                -32602,
+                -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/access/preview": {
+          "request": {
+            "required_fields": [
+              "action"
+            ],
+            "optional_fields": [
+              "subject",
+              "identity"
+            ],
+            "note": "Omitted/null subject previews anonymous access. The caller still needs access.admin or admin standing."
+          },
+          "success": {
+            "required_fields": [
+              "allowed"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32030,
+                -32004,
+                -32602,
+                -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/memory/panel/records": {
+          "request": {
+            "optional_fields": [
+              "realm",
+              "scope",
+              "identity",
+              "scope_key",
+              "status",
+              "limit",
+              "cursor"
+            ]
+          },
+          "success": {
+            "required_fields": [
+              "records",
+              "next_cursor",
+              "realms"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32030,
+                -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/memory/panel/record": {
+          "request": {
+            "required_fields": [
+              "memory_id"
+            ],
+            "optional_fields": [
+              "realm"
+            ]
+          },
+          "success": {
+            "required_fields": [
+              "realm",
+              "record",
+              "chain",
+              "injections"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32030,
+                -32001,
+                -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/memory/panel/quarantine": {
+          "request": {
+            "optional_fields": [
+              "realm",
+              "limit"
+            ]
+          },
+          "success": {
+            "required_fields": [
+              "records",
+              "pending_promotions",
+              "realms"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32030,
+                -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/memory/panel/dreams": {
+          "request": {
+            "optional_fields": [
+              "realm",
+              "limit"
+            ]
+          },
+          "success": {
+            "required_fields": [
+              "runs",
+              "realms"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32030,
+                -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/memory/panel/overview": {
+          "request": {
+            "optional_fields": [
+              "realm"
+            ]
+          },
+          "success": {
+            "required_fields": [
+              "scopes",
+              "realms",
+              "floors"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32030,
+                -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/memory/panel/proposals": {
+          "request": {
+            "optional_fields": [
+              "realm",
+              "limit"
+            ]
+          },
+          "success": {
+            "required_fields": [
+              "proposals",
+              "realms"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32030,
+                -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/memory/panel/injections": {
+          "request": {
+            "optional_fields": [
+              "realm",
+              "limit"
+            ]
+          },
+          "success": {
+            "required_fields": [
+              "injections",
+              "realms"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32030,
+                -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/memory/panel/harvests": {
+          "request": {
+            "optional_fields": [
+              "realm",
+              "limit"
+            ]
+          },
+          "success": {
+            "required_fields": [
+              "harvests",
+              "realms"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32030,
+                -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/memory/panel/dream_runs": {
+          "request": {
+            "optional_fields": [
+              "realm",
+              "limit"
+            ]
+          },
+          "success": {
+            "required_fields": [
+              "runs",
+              "realms"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32030,
+                -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/memory/panel/audit_verdicts": {
+          "request": {
+            "optional_fields": [
+              "realm",
+              "limit"
+            ]
+          },
+          "success": {
+            "required_fields": [
+              "verdicts",
+              "realms"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32030,
+                -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/memory/quarantine/decide": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "required_fields": [
+              "identity",
+              "memory_id",
+              "verdict",
+              "expected_content_hash"
+            ],
+            "optional_fields": [
+              "realm",
+              "rationale"
+            ],
+            "verdict_values": [
+              "release",
+              "tombstone"
+            ],
+            "note": "expected_content_hash is the record.content_hash returned by meta/memory/panel/record. The reviewer recorded in audit is the authenticated console principal; no reviewer field is accepted."
+          },
+          "success": {
+            "required_fields": [
+              "outcome",
+              "realm",
+              "origin",
+              "successor",
+              "decision"
+            ],
+            "outcome_values": [
+              "released",
+              "already_released",
+              "tombstoned",
+              "already_tombstoned"
+            ],
+            "note": "decision.review records the verdict, reviewer, bound hash, quarantine reason and rationale, plus expired_promotions (gated promotions past their expiry) and invalidated_promotions (live gated promotions an operator tombstone invalidated in the same transaction)."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32043,
+                -32602,
+                -32603,
+                -32601
+              ],
+              "note": "-32043 is a typed refusal (data.kind memory_quarantine_review_refused, data.reason not_found | content_mismatch | not_quarantined | gate_pending | successor_conflict | secret_detected | stale_update); nothing was written. gate_pending refuses a release while a live gated promotion owns the record; an operator tombstone invalidates the promotion instead."
+            }
+          ]
+        },
+        "meta/workgraph/snapshot": {
+          "request": {
+            "optional_fields": [
+              "namespace",
+              "all_namespaces",
+              "statuses",
+              "labels",
+              "include_terminal",
+              "limit"
+            ]
+          },
+          "success": {
+            "body": "workgraph_snapshot"
+          },
+          "errors": [
+            {
+              "codes": [
+                -32030,
+                -32041,
+                -32602,
+                -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/workgraph/events": {
+          "request": {
+            "optional_fields": [
+              "namespace",
+              "all_namespaces",
+              "after_seq",
+              "limit"
+            ]
+          },
+          "success": {
+            "required_fields": [
+              "events"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32030,
+                -32041,
+                -32602,
+                -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/workgraph/get": {
+          "request": {
+            "required_fields": [
+              "id"
+            ],
+            "optional_fields": [
+              "namespace"
+            ]
+          },
+          "success": {
+            "required_fields": [
+              "item"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32030,
+                -32041,
+                -32602,
+                -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/workgraph/goal/status": {
+          "request": {
+            "required_fields": [
+              "binding_id"
+            ],
+            "optional_fields": [
+              "namespace"
+            ]
+          },
+          "success": {
+            "required_fields": [
+              "item",
+              "attention"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32030,
+                -32041,
+                -32602,
+                -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/workgraph/claim": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "required_fields": [
+              "id",
+              "expected_revision",
+              "owner"
+            ],
+            "optional_fields": [
+              "lease_seconds",
+              "namespace"
+            ]
+          },
+          "success": {
+            "required_fields": [
+              "item"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32030,
+                -32041,
+                -32042,
+                -32602,
+                -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/workgraph/release": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "required_fields": [
+              "id",
+              "expected_revision"
+            ],
+            "optional_fields": [
+              "namespace"
+            ]
+          },
+          "success": {
+            "required_fields": [
+              "item"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32030,
+                -32041,
+                -32042,
+                -32602,
+                -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/workgraph/close": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "required_fields": [
+              "id",
+              "expected_revision"
+            ],
+            "optional_fields": [
+              "status",
+              "namespace"
+            ]
+          },
+          "success": {
+            "required_fields": [
+              "item"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32030,
+                -32041,
+                -32042,
+                -32602,
+                -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/workgraph/goal/confirm": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "required_fields": [
+              "binding_id",
+              "expected_revision"
+            ],
+            "optional_fields": [
+              "evidence",
+              "namespace"
+            ]
+          },
+          "success": {
+            "required_fields": [
+              "item",
+              "attention"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32030,
+                -32041,
+                -32042,
+                -32602,
+                -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/workgraph/goal/request_close": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "required_fields": [
+              "binding_id",
+              "expected_revision"
+            ],
+            "optional_fields": [
+              "status",
+              "namespace"
+            ]
+          },
+          "success": {
+            "required_fields": [
+              "item",
+              "attention"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32030,
+                -32041,
+                -32042,
+                -32602,
+                -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/workgraph/attention/pause": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "required_fields": [
+              "binding_id",
+              "expected_revision"
+            ],
+            "optional_fields": [
+              "until",
+              "namespace"
+            ]
+          },
+          "success": {
+            "required_fields": [
+              "attention"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32030,
+                -32041,
+                -32042,
+                -32602,
+                -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/workgraph/attention/resume": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "required_fields": [
+              "binding_id",
+              "expected_revision"
+            ],
+            "optional_fields": [
+              "namespace"
+            ]
+          },
+          "success": {
+            "required_fields": [
+              "attention"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32030,
+                -32041,
+                -32042,
+                -32602,
+                -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/workgraph/attention/reassign": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "required_fields": [
+              "binding_id",
+              "expected_revision",
+              "target"
+            ],
+            "optional_fields": [
+              "namespace"
+            ]
+          },
+          "success": {
+            "required_fields": [
+              "previous",
+              "attention"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32030,
+                -32041,
+                -32042,
+                -32602,
+                -32000,
+                -32601
+              ]
+            }
+          ]
+        },
+        "meta/topology/query": {
+          "success": {
+            "required_fields": [
+              "authority",
+              "revision",
+              "policy",
+              "nodes",
+              "edges"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32030,
+                -32004,
+                -32000
+              ]
+            }
+          ]
+        },
+        "meta/topology/plan": {
+          "request": {
+            "required_fields": [
+              "expected_revision",
+              "operations"
+            ]
+          },
+          "success": {
+            "required_fields": [
+              "authority",
+              "base_revision",
+              "operations"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32030,
+                -32009,
+                -32004,
+                -32001,
+                -32602,
+                -32000
+              ]
+            }
+          ]
+        },
+        "meta/topology/apply": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "required_fields": [
+              "expected_revision",
+              "idempotency_key",
+              "operations"
+            ],
+            "optional_fields": [
+              "reason",
+              "risk_tier"
+            ]
+          },
+          "success": {
+            "required_fields": [
+              "operation_id",
+              "status",
+              "revision",
+              "results"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32030,
+                -32009,
+                -32004,
+                -32001,
+                -32602,
+                -32000
+              ]
+            }
+          ]
+        },
+        "meta/topology/operation/get": {
+          "request": {
+            "required_fields": [
+              "operation_id"
+            ]
+          },
+          "success": {
+            "required_fields": [
+              "operation_id",
+              "status",
+              "revision",
+              "results"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32030,
+                -32001,
+                -32602,
+                -32000
+              ]
+            }
+          ]
+        },
+        "meta/topology/audit/query": {
+          "request": {
+            "optional_fields": [
+              "after_seq",
+              "limit"
+            ]
+          },
+          "success": {
+            "required_fields": [
+              "records",
+              "next_after_seq",
+              "oldest_available_seq",
+              "latest_seq",
+              "has_more"
+            ]
+          },
+          "errors": [
+            {
+              "codes": [
+                -32030,
+                -32009,
+                -32001,
+                -32602,
+                -32000
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "sse": {
+      "timeline": {
+        "method": "GET",
+        "path": "/console/timeline/stream",
+        "events": {
+          "type_ref": "TYPE-020"
+        },
+        "headers": {
+          "cursor": "Last-Event-ID"
+        },
+        "errors": [
+          {
+            "status": 401,
+            "shape": {
+              "error": "unauthorized",
+              "message": "console timeline stream requires a valid auth token"
+            }
+          },
+          {
+            "status": 404,
+            "shape": {
+              "error": "unavailable",
+              "message": "console aggregator unavailable"
+            }
+          },
+          {
+            "status": 409,
+            "shape": {
+              "error": "replay_unavailable",
+              "requested_cursor": "console:1",
+              "latest_cursor": "console:99"
+            }
+          }
+        ]
+      },
+      "identity_timeline": {
+        "method": "GET",
+        "path_template": "/console/identity/{identity}/stream",
+        "events": {
+          "type_ref": "TYPE-020"
+        },
+        "headers": {
+          "cursor": "Last-Event-ID"
+        },
+        "required_path_params": [
+          "identity"
+        ],
+        "errors": [
+          {
+            "status": 401,
+            "shape": {
+              "error": "unauthorized",
+              "message": "console timeline stream requires a valid auth token"
+            }
+          },
+          {
+            "status": 404,
+            "shape": {
+              "error": "unavailable",
+              "message": "console aggregator unavailable"
+            }
+          },
+          {
+            "status": 409,
+            "shape": {
+              "error": "replay_unavailable",
+              "requested_cursor": "console:1",
+              "latest_cursor": "console:99"
+            }
+          }
+        ]
+      },
+      "gating": {
+        "method": "GET",
+        "path": "/console/gating/stream",
+        "description": "Change notifications for the gating inbox. Frames carry no gating data: on gating.changed or gating.resync_required the client re-reads the gating state over RPC. The stream does not resume from Last-Event-ID; every connection starts with gating.resync_required.",
+        "events": {
+          "gating.resync_required": {
+            "data": {
+              "reason": "initial_sync | gap"
+            }
+          },
+          "gating.changed": {
+            "data": {}
+          },
+          "gating.access_revoked": {
+            "data": {},
+            "terminal": true
+          }
+        },
+        "errors": [
+          {
+            "status": 401,
+            "shape": {
+              "error": "unauthorized",
+              "reason": "gating stream requires a valid auth token"
+            }
+          },
+          {
+            "status": 403,
+            "shape": {
+              "error": "access_denied",
+              "action": "gating.view"
+            }
+          },
+          {
+            "status": 404,
+            "shape": {
+              "error": "gating_unavailable"
+            }
+          }
+        ]
+      },
+      "activity_feed_keep_alive_event": "keep-alive"
+    }
+  }
+}

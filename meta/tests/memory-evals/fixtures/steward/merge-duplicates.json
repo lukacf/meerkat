@@ -1,0 +1,73 @@
+{
+  "name": "steward-merge-duplicates",
+  "records": [
+    {
+      "id": "mem-001",
+      "kind": "Gotcha",
+      "title": "Release must publish PyPI and npm together",
+      "description": "Matters when preparing a meta release.",
+      "body": "The Rust release must publish meerkat-meta to PyPI and @rkat/meta-sdk to npm at the same version, in the same pass.",
+      "scope_kind": "identity",
+      "scope_key": "identity:release-bot",
+      "trust": "agent_observed",
+      "status": "active"
+    },
+    {
+      "id": "mem-002",
+      "kind": "Gotcha",
+      "title": "PyPI and npm versions ship in lockstep",
+      "description": "Matters for any version bump.",
+      "body": "Never ship the Python package without the npm package: both SDKs are released at the identical version whenever the Rust crate releases.",
+      "scope_kind": "identity",
+      "scope_key": "identity:release-bot",
+      "trust": "agent_observed",
+      "status": "active"
+    },
+    {
+      "id": "mem-003",
+      "kind": "Preference",
+      "title": "Operator prefers terse status updates",
+      "description": "Matters when reporting progress.",
+      "body": "Keep status updates to one or two lines.",
+      "scope_kind": "identity",
+      "scope_key": "identity:release-bot",
+      "trust": "agent_observed",
+      "status": "active"
+    }
+  ],
+  "proposals": [],
+  "mob_context": { "mob": "mob:release", "purpose": "cut and publish meta releases" },
+  "scripted_reply": {
+    "ops": [
+      {
+        "op": "create",
+        "id": "merged-lockstep",
+        "scope": { "kind": "identity", "key": "identity:release-bot" },
+        "kind": "gotcha",
+        "title": "SDK releases ship PyPI and npm in lockstep",
+        "description": "Matters whenever a meta release or version bump is prepared.",
+        "body": "A meta Rust release must publish meerkat-meta to PyPI and @rkat/meta-sdk to npm at the same version in the same pass — never one without the other.",
+        "tags": [],
+        "trust": "agent_observed",
+        "derived_from": ["mem-001", "mem-002"],
+        "rationale": "semantic duplicates merged; lineage on both sources"
+      },
+      { "op": "tombstone", "id": "mem-001", "rationale": "merged into the consolidated record" },
+      { "op": "tombstone", "id": "mem-002", "rationale": "merged into the consolidated record" }
+    ],
+    "proposal_verdicts": [],
+    "quarantine_verdicts": [],
+    "open_loop_escalations": [],
+    "contradictions": [],
+    "working_set": ["merged-lockstep", "mem-003"]
+  },
+  "expected": {
+    "validator": "ok",
+    "ops": { "create": 1, "tombstone": 2 },
+    "live": {
+      "must_reference": ["mem-001", "mem-002"],
+      "must_not_tombstone": ["mem-003"]
+    }
+  },
+  "notes": "Dedup is judgment, not hashing (§8.5): the two lockstep gotchas must merge into one record whose derived_from lists both sources (the transitive ceiling needs the merge edge), with both originals tombstoned in the same batch. The unrelated preference survives."
+}

@@ -1,0 +1,186 @@
+---
+title: "Sessions"
+description: "How Meta's session-store adapters relate to Meerkat's canonical runtime-backed session lifecycle."
+icon: "database"
+---
+
+Meerkat owns the canonical session and runtime lifecycle: input acceptance, turn execution, deduplication, retire/reset semantics, and durable recovery. Meta adds session-store adapters that support Meta's operational workflows, console views, and integration surfaces.
+
+<Note>
+This page describes Meta-specific storage adapters. It does not replace Meerkat's own runtime-backed session durability model.
+</Note>
+
+## Meta storage backends
+
+| Backend | Use case | Description |
+|---------|----------|-------------|
+| `JsonFileSessionStore` | Local development | One JSON row-array file with a shared write lock |
+| `BigQuerySessionStoreAdapter` | Production | Cloud persistence via BigQuery |
+
+### JSON file store
+
+`JsonFileSessionStore` is an optional operational adapter. It stores a JSON
+array of `SessionPersistenceRow` records in one caller-selected file, shared
+by all session IDs written to that store. It is not the default canonical
+gateway session store.
+
+```rust
+use meerkat_meta::JsonFileSessionStore;
+
+let store = JsonFileSessionStore::new("/var/meta/sessions.json");
+```
+
+**Lock-based concurrency.** `append_rows` acquires one shared write lock,
+reads the existing array, appends the supplied rows, and rewrites the data
+file. The default lock path is `data_path.with_extension("lock")`
+(`/var/meta/sessions.lock` above); override it with `with_lock_path(...)`.
+The `JsonStoreLockRecord` contains `owner_pid` and `created_at_ms`.
+
+**Stale lock recovery.** During write-lock acquisition, a valid lock record
+is recoverable only after it reaches `stale_lock_threshold` and its owner PID
+is no longer alive. The default threshold is 30 seconds; configure it with
+`with_stale_lock_threshold(Duration)`. A fresh lock still produces
+`JsonFileSessionStoreError::LockHeld` even if its owner has died, and an aged
+lock with a live owner remains protected. For a malformed lock record, the
+store uses the lock file's modification age instead. A stale lock is removed
+before the store retries acquisition.
+
+### BigQuery adapter
+
+For production-oriented deployments, the BigQuery adapter writes session rows
+to a configured dataset and table. Supply `project_id` and an OAuth
+`access_token` from the host's configuration and credential handling:
+
+```rust
+use meerkat_meta::BigQuerySessionStoreAdapter;
+
+let store = BigQuerySessionStoreAdapter::new_native("meta_sessions", "session_rows")
+    .with_project_id(project_id)
+    .with_access_token(access_token);
+```
+
+Alternatively, operations resolve the project from `BIGQUERY_PROJECT_ID`.
+For the token, a non-empty explicit value takes precedence, followed by
+`BIGQUERY_ACCESS_TOKEN`, `GOOGLE_OAUTH_ACCESS_TOKEN`, and `GOOGLE_ACCESS_TOKEN`
+in that order. A non-empty explicit project ID likewise precedes the
+environment fallback. Missing project or token configuration fails real
+reads and non-empty inserts; an empty insert is a no-op. The adapter does
+not perform automatic application-default credential discovery.
+
+The separate `validate_bigquery_naming(&BigQueryNaming)` policy validator
+checks dataset and table names; `new_native` does not invoke it:
+
+- Dataset and table names must be non-empty
+- Only ASCII alphanumeric characters, underscores, and hyphens are allowed
+
+<Warning>
+The naming-policy validator rejects names such as `my.dataset` or
+`table;DROP`. Embedders constructing an adapter directly must apply that
+validation themselves rather than assuming the constructor validated the names.
+</Warning>
+
+## Session persistence rows
+
+Session state is serialized as `SessionPersistenceRow` records:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `session_id` | `String` | Unique session identifier |
+| `updated_at_ms` | `u64` | Last update timestamp |
+| `deleted` | `bool` | Tombstone flag; a latest row with `true` hides the session from live-row reads |
+| `payload` | `serde_json::Value` | Application JSON stored with the row |
+| `labels` | `BTreeMap<String, String>` | String key-value metadata |
+
+All five fields have Serde defaults when omitted. Turn counts or other
+application state belong inside `payload`, not in additional top-level fields.
+
+## Session store contracts
+
+`SessionStoreContract` is serializable capability metadata returned by
+`session_store_contracts(&decisions)`, not an implementation trait or shared
+CRUD interface:
+
+| Field | Meaning |
+|-------|---------|
+| `store` | `SessionStoreKind::JsonFile` or `SessionStoreKind::BigQuery` |
+| `latest_row_per_session` | Latest-row materialization is supported |
+| `tombstones_supported` | Deletion rows are supported |
+| `dedup_read_path` | Latest/live reads collapse row history per session |
+| `file_locking` | The adapter provides file locking |
+| `crash_recovery` | The adapter advertises crash recovery through stale-lock handling |
+| `bigquery_dataset`, `bigquery_table` | Configured BigQuery names, or `None` for the JSON adapter |
+
+The first three capability flags are `true` for both adapters. `file_locking`
+and `crash_recovery` are `true` only for the JSON adapter.
+
+The concrete APIs differ:
+
+| Adapter | Write API | Read APIs |
+|---------|-----------|-----------|
+| `JsonFileSessionStore` | Synchronous `append_rows(&rows)` | Synchronous `read_rows()`, `read_latest_rows()`, `read_live_rows()` |
+| `BigQuerySessionStoreAdapter` | Asynchronous `stream_insert_rows(&rows).await` | Asynchronous `read_rows().await`, `read_latest_rows().await`, `read_live_rows().await` |
+
+`read_rows` returns row history rather than deduplicating it. Append a row
+with `deleted: true` to represent deletion; these adapters do not expose a
+shared per-session `delete` method. Integration tests exercise each concrete
+adapter's insertion and materialization behavior.
+
+## Materialization
+
+Meta provides two materialization functions for session inspection:
+
+- **`materialize_latest_session_rows`** -- returns the row with the greatest
+  `updated_at_ms` per session; a later input row wins a timestamp tie
+- **`materialize_live_session_rows`** -- returns each session's latest row only
+  when that row has `deleted == false`
+
+"Live" here means storage visibility, not that the session is currently
+active or executing. Use runtime/member inspection for execution liveness.
+
+These power Meta's operational session inspection features and adapter-specific APIs.
+
+## On-disk layout and durability
+
+On persistent gateway launches (`persistent_state`), every session lives in
+Meerkat Core's runtime store, `runtime.sqlite` in the state directory: its
+transcript and its resume, archive and retire state. Meta keeps no session
+database of its own beside it. A session projection that Meta 0.9.3 kept,
+either a session database (`sessions.sqlite3`, or its older spellings
+`sessions.db` and `sessions.sqlite`) or session rows in the continuity
+database (`continuity.sqlite3`, `continuity.db` or
+`identity_continuity.sqlite`) of a runtime with a roster provider, makes a
+0.9.4 launch refuse the directory (`-32014`,
+`NativeStorageMigrationRequired`) until `meta_gateway storage-migrate-native`
+has moved its sessions into Core's stores and retired the projection. A
+`store_path` that names a separate session database file is refused too. See
+[Upgrading to Meta 0.9.4](/guides/upgrading-to-0-9-4).
+
+Durability is fail-closed: a runtime store that cannot open is a startup
+error, never a silent in-memory fallback. A persistent launch keeps its
+sessions under the state directory, so it refuses a declared in-memory
+runtime store: `runtime_options.runtime_store = {"storage": "memory"}` on
+`rpc_gateway` (`runtime_store.memory()` / `runtimeStore.memory()` in the
+SDKs) answers `-32014`, and `ephemeral_runtime_store(true)` on the Rust
+builder is refused with `ConflictingConfiguration`. For sessions that live
+only as long as the process, launch without `persistent_state`. The storage
+census on `meta/status` (`storage.slots`) reports each store's durability
+resolution and backend. See
+[Configuration: Storage layout and durability](/reference/configuration#storage-layout-and-durability).
+
+## Runtime correlation
+
+An accepted `meta/send_message` response includes a best-effort `session_id`
+correlation value. Use a non-empty value for follow-up session inspection and
+debugging, but do not treat it as an atomic receipt identifying the exact
+accepting session across concurrent identity rebinding.
+
+On the identity plane, the gateway reads the session binding after delivery
+and falls back to the resolve-time binding. If neither can be observed, a
+successful send can return `accepted: true` with `session_id: ""`. Empty means
+unknown: it is not a usable session ID and does not mean delivery failed.
+
+## See also
+
+- [Configuration](/reference/configuration) -- session store settings, storage layout, durability classes
+- [RPC API](/api/rpc) -- `meta/session_store/bigquery`, `meta/storage/doctor`
+- [BigQuery naming](/reference/decisions) -- naming validation rules

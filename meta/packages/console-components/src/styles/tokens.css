@@ -1,0 +1,104 @@
+.cc-theme-scope {
+  /* ── Typography ──────────────────────────────────────────────── */
+  --_cc-font-display-default: "Inter Tight", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --_cc-font-mono-default:    "IBM Plex Mono", "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, monospace;
+  --_cc-font-display:         var(--cc-font-display, var(--_cc-font-display-default));
+  --_cc-font-mono:            var(--cc-font-mono, var(--_cc-font-mono-default));
+
+  --_cc-text-sm: var(--cc-text-sm, 13px);
+  --_cc-text-xs: var(--cc-text-xs, 11.5px);
+
+  /* ── Geometry ───────────────────────────────────────────────── */
+  --_cc-radius-xs: var(--cc-radius-xs, 2px);
+  --_cc-radius-sm: var(--cc-radius-sm, 4px);
+  --_cc-radius-md: var(--cc-radius-md, 6px);
+  --_cc-radius-lg: var(--cc-radius-lg, 10px);
+
+  --_cc-content-width-default: 768px;
+  --_cc-bubble-max-width-default: 504px;
+  --_cc-composer-width-default: 784px;
+  --_cc-content-width:    var(--cc-content-width, var(--_cc-content-width-default));
+  --_cc-bubble-max-width: var(--cc-bubble-max-width, var(--_cc-bubble-max-width-default));
+  --_cc-composer-width:   var(--cc-composer-width, var(--_cc-composer-width-default));
+
+  --_cc-titlebar-height: var(--cc-titlebar-height, 44px);
+  --_cc-window-scale:    var(--cc-window-scale, 1);
+
+  --_cc-density-row: var(--cc-density-row, 30px);
+
+  /* ── Palette (bound in themes.css) ───────────────────────────── */
+  --_cc-foreground-strong-default: oklch(0.98 0.006 80);
+  --_cc-foreground-strong:         var(--cc-foreground-strong, var(--_cc-foreground-strong-default));
+  --_cc-foreground-default:        oklch(0.94 0.006 80);
+  --_cc-foreground:                var(--cc-foreground, var(--_cc-foreground-default));
+  --_cc-foreground-muted-default:  oklch(0.74 0.008 80);
+  --_cc-foreground-muted:          var(--cc-foreground-muted, var(--_cc-foreground-muted-default));
+  --_cc-foreground-subtle-default: oklch(0.58 0.010 80);
+  --_cc-foreground-subtle:         var(--cc-foreground-subtle, var(--_cc-foreground-subtle-default));
+
+  --_cc-border-soft-default:       oklch(0.28 0.007 80);
+  --_cc-border-soft:               var(--cc-border-soft, var(--_cc-border-soft-default));
+  --_cc-border-strong-default:     oklch(0.36 0.009 80);
+  --_cc-border-strong:             var(--cc-border-strong, var(--_cc-border-strong-default));
+
+  --_cc-surface-soft-default:      oklch(0.13 0.005 80);
+  --_cc-surface-soft:              var(--cc-surface-soft, var(--_cc-surface-soft-default));
+  --_cc-surface-raised-default:    oklch(0.19 0.006 80);
+  --_cc-surface-raised:            var(--cc-surface-raised, var(--_cc-surface-raised-default));
+  --_cc-surface-hover-default:     oklch(0.22 0.006 80);
+  --_cc-surface-hover:             var(--cc-surface-hover, var(--_cc-surface-hover-default));
+  --_cc-surface-canvas-default:    oklch(0.16 0.005 80);
+  --_cc-surface-canvas:            var(--cc-surface-canvas, var(--_cc-surface-canvas-default));
+  --_cc-surface-card-default:      oklch(0.19 0.006 80);
+  --_cc-surface-card:              var(--cc-surface-card, var(--_cc-surface-card-default));
+
+  --_cc-link-default:              oklch(0.72 0.13 230);
+  --_cc-link:                      var(--cc-link-color, var(--_cc-link-default));
+  --_cc-positive-default:          oklch(0.72 0.13 150);
+  --_cc-positive:                  var(--cc-positive, var(--_cc-positive-default));
+  --_cc-negative-default:          oklch(0.70 0.18 25);
+  --_cc-negative:                  var(--cc-negative, var(--_cc-negative-default));
+
+  /* Warn channel (amber) — sits between positive and negative */
+  --_cc-warning-default:           oklch(0.78 0.15 75);
+  --_cc-warning:                   var(--cc-warning, var(--_cc-warning-default));
+
+  /* Rams-orange member accent */
+  --_cc-member-accent-default:     oklch(0.72 0.15 30);
+  --_cc-member-accent:             var(--cc-member-accent, var(--_cc-member-accent-default));
+  /* Keyboard focus ring (rethemable via --cc-focus-ring; themes.css overrides
+     per variant). Consumed by the flow-card :focus-visible rules. */
+  --_cc-focus-ring-default:        oklch(0.72 0.12 250 / 0.72);
+  --_cc-focus-ring:                var(--cc-focus-ring, var(--_cc-focus-ring-default));
+  --_cc-member-accent-soft-default: oklch(0.32 0.08 30);
+  --_cc-member-accent-soft:        var(--cc-member-accent-soft, var(--_cc-member-accent-soft-default));
+  --_cc-member-surface-default:    oklch(0.24 0.06 30);
+  --_cc-member-surface:            var(--cc-member-surface, var(--_cc-member-surface-default));
+
+  --_cc-sheen-soft-default:        rgba(255, 255, 255, 0.08);
+  --_cc-sheen-soft:                var(--_cc-sheen-soft-default);
+  --_cc-sheen-strong-default:      rgba(255, 255, 255, 0.12);
+  --_cc-sheen-strong:              var(--_cc-sheen-strong-default);
+
+  --_cc-shadow-sm-default: 0 1px 0 rgba(0,0,0,0.3), 0 1px 2px rgba(0,0,0,0.3);
+  --_cc-shadow-sm: var(--_cc-shadow-sm-default);
+  --_cc-shadow-md-default: 0 1px 0 rgba(0,0,0,0.35), 0 8px 24px rgba(0,0,0,0.35);
+  --_cc-shadow-md: var(--_cc-shadow-md-default);
+  --_cc-shadow-lg-default: 0 2px 0 rgba(0,0,0,0.4), 0 14px 32px rgba(0,0,0,0.42);
+  --_cc-shadow-lg: var(--_cc-shadow-lg-default);
+  --_cc-shadow-xl-default: 0 2px 0 rgba(0,0,0,0.45), 0 20px 42px rgba(0,0,0,0.5);
+  --_cc-shadow-xl: var(--_cc-shadow-xl-default);
+
+  --_cc-surface-wash-top-default:    rgba(255, 255, 255, 0.06);
+  --_cc-surface-wash-top:            var(--_cc-surface-wash-top-default);
+  --_cc-surface-wash-bottom-default: rgba(255, 255, 255, 0.02);
+  --_cc-surface-wash-bottom:         var(--_cc-surface-wash-bottom-default);
+
+  --_cc-workbench-sidebar-width:  var(--cc-workbench-sidebar-width, 260px);
+  --_cc-workbench-activity-width: var(--cc-workbench-activity-width, 300px);
+  --_cc-motion-duration: var(--cc-motion-duration, 160ms);
+  --_cc-motion-ease:     var(--cc-motion-ease, ease);
+  --_cc-sidebar-safe-top:  var(--cc-sidebar-safe-top, 10px);
+  --_cc-sidebar-pad-right: var(--cc-sidebar-pad-right, 12px);
+  --_cc-sidebar-pad-left:  var(--cc-sidebar-pad-left, 12px);
+}

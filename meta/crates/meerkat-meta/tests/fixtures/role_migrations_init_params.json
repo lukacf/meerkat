@@ -1,0 +1,9 @@
+{
+  "_comment": "THE wire contract for boot-scoped member role migrations. Both the Python SDK builder (sdk/python/tests/test_role_migrations.py) and the Rust parser (identity_first::bridge tests) are pinned to this one file, so renaming a key on either side goes red instead of both staying green while a host arms nothing. Values are synthetic examples.",
+  "role_migrations": [
+    {
+      "identity": "domain:automation",
+      "from_role": "domain"
+    }
+  ]
+}

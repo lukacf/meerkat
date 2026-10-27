@@ -1,0 +1,75 @@
+---
+title: "Meerkat Meta"
+description: "Compose Core agents into applications with memory, routing, policy, approvals and an operator console."
+icon: "boxes-stacked"
+---
+
+Meerkat Meta is the application layer around Meerkat Core. It brings lasting
+agent identities, memory, routing, access policy, approvals and a console into
+one composition. Use it when agents need an operational home and a way for
+people and other systems to work with them over time.
+
+Core already runs agents and multi-agent mobs. Meta adds the application
+composition and operating experience on top of those runtime contracts.
+It does not require Meerkat Connect.
+
+<CardGroup cols={2}>
+  <Card title="Start a runtime" icon="rocket" href="/quickstart">
+    Connect an SDK, configure the application and open its console.
+  </Card>
+  <Card title="Choose your starting point" icon="compass" href="https://docs.rkat.ai/introduction">
+    Compare Core, Meta and optional integration setup.
+  </Card>
+</CardGroup>
+
+## From a personal agent to a working organization
+
+An application can combine personal agents, domain specialists and coordinators
+with temporary workers. Profiles describe capabilities. A roster describes the
+lasting identities you want to keep available. Topology describes who can
+communicate. Core executes and coordinates the agents; Meta packages the
+application's desired state, persistence providers and operational interfaces.
+
+An agent's stable identity remains its address when its runtime binding changes.
+Use this for enduring roles. Short-lived workers need not become a permanent
+population of identities.
+
+## What you get
+
+| Area | Purpose |
+| --- | --- |
+| Memory | Records with provenance and trust, bounded recall, optional distillation and background consolidation |
+| Policy | Authenticated access, attribute-based view/steer rules and application-defined approval decisions |
+| Operations | Routing, delivery, health supervision and persistent application state |
+| Console | Conversations, roster, topology, shared work, memory, approvals and timeline inspection |
+| Integration surfaces | Rust composition, JSON-RPC, REST, SSE and Python/TypeScript SDKs |
+
+Memory is an agent capability, not just another chat history. Its
+[record and retrieval system](/concepts/memory) can preserve useful experience,
+keep untrusted writes separate and select what belongs in the next context.
+Applications choose their providers and policy.
+
+The console is a view of the same system the SDKs operate. Its projections do
+not replace Core's session, mob or lifecycle state. See the
+[unified runtime guide](/guides/unified-runtime) for the composition boundary.
+
+## Add only what your application needs
+
+Use your own tools and integrations, or add **Connect** for agent-led setup.
+Connect is optional. Its native setup experience is being developed around a
+standalone terminal and the Meta console, without a user-managed Connect server. A conversational frontend still needs
+an application host with suitable routing, identity and delivery.
+
+Meerkat Connect does not become a mandatory Core dependency.
+
+**Meta Forge** guides setup, application authoring and deployment packaging.
+The [example packs](https://github.com/lukacf/meerkat-meta/tree/main/examples)
+show repository-maintained applications and state their exact prerequisites.
+
+## Continue
+
+Start with the [quickstart](/quickstart), then
+[authentication](/guides/authentication), [memory](/concepts/memory) and
+[access control](/concepts/access-control). The
+[architecture reference](/reference/architecture) covers the runtime boundary
+in more depth.

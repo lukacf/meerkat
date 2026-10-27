@@ -1,0 +1,57 @@
+[package]
+name = "meta-store-conformance"
+description = "Storage conformance harness for Meta store backends (console timeline, event log, binary blobs, agent memory)"
+# Not published, recorded as a fact rather than a preference: `cargo publish`
+# refuses this crate outright because its `meerkat-meta` dependency is a path
+# with no version. It has also never been published at any version - crates.io
+# returns 404 on the crate itself, not merely on a version - and the operator deployment, which the
+# storage-unification plan named as the intended consumer, confirmed they have
+# never consumed it by any route.
+#
+# This is not a decision that the archived intent was superseded. The operator deployment built
+# their first store-level harness on 2026-08-28 and may adopt this suite; they
+# can trial it as a git dependency on tag v0.8.26, which resolves despite the
+# versionless path dep because cargo clones the whole repo. If that trial shows
+# a real requirement, publishing means fixing the dependency first and then
+# adding it to release.yml - at which point this line comes out and the gate
+# in scripts/verify-crate-publication.py starts asserting the new answer.
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait = "0.1"
+base64 = "0.22"
+bytes = "1"
+meerkat-core = { version = "=0.9.5" }
+# The one-remote-bundle reference provider (M4b) implements both levels of
+# the composite seam: meerkat's RealmStorageProvider (facade storage_provider
+# module + in-memory store implementations) next to Meta's realm store set.
+meerkat = { version = "=0.9.5", features = ["session-store", "memory-store"] }
+meerkat-runtime = { version = "=0.9.5" }
+meerkat-store = { version = "=0.9.5", features = ["memory"] }
+meerkat-store-conformance = { version = "=0.9.5" }
+meerkat-meta = { path = "../meerkat-meta" }
+# The extension document chapters run against the store trait directly, so
+# the suite reaches it without turning on meerkat-meta's extension-state
+# feature.
+meta-extension-state = { path = "../meta-extension-state" }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

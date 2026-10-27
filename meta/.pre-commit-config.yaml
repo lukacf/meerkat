@@ -1,0 +1,123 @@
+# Pre-commit configuration for Meta
+# Install: pip install pre-commit
+# Setup: pre-commit install && pre-commit install --hook-type pre-push
+
+default_stages: [pre-commit]
+
+repos:
+  # On commit: auto-format Rust code
+  - repo: local
+    hooks:
+      - id: cargo-fmt-fix
+        name: cargo fmt (auto-fix)
+        entry: scripts/repo-cargo fmt --all
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+  # On push: secret detection
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.4
+    hooks:
+      - id: gitleaks
+        stages: [pre-push]
+
+  # On push: file hygiene checks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+        stages: [pre-push]
+        # Byte-lossless corpus fixtures (release-minted realms, forensic
+        # bundles with checksum manifests) and vendored upstream files (each
+        # console or Forge font family's files and license text) must never
+        # be text-normalized.
+        exclude: ^(crates/meerkat-meta/tests/fixtures/|installer/tests/fixtures/|installer/launchkit/templates_v2/toolkit-ui/vendor/|console/src/fonts/[^/]+/|installer/web/fonts/[^/]+/)
+      - id: end-of-file-fixer
+        stages: [pre-push]
+        exclude: ^(crates/meerkat-meta/tests/fixtures/|installer/tests/fixtures/|installer/launchkit/templates_v2/toolkit-ui/vendor/|console/src/fonts/[^/]+/|installer/web/fonts/[^/]+/)
+      - id: check-yaml
+        stages: [pre-push]
+      - id: check-toml
+        stages: [pre-push]
+      - id: check-merge-conflict
+        # Without --assume-in-merge the hook scans files only while
+        # .git/MERGE_MSG exists, so a conflict marker committed during a merge
+        # and pushed later passes untouched (CHANGELOG.md, 2026-09-03). Force
+        # the scan on every push.
+        args: [--assume-in-merge]
+        stages: [pre-push]
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+        stages: [pre-push]
+
+  # On push: formatting check
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt --check
+        entry: scripts/repo-cargo fmt --all -- --check
+        language: system
+        types: [rust]
+        pass_filenames: false
+        stages: [pre-push]
+
+  # On push: the generated Bazel BUILD files match the crate layout. CI runs
+  # the same check in fmt-lint; a new test binary or bin added without
+  # `node scripts/generate-bazel-rust-builds.mjs` fails there (PR #393,
+  # 2026-09-04). No hook regenerates on commit here, so the push gate is the
+  # only local one.
+  - repo: local
+    hooks:
+      - id: bazel-builds-fresh
+        name: generated Bazel BUILD files are fresh
+        entry: node scripts/generate-bazel-rust-builds.mjs --check
+        language: system
+        types: [rust]
+        pass_filenames: false
+        stages: [pre-push]
+
+  # On push: every production AgentLlmClient decorator forwards
+  # request_attempt_authority (the trait default silently reports LegacySplit).
+  - repo: local
+    hooks:
+      - id: decorator-authority
+        name: decorator authority forwarding
+        entry: python3 scripts/verify-decorator-authority.py
+        language: system
+        types: [rust]
+        pass_filenames: false
+        stages: [pre-push]
+
+  # On demand, never on push: the two compile-heavy gates. A push that ran
+  # them took 28m19s on 2026-10-16, 712.88 s in clippy and 974.16 s in the
+  # unit gate, and CI runs both on every pull request that touches Rust: its
+  # clippy job lints the whole workspace with every target, and its test job
+  # runs every lib and bin test. Run either before a push when it helps:
+  #
+  #   pre-commit run --hook-stage manual cargo-clippy --from-ref origin/main --to-ref HEAD
+  #   pre-commit run --hook-stage manual cargo-test --from-ref origin/main --to-ref HEAD
+
+  # Clippy on changed crates only (falls back to workspace for root manifest changes)
+  - repo: local
+    hooks:
+      - id: cargo-clippy
+        name: cargo clippy (changed crates)
+        entry: scripts/pre-push-clippy.sh
+        language: script
+        files: (\.rs$|(^|/)Cargo\.(toml|lock)$|^rust-toolchain(\.toml)?$)
+        pass_filenames: false
+        verbose: true
+        stages: [manual]
+
+  # Unit tests only (integration tests run in CI)
+  - repo: local
+    hooks:
+      - id: cargo-test
+        name: workspace unit gate
+        entry: scripts/pre-push-unit.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+        verbose: true
+        stages: [manual]

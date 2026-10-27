@@ -1,0 +1,4 @@
+{
+  "targets": ["crates.io", "npm", "pypi", "github-releases"],
+  "support_matrix": "same-as-meerkat"
+}

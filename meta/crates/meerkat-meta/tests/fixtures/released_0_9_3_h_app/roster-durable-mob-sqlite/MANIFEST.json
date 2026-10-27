@@ -1,0 +1,872 @@
+{
+  "committed_sessions": {
+    "01a1558e-4965-72cb-adbe-0553e8b0cb06": {
+      "messages": 8,
+      "messages_sha256": "e2d32a51e3d9b1ef8750a0da7cffc16b7f679e62d15afc3ca6a4b60535ad2c52",
+      "projection_messages": 8,
+      "record_identity": "app:app-01",
+      "store_revision": 8,
+      "transcript_history": {
+        "reanchored": false,
+        "retained_generations": [
+          1
+        ],
+        "retired_generations": []
+      }
+    },
+    "01a1558e-4967-71ed-a281-6de2987c0bf9": {
+      "messages": 5,
+      "messages_sha256": "e0e9674a593b4a683f703e1c888f3f4767d7fbe17c1db3b7b5124c2c5e9966f9",
+      "projection_messages": 5,
+      "record_identity": "app:app-02",
+      "store_revision": 5,
+      "transcript_history": null
+    },
+    "01a1558e-4968-75e7-bc39-e2610f394111": {
+      "messages": 7,
+      "messages_sha256": "6cfb4b1f28efa17ef6e101e3dbf722c43fbd15ba0fb96ece1a7e12d6eba44936",
+      "projection_messages": 7,
+      "record_identity": "app:app-03",
+      "store_revision": 7,
+      "transcript_history": null
+    },
+    "01a1558e-496a-73e0-afeb-dabe14d49174": {
+      "messages": 3,
+      "messages_sha256": "d687c4d9eaefaf347b72855e0f8749f93c8ca7291000309d0f94401c9315bd57",
+      "projection_messages": 3,
+      "record_identity": null,
+      "store_revision": 2,
+      "transcript_history": null
+    },
+    "01a1558e-4c48-746d-88c2-82fd8a57ca1f": {
+      "messages": 3,
+      "messages_sha256": "14acafb0cbf12296e3ae1e632eb8805eda7190bf28081ed27a1ea24c9d199278",
+      "projection_messages": 3,
+      "record_identity": null,
+      "store_revision": 2,
+      "transcript_history": null
+    },
+    "01a1558e-4c4d-7735-b744-a52ab21ad12a": {
+      "messages": 3,
+      "messages_sha256": "7e3da31a5bc5a5b5ffd5e446a25dd3c31934f34a711d2830c003c80a10e2e81b",
+      "projection_messages": 3,
+      "record_identity": "app:app-06",
+      "store_revision": 3,
+      "transcript_history": null
+    },
+    "01a1558e-6eb5-71ac-a18e-404684db7550": {
+      "messages": 3,
+      "messages_sha256": "4494458d837af52a29ab414d3f199d4205a7f5745a129d62b6fcf5ab8797c998",
+      "projection_messages": 3,
+      "record_identity": "app:app-04",
+      "store_revision": 3,
+      "transcript_history": null
+    },
+    "01a1558e-7935-751e-9add-fea65b1dc408": {
+      "messages": 1,
+      "messages_sha256": "3d4cb40791e5c9664e1c1aa2a6c2d4e812351cd08634876269819ae788c832a9",
+      "projection_messages": 1,
+      "record_identity": "app:app-05",
+      "store_revision": 1,
+      "transcript_history": null
+    }
+  },
+  "continuity": {
+    "records": {
+      "app:app-01": {
+        "generation": 0,
+        "session_id": "01a1558e-4965-72cb-adbe-0553e8b0cb06"
+      },
+      "app:app-02": {
+        "generation": 0,
+        "session_id": "01a1558e-4967-71ed-a281-6de2987c0bf9"
+      },
+      "app:app-03": {
+        "generation": 0,
+        "session_id": "01a1558e-4968-75e7-bc39-e2610f394111"
+      },
+      "app:app-04": {
+        "generation": 1,
+        "session_id": "01a1558e-6eb5-71ac-a18e-404684db7550"
+      },
+      "app:app-05": {
+        "generation": 0,
+        "session_id": "01a1558e-7935-751e-9add-fea65b1dc408"
+      },
+      "app:app-06": {
+        "generation": 0,
+        "session_id": "01a1558e-4c4d-7735-b744-a52ab21ad12a"
+      }
+    },
+    "schema": [
+      [
+        "meta-continuity",
+        1
+      ]
+    ],
+    "snapshot_rows": 0,
+    "tables": [
+      "continuity_records",
+      "meerkat_schema",
+      "session_snapshots"
+    ]
+  },
+  "corpus": "released_0_9_3_h_app",
+  "empty_dirs": [
+    "blobs"
+  ],
+  "files": {
+    "state": [
+      {
+        "bytes": 4096,
+        "path": "continuity.sqlite3",
+        "sha256": "edbee11a2e909b4413b8e2265b665c0f156aaba120e5c715a11d8fc30ba789d7"
+      },
+      {
+        "bytes": 32768,
+        "path": "continuity.sqlite3-shm",
+        "sha256": "ae6b273d799436964a4a739d7f28dd884b0621efc9cc5c79150571b0f9b0e704"
+      },
+      {
+        "bytes": 189552,
+        "path": "continuity.sqlite3-wal",
+        "sha256": "1169c20295c6e342ee67aca3d80c4db427227d1418ec0bf8524df5532ada1b1b"
+      },
+      {
+        "bytes": 0,
+        "path": "continuity.sqlite3.mfence",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 286720,
+        "path": "council.sqlite3",
+        "sha256": "119af1c8aea8c495d6856cd6667bbd7e890744ff6bdbbb66f19f7156866485e8"
+      },
+      {
+        "bytes": 0,
+        "path": "council.sqlite3.mfence",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 40960,
+        "path": "meta/jobs.sqlite3",
+        "sha256": "337b748a2b398ae229c8c3e9b4c0cf009e1c03afce5d294160252778217d2fbb"
+      },
+      {
+        "bytes": 0,
+        "path": "meta/jobs.sqlite3.mfence",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 53248,
+        "path": "meta_console.sqlite3",
+        "sha256": "ad641dbbac0f8bec4de2de6e6b9a498005139f5af81bdfaac57f8201346a1516"
+      },
+      {
+        "bytes": 20480,
+        "path": "meta_metadata.sqlite3",
+        "sha256": "5a057a2dba145aba56b77843e4e329fa7bc94295ecb334b9a271205667520ea5"
+      },
+      {
+        "bytes": 0,
+        "path": "meta_metadata.sqlite3.mfence",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 303104,
+        "path": "mob.sqlite3",
+        "sha256": "7d26940f361f6aaf905bc6eeb96ef7f62bc2f48411ec00b41fa6b2d3aee2c5f1"
+      },
+      {
+        "bytes": 32768,
+        "path": "mob.sqlite3-shm",
+        "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb"
+      },
+      {
+        "bytes": 0,
+        "path": "mob.sqlite3-wal",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 1513,
+        "path": "mob.sqlite3.composition.json",
+        "sha256": "98c411abae67d88233184a373774ba706d73923e559274e1c72f7ed2052d6c01"
+      },
+      {
+        "bytes": 0,
+        "path": "mob.sqlite3.mfence",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 0,
+        "path": "mobs/child-mobs.lock",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 286720,
+        "path": "mobs/realm_profiles.db",
+        "sha256": "119af1c8aea8c495d6856cd6667bbd7e890744ff6bdbbb66f19f7156866485e8"
+      },
+      {
+        "bytes": 0,
+        "path": "mobs/realm_profiles.db.mfence",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 458752,
+        "path": "runtime.sqlite",
+        "sha256": "5779dab31675aebaba9e0b2eadd73f3361ab74379fc67f7da97e021ed8d125d8"
+      },
+      {
+        "bytes": 0,
+        "path": "runtime.sqlite.execution-custody",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 0,
+        "path": "runtime.sqlite.execution-custody-admission",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 0,
+        "path": "runtime.sqlite.mfence",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 274432,
+        "path": "sessions.sqlite3",
+        "sha256": "440d59941c539b1dd3af365755fdb0dcacb3fc7ca66b7e51c98ca47ce6d3abd5"
+      },
+      {
+        "bytes": 0,
+        "path": "sessions.sqlite3.mfence",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 340,
+        "path": "topology-control.json",
+        "sha256": "6adaf0f20f9b6053084da318916de460f5a97cbc225af53a988037bc3cf76114"
+      },
+      {
+        "bytes": 0,
+        "path": "topology-control.json.lock",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 118784,
+        "path": "workgraph.sqlite3",
+        "sha256": "b877952a5a1ef5debd35fbdbef3d63e43204f30d13bf5c8c3f7e891e70bbef15"
+      },
+      {
+        "bytes": 32768,
+        "path": "workgraph.sqlite3-shm",
+        "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb"
+      },
+      {
+        "bytes": 0,
+        "path": "workgraph.sqlite3-wal",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "bytes": 0,
+        "path": "workgraph.sqlite3.mfence",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    ]
+  },
+  "generated_at": "2026-10-19T19:06:10Z",
+  "operations": [
+    [
+      1,
+      "build",
+      null
+    ],
+    [
+      1,
+      "status",
+      "app:app-01"
+    ],
+    [
+      1,
+      "turn",
+      "app:app-01"
+    ],
+    [
+      1,
+      "status",
+      "app:app-02"
+    ],
+    [
+      1,
+      "turn",
+      "app:app-02"
+    ],
+    [
+      1,
+      "status",
+      "app:app-03"
+    ],
+    [
+      1,
+      "turn",
+      "app:app-03"
+    ],
+    [
+      1,
+      "status",
+      "app:app-04"
+    ],
+    [
+      1,
+      "turn",
+      "app:app-04"
+    ],
+    [
+      1,
+      "status",
+      "app:app-05"
+    ],
+    [
+      1,
+      "turn",
+      "app:app-05"
+    ],
+    [
+      1,
+      "status",
+      "app:app-06"
+    ],
+    [
+      1,
+      "turn",
+      "app:app-06"
+    ],
+    [
+      1,
+      "turn",
+      "app:app-01"
+    ],
+    [
+      1,
+      "turn",
+      "app:app-01"
+    ],
+    [
+      1,
+      "retire",
+      "app:app-03"
+    ],
+    [
+      1,
+      "turn",
+      "app:app-03"
+    ],
+    [
+      1,
+      "reset",
+      "app:app-04"
+    ],
+    [
+      1,
+      "turn",
+      "app:app-04"
+    ],
+    [
+      1,
+      "delete_identity",
+      "app:app-05"
+    ],
+    [
+      1,
+      "turn",
+      "app:app-05"
+    ],
+    [
+      1,
+      "status",
+      "app:app-01"
+    ],
+    [
+      1,
+      "status",
+      "app:app-02"
+    ],
+    [
+      1,
+      "status",
+      "app:app-03"
+    ],
+    [
+      1,
+      "status",
+      "app:app-04"
+    ],
+    [
+      1,
+      "status",
+      "app:app-05"
+    ],
+    [
+      1,
+      "status",
+      "app:app-06"
+    ],
+    [
+      1,
+      "shutdown",
+      null
+    ],
+    [
+      2,
+      "build",
+      null
+    ],
+    [
+      2,
+      "status",
+      "app:app-01"
+    ],
+    [
+      2,
+      "status",
+      "app:app-02"
+    ],
+    [
+      2,
+      "status",
+      "app:app-03"
+    ],
+    [
+      2,
+      "status",
+      "app:app-04"
+    ],
+    [
+      2,
+      "status",
+      "app:app-05"
+    ],
+    [
+      2,
+      "status",
+      "app:app-06"
+    ],
+    [
+      2,
+      "turn",
+      "app:app-01"
+    ],
+    [
+      2,
+      "turn",
+      "app:app-02"
+    ],
+    [
+      2,
+      "turn",
+      "app:app-03"
+    ],
+    [
+      2,
+      "shutdown",
+      null
+    ],
+    [
+      3,
+      "build",
+      null
+    ],
+    [
+      3,
+      "status",
+      "app:app-01"
+    ],
+    [
+      3,
+      "status",
+      "app:app-02"
+    ],
+    [
+      3,
+      "status",
+      "app:app-03"
+    ],
+    [
+      3,
+      "status",
+      "app:app-04"
+    ],
+    [
+      3,
+      "status",
+      "app:app-05"
+    ],
+    [
+      3,
+      "status",
+      "app:app-06"
+    ],
+    [
+      3,
+      "turn",
+      "app:app-01"
+    ],
+    [
+      3,
+      "shutdown",
+      null
+    ]
+  ],
+  "outside_state": {
+    "session_comms_identity": {
+      "root": "$XDG_STATE_HOME/meerkat/session_comms_identity",
+      "sessions": {
+        "01a1558e-4965-72cb-adbe-0553e8b0cb06": [
+          "identity.key",
+          "identity.pub"
+        ],
+        "01a1558e-4967-71ed-a281-6de2987c0bf9": [
+          "identity.key",
+          "identity.pub"
+        ],
+        "01a1558e-4968-75e7-bc39-e2610f394111": [
+          "identity.key",
+          "identity.pub"
+        ],
+        "01a1558e-496a-73e0-afeb-dabe14d49174": [
+          "identity.key",
+          "identity.pub"
+        ],
+        "01a1558e-4c48-746d-88c2-82fd8a57ca1f": [
+          "identity.key",
+          "identity.pub"
+        ],
+        "01a1558e-4c4d-7735-b744-a52ab21ad12a": [
+          "identity.key",
+          "identity.pub"
+        ],
+        "01a1558e-6eb5-71ac-a18e-404684db7550": [
+          "identity.key",
+          "identity.pub"
+        ],
+        "01a1558e-7935-751e-9add-fea65b1dc408": [
+          "identity.key",
+          "identity.pub"
+        ]
+      },
+      "stored": false,
+      "why": "per-session keypairs (key material) that 0.9.3 keeps outside the state directory"
+    }
+  },
+  "packed": [],
+  "producer": {
+    "binary": "s2-mint-093",
+    "binary_sha256": "d4928d732a0b3c7fe71838259bd88105797a385b2ad56676e36615a9da86f747",
+    "compaction": {
+      "auto_compact_threshold": 50000,
+      "recent_turn_budget": 1,
+      "reported_prompt_tokens": 60000,
+      "trigger": "a user message carrying [compact-now] reports a cost above the threshold once"
+    },
+    "driver_files": {
+      "Cargo.lock.fixture": "34f95396a8f350e18c1e22bf9247f6b3003da65a69f0836bdce79d54b332f5a4",
+      "Cargo.toml.fixture": "9f3decd203a9e7f3c711d888b4b65022dd6e7227c9ca4d8d7068bcb52e8a5a65",
+      "src/llm_usage.rs": "aa471188e185cd3fba8c3f0831ee0ffdec470612c412f4781d50c87645452f3d",
+      "src/main.rs": "db9e36699e872988bc438cee6f04775ea4008e0c794a960fc009df2d667af29e"
+    },
+    "meerkat_crates": {
+      "meerkat": {
+        "source": "registry",
+        "version": "0.9.3"
+      },
+      "meerkat-anthropic": {
+        "source": "registry",
+        "version": "0.9.3"
+      },
+      "meerkat-auth-core": {
+        "source": "registry",
+        "version": "0.9.3"
+      },
+      "meerkat-authorization": {
+        "source": "registry",
+        "version": "0.9.3"
+      },
+      "meerkat-authorization-contracts": {
+        "source": "registry",
+        "version": "0.9.3"
+      },
+      "meerkat-capabilities": {
+        "source": "registry",
+        "version": "0.9.3"
+      },
+      "meerkat-client": {
+        "source": "registry",
+        "version": "0.9.3"
+      },
+      "meerkat-comms": {
+        "source": "registry",
+        "version": "0.9.3"
+      },
+      "meerkat-contracts": {
+        "source": "registry",
+        "version": "0.9.3"
+      },
+      "meerkat-copilot": {
+        "source": "registry",
+        "version": "0.9.3"
+      },
+      "meerkat-core": {
+        "source": "registry",
+        "version": "0.9.3"
+      },
+      "meerkat-gemini": {
+        "source": "registry",
+        "version": "0.9.3"
+      },
+      "meerkat-hooks": {
+        "source": "registry",
+        "version": "0.9.3"
+      },
+      "meerkat-jobs": {
+        "source": "registry",
+        "version": "0.9.3"
+      },
+      "meerkat-live": {
+        "source": "registry",
+        "version": "0.9.3"
+      },
+      "meerkat-llm-core": {
+        "source": "registry",
+        "version": "0.9.3"
+      },
+      "meerkat-machine-derive": {
+        "source": "registry",
+        "version": "0.9.3"
+      },
+      "meerkat-machine-dsl": {
+        "source": "registry",
+        "version": "0.9.3"
+      },
+      "meerkat-machine-dsl-core": {
+        "source": "registry",
+        "version": "0.9.3"
+      },
+      "meerkat-machine-kernels": {
+        "source": "registry",
+        "version": "0.9.3"
+      },
+      "meerkat-machine-schema": {
+        "source": "registry",
+        "version": "0.9.3"
+      },
+      "meerkat-mcp": {
+        "source": "registry",
+        "version": "0.9.3"
+      },
+      "meerkat-memory": {
+        "source": "registry",
+        "version": "0.9.3"
+      },
+      "meerkat-meta": {
+        "source": "registry",
+        "version": "0.9.3"
+      },
+      "meerkat-mob": {
+        "source": "registry",
+        "version": "0.9.3"
+      },
+      "meerkat-mob-mcp": {
+        "source": "registry",
+        "version": "0.9.3"
+      },
+      "meerkat-models": {
+        "source": "registry",
+        "version": "0.9.3"
+      },
+      "meerkat-openai": {
+        "source": "registry",
+        "version": "0.9.3"
+      },
+      "meerkat-providers": {
+        "source": "registry",
+        "version": "0.9.3"
+      },
+      "meerkat-runtime": {
+        "source": "registry",
+        "version": "0.9.3"
+      },
+      "meerkat-sandbox": {
+        "source": "registry",
+        "version": "0.9.3"
+      },
+      "meerkat-schedule": {
+        "source": "registry",
+        "version": "0.9.3"
+      },
+      "meerkat-session": {
+        "source": "registry",
+        "version": "0.9.3"
+      },
+      "meerkat-skills": {
+        "source": "registry",
+        "version": "0.9.3"
+      },
+      "meerkat-sqlite": {
+        "source": "registry",
+        "version": "0.9.3"
+      },
+      "meerkat-store": {
+        "source": "registry",
+        "version": "0.9.3"
+      },
+      "meerkat-tools": {
+        "source": "registry",
+        "version": "0.9.3"
+      },
+      "meerkat-workgraph": {
+        "source": "registry",
+        "version": "0.9.3"
+      }
+    },
+    "mob_storage": "persistent, state/mob.sqlite3",
+    "model": "scripted in-process client; reply 'app reply N'",
+    "toolchain": "1.97.0",
+    "wrapper": "mint_released_0_9_3_h_app.py",
+    "wrapper_sha256": "dfa2d4871f08e34fd1044c2482d7f96a32831986c4075d10ba6f48386b49db1c"
+  },
+  "refusals": [
+    {
+      "boot": 1,
+      "identity": "app:app-05",
+      "message": "unknown identity: app:app-05",
+      "op": "turn"
+    },
+    {
+      "boot": 1,
+      "identity": "app:app-05",
+      "message": "unknown identity: app:app-05",
+      "op": "status"
+    },
+    {
+      "boot": 3,
+      "identity": "app:app-06",
+      "message": "unknown identity: app:app-06",
+      "op": "status"
+    }
+  ],
+  "restart_probe_093": {
+    "shutdown": "UnifiedRuntimeShutdownReport { drain: ShutdownDrainReport { drained_count: 2, timed_out: false, drain_duration_ms: 103 }, module_shutdown: RuntimeShutdownReport { terminated_modules: [], orphan_processes: 0, physical_cleanup: ModuleCleanupObservation { phase: Settled, outstanding: [], reaped: [] } }, mob_stop: Ok(()), identity_authority_release: Released { grant_count: 5 }, retired_supervisor_cleanup: NothingPending, mob_terminal_shutdown: Completed(MobShutdownReport { members: {AgentIdentity(\"mk--app_capp-01\"): Unregistered, AgentIdentity(\"mk--app_capp-02\"): Unregistered, AgentIdentity(\"mk--app_capp-03\"): Unregistered, AgentIdentity(\"mk--app_capp-04\"): Unregistered, AgentIdentity(\"mk--app_capp-05\"): Unregistered, AgentIdentity(\"mk--app_capp-06\"): Unregistered}, runs: {}, run_starts: {AgentIdentity(\"mk--app_capp-01\"): Held, AgentIdentity(\"mk--app_capp-02\"): Held, AgentIdentity(\"mk--app_capp-03\"): Held, AgentIdentity(\"mk--app_capp-04\"): Held, AgentIdentity(\"mk--app_capp-05\"): Held, AgentIdentity(\"mk--app_capp-06\"): Held} }), child_mob_stand_down: Released { child_mobs: 0 }, member_mcp_settlement: NothingOwned }",
+    "started": true
+  },
+  "statuses": {
+    "1": {
+      "app:app-01": {
+        "agent_runtime_id": "rt:app:app-01:0",
+        "generation": 0,
+        "session_id": "01a1558e-4965-72cb-adbe-0553e8b0cb06",
+        "state": "active"
+      },
+      "app:app-02": {
+        "agent_runtime_id": "rt:app:app-02:0",
+        "generation": 0,
+        "session_id": "01a1558e-4967-71ed-a281-6de2987c0bf9",
+        "state": "active"
+      },
+      "app:app-03": {
+        "agent_runtime_id": "rt:app:app-03:0",
+        "generation": 0,
+        "session_id": "01a1558e-4968-75e7-bc39-e2610f394111",
+        "state": "active"
+      },
+      "app:app-04": {
+        "agent_runtime_id": "rt:app:app-04:1",
+        "generation": 1,
+        "session_id": "01a1558e-6eb5-71ac-a18e-404684db7550",
+        "state": "active"
+      },
+      "app:app-05": {
+        "agent_runtime_id": "rt:app:app-05:0",
+        "generation": 0,
+        "session_id": "01a1558e-4c48-746d-88c2-82fd8a57ca1f",
+        "state": "active"
+      },
+      "app:app-06": {
+        "agent_runtime_id": "rt:app:app-06:0",
+        "generation": 0,
+        "session_id": "01a1558e-4c4d-7735-b744-a52ab21ad12a",
+        "state": "active"
+      }
+    },
+    "2": {
+      "app:app-01": {
+        "agent_runtime_id": "rt:app:app-01:0",
+        "generation": 0,
+        "session_id": "01a1558e-4965-72cb-adbe-0553e8b0cb06",
+        "state": "active"
+      },
+      "app:app-02": {
+        "agent_runtime_id": "rt:app:app-02:0",
+        "generation": 0,
+        "session_id": "01a1558e-4967-71ed-a281-6de2987c0bf9",
+        "state": "active"
+      },
+      "app:app-03": {
+        "agent_runtime_id": "rt:app:app-03:0",
+        "generation": 0,
+        "session_id": "01a1558e-4968-75e7-bc39-e2610f394111",
+        "state": "active"
+      },
+      "app:app-04": {
+        "agent_runtime_id": "rt:app:app-04:1",
+        "generation": 1,
+        "session_id": "01a1558e-6eb5-71ac-a18e-404684db7550",
+        "state": "active"
+      },
+      "app:app-05": {
+        "agent_runtime_id": "rt:app:app-05:0",
+        "generation": 0,
+        "session_id": "01a1558e-7935-751e-9add-fea65b1dc408",
+        "state": "active"
+      },
+      "app:app-06": {
+        "agent_runtime_id": "rt:app:app-06:0",
+        "generation": 0,
+        "session_id": "01a1558e-4c4d-7735-b744-a52ab21ad12a",
+        "state": "active"
+      }
+    },
+    "3": {
+      "app:app-01": {
+        "agent_runtime_id": "rt:app:app-01:0",
+        "generation": 0,
+        "session_id": "01a1558e-4965-72cb-adbe-0553e8b0cb06",
+        "state": "active"
+      },
+      "app:app-02": {
+        "agent_runtime_id": "rt:app:app-02:0",
+        "generation": 0,
+        "session_id": "01a1558e-4967-71ed-a281-6de2987c0bf9",
+        "state": "active"
+      },
+      "app:app-03": {
+        "agent_runtime_id": "rt:app:app-03:0",
+        "generation": 0,
+        "session_id": "01a1558e-4968-75e7-bc39-e2610f394111",
+        "state": "active"
+      },
+      "app:app-04": {
+        "agent_runtime_id": "rt:app:app-04:1",
+        "generation": 1,
+        "session_id": "01a1558e-6eb5-71ac-a18e-404684db7550",
+        "state": "active"
+      },
+      "app:app-05": {
+        "agent_runtime_id": "rt:app:app-05:0",
+        "generation": 0,
+        "session_id": "01a1558e-7935-751e-9add-fea65b1dc408",
+        "state": "active"
+      }
+    }
+  },
+  "variant": "roster-durable-mob-sqlite"
+}

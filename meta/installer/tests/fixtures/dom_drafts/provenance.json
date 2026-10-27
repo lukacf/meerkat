@@ -1,0 +1,14 @@
+{
+  "original": {
+    "source": ".artifacts/novice-full-path/20261001T221059Z-6bacbddf-5f34-42e6-b9b5-50cf09d56557/exact-draft-source/application/drafts.py",
+    "source_sha256": "180a9142059319a60113d87a71cbebe97aecf8bb1caa90ddc0ff785437224740",
+    "script_sha256": "f93614884caf588f456353d2e99432e230a2e97772a6b42e09c40fdfa6161aa0",
+    "scope": "Exact historical production SCRIPT literal, no app import/execution; DOM evidence only."
+  },
+  "repaired": {
+    "source": ".artifacts/novice-full-path/20261001T221059Z-6bacbddf-5f34-42e6-b9b5-50cf09d56557/newline-source/application/drafts.py",
+    "source_sha256": "b9d3880f7e18039d5b1640d4b47231d1d1de390ee7648d3f1f4328b620ba20fb",
+    "script_sha256": "370c6f345e2f7b78c449326d94ff5a57762e9787baea5bc84d7cdcd5be3eb534",
+    "scope": "Exact historical production SCRIPT literal, no app import/execution; DOM evidence only."
+  }
+}

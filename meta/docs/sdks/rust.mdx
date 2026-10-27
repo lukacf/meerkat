@@ -1,0 +1,687 @@
+---
+title: "Rust SDK"
+description: "Use Meta as a Rust library: bootstrap runtimes, route module calls, and manage operational subsystems programmatically."
+icon: "code"
+---
+
+The Rust crate `meerkat-meta` is the primary interface for Meta. All other interfaces (JSON-RPC, SDKs, console) are built on top of it.
+
+## Installation
+
+```toml Cargo.toml
+[dependencies]
+meerkat-meta = "0.9.5"
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+```
+
+## Quick start
+
+Host-supplied modules are optional. This runnable baseline starts no module
+processes; add module declarations only for executables or MCP transports your
+host actually supplies.
+
+```rust
+use meerkat_meta::{start_meta_runtime, DiscoverySpec, MetaConfig};
+use std::time::Duration;
+
+let config = MetaConfig {
+    modules: vec![],
+    discovery: DiscoverySpec {
+        namespace: "my-app".into(),
+        modules: vec![],
+    },
+    pre_spawn: vec![],
+};
+
+let runtime = start_meta_runtime(config, vec![], Duration::from_secs(30))?;
+```
+
+## Core types
+
+### MetaConfig
+
+Top-level configuration for the module runtime.
+
+```rust
+struct MetaConfig {
+    modules: Vec<ModuleConfig>,
+    discovery: DiscoverySpec,
+    pre_spawn: Vec<PreSpawnData>,
+}
+```
+
+### ModuleConfig
+
+Configuration for a single module.
+
+```rust
+struct ModuleConfig {
+    id: String,
+    command: String,
+    args: Vec<String>,
+    restart_policy: RestartPolicy,
+}
+```
+
+### EventEnvelope
+
+Timestamped event wrapper.
+
+```rust
+struct EventEnvelope<T> {
+    event_id: String,
+    source: String,
+    timestamp_ms: u64,
+    event: T,
+}
+```
+
+### UnifiedEvent
+
+Agent or module event discriminator.
+
+```rust
+enum UnifiedEvent {
+    Agent {
+        agent_id: String,
+        event_type: String,
+        payload: Option<Value>,
+    },
+    Module(ModuleEvent),
+}
+
+struct ModuleEvent {
+    module: String,
+    event_type: String,
+    payload: Value,
+}
+```
+
+## Runtime functions
+
+### `start_meta_runtime`
+
+Bootstrap a module-only runtime:
+
+```rust
+fn start_meta_runtime(
+    config: MetaConfig,
+    agent_events: Vec<EventEnvelope<UnifiedEvent>>,
+    timeout: Duration,
+) -> Result<MetaRuntimeHandle, MetaRuntimeError>
+```
+
+### `start_meta_runtime_with_options`
+
+Bootstrap with additional options:
+
+```rust
+fn start_meta_runtime_with_options(
+    config: MetaConfig,
+    agent_events: Vec<EventEnvelope<UnifiedEvent>>,
+    timeout: Duration,
+    options: RuntimeOptions,
+) -> Result<MetaRuntimeHandle, MetaRuntimeError>
+```
+
+### `UnifiedRuntime::builder`
+
+Builder for the combined mob + module runtime:
+
+```rust
+UnifiedRuntime::builder()
+    .mob_spec(spec)
+    .module_config(config)
+    .timeout(duration)
+    .build()
+    .await?
+```
+
+For identity-first runtimes with a roster provider, the Rust builder can enable
+identity-scoped agent memory injection. Open the SQLite authority explicitly
+and pass it through the provider seam:
+
+```rust
+use std::sync::Arc;
+use meerkat_meta::{AgentMemoryConfig, SqliteAgentMemoryStore, UnifiedRuntime};
+
+let memory = Arc::new(SqliteAgentMemoryStore::open(".meta/state/agent-memory")?);
+
+let runtime = UnifiedRuntime::builder()
+    .definition_path("config/mob.toml")
+    .persistent_state(".meta/state")
+    .roster_provider(roster_provider)
+    .agent_memory(memory, AgentMemoryConfig::default())
+    .build()
+    .await?;
+```
+
+The SQLite provider stores one database per realm. When a realm is first
+accessed and its SQLite connection is opened, it imports that realm's legacy
+markdown files from the same agent-memory directory. Markdown is not a live
+provider. To supply another storage or retrieval authority, pass any
+`Arc<dyn AgentMemoryProvider>` with `.agent_memory(provider, config)`.
+
+Rust callers can write, read, and delete durable records through the unified
+runtime:
+
+```rust
+use meerkat_meta::{AgentMemoryRecallRequest, AgentMemorySelection, NewAgentMemory};
+
+let record = runtime
+    .remember_agent_memory(
+        "default",
+        &identity,
+        NewAgentMemory {
+            title: "Deployment preference".into(),
+            body: "Use the staging realm before production deploys.".into(),
+            tags: vec!["deploy".into()],
+        },
+    )
+    .await?;
+
+let records = runtime
+    .recall_agent_memory(AgentMemoryRecallRequest {
+        identity: identity.clone(),
+        realm: "default".into(),
+        selection: AgentMemorySelection::Contextual,
+        query_text: Some("What should I check before deploying?".into()),
+        query_terms: vec!["deploy".into()],
+        max_entries: 4,
+    })
+    .await?;
+
+if let Some(record) = records.first() {
+    runtime
+        .forget_agent_memory("default", &identity, &record.memory_id)
+        .await?;
+}
+```
+
+### Bootstrap completion
+
+A host that starts its own work once the runtime is up (a first recovery
+pass, a readiness signal) takes the runtime's bootstrap completion and starts
+that work inside its publication, which never runs on a runtime that has
+begun to close:
+
+```rust
+use meerkat_meta::{BootstrapCompletionRefused, UnifiedRuntime};
+
+let runtime = UnifiedRuntime::builder()
+    .definition_path("config/mob.toml")
+    .persistent_state(".meta/state")
+    .build()
+    .await?;
+
+let completion = runtime.take_bootstrap_completion()?;
+match completion.publish(|| spawn_first_recovery_pass()) {
+    Ok(_pass) => { /* the pass runs under the mob's ordinary admission */ }
+    Err(BootstrapCompletionRefused::RuntimeClosing) => { /* the close began first */ }
+    Err(_) => { /* AdmissionClosed: the mob's admission closed */ }
+}
+```
+
+The runtime mints one completion, on its bootstrap success path: the identity
+bootstrap on `Ok` (a held one on `Activated`), or
+`activate_without_identity_context` on `Ok`. `UnifiedRuntimeBuilder::build`
+passes through one of these, and a failed bootstrap mints nothing.
+`take_bootstrap_completion` hands it out once; otherwise it answers
+`BootstrapCompletionUnavailable::NotCompleted` or `AlreadyTaken`. A runtime
+from a legacy constructor (`UnifiedRuntime::bootstrap` and the
+`bootstrap_with_*` family) has no completion until
+`activate_without_identity_context` returns `Ok`. Installing an identity
+context withdraws a completion not yet taken, because the identity bootstrap
+that follows mints again; attaching one leaves it as it is.
+
+`publish(f)` runs `f` once, only while the runtime has not begun to close and
+its mob still admits work. The runtime's close (`shutdown`, a failed
+bootstrap's cleanup, or the retained teardown of a dropped composition) begins
+under the same gate: a publication that has begun finishes first, and a later
+one is refused with `RuntimeClosing` without running `f`. A mob whose
+admission already closed refuses with `AdmissionClosed`. While `f` runs the
+mob cannot close for being idle, but an explicit `MobHandle::close_admission`
+can still land, so work that `f` spawns handles `MobError::AdmissionClosed`
+like any other caller of the mob.
+
+Keep `f` short and synchronous, because a shutdown that begins meanwhile waits
+for it. It must not block on async work, take the host's own close boundary
+again, or shut the runtime down: the gate is not reentrant. If `f` panics,
+the panic propagates and the runtime can still close.
+
+On the stdio gateway (`rpc_gateway`), the driver takes the completion once the
+stdout capacity for its Ready line is reserved, so the runtime then answers
+`AlreadyTaken`. A host composing the gateway gets it from
+`GatewayBootstrapReady::take_runtime_completion` and publishes it inside the
+same boundary as the Ready. A Ready published without taking it drops it.
+
+### Operation refusal observer
+
+A governed operation that Meerkat refuses reaches the model only as uniform
+feedback. A host sees which typed refusal Meerkat met, and what it did with
+it, through Meerkat's `OperationRefusalObserver` (see
+[Observe refusal dispositions](https://docs.rkat.ai/rust/native-authorization#observe-refusal-dispositions)).
+Install it with the builder:
+
+```rust
+use meerkat_meta::UnifiedRuntime;
+use std::sync::Arc;
+
+let runtime = UnifiedRuntime::builder()
+    .definition_path("config/mob.toml")
+    .operation_refusal_observer(Arc::new(refusal_log)) // impl OperationRefusalObserver
+    .build()
+    .await?;
+```
+
+The builder installs it on every agent factory it owns, for persistent,
+scratch and temp-dir launches. Nothing of it reaches the event stream, a wire
+type or the model. A builder given an already-built `mob_spec(...)` refuses
+the observer with `UnifiedRuntimeBuilderError::ConflictingConfiguration`, and
+the public `MobBootstrapSpec` constructors take none: a host that builds its
+own spec installs the observer on its own agent factory and passes a session
+service built on that factory to `MobBootstrapSpec::new`.
+
+A host composing the stdio gateway answers
+`GatewayHostComposition::operation_refusal_observer`. The gateway asks once
+per member factory, with the construction it offers `compose_member_factory`,
+before any answer is installed. `Ok(None)` (the default) installs nothing,
+and `Err` refuses init. The observer sees every agent that factory builds:
+roster members, spawned helpers and forks, and the child mobs and councils
+agents create.
+
+`observe` is synchronous and must not block, and a panic in it propagates on
+the deciding task (the member's turn).
+
+### Operation review on a host-composed gateway
+
+A host composing the stdio gateway can install Meerkat's operation review
+(`meerkat_core::approval::review::BoundOperationReview`: its reviewer,
+approval owner and deadline) on the gateway's member agents by answering
+`GatewayHostComposition::operation_review`. The gateway asks once per member
+factory, with the construction it offers `compose_member_factory` and
+`operation_refusal_observer`, before any answer is installed and before any
+session exists on the gateway's runtime. Each launch builds one member factory
+on its own runtime, so the gateway asks once per runtime.
+
+```rust
+fn operation_review(
+    &self,
+    _construction: &GatewayFactoryConstruction<'_>,
+) -> Result<Option<Arc<BoundOperationReview>>, GatewayHostError> {
+    let review = BoundOperationReview::new(reviewer, approvals, deadline)
+        .with_human_consent(consent_route, consent_validity);
+    Ok(Some(Arc::new(review)))
+}
+```
+
+When the review routes R3 to human consent (`with_human_consent`), the gateway
+first installs the review's consent owner-loss settlement, the approval owner
+that issues that consent, on the gateway's runtime, and then installs the
+review on the factory. A review without a consent route is installed on the
+factory alone. The review covers every agent that factory builds: roster
+members, spawned helpers and forks, and the child mobs and councils agents
+create. `Ok(None)` (the default) installs nothing, and `Err` refuses init. The
+settlement goes on the runtime the gateway has just built, before any session;
+should that runtime refuse it, init fails with
+`GatewayHostError::ConsentSettlementRefused`.
+
+### Agent customizer on a host-composed gateway
+
+A host composing the stdio gateway (`rpc_gateway::run_persistent_with_host`)
+can wrap the gateway's agent customizer by answering
+`GatewayHostComposition::compose_agent_customizer`. When the init registers a
+roster provider, the gateway asks once, after `bind_runtime` and before the
+identity context is installed, with the customizer it composed: the SDK's
+agent customizer (`.agent_customizer(...)` in Python, `.agentCustomizer(...)`
+in TypeScript), wrapped by agent memory when that is configured. The answer is
+the customizer of every identity member build: the roster bootstrap's and the
+later ones, such as a reset's fresh session. The default keeps the composed
+customizer, and a gateway without a roster provider never asks.
+
+A wrapper delegates `after_create` as well as `customize_build`. The gateway
+calls `after_create` once after each build of a live member that ran
+`customize_build`, with the session the build created or resumed,
+best-effort: an error is logged and the build stands. It calls it with no lock
+of the identity held, so once the init has settled an `after_create` can call
+back into the gateway for the same identity; during the roster bootstrap the
+gateway still answers `init_in_progress`. The call can come after the
+operation that built the member has answered. The context's `model` is the
+build's model, else the model of the profile when the mob definition declares
+it inline; it is empty for a realm-bound profile the build sets no model for.
+`AgentCustomizer::after_create` has a no-op default, so a wrapper that
+overrides only `customize_build` silently drops the SDK's `after_create`
+callback. A member Core rebuilds on its own (its restore at a restart, a
+delivery-time repair) calls neither: the identity's customizer tools stay
+attached through its tool dispatcher.
+
+The hook can wrap the composed customizer, but it cannot add one. Whether a
+customizer is composed is settled before the hook runs, because the registry
+that keeps each member's `customize_build` tools across rebuilds (a restart,
+a respawn, a delivery-time repair) exists only when one is composed. A
+customizer added later would lose its tools at the first rebuild. So:
+
+- When the init registers no SDK agent customizer and configures no agent
+  memory, the gateway offers `None`. The host answers `Ok(None)` to start
+  without a customizer, or `Err` to refuse init.
+- Answering a customizer for `None` refuses init with `-32603`, and so does
+  answering `None` for a composed customizer.
+
+An application whose host gives members tools or other build-time surface
+through this hook, such as one that declares member classes, must therefore
+configure the SDK's agent customizer. A pass-through is enough:
+
+```python
+from meerkat_meta import AgentCustomizerProtocol
+
+class PassThrough(AgentCustomizerProtocol):
+    async def customize_build(self, context, spec, draft) -> None:
+        pass  # the host's wrapper adds what its members need
+
+# Meta.builder() ... .agent_customizer(PassThrough()) ... .build()
+```
+
+In TypeScript, `.agentCustomizer({ async customizeBuild() {} })` does the
+same. A host that needs a customizer and is offered `None` answers
+`Err(GatewayHostError::AgentCustomizerRequired)`, so init fails before the
+identity bootstrap instead of starting members without their surface. The
+init failure (`-32603`) carries the variant's text, which tells the operator
+to configure the SDK agent customizer and that a pass-through is enough.
+
+### Fork instruction policy
+
+A fork of a member with activated host instructions does with them what the
+host's fork instruction policy says (the values are in the `runtime_options`
+row `fork_instruction_policy` of the
+[configuration reference](/reference/configuration)). Set it with the builder:
+
+```rust
+use meerkat_core::ForkInstructionPolicy;
+use meerkat_meta::UnifiedRuntime;
+
+let runtime = UnifiedRuntime::builder()
+    .definition_path("config/mob.toml")
+    .fork_instruction_policy(ForkInstructionPolicy::ReactivateInherited)
+    .build()
+    .await?;
+```
+
+The builder applies it to its mob for persistent, scratch and temp-dir
+launches, on create and on resume. Unset, Meerkat's default
+(`RequireExplicitActivation`) applies. A builder given an already-built
+`mob_spec(...)` refuses it with
+`UnifiedRuntimeBuilderError::ConflictingConfiguration`: set it on that spec
+with `MobBootstrapSpec::with_fork_instruction_policy`.
+
+The mob does not store the policy, so the builder applies it on every create
+and resume, and it cannot be chosen per fork. Under the default, a fork you
+drive yourself with `UnifiedRuntime::fork_member` is committed, and its child
+runs no turn until you activate each inherited key on it with
+`runtime.mob_handle().activate_member_instruction(child, request)`; read the
+key's `key_state` with `read_member_instruction_activations` first for the
+`expectation` and `supersedes` to use. A fork that starts its own first turn
+(`fork_off`, a delegation fork, a council participant, the bounded and
+detached member forks) is refused with `MobError::ForkInstructionRefused`
+instead. See [Fork instruction policy](/reference/configuration#fork-instruction-policy)
+for what a fork copies and what `ReactivateInherited` trusts.
+
+### Provider credential store
+
+By default every agent factory keeps provider credentials (persisted API keys
+and the OAuth tokens a login saved) in Meerkat's process default store,
+`<config dir>/meerkat/credentials`, which every runtime and process of the OS
+user shares (see [Provider credentials](/reference/configuration#provider-credentials)).
+A host serving several users opens a store per user and hands it to the
+builder:
+
+```rust
+use meerkat::TokenStoreBackend;
+use meerkat_meta::UnifiedRuntime;
+
+let credentials = TokenStoreBackend::File {
+    root: user_root.join("credentials"),
+}
+.open_with_refresh_authority()?;
+
+let runtime = UnifiedRuntime::builder()
+    .definition_path("config/mob.toml")
+    .persistent_state(user_root.join("state"))
+    .provider_auth_persistence(credentials)
+    .build()
+    .await?;
+```
+
+The builder attaches a clone of the store to every agent factory it owns, for
+persistent, scratch and temp-dir launches, before anything clones the
+factory: the members and the agents they create, live sessions and the agent
+memory engines all resolve and persist provider credentials there, with one
+refresh authority. Pass the same root again whenever you reopen that user's
+state. A builder given an already-built `mob_spec(...)` refuses the store
+with `UnifiedRuntimeBuilderError::ConflictingConfiguration`, and the public
+`MobBootstrapSpec` constructors take none: a host that builds its own spec
+attaches the store to its own agent factory with
+`AgentFactory::with_provider_auth_persistence`, passes a session service built
+on that factory to `MobBootstrapSpec::new`, and gives memory engines it
+assembles itself the same store with
+`memory_wiring::attach_memory_engines_with_provider_auth`.
+
+A host deploy's `rkat mob run` process cannot carry the store, so a runtime
+built with it refuses `meta/mobpacks/deploy` with `execute: true` on its RPC
+and its Flow Editor (`-32004`, `data.kind =
+"provider_credentials_not_carried"`). A host that attached the store to its
+own spec's factory records it with
+`runtime.set_explicit_provider_credentials(true)` before it builds routers.
+
+A host composing the stdio gateway answers
+`GatewayHostComposition::provider_auth_persistence`. The gateway asks once per
+launch, before any agent factory is built, and attaches the store to its
+member factory before `compose_member_factory` is offered it, so the
+construction's host auth service and realm MCP installation use it too.
+`Ok(None)` (the default) keeps the process default, `Err` refuses init, and
+`runtime_options.provider_credentials_root` is refused under a native host.
+
+### Session hooks and mob operator authority
+
+A session hook (`SessionHook`, installed with `.session_hook(...)`) runs
+`before_create` on every build of a session: a member's first build and each
+rebuild of its session, including the restore of a member after a restart.
+An edit the hook makes to the request applies to that build only.
+
+A member whose profile enables `tools.mob` gets Meerkat's default mob operator
+authority, which may spawn every profile of its mob. A host narrows it in the
+hook, on the build's `mob_tool_authority_context`, and leaves alone a build
+whose authority holds no scope in its mob (a member of a child mob, for
+example). The sample uses `meerkat-core`, `meerkat-runtime` and `async-trait`
+as direct dependencies besides `meerkat-meta`:
+
+```rust
+use async_trait::async_trait;
+use meerkat_core::service::{CreateSessionRequest, SessionError};
+use meerkat_meta::SessionHook;
+use meerkat_runtime::mob_operator_authority::restrict_spawn_profiles_in_mob;
+
+struct WorkersOnly;
+
+#[async_trait]
+impl SessionHook for WorkersOnly {
+    async fn before_create(&self, req: &mut CreateSessionRequest) -> Result<(), SessionError> {
+        let Some(build) = req.build.as_mut() else {
+            return Ok(());
+        };
+        let Some(authority) = build.mob_tool_authority_context.as_ref() else {
+            return Ok(());
+        };
+        if !authority.spawn_profile_scope().contains_key("my-mob") {
+            return Ok(());
+        }
+        let narrowed = restrict_spawn_profiles_in_mob(authority, "my-mob", ["worker"])
+            .map_err(SessionError::Unsupported)?;
+        build.mob_tool_authority_context = Some(narrowed);
+        Ok(())
+    }
+}
+```
+
+The member's `spawn_member` and `spawn_many_members` then refuse any other
+profile of that mob with `access_denied`. A batch that names one is refused
+whole: none of its members spawn.
+
+The narrowing is per build, and so is a disable of the member's mob tools
+made in the hook. Neither is restored as authority: a restore build reaches
+the hook with the profile's setting and the default authority again. Make the
+edit on every build, restores included, or a restored member returns to the
+default authority. A hook that also installs host tools composes them over
+the session's own tools
+(`meerkat_meta::tool_compose::ComposedExternalTools::over`), so the member
+keeps its mob tools and the authority Meerkat binds on them.
+
+## Module routing
+
+### `route_module_call`
+
+Route a typed call to a module:
+
+```rust
+pub fn route_module_call(
+    runtime: &MetaRuntimeHandle,
+    request: &ModuleRouteRequest,
+    timeout: Duration,
+) -> Result<ModuleRouteResponse, ModuleRouteError>
+```
+
+### `route_module_call_rpc_json`
+
+Route a JSON-encoded request and receive a JSON-encoded response:
+
+```rust
+pub fn route_module_call_rpc_json(
+    runtime: &MetaRuntimeHandle,
+    request_json: &str,
+    timeout: Duration,
+) -> Result<String, RpcRouteError>
+```
+
+## Operational subsystem functions
+
+### Decisions
+
+```rust
+fn validate_bigquery_naming(naming: &BigQueryNaming) -> Result<(), DecisionPolicyError>
+fn load_trusted_meta_modules_from_toml(toml: &str) -> Result<Vec<ModuleConfig>, DecisionPolicyError>
+fn enforce_console_route_access(auth: &AuthPolicy, console: &ConsolePolicy, req: &ConsoleAccessRequest) -> Result<(), DecisionPolicyError>
+fn validate_runtime_ops_policy(policy: &RuntimeOpsPolicy) -> Result<(), DecisionPolicyError>
+fn validate_trusted_oidc_runtime_config(config: &TrustedOidcRuntimeConfig) -> Result<(), DecisionPolicyError>
+fn build_runtime_decision_state(input: RuntimeDecisionInputs) -> Result<RuntimeDecisionState, DecisionRuntimeError>
+impl RuntimeDecisionState {
+    // Explicit opt-out: a console that trusts no identity provider.
+    fn local_console(console: ConsolePolicy, bigquery: Option<BigQueryNaming>) -> Self
+    // Trusted module set for a local_console state (starts empty).
+    fn with_modules(self, modules: Vec<ModuleConfig>) -> Self
+}
+```
+
+`build_runtime_decision_state` is the validating constructor; it checks the
+trusted OIDC snapshot only when `console.require_app_auth` is `true`.
+`RuntimeDecisionState::local_console` is the explicit opt-out for local or
+host-protected consoles; at serve time the runtime reads `console`, the
+session-store naming and `modules`, and a host with trusted modules adds them
+with `.with_modules(...)`. The default stays fail-closed: `ConsolePolicy::default()`
+requires app auth, and a state that trusts no key refuses every request. See
+[Decisions](/reference/decisions#runtime-decision-state) for every check and
+when it runs.
+
+`gateway_composition` also exports the HTTP exposure vocabulary both binaries
+use: `GatewaySurface` (`RpcGateway` | `MetaGateway`, `Display` is the binary
+name), `ConsoleAuthPosture::of(&decisions)` (`Open` | `ClosedToEveryCaller` |
+`Enforced`, the one classifier behind the bind gate and the non-loopback
+warning), `HttpBindPolicy`, `validate_http_bind_policy(surface, listen, policy)`,
+`warn_on_non_loopback_bind(surface, bound, &decisions)`, and the typed
+`HttpExposureParseError` behind `parse_http_listen_addr`,
+`parse_http_public_base_url` and `parse_http_listen_arg`. The error enums
+(`HttpBindPolicyError`, `HttpExposureParseError`, `GatewayHostConfigError`,
+`HostConfigTableInMobToml`) are `#[non_exhaustive]`.
+
+### Authentication
+
+```rust
+fn inspect_jwt_header(token: &str) -> Result<JwtHeaderView, JwtValidationError>
+fn validate_jwt_locally(token: &str, config: &JwtValidationConfig) -> Result<ValidatedJwt, JwtValidationError>
+fn parse_oidc_discovery_json(json: &str) -> Result<OidcDiscoveryDocument, OidcContractError>
+fn parse_jwks_json(json: &str) -> Result<JwksDocument, OidcContractError>
+```
+
+### Governance
+
+```rust
+fn validate_governance_state(file_name: &str, content: &str) -> Result<(), GovernanceValidationError>
+fn validate_traceability_statuses(markdown: &str) -> Result<(), GovernanceValidationError>
+```
+
+The first function receives a diagnostic file label and document contents, not
+a state value or a file to read. The second accepts a Markdown table or YAML
+traceability document, including evidence for statuses that require it; it does
+not accept an array of status names. See [Governance](/reference/governance)
+for complete examples and the validators' limits.
+
+## HTTP routers
+
+Build Axum routers for serving the console and interactions:
+
+```rust
+// Decision state. Explicit opt-out for a local console that trusts no
+// identity provider; ConsolePolicy::default() would require app auth and,
+// with no trusted key, refuse every request.
+let decisions = RuntimeDecisionState::local_console(
+    ConsolePolicy { require_app_auth: false, ..ConsolePolicy::default() },
+    None,
+);
+// Authenticated console: build_runtime_decision_state(RuntimeDecisionInputs { .. })?
+
+// Console frontend (HTML + JS + CSS)
+let frontend: Router = console_frontend_router();
+
+// Console JSON API, JSON-RPC, timeline SSE, multipart upload/send, and blobs
+let json_api_without_runtime: Router = console_json_router(decisions.clone());
+let json_api_with_runtime: Router =
+    console_json_router_with_runtime(decisions, mob_runtime, None, None);
+```
+
+Binding is separate from routing. `GatewayHttpBinding::bind_loopback()` is
+the default posture (loopback, ephemeral port) and
+`GatewayHttpBinding::bind(addr)` takes any `SocketAddr`; `http_base_url()`
+returns the same-host form, mapping wildcard binds to loopback of the same
+family: `0.0.0.0:PORT` becomes `http://127.0.0.1:PORT`, and `[::]:PORT`
+becomes `http://[::1]:PORT`. Concrete bound addresses and the bound port are
+preserved. `with_advertised_base_url(..)` carries a proxy-facing base for
+your init reply.
+
+Before binding, validate the requested `addr: SocketAddr` against your launch's
+`allow_remote` acknowledgement and decision state:
+
+```rust
+use meerkat_meta::gateway_composition::{
+    validate_http_bind_policy, GatewaySurface, HttpBindPolicy,
+};
+
+validate_http_bind_policy(
+    GatewaySurface::RpcGateway,
+    addr,
+    HttpBindPolicy::for_gateway(allow_remote, &decisions),
+)?;
+```
+
+`GatewaySurface` is the closed gateway diagnostic enum, not an arbitrary
+host name; use `GatewaySurface::MetaGateway` instead when representing that surface.
+The check applies the gateways' fail-closed rule: non-loopback needs enforced
+console auth or the `allow_remote` acknowledgement. After binding, call
+`warn_on_non_loopback_bind(surface, bound, &decisions)` for the gateways'
+WARN line. These helpers and `GatewayHttpBinding` live in
+`meerkat_meta::gateway_composition`. See [Deployment](/guides/deployment).
+
+## See also
+
+- [Quickstart](/quickstart) -- getting started
+- [Architecture](/reference/architecture) -- crate structure and design
+- [TypeScript SDK](/sdks/typescript) -- TypeScript equivalent
+- [Python SDK](/sdks/python) -- Python equivalent

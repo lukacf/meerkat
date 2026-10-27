@@ -1,0 +1,245 @@
+/* ===================================================================
+   Meta Console — Rams-inspired theme tokens
+   Warm paper / ink base, single functional accent, oklch-based.
+
+   Three variants steered via `data-cc-variant` on the console root:
+     - rams      (default): warm paper, editorial, Rams orange accent
+     - terminal            : deep ink, mono everywhere, phosphor green
+     - graphite            : refined neutral, cool blue accent
+   =================================================================== */
+
+.cc-theme-scope {
+  color-scheme: dark;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   RAMS — default variant
+   ══════════════════════════════════════════════════════════════════ */
+
+/* Light: warm paper */
+[data-cc-theme="light"] .cc-theme-scope,
+.cc-theme-scope[data-cc-theme="light"],
+[data-cc-variant="rams"][data-cc-theme="light"] .cc-theme-scope,
+.cc-theme-scope[data-cc-variant="rams"][data-cc-theme="light"] {
+  color-scheme: light;
+
+  --_cc-foreground-strong-default:   oklch(0.18 0.012 80);
+  --_cc-foreground-default:          oklch(0.22 0.012 80);
+  --_cc-foreground-muted-default:    oklch(0.45 0.012 80);
+  --_cc-foreground-subtle-default:   oklch(0.58 0.010 80);
+
+  --_cc-border-soft-default:         oklch(0.89 0.006 80);
+  --_cc-border-strong-default:       oklch(0.82 0.008 80);
+
+  --_cc-surface-canvas-default:      oklch(0.975 0.005 80);
+  --_cc-surface-soft-default:        oklch(0.955 0.006 80);
+  --_cc-surface-raised-default:      oklch(0.985 0.004 80);
+  --_cc-surface-hover-default:       oklch(0.955 0.006 80);
+  --_cc-surface-card-default:        oklch(1 0 0);
+
+  --_cc-link-default:                oklch(0.52 0.13 230);
+  --_cc-positive-default:            oklch(0.58 0.11 150);
+  --_cc-negative-default:            oklch(0.58 0.18 25);
+  --_cc-warning-default:             oklch(0.68 0.15 75);
+
+  --_cc-member-accent-default:       oklch(0.55 0.14 30);
+  --_cc-member-accent-soft-default:  oklch(0.93 0.04 30);
+  --_cc-member-surface-default:      oklch(0.97 0.015 30);
+
+  --_cc-sheen-soft-default:          rgba(255, 255, 255, 0.6);
+  --_cc-sheen-strong-default:        rgba(255, 255, 255, 0.8);
+  --_cc-shadow-sm-default:           0 1px 0 rgba(0,0,0,0.02), 0 1px 2px rgba(0,0,0,0.04);
+  --_cc-shadow-md-default:           0 1px 0 rgba(0,0,0,0.03), 0 4px 14px rgba(0,0,0,0.05);
+  --_cc-shadow-lg-default:           0 1px 0 rgba(0,0,0,0.03), 0 8px 20px rgba(0,0,0,0.06);
+  --_cc-shadow-xl-default:           0 2px 0 rgba(0,0,0,0.03), 0 16px 32px rgba(0,0,0,0.08);
+  --_cc-surface-wash-top-default:    rgba(255, 255, 255, 0.7);
+  --_cc-surface-wash-bottom-default: rgba(255, 255, 255, 0.55);
+}
+
+/* Dark: warm near-black */
+[data-cc-theme="dark"] .cc-theme-scope,
+.cc-theme-scope[data-cc-theme="dark"],
+[data-cc-variant="rams"][data-cc-theme="dark"] .cc-theme-scope,
+.cc-theme-scope[data-cc-variant="rams"][data-cc-theme="dark"] {
+  color-scheme: dark;
+
+  --_cc-foreground-strong-default:   oklch(0.98 0.006 80);
+  --_cc-foreground-default:          oklch(0.94 0.006 80);
+  --_cc-foreground-muted-default:    oklch(0.74 0.008 80);
+  --_cc-foreground-subtle-default:   oklch(0.58 0.010 80);
+
+  --_cc-border-soft-default:         oklch(0.28 0.007 80);
+  --_cc-border-strong-default:       oklch(0.36 0.009 80);
+
+  --_cc-surface-canvas-default:      oklch(0.16 0.005 80);
+  --_cc-surface-soft-default:        oklch(0.13 0.005 80);
+  --_cc-surface-raised-default:      oklch(0.19 0.006 80);
+  --_cc-surface-hover-default:       oklch(0.22 0.006 80);
+  --_cc-surface-card-default:        oklch(0.19 0.006 80);
+
+  --_cc-link-default:                oklch(0.72 0.13 230);
+  --_cc-positive-default:            oklch(0.72 0.13 150);
+  --_cc-negative-default:            oklch(0.70 0.18 25);
+  --_cc-warning-default:             oklch(0.78 0.15 75);
+
+  --_cc-member-accent-default:       oklch(0.72 0.15 30);
+  --_cc-member-accent-soft-default:  oklch(0.32 0.08 30);
+  --_cc-member-surface-default:      oklch(0.24 0.06 30);
+
+  --_cc-sheen-soft-default:          rgba(255, 255, 255, 0.04);
+  --_cc-sheen-strong-default:        rgba(255, 255, 255, 0.08);
+  --_cc-shadow-sm-default:           0 1px 0 rgba(0,0,0,0.3), 0 1px 2px rgba(0,0,0,0.3);
+  --_cc-shadow-md-default:           0 1px 0 rgba(0,0,0,0.35), 0 8px 24px rgba(0,0,0,0.35);
+  --_cc-shadow-lg-default:           0 2px 0 rgba(0,0,0,0.4), 0 14px 32px rgba(0,0,0,0.42);
+  --_cc-shadow-xl-default:           0 2px 0 rgba(0,0,0,0.45), 0 20px 42px rgba(0,0,0,0.5);
+  --_cc-surface-wash-top-default:    rgba(255, 255, 255, 0.06);
+  --_cc-surface-wash-bottom-default: rgba(255, 255, 255, 0.02);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   TERMINAL — deep ink, mono everywhere, phosphor green
+   ══════════════════════════════════════════════════════════════════ */
+
+[data-cc-variant="terminal"][data-cc-theme="dark"] .cc-theme-scope,
+.cc-theme-scope[data-cc-variant="terminal"][data-cc-theme="dark"] {
+  color-scheme: dark;
+
+  --_cc-focus-ring-default:          rgba(126, 231, 135, 0.85);
+  --_cc-foreground-strong-default:   #e6ebef;
+  --_cc-foreground-default:          #c9d1d9;
+  --_cc-foreground-muted-default:    #8b949e;
+  --_cc-foreground-subtle-default:   #6e7681;
+
+  --_cc-border-soft-default:         #1a1e26;
+  --_cc-border-strong-default:       #252a35;
+
+  --_cc-surface-canvas-default:      #07090c;
+  --_cc-surface-soft-default:        #050608;
+  --_cc-surface-raised-default:      #0b0d11;
+  --_cc-surface-hover-default:       #0f1218;
+  --_cc-surface-card-default:        #0b0d11;
+
+  --_cc-link-default:                oklch(0.70 0.15 230);
+  --_cc-positive-default:            oklch(0.82 0.17 145);
+  --_cc-negative-default:            oklch(0.72 0.20 20);
+  --_cc-warning-default:             oklch(0.80 0.17 80);
+
+  --_cc-member-accent-default:       oklch(0.82 0.17 145);
+  --_cc-member-accent-soft-default:  oklch(0.30 0.07 145);
+  --_cc-member-surface-default:      oklch(0.20 0.05 145);
+
+  --_cc-font-display-default:        "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --_cc-font-mono-default:           "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --_cc-radius-xs: 0px;
+  --_cc-radius-sm: 0px;
+  --_cc-radius-md: 2px;
+  --_cc-radius-lg: 3px;
+
+  --_cc-shadow-sm-default: none;
+  --_cc-shadow-md-default: none;
+  --_cc-shadow-lg-default: none;
+  --_cc-shadow-xl-default: none;
+}
+
+[data-cc-variant="terminal"][data-cc-theme="light"] .cc-theme-scope,
+.cc-theme-scope[data-cc-variant="terminal"][data-cc-theme="light"] {
+  color-scheme: light;
+
+  --_cc-focus-ring-default:          rgba(20, 110, 45, 0.85);
+  --_cc-foreground-strong-default:   #0a0a0a;
+  --_cc-foreground-default:          #1a1a1a;
+  --_cc-foreground-muted-default:    #555;
+  --_cc-foreground-subtle-default:   #777;
+
+  --_cc-border-soft-default:         #d9d9d0;
+  --_cc-border-strong-default:       #b8b8a8;
+
+  --_cc-surface-canvas-default:      #f5f5f0;
+  --_cc-surface-soft-default:        #eeeee8;
+  --_cc-surface-raised-default:      #f9f9f4;
+  --_cc-surface-hover-default:       #eeeee8;
+  --_cc-surface-card-default:        #ffffff;
+
+  --_cc-link-default:                oklch(0.52 0.16 230);
+  --_cc-positive-default:            oklch(0.52 0.16 145);
+  --_cc-negative-default:            oklch(0.55 0.20 20);
+  --_cc-warning-default:             oklch(0.58 0.16 80);
+
+  --_cc-member-accent-default:       oklch(0.52 0.16 145);
+  --_cc-member-accent-soft-default:  oklch(0.92 0.06 145);
+  --_cc-member-surface-default:      oklch(0.96 0.03 145);
+
+  --_cc-font-display-default:        "IBM Plex Mono", ui-monospace, monospace;
+  --_cc-font-mono-default:           "IBM Plex Mono", ui-monospace, monospace;
+
+  --_cc-radius-xs: 0px;
+  --_cc-radius-sm: 0px;
+  --_cc-radius-md: 2px;
+  --_cc-radius-lg: 3px;
+
+  --_cc-shadow-sm-default: none;
+  --_cc-shadow-md-default: none;
+  --_cc-shadow-lg-default: none;
+  --_cc-shadow-xl-default: none;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   GRAPHITE — refined neutral, cool blue accent
+   ══════════════════════════════════════════════════════════════════ */
+
+[data-cc-variant="graphite"][data-cc-theme="dark"] .cc-theme-scope,
+.cc-theme-scope[data-cc-variant="graphite"][data-cc-theme="dark"] {
+  color-scheme: dark;
+
+  --_cc-foreground-strong-default:   rgba(246, 247, 249, 0.98);
+  --_cc-foreground-default:          rgba(232, 234, 237, 0.96);
+  --_cc-foreground-muted-default:    rgba(232, 234, 237, 0.62);
+  --_cc-foreground-subtle-default:   rgba(232, 234, 237, 0.44);
+
+  --_cc-border-soft-default:         #26272e;
+  --_cc-border-strong-default:       #33343c;
+
+  --_cc-surface-canvas-default:      #131316;
+  --_cc-surface-soft-default:        #0f0f12;
+  --_cc-surface-raised-default:      #1a1b20;
+  --_cc-surface-hover-default:       #212228;
+  --_cc-surface-card-default:        #1a1b20;
+
+  --_cc-link-default:                oklch(0.78 0.13 250);
+  --_cc-positive-default:            oklch(0.75 0.14 160);
+  --_cc-negative-default:            oklch(0.72 0.18 25);
+  --_cc-warning-default:             oklch(0.80 0.14 75);
+
+  --_cc-member-accent-default:       oklch(0.78 0.13 250);
+  --_cc-member-accent-soft-default:  oklch(0.28 0.07 250);
+  --_cc-member-surface-default:      oklch(0.22 0.05 250);
+}
+
+[data-cc-variant="graphite"][data-cc-theme="light"] .cc-theme-scope,
+.cc-theme-scope[data-cc-variant="graphite"][data-cc-theme="light"] {
+  color-scheme: light;
+
+  --_cc-foreground-strong-default:   #09090b;
+  --_cc-foreground-default:          #18181b;
+  --_cc-foreground-muted-default:    #52525b;
+  --_cc-foreground-subtle-default:   #71717a;
+
+  --_cc-border-soft-default:         #e4e4e7;
+  --_cc-border-strong-default:       #cfcfd4;
+
+  --_cc-surface-canvas-default:      #f8f8f9;
+  --_cc-surface-soft-default:        #f0f0f2;
+  --_cc-surface-raised-default:      #fafafb;
+  --_cc-surface-hover-default:       #f0f0f2;
+  --_cc-surface-card-default:        #ffffff;
+
+  --_cc-link-default:                oklch(0.55 0.16 250);
+  --_cc-positive-default:            oklch(0.52 0.16 160);
+  --_cc-negative-default:            oklch(0.55 0.20 25);
+  --_cc-warning-default:             oklch(0.62 0.16 75);
+
+  --_cc-member-accent-default:       oklch(0.55 0.16 250);
+  --_cc-member-accent-soft-default:  oklch(0.92 0.04 250);
+  --_cc-member-surface-default:      oklch(0.96 0.02 250);
+}

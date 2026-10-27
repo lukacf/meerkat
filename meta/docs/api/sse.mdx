@@ -1,0 +1,379 @@
+---
+title: "SSE API"
+description: "Server-Sent Events for real-time Meta interaction and event subscription flows."
+icon: "bolt"
+---
+
+Meta uses Server-Sent Events (SSE) for several live HTTP streams:
+
+- agent-scoped streaming through `GET /agents/{agent_id}/events`
+- mob-merged streaming through `GET /mob/events`
+- structural mob events through `GET /meta/mob_events/stream`
+- lossy WorkGraph wake events through `GET /meta/workgraph/facts/stream`
+- console timeline replay and live continuation through `GET /console/timeline/stream`
+- identity-filtered console timeline streaming through `GET /console/identity/{identity}/stream`
+
+The related `meta/events/subscribe` JSON-RPC method returns bounded replay
+snapshots in SSE frame format, but does not open a stream.
+
+## Authentication
+
+Every SSE route honors `RuntimeDecisionState.console.require_app_auth`.
+When `require_app_auth` is on, the request must carry one of:
+
+- `Authorization: Bearer <token>` header, or
+- `?auth_token=<token>` query parameter
+
+Missing or invalid credentials return HTTP **401**. Tokens are
+percent-decoded; a token containing characters that need URL-encoding
+(`=`, `&`, `+`, `%`) is handled correctly.
+
+A stream stays open only while its token is accepted. Once a request with
+the same token would get **401**, 30 seconds after the token's `exp`, the
+stream ends without a final event, and it sends nothing it decided after that
+point; reconnect with a current token. On a route that does not require a
+token, a token the caller sends anyway identifies it to access control; such a
+stream ends the same way, and its reconnect without a current token is
+anonymous. A token without `exp` never lapses. A revocation of the token's
+principal (`meta/console/revoke_sessions`) ends the stream at once, with or
+without `exp`, and its reconnect is refused with **401**.
+
+## Agent event stream
+
+```
+GET /agents/{agent_id}/events
+```
+
+Subscribe to raw Meerkat agent events for one agent (`Content-Type: text/event-stream`).
+
+### Replay and reconnect
+
+A connection without `Last-Event-ID` first replays the events the agent's
+current actor still retains (Meerkat keeps each actor's latest 1024 events
+and 4 MiB), then streams live. A client that connects after a run started
+therefore still receives that run from `run_started`. If the retained window
+no longer reaches back far enough, the replay starts with a `stream_truncated`
+event (`{"reason":{"kind":"stream_lagged","dropped":N}}`).
+
+Each event's `id` is its position in the agent's event sequence,
+`<epoch>:<seq>`. The epoch names the sequence space, which changes when the
+runtime restarts or a placed member moves to a new host binding. An
+`EventSource` reconnect sends the last id as `Last-Event-ID`, and the stream
+resumes right after that event, with nothing replayed twice. If the id
+belongs to another sequence space, the stream replays the current space from
+its earliest retained event. A `stream_truncated` gap event carries no `id`,
+so it does not move the reconnect position.
+
+### Frame format
+
+```
+id: 0192f0c1-7a3e-7d10-9c2b-4f1e2d3c4b5a:17
+event: text_delta
+data: {"type": "text_delta", "delta": "Analyzing the metrics now..."}
+
+id: 0192f0c1-7a3e-7d10-9c2b-4f1e2d3c4b5a:18
+event: tool_call_requested
+data: {"type": "tool_call_requested", "id": "tool-1", "tool_call_id": "tool-1", "name": "query_metrics", "args": {"metric": "latency_p95"}}
+
+id: 0192f0c1-7a3e-7d10-9c2b-4f1e2d3c4b5a:19
+event: run_completed
+data: {"type": "run_completed", "session_id": "session-1", "result": "Done."}
+```
+
+Routers built from a live-only subscribe function
+(`agent_events_sse_router`) keep connection-local `<agent_id>:<n>` ids and do
+not replay.
+
+## Mob-merged event stream
+
+```
+GET /mob/events
+```
+
+This is a live merger of agent events, not `EventEnvelope<UnifiedEvent>` and
+not the structural mob ledger. Each event uses the agent event name and wraps
+its projected payload with `member_id` and `source`:
+
+```
+id: mob:0
+event: text_delta
+data: {"member_id":"worker-1:0","source":"worker-1:0","payload":{"type":"text_delta","delta":"Analyzing the metrics now..."}}
+```
+
+Both source fields use the projected runtime alias including its generation
+suffix (`worker-1:0` here). The `mob:<sequence>` ID is connection-local and
+starts again on a new connection; it is not a durable cursor. This route
+does not replay from `Last-Event-ID`. Use
+[structural mob SSE](#structural-mob-events-stream) for ledger-cursor replay,
+or `meta/events/subscribe` for a bounded merged-event RPC snapshot with its
+own envelope and checkpoint contract.
+
+## Console timeline stream
+
+```
+GET /console/timeline/stream
+```
+
+Streams a replay snapshot followed by live console timeline frames. The route
+accepts the same `identity`, `conversation_id`, `after`, `before`, `mode`, and
+`limit` parameters as [`GET /console/timeline`](/api/rest), with distinct seed
+semantics: without `after`, `since` switches to `recent`. `recent` returns a
+bounded seed page; anchored `since` drains all retained matching backlog in
+pages, so `limit` controls each page, not total replay size. A non-empty
+`Last-Event-ID` header overrides the URL's `after`.
+
+### Timeline frame format
+
+SSE `data` is a type-tagged `ConsoleTimelineEvent`, not a bare
+`ConsoleFrame` or agent event. For example (the frame is abbreviated):
+
+```
+event: snapshot_started
+data: {"type":"snapshot_started","after":"console:239"}
+
+id: console:240
+event: console_frame
+data: {"type":"console_frame","frame":{"id":"frame-240","cursor":"console:240","identity":"worker-1","kind":"interaction_complete","payload":{"text":"Done."}}}
+
+id: console:240
+event: snapshot_complete
+data: {"type":"snapshot_complete","cursor":"console:240"}
+```
+
+| SSE event | `data` shape and handling | SSE `id` |
+|-----------|---------------------------|----------|
+| `snapshot_started` | `{type: "snapshot_started", after?}` begins replay | none |
+| `console_frame` | `{type: "console_frame", frame: ConsoleFrame}` | `frame.cursor` |
+| `frame_updated` | `{type: "frame_updated", frame}` **or** `{type: "console_frame", frame}` with `frame.kind = "frame_updated"`; handle as an update, not a new completed interaction | `frame.cursor` |
+| `snapshot_complete` | `{type: "snapshot_complete", cursor?}` ends replay; live continuation follows | `cursor` when present |
+| `replay_unavailable` | `{type: "replay_unavailable", requested_cursor, latest_cursor}`; `latest_cursor` may be `null`; refetch a recent page | none |
+| `access_changed` | `{type: "access_changed", revision}`: the committed revision of the Console access configuration, sent once when the live part of the stream starts and again after each committed change, only when Console access control is configured; read access-dependent views (Access, the roster) again when it is newer than the revision you hold | none |
+
+`after` and `cursor` are omitted on markers when absent. The SSE event name
+and `data.type` need not coincide for updates. Persist cursor-bearing IDs for
+`Last-Event-ID` continuation; frame content remains in `frame.payload`.
+Initial replay refusal is an HTTP error before the stream opens, rather than
+a promise that every failure arrives as a `replay_unavailable` event.
+
+If replay cannot satisfy the requested cursor, the server returns HTTP **409** with:
+
+```json
+{
+  "error": "replay_unavailable",
+  "requested_cursor": "console:10",
+  "latest_cursor": "console:240"
+}
+```
+
+Clients should refetch a recent page and resume from its `latest_cursor`
+rather than retrying the stale cursor.
+
+## Identity timeline stream
+
+```
+GET /console/identity/{identity}/stream
+```
+
+Convenience route for an identity-filtered console timeline stream. It sets the timeline query `identity` from the path and otherwise uses the same replay rules, event envelopes, markers, and cursor headers as `GET /console/timeline/stream`.
+
+## Event subscription
+
+Use the `meta/events/subscribe` JSON-RPC method to request a bounded
+point-in-time snapshot. It returns each selected event both as a typed envelope
+and as an SSE-ready frame. It does not open a live connection or return a
+stream URL; use the HTTP routes on this page for live observation.
+
+Example request:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "sub-1",
+  "method": "meta/events/subscribe",
+  "params": {
+    "scope": "agent",
+    "agent_id": "worker-1",
+    "last_event_id": "evt-42"
+  }
+}
+```
+
+The response includes:
+
+| Field | Description |
+|-------|-------------|
+| `scope` | Normalized selected scope |
+| `replay_from_event_id` | Requested checkpoint, or `null` |
+| `keep_alive.interval_ms` | Server keep-alive cadence |
+| `keep_alive.event` | Keep-alive event name |
+| `keep_alive_comment` | SSE comment frame for keep-alive output |
+| `event_frames` | SSE-ready frames for replay |
+| `events` | Typed `EventEnvelope<UnifiedEvent>` values |
+
+Supported scopes:
+
+| Scope | Notes |
+|-------|-------|
+| `mob` | All merged module and agent events; this is the default |
+| `agent` | Agent events only; requires a non-empty `agent_id` |
+| `interaction` | Agent or module events whose `event_type` starts with `interaction` |
+
+For `agent` scope, `agent_id` may be the exact projected ID or the bare alias
+whose only difference is a trailing numeric generation suffix. The server
+applies the scope first and retains at most its three newest matching events.
+
+`last_event_id` is an `event_id` from an earlier
+`meta/events/subscribe` result, not an HTTP SSE frame ID. It must be present
+in that bounded, scope-filtered window. Replay is inclusive: the checkpoint
+event is returned again, followed by later retained events. An unknown,
+out-of-scope, or expired checkpoint returns JSON-RPC `-32602`, so reconnecting
+consumers should deduplicate the first event by `event_id`.
+
+## WorkGraph wake stream
+
+```
+GET /meta/workgraph/facts/stream
+```
+
+This route is present when the runtime has a WorkGraph service. It is a
+dedicated, lossy wake channel, not another view of the merged event log. Its
+`data` field is a bare `UnifiedEvent::Module` value with module
+`meta.workgraph`; the event is not wrapped in `EventEnvelope` and is not
+duplicated into `GET /mob/events` or `meta/events/subscribe`.
+
+Every connection starts with this mandatory resynchronization signal:
+
+```
+event: workgraph.resync_required
+data: {"kind":"module","module":"meta.workgraph","event_type":"workgraph.resync_required","payload":{"reason":"initial_sync","skipped":null,"authority":"durable_workgraph_pull"}}
+```
+
+On receipt, read authoritative state through `meta/workgraph/get`,
+`meta/workgraph/list`, `meta/workgraph/ready`, or
+`meta/workgraph/snapshot`. Subsequent `workgraph.fact` events carry
+identifiers that can accelerate another read, but they are never state
+authority.
+
+The stream has no SSE `id`, `Last-Event-ID`, cursor query, catch-up, or replay
+contract. A slow consumer can miss events. When broadcast lag occurs, the
+server sends `workgraph.resync_required` with `reason: "lagged"` and the
+number of skipped wakes in `skipped`; read authoritative WorkGraph state again.
+When access control is enforced, the caller also needs the `workgraph.view`
+grant.
+
+## Structural mob events stream
+
+```
+GET /meta/mob_events/stream?after_seq=<cursor>&mob_id=<id>&run_id=<id>&event_types=<list>
+```
+
+Per-client SSE stream of structural `MobEvent`s (typed envelopes
+preserving `mob_id`, `run_id`, `step_id`, `agent_identity`, and the
+full `MobEventKind` payload).
+
+Each connection opens its own `MobEventsView::subscribe_after` so
+catch-up and live tail share the same ordered stream — there is no
+race window between snapshot and live subscription.
+
+### Query parameters
+
+| Param | Type | Notes |
+|-------|------|-------|
+| `after_seq` | u64 | Resume from this cursor (exclusive). When omitted, starts at the current `latest_cursor` (live tail only). |
+| `mob_id` | string | Filter by mob id |
+| `run_id` | string | Filter by flow run id |
+| `step_id` | string | Filter by flow step id |
+| `event_types` | comma-separated | e.g. `flow_started,step_completed` |
+| `since_ms` / `until_ms` | u64 | Inclusive / exclusive timestamp filters |
+| `identity` / `member_id` | string | Filter by agent identity |
+
+### Frame format
+
+```
+event: flow_started
+id: mob-evt-1234
+data: {"event_id":"mob-evt-1234","cursor":1234,"mob_id":"home","run_id":"...","kind":"flow_started",...}
+```
+
+### Stale cursor
+
+If `after_seq > latest_cursor`, the route returns HTTP **410 Gone**
+with `{"error":"event_query_stale","after_cursor":N,"latest_cursor":M}`.
+SDK clients should rewind to `latest_cursor` and reconnect.
+
+### Continuation from `meta/mob_events/subscribe`
+
+The JSON-RPC handshake returns a snapshot frame plus a
+`subscribe_url` field that already encodes the resume cursor and
+filters:
+
+```json
+{
+  "stream": "mob_events",
+  "events": [...],
+  "next_after_seq": 1234,
+  "subscribe_url": "/meta/mob_events/stream?after_seq=1234&mob_id=home",
+  "keep_alive": {"interval_ms": 15000, "event": "keep_alive"}
+}
+```
+
+`after_seq` falls back to `latest_cursor` captured at handshake
+when the snapshot is empty, so the SSE handler picks up gaplessly
+even when no events match yet.
+
+### Cursor durability
+
+`MobStructuralEvent.cursor` is the upstream meerkat ledger cursor. Consumers
+can checkpoint it and reconnect with `after_seq=<checkpointed cursor>` only
+while the configured mob-event store retains that cursor and its later events.
+
+`.persistent_state(path)` alone does not make the mob-event ledger durable. It
+persists Meta projection metadata, while the stock unified-runtime builder
+still uses in-memory Mob storage. Restart-safe replay requires a separately
+configured upstream Meerkat mob-event store that retains the ledger across the
+restart. If a checkpoint is ahead of the available ledger, the route returns
+HTTP **410 Gone** as described above.
+
+## Keep-alive
+
+The stock HTTP streams send a keep-alive comment after 15 seconds of idle
+time to prevent connection timeouts. This interval is fixed, not an exposed
+configuration option:
+
+```
+: keep-alive
+```
+
+When the console timeline broadcast lags (slow consumer, channel saturated), the stream closes. Clients should refetch a recent timeline page and reconnect from the returned `latest_cursor` or a fresh `Last-Event-ID`.
+
+## Sending messages
+
+To send a message to an agent, use the `meta/send_message` RPC method and capture the returned `session_id` for correlation:
+
+```json
+{
+  "accepted": true,
+  "member_id": "lead-1",
+  "session_id": "0195c3f2-8f40-7f95-a5a7-cc4f7d90d3d1"
+}
+```
+
+Then observe live responses via `GET /console/timeline/stream` or
+`GET /console/identity/{identity}/stream`. Use `meta/events/subscribe` only
+when a bounded merged-event replay snapshot is sufficient.
+
+## Error handling
+
+If the target agent/member does not exist or a subscription request is malformed, SSE routes return an HTTP error response before opening the stream:
+
+| Status | Cause |
+|--------|-------|
+| `400` | Empty or invalid member ID / malformed body |
+| `404` | Member not found |
+| `500` | Internal server error |
+
+## See also
+
+- [REST API](/api/rest) -- HTTP endpoints overview
+- [Console guide](/guides/console) -- how the console uses SSE
+- [Events](/concepts/events) -- unified event model

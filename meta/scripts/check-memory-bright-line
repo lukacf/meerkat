@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+"""Memory bright-line ratchet — docs/design/agent-memory-architecture.md §12.
+
+Meta's memory modules must never grow retrieval-index or embedding
+machinery: that is external memory hub material. This gate enforces the ratchet in
+two passes:
+
+  1. Deny-list scan of crates/meerkat-meta/Cargo.toml dependency names
+     (case-insensitive substring match) for retrieval-index / embedding
+     crates.
+  2. Source scan of the memory modules
+     (crates/meerkat-meta/src/identity_first/agent_memory*.rs and, forward-
+     compatibly, crates/meerkat-meta/src/memory*) for SQL full-text-index
+     patterns (FTS5/FTS4, CREATE VIRTUAL TABLE, SQL MATCH) and
+     embedding/vector identifiers.
+
+Any hit fails the check. The only escape hatch is
+scripts/memory-bright-line-allow.txt (see that file for entry format); every
+entry requires an inline justification comment.
+
+Exit codes: 0 clean, 1 violations, 2 configuration error.
+"""
+
+import re
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+CARGO_TOML = REPO_ROOT / "crates" / "meerkat-meta" / "Cargo.toml"
+ALLOWLIST_PATH = REPO_ROOT / "scripts" / "memory-bright-line-allow.txt"
+DESIGN_DOC = "docs/design/agent-memory-architecture.md"
+
+DENIED_CRATE_SUBSTRINGS = (
+    "hnsw",
+    "fastembed",
+    "tantivy",
+    "ort",
+    "candle",
+    "usearch",
+    "lancedb",
+    "faiss",
+    "annoy",
+    # meerkat-memory is an HNSW embedding store (pulls in hnsw_rs). Its ONE
+    # sanctioned use — the Distiller's §8.4 read-only compaction-discard
+    # harvest of meerkat's OWN session store — is pinned by allowlist entries
+    # carrying the boundary justification; anything else fails here.
+    "meerkat-memory",
+)
+
+# Source patterns are named so an allowlist entry can suppress exactly one
+# (path, pattern) pair: `src:<repo-relative-path>:<pattern-name>  # reason`.
+# SQL MATCH is matched case-sensitively so Rust's `match` keyword never trips.
+SOURCE_PATTERNS = (
+    ("fts", re.compile(r"(?i)fts[45]"), "SQLite FTS5/FTS4 full-text index"),
+    (
+        "virtual-table",
+        re.compile(r"(?i)create\s+virtual\s+table"),
+        "SQL virtual table (FTS/vector index)",
+    ),
+    ("sql-match", re.compile(r"\bMATCH\b"), "SQL MATCH against a virtual table"),
+    ("embedding", re.compile(r"(?i)\bembedding"), "embedding machinery"),
+    ("vector_", re.compile(r"(?i)\bvector_"), "vector-index identifier"),
+    ("hnsw", re.compile(r"(?i)hnsw"), "HNSW vector-index identifier"),
+    (
+        "meerkat-memory",
+        re.compile(r"(?i)\bmeerkat_memory\b"),
+        "meerkat session semantic-memory store access",
+    ),
+)
+
+BRIGHT_LINE_QUOTE = f"""\
+This violates the memory bright line ({DESIGN_DOC} §12,
+"Hub-compatibility discipline"):
+
+  "Meta's store never grows: entities, relations, truth slots, embeddings,
+   chunking, FTS/vector indexes, freshness engines. The moment a record is
+   entity-shaped *world knowledge* ... rather than *working knowledge* ...,
+   it is hub material ... Enforced as a ratchet: a CI gate forbids
+   retrieval-index and embedding dependencies in the memory module, in the
+   meerkat governance-gate tradition."
+
+Retrieval-index and embedding machinery belongs in the memory hub
+(docs/design/memory-hub-roadmap.md), not in Meta. If a hit is a genuine
+false positive, add an entry with a justification comment to
+scripts/memory-bright-line-allow.txt (crate name for dependency hits,
+`src:<path>:<pattern-name>` for source hits)."""
+
+
+def fail_config(message):
+    print(f"check-memory-bright-line: configuration error: {message}", file=sys.stderr)
+    sys.exit(2)
+
+
+def load_allowlist():
+    """Return the set of allowlisted entries. Every entry needs an inline
+    `# justification` — a bare entry is a configuration error, not a pass."""
+    entries = set()
+    if not ALLOWLIST_PATH.exists():
+        fail_config(f"allowlist file missing: {ALLOWLIST_PATH}")
+    for lineno, raw in enumerate(ALLOWLIST_PATH.read_text().splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        entry, sep, justification = line.partition("#")
+        entry = entry.strip()
+        if not sep or not justification.strip():
+            fail_config(
+                f"{ALLOWLIST_PATH.name}:{lineno}: entry '{entry}' has no "
+                "justification comment (format: `<entry>  # why this is allowed`)"
+            )
+        entries.add(entry)
+    return entries
+
+
+def cargo_dependency_names():
+    """Yield (crate_name, lineno) for every dependency declared in
+    crates/meerkat-meta/Cargo.toml, including `package = "..."` renames and
+    `[dependencies.<name>]` table headers."""
+    if not CARGO_TOML.exists():
+        fail_config(f"missing {CARGO_TOML}")
+    section = ""
+    section_re = re.compile(r"^\s*\[([^\]]+)\]")
+    key_re = re.compile(r'^\s*(?:"([^"]+)"|([A-Za-z0-9_.-]+))\s*=')
+    pkg_re = re.compile(r'package\s*=\s*"([^"]+)"')
+    dep_table_re = re.compile(
+        r"^(?:workspace\.|target\.[^.]+\.)?(?:dev-|build-)?dependencies(?:\.(?P<name>.+))?$"
+    )
+    for lineno, line in enumerate(CARGO_TOML.read_text().splitlines(), 1):
+        header = section_re.match(line)
+        if header:
+            section = header.group(1).strip().strip("'\"")
+            table = dep_table_re.match(section)
+            if table and table.group("name"):
+                yield table.group("name"), lineno
+            continue
+        table = dep_table_re.match(section)
+        if not table:
+            continue
+        if not table.group("name"):
+            key = key_re.match(line)
+            if key:
+                yield (key.group(1) or key.group(2)), lineno
+        rename = pkg_re.search(line)
+        if rename:
+            yield rename.group(1), lineno
+
+
+def scan_dependencies(allowlist):
+    violations = []
+    for name, lineno in cargo_dependency_names():
+        if name in allowlist:
+            continue
+        lowered = name.lower()
+        for denied in DENIED_CRATE_SUBSTRINGS:
+            if denied in lowered:
+                violations.append(
+                    f"crates/meerkat-meta/Cargo.toml:{lineno}: dependency `{name}` "
+                    f"matches denied crate substring \"{denied}\""
+                )
+                break
+    return violations
+
+
+def memory_source_files():
+    src = REPO_ROOT / "crates" / "meerkat-meta" / "src"
+    files = sorted(src.glob("identity_first/agent_memory*.rs"))
+    files += sorted(src.glob("memory*.rs"))
+    for directory in sorted(src.glob("memory*/")):
+        files += sorted(directory.rglob("*.rs"))
+    return files
+
+
+def scan_sources(allowlist):
+    violations = []
+    for path in memory_source_files():
+        rel = path.relative_to(REPO_ROOT)
+        for lineno, line in enumerate(path.read_text().splitlines(), 1):
+            for pattern_name, pattern, description in SOURCE_PATTERNS:
+                if not pattern.search(line):
+                    continue
+                if f"src:{rel}:{pattern_name}" in allowlist:
+                    continue
+                violations.append(
+                    f"{rel}:{lineno}: pattern `{pattern_name}` "
+                    f"({description}): {line.strip()}"
+                )
+    return violations
+
+
+def main():
+    allowlist = load_allowlist()
+    violations = scan_dependencies(allowlist) + scan_sources(allowlist)
+    if violations:
+        print("check-memory-bright-line: FAILED\n", file=sys.stderr)
+        for violation in violations:
+            print(f"  {violation}", file=sys.stderr)
+        print(f"\n{BRIGHT_LINE_QUOTE}", file=sys.stderr)
+        sys.exit(1)
+    file_count = len(memory_source_files())
+    print(
+        "check-memory-bright-line: OK "
+        f"(crates/meerkat-meta/Cargo.toml dependencies clean; {file_count} "
+        "memory-module source file(s) clean)"
+    )
+
+
+if __name__ == "__main__":
+    main()

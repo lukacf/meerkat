@@ -1,0 +1,2089 @@
+{
+  "$defs": {
+    "AdaptiveValue": {
+      "anyOf": [
+        {
+          "properties": {
+            "ref": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ref"
+          ],
+          "type": "object"
+        },
+        true
+      ]
+    },
+    "AnthropicCacheControlPolicy": {
+      "description": "Typed shape of Anthropic's prompt-cache breakpoint policy.",
+      "oneOf": [
+        {
+          "const": "disabled",
+          "description": "Do not request Anthropic prompt-cache breakpoints.",
+          "type": "string"
+        },
+        {
+          "const": "automatic",
+          "description": "Ask Anthropic to keep a moving breakpoint on the last cacheable block.\n\nThis is the normal multi-turn policy: the provider advances the\nbreakpoint as conversation history grows. Anthropic searches backward\nup to 20 cacheable blocks from that breakpoint, so a hit is not\nguaranteed when more than 20 new blocks are added between requests.",
+          "type": "string"
+        },
+        {
+          "const": "system_prefix",
+          "description": "Mark the stable top-level system prompt as an ephemeral cache prefix.",
+          "type": "string"
+        },
+        {
+          "const": "system_and_conversation",
+          "description": "Mark the stable system/profile prefix and up to three recent\nconversation boundaries. This is explicit provider authoring, not a\nprocess-wide cache default.",
+          "type": "string"
+        }
+      ]
+    },
+    "AnthropicCacheTtl": {
+      "description": "Anthropic prompt-cache TTL selected per agent/profile.",
+      "oneOf": [
+        {
+          "const": "5m",
+          "description": "Provider-default five-minute cache lifetime.",
+          "type": "string"
+        },
+        {
+          "const": "1h",
+          "description": "One-hour cache lifetime for sufficiently frequent profiles.",
+          "type": "string"
+        }
+      ]
+    },
+    "AnthropicCompactionConfig": {
+      "description": "Typed shape of Anthropic's automatic-compaction knob.",
+      "oneOf": [
+        {
+          "description": "`\"auto\"` — provider picks trigger and instructions.",
+          "properties": {
+            "kind": {
+              "const": "auto",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Caller-provided edit body merged into the compact edit shape.\nFields like `trigger` / `instructions` are preserved verbatim.",
+          "properties": {
+            "edit": {
+              "$ref": "#/$defs/OpaqueProviderBody"
+            },
+            "kind": {
+              "const": "custom",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "edit"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "AnthropicContextWindow": {
+      "description": "Typed shape of Anthropic's context-window opt-in.",
+      "oneOf": [
+        {
+          "const": "one_megabyte",
+          "description": "1M-token beta context window (2025-08-07 beta header).",
+          "type": "string"
+        }
+      ]
+    },
+    "AnthropicEffort": {
+      "description": "Typed shape of Anthropic's response-effort knob.\n`XHigh` is the Opus 4.8 / 4.7 extended-high effort level.",
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "max",
+        "x_high"
+      ],
+      "type": "string"
+    },
+    "AnthropicInferenceGeo": {
+      "description": "Typed shape of Anthropic's data-residency knob.",
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "us",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "global",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Caller-provided region string — providers may accept region codes\nthis typed variant does not yet enumerate.",
+          "properties": {
+            "kind": {
+              "const": "other",
+              "type": "string"
+            },
+            "region": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "region"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "AnthropicThinkingConfig": {
+      "description": "Typed shape of Anthropic's extended-thinking knob.",
+      "oneOf": [
+        {
+          "description": "Adaptive thinking — provider picks the budget.",
+          "properties": {
+            "type": {
+              "const": "adaptive",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Explicit budget — model emits at most `budget_tokens` tokens of\nreasoning before the assistant text.",
+          "properties": {
+            "budget_tokens": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "enabled",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "budget_tokens"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "No up-front thinking: the model only writes short progress updates\nbetween tool calls. The lowest thinking setting on models whose\ncatalog row admits it (Claude Sonnet 5.5), accepted at `high` effort\nor below; wire shape `{\"type\": \"between_tools\"}`.",
+          "properties": {
+            "type": {
+              "const": "between_tools",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "AuthBindingRef": {
+      "description": "Session-facing reference to a binding inside a realm.\n\n`AuthBindingRef` is purely structural — it does NOT carry a `\"realm:binding\"`\nstring form. Wave-b deleted `parse` and `Display` so that no code path\naccidentally ferries the opaque join through the runtime. CLI input that\narrives as `\"realm:binding[:profile]\"` must be split at the CLI boundary\nand constructed field-by-field.",
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/BindingId"
+        },
+        "origin": {
+          "$ref": "#/$defs/BindingOrigin",
+          "description": "Whether this ref names a configured durable identity or the synthetic\nenv-var fallback. Defaults to [`BindingOrigin::Configured`] for back-read\nof rows persisted before the discriminant existed."
+        },
+        "profile": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProfileId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "realm": {
+          "$ref": "#/$defs/RealmId"
+        }
+      },
+      "required": [
+        "realm",
+        "binding"
+      ],
+      "type": "object"
+    },
+    "BindingId": {
+      "description": "Opaque slug identifying a binding inside a realm.",
+      "type": "string"
+    },
+    "BindingOrigin": {
+      "description": "Origin discriminant for an [`AuthBindingRef`].\n\nDistinguishes a binding that names a durable, config-resolvable identity\n(`Configured`) from the synthetic env-var fallback the resolver mints when\nno realm config exists but a well-known API-key env var is set\n(`SyntheticEnvDefault`). The synthetic origin is ephemeral: it must never be\nrehydrated as a durable identity nor publish a durable auth lease.\n\nThis is the typed owner of the \"is this the env-var default?\" fact, replacing\nthe prior recovery-by-magic-slug (`realm == \"env_default\"`,\n`binding == \"default\"`). Identity slugs (`RealmId`/`BindingId`) are pure\nopaque identity again; origin is carried explicitly.",
+      "oneOf": [
+        {
+          "const": "configured",
+          "description": "A durable, config-resolvable binding. This is the back-read default so\nthat wire/persisted rows written before this field existed deserialize\nas a configured identity.",
+          "type": "string"
+        },
+        {
+          "const": "synthetic_env_default",
+          "description": "The synthetic env-var fallback binding (ephemeral, not durable).",
+          "type": "string"
+        }
+      ]
+    },
+    "BudgetLimits": {
+      "description": "Resource limits for an agent run\n\n# Two time horizons, one owner\n\n[`Budget`] is the single owner of \"may this run continue in time\". It\ncarries two independent horizons because they answer different questions\nand are measured from different epochs:\n\n- [`BudgetLimits::max_duration`] is the **agent-lifetime** horizon. Its\n  epoch is [`Budget::new`], which service-backed surfaces call once when the\n  session's agent is built, not once per turn. It therefore spans every turn\n  of that agent, including the idle wall-clock between turns.\n- [`BudgetLimits::max_turn_duration`] is the **per-turn aggregate** horizon.\n  Its epoch is re-armed by [`Budget::begin_turn`] at each run entry, so it\n  bounds one turn end-to-end regardless of how many LLM calls, retries, and\n  tool batches that turn contains.\n\nEvery segment of a turn already carries its own bound (per-call LLM timeout,\nstream-inactivity watchdog, per-tool-call timeout). Before\n`max_turn_duration` existed, the *sum* of those segments was unbounded: a\nturn could legally spend an hour without any owner asking whether it was\nallowed to. `max_turn_duration` is that owner.",
+      "properties": {
+        "max_duration": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Duration"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Maximum agent-lifetime duration, measured from [`Budget::new`].\n\nThis is NOT a per-turn deadline: the epoch is agent construction, which\nfor `SessionService`-backed surfaces is session creation, and it is\nnever re-armed. Use [`BudgetLimits::max_turn_duration`] to bound one\nturn."
+        },
+        "max_tokens": {
+          "description": "Maximum tokens to consume",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_tool_calls": {
+          "description": "Maximum tool calls",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_turn_duration": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Duration"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Maximum aggregate wall-clock for a single turn, re-armed at each run\nentry by [`Budget::begin_turn`].\n\n`None` (the default) means turns are unbounded in aggregate: every\nsegment still carries its own timeout, but their sum has no ceiling.\nAbsence is representable and never substituted with an invented\ndefault; a deployment that leaves this unset has chosen unbounded\nturns.\n\n`skip_serializing_if` is load-bearing, not style: a spec carrying no\nturn ceiling must keep its historical canonical bytes so the frozen\n`spec_digest` pin (`meerkat_contracts::wire::spec_digest`) and every\ndigest already recorded in host stores still match. Same reasoning as\n`PortableToolConfig.read_only` in 0.8.23."
+        }
+      },
+      "type": "object"
+    },
+    "CollectorContract": {
+      "properties": {
+        "output_schema": {
+          "$ref": "#/$defs/SchemaRef"
+        },
+        "profile": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "profile",
+        "output_schema"
+      ],
+      "type": "object"
+    },
+    "Duration": {
+      "properties": {
+        "nanos": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "secs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "secs",
+        "nanos"
+      ],
+      "type": "object"
+    },
+    "FinishResult": {
+      "properties": {
+        "result": true
+      },
+      "required": [
+        "result"
+      ],
+      "type": "object"
+    },
+    "GeminiThinkingConfig": {
+      "additionalProperties": false,
+      "description": "Typed shape of Gemini's thinking knob.",
+      "properties": {
+        "include_thoughts": {
+          "description": "Whether reasoning output is included in the response.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "thinking_budget": {
+          "description": "Reasoning token budget.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "thinking_level": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GeminiThinkingLevel"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Gemini 3 reasoning level."
+        }
+      },
+      "type": "object"
+    },
+    "GeminiThinkingLevel": {
+      "description": "Gemini 3 reasoning levels accepted by the API.",
+      "enum": [
+        "minimal",
+        "low",
+        "medium",
+        "high"
+      ],
+      "type": "string"
+    },
+    "LayerCollection": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "const": "all",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "any",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "n": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "quorum",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "n"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "LayerPlan": {
+      "properties": {
+        "activation_params": {
+          "additionalProperties": {
+            "$ref": "#/$defs/AdaptiveValue"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "collector": {
+          "$ref": "#/$defs/CollectorContract"
+        },
+        "id": {
+          "type": "string"
+        },
+        "objective": {
+          "type": "string"
+        },
+        "profiles": {
+          "additionalProperties": {
+            "$ref": "#/$defs/LayerProfile"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "shape": {
+          "$ref": "#/$defs/LayerShape"
+        },
+        "spawn": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/LayerSpawnSpec"
+          },
+          "type": "array"
+        },
+        "spawn_groups": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/LayerSpawnGroup"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "objective",
+        "shape",
+        "collector"
+      ],
+      "type": "object"
+    },
+    "LayerProfile": {
+      "anyOf": [
+        {
+          "properties": {
+            "template": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "template"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "inline": {
+              "$ref": "#/$defs/Profile"
+            }
+          },
+          "required": [
+            "inline"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "LayerShape": {
+      "oneOf": [
+        {
+          "properties": {
+            "collection": {
+              "$ref": "#/$defs/LayerCollection"
+            },
+            "kind": {
+              "const": "fan_out_collect",
+              "type": "string"
+            },
+            "worker_role": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "worker_role",
+            "collection"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "solo",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "LayerSpawnGroup": {
+      "properties": {
+        "initial_message_template": {
+          "type": "string"
+        },
+        "items_ref": {
+          "type": "string"
+        },
+        "key_path": {
+          "type": "string"
+        },
+        "max_items": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "prefix": {
+          "type": "string"
+        },
+        "profile": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "prefix",
+        "profile",
+        "items_ref",
+        "key_path",
+        "initial_message_template",
+        "max_items"
+      ],
+      "type": "object"
+    },
+    "LayerSpawnSpec": {
+      "properties": {
+        "budget_limits": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BudgetLimits"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "identity": {
+          "type": "string"
+        },
+        "initial_message": {
+          "type": "string"
+        },
+        "profile": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "identity",
+        "profile",
+        "initial_message"
+      ],
+      "type": "object"
+    },
+    "McpAccountDeclaration": {
+      "description": "A host's declaration of the account an MCP server's operations act with.",
+      "enum": [
+        "none"
+      ],
+      "type": "string"
+    },
+    "McpConnectorBinding": {
+      "additionalProperties": false,
+      "description": "The connector credential a trusted MCP server installation's calls need:\nthe slot, the verified account and stable context the credential must be\nbound to, and each raw operation's required scopes and destination.",
+      "properties": {
+        "account": {
+          "description": "The provider-verified account subject (the strategy's canonical\naccount id) the credential must be bound to.",
+          "type": "string"
+        },
+        "client": {
+          "type": "string"
+        },
+        "issuer": {
+          "type": "string"
+        },
+        "operations": {
+          "additionalProperties": {
+            "$ref": "#/$defs/McpConnectorOperation"
+          },
+          "description": "Every raw operation the server exposes; an unlisted one is refused.",
+          "type": "object"
+        },
+        "realm_id": {
+          "type": "string"
+        },
+        "resource": {
+          "type": "string"
+        },
+        "slot_id": {
+          "type": "string"
+        },
+        "strategy_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "realm_id",
+        "slot_id",
+        "issuer",
+        "client",
+        "resource",
+        "strategy_id",
+        "account",
+        "operations"
+      ],
+      "type": "object"
+    },
+    "McpConnectorOperation": {
+      "additionalProperties": false,
+      "description": "One raw operation of a connector-bound installation.",
+      "properties": {
+        "destination_origin": {
+          "description": "`scheme://host[:port]` of the connector API the operation calls.",
+          "type": "string"
+        },
+        "read_only": {
+          "description": "The host's typed declaration that this operation only reads. Absent\n(`false`), the operation is undeclared, never inferred read-only from\nits name, the server's annotations or an access ceiling.",
+          "type": "boolean"
+        },
+        "required_scopes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "destination_origin"
+      ],
+      "type": "object"
+    },
+    "McpHttpConfig": {
+      "additionalProperties": false,
+      "description": "HTTP transport configuration (streamable HTTP or legacy SSE)",
+      "properties": {
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Extra headers to include on requests",
+          "type": "object"
+        },
+        "oauth_account": {
+          "description": "Selected OAuth provider subject or account ID, never a display name.\nA selection is an expectation; native OAuth verifies the credential.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "oauth_account_selection": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/McpOAuthAccountSelection"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Account binding when no `oauth_account` is named: `discover` binds the\nprovider-verified account at the first login, `unverified` is an\nexplicit opt-in to resource-bound access with no account evidence.\nOnly host configuration sets it; it conflicts with `oauth_account`."
+        },
+        "transport": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/McpHttpTransport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "HTTP transport selection (default: streamable-http)"
+        },
+        "url": {
+          "description": "Server URL",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "type": "object"
+    },
+    "McpHttpTransport": {
+      "description": "HTTP transport selection for URL-based servers",
+      "enum": [
+        "streamable-http",
+        "sse"
+      ],
+      "type": "string"
+    },
+    "McpOAuthAccountSelection": {
+      "description": "Account binding of an OAuth-protected MCP server that names no account.",
+      "oneOf": [
+        {
+          "const": "discover",
+          "description": "Bind the account the provider verifies at the first login; later\nlogins must prove that same account.",
+          "type": "string"
+        },
+        {
+          "const": "unverified",
+          "description": "Resource-bound access without account evidence. The credential never\nestablishes, verifies or represents an account.",
+          "type": "string"
+        }
+      ]
+    },
+    "McpServerAccess": {
+      "additionalProperties": false,
+      "description": "Host access ceiling for one MCP server, enforced by the connection that\ncalls it.\n\nOnly the raw MCP operations in `allowed_operations` may be called. The\nrouter does not offer any other under any name, and the connection\nrefuses any other before anything is sent.\nThe ceiling only narrows access. It does not certify that the listed\noperations are reads: session read-only policy still requires a trusted\nhost declaration for the exact destination and operation. Nothing is\ninferred from operation names or from the server's annotations.",
+      "properties": {
+        "allowed_operations": {
+          "description": "The raw MCP operation names that may be called.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "allowed_operations"
+      ],
+      "type": "object"
+    },
+    "McpServerConfig": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/McpStdioConfig"
+        },
+        {
+          "$ref": "#/$defs/McpHttpConfig"
+        }
+      ],
+      "description": "Configuration for a single MCP server",
+      "properties": {
+        "access": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/McpServerAccess"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Host access ceiling for this server's operations. Absent, every\noperation the server lists is callable (subject to session tool\npolicy). The server's own tool annotations never set or widen it."
+        },
+        "account": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/McpAccountDeclaration"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The host's declaration of the account this server's operations act\nwith, stated to review and consent: `none` declares that they act\nwith no selected account. Absent, the account is the connector\nbinding's or the OAuth account selection's, and otherwise unavailable:\na server without either never states that it has none. It conflicts\nwith both. Only host configuration sets it."
+        },
+        "connect_timeout_secs": {
+          "description": "Connection timeout in seconds (connect + handshake + list_tools).\nDefaults to 10 seconds when not specified.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "connector": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/McpConnectorBinding"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Trusted connector credential binding of a stdio server installation:\neach listed operation's calls carry the connector credential that\nsatisfies it, and the server gets the expected account binding at\nstartup. Only host configuration sets it."
+        },
+        "name": {
+          "description": "Server name (must be unique within scope)",
+          "type": "string"
+        },
+        "tool_names": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Explicit raw MCP operation -> exposed tool name selected by configuration.\nUnmapped operations keep their raw names. Names are never derived from\ncredentials or the current set of sibling servers. Explicit exposed\nnames are 1-64 ASCII letters, digits, underscores or hyphens; the router\nrejects reserved catalog-control names before staging. An unlisted raw\noperation in the map does not create a tool.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "McpStdioConfig": {
+      "additionalProperties": false,
+      "description": "Stdio transport configuration",
+      "properties": {
+        "args": {
+          "default": [],
+          "description": "Arguments to pass to the command",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "command": {
+          "description": "Command to spawn the server",
+          "type": "string"
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Environment variables",
+          "type": "object"
+        },
+        "secret_env": {
+          "description": "Names of environment variables whose values the realm that defines\nthis server keeps in its protected credential store. Only the names\nare configuration: each value is read for this exact definition when\nthe server is launched, and never from the host environment.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    "MeerkatSchema": {
+      "description": "A Meerkat-native JSON schema."
+    },
+    "MobBackendKind": {
+      "description": "Supported mob member provisioning backends.",
+      "enum": [
+        "session",
+        "external"
+      ],
+      "type": "string"
+    },
+    "MobRuntimeMode": {
+      "description": "Runtime execution mode for a mob member.",
+      "oneOf": [
+        {
+          "const": "autonomous_host",
+          "description": "Long-lived autonomous host loop (default).",
+          "type": "string"
+        },
+        {
+          "const": "turn_driven",
+          "description": "Explicit turn-by-turn execution.",
+          "type": "string"
+        }
+      ]
+    },
+    "ModelFallbackConfig": {
+      "additionalProperties": false,
+      "description": "Ordered model failover policy used when a turn reaches a recoverable LLM\nfailure boundary.\n\nFallback is off unless explicitly enabled with a nonempty chain. A present\ntable replaces the inherited policy as a whole; a chain never enables it.",
+      "properties": {
+        "chain": {
+          "description": "Ordered operator-provided backup targets.",
+          "items": {
+            "$ref": "#/$defs/ModelFallbackTarget"
+          },
+          "type": "array"
+        },
+        "enabled": {
+          "description": "Absent is disabled. Presence preserves explicit false across inheritance.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "policy": {
+          "$ref": "#/$defs/ModelFallbackPolicy",
+          "default": {
+            "cross_provider": false,
+            "min_context_headroom": 0.1,
+            "require_tool_parity": true,
+            "trigger_after_attempts": 3,
+            "triggers": [
+              "provider_unavailable",
+              "capacity"
+            ]
+          }
+        }
+      },
+      "type": "object"
+    },
+    "ModelFallbackPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "cross_provider": {
+          "default": false,
+          "type": "boolean"
+        },
+        "min_context_headroom": {
+          "default": 0.1,
+          "format": "double",
+          "type": "number"
+        },
+        "require_tool_parity": {
+          "default": true,
+          "type": "boolean"
+        },
+        "trigger_after_attempts": {
+          "default": 3,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "triggers": {
+          "default": [
+            "provider_unavailable",
+            "capacity"
+          ],
+          "items": {
+            "$ref": "#/$defs/ModelFallbackTrigger"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "ModelFallbackTarget": {
+      "additionalProperties": false,
+      "description": "One configured model fallback target.",
+      "properties": {
+        "auth_binding": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuthBindingRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional realm-scoped auth binding for this target. When omitted, the\nprovider's default binding is resolved by the existing provider-runtime\nregistry.\n\n`AuthBindingRef` only derives `JsonSchema` under the `schema` feature\n(its slug newtypes gate the same way), while this struct's derive is\nunconditional; without the schema-off skip, `--no-default-features`\nfails to compile. The emitted schema (feature on) is unchanged."
+        },
+        "model": {
+          "description": "Model id, resolved through the effective [`crate::ModelRegistry`].",
+          "type": "string"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Provider"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional typed provider override. When omitted, registry ownership of\n`model` supplies the provider."
+        }
+      },
+      "required": [
+        "model"
+      ],
+      "type": "object"
+    },
+    "ModelFallbackTrigger": {
+      "enum": [
+        "capacity",
+        "provider_unavailable",
+        "transport",
+        "empty_output"
+      ],
+      "type": "string"
+    },
+    "OpaqueProviderBody": {
+      "description": "Opaque provider-native JSON body carried verbatim from caller to\nprovider. Used for pass-through sub-shapes (web search config,\nprovider-native custom compaction edits, OpenAI-compatible\n`chat_template_kwargs`/`thinking`/`reasoning` forwards) where the\nexact wire shape varies across downstream providers (Anthropic /\nDeepSeek / OpenRouter / custom proxies) and the runtime deliberately\ndoes not parse the body — it simply forwards it.",
+      "type": "string"
+    },
+    "OpenAiPromptCacheMode": {
+      "description": "Request-wide GPT-5.6 prompt-cache breakpoint policy.",
+      "enum": [
+        "implicit",
+        "explicit"
+      ],
+      "type": "string"
+    },
+    "OpenAiPromptCacheOptions": {
+      "additionalProperties": false,
+      "description": "GPT-5.6 request-wide prompt-cache controls.",
+      "properties": {
+        "mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OpenAiPromptCacheMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Automatic (`implicit`) placement or Meerkat-authored explicit placement."
+        },
+        "ttl": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OpenAiPromptCacheTtl"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Minimum cache lifetime. GPT-5.6 currently accepts only `30m`."
+        }
+      },
+      "type": "object"
+    },
+    "OpenAiPromptCacheRetention": {
+      "description": "Typed shape of OpenAI's prompt-cache retention hint.",
+      "oneOf": [
+        {
+          "const": "in_memory",
+          "description": "Retain only in memory.",
+          "type": "string"
+        },
+        {
+          "const": "24h",
+          "description": "Retain for 24 hours.",
+          "type": "string"
+        }
+      ]
+    },
+    "OpenAiPromptCacheTtl": {
+      "description": "Minimum lifetime for GPT-5.6 prompt-cache entries.",
+      "enum": [
+        "30m"
+      ],
+      "type": "string"
+    },
+    "OpenAiReasoningContext": {
+      "description": "Which available reasoning items GPT-5.6 may render into the next sample.",
+      "enum": [
+        "auto",
+        "current_turn",
+        "all_turns"
+      ],
+      "type": "string"
+    },
+    "OpenAiReasoningMode": {
+      "description": "GPT-5.6 Responses execution mode.",
+      "enum": [
+        "standard",
+        "pro"
+      ],
+      "type": "string"
+    },
+    "OpenAiTextVerbosity": {
+      "description": "Default level of detail for OpenAI text output.",
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "type": "string"
+    },
+    "OutputSchema": {
+      "description": "Configuration for structured output extraction.\n\nWhen provided to an agent, the agent will perform an extraction turn after\ncompleting the agentic work, forcing the LLM to output validated JSON that\nconforms to the provided schema. [`RunResult::text`] remains the committed\nmain-turn output; extraction populates [`RunResult::structured_output`] on\nsuccess or [`RunResult::extraction_error`] on failure.",
+      "properties": {
+        "compat": {
+          "$ref": "#/$defs/SchemaCompat",
+          "default": "lossy",
+          "description": "Compatibility mode for provider lowering (lossy or strict)"
+        },
+        "format": {
+          "$ref": "#/$defs/SchemaFormat",
+          "default": "meerkat_v1",
+          "description": "Schema format version"
+        },
+        "name": {
+          "description": "Optional name for the schema (used by some providers)",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "schema": {
+          "$ref": "#/$defs/MeerkatSchema",
+          "description": "The JSON schema that the output must conform to"
+        },
+        "strict": {
+          "default": false,
+          "description": "Whether to enforce strict schema validation (provider-specific)",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schema"
+      ],
+      "type": "object"
+    },
+    "Profile": {
+      "description": "Profile template for spawning mob members.\n\nEach profile defines the model, skills, tool configuration, and\ncommunication properties for a class of mob members.",
+      "properties": {
+        "auto_compact_threshold": {
+          "default": null,
+          "description": "Per-profile auto-compaction threshold override (tokens, non-zero).\n\n`NonZeroU64` fails closed at ingress: a zero threshold rejects the\nprofile instead of silently disabling compaction. When set, this wins\nover the global config knob and model-aware context-window scaling.",
+          "format": "uint64",
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "backend": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MobBackendKind"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional backend override for this profile.\n\nIf unset, runtime uses `definition.backend.default`."
+        },
+        "external_addressable": {
+          "default": false,
+          "description": "Whether this member can receive turns from external callers.",
+          "type": "boolean"
+        },
+        "image_generation_provider": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Provider"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Configured default provider for `Auto` image-generation targets.\n\nOverrides the mob-level default. When neither is set, `Auto` resolves\nvia the session's effective text provider."
+        },
+        "max_inline_peer_notifications": {
+          "default": null,
+          "description": "Maximum peer-count threshold for inline peer lifecycle context injection.\n\n- `None`: use runtime default\n- `0`: never inline peer lifecycle notifications\n- `-1`: always inline peer lifecycle notifications\n- `>0`: inline only when post-drain peer count is <= threshold\n- `<-1`: invalid",
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "model": {
+          "description": "LLM model name (e.g. \"claude-opus-4-8\").",
+          "type": "string"
+        },
+        "model_fallback": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelFallbackConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Whole-table override; omitted inherits mob runtime, then host policy."
+        },
+        "output_schema": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MeerkatSchema"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional JSON Schema for structured output extraction.\n\nWhen set, the agent session is configured with an `OutputSchema` that\nforces the LLM to respond with validated JSON conforming to this schema.\n\nTyped owner: a validated, normalized [`meerkat_core::MeerkatSchema`].\nThe schema is validated ONCE at profile ingress — deserialization fails\nclosed on an invalid schema (non-object root) — so a profile holding an\ninvalid schema can no longer be persisted or transmitted and rejected\nonly later at spawn time."
+        },
+        "peer_description": {
+          "default": "",
+          "description": "Human-readable description of this member's role, shown to peers in\ndiscovery: it becomes the member's `PeerMeta.description`, which other\nmembers read through the `peers` tool and the `mob.peer_added`\nlifecycle notice.\n\nNOT this member's system prompt. The member's own prompt is assembled\nfrom [`Self::skills`] resolved against the definition's `[skills.<id>]`\ntables (inline or path content); see the mobs guide, \"Member system\nprompt\". A profile has no prompt key, and `MobDefinition::from_toml`\nrefuses one (see [`UnsupportedProfileKey`]).",
+          "type": "string"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Provider"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Explicit typed provider for this profile's model.\n\nParsed fail-closed at profile ingress into the closed\n[`meerkat_core::Provider`] vocabulary (unknown names reject the\nprofile). Required for uncatalogued model ids that no registry entry\nowns; for catalogued ids the registry rejects a conflicting owner at\nbuild time."
+        },
+        "provider_params": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderParamsOverride"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional provider-specific parameters passed to the LLM adapter.\n\nThis maps directly to `AgentBuildConfig.provider_params` and is useful\nfor model/provider knobs such as Gemini `thinking_budget` or OpenAI\n`reasoning_effort`."
+        },
+        "resume_overrides": {
+          "default": [],
+          "description": "Profile fields that win over durable session metadata on resume.\n\nSurfaces the typed [`meerkat_core::service::ResumeOverrideMask`]: a\nlisted field is re-applied from the (possibly updated) profile when a\ndurable member session resumes, instead of being restored from\npersisted metadata. Unlisted fields keep durable truth.",
+          "items": {
+            "$ref": "#/$defs/ResumeOverrideField"
+          },
+          "type": "array"
+        },
+        "runtime_mode": {
+          "$ref": "#/$defs/MobRuntimeMode",
+          "default": "autonomous_host",
+          "description": "Runtime mode for members spawned from this profile.\n\nDefaults to autonomous keep-alive behavior when omitted."
+        },
+        "self_hosted_server_id": {
+          "default": null,
+          "description": "Durable self-hosted server binding for configured self-hosted aliases.\n\nOnly meaningful together with `provider = \"self_hosted\"` and a\n`[self_hosted.models]` entry in the host config.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "skills": {
+          "default": [],
+          "description": "Skill references to load for this profile.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "tools": {
+          "$ref": "#/$defs/ToolConfig",
+          "default": {
+            "builtins": false,
+            "comms": false,
+            "image_generation": false,
+            "mcp": [],
+            "mcp_servers": [],
+            "memory": false,
+            "mob": false,
+            "read_only": false,
+            "rust_bundles": [],
+            "schedule": false,
+            "shell": false,
+            "workgraph": false
+          },
+          "description": "Tool configuration."
+        }
+      },
+      "required": [
+        "model"
+      ],
+      "type": "object"
+    },
+    "ProfileId": {
+      "description": "Opaque slug identifying an auth profile override on a connection.",
+      "type": "string"
+    },
+    "Provider": {
+      "description": "Supported LLM providers.\n\n`JsonSchema` is derived unconditionally (schemars is a non-optional\nmeerkat-core dependency): config-owned types such as\n[`crate::config::CustomModelConfig`] embed the typed provider directly and\nderive their schemas without the `schema` feature.",
+      "enum": [
+        "anthropic",
+        "openai",
+        "gemini",
+        "self_hosted",
+        "other"
+      ],
+      "type": "string"
+    },
+    "ProviderParamsOverride": {
+      "additionalProperties": false,
+      "description": "Typed per-turn provider parameter overrides.\n\nReplaces the legacy untyped `serde_json::Value` bag. Every knob exposed\nby the runtime on a per-turn seam must have a typed field here. Anything\nprovider-specific enough to not fit goes on [`ProviderTag`]; anything\nthat is fundamentally per-binding (not per-turn) lives on the auth /\nbackend profile and never traverses this seam.",
+      "properties": {
+        "max_output_tokens": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "provider_tag": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderTag"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reasoning": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReasoningMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "temperature": {
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "thinking_budget_tokens": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "top_p": {
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ProviderTag": {
+      "description": "Provider-specific typed override payload carried on a single turn.\n\nEach provider family gets its own typed variant. Anything that does not\nfit a typed field belongs on the per-binding auth/backend profile, not\non the per-turn override — the per-turn seam carries only scalars the\nruntime can route authoritatively.\n\n`Unknown { bag }` is the typed escape hatch for V3 legacy-row\ndeserialize (see C-TM-V3): the untyped `serde_json::Value` thinking\ncarrier from pre-wave rows projects into `StructuredProviderExtension`\nrather than being silently dropped (persistence-migration.md §3.1,\nadversarial review flaw 5).",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Per-turn Anthropic-specific knobs carried in `ProviderTag::Anthropic`.",
+          "properties": {
+            "cache_control": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AnthropicCacheControlPolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Prompt-cache breakpoint policy."
+            },
+            "cache_ttl": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AnthropicCacheTtl"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Prompt-cache lifetime. Effective only when this profile explicitly\nenables a cache-control policy."
+            },
+            "compaction": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AnthropicCompactionConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Automatic compaction configuration."
+            },
+            "context": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AnthropicContextWindow"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Context-window opt-in (1M beta)."
+            },
+            "effort": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AnthropicEffort"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Response-effort knob."
+            },
+            "inference_geo": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AnthropicInferenceGeo"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Data-residency override for inference routing."
+            },
+            "provider": {
+              "const": "anthropic",
+              "type": "string"
+            },
+            "structured_output": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/OutputSchema"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Structured-output schema (forces JSON-schema output envelope)."
+            },
+            "supports_temperature_override": {
+              "description": "Internal override: force-enable temperature for this request even\nwhen the model profile says unsupported. Used by proxied /\ncustom deployments.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "thinking": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AnthropicThinkingConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Extended-thinking configuration."
+            },
+            "thinking_budget_tokens": {
+              "description": "Legacy flat `thinking_budget_tokens` — preserved for V3\npersistence round-trip (single-key legacy projector) and for\ncallers that cannot express the full `thinking` shape.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "top_k": {
+              "description": "Override top-k sampling.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "web_search": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/OpaqueProviderBody"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Provider-native web-search tool body, injected alongside\n`tools` at the provider-runtime boundary."
+            }
+          },
+          "required": [
+            "provider"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Per-turn OpenAI-specific knobs carried in `ProviderTag::OpenAi`.",
+          "properties": {
+            "chat_template_kwargs": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/OpaqueProviderBody"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "OpenAI-compatible endpoints: `chat_template_kwargs` passthrough."
+            },
+            "frequency_penalty": {
+              "description": "Frequency penalty (-2.0 .. 2.0).",
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "presence_penalty": {
+              "description": "Presence penalty (-2.0 .. 2.0).",
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "prompt_cache_enabled": {
+              "description": "Meerkat-owned prompt-cache enable intent.\n\n`false` is a durable opt-out. On GPT-5.6 it lowers to explicit-only\nmode with no authored breakpoints, which performs no cache reads or\nwrites and incurs no cache-write charges.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "prompt_cache_key": {
+              "description": "OpenAI prompt-cache affinity routing key.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "prompt_cache_options": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/OpenAiPromptCacheOptions"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "GPT-5.6 request-wide prompt-cache policy and minimum TTL."
+            },
+            "prompt_cache_retention": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/OpenAiPromptCacheRetention"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "OpenAI prompt-cache retention hint."
+            },
+            "provider": {
+              "const": "open_ai",
+              "type": "string"
+            },
+            "reasoning": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/OpaqueProviderBody"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "OpenAI-compatible endpoints (DeepSeek / OpenRouter / vLLM):\nfull `reasoning` body forwarded verbatim alongside\n`reasoning_effort`."
+            },
+            "reasoning_context": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/OpenAiReasoningContext"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "GPT-5.6 persisted-reasoning context selection."
+            },
+            "reasoning_effort": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ReasoningEffort"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Reasoning-effort level for o-series and GPT-5 models."
+            },
+            "reasoning_mode": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/OpenAiReasoningMode"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "GPT-5.6 Responses execution mode (`standard` or `pro`)."
+            },
+            "seed": {
+              "description": "Deterministic-sampling seed.",
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "store": {
+              "description": "Responses API persistence override. Absent means the client sends\n`store: false` by default; callers may explicitly opt in with\n`Some(true)`.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "structured_output": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/OutputSchema"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Structured-output schema (forces `text.format.json_schema`)."
+            },
+            "supports_reasoning_override": {
+              "description": "Internal override: force-enable reasoning payload for this\nrequest (used by client_compatible endpoints).",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "supports_temperature_override": {
+              "description": "Internal override: force-enable temperature for this request.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "text_verbosity": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/OpenAiTextVerbosity"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Default GPT-5.6 text-output detail level."
+            },
+            "thinking": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/OpaqueProviderBody"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "OpenAI-compatible endpoints: vendor-specific `thinking` body\nforwarded verbatim."
+            },
+            "web_search": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/OpaqueProviderBody"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Provider-native web-search tool body, injected alongside `tools`."
+            }
+          },
+          "required": [
+            "provider"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Per-turn Gemini-specific knobs carried in `ProviderTag::Gemini`.",
+          "properties": {
+            "cached_content_name": {
+              "description": "Gemini explicit context-cache resource name.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "candidate_count": {
+              "description": "Number of candidate completions (runtime/persistence knob, not\nread by the Gemini client today — preserved for V3 round-trip).",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "google_search": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/OpaqueProviderBody"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Provider-native google_search grounding tool body."
+            },
+            "provider": {
+              "const": "gemini",
+              "type": "string"
+            },
+            "structured_output": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/OutputSchema"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Structured-output schema."
+            },
+            "thinking": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/GeminiThinkingConfig"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Thinking configuration (Gemini 3+ models)."
+            },
+            "thinking_budget": {
+              "description": "Legacy flat `thinking_budget` — preserved for V3 persistence\nround-trip.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "thinking_level": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/GeminiThinkingLevel"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Gemini 3 flat thinking level override."
+            },
+            "top_k": {
+              "description": "Top-K sampling override.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "top_p": {
+              "description": "Top-P (nucleus) sampling override.",
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "provider"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Opaque pass-through for legacy-row knobs that don't (yet) map to a\ntyped variant. Carries the namespaced bag so a later wave can\npromote the structure to a typed variant without losing data.",
+          "properties": {
+            "bag": {
+              "$ref": "#/$defs/StructuredProviderExtension"
+            },
+            "provider": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "provider",
+            "bag"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "RealmId": {
+      "description": "Opaque slug identifying a realm.",
+      "type": "string"
+    },
+    "ReasoningEffort": {
+      "description": "Typed projection of OpenAI's reasoning-effort knob.",
+      "enum": [
+        "none",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "type": "string"
+    },
+    "ReasoningMode": {
+      "description": "Typed mode for generalized reasoning emission.",
+      "oneOf": [
+        {
+          "const": "emit",
+          "description": "Reasoning output is emitted inline to the caller.",
+          "type": "string"
+        },
+        {
+          "const": "silent",
+          "description": "Reasoning is performed but not emitted.",
+          "type": "string"
+        },
+        {
+          "const": "off",
+          "description": "Reasoning is disabled entirely for this turn.",
+          "type": "string"
+        }
+      ]
+    },
+    "ResumeOverrideField": {
+      "description": "Profile fields that may override durable session metadata on resume.\n\nTyped, closed vocabulary parsed fail-closed at profile ingress; maps onto\nthe corresponding bits of [`meerkat_core::service::ResumeOverrideMask`].",
+      "oneOf": [
+        {
+          "const": "model",
+          "description": "Re-apply the profile `model` on resume.",
+          "type": "string"
+        },
+        {
+          "const": "provider",
+          "description": "Re-apply the profile `provider` (and self-hosted binding) on resume.",
+          "type": "string"
+        },
+        {
+          "const": "provider_params",
+          "description": "Re-apply the profile `provider_params` on resume.",
+          "type": "string"
+        }
+      ]
+    },
+    "SchemaCompat": {
+      "description": "Compatibility mode for provider lowering.",
+      "enum": [
+        "lossy",
+        "strict"
+      ],
+      "type": "string"
+    },
+    "SchemaFormat": {
+      "description": "Schema format versions supported by Meerkat.",
+      "enum": [
+        "meerkat_v1"
+      ],
+      "type": "string"
+    },
+    "SchemaRef": {
+      "anyOf": [
+        {
+          "properties": {
+            "inline": true
+          },
+          "required": [
+            "inline"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "registry": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "registry"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "StructuredProviderExtension": {
+      "description": "Typed non-semantic opaque bag for per-turn provider knobs that cannot be\nfully typed without blocking a wave boundary. Explicitly marked\nnon-semantic and RMAT-exempt.\n\nUse of this type is a deliberate boundary marker: content is passed\nthrough without interpretation. Any consumer that needs to interpret the\ncontent must promote the relevant structure into a proper typed variant\nin its own wave.\n\nRelocated from `meerkat_contracts::wire::runtime` into core so\n`ProviderTag::Unknown { bag }` can name the bag without a cross-crate\ncycle (adversarial review flaw 5). `meerkat-contracts` re-exports this\ntype so the wire path is preserved.",
+      "properties": {
+        "body": {
+          "default": "",
+          "description": "Opaque body. Non-semantic — never pattern matched across the wire.",
+          "type": "string"
+        },
+        "key": {
+          "description": "Opaque key identifying the extension within the namespace.",
+          "type": "string"
+        },
+        "namespace": {
+          "description": "Free-form provider namespace discriminator (e.g. `\"anthropic\"`).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "namespace",
+        "key"
+      ],
+      "type": "object"
+    },
+    "ToolConfig": {
+      "description": "Tool configuration for a mob member profile.\n\nControls which tool categories are enabled for members spawned\nfrom this profile.",
+      "properties": {
+        "builtins": {
+          "default": false,
+          "description": "Enable built-in tools (file read, etc.).",
+          "type": "boolean"
+        },
+        "comms": {
+          "default": false,
+          "description": "Enable comms tools (peer messaging).\n\nMust be `true` for every profile that spawns a member. A member's\nidentity, roster entry, wiring, peer messaging, and supervisor bridge\nare keyed on its comms name, and the facade composes comms tools\nwhenever that name is set, so `build_agent_config` rejects\n`comms = false` instead of silently ignoring it. The serde default is\n`false`, which means omitting the key is rejected too. A member that\nmust not message peers keeps comms on and uses [`Self::read_only`] or a\nper-spawn `tool_access_policy` deny list.",
+          "type": "boolean"
+        },
+        "deny": {
+          "description": "Tool names members of this profile may not execute, although their\nfamilies are enabled (for example `mob = true` with the topology\ntools `mob_wire`, `mob_unwire`, `mob_spawn_member` denied, so peers\ncannot rewire themselves).\n\nAn enforcement declaration like [`Self::read_only`]: it conjoins with\nthe per-spawn tool access policy (a spawn cannot widen it) and is\nrecomputed from the current definition on every build, including a\nresume. Each name must be a tool the member's build composed or a name\nin a tool vocabulary: the built-in families' tools (whether compiled or\nenabled or not), the mob operator tools (`spawn_member`,\n`wire_members`, ...), the agent mob tools (`mob_spawn_member`,\n`mob_wire`, `mob_create`, ...), the exposed names this profile's\n[`Self::mcp_servers`] map, and the tools of its own registered\n[`Self::rust_bundles`]. A known name the member does not mount is\ninert. While the profile declares an MCP server that maps no tool\nnames, any other name is deferred to the execution gate (logged at\nbuild); otherwise it fails the member's build with a typed error naming\nthe vocabularies. To validate an MCP tool name at build, map it in the\nserver's `tool_names`. Denied tools stay listed and the execution gate\nrefuses every call by name.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "image_generation": {
+          "default": false,
+          "description": "Enable assistant image generation tools.",
+          "type": "boolean"
+        },
+        "mcp": {
+          "default": [],
+          "description": "MCP server names this profile connects to.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "mcp_servers": {
+          "default": [],
+          "description": "Declarative MCP server configs for members built from this profile.\n\nDurable on the profile (unlike the in-process-only per-spawn\n`SpawnMemberSpec.external_tools` overlay), so revival recomposes the\nmember's MCP tools from the same profile that built it. These are\nalready profile-scoped; the `mcp` name allowlist above gates only the\nmob-wide default external-tools provider (where an empty list means\nthe full host surface).",
+          "items": {
+            "$ref": "#/$defs/McpServerConfig"
+          },
+          "type": "array"
+        },
+        "memory": {
+          "default": false,
+          "description": "Enable memory/semantic search tools.",
+          "type": "boolean"
+        },
+        "mob": {
+          "default": false,
+          "description": "Enable mob management tools (spawn, retire, wire, unwire, list).",
+          "type": "boolean"
+        },
+        "read_only": {
+          "default": false,
+          "description": "Declare this profile read-only: every tool call is admitted at the\nexecution gate only when the dispatcher that owns the tool declares it\nread-only ([`meerkat_core::ToolMutationClass::ReadOnly`]).\n\nThis is an enforcement declaration, not prompt guidance, and it wins\nover the per-spawn tool access policy (a spawn cannot widen a\nread-only profile). The category booleans above still decide what is\n*visible*; this decides what may *execute*. The guarantee covers only\ntools that traverse the dispatcher: see\n`meerkat_core::tool_execution_policy` for the exact boundary\n(provider-native tools, MCP tools, and `shell` are not read-only).",
+          "type": "boolean"
+        },
+        "rust_bundles": {
+          "default": [],
+          "description": "Named Rust tool bundles wired by the mob runtime.\n\nString names referencing `Arc<dyn AgentToolDispatcher>` instances\nregistered at mob construction time. Not serializable — must be\nre-registered on resume.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "schedule": {
+          "default": false,
+          "description": "Enable schedule tools (create, list, update, pause, resume, delete).",
+          "type": "boolean"
+        },
+        "shell": {
+          "default": false,
+          "description": "Enable shell execution tool.",
+          "type": "boolean"
+        },
+        "workgraph": {
+          "default": false,
+          "description": "Expose the realm-scoped WorkGraph commitment tools to this member.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "properties": {
+        "decision": {
+          "const": "run_layer",
+          "type": "string"
+        },
+        "plan": {
+          "$ref": "#/$defs/LayerPlan"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "decision",
+        "reason",
+        "plan"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "decision": {
+          "const": "finish",
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "result": {
+          "$ref": "#/$defs/FinishResult"
+        }
+      },
+      "required": [
+        "decision",
+        "reason",
+        "result"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "LayerDecision"
+}

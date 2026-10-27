@@ -1,0 +1,942 @@
+---
+title: "Unified Runtime"
+description: "Combine a Meerkat mob with Meta modules into a single managed runtime with merged events and coordinated lifecycle."
+icon: "layer-group"
+---
+
+The unified runtime is the production entry point for Meta. It bootstraps a Meerkat mob and Meta's module subsystems together, merges their event streams, and manages the combined lifecycle through a single handle.
+
+## Builder paths
+
+For new hosts, build from a mob definition. `definition_path` loads TOML, while
+`definition` accepts an already parsed `MobDefinition`:
+
+```rust
+use meerkat_meta::UnifiedRuntime;
+
+let runtime = UnifiedRuntime::builder()
+    .definition_path("config/mob.toml")
+    .persistent_state(".meta/state")
+    .build()
+    .await?;
+```
+
+On this definition-based path, only `definition(...)` or
+`definition_path(...)` is required. The other common fields have defaults:
+
+| Builder field | Default when omitted |
+|---------------|----------------------|
+| `module_config` | Empty module and discovery configuration |
+| `timeout` | 30 seconds |
+| `persistent_state` | Ephemeral session service with an auto-created temporary directory |
+| `session_repair_scope` | Derived from the runtime store the build opened: `persistent_state` opens `<state_dir>/runtime.sqlite`, so a member parked with a `session_repair_required` hold names `rkat session repair-wholeblob <id> --runtime-store <state_dir>/runtime.sqlite`; a composite storage provider's meerkat-level realm renders as `rkat --state-root <state_dir> --realm meta ...`; a build with no persistent runtime store declares no scope and the commands keep explicit `<state-root>` / `<realm>` placeholders |
+
+The older `mob_spec(...)` path accepts a pre-built `MobBootstrapSpec`. It still
+requires explicit module configuration and timeout because the spec already
+owns its session service and construction policy:
+
+```rust
+use meerkat_meta::UnifiedRuntime;
+use std::time::Duration;
+
+let runtime = UnifiedRuntime::builder()
+    .mob_spec(mob_bootstrap_spec)
+    .module_config(meta_config)
+    .timeout(Duration::from_secs(30))
+    .build()
+    .await?;
+```
+
+If neither definition source nor `mob_spec` is present, the builder returns
+`MissingRequiredField(MobSpec)`. On the legacy path, omitting
+`module_config` or `timeout` returns the corresponding missing-field error.
+
+## Optional extension documents
+
+Rust hosts can enable the default-off `extension-state` Cargo feature and
+register an external `ToolBundleFactory`. The extension package owns its tools
+and payload schema; Meta supplies durable storage and caller authority. The
+following example uses a `durable-documents-test` factory with read and edit
+tools. Profile selection keeps the tools off agents that do not need them:
+
+```toml
+[profiles.worker.tools]
+rust_bundles = ["durable-documents-test"]
+```
+
+Register the package's factory on the host's configured persistent builder:
+
+```rust
+use meerkat_meta::extension_state::ToolBundleRequirements;
+
+let runtime = persistent_builder
+    .register_tool_bundle_factory(
+        "durable-documents-test",
+        ToolBundleRequirements::durable_documents(
+            "durable-documents-test", "documents_read", "documents_apply",
+        ),
+        external_factory, // Arc<dyn ToolBundleFactory> supplied by the package
+    )
+    .build()
+    .await?;
+```
+
+Every member waits for its configured MCP connection attempts, document-bound
+or not, before its construction is prepared. A member's authoritative tool
+surface, and the native inherited tool visibility resolved against it, are
+captured after its configured MCP servers connect or fail: its construction
+waits for each configured MCP server, profile-injected or document-bound, up
+to its connect timeout (`connect_timeout_secs`) plus at most 0.25 s (plus the
+TERM grace for a server that ignores SIGTERM), and its first turn starts
+after that. For an eager roster the construction is the runtime's start,
+which restores `META_IDENTITY_RESTORE_CONCURRENCY` members at a time (4 by
+default; 1 serializes them), so servers that never answer add about that
+timeout times ceil(members / concurrency) to it; a lazy member waits at its
+first wake. A failed connection completes the wait without making its tools
+available, and the member's session holds a typed setup-failure notice for
+it.
+
+The configured storage provider must support durable extension documents.
+The disk provider supplies this capability. No factory means no extension
+store or tool registration, even if the feature is compiled.
+
+Documents start private to the executing agent. Forks inherit the owner's
+data access by default; ordinary spawned helpers need an explicit grant or
+descendant sharing. Reader grants remain read-only through forks, and
+inherited access never permits changing grants, transferring or deleting a
+document. Revocation is checked on the next access. Native policy always
+applies; an enabled host access controller additionally checks
+`extension.read`, `extension.edit` and `extension.manage`. With host ABAC
+disabled or unconfigured, that layer adds no restriction. See
+[Access control](/concepts/access-control) for host rules.
+
+Document persistence does not change native member lifetime. In the current
+Meta composition, `delegate` uses an ephemeral child mob and retires the
+helper and its fork descendants when delegation completes. Such members
+cannot be resumed after restart. Persistent root-mob members retain their
+native identity and lineage through the configured durable mob storage.
+The convenience `persistent_state(...)` path persists sessions, the native
+mob journal (`<persistent_state>/event_log.sqlite3`) and the other stores, so
+members keep their identity and lineage across process restarts. A host that
+keeps the journal elsewhere supplies `mob_spec(...)` using
+`MobBootstrapSpec::persistent(...)` with `persistent_mob_storage(...)` and its
+storage provenance. Durable document rows alone cannot reconstruct missing
+native creation facts; the extension refuses unavailable authority.
+
+Documents name a mob by its id alone, as their owner (`Owner::Mob`) or in an
+audience grant or deny (`Audience::Mob`), and they outlive the mob. A new mob
+under the id of a destroyed one would inherit what they grant, so the agent
+mob-tool state refuses every create (an agent's `mob_create`, a temporary
+council, a create without an owner session) under an id that any live
+document of the realm still names, whatever is bound under the id. The typed
+refusal names the remedies: choose another mob id, or have a host or
+operator with access to the extension store transfer each document the id
+owns to another owner and remove or replace each `Audience::Mob` grant or
+deny naming it. An owner transfer alone leaves the audience entries, and the
+document tools alone cannot manage a document whose owning mob was
+destroyed.
+
+The one exemption is the implicit delegation mob that its own session's
+runtime path creates or recreates (as for a model change). Ownership is by
+id, not by mob instance, so the owner session of a destroyed mob cannot
+recreate the same explicit id while documents name it either. The built-in
+SQLite store answers the check from an index of the mob ids its live
+documents name: it reads a realm's documents once, at the first check after
+it opens, keeps the index with its own writes, and reads the realm again
+after another connection commits, so a check costs a lookup, not a scan of
+the realm under the store's one connection. A refusal tells the caller that
+some document names the id, including one it cannot read.
+
+The check is ordered against document operations. It waits for every
+operation in flight through the document services the runtime builds (tool
+bundles and document MCP bindings) and sees what they committed. The caller
+resolver stamps each caller with the generation it read before any
+authority (`HostAccessContext::authority_generation`), and an admitted
+create under an id, or the release of the destroyed mob that held it, moves
+that id's generation. An operation is refused with `AuthorityUnavailable`
+when a mob id its caller's authority names
+(`HostAccessContext::authority_mob_ids`), or a write's new owner or access
+names, changed after the stamp, and the tool resolves its caller again. The
+document services refuse a caller context the resolver did not resolve,
+such as one the host built itself; a host that needs unordered access uses
+its provider's store directly. The ordering covers one runtime in one
+process, and the implicit delegation mob's exemption above takes no part in
+it.
+
+Every activation checks who holds the mob's id. The document store records,
+per realm and mob id, the holder of the mob that took the id
+(`MobIdHolder`): the owner session it was created for, or the host for a
+mob created with no owner session. A create the check admitted (the
+implicit delegation mob's included) records its holder and binds.
+Activations under an id are decided one at a time: one that finds a live mob
+bound under the id is refused, records nothing and drops whatever admission
+is pending under the id. A restore, or a held child's resume, binds when the
+store records the mob's own holder for the id, or when no live document names
+the id; an id with no
+holder record (references from before 0.9.3, or a mob created without the
+extension's hooks) is adopted by the first mob restored under it, which
+records its holder. When live documents name the id and the store records
+another holder, the restored mob is quarantined, and so it is when the
+store cannot answer. A quarantined mob is bound (an error would abort
+Meerkat's restore of every mob), but its members resolve no document
+caller, it is no valid document owner, nobody manages it and lineage
+through it does not resolve. `UnifiedRuntime::extension_mob_quarantines`
+lists each one with its typed reason. It stays quarantined until it is
+destroyed, or until a later restore finds that an operator cleared the
+references. Holder records outlive a destroy, so restoring a whole state
+generation (documents, holder records and mob state together) keeps its
+mobs bound. Holders are owner sessions, and every mob the host creates
+without one is the same holder, so a re-creation under an id by the same
+session, or by the host, without the extension's hooks is adopted as that
+holder's mob. An admission whose create failed after the check stays until
+the id's next admission or activation: a destroy under the id refreshes an
+admission made after that destroy rather than expiring it, and the next
+activation under the id that names the same holder binds without the holder
+check.
+
+A document store a host supplies through
+`MetaStorageProvider::open_extension_state` must implement
+`ExtensionDocumentStore::references_mob`, failing the answer (never skipping
+the document) on a document it cannot read, and
+`ExtensionDocumentStore::mob_id_holder` and
+`ExtensionDocumentStore::record_mob_id_holder`, recording holders durably
+beside the documents. The defaults answer errors: every create except a
+session's implicit delegation mob is then refused, and every mob is bound
+quarantined. `meta_store_conformance::chapters::mob_references` and
+`mob_id_holders` check an implementation. The built-in store keeps its
+holders in a plain `extension_mob_holders` table beside its ledgered
+tables, which Meta 0.9.2 ignores.
+
+The extension resolves the identity behind a session through Core's member
+history, which keeps every binding Core committed for an identity, including
+bindings from before the extension was enabled. A history Core cannot read
+answers typed `ExtensionAuthorityUnavailable`; it is never interpreted as an
+unrelated Worker. Disabling the factory does not remove stored documents.
+
+The extension integration requires the Meerkat crate family at the exact
+versions declared in the repository manifests. Applications using the Meta Git
+dependency should pin the reviewed revision and resolve their committed
+lockfile against those packages.
+
+## Keeping a Meta realm in your own database
+
+A host that keeps its data in its own database can keep the whole Meta realm
+there, through Meerkat Core's host store SPI: the host implements Core's
+`HostStore` trait over its database (see Core's host store reference), and
+`HostStoreMetaStorageProvider` puts the realm on it. The provider opens the
+realm's one `SpiRealm` (the fence, its lease and every scope) and hands that
+one handle to every store the runtime composes. Nothing else in the process
+opens the host store.
+
+| Slot | Where it lives |
+|------|----------------|
+| Sessions and runtime state | The realm's runtime scopes (Core's `SpiRuntimeStore`) |
+| Mob roster, event log, identity bindings, flow runs | The realm's mob storage `root` (Core's `SpiMobStoreHost`): every member spawn and wiring change is one batch over the mob and identity scopes |
+| Identity continuity | Core's mob identity authority in that mob storage |
+| Single writer | The realm's fence, renewed at the host's `FenceTiming` |
+| Realm record, composition manifest, first-boot rows, held-completion marks, structural-events cursor, idle-retirement opt-ins | Meta's own record family in the realm (scope tag `mx`) |
+| Schedules, work graph, blobs | The host's stores, declared in `HostStoreMetaStores` |
+| Detached jobs, console timeline, agent memory, event log | The host's stores when supplied; otherwise a declared default: a process-local job store, a process-local console timeline, no agent memory, no event log |
+
+The local directory is a per-host cache: `scratch_dir()` when set, else a
+temporary directory the runtime owns. It holds the agent factory's files and
+engine state only.
+
+**Comms identities.** Each member's comms identity (its key pair, one
+directory per session) is in neither the realm nor the cache: it lives under
+the session comms identity root, by default
+`$XDG_STATE_HOME/meerkat/session_comms_identity` on Linux (else
+`~/.local/state/meerkat/session_comms_identity`) and
+`~/Library/Application Support/meerkat/session_comms_identity` on macOS. A
+restored member's comms endpoint must match the one the realm recorded for
+it, so a start without that directory brings every restored member up broken,
+and the storage census (`comms_identity`) and the startup log name the
+directory, its path and the members. Keep it on storage that survives a
+restart and moves with the realm, such as a persistent volume, and point the
+runtime at it with the builder's `session_identity_config_root(root)`, which
+keeps the keys under `<root>/.rkat/session_comms_identity`, as the gateway's
+`runtime_options.session_identity_config_root` does. With that, a start on
+another host with an empty cache recovers exactly as a restart on the same
+host does. The first start after an import needs no keys: each imported
+member gets a new key pair. Turning the setting on, or changing it, for
+members whose keys already live elsewhere marks every one of them broken at
+the next start: copy their per-session key directories into
+`<root>/.rkat/session_comms_identity` first, or set the root from the first
+start after an import, as for a cutover. The same root is also the agent
+factory's user-global convention root, which Core consults when it resolves
+skill repositories, as with the gateway's setting. An empty root is refused.
+
+Open the provider before the build. A second process on the same realm
+meets `HostStoreOpenError::Held`, with what remains of the holder's lease;
+wait it out and open again, or open with `AcquireMode::Takeover` once the
+holder is known to be gone:
+
+```rust
+use std::sync::Arc;
+use meerkat_meta::host_store::{
+    HostStore, HostStoreMetaStorageProvider, HostStoreMetaStores, HostStoreOpenError,
+    SpiRealmConfig,
+};
+
+async fn open_realm(
+    host: Arc<dyn HostStore>,
+    stores: impl Fn() -> HostStoreMetaStores,
+) -> Result<HostStoreMetaStorageProvider, HostStoreOpenError> {
+    loop {
+        let opened = HostStoreMetaStorageProvider::open(
+            "my-database",
+            Arc::clone(&host),
+            SpiRealmConfig::default(),
+            stores(),
+        )
+        .await;
+        match opened {
+            // Another process holds the realm, or a stopped one's lease has
+            // not lapsed yet.
+            Err(HostStoreOpenError::Held { remaining, .. }) => {
+                tokio::time::sleep(remaining).await;
+            }
+            other => return other,
+        }
+    }
+}
+
+let provider = Arc::new(open_realm(host, make_stores).await?);
+let runtime = UnifiedRuntime::builder()
+    .definition_path("config/mob.toml")
+    .storage_provider(provider.clone())
+    .roster_provider(roster)
+    // A directory on a volume that survives restarts and moves with the realm.
+    .session_identity_config_root("/var/lib/my-app/meta")
+    .build()
+    .await?;
+```
+
+A provider serves one build: a second build over it refuses. Run one Meta
+process per realm; several replicas need several realms.
+
+**Readiness.** A batch that fails poisons the scopes it touched, and a lost
+fence poisons the whole realm; either refuses until the process opens the
+realm again, so the host restarts it. Poll `provider.readiness()` from your
+readiness probe: `is_ready()` is false while the realm or a scope is
+poisoned, and after a start that found restored members without their comms
+identity on this host (`comms_identity_degraded`) or members Core restored
+broken (`broken_members`): those members serve nothing until they are
+repaired.
+
+**Restart wait.** The SPI has no fence release: after a stop, the next open
+waits at most the lease the host declared in its `FenceTiming` (30 seconds by
+default). A shorter lease shortens the wait.
+
+**Event log.** The builder's `event_log(config)` works over a host store
+realm when `HostStoreMetaStores::event_log_store` is `None`: the builder's
+config, store and settings are used. A store in `event_log_store` and no
+`event_log()` ingests with the default settings. Supplying both refuses with
+`ConflictingConfiguration`, naming the event log.
+
+**Cost of a round.** A host store realm keeps each session's document whole
+(WholeBlob): every round commit writes the whole document, so a tool round
+writes about twice its size, and a long tool-heavy run writes bytes that grow
+with the square of its rounds. Bound the document size with the builder's
+`compaction()` policy.
+
+**Limits on a host store realm.** The storage census (`meta/status`,
+`meta/capabilities`) lists the process-bound and per-host slots:
+
+- Agent-created child mobs (`mob_create`, delegate's implicit mob) and
+  temporary councils are process-bound: they work, and they do not survive a
+  restart. A durable child mob storage is refused.
+- The builtin task tools and the file memory tool keep their files under the
+  agent factory's store path, the per-host cache.
+- Each member's comms key pair is in the per-host comms identity directory
+  (see Comms identities above).
+- An OAuth login in progress does not survive a restart (completed
+  credentials do).
+- `persistent_state()`, `mob_storage()`, `continuity_from_state_dir()` and the
+  per-slot store seams the provider supplies are refused, as are a
+  `topology_control()` mode other than Disabled (a `TopologyProvider`'s
+  desired topology works: it is reconciled against the mob's wiring, which the
+  realm keeps), `persistent_agent_memory_stack()` without a provider memory,
+  and extension documents.
+- One root mob per realm, in the mob storage named `root`; the mob keeps the
+  id its definition gives it.
+- The builder is the only entry: `meta_gateway` and `rpc_gateway` do not open
+  a host store in this release.
+
+**Mob announcements.** `mob_announcements()` works over a host store realm:
+the announcement store keeps its tables in the realm, and the storage census
+lists `mob_announcements` there. The process works on an in-memory copy of
+the tables, loaded whole at the start, and every call that changes the store
+is one batch of the realm, settled before the call answers. A collector
+step's items, their captures, the cursor and the step's receipt land together
+or not at all.
+
+- **Your scheduler runs the collectors.** Meta schedules no source runner on
+  a host store realm. A declared source with a runner is accepted, and
+  `sources/get` reports `runner_scheduled_here: false`. Your own scheduler
+  fires each source's collector at its `runner.every_seconds`, read from
+  `runtime.mob_announcements()?.sources(...)`, and hands each step to
+  `advance_source` with a new operation id. A retry of a step reuses its
+  operation id, and its original result answers again, marked replayed.
+- **Latency.** Calls run one at a time, and reads wait behind a commit in
+  flight, so the store takes about one change per host commit latency. A
+  collector step of up to 100 items with all its captures is one commit; a
+  delivered batch takes a few commits as it moves from sealed to handled. A
+  handling read that finds the turn still pending and an escalation pass that
+  only moves its mark wait in the copy for the next commit, or a flush within
+  60 seconds. Nothing flushes them at shutdown, so a graceful stop loses them
+  just as a crash does, and at most them: a lost read falls due at once at
+  the next start.
+- **Starts and rewrites.** The call that takes the store's journal to 400
+  rows writes the store whole again, in one batch (and its chunks first), and
+  waits for it; a start reads that image and fewer than 400 rows after it. The
+  whole store is held in memory while the process runs, and while a rewrite
+  runs the process holds about three more copies of it (the image, its encoded
+  rows and the packed chunk).
+- **The start read.** `build()` waits for the store's start read, which runs
+  after the identity bootstrap: with entries of up to 256 KiB it takes at most
+  27 read calls of your host store, plus one per 16 MiB of the store's image.
+  Until it is done, the member tools answer that mob announcements are not
+  ready on this gateway.
+- **Failures.** A batch the host refuses, or whose outcome stays unknown,
+  poisons the announcement store: every later call refuses, and
+  `provider.readiness()` turns false, until the process opens the realm again.
+- **The lease.** Every announcement call, reads included, first makes sure
+  the realm's lease is live. While the lease can be neither renewed nor taken
+  again (a host outage longer than the self-fence window), announcement calls
+  refuse, reads included; they serve again on their own once a renew or a
+  re-acquire succeeds.
+- **No import.** Announcement state in a state directory is not moved into a
+  realm. A new realm's store starts empty: declarations make their sources and
+  subscriptions again, and each source onboards from no cursor.
+
+**Moving a 0.9.3 deployment in.** Before the realm's first start, import the
+continuity export (see the continuity export guide) with
+`storage_migrate_native::import_continuity_export_into_host_store`. A dry run
+reports each session and writes no session, document or row; an apply
+creates each session's document in the realm and the first-boot rows the
+first start carries out, and a rerun with the same export continues an
+import that stopped part way. Both take the realm's fence like any open and
+hold it until its lease lapses, so a runtime started right after either
+waits up to that lease.
+Until the import is done, opening the realm refuses with
+`HostStoreOpenError::ImportIncomplete`. Moving a 0.9.4 or 0.9.5 state
+directory into a host store realm is not covered in this release.
+
+**No downgrade.** An earlier Meta, or a provider of your own, over a host
+store realm ignores Meta's records in it and would compose a different mob
+storage: do not run one on a realm this release wrote.
+
+A `storage_provider()` whose backend keeps the sessions but runs over a
+`scratch_dir()` keeps its mob storage in memory unless `mob_storage()`
+supplies one, so after a restart every identity starts on a fresh session
+while its old one remains. The storage census and the log warn about it; keep
+such a realm in a host store instead.
+
+## Bootstrap sequence
+
+<Steps>
+  <Step title="Mob preparation">
+    The runtime first prepares the Meerkat mob. This does not unconditionally provision members or finish wiring. A persistent identity-first resume can remain staged in `Stopped` until activation can proceed. A mob preparation failure returns `UnifiedRuntimeBootstrapError::Mob`.
+  </Step>
+  <Step title="Module startup">
+    After mob preparation, the supervisor attempts each discovered module and records its startup transitions. A module that exhausts its restart policy remains unloaded and emits a supervisor warning. A module-runtime initialization error or startup-thread panic rolls back the prepared mob before the builder returns an error.
+  </Step>
+  <Step title="Configured member materialization and wiring">
+    Later in builder construction, configured identity roster bootstrap or classic `Discovery` spawning materializes the desired members. The builder then performs final edge reconciliation when configured. Modules must not assume an already-populated, fully wired, `Running` mob at startup.
+  </Step>
+  <Step title="Event merging">
+    Agent and module events feed the unified event transport. Hosts read the public snapshot and subscription APIs rather than accessing the internal event vector.
+  </Step>
+</Steps>
+
+Profiles are templates, not member declarations. A fresh definition-only
+runtime without a roster or `Discovery` can have no members; hosts must
+declare or explicitly create them. Persistent resumes can already have
+members, so this is not a guarantee that every bootstrap starts empty. See
+[Roster and member lifecycle](/concepts/roster).
+
+## Rollback on failure
+
+If module-runtime initialization fails or its startup thread panics after
+mob preparation, the runtime performs a coordinated rollback:
+
+1. Attempt to shut down the mob runtime
+2. If rollback succeeds, return the original module startup error
+3. If rollback also fails, return `ModuleStartupRollbackFailed` containing both errors
+
+This prevents orphaned mob processes when module-runtime bootstrap fails.
+
+## Runtime handle
+
+After successful bootstrap, the builder returns a `UnifiedRuntime` handle with access to:
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `mob_handle()` | `MobHandle` | Public Meerkat mob control handle |
+| `mob_runtime()` | `&MobRuntime` | Underlying mob runtime owned by the unified runtime |
+| `loaded_modules().await` | `Vec<String>` | Loaded module IDs |
+| `module_events().await` | `Vec<EventEnvelope<UnifiedEvent>>` | Current module-runtime event snapshot |
+| `subscribe_events(request).await` | `SubscribeResponse` | Bounded unified-event replay for the requested scope |
+| `module_health_transitions().await` | `Vec<ModuleHealthTransition>` | Recorded module startup transitions |
+| `set_error_hook(hook)` | `()` | Install the operational error hook after construction; see [Error hook and logging](#error-hook-and-logging) |
+
+The raw `MetaRuntimeHandle` is intentionally not exposed. Module operations
+such as routing, delivery, memory, and gating are methods on `UnifiedRuntime`.
+
+### Reconciliation
+
+The reconciliation method depends on which authority model built the runtime.
+
+For a classic runtime without identity-first authority, pass the complete
+desired member specs:
+
+```rust
+let report: UnifiedRuntimeReconcileReport = runtime
+    .reconcile(desired_specs)
+    .await?;
+```
+
+`desired_specs` is a `Vec<SpawnMemberSpec>`. This path reconciles members,
+managed peer edges, and delivery routing. When the `router` module is loaded,
+it maintains route keys named `mob.member.{member_id}` with the
+`notification` channel.
+
+For an identity-first runtime, roster and topology providers own desired state.
+Refresh those providers through the identity authority instead:
+
+```rust
+let result = runtime.refresh_desired_topology().await?;
+```
+
+`refresh_desired_topology` returns `Some(RestoreFlowResult)` when identity-first
+authority is attached and `None` otherwise. Calling whole-mob `reconcile` on an
+identity-first runtime fails rather than bypassing that authority.
+
+### Retiring an identity at a captured scope
+
+`retire_member_alias_tracked` refuses a generated alias of an older
+generation, but Core can move a member's session binding without a new
+generation: an alias captured before such a move still retires the member on
+its new session. A host that must retire exactly the member it captured
+retires at its saved `DeliveryScope` instead (see
+[scope-bound dispatch](/api/rpc#scope-bound-dispatch)):
+
+```rust
+let scope = identity_runtime.capture_delivery_scope(&identity).await?;
+// ... persist the scope, deliver against it ...
+match identity_runtime.retire_at_scope_tracked(&identity, &scope).await {
+    Ok(_fencing_token) => { /* retired */ }
+    Err(ScopedRetireError::StaleScope { mismatch, .. }) => { /* the scope's member is not retired */ }
+    Err(other) => return Err(other.into()),
+}
+```
+
+Core decides. Under the identity's lifecycle lock, Meta reads Core's live
+member scope: when it is the member the scope names, the ordinary retire's
+memory hooks run first (the pre-retire distillation of the outgoing session,
+then the exit-interview note); when it is not, no hooks run. Then meerkat's
+`MobHandle::retire_at_scope` retires exactly the member incarnation the scope
+names, with retire's process-tree semantics: the member's `spawned_by`
+descendants, then the member, then the descendants again. Each step
+re-checks the scope inside the actor command that retires it, so a successor
+minted after the capture (a respawn, a reset, a wake after a retire) is never
+retired through the old scope. Meta holds no lease for the call and writes
+no continuity record; scoped dispatch compares the same Core facts.
+
+It returns the Core fence of the incarnation the scope names. `Ok` is
+meerkat's terminal barrier: that incarnation is retired, or no incarnation of
+the identity is current and none is still retiring, so a retry after a lost
+reply converges to `Ok`, as does a first call for an identity that is already
+retired. Core keeps the retired member's history and session,
+and a later wake resumes it at the next generation.
+
+A refusal does not retire the scope's member:
+
+- `Unsupported`: the bridge has no scoped seam, or the identity is externally
+  bound.
+- `Rejected`: a scope of another identity, or one wrapped around another
+  identity's member; a runtime that no longer admits identity operations (it
+  is shutting down, or its mob is closed); a mob that is not running; Core's
+  live member scope could not be read; the mob's actor stopped while the
+  call ran; or a denied control scope.
+- `Refused(IdentityHostAdopted)`: Core holds an identity intent row for the
+  identity, so the host owns it. `Refused(IdentityHistoryUnavailable)`: Core
+  cannot read that row.
+- `StaleScope { mismatch }`: the scope is stale for good; capture it again.
+  `RuntimeId`: another incarnation is current under another runtime id
+  (after a reset, a respawn, or a retire then a wake at Core's next
+  generation). `LeaseFencingToken`: Core's fence moved; the slot keeps its
+  0.9.3 name and carries Core's fence. `MemberBinding`: the scope's
+  incarnation is current but bound to another session, or the scope was
+  captured at another incarnation of the mob (destroyed and created again
+  under its id). A successor minted while the call runs can show as either
+  of the first two.
+
+Because Core re-checks the scope at each step, a `StaleScope` or `Rejected`
+answer can come after the first pass over the descendants: the descendants
+retired before it stay retired, and the scope's member is not retired.
+
+`Retire` is a failure: meerkat's retirement failed or is stuck, or the
+tracked operation ended without a result. Read the identity's status to see
+whether it was retired.
+
+### Adding one held member to a running roster
+
+`bootstrap_roster_held` holds a whole fresh roster at startup. To add one
+fresh member while the others keep running, hold it the same way with
+`add_member_held` on the identity-first context:
+
+```rust
+// `roster` is the host's MutableRosterProvider. The next roster pass
+// retires a member its result does not list.
+let listing = Arc::clone(&roster);
+let listed = spec.clone();
+let start = context
+    .add_member_held(spec, deadline, move |members, completion| async move {
+        // Complete the application from members[0].finished_surface, then
+        // list the member: the add still holds the bootstrap controller.
+        listing.upsert(listed);
+        Ok(())
+    })
+    .await?;
+match start {
+    HeldBootstrapStart::Activated(result) => { /* the member's own outcome */ }
+    HeldBootstrapStart::Unsettled(settlement) => {
+        roster.remove(&identity); // owed until a held pass publishes it
+        let error = settlement.settled().await; // the abort and its cleanup settled
+    }
+}
+```
+
+The add runs under the same bootstrap controller as every roster pass, so a
+pass waits for it, and it has the same one terminal decision: the deadline
+first, then the caller's loss, then the host's completion. It registers and
+embodies that identity only; it never reconciles the roster and never
+changes the managed peer edges, so refresh the topology afterwards when your
+topology provider wires the member. Freshness is Core's member history,
+read as for a held roster bootstrap: an identity Core spawned since the
+latest mob reset, live or retired, or one a first-boot row names, is refused
+(`ExistingContinuity`), and a failed read of that history is never taken as
+fresh. An identity a host adopted (Core holds an identity intent row for it)
+is refused (`IdentityHostAdopted`). A member embodied outside the add after
+its freshness read refuses the add (`NotHeld`). In each case the host is
+never asked. In lazy mode, too, the add embodies its member at once.
+
+Before the member exists, the add marks its identity as owing the host a
+held completion (in `<state>/held-completion-owed/`, as a held roster pass
+does), and it clears the mark when it publishes the member. A member whose
+add aborted never got a Core binding, so it can be added again. Until a held
+pass (that re-add, or a held roster pass) publishes it, every other wake or
+reset refuses it (`HeldCompletionOwed`), across a restart too; a delete finds
+nothing to delete, since Core never spawned it, and the mark stays. On the
+wire this refusal keeps the internal-error code `-32603` with structured data
+`{kind: "held_completion_owed", identity}`, in an RPC error and in a refused
+`meta/reconcile_identity` outcome alike. After an eager roster pass the
+identity's bootstrap status entry is `broken`, with `restore`
+`{stage: "refused", code: -32603, kind: "held_completion_owed"}`. Read it as
+an admission still owed to the host, not as a failed member: only a held
+pass that publishes the member clears it.
+
+List the member from inside the completion, as above, never before the add.
+Until the add ends it holds the bootstrap controller, so no pass of the
+attached identity-first context reads the listing before the member is held
+and completed. A spec listed before the add starts can be read by a pass
+the host did not start, such as a `meta/reconcile_identity`, before the add
+has written its mark: in eager mode that pass embodies the member unheld, and
+in lazy mode it registers the member and an on-demand dispatch materializes
+it unheld. The add then refuses with `ExistingContinuity`, after the member
+has run without the host's completion. Once the add has ended without
+publishing the member, every other wake refuses it (`HeldCompletionOwed`).
+
+Three paths run outside the controller, and so outside that guarantee:
+`meta/reconcile_identity` on an RPC context that is not attached to the
+unified runtime, which reads the roster and restores it with no controller;
+`IdentityRuntime::restore_flow(roster, ...)`, which registers and wakes the
+roster its caller gives with no controller (it retires nothing); and the
+host's own `bootstrap_roster(roster)`, which applies the roster it is given:
+a roster resolved before the add and applied after it retires the member.
+
+When the add ends `Unsettled`, unlist the member, or add it again. Until a
+held pass publishes it, a pass that reads the listing refuses it
+(`HeldCompletionOwed`), and the re-add's own held pass covers it, so a
+listed, owed member can be added again without unlisting it first. A caller
+that goes away while the completion runs after listing never sees
+`Unsettled`: the add aborts and the member stays listed and owed, so the
+host unlists it, or adds it again, on its recovery path.
+
+The add publishes no bootstrap generation. Until the next roster pass,
+`identity_bootstrap_status` does not list the added member, and its counts
+and `ready` do not cover it; the add's own result is its outcome.
+
+### Shutdown
+
+In the mob/module teardown sequence, graceful shutdown quiesces and stops the
+mob while its router and module dependencies remain alive. It then closes the
+event router and shuts down the modules:
+
+- **Flow runs:** the mob stop settles active flow runs first, because
+  meerkat's Stop refuses while a flow run is active. It cancels each one,
+  awaits its terminal on the mob event ledger, and then stops the mob.
+- **Bound:** the stop is bounded by `MOB_STOP_FLOW_SETTLE_BUDGET`. A run
+  that does not end in time is reported as
+  `MobRuntimeError::MobStopFlowRunsUnsettled`, naming the runs and the last
+  stop refusal.
+- **Other refusals:** any other refusal is returned as is. Teardown never
+  re-sends the stop on a timer and never cancels member work, because
+  meerkat's Stop settles member runs itself.
+
+```rust
+let report: UnifiedRuntimeShutdownReport = runtime.shutdown().await;
+```
+
+The shutdown report includes status from both the mob and module runtimes.
+
+## HTTP composition and binding
+
+`build_reference_app_router` is the public composition root for the health,
+console, Flow Editor, JSON-RPC, blob, and SSE surfaces. The router does not bind
+a socket by itself:
+
+```rust
+use meerkat_meta::gateway_composition::GatewayHttpBinding;
+use std::sync::Arc;
+
+let runtime = Arc::new(runtime);
+let event_drain_task = Arc::clone(&runtime).spawn_event_drain_task();
+let app = runtime.build_reference_app_router(decisions);
+let binding = GatewayHttpBinding::bind_loopback().await?;
+let http_base_url = binding.http_base_url();
+let http_server = binding.serve(app);
+
+println!("reference app: {http_base_url}/console");
+```
+
+`GatewayHttpBinding::bind_loopback` selects an available port on `127.0.0.1`.
+The shipping gateways return that concrete `http_base_url` during
+initialization. Embedders may instead serve the returned Axum router on their
+own listener. A host-owned Axum server must keep `event_drain_task` running so
+mob events reach console SSE and event-log consumers. During ordered shutdown,
+drain `http_server`, abort the event-drain task, and then shut down the runtime.
+
+Key routes in the reference app include:
+
+| Route | Method | Description |
+|-------|--------|-------------|
+| `/healthz` | GET | Runtime health summary: `ok`, or in JSON a `status` that reads `degraded` while Core holds restored members broken (`broken_members` names each) |
+| `/console` | GET | Admin console HTML |
+| `/console/assets/console-app.js` | GET | React bundle |
+| `/console/assets/console-app.css` | GET | Stylesheet |
+| `/console/experience` | GET | Experience metadata JSON |
+| `/console/modules` | GET | Configured module IDs (JSON) |
+| `/console/identities` | GET | Identity records |
+| `/console/timeline` | GET | Replayable timeline page |
+| `/console/timeline/stream` | GET | Timeline replay/live SSE |
+| `/console/identity/{identity}/stream` | GET | Identity-filtered timeline SSE |
+| `/console/rpc` | POST | Console JSON-RPC |
+| `/console/rpc/multipart` | POST | Multipart console JSON-RPC |
+| `/blobs/{blob_id}` | GET | Blob/image retrieval |
+| `/agents/{agent_id}/events` | GET | Per-agent event SSE |
+| `/mob/events` | GET | Mob-merged event SSE |
+| `/meta/mob_events/stream` | GET | Structural mob-events SSE |
+| `/flow-editor` | GET | Visual mobpack editor |
+| `/flow-editor/rpc` | POST | Mobpack-authoring JSON-RPC |
+
+`GET /console/modules` lists IDs from `RuntimeDecisionState.modules`.
+It is a configuration inventory, not confirmation of successful startup,
+current liveness, or health. Startup results are available separately through
+`loaded_modules().await` and `module_health_transitions().await`.
+
+## Console voice and live from the builder
+
+A library embedder that fronts the console with its own authentication (for
+example Google sign-in in front of Meta) can register the same live doors
+the gateway binaries expose, without building a session service by hand:
+
+```rust
+use meerkat_meta::console_auth_config::parse_console_auth_config;
+use meerkat_meta::public_live_config::PublicLiveRegistration;
+use meerkat_meta::unified_runtime::live_compose::LiveOptions;
+use serde_json::json;
+use std::sync::Arc;
+
+let registration = PublicLiveRegistration::parse(&json!({
+    "principal": "alice@example.com",          // the authenticated console subject
+    "realm": "default",
+    "auth_binding": { "realm": "default", "binding": "openai" },
+    "voice": "marin"
+    // optional: "summary": { "model": "...", "max_input_bytes": 65536, "max_output_bytes": 4096 }
+}))?;
+
+let runtime = meerkat_meta::UnifiedRuntime::builder()
+    .definition(definition)
+    .session_store(session_store)                 // persistent sessions are required
+    .meerkat_config(host_config)                  // carries the realm's openai binding
+    .console_voice(registration)                  // gpt-live-1 through the console
+    // external meta/live/* over /live/ws; the public origin is required
+    // because only the embedder knows where it serves the router
+    .live(LiveOptions::new("wss://meta.example.com"))
+    .build()
+    .await?;
+let runtime = Arc::new(runtime);
+
+// Console voice serves only authenticated principals, so the decision state
+// must require app auth. Trust your identity provider's keys directly:
+let decisions = parse_console_auth_config(&json!({
+    "provider": "oidc",
+    "issuer": "https://accounts.google.com",
+    "audience": "<your OAuth client id>.apps.googleusercontent.com",
+    "jwks_uri": "https://www.googleapis.com/oauth2/v3/certs",
+    "email_allowlist": ["alice@example.com"]
+}))?;
+
+let app = runtime.build_reference_app_router_with_live(decisions).await?;
+// Serve `app` on your own listener: the console, `/console/rpc` voice
+// methods, and `/live/ws` all ride the same router.
+```
+
+What happens at build and at router time:
+
+- Persistent sessions (`persistent_state(...)`) are required. Registering a
+  live door on an ephemeral runtime fails `build()` closed with
+  `UnifiedRuntimeBuilderError::LiveCompose(LiveRequiresPersistentSessions)`;
+  `live(...)` with an empty `public_base_url` fails with
+  `LiveRequiresPublicBaseUrl`. Console voice alone needs no URL: its transport
+  is negotiated over WebRTC.
+- The doors compose once, after the runtime is shared:
+  `UnifiedRuntime::compose_live` builds one live context (one adapter host,
+  one WebSocket state, one voice-path arbiter) and, over it, the console voice
+  controller and the external `meta/live/*` handler. A success is bound once;
+  an error is not cached, so a failing registration is retried on the next
+  call. With both registered,
+  they take turns on the voice path ("latest engaged wins") exactly as in the
+  gateway binaries; see the console guide for the typed reasons.
+- `build_reference_app_router_with_live` composes, layers the controller the
+  console RPC reads, and merges the live WebSocket router when `live(...)` was
+  registered. It refuses with `LiveComposeError::ConsoleVoiceRequiresAppAuth`
+  when voice is composed but `console.require_app_auth` is false. The plain
+  `build_reference_app_router` keeps working unchanged for hosts without live
+  doors.
+- Accessors after composition: `console_voice_controller()`, `live_context()`,
+  and `live_rpc_handler()` (dispatch `meta/live/*` from your own transport,
+  for example an embodiment daemon).
+
+Two deployment notes for hosts that build with the `openai-live` feature: link
+the system Opus library so the build never falls back to compiling bundled Opus
+through CMake (see the deployment guide), and expect the browser transport to
+be WebRTC, so the console needs HTTPS or localhost.
+
+## Error hook and logging
+
+Failures the runtime detects after bootstrap (a member spawn that failed, a
+checkpoint that did not persist, a stalled actor loop) have no caller to return
+to. They are emitted as typed `ErrorEvent`s through the error hook, registered
+with `UnifiedRuntimeBuilder::on_error` or, for hosts that construct the runtime
+through `UnifiedRuntime::bootstrap`, with `UnifiedRuntime::set_error_hook`.
+The hook is fire-and-forget: it runs on a detached task, and a slow or failing
+hook cannot break the runtime. An attached identity-first runtime receives the
+same hook.
+
+```rust
+use meerkat_meta::{ErrorEvent, ErrorHook, UnifiedRuntime};
+use std::sync::Arc;
+
+let hook: ErrorHook = Arc::new(|event: ErrorEvent| {
+    Box::pin(async move {
+        match event {
+            ErrorEvent::SpawnFailure { member_id, error, .. } => page(&member_id, &error).await,
+            ErrorEvent::ActorLoopRecovered { .. } => {}
+            other => alert(&other).await,
+        }
+    })
+});
+
+let runtime = UnifiedRuntime::builder()
+    .definition_path("config/mob.toml")
+    .on_error(hook)
+    .build()
+    .await?;
+```
+
+`ErrorEvent` is `#[non_exhaustive]` and serializes with an internal
+`category` tag in `snake_case`, so match with a wildcard arm and branch on
+`category` on the wire. The variants and where the runtime fires them:
+
+| `category` | Fields | Fired when |
+|------------|--------|------------|
+| `spawn_failure` | `member_id`, `profile`, `error` | a member spawn fails |
+| `reconcile_incomplete` | `failures`, `skipped`, `failed` | `reconcile_edges` finished with failed edges; `skipped` counts the edges skipped beside them, and `failed` lists the first five failed edge operations, each `{edge: {a, b}, operation, error}`. A reconcile that only skipped edges, because an endpoint is not a member yet, logs at INFO instead |
+| `checkpoint_failure` | `session_id`, `error` | the session store's periodic checkpoint/GC failed |
+| `compaction_persistence_rejected` | `identity`, `session_id`, `error`, `preserved_history?`, `attempted_entries?` | a member's compaction handoff was refused durably; `preserved_history` says whether the member can still send |
+| `actor_loop_stalled` | `probe_waited_secs`, `detail`, `stall_id?`, `prior_resolved_stalls?` | the actor-loop probe's round trip went unanswered past its budget |
+| `actor_loop_recovered` | `stall_id`, `stalled_for_secs` | that stall resolved; a resolution, not a failure, correlated by `stall_id` |
+| `actor_loop_terminated` | `detail`, `stall_id?` | the probe observed the actor's command or reply channel closing; the actor is gone |
+| `host_loop_crash` | `member_id`, `error` | a member run failed (`run_failed` during event drain); a run that ended cancelled, by an interrupt, a stop or a shutdown, does not fire it |
+| `rediscover_failure` | `error` | `rediscover` failed |
+| `event_log_flush_failure` | `error` | the operational event log could not flush |
+| `identity_materialization_failure` | `identity`, `initiator?`, `operation`, `error` | identity-first hydration skipped a member |
+| `mob_stop_proceeded_without_interrupt` | `waited_ms`, `member?`, `error` | not produced since MobKit 0.8.46 (meerkat 0.8.51's Stop no longer refuses on runtime-attach readiness); kept for wire compatibility |
+| `retired_member_release_failed` | `identity`, `agent_runtime_id`, `session_id?`, `cause`, `error` | a gateway host's retirement hook (`GatewayHostComposition::identity_member_retired`) answered an error for a retired incarnation. The retirement stands and is not retried; `cause` is `unlisted`, `retire` or `scoped` |
+| `mob_announcement_escalated` | `escalation`, `event`, `renotify_count`, `cursor` | a mob announcement escalation was raised (`event` `raised`) or notified again while it stays open (`renotified`); `escalation` is the record as it stood at that event, and `cursor` its event cursor (see [Mob announcement health](/api/rpc#mob-announcement-health)) |
+| `mob_announcement_escalation_resolved` | `escalation_id`, `cause`, `subject`, `resolved_at_ms`, `cursor` | that escalation resolved; a resolution, not a failure, correlated by `escalation_id` |
+
+`actor_loop_terminated` is terminal, not an `actor_loop_recovered` event.
+It can occur without a prior stall (`stall_id` is then absent). The probe
+ends, guarded deliveries fail fast with `ActorTerminated`, and there is no
+in-process actor recovery. The operator must restart the process rather than
+wait for a recovery notification.
+
+**Default sink (since 0.8.18).** Every `ErrorEvent` is also logged through
+`tracing` whether or not a hook is registered: at ERROR, or at INFO for
+`actor_loop_recovered` and `mob_announcement_escalation_resolved`, with a
+`hook_registered` field. A host that never
+registers a hook additionally gets one WARN, `no error hook is registered, so
+runtime error events reach logs only; register one with
+UnifiedRuntimeBuilder::on_error (or UnifiedRuntime::set_error_hook) to route
+them to paging`: `build()` emits it at startup when `on_error` was never
+called, and the fire path emits it once per process for hosts that bootstrap
+directly and install no hook.
+
+**Gateways.** `rpc_gateway` installs a hook that forwards every event to the
+SDK as the `meta/on_error` JSON-RPC notification (params are the serialized
+event); register a receiver with Python `.on_error(callback)` or TypeScript
+`.onError(callback)`. Because that forwarding hook is always installed, the
+absent-hook WARN never fires for SDK hosts; an SDK host that registers no
+callback sees only the gateway's stderr ERROR line, which the SDKs inherit by
+default (see [Gateway logging](/sdks/python#gateway-logging-stderr)).
+`meta_gateway` installs no hook and relies on the log sink alone. Both
+binaries install a stderr `tracing` subscriber whose default filter is
+`warn,meerkat_meta=info,<binary>=info`; `RUST_LOG` overrides it.
+
+**Rust library hosts must install a tracing subscriber before `build()`.**
+`meerkat-meta` emits `tracing` events and installs no subscriber of its own.
+The default sink and the absent-hook notice are both `tracing` lines, so a host
+without a subscriber sees neither the failures nor the hint that nobody is
+listening. The minimum is a stderr subscriber honouring `RUST_LOG`:
+
+```rust
+tracing_subscriber::fmt()
+    .with_env_filter(
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,meerkat_meta=info")),
+    )
+    .with_writer(std::io::stderr)
+    .init();
+```
+
+## Error hierarchy
+
+| Error | Cause |
+|-------|-------|
+| `UnifiedRuntimeBuilderError::MissingRequiredField` | No definition/spec, or a required legacy-path field is missing |
+| `UnifiedRuntimeBootstrapError::Mob` | Meerkat mob failed to start |
+| `UnifiedRuntimeBootstrapError::Module` | Meta module-runtime initialization failed |
+| `UnifiedRuntimeBootstrapError::ModuleStartupThreadPanicked` | Module startup thread panicked |
+| `UnifiedRuntimeBootstrapError::ModuleStartupRollbackFailed` | Both startup and rollback failed |
+
+## See also
+
+- [Quickstart](/quickstart) - minimal bootstrap example
+- [Modules](/concepts/modules) - module configuration
+- [Console guide](/guides/console) - admin console details
+- [Architecture](/reference/architecture) - internal design

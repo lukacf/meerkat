@@ -1,0 +1,243 @@
+name: Forge
+
+on:
+  pull_request:
+    paths:
+      - 'installer/**'
+      - 'console/**'
+      - 'packages/console-core/**'
+      - 'packages/console-components/**'
+      - 'sdk/python/**'
+      # installer/tests/test_gateway_shutdown_horizon.py reads the shutdown
+      # horizon the gateway advertises from this source.
+      - 'crates/meerkat-meta/src/rpc_gateway.rs'
+      - 'README.md'
+      - 'LICENSE-MIT'
+      - 'LICENSE-APACHE'
+      - '.github/workflows/forge.yml'
+  # A Forge release (forge-release.yml) binds a green dispatched run that
+  # tested its exact Forge inputs. A pull request run tests a merge commit,
+  # so it never counts: dispatch this for the release commit.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: forge-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - run: npm --prefix console ci --ignore-scripts
+      - run: npm --prefix installer/web ci
+      - run: npm --prefix installer/web run build
+      - name: Frontend regression tests
+        working-directory: installer/web
+        env:
+          NODE_OPTIONS: --max-old-space-size=3072
+        run: node --test --test-concurrency=2 *.test.mjs
+      # forge-release.py binds a reused run to the versions it ran with.
+      - name: Record the toolchain
+        run: |
+          printf '{"python": "%s", "node": "%s"}\n' "$(python3 --version 2>&1)" "$(node --version)" > forge-toolchain.json
+      - name: Retain the toolchain
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: forge-toolchain-${{ github.job }}-${{ github.run_attempt }}
+          path: forge-toolchain.json
+          if-no-files-found: error
+
+  # Release-gating live row: a compiled agent team installs the published
+  # Meta release with its own install.sh, then it and an ordinary application
+  # package run on the real gateways, with a placeholder provider key and no
+  # agent turn. The backend job waits for it, so forge-release.py's backend
+  # evidence includes it.
+  agent-team-live:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -e ./installer
+      - name: Agent team and application package on the published Meta release
+        run: python installer/tests/forge_live_agent_team.py "$RUNNER_TEMP/agent-team-live"
+      # Artifact names are unique within a run; a rerun attempt uploads its own.
+      - name: Retain the live logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: forge-agent-team-live-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/agent-team-live/*.log
+          if-no-files-found: ignore
+
+  # The backend suite runs in shards balanced on recorded test time
+  # (installer/tests/forge_shards.py). forge-release.py binds the backend job
+  # below, which runs only once every shard has passed.
+  backend-shard:
+    name: backend shard ${{ matrix.shard }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - name: Install the reviewed Guide client SDK
+        run: python -m pip install --no-index --no-deps --require-hashes --find-links installer/vendor/guide -r installer/requirements-guide-sdk.txt
+      - run: python -m pip install -e './installer[test]'
+      - name: Prepare Linux acceptance isolation
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y bubblewrap libseccomp2 apparmor apparmor-profiles
+          forge_bwrap_profile=
+          for candidate in /etc/apparmor.d/bwrap /etc/apparmor.d/bwrap-userns-restrict /usr/share/apparmor/extra-profiles/bwrap-userns-restrict; do
+            if test -f "$candidate"; then
+              forge_bwrap_profile=$candidate
+              break
+            fi
+          done
+          test -n "$forge_bwrap_profile"
+          printf 'Loading packaged bubblewrap policy: %s\n' "$forge_bwrap_profile"
+          sudo apparmor_parser -r "$forge_bwrap_profile"
+      - name: Verify Linux acceptance isolation
+        env:
+          PYTHONPATH: installer
+        run: |
+          bwrap --version
+          bwrap --unshare-user --unshare-pid --unshare-net --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 -- /usr/bin/true
+          python - <<'PY'
+          import pathlib
+          import sysconfig
+          from launchkit.implementation_workspace import _sandbox_executable
+          library = pathlib.Path(sysconfig.get_config_var("LIBDIR")) / sysconfig.get_config_var("LDLIBRARY")
+          print("Selected Python shared library:", library, "->", library.resolve(), flush=True)
+          if not _sandbox_executable():
+              raise SystemExit("Linux acceptance isolation is unavailable; no generated-code checks can run.")
+          print("Linux acceptance isolation probe passed.")
+          PY
+      - name: Prepare private DOM dependencies
+        run: |
+          umask 077
+          npm --prefix console ci --ignore-scripts
+      - run: npm --prefix installer/web ci
+      - run: npm --prefix installer/web run build
+      - name: Prepare protected DOM checks
+        env:
+          PYTHONPATH: installer
+        run: |
+          python -m launchkit.checker_runtime
+          python - <<'PY'
+          from pathlib import Path
+          from tempfile import TemporaryDirectory
+          from launchkit.dom_check import prepare_dependencies
+          with TemporaryDirectory() as folder:
+              prepare_dependencies(Path(folder).resolve())
+          print("Authenticated DOM dependency closure is ready.")
+          PY
+      - name: Isolated controller subprocess checks
+        if: matrix.shard == 0
+        run: >-
+          python -m pytest -q
+          installer/tests/test_remote_destination.py::test_actual_isolated_cli_emits_one_bounded_frame_and_no_raw_error
+          installer/tests/test_remote_interface_bundle.py
+          --tb=short
+      - name: Select this shard's test files
+        run: python installer/tests/forge_shards.py ${{ matrix.shard }} 12 forge-shard-files.txt forge-shard-startup.txt
+      # The backend job checks these lists of every shard together.
+      - name: Retain this shard's plan
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: forge-shard-plan-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: |
+            forge-shard-files.txt
+            forge-shard-startup.txt
+          if-no-files-found: error
+      # Every failure is reported: no failure limit stops a shard early.
+      - name: Backend regression tests
+        run: python -m pytest -vv --tb=short --durations=20 --junitxml=forge-pytest.xml $(cat forge-shard-files.txt)
+      # Application startup code runs against the selected product's Meta SDK,
+      # not the Guide SDK installed above. Rerun this shard's share of
+      # installer/tests/checkout_sdk_startup_tests.txt with this checkout's SDK,
+      # also after a failure above, so that every failure is reported.
+      - name: Application startup checks with this checkout's Meta SDK
+        if: ${{ !cancelled() }}
+        env:
+          PYTHONPATH: sdk/python:installer
+        run: |
+          if test -s forge-shard-startup.txt; then
+            python -m pytest -q --tb=short $(cat forge-shard-startup.txt)
+          fi
+      # The backend job binds the versions every shard recorded.
+      - name: Record the toolchain
+        run: |
+          printf '{"python": "%s", "node": "%s"}\n' "$(python3 --version 2>&1)" "$(node --version)" > forge-toolchain.json
+      - name: Retain the toolchain
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: forge-toolchain-${{ github.job }}-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: forge-toolchain.json
+          if-no-files-found: error
+      # Artifact names are unique within a run; a rerun attempt uploads its own.
+      - name: Retain test results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: forge-pytest-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: forge-pytest.xml
+          if-no-files-found: ignore
+
+  backend:
+    needs: [backend-shard, agent-team-live]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Collect the shards' plans
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: forge-shard-plan-*-${{ github.run_attempt }}
+          path: plans
+      # Each shard planned on its own. Fail unless together they ran every
+      # installer test file once and reran every listed startup file once.
+      - name: Check that the shards ran every test file once
+        run: python3 installer/tests/forge_shards.py verify 12 plans
+      - name: Collect the shards' toolchains
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: forge-toolchain-backend-shard-*-${{ github.run_attempt }}
+          path: shards
+      # forge-release.py binds a reused run to the versions it ran with; every
+      # shard must have recorded the same ones.
+      - name: Record the toolchain
+        run: |
+          python3 - > forge-toolchain.json <<'PY'
+          import pathlib
+          records = sorted(pathlib.Path("shards").glob("*/forge-toolchain.json"))
+          values = {path.read_text() for path in records}
+          if len(records) != 12 or len(values) != 1:
+              raise SystemExit(f"Expected 12 identical shard toolchains, found {len(records)} records of {len(values)} kinds.")
+          print(values.pop(), end="")
+          PY
+      - name: Retain the toolchain
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: forge-toolchain-${{ github.job }}-${{ github.run_attempt }}
+          path: forge-toolchain.json
+          if-no-files-found: error

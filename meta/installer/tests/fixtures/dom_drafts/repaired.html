@@ -1,0 +1,77 @@
+<p id="draft-status" role="status">Drafts are stored on this browser only, not synced or backed up. Private browsing, clearing storage or disabling JavaScript can lose drafts. Saved records are separate.</p>
+<script>
+(() => {
+ const status=document.getElementById('draft-status');
+ const prefix='seestar:draft:v1:';
+ const limits={setup:{label:500,effective:10,notes:60000},plan:{setup:100,date:10,site:60000,minutes:3,forecast:60000,source:60000,issued:100,visibility:60000,operation:100},observation:{date:10,notes:60000}};
+ const acknowledgements=JSON.parse(document.getElementById('draft-acknowledgements').textContent);
+ const fresh=()=>crypto.randomUUID();
+ // HTML form serialization uses CRLF, while textarea.value uses LF.
+ // Canonicalize only textarea fields at this boundary; no trimming or other
+ // whitespace/Unicode/numeric/token normalization is permitted.
+ const textareaFields={setup:['notes'],plan:['forecast','visibility'],observation:['notes']};
+ const kindFor=key=>key==='setup:new'?'setup':key.startsWith('observation:')?'observation':'plan';
+ const domValues=(key,values)=>Object.fromEntries(Object.entries(values).map(([k,v])=>[k,textareaFields[kindFor(key)].includes(k) && typeof v==='string'?v.replace(/\r\n?/g,'\n'):v]));
+ const equal=(a,b)=>Object.keys(a).length===Object.keys(b).length && Object.keys(a).every(k=>a[k]===b[k]);
+ const acknowledged=(key,saved)=>acknowledgements.some(a=>a.scope===key && typeof a.edit==='string' && a.edit.length>0 && a.edit===saved.edit && equal(domValues(key,a.values),domValues(key,saved.values)));
+ let storage;
+ const warn=()=>{status.textContent='Browser draft storage unavailable or full. Current text is still here. Copy unsent text before refresh, navigation or reload.';};
+ try { storage=localStorage; storage.setItem(prefix+'probe','1'); storage.removeItem(prefix+'probe'); }
+ catch(e) { storage=null; warn(); }
+ const decode=(raw,key)=>{
+  if(!raw) return null;
+  if(raw.length>400000) throw Error('Oversized draft');
+  let s=JSON.parse(raw); const kind=key==='setup:new'?'setup':key.startsWith('observation:')?'observation':'plan';
+  // Migrate the accepted source's unversioned allowlisted strings only.
+  if(s && !Object.hasOwn(s,'version') && !Array.isArray(s)) {
+   const old=s; s={version:2,edit:fresh(),submitted:kind==='plan',values:{}};
+   Object.keys(limits[kind]).forEach(k=>{s.values[k]=Object.hasOwn(old,k)?old[k]:'';});
+  }
+  if(!s || s.version!==2 || typeof s.edit!=='string' || s.edit.length>100 || typeof s.submitted!=='boolean' || !s.values || Array.isArray(s.values)) throw Error('Invalid draft');
+  if(Object.keys(s).some(k=>!['version','edit','submitted','values'].includes(k))) throw Error('Invalid fields');
+  if(Object.keys(s.values).length!==Object.keys(limits[kind]).length || Object.entries(s.values).some(([k,v])=>!Object.hasOwn(limits[kind],k) || typeof v!=='string' || v.length>limits[kind][k])) throw Error('Invalid values');
+  return s;
+ };
+ const landing=new URL(location.href);
+ const clear=landing.searchParams.get('cleared');
+ if(clear) {
+  landing.searchParams.delete('cleared');
+  try {
+   history.replaceState(history.state,'',landing.pathname+landing.search+landing.hash);
+   if(storage) { const saved=decode(storage.getItem(prefix+clear),clear); if(saved && acknowledged(clear,saved)) storage.removeItem(prefix+clear); }
+  } catch(e) {
+   warn();
+  }
+ }
+ document.querySelectorAll('form[data-draft]').forEach(form => {
+  const key=form.dataset.draft; if(!key) return;
+  const kind=key==='setup:new'?'setup':key.startsWith('observation:')?'observation':'plan';
+  const fields=[...form.elements].filter(x=>Object.hasOwn(limits[kind],x.name));
+  const edit=document.createElement('input'); edit.type='hidden'; edit.name='draft_edit'; edit.value=fresh(); form.appendChild(edit);
+  let submitted=false;
+  if(storage) try {
+   const saved=decode(storage.getItem(prefix+key),key);
+   if(saved && acknowledged(key,saved)) storage.removeItem(prefix+key);
+   else if(saved) {fields.forEach(x=>{if(Object.hasOwn(saved.values,x.name)) x.value=saved.values[x.name];}); edit.value=saved.edit; submitted=saved.submitted;}
+  } catch(e) {warn();}
+  const snapshot=()=>({version:2,edit:edit.value,submitted,values:Object.fromEntries(fields.map(x=>[x.name,x.value]))});
+  const save=()=>{if(storage) try {const raw=JSON.stringify(snapshot()); decode(raw,key); storage.setItem(prefix+key,raw);} catch(e) {warn();}};
+  const changed=()=>{
+   // Editing after an attempted submission is explicit distinct work, not a resend.
+   if(submitted) {const operation=fields.find(x=>x.name==='operation'); if(operation) operation.value=fresh(); submitted=false;}
+   edit.value=fresh(); save();
+  };
+  form.addEventListener('input',changed); form.addEventListener('change',changed);
+  form.addEventListener('submit',()=>{submitted=true;save();});
+  window.addEventListener('pagehide',save);
+  // Back may restore an old submitted DOM. Reconcile it only with real saved inputs.
+  window.addEventListener('pageshow',()=>{
+   const current=snapshot();
+   if(acknowledged(key,current)) {
+    const operation=fields.find(x=>x.name==='operation'); if(operation) operation.value=fresh();
+    submitted=false; edit.value=fresh();
+   }
+  });
+ });
+})();
+</script>

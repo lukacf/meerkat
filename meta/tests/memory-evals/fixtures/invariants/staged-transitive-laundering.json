@@ -1,0 +1,49 @@
+{
+  "name": "staged-transitive-laundering",
+  "invariant": "transitive_laundering_rejected",
+  "stage": "staged-validator",
+  "store": [
+    {
+      "id": "mem-q",
+      "scope": { "scope": "identity", "realm": "family", "identity": "identity:asa" },
+      "trust": "agent_observed",
+      "status": { "status": "quarantined", "reason": "written from a taint-marked session" },
+      "derived_from": [],
+      "has_verification": false
+    }
+  ],
+  "batch": {
+    "realm": "family",
+    "author": { "author": "steward", "run_id": "dream-2026-07-01" },
+    "ops": [
+      {
+        "op": "create",
+        "id": "mem-fresh",
+        "scope": { "scope": "identity", "realm": "family", "identity": "identity:asa" },
+        "record": {
+          "kind": "fact",
+          "title": "Consolidated deployment credential handling",
+          "description": "Matters whenever the agent handles deployment credentials.",
+          "body": "Merged from prior observations of credential handling during deploys.",
+          "tags": [],
+          "evidence": [],
+          "verification": {
+            "checked": "re-read the source transcript and confirmed the procedure",
+            "evidence": []
+          }
+        },
+        "trust": "agent_observed",
+        "derived_from": ["mem-q"],
+        "rationale": "dream consolidation of the quarantined observation"
+      },
+      {
+        "op": "retier",
+        "id": "mem-fresh",
+        "trust": "agent_verified",
+        "rationale": "verification claim present, promote the fresh record"
+      }
+    ]
+  },
+  "expected": { "verdict": "reject", "error": "transitive_taint_ceiling", "op_index": 1 },
+  "notes": "Transitive-laundering invariant (arch doc §10.2, §11): merging quarantined content into a 'fresh' consolidated record carries the provenance ceiling with it — mem-fresh's derived_from reaches quarantined mem-q, so the follow-up retier above agent_observed is a validator reject even with a steward author and a verification claim. Executable check: laundering tests in crates/meerkat-meta/src/memory/staged.rs; schema-validated only here."
+}

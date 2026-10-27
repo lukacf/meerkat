@@ -1,0 +1,51 @@
+{
+  "name": "steward-promotion-accept-vs-reject",
+  "records": [],
+  "proposals": [
+    {
+      "proposal_id": "prop-shared-gotcha",
+      "scope_kind": "mob",
+      "scope_key": "mob:support",
+      "title": "Refunds over 100 EUR need the finance approval tool",
+      "body": "Any refund above 100 EUR must go through the finance_approve tool first; direct refunds bounce. Every support member hits this."
+    },
+    {
+      "proposal_id": "prop-member-trivia",
+      "scope_kind": "mob",
+      "scope_key": "mob:support",
+      "title": "I like to start my summaries with a checklist",
+      "body": "Personal style note: I find starting my own summaries with a checklist helps me stay organized."
+    }
+  ],
+  "mob_context": {
+    "mob": "mob:support",
+    "purpose": "handle customer support tickets and refunds as a team"
+  },
+  "scripted_reply": {
+    "ops": [],
+    "proposal_verdicts": [
+      {
+        "proposal_id": "prop-shared-gotcha",
+        "verdict": "accept",
+        "rationale": "cross-member operational gotcha squarely inside the mob's refund-handling purpose"
+      },
+      {
+        "proposal_id": "prop-member-trivia",
+        "verdict": "reject",
+        "rationale": "member-local style preference; not mob-purpose knowledge"
+      }
+    ],
+    "quarantine_verdicts": [],
+    "open_loop_escalations": [],
+    "contradictions": [],
+    "working_set": []
+  },
+  "expected": {
+    "validator": "ok:0",
+    "proposal_verdicts": {
+      "prop-shared-gotcha": "accept",
+      "prop-member-trivia": "reject"
+    }
+  },
+  "notes": "Promotion judgment is scoped by the mob's purpose (§8.5): the refund-tool gotcha is exactly what mob scope is for; the personal checklist habit is member-local trivia and must not be shared mob-wide. Accept and reject in the same dream."
+}

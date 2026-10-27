@@ -1,0 +1,14 @@
+{
+  "assertions": [
+    {
+      "assertion_id": "memory-assert-000000",
+      "entity": "fixture-curriculum",
+      "topic": "unit-one",
+      "store": "knowledge_graph",
+      "fact": "FIXTURE-0826-LEDGER-FACT: unit one is the synthetic starting unit.",
+      "metadata": null,
+      "indexed_at_ms": 1791985601414
+    }
+  ],
+  "conflicts": []
+}

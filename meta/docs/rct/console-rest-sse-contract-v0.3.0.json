@@ -1,0 +1,143 @@
+{
+  "contract_version": "0.3.0",
+  "version_pin": "v0.3.0",
+  "spec_source": {
+    "rct_spec_markdown": ".rct/spec.md",
+    "rct_spec_yaml": ".rct/spec.yaml"
+  },
+  "type_refs": {
+    "experience": "TYPE-005",
+    "identity_status_row": "TYPE-006",
+    "activity_filter_preset": "TYPE-012",
+    "console_frame": "TYPE-020",
+    "console_timeline_query": "TYPE-021",
+    "console_send_request": "TYPE-022",
+    "console_timeline_accepted": "TYPE-023",
+    "console_interaction_rejected_error": "TYPE-019"
+  },
+  "breaking_changes": [
+    {
+      "id": "BC-001",
+      "surface": "identity-first status and inspect payloads",
+      "change": "addressability wire values are lowercase",
+      "previous_examples": [
+        "Addressable",
+        "InternalOnly"
+      ],
+      "current_examples": [
+        "addressable",
+        "internal_only"
+      ],
+      "action_required": "Clients matching on addressability strings must update to lowercase wire enums."
+    }
+  ],
+  "surfaces": {
+    "rest": {
+      "experience": {
+        "method": "GET",
+        "path": "/console/experience",
+        "response": {
+          "type_ref": "TYPE-005",
+          "required_top_level_fields": [
+            "contract_version",
+            "runtime_capabilities",
+            "base_panel",
+            "agent_sidebar",
+            "activity_feed",
+            "chat_inspector",
+            "topology",
+            "health_overview",
+            "flows",
+            "session_history"
+          ]
+        }
+      },
+      "modules": {
+        "method": "GET",
+        "path": "/console/modules",
+        "response": {
+          "required_top_level_fields": [
+            "contract_version",
+            "modules"
+          ]
+        }
+      }
+    },
+    "rpc": {
+      "console_rpc_endpoint": {
+        "method": "POST",
+        "path": "/console/rpc",
+        "protocol": "JSON-RPC 2.0"
+      },
+      "methods": {
+        "meta/console/send": {
+          "request": {
+            "type_ref": "TYPE-022",
+            "required_fields": [
+              "identity",
+              "content"
+            ]
+          },
+          "success": {
+            "type_ref": "TYPE-023"
+          },
+          "errors": [
+            {
+              "type_ref": "TYPE-019",
+              "codes": [
+                -32001,
+                -32002,
+                -32003,
+                -32004,
+                -32602,
+                -32603
+              ]
+            }
+          ]
+        },
+        "meta/console/query_timeline": {
+          "request": {
+            "type_ref": "TYPE-021"
+          },
+          "success": {
+            "required_fields": [
+              "frames"
+            ]
+          },
+          "errors": [
+            {
+              "type_ref": "TYPE-019",
+              "codes": [
+                -32001,
+                -32002,
+                -32003,
+                -32004,
+                -32602,
+                -32603
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "sse": {
+      "timeline": {
+        "method": "GET",
+        "path": "/console/timeline/stream",
+        "events": {
+          "type_ref": "TYPE-020"
+        },
+        "errors": [
+          {
+            "status": 401,
+            "shape": {
+              "error": "unauthorized",
+              "reason": "console stream requires a valid auth token"
+            }
+          }
+        ]
+      },
+      "activity_feed_keep_alive_event": "keep-alive"
+    }
+  }
+}

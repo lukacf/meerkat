@@ -1,0 +1,102 @@
+title = "Swarm Stress"
+
+[brand]
+label = "Meta Load Lab"
+logo_alt = "Meta Load Lab"
+
+[appearance]
+default_theme = "dark"
+default_variant = "graphite"
+
+[environment]
+label = "example-003 / 300+240 real-agent fan-out"
+
+[layout]
+initial_preset = "single"
+sidebar_collapsed = false
+
+[rail]
+visible = true
+collapsed = false
+active_preset_id = "burst"
+empty_text = "No burst signals yet."
+
+[[rail.filter_presets]]
+id = "burst"
+label = "Burst"
+alert_levels = ["normal", "elevated"]
+
+[[rail.filter_presets]]
+id = "watched"
+label = "Watched"
+watched_only = true
+
+[[rail.filter_presets]]
+id = "elevated"
+label = "Elevated"
+alert_levels = ["elevated"]
+
+[sidebar]
+visible_controls = ["roster", "topology", "timeline", "routing", "logs", "health"]
+hidden_controls = []
+
+[[sidebar.buttons]]
+id = "burst-runbook"
+label = "Burst Runbook"
+href = "https://example.test/meta/swarm-stress/runbook"
+target = "_blank"
+
+[[sidebar.buttons]]
+id = "timeline-audit"
+label = "Timeline Audit"
+control = "timeline"
+
+[agent_list]
+group_by = ["labels.console_group", "labels.swarm_mob", "role"]
+subgroup_by = ["labels.wave", "labels.shard"]
+section_order = ["Atlas Load Mob", "Borealis Memory Mob", "Cygnus Comms Mob", "Draco Recovery Mob"]
+fallback_group = "Swarm"
+fallback_subgroup = "Unassigned"
+collapse_single_subgroup = false
+
+[[agent_list.badges]]
+id = "wave"
+label = "Wave"
+field = "labels.wave"
+tone = "info"
+
+[[agent_list.badges]]
+id = "shard"
+label = "Shard"
+field = "labels.shard"
+
+[[agent_list.badges]]
+id = "model"
+label = "Model"
+field = "labels.model"
+tone = "warning"
+
+[[agent_list.sections]]
+name = "Atlas Load Mob"
+collapsed = false
+
+[[agent_list.sections]]
+name = "Borealis Memory Mob"
+collapsed = false
+
+[[agent_list.sections]]
+name = "Cygnus Comms Mob"
+collapsed = false
+
+[[agent_list.sections]]
+name = "Draco Recovery Mob"
+collapsed = false
+
+[actions]
+inspect_label = "Inspect"
+chat_label = "Open"
+send_label = "Send"
+respawn_label = "Respawn"
+retire_label = "Retire"
+reset_label = "Reset swarm"
+show_reset = true

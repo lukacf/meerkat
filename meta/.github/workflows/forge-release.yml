@@ -1,0 +1,296 @@
+name: Forge Release
+# Meta Forge ships in its own release, beside Meta's: a forge-v<version> tag
+# (the version in installer/pyproject.toml), its own attested candidate
+# manifest, and its own GitHub release, published as a prerelease that is
+# never the repository's latest. Meta's release.yml and release-candidate.py
+# are not involved; scripts/forge-release.py reuses release-candidate.py's
+# helpers read-only and checks every run and attestation against this file.
+#
+# candidate: build each target's package from the pinned public inputs in
+#   installer/release/forge-release-inputs.json, verify and attest it, and
+#   bind the set in an attested forge-candidate-manifest.json. Any branch can
+#   build one as a dry run. Only a main candidate whose exact-main CI run is
+#   green can be published: publication verifies every attestation against
+#   main.
+# publish: release an accepted candidate (the selection a candidate run
+#   prints) under its forge-v<version> tag, which an operator pushes to the
+#   candidate's commit first. No build. installer/RELEASING.md has the steps.
+#
+# No job reads a secret: downloads are public, and every write uses the run's
+# own token under the job's permissions.
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_mode:
+        description: "candidate: build and bind packages; publish: release an accepted candidate"
+        required: true
+        default: candidate
+        type: choice
+        options: [candidate, publish]
+      source_sha:
+        description: "Candidate only: the dispatched commit (must equal the dispatch SHA)"
+        required: false
+        default: ""
+        type: string
+      artifact_selection:
+        description: "Publish only: the accepted candidate selection JSON"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  # require_ci_green and collect read workflow runs and artifacts. A
+  # permissions block sets every unlisted scope to none.
+  actions: read
+  contents: read
+
+concurrency:
+  # Candidates are independent; publications are serialized.
+  group: forge-release-${{ inputs.release_mode == 'publish' && 'publish' || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Resolve Forge release
+    runs-on: ubuntu-24.04
+    outputs:
+      mode: ${{ steps.resolve.outputs.mode }}
+      sha: ${{ steps.resolve.outputs.sha }}
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      publishable: ${{ steps.resolve.outputs.publishable }}
+      matrix: ${{ steps.resolve.outputs.matrix }}
+    steps:
+      - name: Checkout the dispatched commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Resolve mode, source and targets
+        id: resolve
+        env:
+          RELEASE_MODE: ${{ inputs.release_mode }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          ARTIFACT_SELECTION: ${{ inputs.artifact_selection }}
+        run: python3 scripts/forge-release.py resolve
+
+  build_package:
+    name: Build Forge package (${{ matrix.target }})
+    # No CI gate here: the builds overlap the exact-main CI run, and
+    # require_ci_green runs before collection.
+    needs: [resolve]
+    if: >-
+      !cancelled() &&
+      needs.resolve.result == 'success' &&
+      needs.resolve.outputs.mode == 'candidate'
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    # Packaging reads, copies and hashes bytes; it executes no product
+    # binary, so every target packages on Linux. The Linux package's
+    # destination floor (glibc 2.39) is the product's, not this runner's.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
+    env:
+      FORGE_TARGET: ${{ matrix.target }}
+      FORGE_VERSION: ${{ needs.resolve.outputs.version }}
+    steps:
+      - name: Checkout the candidate source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+
+      # The toolchain forge.yml declares, which collect requires of the
+      # Forge run it binds.
+      - name: Install Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+
+      # This job holds the attestation token, so no dependency lifecycle
+      # script runs. The packager copies the checker's DOM dependencies from
+      # console/node_modules and requires their private modes, hence umask.
+      - name: Prepare the checker DOM dependencies
+        run: |
+          umask 077
+          npm --prefix console ci --ignore-scripts
+
+      - name: Build the Forge interface
+        run: |
+          npm --prefix installer/web ci --ignore-scripts
+          npm --prefix installer/web run build
+
+      - name: Fetch the pinned product inputs
+        run: python3 scripts/forge-release.py fetch-inputs --target "$FORGE_TARGET" --output-dir "$RUNNER_TEMP/forge-inputs"
+
+      - name: Package
+        run: |
+          python3 scripts/forge-release.py package --target "$FORGE_TARGET" \
+            --inputs-dir "$RUNNER_TEMP/forge-inputs" --output "dist/meta-forge-${FORGE_VERSION}-${FORGE_TARGET}.zip"
+
+      # Unpacks the package and runs the packager's own verifier on it (no
+      # model or native process), then writes the .sha256 file.
+      - name: Verify the package
+        run: |
+          python3 scripts/forge-release.py check-package --target "$FORGE_TARGET" --version "$FORGE_VERSION" \
+            "dist/meta-forge-${FORGE_VERSION}-${FORGE_TARGET}.zip"
+
+      - name: Attest the package
+        id: provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
+        with:
+          subject-path: dist/meta-forge-*.zip
+
+      - name: Retain the package provenance bundle
+        env:
+          BUNDLE_PATH: ${{ steps.provenance.outputs.bundle-path }}
+        run: cp "$BUNDLE_PATH" "dist/meta-forge-${FORGE_VERSION}-${FORGE_TARGET}-provenance.jsonl"
+
+      - name: Upload the package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: forge-package-${{ matrix.target }}-${{ github.run_attempt }}
+          path: dist/*
+          if-no-files-found: error
+          overwrite: false
+          # A branch dry run can never be published; keep it briefly.
+          retention-days: ${{ needs.resolve.outputs.publishable == 'true' && 90 || 7 }}
+
+  require_ci_green:
+    name: Require green exact-main CI
+    # Unlike release.yml's gate, which refuses at once, this one reads the
+    # exact-main CI listing again for up to 10 minutes while GitHub has not
+    # listed the run yet, the run is still going, or a read fails with a 5xx
+    # or a dropped connection. A run that finished red refuses at once. A
+    # branch dry run has no exact-main CI and skips it; its candidate is never
+    # publishable.
+    needs: [resolve, build_package]
+    if: >-
+      !cancelled() &&
+      needs.resolve.result == 'success' &&
+      needs.resolve.outputs.mode == 'candidate' &&
+      needs.resolve.outputs.publishable == 'true' &&
+      needs.build_package.result == 'success'
+    runs-on: ubuntu-24.04
+    outputs:
+      run_id: ${{ steps.ci.outputs.run_id }}
+      run_attempt: ${{ steps.ci.outputs.run_attempt }}
+    steps:
+      - name: Checkout the candidate source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+
+      - name: Refuse unless exact-main CI is green for this commit
+        id: ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ needs.resolve.outputs.sha }}
+        run: python3 scripts/forge-release.py ci-green
+
+  collect:
+    name: Bind the Forge candidate
+    # Besides the packages, it binds a green dispatched forge.yml run
+    # (backend and frontend) that tested exactly the Forge inputs at this
+    # commit, so the release does not rerun Forge's suite. Pull request runs
+    # test a merge commit and never count. With none, it refuses until
+    # forge.yml is dispatched for this commit.
+    needs: [resolve, build_package, require_ci_green]
+    if: >-
+      !cancelled() &&
+      needs.resolve.result == 'success' &&
+      needs.resolve.outputs.mode == 'candidate' &&
+      needs.build_package.result == 'success' &&
+      (needs.require_ci_green.result == 'success' ||
+       (needs.resolve.outputs.publishable == 'false' &&
+        needs.require_ci_green.result == 'skipped'))
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_SHA: ${{ needs.resolve.outputs.sha }}
+      RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+      RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+    steps:
+      - name: Checkout the candidate source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+
+      - name: Collect the verified packages
+        env:
+          CI_RUN_ID: ${{ needs.require_ci_green.outputs.run_id }}
+          CI_RUN_ATTEMPT: ${{ needs.require_ci_green.outputs.run_attempt }}
+        run: python3 scripts/forge-release.py collect --output-dir candidate
+
+      - name: Attest the candidate manifest
+        id: provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
+        with:
+          subject-path: candidate/forge-candidate-manifest.json
+
+      - name: Retain the manifest provenance bundle
+        env:
+          BUNDLE_PATH: ${{ steps.provenance.outputs.bundle-path }}
+        run: cp "$BUNDLE_PATH" candidate/forge-manifest-provenance.jsonl
+
+      - name: Upload the candidate manifest
+        id: manifest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: forge-candidate-manifest-${{ github.run_attempt }}
+          path: candidate/*
+          if-no-files-found: error
+          overwrite: false
+          retention-days: ${{ needs.resolve.outputs.publishable == 'true' && 90 || 7 }}
+
+      - name: Emit the acceptance selection
+        env:
+          ARTIFACT_ID: ${{ steps.manifest.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.manifest.outputs.artifact-digest }}
+        run: |
+          python3 scripts/forge-release.py selection --manifest-file candidate/forge-candidate-manifest.json \
+            --artifact-id "$ARTIFACT_ID" --artifact-digest "$ARTIFACT_DIGEST"
+
+  publish:
+    name: Publish an accepted Forge candidate
+    needs: [resolve]
+    if: >-
+      !cancelled() &&
+      needs.resolve.result == 'success' &&
+      needs.resolve.outputs.mode == 'publish'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Checkout the release tools
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Reverify and publish the accepted packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_MODE: ${{ needs.resolve.outputs.mode }}
+          ARTIFACT_SELECTION: ${{ inputs.artifact_selection }}
+        run: python3 scripts/forge-release.py publish

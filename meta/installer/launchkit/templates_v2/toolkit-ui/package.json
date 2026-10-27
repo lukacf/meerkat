@@ -1,0 +1,12 @@
+{
+  "name": "@rkat/toolkit-browser-component",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./style.css": "./style.css"
+  },
+  "types": "./index.d.ts",
+  "license": "MIT OR Apache-2.0"
+}

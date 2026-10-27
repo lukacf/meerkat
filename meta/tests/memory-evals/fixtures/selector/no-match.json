@@ -1,0 +1,35 @@
+{
+  "name": "no-match",
+  "manifest": [
+    {
+      "id": "mem-010",
+      "kind": "Gotcha",
+      "title": "rustc ICE on lib-test builds without CARGO_INCREMENTAL=0",
+      "description": "Matters when Rust lib-test builds fail with an internal compiler error: set CARGO_INCREMENTAL=0.",
+      "age_days": 25,
+      "rank": 4
+    },
+    {
+      "id": "mem-011",
+      "kind": "Reference",
+      "title": "BuildBuddy RBE dashboard",
+      "description": "Matters when investigating remote Bazel build performance or cache hits: dashboard link for the hosted BuildBuddy org.",
+      "age_days": 55,
+      "rank": null
+    },
+    {
+      "id": "mem-012",
+      "kind": "Procedure",
+      "title": "Flow Editor e2e runs through run-flow-editor-rkat-e2e.sh",
+      "description": "Matters when validating Flow Editor export/import against a live rkat: use the script, not ad-hoc curl.",
+      "age_days": 30,
+      "rank": 6
+    }
+  ],
+  "turn_text": "What time zone should the standup calendar invite use for the Stockholm folks?",
+  "expected": {
+    "must_select": [],
+    "must_not_select": ["mem-010", "mem-011", "mem-012"]
+  },
+  "notes": "Empty selection is the correct output: nothing in the store bears on the turn, and the 'certain to be helpful' bar must hold against topic-adjacent temptation."
+}

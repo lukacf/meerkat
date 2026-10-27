@@ -1,0 +1,263 @@
+/* -----------------------------------------------------------------------
+   ConsoleComposer – structural / layout styles
+   Package: @console-components
+   ----------------------------------------------------------------------- */
+
+.cc-composer {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  padding: 2px var(--_cc-composer-gutter, 24px) 10px;
+}
+
+.cc-composer__shell {
+  min-width: 0;
+  width: min(100%, var(--_cc-composer-width, 100%));
+  max-width: 100%;
+  margin: 0 auto;
+  min-height: var(--_cc-composer-shell-min-height, 64px);
+  border-radius: var(--_cc-composer-shell-radius, 22px);
+  border: 1px solid rgba(255, 255, 255, 0.055);
+  background:
+    linear-gradient(180deg, rgba(41, 44, 53, 0.1), rgba(28, 30, 35, 0.03) 58%, rgba(20, 22, 28, 0) 100%),
+    rgba(28, 29, 33, 0.58);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
+  -webkit-backdrop-filter: blur(20px) saturate(120%);
+  backdrop-filter: blur(20px) saturate(120%);
+  padding: var(--_cc-composer-shell-pad-top, 10px) calc(var(--_cc-composer-shell-pad-x, 14px) - 3px) var(--_cc-composer-shell-pad-bottom, 8px);
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+}
+
+.cc-composer__textarea {
+  width: 100%;
+  min-width: 0;
+  min-height: var(--_cc-composer-textarea-min-height, 24px);
+  max-height: calc(1.4em * 10);
+  resize: none;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--_cc-composer-text, var(--text, #e2e6ec));
+  padding: 0;
+  font-size: calc(13px * var(--_cc-window-scale, 1));
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.cc-composer__textarea::placeholder {
+  color: rgba(202, 207, 214, 0.38);
+}
+
+.cc-composer__textarea:disabled {
+  opacity: 0.46;
+  cursor: default;
+}
+
+/* ------- Main row (inside the shell, below textarea) ------- */
+
+.cc-composer__main-row {
+  display: flex;
+  align-items: center;
+  gap: var(--_cc-composer-main-row-gap, 6px);
+  padding-top: 4px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+/* ------- Pill button (labeled, main row) ------- */
+
+.cc-composer__pill {
+  min-width: 0;
+  max-width: 100%;
+  height: 28px;
+  border-radius: 999px;
+  color: rgba(226, 230, 236, 0.82);
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px;
+  font-size: calc(12px * var(--_cc-window-scale, 1));
+  font-weight: 560;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  background: rgba(16, 17, 21, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+}
+
+.cc-composer__pill:disabled {
+  opacity: 0.46;
+  cursor: default;
+}
+
+/* ------- Pill-icon button (compact icon-only, no background) ------- */
+
+.cc-composer__pill-icon {
+  width: 22px;
+  height: 22px;
+  justify-content: center;
+  padding: 0;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  border-radius: 0;
+  color: rgba(226, 230, 236, 0.82);
+  display: inline-flex;
+  align-items: center;
+}
+
+.cc-composer__pill-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.cc-composer__pill-icon:disabled {
+  opacity: 0.46;
+  cursor: default;
+}
+
+/* ------- Icon-ghost button (icon-only, main row) ------- */
+
+.cc-composer__icon-ghost {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 0;
+  background: rgba(16, 17, 21, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+  color: rgba(210, 214, 219, 0.72);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: auto;
+}
+
+.cc-composer__icon-ghost svg {
+  width: 18px;
+  height: 18px;
+}
+
+.cc-composer__icon-ghost:disabled {
+  opacity: 0.46;
+  cursor: default;
+}
+
+/* ------- Send button ------- */
+
+.cc-composer__send-btn {
+  flex: 0 0 auto;
+  margin-left: auto;
+  width: 40px;
+  min-width: 40px;
+  height: 40px;
+  border-radius: 999px;
+  background: rgba(248, 249, 251, 0.98);
+  color: #0c0d10;
+  font-size: 17px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  box-shadow: none;
+}
+
+.cc-composer__send-btn:hover {
+  background: #ffffff;
+}
+
+.cc-composer__send-btn:disabled {
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(223, 228, 235, 0.72);
+  opacity: 1;
+}
+
+/* ------- Footer ------- */
+
+.cc-composer__footer {
+  width: min(100%, var(--_cc-composer-width, 100%));
+  max-width: 100%;
+  min-width: 0;
+  margin: var(--_cc-composer-footer-top-gap, 8px) auto 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: nowrap;
+  position: relative;
+  z-index: 2;
+  container: cc-composer-footer / inline-size;
+}
+
+.cc-composer__footer-left,
+.cc-composer__footer-right {
+  display: flex;
+  align-items: center;
+  gap: var(--_cc-composer-footer-row-gap, 6px);
+  min-width: 0;
+  flex-wrap: nowrap;
+}
+
+/* ------- Sub-pill button (footer-level) ------- */
+
+.cc-composer__sub-pill {
+  height: 28px;
+  border-radius: 999px;
+  color: rgba(198, 204, 213, 0.82);
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px;
+  font-size: calc(11.5px * var(--_cc-window-scale, 1));
+  font-weight: 540;
+  white-space: nowrap;
+  background: rgba(16, 17, 21, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+}
+
+.cc-composer__sub-pill svg {
+  width: 14px;
+  height: 14px;
+}
+
+.cc-composer__sub-pill:disabled {
+  opacity: 0.46;
+  cursor: default;
+}
+
+/* ------- Footer-icon button (icon-only, footer) ------- */
+
+.cc-composer__footer-icon {
+  width: 18px;
+  height: 18px;
+  border-radius: 0;
+  color: rgba(192, 198, 207, 0.78);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+}
+
+.cc-composer__footer-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.cc-composer__footer-icon:disabled {
+  opacity: 0.46;
+  cursor: default;
+}
+
+/* ------- Chevron indicator ------- */
+
+.cc-composer__pill .chev,
+.cc-composer__sub-pill .chev {
+  opacity: 0.8;
+}

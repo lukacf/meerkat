@@ -1,0 +1,29 @@
+{
+  "name": "staged-tier-ceiling",
+  "invariant": "staged_tier_ceiling_rejected",
+  "stage": "staged-validator",
+  "store": [
+    {
+      "id": "mem-pref-1",
+      "scope": { "scope": "identity", "realm": "family", "identity": "identity:asa" },
+      "trust": "agent_observed",
+      "status": { "status": "active" },
+      "derived_from": [],
+      "has_verification": false
+    }
+  ],
+  "batch": {
+    "realm": "family",
+    "author": { "author": "steward", "run_id": "dream-2026-07-01" },
+    "ops": [
+      {
+        "op": "retier",
+        "id": "mem-pref-1",
+        "trust": "operator",
+        "rationale": "the operator confirmed this preference verbally, promote it"
+      }
+    ]
+  },
+  "expected": { "verdict": "reject", "error": "tier_not_staged_assignable", "op_index": 0 },
+  "notes": "Tier-ceiling invariant (arch doc §10.2, §11): operator and application trust tiers are assignable only by non-LLM principals through direct surfaces — never via any StagedMutationBatch, regardless of author or rationale. A staged retier to operator must be a validator reject. Executable check: tier tests in crates/meerkat-meta/src/memory/staged.rs; schema-validated only here."
+}

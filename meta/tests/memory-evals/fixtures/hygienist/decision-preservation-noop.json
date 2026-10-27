@@ -1,0 +1,20 @@
+{
+  "name": "decision-preservation-noop",
+  "transcript": [
+    {"role": "user", "text": "should we key operator scope by auth principal or explicit registration?"},
+    {"role": "assistant", "text": "Recommendation: auth principal, provisionally — registration adds ceremony without closing the cross-realm question."},
+    {"role": "user", "text": "agreed, go with the auth principal, but keep the enum open for a final keying"},
+    {"role": "assistant", "text": "Done. Decision recorded: provisional keying by console auth principal, enum leaves room for a final variant."}
+  ],
+  "span_references": [],
+  "sequenced_after_harvest": true,
+  "scripted_reply": {"ops": []},
+  "expected": {
+    "validator": "ok",
+    "ops": {},
+    "live": {
+      "must_not_touch": [0, 1, 2, 3]
+    }
+  },
+  "notes": "A transcript that is ALL decisions and rationale: the preferred output is no ops at all (§8.6 rule 1/2). Live mode fails if the model proposes touching any message."
+}

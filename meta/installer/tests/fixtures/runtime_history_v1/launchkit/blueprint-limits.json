@@ -1,0 +1,7 @@
+{
+  "maxIdentities": 4096,
+  "maxInstancesPerClass": 512,
+  "maxClasses": 32,
+  "maxFlowSteps": 1024,
+  "maxPeerEdges": 131072
+}

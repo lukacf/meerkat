@@ -1,0 +1,108 @@
+Meta 0.9.3 H-app (embedded builder) state directory (synthetic) for #306 A1/G1
+Produced 2026-10-19T19:05:50Z by mint_released_0_9_3_h_app.py (sha256 dfa2d4871f08e34fd1044c2482d7f96a32831986c4075d10ba6f48386b49db1c)
+
+PRODUCER
+  binary s2-mint-093 sha256 d4928d732a0b3c7fe71838259bd88105797a385b2ad56676e36615a9da86f747 (toolchain 1.97.0)
+  driver/Cargo.lock.fixture sha256 34f95396a8f350e18c1e22bf9247f6b3003da65a69f0836bdce79d54b332f5a4
+  driver/Cargo.toml.fixture sha256 9f3decd203a9e7f3c711d888b4b65022dd6e7227c9ca4d8d7068bcb52e8a5a65
+  driver/src/llm_usage.rs sha256 aa471188e185cd3fba8c3f0831ee0ffdec470612c412f4781d50c87645452f3d
+  driver/src/main.rs sha256 db9e36699e872988bc438cee6f04775ea4008e0c794a960fc009df2d667af29e
+  38 meerkat crates from crates.io, versions ['0.9.3']
+  model: scripted in-process client; reply 'app reply N'
+  compaction: {"auto_compact_threshold": 50000, "recent_turn_budget": 1, "reported_prompt_tokens": 60000, "trigger": "a user message carrying [compact-now] reports a cost above the threshold once"}
+  mob storage: persistent, state/event_log.sqlite3
+
+VARIANT roster-durable
+
+STATUSES (boot: identity state session generation)
+  boot 1: app:app-01 active 01a1558d-ff2f-7660-a203-2ddd66f4c6c1 0
+  boot 1: app:app-02 active 01a1558d-ff3f-7196-9f26-cd12f26434e8 0
+  boot 1: app:app-03 active 01a1558d-ff51-71c0-b5e5-193feeb3d231 0
+  boot 1: app:app-04 active 01a1558e-21d7-72e7-a109-a339d3a435d5 1
+  boot 1: app:app-05 active 01a1558e-01ae-7358-8e87-d2c8b7905dfd 0
+  boot 1: app:app-06 active 01a1558e-01b0-7708-879b-1d3ff6b002b9 0
+  boot 2: app:app-01 active 01a1558d-ff2f-7660-a203-2ddd66f4c6c1 0
+  boot 2: app:app-02 active 01a1558d-ff3f-7196-9f26-cd12f26434e8 0
+  boot 2: app:app-03 active 01a1558d-ff51-71c0-b5e5-193feeb3d231 0
+  boot 2: app:app-04 active 01a1558e-21d7-72e7-a109-a339d3a435d5 1
+  boot 2: app:app-05 active 01a1558e-2b2c-70e0-8b5f-fb5799627a51 0
+  boot 2: app:app-06 active 01a1558e-01b0-7708-879b-1d3ff6b002b9 0
+  boot 3: app:app-01 active 01a1558d-ff2f-7660-a203-2ddd66f4c6c1 0
+  boot 3: app:app-02 active 01a1558d-ff3f-7196-9f26-cd12f26434e8 0
+  boot 3: app:app-03 active 01a1558d-ff51-71c0-b5e5-193feeb3d231 0
+  boot 3: app:app-04 active 01a1558e-21d7-72e7-a109-a339d3a435d5 1
+  boot 3: app:app-05 active 01a1558e-2b2c-70e0-8b5f-fb5799627a51 0
+
+0.9.3 REFUSALS RECORDED BY THE DRIVER (boot op identity: message)
+  boot1 turn app:app-05: unknown identity: app:app-05
+  boot1 status app:app-05: unknown identity: app:app-05
+  boot3 status app:app-06: unknown identity: app:app-06
+
+0.9.3 RESTART PROBE: started True
+
+COMMITTED SESSIONS (runtime.sqlite WholeBlob, WAL included; sessions.sqlite3; continuity record)
+  01a1558d-ff2f-7660-a203-2ddd66f4c6c1: revision 8 messages 8 projection messages 8 record of app:app-01 transcript {'retained_generations': [1], 'retired_generations': [], 'reanchored': False}
+  01a1558d-ff3f-7196-9f26-cd12f26434e8: revision 5 messages 5 projection messages 5 record of app:app-02 transcript None
+  01a1558d-ff51-71c0-b5e5-193feeb3d231: revision 7 messages 7 projection messages 7 record of app:app-03 transcript None
+  01a1558d-ff61-764e-8a0c-d85960203755: revision 2 messages 3 projection messages 3 record of None transcript None
+  01a1558e-01ae-7358-8e87-d2c8b7905dfd: revision 2 messages 3 projection messages 3 record of None transcript None
+  01a1558e-01b0-7708-879b-1d3ff6b002b9: revision 3 messages 3 projection messages 3 record of app:app-06 transcript None
+  01a1558e-21d7-72e7-a109-a339d3a435d5: revision 3 messages 3 projection messages 3 record of app:app-04 transcript None
+  01a1558e-2b2c-70e0-8b5f-fb5799627a51: revision 1 messages 1 projection messages 1 record of app:app-05 transcript None
+
+CONTINUITY STORE
+  schema [['meta-continuity', 1]] tables ['continuity_records', 'meerkat_schema', 'session_snapshots'] snapshot rows 0
+  record app:app-01 -> 01a1558d-ff2f-7660-a203-2ddd66f4c6c1 generation 0
+  record app:app-02 -> 01a1558d-ff3f-7196-9f26-cd12f26434e8 generation 0
+  record app:app-03 -> 01a1558d-ff51-71c0-b5e5-193feeb3d231 generation 0
+  record app:app-04 -> 01a1558e-21d7-72e7-a109-a339d3a435d5 generation 1
+  record app:app-05 -> 01a1558e-2b2c-70e0-8b5f-fb5799627a51 generation 0
+  record app:app-06 -> 01a1558e-01b0-7708-879b-1d3ff6b002b9 generation 0
+
+OUTSIDE THE STATE DIRECTORY (not stored): $XDG_STATE_HOME/meerkat/session_comms_identity
+  01a1558d-ff2f-7660-a203-2ddd66f4c6c1/identity.key, identity.pub
+  01a1558d-ff3f-7196-9f26-cd12f26434e8/identity.key, identity.pub
+  01a1558d-ff51-71c0-b5e5-193feeb3d231/identity.key, identity.pub
+  01a1558d-ff61-764e-8a0c-d85960203755/identity.key, identity.pub
+  01a1558e-01ae-7358-8e87-d2c8b7905dfd/identity.key, identity.pub
+  01a1558e-01b0-7708-879b-1d3ff6b002b9/identity.key, identity.pub
+  01a1558e-21d7-72e7-a109-a339d3a435d5/identity.key, identity.pub
+  01a1558e-2b2c-70e0-8b5f-fb5799627a51/identity.key, identity.pub
+
+PACKED (stored gzip-compressed under the repository's per-file limit; inflate before use)
+  none
+
+EMPTY DIRECTORIES in ./state (git does not keep them): blobs
+
+FILES (sha256 bytes path; the raw bytes, after inflating the packed files)
+edbee11a2e909b4413b8e2265b665c0f156aaba120e5c715a11d8fc30ba789d7 4096 ./state/continuity.sqlite3
+a65cdc28866b2e2fe3d20badbd00b5cb570dddfbee6e6f0f112d601659afecdf 32768 ./state/continuity.sqlite3-shm
+d287b3918bb505dc9072f1e2b956312020693d06d7d9bcff47f97ff442f4cd88 189552 ./state/continuity.sqlite3-wal
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/continuity.sqlite3.mfence
+119af1c8aea8c495d6856cd6667bbd7e890744ff6bdbbb66f19f7156866485e8 286720 ./state/council.sqlite3
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/council.sqlite3.mfence
+40b3b49665497d3c8c827d0582d3922f20b1c63a9ee2a0c20ce3b413e338da78 303104 ./state/event_log.sqlite3
+fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb 32768 ./state/event_log.sqlite3-shm
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/event_log.sqlite3-wal
+98c411abae67d88233184a373774ba706d73923e559274e1c72f7ed2052d6c01 1513 ./state/event_log.sqlite3.composition.json
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/event_log.sqlite3.mfence
+337b748a2b398ae229c8c3e9b4c0cf009e1c03afce5d294160252778217d2fbb 40960 ./state/meta/jobs.sqlite3
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/meta/jobs.sqlite3.mfence
+ad641dbbac0f8bec4de2de6e6b9a498005139f5af81bdfaac57f8201346a1516 53248 ./state/meta_console.sqlite3
+5a057a2dba145aba56b77843e4e329fa7bc94295ecb334b9a271205667520ea5 20480 ./state/meta_metadata.sqlite3
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/meta_metadata.sqlite3.mfence
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/mobs/child-mobs.lock
+119af1c8aea8c495d6856cd6667bbd7e890744ff6bdbbb66f19f7156866485e8 286720 ./state/mobs/realm_profiles.db
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/mobs/realm_profiles.db.mfence
+37554e400d1dfce49f982d88c542d2c041a01baa661814816bd84c31f15b614b 458752 ./state/runtime.sqlite
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/runtime.sqlite.execution-custody
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/runtime.sqlite.execution-custody-admission
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/runtime.sqlite.mfence
+edd59cf1c883ed55b3bab68669df8b36795e56c538d5771cb1af441b82378609 274432 ./state/sessions.sqlite3
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/sessions.sqlite3.mfence
+6adaf0f20f9b6053084da318916de460f5a97cbc225af53a988037bc3cf76114 340 ./state/topology-control.json
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/topology-control.json.lock
+b877952a5a1ef5debd35fbdbef3d63e43204f30d13bf5c8c3f7e891e70bbef15 118784 ./state/workgraph.sqlite3
+fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb 32768 ./state/workgraph.sqlite3-shm
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/workgraph.sqlite3-wal
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 ./state/workgraph.sqlite3.mfence

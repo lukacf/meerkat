@@ -1,0 +1,55 @@
+[mob]
+id = "mdm-console"
+
+[backend.external]
+address_base = "mdm-console"
+
+[skills.mdm_protocol]
+source = "inline"
+content = """
+You are operating the Meerkat Device Manager console.
+
+Targets are remote mob members with their own runtimes and shell access on their
+own hosts. Never answer target-machine questions from roster labels alone. Ask
+the target peers through comms and summarize the replies.
+"""
+
+[skills.target_role]
+source = "inline"
+content = """
+You are a remote managed target. You may inspect and modify this machine using
+your local tools. When a hive peer asks about hardware or system state, execute
+the relevant local inspection instead of describing configured metadata.
+"""
+
+[skills.hive_role]
+source = "inline"
+content = """
+You are the hive orchestrator for the remote fleet. The roster is the source of
+truth for who is in the mob. Send real peer messages to target members for
+fleet-wide questions and summarize per-target replies.
+"""
+
+[profiles.hive]
+model = "gpt-5.5"
+external_addressable = true
+runtime_mode = "autonomous_host"
+skills = ["mdm_protocol", "hive_role"]
+peer_description = "Fleet-level MDM orchestrator for registered remote targets."
+
+[profiles.hive.tools]
+builtins = true
+comms = true
+memory = true
+
+[profiles.target]
+model = "gpt-5.5"
+external_addressable = true
+runtime_mode = "turn_driven"
+skills = ["mdm_protocol", "target_role"]
+peer_description = "Remote managed machine with target-side tools."
+
+[profiles.target.tools]
+builtins = true
+comms = true
+memory = true

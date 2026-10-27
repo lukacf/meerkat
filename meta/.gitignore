@@ -1,0 +1,66 @@
+# Rust
+/target/
+
+# Meta internal
+.rct/
+.rkat/
+.release-hook-done
+/.rct-legacy/
+/.rct-legacy-*/
+docs/rct/traceability.legacy-*.md
+
+# Dev screenshots (keep docs/images/)
+/console-*.png
+/console-vite-dev.png
+
+# Playwright MCP logs/snapshots
+.playwright-mcp/
+/output/playwright/
+
+# Example runtime state
+examples/*/.state/
+
+# Console build temp
+console/.tmp/
+
+# Test-run scratch dirs (tempfile-created .tmpXXXXXX with sqlite state)
+**/.tmp*/
+
+# Claude Code worktrees
+.claude/worktrees/
+
+# Node
+/console/node_modules/
+node_modules/
+
+# Python
+**/__pycache__/
+*.pyc
+*.egg-info/
+*.egg
+sdk/python/build/
+dist/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.*
+
+# OS
+.DS_Store
+Thumbs.db
+.claude/*
+!.claude/commands/
+!.claude/commands/ship.md
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/meerkat-meta/
+!.claude/skills/meerkat-meta/SKILL.md

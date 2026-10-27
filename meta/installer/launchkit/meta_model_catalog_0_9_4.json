@@ -1,0 +1,814 @@
+{
+  "format": "forge-public-meta-model-catalog-v1",
+  "version": "0.9.4",
+  "source": {
+    "release": "https://github.com/lukacf/meerkat-meta/releases/download/v0.9.4",
+    "archive": "meta-rpc-gateway-0.9.4-x86_64-unknown-linux-gnu.tar.gz",
+    "archive_sha256": "2713c2fceddba62d22f81dbb0e0ee6ef82b716cd0ad15de8c1acf4b5ec455f39",
+    "sdk": "meerkat-meta==0.9.4",
+    "sdk_wheel_sha256": "46cc44eb3e05a4bd9fb2ec630c06f2e3c62548184b7f6c81101f042d8e11a659",
+    "method": "runtime.mob_handle().models_catalog()"
+  },
+  "models": [
+    {
+      "id": "claude-fable-5-1",
+      "display_name": "Claude Fable 5.1",
+      "provider": "anthropic",
+      "tier": "recommended",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "vision": true,
+      "image_tool_results": true
+    },
+    {
+      "id": "claude-fable-5",
+      "display_name": "Claude Fable 5",
+      "provider": "anthropic",
+      "tier": "recommended",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "vision": true,
+      "image_tool_results": true
+    },
+    {
+      "id": "claude-opus-5-5",
+      "display_name": "Claude Opus 5.5",
+      "provider": "anthropic",
+      "tier": "recommended",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "vision": true,
+      "image_tool_results": true
+    },
+    {
+      "id": "claude-opus-5",
+      "display_name": "Claude Opus 5",
+      "provider": "anthropic",
+      "tier": "recommended",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "vision": true,
+      "image_tool_results": true
+    },
+    {
+      "id": "claude-opus-4-8",
+      "display_name": "Claude Opus 4.8",
+      "provider": "anthropic",
+      "tier": "recommended",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "vision": true,
+      "image_tool_results": true
+    },
+    {
+      "id": "claude-opus-4-7",
+      "display_name": "Claude Opus 4.7",
+      "provider": "anthropic",
+      "tier": "supported",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "vision": true,
+      "image_tool_results": true
+    },
+    {
+      "id": "claude-sonnet-5-5",
+      "display_name": "Claude Sonnet 5.5",
+      "provider": "anthropic",
+      "tier": "recommended",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "vision": true,
+      "image_tool_results": true
+    },
+    {
+      "id": "claude-sonnet-5",
+      "display_name": "Claude Sonnet 5",
+      "provider": "anthropic",
+      "tier": "supported",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "vision": true,
+      "image_tool_results": true
+    },
+    {
+      "id": "claude-sonnet-4-6",
+      "display_name": "Claude Sonnet 4.6",
+      "provider": "anthropic",
+      "tier": "recommended",
+      "context_window": 1000000,
+      "max_output_tokens": 64000,
+      "vision": true,
+      "image_tool_results": true
+    },
+    {
+      "id": "claude-sonnet-4-5",
+      "display_name": "Claude Sonnet 4.5",
+      "provider": "anthropic",
+      "tier": "supported",
+      "context_window": 200000,
+      "max_output_tokens": 64000,
+      "vision": true,
+      "image_tool_results": true
+    },
+    {
+      "id": "claude-haiku-5-5",
+      "display_name": "Claude Haiku 5.5",
+      "provider": "anthropic",
+      "tier": "recommended",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "vision": true,
+      "image_tool_results": true
+    },
+    {
+      "id": "claude-haiku-4-5-20251001",
+      "display_name": "Claude Haiku 4.5",
+      "provider": "anthropic",
+      "tier": "recommended",
+      "context_window": 200000,
+      "max_output_tokens": 64000,
+      "vision": true,
+      "image_tool_results": true
+    },
+    {
+      "id": "claude-haiku-4-5",
+      "display_name": "Claude Haiku 4.5",
+      "provider": "anthropic",
+      "tier": "recommended",
+      "context_window": 200000,
+      "max_output_tokens": 64000,
+      "vision": true,
+      "image_tool_results": true
+    },
+    {
+      "id": "claude-opus-4-5",
+      "display_name": "Claude Opus 4.5",
+      "provider": "anthropic",
+      "tier": "supported",
+      "context_window": 200000,
+      "max_output_tokens": 64000,
+      "vision": true,
+      "image_tool_results": true
+    },
+    {
+      "id": "gpt-6-astra",
+      "display_name": "GPT-6 Astra",
+      "provider": "openai",
+      "tier": "recommended",
+      "context_window": 1050000,
+      "max_output_tokens": 128000,
+      "vision": true,
+      "image_tool_results": true
+    },
+    {
+      "id": "gpt-6-sol",
+      "display_name": "GPT-6 Sol",
+      "provider": "openai",
+      "tier": "supported",
+      "context_window": 1050000,
+      "max_output_tokens": 128000,
+      "vision": true,
+      "image_tool_results": true
+    },
+    {
+      "id": "gpt-6.1-sol",
+      "display_name": "GPT-6.1 Sol",
+      "provider": "openai",
+      "tier": "supported",
+      "context_window": 1050000,
+      "max_output_tokens": 128000,
+      "vision": true,
+      "image_tool_results": true
+    },
+    {
+      "id": "gpt-6-luna",
+      "display_name": "GPT-6 Luna",
+      "provider": "openai",
+      "tier": "supported",
+      "context_window": 1050000,
+      "max_output_tokens": 128000,
+      "vision": true,
+      "image_tool_results": true
+    },
+    {
+      "id": "gpt-5.6-sol",
+      "display_name": "GPT-5.6 Sol",
+      "provider": "openai",
+      "tier": "supported",
+      "context_window": 1050000,
+      "max_output_tokens": 128000,
+      "vision": true,
+      "image_tool_results": true
+    },
+    {
+      "id": "gpt-5.6-terra",
+      "display_name": "GPT-5.6 Terra",
+      "provider": "openai",
+      "tier": "supported",
+      "context_window": 1050000,
+      "max_output_tokens": 128000,
+      "vision": true,
+      "image_tool_results": true
+    },
+    {
+      "id": "gpt-5.6-luna",
+      "display_name": "GPT-5.6 Luna",
+      "provider": "openai",
+      "tier": "supported",
+      "context_window": 1050000,
+      "max_output_tokens": 128000,
+      "vision": true,
+      "image_tool_results": true
+    },
+    {
+      "id": "gpt-5.6",
+      "display_name": "GPT-5.6 Sol",
+      "provider": "openai",
+      "tier": "supported",
+      "context_window": 1050000,
+      "max_output_tokens": 128000,
+      "vision": true,
+      "image_tool_results": true
+    },
+    {
+      "id": "gpt-5.5",
+      "display_name": "GPT-5.5",
+      "provider": "openai",
+      "tier": "recommended",
+      "context_window": 1050000,
+      "max_output_tokens": 128000,
+      "vision": true,
+      "image_tool_results": true
+    },
+    {
+      "id": "gpt-5.5-pro",
+      "display_name": "GPT-5.5 Pro",
+      "provider": "openai",
+      "tier": "recommended",
+      "context_window": 1050000,
+      "max_output_tokens": 128000,
+      "vision": true,
+      "image_tool_results": true
+    },
+    {
+      "id": "gpt-5.4",
+      "display_name": "GPT-5.4",
+      "provider": "openai",
+      "tier": "supported",
+      "context_window": 1050000,
+      "max_output_tokens": 128000,
+      "vision": true,
+      "image_tool_results": true
+    },
+    {
+      "id": "gpt-5.4-mini",
+      "display_name": "GPT-5.4 Mini",
+      "provider": "openai",
+      "tier": "supported",
+      "context_window": 128000,
+      "max_output_tokens": 16384,
+      "vision": true,
+      "image_tool_results": true
+    },
+    {
+      "id": "gpt-5.3-codex",
+      "display_name": "GPT-5.3 Codex",
+      "provider": "openai",
+      "tier": "supported",
+      "context_window": 400000,
+      "max_output_tokens": 128000,
+      "vision": true,
+      "image_tool_results": true
+    },
+    {
+      "id": "gpt-live-1-codex",
+      "display_name": "GPT Live 1 Codex (Experimental)",
+      "provider": "openai",
+      "tier": "supported",
+      "context_window": null,
+      "max_output_tokens": null,
+      "vision": false,
+      "image_tool_results": false
+    },
+    {
+      "id": "gpt-live-1",
+      "display_name": "GPT Live 1",
+      "provider": "openai",
+      "tier": "supported",
+      "context_window": null,
+      "max_output_tokens": null,
+      "vision": false,
+      "image_tool_results": false
+    },
+    {
+      "id": "gpt-realtime-2",
+      "display_name": "GPT Realtime 2",
+      "provider": "openai",
+      "tier": "recommended",
+      "context_window": 128000,
+      "max_output_tokens": 32000,
+      "vision": true,
+      "image_tool_results": false
+    },
+    {
+      "id": "gemini-4-argon",
+      "display_name": "Gemini 4 Argon",
+      "provider": "gemini",
+      "tier": "recommended",
+      "context_window": 1048576,
+      "max_output_tokens": 65536,
+      "vision": true,
+      "image_tool_results": true
+    },
+    {
+      "id": "gemini-3.8-flash",
+      "display_name": "Gemini 3.8 Flash",
+      "provider": "gemini",
+      "tier": "recommended",
+      "context_window": 1048576,
+      "max_output_tokens": 65536,
+      "vision": true,
+      "image_tool_results": true
+    },
+    {
+      "id": "gemini-3.7-flash",
+      "display_name": "Gemini 3.7 Flash",
+      "provider": "gemini",
+      "tier": "supported",
+      "context_window": 1048576,
+      "max_output_tokens": 65536,
+      "vision": true,
+      "image_tool_results": true
+    },
+    {
+      "id": "gemini-3.6-flash",
+      "display_name": "Gemini 3.6 Flash",
+      "provider": "gemini",
+      "tier": "supported",
+      "context_window": 1048576,
+      "max_output_tokens": 65536,
+      "vision": true,
+      "image_tool_results": true
+    },
+    {
+      "id": "gemini-3.5-flash",
+      "display_name": "Gemini 3.5 Flash",
+      "provider": "gemini",
+      "tier": "supported",
+      "context_window": 1048576,
+      "max_output_tokens": 65536,
+      "vision": true,
+      "image_tool_results": true
+    },
+    {
+      "id": "gemini-3.5-flash-lite",
+      "display_name": "Gemini 3.5 Flash Lite",
+      "provider": "gemini",
+      "tier": "supported",
+      "context_window": 1048576,
+      "max_output_tokens": 65536,
+      "vision": true,
+      "image_tool_results": true
+    },
+    {
+      "id": "gemini-3.1-pro-preview",
+      "display_name": "Gemini 3.1 Pro Preview",
+      "provider": "gemini",
+      "tier": "supported",
+      "context_window": 1048576,
+      "max_output_tokens": 65536,
+      "vision": true,
+      "image_tool_results": true
+    },
+    {
+      "id": "gemini-3.1-flash-lite",
+      "display_name": "Gemini 3.1 Flash Lite",
+      "provider": "gemini",
+      "tier": "supported",
+      "context_window": 1048576,
+      "max_output_tokens": 65536,
+      "vision": true,
+      "image_tool_results": true
+    },
+    {
+      "id": "gemini-3.1-flash-lite-preview",
+      "display_name": "Gemini 3.1 Flash Lite Preview",
+      "provider": "gemini",
+      "tier": "supported",
+      "context_window": 1048576,
+      "max_output_tokens": 65536,
+      "vision": true,
+      "image_tool_results": true
+    }
+  ],
+  "provider_defaults": [
+    {
+      "provider": "anthropic",
+      "default_model_id": "claude-opus-5-5",
+      "models": [
+        {
+          "id": "claude-fable-5-1",
+          "display_name": "Claude Fable 5.1",
+          "provider": "anthropic",
+          "tier": "recommended",
+          "context_window": 1000000,
+          "max_output_tokens": 128000,
+          "vision": false,
+          "image_tool_results": false
+        },
+        {
+          "id": "claude-fable-5",
+          "display_name": "Claude Fable 5",
+          "provider": "anthropic",
+          "tier": "recommended",
+          "context_window": 1000000,
+          "max_output_tokens": 128000,
+          "vision": false,
+          "image_tool_results": false
+        },
+        {
+          "id": "claude-opus-5-5",
+          "display_name": "Claude Opus 5.5",
+          "provider": "anthropic",
+          "tier": "recommended",
+          "context_window": 1000000,
+          "max_output_tokens": 128000,
+          "vision": false,
+          "image_tool_results": false
+        },
+        {
+          "id": "claude-opus-5",
+          "display_name": "Claude Opus 5",
+          "provider": "anthropic",
+          "tier": "recommended",
+          "context_window": 1000000,
+          "max_output_tokens": 128000,
+          "vision": false,
+          "image_tool_results": false
+        },
+        {
+          "id": "claude-opus-4-8",
+          "display_name": "Claude Opus 4.8",
+          "provider": "anthropic",
+          "tier": "recommended",
+          "context_window": 1000000,
+          "max_output_tokens": 128000,
+          "vision": false,
+          "image_tool_results": false
+        },
+        {
+          "id": "claude-opus-4-7",
+          "display_name": "Claude Opus 4.7",
+          "provider": "anthropic",
+          "tier": "supported",
+          "context_window": 1000000,
+          "max_output_tokens": 128000,
+          "vision": false,
+          "image_tool_results": false
+        },
+        {
+          "id": "claude-sonnet-5-5",
+          "display_name": "Claude Sonnet 5.5",
+          "provider": "anthropic",
+          "tier": "recommended",
+          "context_window": 1000000,
+          "max_output_tokens": 128000,
+          "vision": false,
+          "image_tool_results": false
+        },
+        {
+          "id": "claude-sonnet-5",
+          "display_name": "Claude Sonnet 5",
+          "provider": "anthropic",
+          "tier": "supported",
+          "context_window": 1000000,
+          "max_output_tokens": 128000,
+          "vision": false,
+          "image_tool_results": false
+        },
+        {
+          "id": "claude-sonnet-4-6",
+          "display_name": "Claude Sonnet 4.6",
+          "provider": "anthropic",
+          "tier": "recommended",
+          "context_window": 1000000,
+          "max_output_tokens": 64000,
+          "vision": false,
+          "image_tool_results": false
+        },
+        {
+          "id": "claude-sonnet-4-5",
+          "display_name": "Claude Sonnet 4.5",
+          "provider": "anthropic",
+          "tier": "supported",
+          "context_window": 200000,
+          "max_output_tokens": 64000,
+          "vision": false,
+          "image_tool_results": false
+        },
+        {
+          "id": "claude-haiku-5-5",
+          "display_name": "Claude Haiku 5.5",
+          "provider": "anthropic",
+          "tier": "recommended",
+          "context_window": 1000000,
+          "max_output_tokens": 128000,
+          "vision": false,
+          "image_tool_results": false
+        },
+        {
+          "id": "claude-haiku-4-5-20251001",
+          "display_name": "Claude Haiku 4.5",
+          "provider": "anthropic",
+          "tier": "recommended",
+          "context_window": 200000,
+          "max_output_tokens": 64000,
+          "vision": false,
+          "image_tool_results": false
+        },
+        {
+          "id": "claude-haiku-4-5",
+          "display_name": "Claude Haiku 4.5",
+          "provider": "anthropic",
+          "tier": "recommended",
+          "context_window": 200000,
+          "max_output_tokens": 64000,
+          "vision": false,
+          "image_tool_results": false
+        },
+        {
+          "id": "claude-opus-4-5",
+          "display_name": "Claude Opus 4.5",
+          "provider": "anthropic",
+          "tier": "supported",
+          "context_window": 200000,
+          "max_output_tokens": 64000,
+          "vision": false,
+          "image_tool_results": false
+        }
+      ]
+    },
+    {
+      "provider": "gemini",
+      "default_model_id": "gemini-4-argon",
+      "models": [
+        {
+          "id": "gemini-4-argon",
+          "display_name": "Gemini 4 Argon",
+          "provider": "gemini",
+          "tier": "recommended",
+          "context_window": 1048576,
+          "max_output_tokens": 65536,
+          "vision": false,
+          "image_tool_results": false
+        },
+        {
+          "id": "gemini-3.8-flash",
+          "display_name": "Gemini 3.8 Flash",
+          "provider": "gemini",
+          "tier": "recommended",
+          "context_window": 1048576,
+          "max_output_tokens": 65536,
+          "vision": false,
+          "image_tool_results": false
+        },
+        {
+          "id": "gemini-3.7-flash",
+          "display_name": "Gemini 3.7 Flash",
+          "provider": "gemini",
+          "tier": "supported",
+          "context_window": 1048576,
+          "max_output_tokens": 65536,
+          "vision": false,
+          "image_tool_results": false
+        },
+        {
+          "id": "gemini-3.6-flash",
+          "display_name": "Gemini 3.6 Flash",
+          "provider": "gemini",
+          "tier": "supported",
+          "context_window": 1048576,
+          "max_output_tokens": 65536,
+          "vision": false,
+          "image_tool_results": false
+        },
+        {
+          "id": "gemini-3.5-flash",
+          "display_name": "Gemini 3.5 Flash",
+          "provider": "gemini",
+          "tier": "supported",
+          "context_window": 1048576,
+          "max_output_tokens": 65536,
+          "vision": false,
+          "image_tool_results": false
+        },
+        {
+          "id": "gemini-3.5-flash-lite",
+          "display_name": "Gemini 3.5 Flash Lite",
+          "provider": "gemini",
+          "tier": "supported",
+          "context_window": 1048576,
+          "max_output_tokens": 65536,
+          "vision": false,
+          "image_tool_results": false
+        },
+        {
+          "id": "gemini-3.1-pro-preview",
+          "display_name": "Gemini 3.1 Pro Preview",
+          "provider": "gemini",
+          "tier": "supported",
+          "context_window": 1048576,
+          "max_output_tokens": 65536,
+          "vision": false,
+          "image_tool_results": false
+        },
+        {
+          "id": "gemini-3.1-flash-lite",
+          "display_name": "Gemini 3.1 Flash Lite",
+          "provider": "gemini",
+          "tier": "supported",
+          "context_window": 1048576,
+          "max_output_tokens": 65536,
+          "vision": false,
+          "image_tool_results": false
+        },
+        {
+          "id": "gemini-3.1-flash-lite-preview",
+          "display_name": "Gemini 3.1 Flash Lite Preview",
+          "provider": "gemini",
+          "tier": "supported",
+          "context_window": 1048576,
+          "max_output_tokens": 65536,
+          "vision": false,
+          "image_tool_results": false
+        }
+      ]
+    },
+    {
+      "provider": "openai",
+      "default_model_id": "gpt-6-astra",
+      "models": [
+        {
+          "id": "gpt-6-astra",
+          "display_name": "GPT-6 Astra",
+          "provider": "openai",
+          "tier": "recommended",
+          "context_window": 1050000,
+          "max_output_tokens": 128000,
+          "vision": false,
+          "image_tool_results": false
+        },
+        {
+          "id": "gpt-6-sol",
+          "display_name": "GPT-6 Sol",
+          "provider": "openai",
+          "tier": "supported",
+          "context_window": 1050000,
+          "max_output_tokens": 128000,
+          "vision": false,
+          "image_tool_results": false
+        },
+        {
+          "id": "gpt-6.1-sol",
+          "display_name": "GPT-6.1 Sol",
+          "provider": "openai",
+          "tier": "supported",
+          "context_window": 1050000,
+          "max_output_tokens": 128000,
+          "vision": false,
+          "image_tool_results": false
+        },
+        {
+          "id": "gpt-6-luna",
+          "display_name": "GPT-6 Luna",
+          "provider": "openai",
+          "tier": "supported",
+          "context_window": 1050000,
+          "max_output_tokens": 128000,
+          "vision": false,
+          "image_tool_results": false
+        },
+        {
+          "id": "gpt-5.6-sol",
+          "display_name": "GPT-5.6 Sol",
+          "provider": "openai",
+          "tier": "supported",
+          "context_window": 1050000,
+          "max_output_tokens": 128000,
+          "vision": false,
+          "image_tool_results": false
+        },
+        {
+          "id": "gpt-5.6-terra",
+          "display_name": "GPT-5.6 Terra",
+          "provider": "openai",
+          "tier": "supported",
+          "context_window": 1050000,
+          "max_output_tokens": 128000,
+          "vision": false,
+          "image_tool_results": false
+        },
+        {
+          "id": "gpt-5.6-luna",
+          "display_name": "GPT-5.6 Luna",
+          "provider": "openai",
+          "tier": "supported",
+          "context_window": 1050000,
+          "max_output_tokens": 128000,
+          "vision": false,
+          "image_tool_results": false
+        },
+        {
+          "id": "gpt-5.6",
+          "display_name": "GPT-5.6 Sol",
+          "provider": "openai",
+          "tier": "supported",
+          "context_window": 1050000,
+          "max_output_tokens": 128000,
+          "vision": false,
+          "image_tool_results": false
+        },
+        {
+          "id": "gpt-5.5",
+          "display_name": "GPT-5.5",
+          "provider": "openai",
+          "tier": "recommended",
+          "context_window": 1050000,
+          "max_output_tokens": 128000,
+          "vision": false,
+          "image_tool_results": false
+        },
+        {
+          "id": "gpt-5.5-pro",
+          "display_name": "GPT-5.5 Pro",
+          "provider": "openai",
+          "tier": "recommended",
+          "context_window": 1050000,
+          "max_output_tokens": 128000,
+          "vision": false,
+          "image_tool_results": false
+        },
+        {
+          "id": "gpt-5.4",
+          "display_name": "GPT-5.4",
+          "provider": "openai",
+          "tier": "supported",
+          "context_window": 1050000,
+          "max_output_tokens": 128000,
+          "vision": false,
+          "image_tool_results": false
+        },
+        {
+          "id": "gpt-5.4-mini",
+          "display_name": "GPT-5.4 Mini",
+          "provider": "openai",
+          "tier": "supported",
+          "context_window": 128000,
+          "max_output_tokens": 16384,
+          "vision": false,
+          "image_tool_results": false
+        },
+        {
+          "id": "gpt-5.3-codex",
+          "display_name": "GPT-5.3 Codex",
+          "provider": "openai",
+          "tier": "supported",
+          "context_window": 400000,
+          "max_output_tokens": 128000,
+          "vision": false,
+          "image_tool_results": false
+        },
+        {
+          "id": "gpt-live-1-codex",
+          "display_name": "GPT Live 1 Codex (Experimental)",
+          "provider": "openai",
+          "tier": "supported",
+          "context_window": null,
+          "max_output_tokens": null,
+          "vision": false,
+          "image_tool_results": false
+        },
+        {
+          "id": "gpt-live-1",
+          "display_name": "GPT Live 1",
+          "provider": "openai",
+          "tier": "supported",
+          "context_window": null,
+          "max_output_tokens": null,
+          "vision": false,
+          "image_tool_results": false
+        },
+        {
+          "id": "gpt-realtime-2",
+          "display_name": "GPT Realtime 2",
+          "provider": "openai",
+          "tier": "recommended",
+          "context_window": 128000,
+          "max_output_tokens": 32000,
+          "vision": false,
+          "image_tool_results": false
+        }
+      ]
+    }
+  ]
+}

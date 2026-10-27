@@ -1,0 +1,13 @@
+.cc-transport-status { display: flex; align-items: center; justify-content: flex-end; gap: 7px; min-width: 0; padding: 6px 12px; font-size: 12px; line-height: 1.4; color: var(--ink-muted, var(--_cc-foreground-muted)); }
+.cc-transport-status__dot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--warn, var(--_cc-warning)); }
+.cc-transport-status[data-phase="live"] .cc-transport-status__dot { background: var(--ok, var(--_cc-positive)); }
+.cc-transport-status:is([data-phase="forbidden"], [data-phase="consumer-failed"], [data-phase="authentication-required"]) .cc-transport-status__dot { background: var(--crit, var(--_cc-negative)); }
+.cc-transport-status__label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cc-transport-status button { flex: none; padding: 3px 7px; border: 1px solid var(--line, var(--_cc-border-soft)); border-radius: 5px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.cc-transport-status button:hover { background: var(--bg-elev-1, var(--_cc-surface-hover)); color: var(--ink, var(--_cc-foreground)); }
+.cc-transport-status button:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+.meta-topbar > .cc-transport-status { align-self: stretch; max-width: 42%; }
+@media (max-width: 700px) {
+  .meta-topbar > .cc-transport-status { margin-left: auto; max-width: 48%; padding-inline: 6px; }
+  .meta-topbar > .cc-transport-status[data-phase="live"] .cc-transport-status__label { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); }
+}

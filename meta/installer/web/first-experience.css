@@ -1,0 +1,374 @@
+/* The opening uses the same guide and composer as the rest of the journey. */
+.setup-shell.setup-welcome {
+  --forge-welcome-rust: #bb5835;
+  --forge-welcome-canvas: #f3f1ea;
+}
+.setup-welcome .setup-header { background: #f7f6f1; border-bottom-color: #e8e6df; }
+.forge-welcome-orientation { display: flex; align-items: center; gap: 24px; list-style: none; margin: 0; padding: 0; color: #6f6b63; font-size: 12px; white-space: nowrap; }
+.forge-welcome-orientation li { display: inline-flex; align-items: center; gap: 8px; }
+.forge-welcome-orientation li + li::before { content: ""; width: 22px; height: 1px; margin-right: 4px; background: #dfdacf; }
+.forge-welcome-orientation li[aria-current="step"] { color: #35332c; font-weight: 500; }
+.forge-welcome-orientation li[aria-current="step"]::after { content: ""; width: 5px; height: 5px; border-radius: 50%; background: #bb5835; }
+/* Keep Continue stationary between textarea blur and pointer release. */
+.setup-shell.setup-welcome.setup-composer-focused > .setup-header { display: flex; }
+.setup-welcome .setup-header-actions > button:disabled { display: none; }
+.setup-welcome .setup-chat-top,
+.setup-welcome .setup-conversation-start,
+.setup-welcome .setup-interactive-answer,
+.setup-welcome .ep-header,
+.setup-welcome .ps-empty,
+.setup-welcome .ep-empty-facts { display: none; }
+.setup-shell.setup-welcome .setup-columns { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.setup-shell.setup-welcome .setup-conversation { padding: 24px clamp(24px, 4.5vw, 72px); background: #fdfcf8; justify-content: safe center; overflow-y: auto; }
+.setup-shell.setup-welcome .setup-chat-scroll { flex: 0 0 auto; padding: 0; overflow: visible; }
+.setup-shell.setup-welcome .setup-current-question { margin: 0; padding: 0; border: 0; }
+.setup-welcome .setup-agent-message { margin: 0; }
+.setup-welcome .setup-question-bubble { width: 100%; }
+.forge-welcome-eyebrow { display: flex; align-items: center; gap: 9px; color: #74716a; font-size: 10px; letter-spacing: .14em; font-weight: 600; }
+.forge-welcome-eyebrow i { width: 5px; height: 5px; border-radius: 50%; background: var(--forge-welcome-rust); }
+.forge-welcome-mobile-art { display: none; }
+.forge-welcome-mobile-editor { display: none; }
+.forge-welcome-dialog { width: min(88vw, 640px); max-height: calc(100dvh - 40px); box-sizing: border-box; overflow-y: auto; padding: 20px; border: 1px solid #ddd8cb; border-radius: 18px; background: var(--forge-welcome-canvas, #f3f1ea); color: #34342d; box-shadow: 0 24px 80px #24241d26; }
+.forge-welcome-dialog::backdrop { background: #29292266; backdrop-filter: blur(3px); }
+.forge-welcome-dialog-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.forge-welcome-dialog-header > span { font-size: 10px; letter-spacing: .1em; color: #706a5d; }
+.setup-shell .forge-welcome-dialog-header button { display: inline-flex; align-items: center; gap: 8px; min-height: 44px; padding: 8px; border: 0; border-radius: 6px; background: transparent; color: #454239; font-size: 13px; }
+.forge-welcome-dialog-header button:focus-visible { outline: 2px solid #a54e2d; outline-offset: 3px; }
+.forge-welcome-dialog .forge-welcome-portrait { padding-top: 8px; }
+.forge-welcome-dialog .forge-portrait-eyebrow { display: none; }
+.forge-welcome-dialog .forge-portrait-art { width: min(100%, 48dvh); }
+.forge-welcome-dialog .forge-portrait-caption h2 { font-size: 28px; }
+.forge-welcome-dialog .forge-portrait-caption small { margin-top: 14px; }
+.setup-shell.setup-welcome .setup-welcome-intro h1 { font-family: Newsreader, Georgia, "Times New Roman", serif; font-size: clamp(40px, 4vw, 56px) !important; font-weight: 400; line-height: 1.08 !important; letter-spacing: -.025em; margin: 20px 0 18px; max-width: 15ch; text-wrap: balance; transition: font-size .18s, margin .18s; }
+.setup-welcome-intro > p { color: #625e54; max-width: 43ch; font-size: 16px; line-height: 1.65; margin: 0; text-wrap: pretty; }
+.forge-welcome-purpose { display: flex; align-items: center; gap: 8px; color: #625e54; font-size: 10px; line-height: 1.5; letter-spacing: .12em; }
+.forge-welcome-purpose i { flex: 0 0 5px; width: 5px; height: 5px; border-radius: 50%; background: #bb5835; }
+.forge-welcome-next { margin-top: 13px; max-width: 49ch; color: #625e54; font-size: 12px; line-height: 1.65; }
+.forge-welcome-next > span { display: block; margin-bottom: 3px; color: #77746b; font-size: 11px; }
+.setup-shell .forge-welcome-next p { line-height: 1.6; }
+.forge-mobile-journey { flex: 0 0 auto; padding: 10px 24px; border-bottom: 1px solid #e8e6df; background: #f7f6f1; }
+.forge-mobile-journey .forge-welcome-orientation { justify-content: center; gap: 14px; font-size: 11px; }
+.forge-mobile-journey .forge-welcome-orientation li + li::before { width: 16px; margin-right: 0; }
+/* The opening stays recognizable while the current question takes focus. */
+.setup-shell.setup-welcome .setup-conversation:has(.forge-starting-help__toggle[aria-expanded="true"], .forge-starting-help__handoff) .setup-welcome-intro h1 { font-size: 24px !important; line-height: 1.25 !important; max-width: none; margin: 12px 0 0; color: #625e54; }
+.setup-welcome .setup-conversation:has(.forge-starting-help__toggle[aria-expanded="true"], .forge-starting-help__handoff) .setup-welcome-intro > p { display: none; }
+.setup-shell.setup-welcome:not(.setup-welcome-provider) .setup-composer-area { flex: 0 0 auto; padding: 26px 0 0; border: 0; background: transparent; }
+.setup-shell.setup-welcome:not(.setup-welcome-provider) .cc-composer__shell { display: block; border-radius: 14px; border: 1px solid #ceccc3; padding: 0; background: #fffefa; box-shadow: 0 4px 18px #24241d06; transition: border-color .2s, box-shadow .2s; }
+.forge-welcome-input-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 17px 0 10px; }
+.setup-composer-area:has(.forge-starting-help__toggle[aria-expanded="true"]) .forge-welcome-input-heading { display: flex; }
+.setup-composer-area:has(.forge-starting-help__handoff) .forge-welcome-input-heading { display: flex; }
+.forge-welcome-input-heading > label { color: #454239; font-size: 14px; line-height: 1.5; font-weight: 500; }
+.forge-welcome-input-heading > small { color: #77746b; font-size: 11px; }
+.forge-welcome-input-heading[data-context="false"] > small { display: none; }
+.forge-welcome-input-heading[data-context="false"] { margin-top: 0; }
+.setup-welcome:not(.setup-welcome-provider) .cc-composer__shell:focus-within { border-color: #ad6d50; box-shadow: 0 0 0 3px #bb583518; }
+.setup-welcome:not(.setup-welcome-provider) .cc-composer__textarea:focus { outline: none; }
+.setup-shell.setup-welcome:not(.setup-welcome-provider) .setup-composer-area .cc-composer__textarea { height: 100px; min-height: 100px; max-height: 25dvh; padding: 17px 18px 8px; font-size: 15px; line-height: 1.6; }
+.forge-welcome-composer-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px 12px; }
+.forge-welcome-composer-actions button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; border-radius: 8px; min-height: 40px; font-size: 13px; }
+.forge-welcome-attach { background: transparent; border: 0; color: #75736b; padding: 8px; }
+.forge-welcome-attach:hover:not(:disabled) { background: #f0eee7; color: #38372f; }
+.setup-shell .setup-welcome-continue { background: #a54e2d; color: #fffdf6; border: 1px solid #a54e2d; padding: 9px 15px; }
+.setup-shell .setup-welcome-continue:hover:not(:disabled) { background: #8d4024; }
+.setup-shell .setup-welcome-continue:disabled { opacity: 1; border-color: #e0dcd2; background: #eeece5; color: #79756c; }
+.forge-welcome-hint { font-size: 12px; line-height: 1.6; color: #646258; margin: 10px 0 0; }
+.forge-welcome-shortcuts { display: block; margin-top: 8px; color: #77746b; font-size: 11px; line-height: 1.5; }
+.forge-welcome-shortcuts kbd { font-family: inherit; font-size: inherit; }
+.forge-welcome-resume { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 18px 0; margin-top: 24px; border-top: 1px solid #e7e5dd; }
+.forge-welcome-resume > div { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.forge-welcome-resume span { color: #77746b; font-size: 11px; }
+.forge-welcome-resume strong { color: #34342d; font-size: 14px; font-weight: 500; overflow-wrap: anywhere; }
+.forge-welcome-resume small { color: #69675f; font-size: 11px; }
+.setup-shell .forge-welcome-resume button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; flex-shrink: 0; padding: 9px 12px; border: 1px solid #d8d4c8; border-radius: 8px; background: #fffef9; color: #454239; font-size: 12px; }
+.setup-shell .forge-welcome-resume button:hover:not(:disabled) { border-color: #ad6d50; background: #f6f4ec; }
+.forge-welcome-resume button:focus-visible { outline: 2px solid #a54e2d; outline-offset: 3px; }
+.forge-welcome-resume button:disabled { opacity: .45; }
+.forge-welcome-resume .forge-welcome-resume-content { flex: 1; }
+.forge-welcome-resume .saved-setup-build-status > p:first-child { margin-top: 9px; }
+.forge-welcome-resume .saved-setup-build-status strong { font-size: 12px; color: #59564b; }
+.forge-welcome-resume .saved-setup-build-status > p:nth-of-type(2) { max-width: 46ch; margin: 4px 0 6px; font-size: 12px; line-height: 1.6; }
+.setup-shell .forge-welcome-resume .saved-setup-build-status button { min-height: 42px; padding: 9px 13px; margin-top: 3px; border: 1px solid #34342d; border-radius: 7px; background: #34342d; color: #fffdf7; }
+.setup-shell .forge-welcome-resume .saved-setup-build-status button:hover:not(:disabled) { background: #49473e; color: #fffdf7; text-decoration: none; }
+.setup-shell .forge-welcome-resume-conversation { align-self: flex-start; margin-top: 23px; }
+@media (max-width: 480px) {
+  .forge-welcome-resume { flex-wrap: wrap; gap: 10px; }
+  .forge-welcome-resume .forge-welcome-resume-content { flex-basis: 100%; }
+  .setup-shell .forge-welcome-resume-conversation { margin-top: 0; min-height: 40px; }
+}
+/* Optional first-minute help only. Root owns integration with the opening layout. */
+.forge-starting-help { flex-shrink: 0; min-width: 0; margin-top: 20px; border: 1px solid #e2dfd4; border-radius: 10px; background: #f6f4ec; container: forge-help / inline-size; }
+.forge-starting-help__invitation { padding: 9px 16px 12px; }
+.setup-shell .forge-starting-help__toggle { display: flex; justify-content: space-between; align-items: center; gap: 12px; width: 100%; min-height: 44px; padding: 0; border: 0; background: transparent; color: #34342d; font-size: 14px; font-weight: 500; text-align: left; }
+.forge-starting-help__toggle::after { content: "+"; display: grid; place-items: center; flex: 0 0 24px; height: 24px; border: 1px solid #e2dfd4; border-radius: 50%; color: #a54e2d; font-size: 16px; font-weight: 400; }
+.forge-starting-help__toggle[aria-expanded="true"]::after { content: "-"; }
+.forge-starting-help__invitation p { margin: 2px 0 0; color: #6a665b; font-size: 12px; line-height: 1.5; }
+.forge-starting-help__content:not([hidden]) { padding: 0 16px 16px; }
+.forge-starting-help__step-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 9px; }
+.forge-starting-help__progress { margin: 0; color: #817969; font-size: 10px; line-height: 1.5; letter-spacing: .075em; text-transform: uppercase; }
+.forge-starting-help__step-marks { display: flex; gap: 5px; }
+.forge-starting-help__step-marks i { width: 16px; height: 3px; border-radius: 2px; background: #ded8cb; }
+.forge-starting-help__step-marks i[data-current="true"] { background: #bb5835; }
+.forge-starting-help__content h3 { margin: 0 0 14px; color: #34342d; font-family: Newsreader, Georgia, "Times New Roman", serif; font-size: 28px; font-weight: 400; line-height: 1.2; letter-spacing: -.025em; scroll-margin-block: 16px 260px; }
+.forge-starting-help__answer { margin: -5px 0 12px; color: #6a665b; font-size: 12px; line-height: 1.5; }
+.forge-starting-help__notice { margin: 0 0 12px; color: #777164; font-size: 12px; line-height: 1.5; }
+.forge-starting-help__choices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
+.forge-starting-help__choice:last-child { grid-column: 1 / -1; }
+.setup-shell .forge-starting-help__choice { display: flex; align-items: flex-start; gap: 9px; min-width: 0; min-height: 66px; padding: 12px 11px; border: 1px solid #d8d4c8; border-radius: 8px; background: #fdfcf8; color: #454239; font-size: 13px; line-height: 1.4; text-align: left; transition: border-color .15s, background .15s; }
+.setup-shell .forge-starting-help__choice:hover:not(:disabled) { border-color: #b5aa95; background: #fcfaf4; }
+.forge-starting-help__choice-mark { display: block; flex: 0 0 12px; height: 12px; margin-top: 3px; border: 1px solid #b9b3a5; border-radius: 50%; }
+.forge-starting-help__choice-copy { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.forge-starting-help__choice-copy strong { font-size: 13px; font-weight: 500; }
+.forge-starting-help__choice-copy small { color: #777164; font-size: 12px; line-height: 1.4; }
+.setup-shell .forge-starting-help__choice:last-child { min-height: 54px; }
+.setup-shell .forge-starting-help__choice[aria-pressed="true"] { border-color: #bb7655; background: #f4e8db; color: #8c3e21; }
+.forge-starting-help__choice[aria-pressed="true"] .forge-starting-help__choice-mark { border-color: #a54e2d; background: #a54e2d; box-shadow: inset 0 0 0 3px #f4e8db; }
+.forge-starting-help button:focus-visible, .forge-starting-help h3:focus-visible { outline: 2px solid #a54e2d; outline-offset: 3px; }
+.setup-welcome .forge-starting-help--inline { margin: 16px 0 0; border: 0; border-radius: 0; background: transparent; }
+.forge-starting-help--inline .forge-starting-help__invitation { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 4px 12px; padding: 0; background: transparent; }
+.setup-shell .forge-starting-help--inline .forge-starting-help__toggle { display: inline-flex; justify-content: flex-start; gap: 8px; width: auto; min-width: 0; min-height: 44px; padding: 8px 0; border: 0; border-radius: 4px; background: transparent; color: #994523; font-size: 13px; font-weight: 500; line-height: 1.4; text-align: left; }
+.forge-starting-help--inline .forge-starting-help__invitation button::before { content: ""; width: 16px; height: 16px; flex: 0 0 16px; border: 0; border-radius: 0; background: currentColor; mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='none' stroke='black' stroke-width='1.2'/%3E%3Ccircle cx='8' cy='8' r='1.8'/%3E%3C/svg%3E") center / contain no-repeat; }
+.setup-shell .forge-starting-help--inline .forge-starting-help__invitation button[aria-expanded="true"] { color: #713319; }
+.setup-shell .forge-starting-help--inline .forge-starting-help__invitation button:hover:not(:disabled) { color: #713319; text-decoration: underline; text-underline-offset: 4px; }
+.forge-starting-help--inline .forge-starting-help__toggle::after { display: none; }
+.setup-shell .forge-starting-help--inline .forge-starting-help__toggle[aria-expanded="true"] { min-height: 32px; padding: 4px 0; font-size: 12px; }
+.forge-starting-help--inline .forge-starting-help__toggle[aria-expanded="true"]::before { display: none; }
+.setup-welcome .setup-composer-area:has(.forge-starting-help__toggle[aria-expanded="true"]) .forge-welcome-resume,
+.setup-welcome .setup-composer-area:has(.forge-starting-help__toggle[aria-expanded="true"]) .forge-example-disclosure,
+.setup-welcome .setup-composer-area:has(.forge-starting-help__toggle[aria-expanded="true"]) .forge-welcome-mobile-editor { display: none; }
+.forge-starting-help--inline .forge-starting-help__step-header { justify-content: flex-start; gap: 8px; }
+.forge-starting-help--inline .forge-starting-help__step-marks { margin-right: auto; }
+.setup-shell .forge-starting-help--inline .forge-starting-help__step-header .forge-starting-help__back { min-height: 32px; padding: 4px 0; }
+.forge-starting-help--inline .forge-starting-help__invitation[data-entry-options="true"] { flex-wrap: nowrap; gap: 12px; }
+.forge-starting-help__encouragement { color: #706a5d; font-size: 12px; line-height: 1.5; }
+.forge-starting-help__invitation[data-entry-options="true"] .forge-starting-help__toggle { flex-shrink: 0; }
+/* Keep the original disclosure node while placing it in the question header. */
+.forge-starting-help--inline:has(.forge-starting-help__toggle[aria-expanded="true"]) { position: relative; }
+.forge-starting-help--inline:has(.forge-starting-help__toggle[aria-expanded="true"]) > .forge-starting-help__invitation { position: absolute; top: 13px; right: 16px; z-index: 1; }
+.setup-shell .forge-starting-help--inline .forge-starting-help__toggle[aria-expanded="true"] { width: auto; min-height: 44px; padding: 10px 0 10px 10px; }
+.forge-starting-help--inline .forge-starting-help__content:not([hidden]) { margin-top: 0; padding: 16px; border: 1px solid #e2dfd4; border-radius: 10px; background: #f6f4ec; }
+.forge-starting-help--inline .forge-starting-help__step-header { min-height: 38px; padding-right: 112px; margin-bottom: 8px; }
+.setup-shell .forge-starting-help--inline .forge-starting-help__step-header .forge-starting-help__back { min-height: 44px; padding: 10px 0; }
+
+.forge-starting-help__invitation[data-context-summary="true"] { flex-wrap: nowrap; gap: 12px; margin-bottom: 8px; }
+.forge-starting-help__summary { min-width: 0; color: #777164; font-size: 13px; line-height: 1.5; }
+.forge-starting-help__summary > span { padding: 0 3px; }
+.forge-starting-help__invitation[data-context-summary="true"] .forge-starting-help__toggle { flex-shrink: 0; }
+.forge-starting-help__invitation[data-context-summary="true"] .forge-starting-help__toggle::before { display: none; }
+.forge-starting-help__context { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.forge-starting-help__context span { padding: 4px 8px; border: 1px solid #e2dfd4; border-radius: 5px; color: #777164; font-size: 11px; line-height: 1.4; }
+.forge-starting-help__preview { margin: 0; padding: 0; border: 0; color: #646052; font-size: 12px; line-height: 1.6; }
+.forge-starting-help__preview p { margin: 0 0 12px; }
+.forge-starting-help__preview .forge-starting-help__task-prompt { color: #454239; font-size: 14px; line-height: 1.55; }
+.forge-starting-help__handoff { padding: 0 0 8px; }
+.forge-starting-help__handoff .forge-starting-help__task-prompt { margin: 0 0 6px; color: #34342d; font-family: Newsreader, Georgia, serif; font-size: 26px; line-height: 1.25; }
+.forge-starting-help__handoff label.forge-starting-help__task-prompt { display: block; cursor: text; }
+.forge-starting-help__task-example { margin: 0; color: #625e54; font-size: 13px; line-height: 1.6; text-wrap: pretty; }
+.forge-starting-help__suggestion { padding: 12px; border: 1px solid #e2dfd4; border-radius: 7px; background: #fdfcf8; color: #454239; overflow-wrap: anywhere; }
+.forge-starting-help__preview-actions, .forge-starting-help__navigation { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.forge-starting-help__navigation { margin-top: 10px; }
+.setup-shell .forge-starting-help__use, .setup-shell .forge-starting-help__keep, .setup-shell .forge-starting-help__back { min-height: 44px; padding: 9px 12px; border: 1px solid transparent; border-radius: 7px; font-size: 12px; line-height: 1.4; }
+.setup-shell .forge-starting-help__preview-actions .forge-starting-help__use { border-color: #a54e2d; background: #a54e2d; color: #fffdf6; }
+.setup-shell .forge-starting-help__preview-actions .forge-starting-help__use:hover:not(:disabled) { border-color: #8d4024; background: #8d4024; }
+.setup-shell .forge-starting-help__keep, .setup-shell .forge-starting-help__back { background: transparent; color: #646052; }
+.setup-shell .forge-starting-help__keep:hover:not(:disabled), .setup-shell .forge-starting-help__back:hover:not(:disabled) { background: #eee9dc; color: #34342d; }
+.setup-shell .forge-starting-help button:disabled { opacity: .45; }
+@container forge-help (max-width: 280px) {
+  .forge-starting-help__choices { grid-template-columns: minmax(0, 1fr); }
+  .forge-starting-help--inline .forge-starting-help__invitation[data-entry-options="true"] { flex-wrap: wrap; gap: 0 12px; }
+}
+.forge-example-disclosure { flex-shrink: 0; margin-top: 16px; color: #6a665b; font-size: 12px; }
+.forge-example-disclosure > summary { cursor: pointer; min-height: 32px; padding: 6px 0; }
+.forge-example-disclosure > summary:focus-visible { outline: 2px solid #a54e2d; outline-offset: 3px; }
+.setup-welcome .forge-example-disclosure .forge-examples-heading { display: none; }
+.setup-shell.setup-welcome .forge-example-disclosure .setup-starting-points { margin-top: 5px; }
+.setup-shell.setup-welcome .setup-starting-points { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0 20px; margin-top: 14px; }
+.setup-welcome .setup-starting-points > span { grid-column: 1 / -1; margin-bottom: 3px; font-size: 11px; }
+.setup-welcome .forge-examples-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; color: #56534a; }
+.forge-examples-heading small { color: #77746b; font-size: 10px; font-weight: 400; }
+.setup-shell.setup-welcome .setup-starting-points > button { padding: 13px 0; min-height: 66px; border: 0; border-top: 1px solid #e7e5dd; border-radius: 0; box-shadow: none; font-size: 13px; background: transparent; gap: 12px; justify-content: space-between; text-align: left; transition: background .15s, border-color .15s; }
+.setup-shell.setup-welcome .setup-starting-points > button:hover:not(:disabled) { background: #f6f4ec; border-color: #aaa493; }
+.setup-welcome .setup-starting-points button:focus-visible { outline: 2px solid #a54e2d; outline-offset: 3px; }
+.setup-starting-point-copy { display: flex; flex-direction: column; gap: 3px; }
+.setup-starting-point-copy strong { font-size: inherit; font-weight: 500; color: #34342d; }
+.setup-starting-point-copy small { color: #77746b; font-size: 11px; line-height: 1.4; }
+.forge-example-action { display: flex; align-items: center; gap: 5px; flex-shrink: 0; color: #77746b; font-size: 10px; white-space: nowrap; }
+.forge-example-action > span { font-size: 13px; }
+.setup-welcome .setup-starting-points > button .forge-example-action,
+.setup-welcome .setup-starting-points > button .forge-example-action > span { color: #686357; }
+.setup-welcome .setup-starting-points details { width: 100%; font-size: 12px; }
+.setup-welcome .setup-starting-points details { grid-column: 1 / -1; margin-top: 10px; padding: 13px 15px; border: 1px solid #e3dfd4; border-radius: 8px; background: #f8f6ef; }
+.setup-welcome .setup-starting-points details p { line-height: 1.65; color: #57534a; }
+.setup-welcome .setup-starting-points details small { line-height: 1.6; color: #77746b; }
+.forge-example-preview-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.setup-shell .forge-example-preview-actions button { min-height: 44px; padding: 9px 12px; border: 1px solid #d8d4c8; border-radius: 7px; background: #fffef9; color: #454239; font-size: 12px; line-height: 1.4; }
+.setup-shell .forge-example-preview-actions button:first-child { border-color: #a54e2d; background: #a54e2d; color: #fffdf6; }
+.setup-shell .forge-example-preview-actions button:hover:not(:disabled) { border-color: #8d4024; }
+.forge-starting-point-help { grid-column: 1 / -1; width: 100%; display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; margin: 0 0 2px; font-size: 12px; color: #69675f; }
+.setup-shell .forge-starting-point-help button { min-height: 32px; padding: 5px 0; border: 0; background: transparent; color: #994523; font-size: 12px; }
+.setup-shell .forge-starting-point-help button:hover:not(:disabled) { color: #713319; text-decoration: underline; text-underline-offset: 3px; }
+.setup-welcome:not(.setup-welcome-provider) .setup-composer-foot { display: none; }
+.setup-shell.setup-welcome .setup-plan-pane { background: var(--forge-welcome-canvas); border-left: 1px solid #e7e5dc; }
+.setup-shell.setup-welcome .evolving-plan { height: 100%; }
+.setup-shell.setup-welcome .evolving-plan > .ep-inner { height: 100%; gap: 0; padding: 0 28px 18px; }
+.forge-welcome-portrait { display: flex; flex: 1; min-height: 0; flex-direction: column; justify-content: center; align-items: center; text-align: center; padding-top: 20px; }
+.forge-portrait-eyebrow { font-size: 10px; font-weight: 500; letter-spacing: .14em; color: #706a5d; }
+.forge-portrait-art { display: block; width: min(100%, 470px, 59dvh); aspect-ratio: 1; overflow: visible; margin: 4px 0 8px; }
+/* Fit the illustration to its available pane, including gathered context below it. */
+.setup-shell .setup-plan-pane .forge-welcome-portrait {
+  display: grid;
+  grid-template-rows: auto minmax(120px, 1fr) auto;
+  justify-items: center;
+  gap: 10px;
+}
+.setup-shell .setup-plan-pane .forge-portrait-art {
+  width: auto;
+  height: min(100%, 470px);
+  max-width: 100%;
+  margin: 0;
+  align-self: center;
+}
+.ep-illustrated:has(.ep-brief) .forge-portrait-caption h2,
+.ep-illustrated:has(.ep-brief) .forge-portrait-caption > p {
+  display: none;
+}
+.ep-illustrated:has(.ep-brief) .forge-portrait-caption small {
+  margin-top: 0;
+}
+.forge-portrait-caption h2 { font-family: Newsreader, Georgia, "Times New Roman", serif; font-size: clamp(24px, 2.3vw, 32px); font-weight: 400; line-height: 1.2; letter-spacing: -.025em; margin: 0 0 12px; text-wrap: balance; }
+.forge-portrait-caption p { font-size: 14px; line-height: 1.65; color: #646258; margin: 0; }
+.forge-portrait-caption small { display: block; font-size: 12px; color: #646258; margin-top: 21px; }
+.setup-welcome .forge-portrait-caption small { margin-top: 12px; font-size: 11px; color: #777164; }
+.setup-shell .forge-motion-toggle { min-height: 44px; padding: 10px 12px; margin-top: 8px; border: 0; border-radius: 6px; background: transparent; color: #777164; font-size: 11px; }
+.setup-shell .forge-motion-toggle:hover { color: #994523; background: #e8e4d94d; }
+.forge-motion-toggle:focus-visible { outline: 2px solid #a54e2d; outline-offset: 2px; }
+.ep-illustrated { height: 100%; }
+.ep-illustrated > .ep-inner { height: 100%; }
+.ep-illustrated .ep-header, .ep-illustrated .ps-empty, .ep-illustrated .ep-empty-facts { display: none; }
+.ep-illustrated .ep-adjust { flex-shrink: 0; border: 0; }
+.ep-illustrated .ep-adjust > span { display: none; }
+.ep-illustrated .ep-adjust button { margin-left: auto; }
+.setup-shell.setup-welcome .ep-adjust { flex-shrink: 0; padding-top: 18px; font-size: 10px; color: #8a867a; border: 0; }
+.setup-welcome .ep-adjust > span { display: none; }
+.setup-welcome .ep-adjust button { margin-left: auto; font-size: 11px; }
+.setup-shell.setup-welcome-provider .setup-conversation { padding: 24px; justify-content: flex-start; }
+.setup-shell.setup-welcome-provider .setup-chat-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.setup-welcome-provider .setup-current-question { display: none; }
+.setup-welcome-provider .setup-composer-area { display: none; }
+@media (min-width: 761px) and (max-width: 1050px) {
+  .setup-shell.setup-welcome .setup-columns { grid-template-columns: minmax(0, 1.2fr) minmax(0, .8fr); }
+  .setup-shell.setup-welcome .setup-conversation { padding-inline: 28px; }
+  .setup-shell.setup-welcome .evolving-plan > .ep-inner { padding-inline: 16px; }
+  .setup-shell.setup-welcome .setup-plan-pane .forge-portrait-art { height: min(100%, 340px); }
+  .setup-welcome .forge-portrait-caption h2 { font-size: 26px; }
+  .setup-welcome .forge-portrait-caption p { font-size: 13px; }
+}
+@media (max-width: 760px) {
+  .setup-header > .forge-welcome-orientation { display: none; }
+  .setup-welcome .setup-mobile-tabs { display: none; }
+  .setup-shell.setup-welcome .setup-columns { display: flex; }
+  .setup-shell.setup-welcome .setup-conversation { display: flex; padding: 22px 24px 24px; justify-content: flex-start; width: 100%; }
+  .setup-welcome .setup-plan-pane { display: none !important; }
+  .setup-welcome-intro { position: relative; }
+  .forge-welcome-mobile-art { display: flex; align-items: center; gap: 14px; margin: 0 0 14px; }
+  .setup-shell .forge-welcome-preview-button { display: flex; flex: 0 0 72px; flex-direction: column; align-items: center; gap: 3px; width: 72px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: #994523; font-size: 11px; }
+  .forge-welcome-preview-button > span:first-child { display: block; width: 72px; height: 72px; }
+  .forge-welcome-preview-button:focus-visible { outline: 2px solid #a54e2d; outline-offset: 3px; }
+  .forge-welcome-mobile-caption { display: grid; gap: 6px; min-width: 0; }
+  .forge-welcome-mobile-caption .forge-welcome-orientation { gap: 10px; font-size: 11px; }
+  .forge-welcome-mobile-caption .forge-welcome-orientation li { gap: 5px; }
+  .forge-welcome-mobile-caption .forge-welcome-orientation li + li::before { display: none; }
+  .forge-welcome-mobile-caption .forge-welcome-orientation li > span { width: 16px; height: 16px; font-size: 9px; }
+  .forge-welcome-mobile-caption > span { color: #706a5d; font-size: 12px; }
+  .forge-welcome-purpose { font-size: 10px; }
+  .setup-welcome .forge-welcome-eyebrow { display: none; }
+  .setup-shell.setup-welcome .setup-welcome-intro h1 { max-width: none; font-size: 36px !important; margin-top: 2px; margin-bottom: 14px; }
+  .setup-shell.setup-welcome .setup-conversation:has(.forge-starting-help__toggle[aria-expanded="true"], .forge-starting-help__handoff) .setup-welcome-intro h1 { font-size: 18px !important; margin: 8px 0 0; }
+  .setup-welcome .setup-conversation:has(.forge-starting-help__toggle[aria-expanded="true"], .forge-starting-help__handoff) .setup-welcome-intro > :not(.forge-welcome-mobile-art, h1, dialog) { display: none; }
+  .setup-welcome:not(.setup-welcome-provider) .setup-conversation:has(.forge-starting-help__toggle[aria-expanded="true"], .forge-starting-help__handoff) .setup-chat-scroll { position: sticky; top: 0; z-index: 2; background: #fdfcf8; }
+  .setup-welcome:not(.setup-welcome-provider) .setup-conversation:has(.forge-starting-help__toggle[aria-expanded="true"], .forge-starting-help__handoff) .setup-composer-area { padding-top: 8px; }
+  .setup-welcome .setup-conversation:has(.forge-starting-help__toggle[aria-expanded="true"], .forge-starting-help__handoff) .forge-welcome-mobile-art { gap: 12px; margin-bottom: 0; padding: 4px 0; }
+  .setup-shell.setup-welcome .setup-conversation:has(.forge-starting-help__toggle[aria-expanded="true"], .forge-starting-help__handoff) .forge-welcome-preview-button { flex-basis: 48px; width: 48px; gap: 0; }
+  .setup-welcome .setup-conversation:has(.forge-starting-help__toggle[aria-expanded="true"], .forge-starting-help__handoff) .forge-welcome-preview-button > span:first-child { width: 48px; height: 48px; }
+  .setup-welcome .setup-conversation:has(.forge-starting-help__toggle[aria-expanded="true"], .forge-starting-help__handoff) .forge-welcome-preview-button > span:last-child { display: none; }
+  .setup-welcome .setup-conversation:has(.forge-starting-help__toggle[aria-expanded="true"], .forge-starting-help__handoff) .forge-welcome-mobile-caption { gap: 4px; }
+  .setup-welcome-intro > p { font-size: 15px; line-height: 1.6; }
+  .setup-shell.setup-welcome:not(.setup-welcome-provider) .setup-composer-area { padding-top: 20px; }
+  .setup-shell.setup-welcome:not(.setup-welcome-provider) .setup-composer-area .cc-composer__textarea { height: 80px; min-height: 80px; max-height: 27dvh; font-size: 16px; }
+  .forge-welcome-composer-actions { flex-wrap: wrap; gap: 6px; padding: 10px 8px 12px; }
+  .setup-shell.setup-welcome .forge-welcome-composer-actions button { min-height: 44px; font-size: 12px; white-space: nowrap; }
+  .setup-shell.setup-welcome .forge-welcome-composer-actions .setup-welcome-continue { flex-grow: 1; }
+  .forge-welcome-shortcuts { display: none; }
+  .forge-starting-help { margin-top: 20px; }
+  .setup-shell .forge-starting-help__toggle { min-height: 44px; font-size: 14px; }
+  .setup-shell .forge-starting-help--inline .forge-starting-help__invitation button { gap: 7px; font-size: 12px; }
+  .setup-welcome .forge-welcome-input-heading { justify-content: flex-start; margin: 10px 0 8px; }
+  .setup-welcome .forge-welcome-input-heading > small { flex-shrink: 0; }
+  .forge-starting-help__choices { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .forge-starting-help--inline .forge-starting-help__content:not([hidden]) { padding: 12px; margin-top: 0; }
+  .forge-starting-help--inline:has(.forge-starting-help__toggle[aria-expanded="true"]) > .forge-starting-help__invitation { top: 8px; right: 12px; }
+  .forge-starting-help--inline .forge-starting-help__step-header { min-height: 36px; padding-right: 100px; gap: 5px; }
+  .forge-starting-help--inline .forge-starting-help__step-header .forge-starting-help__step-marks { display: none; }
+  .setup-shell .forge-starting-help--inline .forge-starting-help__step-header .forge-starting-help__back { margin-left: auto; min-width: 44px; }
+  .forge-starting-help--inline .forge-starting-help__content h3 { font-size: 24px; margin-bottom: 10px; }
+  .setup-shell .forge-starting-help--inline .forge-starting-help__choice { min-height: 52px; padding: 6px 12px; }
+  .forge-starting-help--inline .forge-starting-help__choice-copy { gap: 2px; }
+  .forge-starting-help--inline .forge-starting-help__choice-copy strong { font-size: 14px; line-height: 20px; }
+  .forge-starting-help--inline .forge-starting-help__choice-copy small { font-size: 12px; line-height: 16px; }
+  .forge-starting-help--inline .forge-starting-help__notice { font-size: 11px; margin-bottom: 8px; }
+  /* Both questions keep the explanation visible beside one clear choice. */
+  .forge-starting-help--inline [data-step="help"] .forge-starting-help__notice { margin-bottom: 10px; font-size: 12px; }
+  .forge-starting-help__invitation p { font-size: 12px; }
+  .forge-example-disclosure > summary { min-height: 44px; padding-top: 11px; }
+  .setup-shell .forge-starting-help__use, .setup-shell .forge-starting-help__keep { min-height: 44px; }
+  .setup-shell.setup-welcome .setup-starting-points { grid-template-columns: minmax(0, 1fr); gap: 0; margin-top: 20px; }
+  .setup-welcome .forge-examples-heading { flex-direction: column; gap: 4px; }
+  .setup-shell.setup-welcome .setup-starting-points > button { min-height: 68px; padding: 13px 0; font-size: 13px; gap: 12px; }
+  .setup-welcome .setup-starting-points > button .forge-example-action,
+  .setup-welcome .setup-starting-points > button .forge-example-action > span { color: #994523; }
+  .setup-shell .forge-starting-point-help button { min-height: 44px; }
+  .setup-welcome .forge-welcome-mobile-editor { display: inline-flex; align-items: center; gap: 8px; min-height: 44px; margin-top: 12px; padding: 8px 0; border: 0; background: transparent; color: #74716a; font-size: 12px; }
+  .setup-welcome .forge-welcome-mobile-editor:hover:not(:disabled) { color: #292922; }
+  .setup-welcome .forge-welcome-mobile-editor:disabled { opacity: .45; }
+  .setup-shell.setup-welcome-provider .setup-conversation { padding: 18px 20px; }
+}
+@media (max-width: 359px) {
+  .setup-shell.setup-welcome .setup-conversation { padding-inline: 18px; }
+  .setup-shell.setup-welcome .setup-welcome-intro h1 { font-size: 32px !important; }
+  .forge-welcome-mobile-art { gap: 10px; margin-bottom: 10px; }
+  .setup-shell .forge-welcome-preview-button { flex-basis: 56px; width: 56px; }
+  .forge-welcome-preview-button > span:first-child { width: 56px; height: 56px; }
+}
+@media (max-height: 640px) and (min-width: 761px) {
+  .setup-shell.setup-welcome .setup-conversation { padding-top: 20px; padding-bottom: 20px; justify-content: flex-start; }
+  .setup-shell.setup-welcome .setup-welcome-intro h1 { margin-top: 16px; }
+  .setup-shell.setup-welcome .setup-starting-points { margin-top: 16px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .setup-shell.setup-welcome .setup-welcome-intro h1 { transition: none; }
+}
+
+/* Keep the first conversation in the same balanced frame as the opening. */
+@media (min-width: 761px) {
+  .setup-shell.setup-first-conversation .setup-columns { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .setup-first-conversation .ep-illustrated > .ep-inner { gap: 12px; }
+  .setup-first-conversation .ep-illustrated:has(.ep-brief) .forge-portrait-caption { display: flex; align-items: center; gap: 12px; }
+  .setup-first-conversation .ep-illustrated:has(.ep-brief) .forge-motion-toggle { margin-top: 0; flex-shrink: 0; }
+}
+
+@media (min-width: 761px) and (max-width: 1050px) {
+  .setup-shell.setup-first-conversation .setup-columns { grid-template-columns: minmax(0, 1.2fr) minmax(0, .8fr); }
+}
+
+.setup-shell .forge-organization-start { border: 0; border-radius: 0; background: transparent; margin-top: 4px; }
+.forge-organization-start__header { display: flex; align-items: start; gap: 20px; justify-content: space-between; margin-bottom: 16px; }
+.forge-organization-start__header h2 { font-family: Newsreader, Georgia, serif; font-size: 24px; font-weight: 400; margin: 0 0 8px; }
+.forge-organization-start__header p { margin: 0; color: #716e65; font-size: 13px; line-height: 1.5; }
+.setup-shell .forge-organization-start__header > button { flex-shrink: 0; min-height: 44px; padding: 4px 0; color: #994523; font-size: 13px; }
+.setup-shell.setup-welcome .forge-organization-start .setup-starting-points { gap: 10px; margin: 0; }
+.setup-shell.setup-welcome .forge-organization-start .setup-starting-points > button { padding: 14px; border: 1px solid #e2dfd4; border-radius: 8px; min-height: 88px; background: #fffefa; font-size: 14px; }
+.setup-shell.setup-welcome .forge-organization-start .setup-starting-points > button:last-of-type:nth-of-type(odd) { grid-column: 1 / -1; }
+.forge-organization-start .setup-starting-point-copy small { font-size: 12px; line-height: 1.45; }
+.forge-organization-start__hint { font-size: 12px; color: #716e65; margin: 12px 0 18px; }
+@media (max-width: 540px) {
+  .forge-organization-start__header { flex-direction: column; gap: 8px; }
+}

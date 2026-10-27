@@ -1,0 +1,8 @@
+.env
+.env.gcp
+.state/
+.target-state/
+.backups/
+contacts.generated.toml
+playwright-report/
+test-results/

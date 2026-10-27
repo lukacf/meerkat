@@ -1,0 +1,126 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "name": "Meerkat Meta",
+  "description": "Compose Core agents into applications with memory, routing, policy, approvals and a console.",
+  "theme": "maple",
+  "colors": {
+    "primary": "#607F51",
+    "light": "#8AB576",
+    "dark": "#4F6B43"
+  },
+  "logo": {
+    "light": "/logo.png",
+    "dark": "/logo.png"
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "Introduction",
+        "href": "https://docs.rkat.ai/introduction"
+      },
+      { "label": "GitHub", "href": "https://github.com/lukacf/meerkat-meta" }
+    ]
+  },
+  "redirects": [
+    {
+      "source": "/plans/storage-unification-plan",
+      "destination": "/archive/plans/storage-unification-plan-2026-07"
+    }
+  ],
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Getting started",
+            "pages": ["introduction", "quickstart"]
+          },
+          {
+            "group": "Core concepts",
+            "pages": [
+              "concepts/modules",
+              "concepts/events",
+              "concepts/roster",
+              "concepts/gating",
+              "concepts/access-control",
+              "concepts/delivery",
+              "concepts/mob-announcements",
+              "concepts/scheduling",
+              "concepts/memory",
+              "concepts/sessions"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/unified-runtime",
+              "guides/module-system",
+              "guides/console",
+              "guides/flow-editor",
+              "guides/authentication",
+              "guides/deployment",
+              "guides/upgrading-to-0-9-4",
+              "guides/upgrading-from-mobkit",
+              "guides/continuity-export"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "APIs",
+        "groups": [
+          {
+            "group": "Protocols",
+            "pages": [
+              "api/rpc",
+              "api/rest",
+              "api/sse"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "SDKs",
+        "groups": [
+          {
+            "group": "Rust",
+            "pages": ["sdks/rust"]
+          },
+          {
+            "group": "TypeScript",
+            "pages": ["sdks/typescript"]
+          },
+          {
+            "group": "Python",
+            "pages": ["sdks/python"]
+          }
+        ]
+      },
+      {
+        "tab": "Reference",
+        "groups": [
+          {
+            "group": "Architecture",
+            "pages": [
+              "reference/architecture",
+              "reference/configuration"
+            ]
+          },
+          {
+            "group": "Governance",
+            "pages": [
+              "reference/decisions",
+              "reference/governance"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/lukacf/meerkat-meta"
+    }
+  }
+}

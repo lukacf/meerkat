@@ -1,0 +1,2 @@
+# The Guide's client: the published wheel of its selected Meta release.
+meerkat-meta==0.9.3 --hash=sha256:3e87446e560b94ab6d9d0b3dfac5868b2603db7739316e251aefb5e3b4b4d610

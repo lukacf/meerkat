@@ -1,0 +1,122 @@
+module(
+    name = "meerkat_meta",
+    version = "0.9.5",
+)
+
+bazel_dep(name = "rules_rust", version = "0.70.0")
+bazel_dep(name = "rules_shell", version = "0.8.0")
+bazel_dep(name = "platforms", version = "1.1.0")
+bazel_dep(name = "apple_support", version = "1.24.5")
+bazel_dep(name = "rules_cc", version = "0.2.18")
+bazel_dep(name = "toolchains_buildbuddy", version = "0.0.4")
+
+buildbuddy = use_extension("@toolchains_buildbuddy//:extensions.bzl", "buildbuddy")
+buildbuddy.msvc_toolchain(
+    msvc_edition = "Professional",
+    msvc_release = "2022",
+    msvc_version = "14.42.34433",
+    windows_kits_version = "10.0.26100.0",
+    windows_kits_release = "10",
+)
+use_repo(buildbuddy, "buildbuddy_toolchain")
+
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(
+    edition = "2024",
+    extra_target_triples = [
+        "x86_64-apple-darwin",
+        "x86_64-pc-windows-msvc",
+        "aarch64-unknown-linux-gnu",
+    ],
+    versions = ["1.94.0"],
+)
+use_repo(rust, "rust_toolchains")
+register_toolchains("@rust_toolchains//:all")
+register_toolchains(
+    "//tools/bazel/platforms:meerkat_windows_cc_toolchain_impl",
+    "@buildbuddy_toolchain//:ubuntu_cc_toolchain",
+    "@buildbuddy_toolchain//:ubuntu_cc_toolchain_arm64",
+)
+
+crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+
+# The meerkat machine-authority crates have a build.rs that emits the authority /
+# agent-factory bridge code; that script can't run under crate_universe (it can't
+# locate the workspace-generated suffix), so mirror meerkat's own BUILD targets:
+# turn the build script off, hardcode the suffix env, and force the internal bridge
+# features the script would otherwise enable. (meta's Cargo.toml enables the
+# `live` feature so meerkat-live is in the lock and crate_universe resolves it.)
+crate.annotation(
+    crate = "meerkat",
+    gen_build_script = "off",
+    rustc_env = {"MEERKAT_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_agent_factory_build"},
+)
+# opt-level=0 on the heavy meerkat crates. These are large, generic-heavy crates
+# whose LLVM optimization at opt-1 is the cold-build long pole: meerkat_runtime
+# alone is one ~107-file rustc compile pinned to a single executor that ran 40-90+
+# min optimizing. They are cold-path orchestration/runtime code for an I/O-bound
+# gateway (awaiting LLM/network/comms, not crunching), so dropping their optimization
+# has no measurable runtime effect while collapsing the build time. opt-0 here is
+# appended after the global -Copt-level=1 (.bazelrc), so it wins. Mirrors the
+# existing meerkat-machine-schema opt-0 override below.
+crate.annotation(
+    crate = "meerkat-core",
+    gen_build_script = "off",
+    crate_features = [
+        "__meerkat-generated-authority-bridge",
+        "__meerkat-facade-agent-factory-build",
+    ],
+    # The bridge fns are #[cfg(meerkat_internal_*)] — a cfg, not a feature; the
+    # disabled build.rs would emit these via cargo:rustc-cfg, so set them directly.
+    rustc_flags = [
+        "--cfg=meerkat_internal_generated_authority_bridge",
+        "--cfg=meerkat_internal_agent_factory_build",
+        "-Copt-level=0",
+    ],
+    rustc_env = {
+        "MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge",
+        "MEERKAT_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_agent_factory_build",
+    },
+)
+crate.annotation(
+    crate = "meerkat-runtime",
+    gen_build_script = "off",
+    rustc_flags = ["-Copt-level=0"],
+    rustc_env = {"MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge"},
+)
+crate.annotation(
+    crate = "meerkat-live",
+    gen_build_script = "off",
+    rustc_flags = [
+        "--cfg=meerkat_internal_generated_authority_bridge",
+        "-Copt-level=0",
+    ],
+    rustc_env = {"MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge"},
+)
+crate.annotation(
+    crate = "meerkat-mob",
+    gen_build_script = "off",
+    rustc_flags = ["-Copt-level=0"],
+    rustc_env = {"MEERKAT_GENERATED_AUTHORITY_BRIDGE_SYMBOL_SUFFIX": "bazel_private_generated_authority_bridge"},
+)
+# meerkat-machine-schema expands the machine! DSL into a single 265-arm generated
+# match; optimizing it under --compilation_mode=opt is extremely slow (the same
+# pathological case that OOM'd cargo). It's cold-path schema code, so force
+# opt-level=0 in bazel too (mirrors the Cargo [profile.release.package] override).
+crate.annotation(
+    crate = "meerkat-machine-schema",
+    rustc_flags = ["-Copt-level=0"],
+)
+crate.from_cargo(
+    name = "crates",
+    cargo_lockfile = "//:Cargo.lock",
+    manifests = ["//:Cargo.toml"],
+    supported_platform_triples = [
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-gnu",
+        "x86_64-pc-windows-msvc",
+    ],
+)
+use_repo(crate, "crates")

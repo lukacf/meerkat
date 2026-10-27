@@ -914,6 +914,22 @@ def normalized_manifest(crate_dir: pathlib.Path, root: pathlib.Path, kept_paths:
     return manifest
 
 
+def resolve_problem(stderr: str) -> str:
+    """What keeps a product's declared dependencies from resolving against
+    crates.io, from `cargo metadata`'s stderr: the requirements no published
+    version satisfies and the crates that are not published at all, else
+    cargo's first error line."""
+    unmet = sorted(set(re.findall(r"failed to select a version for the requirement `([^`]+)`", stderr)))
+    unpublished = sorted(set(re.findall(r"no matching package named `([^`]+)` found", stderr)))
+    if unmet or unpublished:
+        return "; ".join([*unmet, *(f"{name} is not on crates.io" for name in unpublished)])
+    errors = [line.strip().removeprefix("error: ") for line in stderr.splitlines() if line.strip().startswith("error: ")]
+    if errors:
+        return errors[0]
+    lines = [line for line in stderr.strip().splitlines() if line.strip()]
+    return lines[-1] if lines else "no output"
+
+
 def repository_env(root: pathlib.Path) -> str:
     """The repository's Cargo [env] table, as a config file for the scratch
     workspace: the floor builds with the build settings CI tested."""
@@ -983,10 +999,7 @@ def floor(root: pathlib.Path, product_name: str, out: pathlib.Path, mode: str, a
     proc = subprocess.run([cargo(), "metadata", "--format-version", "1"], cwd=ws, env=env, capture_output=True, text=True)
     (logs / "resolve.log").write_text(f"$ cargo metadata\n# cwd {ws}\n{proc.stderr}\n# rc {proc.returncode}\n")
     if proc.returncode != 0:
-        missing = sorted(set(re.findall(r"failed to select a version for the requirement `([^`]+)`", proc.stderr)))
-        lines = [line for line in proc.stderr.strip().splitlines() if line.strip()]
-        detail = "; ".join(missing) if missing else (lines[-1] if lines else "no output")
-        return finish("resolve", [f"declared dependency versions do not resolve from crates.io: {detail}"])
+        return finish("resolve", [f"declared dependency versions do not resolve from crates.io: {resolve_problem(proc.stderr)}"])
     resolved = json.loads(proc.stdout)
     problems = []
     for pkg in resolved["packages"]:

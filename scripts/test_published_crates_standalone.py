@@ -26,6 +26,53 @@ def kinds(findings):
     return [kind for kind, _line, _excerpt in findings]
 
 
+class FloorNormalization(unittest.TestCase):
+    """The published-floor check's manifests: what `cargo package` would
+    write for a product crate built against crates.io."""
+
+    def setUp(self):
+        self.root = pathlib.Path("/repo")
+        self.crate = self.root / "connect" / "crates" / "app"
+        self.kept = {(self.root / "connect" / "crates" / "lib").resolve(): "../lib"}
+
+    def normalize(self, name, spec, workspace_deps=None):
+        return pcs.normalized_dependency(name, spec, workspace_deps or {}, self.kept, self.crate, self.root)
+
+    def test_workspace_inheritance_merges_features_and_drops_paths_outside_the_product(self):
+        spec = self.normalize("meerkat", {"workspace": True, "features": ["b"]},
+                              {"meerkat": {"version": "=0.9.6", "path": "crates/meerkat", "features": ["a"]}})
+        self.assertEqual(spec, {"version": "=0.9.6", "features": ["a", "b"]})
+
+    def test_a_product_crate_keeps_its_scratch_path(self):
+        spec = self.normalize("lib", {"version": "=0.9.4", "path": "../lib"})
+        self.assertEqual(spec, {"version": "=0.9.4", "path": "../lib"})
+
+    def test_a_path_dependency_without_a_version_cannot_be_published(self):
+        with self.assertRaises(pcs.UsageError):
+            self.normalize("tool", {"path": "../../../crates/tool"})
+
+    def test_an_undeclared_workspace_dependency_is_refused(self):
+        with self.assertRaises(pcs.UsageError):
+            self.normalize("missing", {"workspace": True})
+
+
+class FloorResolveProblem(unittest.TestCase):
+    def test_an_unmet_requirement_is_named(self):
+        stderr = "error: failed to select a version for the requirement `meerkat = \"=0.9.6\"`\ncandidate versions found which didn't match: 0.9.5\n"
+        self.assertEqual(pcs.resolve_problem(stderr), 'meerkat = "=0.9.6"')
+
+    def test_an_unpublished_crate_is_named(self):
+        stderr = ("    Updating crates.io index\n"
+                  "error: no matching package named `meerkat-machine-codegen` found\n"
+                  "location searched: crates.io index\n"
+                  "required by package `toolkit-catalog v0.9.4 (/ws/toolkit-catalog)`\n")
+        self.assertEqual(pcs.resolve_problem(stderr), "meerkat-machine-codegen is not on crates.io")
+
+    def test_any_other_error_reports_cargos_first_error_line(self):
+        stderr = "warning: x\nerror: failed to parse manifest\n\nCaused by:\n  bad\n"
+        self.assertEqual(pcs.resolve_problem(stderr), "failed to parse manifest")
+
+
 class StripComments(unittest.TestCase):
     def test_comments_blanked_strings_kept_and_lines_preserved(self):
         src = (

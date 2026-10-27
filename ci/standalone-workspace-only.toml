@@ -1026,6 +1026,13 @@ excluded = [
     { path = "tests/docs_machine_authority_alignment.rs", reason = "pins the repository's docs/reference tables against the registry" },
 ]
 
+[crates.meerkat-machine-codegen]
+excluded = [
+    { path = "tests/render_contracts.rs", reason = "reads meerkat-mob's and meerkat-runtime's production sources and calls meerkat-mob" },
+    { path = "tests/runtime_alphabet_parity.rs", reason = "compares the generated alphabets with meerkat-runtime's and meerkat-mob's catalogs" },
+    { path = "tests/runtime_schema_parity.rs", reason = "compares production schemas of meerkat-runtime, meerkat-mob, meerkat-schedule and meerkat-workgraph and embeds meerkat-machine-kernels' generated sources" },
+]
+
 [crates.meerkat-client]
 excluded = [
     { path = "tests/live_client_provider_matrix.rs", reason = "live or system lane (integration-real-tests): needs provider credentials, built binaries or repository fixtures" },

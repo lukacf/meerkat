@@ -4,7 +4,7 @@
 #
 # The product's crate list is MEERKAT_RELEASE_CRATE_LIST, a script that prints
 # the canonical order and answers --levels (default
-# scripts/release-rust-crates.sh, Core's 46 crates; Meta's release passes
+# scripts/release-rust-crates.sh, Core's 47 crates; Meta's release passes
 # scripts/release-meta-crates.sh). Each product publishes only its own list,
 # so a Meta release never republishes Core and the reverse.
 #

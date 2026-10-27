@@ -5,10 +5,12 @@
 //! must supply its actual provisioning-policy owner. Merely implementing this
 //! interface does not authenticate arbitrary application code.
 
-use std::sync::Arc;
-use meerkat_core::{ApprovalPrincipalId, PrincipalRef, RealmId, ToolCallView, agent::ToolDispatchContext};
+use meerkat_core::{
+    ApprovalPrincipalId, PrincipalRef, RealmId, ToolCallView, agent::ToolDispatchContext,
+};
 use meerkat_toolkit::host_lifetime::{NativeHostLifetime, control::HostLifetimeError};
 use serde_json::{Map, Value, json};
+use std::sync::Arc;
 use toolkit_package::Id;
 
 /// The exact retained software action, borrowed only for this policy decision.
@@ -31,8 +33,10 @@ pub struct InstallationPolicyRequest<'a> {
 /// It must not acquire the native publication/phase reservation, perform native
 /// dispatch or call back into the selected NativeHostLifetime.
 pub trait ApplicationInstallationPolicy: Send + Sync {
-    fn reserve(&self, request: &InstallationPolicyRequest<'_>)
-        -> Result<InstallationPolicyDecision, HostLifetimeError>;
+    fn reserve(
+        &self,
+        request: &InstallationPolicyRequest<'_>,
+    ) -> Result<InstallationPolicyDecision, HostLifetimeError>;
 }
 
 pub enum InstallationPolicyDecision {
@@ -74,15 +78,26 @@ pub struct InstalledInstallationPolicy {
     realm: RealmId,
 }
 impl InstalledInstallationPolicy {
-    pub fn new(lifetime: Arc<NativeHostLifetime>, provider: Arc<dyn ApplicationInstallationPolicy>)
-        -> Result<Self, HostLifetimeError>
-    {
+    pub fn new(
+        lifetime: Arc<NativeHostLifetime>,
+        provider: Arc<dyn ApplicationInstallationPolicy>,
+    ) -> Result<Self, HostLifetimeError> {
         lifetime.validate_current_selection()?;
-        let native = lifetime.selected_policy().native_host.as_ref()
+        let native = lifetime
+            .selected_policy()
+            .native_host
+            .as_ref()
             .ok_or(HostLifetimeError::Unavailable)?;
-        Ok(Self { owner: native.grant_administrator.clone(), realm: native.realm.clone(), lifetime, provider })
+        Ok(Self {
+            owner: native.grant_administrator.clone(),
+            realm: native.realm.clone(),
+            lifetime,
+            provider,
+        })
     }
-    pub(crate) fn lifetime(&self) -> &Arc<NativeHostLifetime> { &self.lifetime }
+    pub(crate) fn lifetime(&self) -> &Arc<NativeHostLifetime> {
+        &self.lifetime
+    }
     /// Observe the selected owner before acquiring the approval-state lock.
     /// The native dispatcher still owns its actual admission check; stopped-host
     /// replacement must close/join this owner before changing selected files.
@@ -93,32 +108,56 @@ impl InstalledInstallationPolicy {
     pub(crate) fn actor(&self) -> Result<ApprovalPrincipalId, HostLifetimeError> {
         // Ordinary native actor attribution is derived from the actual qualified
         // principal. It is not a native POLICY origin or human authentication.
-        ApprovalPrincipalId::new(serde_json::to_string(&self.owner)
-            .map_err(|_| HostLifetimeError::InvalidSelection)?)
-            .map_err(|_| HostLifetimeError::InvalidSelection)
+        ApprovalPrincipalId::new(
+            serde_json::to_string(&self.owner).map_err(|_| HostLifetimeError::InvalidSelection)?,
+        )
+        .map_err(|_| HostLifetimeError::InvalidSelection)
     }
-    pub(crate) fn reserve(&self, realm: &RealmId, call: ToolCallView<'_>, context: &ToolDispatchContext,
-        proposal: &Value) -> Result<Option<PolicyEntry>, HostLifetimeError>
-    {
+    pub(crate) fn reserve(
+        &self,
+        realm: &RealmId,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+        proposal: &Value,
+    ) -> Result<Option<PolicyEntry>, HostLifetimeError> {
         self.lifetime.validate_current_selection()?;
-        if realm != &self.realm { return Err(HostLifetimeError::WrongOwner); }
+        if realm != &self.realm {
+            return Err(HostLifetimeError::WrongOwner);
+        }
         let selected = self.lifetime.selected_policy();
-        let request = InstallationPolicyRequest { application: &self.owner,
-            deployment: &selected.deployment, source_policy_sha256: &selected.source_policy_sha256,
-            realm, call, context, proposal };
+        let request = InstallationPolicyRequest {
+            application: &self.owner,
+            deployment: &selected.deployment,
+            source_policy_sha256: &selected.source_policy_sha256,
+            realm,
+            call,
+            context,
+            proposal,
+        };
         match self.provider.reserve(&request)? {
             InstallationPolicyDecision::RequiresHuman => Ok(None),
             InstallationPolicyDecision::Permit(reservation) => {
-                if reservation.owner() != &self.owner { return Err(HostLifetimeError::WrongOwner); }
+                if reservation.owner() != &self.owner {
+                    return Err(HostLifetimeError::WrongOwner);
+                }
                 reservation.check_current()?;
                 // Audit data stays bounded; values must never contain credentials.
                 if reservation.provenance().is_empty()
-                    || serde_json::to_vec(reservation.provenance()).map_err(|_| HostLifetimeError::InvalidSelection)?.len() > 16 * 1024
-                { return Err(HostLifetimeError::InvalidSelection); }
+                    || serde_json::to_vec(reservation.provenance())
+                        .map_err(|_| HostLifetimeError::InvalidSelection)?
+                        .len()
+                        > 16 * 1024
+                {
+                    return Err(HostLifetimeError::InvalidSelection);
+                }
                 let provenance = json!({"application": self.owner, "deployment": selected.deployment,
                     "source_policy_sha256": selected.source_policy_sha256,
                     "decision": reservation.provenance()});
-                Ok(Some(PolicyEntry { policy: self.clone(), reservation, provenance }))
+                Ok(Some(PolicyEntry {
+                    policy: self.clone(),
+                    reservation,
+                    provenance,
+                }))
             }
         }
     }
@@ -148,8 +187,12 @@ pub(crate) struct PolicyEntry {
     provenance: Value,
 }
 impl PolicyEntry {
-    pub(crate) fn provenance(&self) -> &Value { &self.provenance }
-    pub(crate) fn actor(&self) -> Result<ApprovalPrincipalId, HostLifetimeError> { self.policy.actor() }
+    pub(crate) fn provenance(&self) -> &Value {
+        &self.provenance
+    }
+    pub(crate) fn actor(&self) -> Result<ApprovalPrincipalId, HostLifetimeError> {
+        self.policy.actor()
+    }
     pub(crate) fn check_current(&self) -> Result<(), HostLifetimeError> {
         self.reservation.check_current()
     }
@@ -168,8 +211,12 @@ impl PolicyEntry {
 /// evidence of a denial decision. Other owner refusals retain access denial.
 pub(crate) fn tool_refusal(name: &str, error: HostLifetimeError) -> meerkat_core::ToolError {
     match error {
-        HostLifetimeError::Unavailable | HostLifetimeError::NotSettled => meerkat_core::ToolError::unavailable(
-            name, meerkat_core::ToolUnavailableReason::TemporarilyUnavailable),
+        HostLifetimeError::Unavailable | HostLifetimeError::NotSettled => {
+            meerkat_core::ToolError::unavailable(
+                name,
+                meerkat_core::ToolUnavailableReason::TemporarilyUnavailable,
+            )
+        }
         _ => meerkat_core::ToolError::access_denied(name),
     }
 }

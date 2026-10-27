@@ -341,12 +341,24 @@ const NODE_PACKAGE: &[u8] = include_bytes!("fixtures/node-install/package.json")
 // Explicit software declaration fixture, independent of ActivationManifest.
 fn software_documents(profile: LocalSelectionProfile) -> (&'static [u8], Vec<u8>, &'static str) {
     let (bytes, runtime, component, strategy, location, executable, artifacts) = match profile {
-        LocalSelectionProfile::Python => (PYTHON_PACKAGE, "python", "python-server", "python-local",
-            "https://example.invalid/fixture_server-1.0-py3-none-any.whl", "fixture_server/__main__.py",
-            json!({"requirements":"2".repeat(64),"dependency_one-1.0-py3-none-any.whl":"3".repeat(64)})),
-        LocalSelectionProfile::Node => (NODE_PACKAGE, "node", "node-server", "node-local",
-            "https://example.invalid/node-server.tgz", "dist/index.js",
-            json!({"package-json":"2".repeat(64),"package-lock":"3".repeat(64),"dependency-archive":"4".repeat(64)})),
+        LocalSelectionProfile::Python => (
+            PYTHON_PACKAGE,
+            "python",
+            "python-server",
+            "python-local",
+            "https://example.invalid/fixture_server-1.0-py3-none-any.whl",
+            "fixture_server/__main__.py",
+            json!({"requirements":"2".repeat(64),"dependency_one-1.0-py3-none-any.whl":"3".repeat(64)}),
+        ),
+        LocalSelectionProfile::Node => (
+            NODE_PACKAGE,
+            "node",
+            "node-server",
+            "node-local",
+            "https://example.invalid/node-server.tgz",
+            "dist/index.js",
+            json!({"package-json":"2".repeat(64),"package-lock":"3".repeat(64),"dependency-archive":"4".repeat(64)}),
+        ),
         LocalSelectionProfile::Mcpb => panic!("full MCPB path only"),
     };
     let package: IntegrationPackage = serde_json::from_slice(bytes).unwrap();
@@ -367,35 +379,64 @@ fn software_documents(profile: LocalSelectionProfile) -> (&'static [u8], Vec<u8>
 
 #[test]
 fn software_save_cli_retains_exact_new_form_for_python_and_node_and_refuses_cross_form_flags() {
-    for profile in [LocalSelectionProfile::Python,LocalSelectionProfile::Node] {
-        let fixture=Fixture::new();
-        let (package,declaration,component)=software_documents(profile);
-        fs::write(fixture.root.join("package.json"),package).unwrap();
-        fs::write(fixture.root.join("declaration.json"),&declaration).unwrap();
-        let mut args=fixture.save();
-        let selection=args.iter().position(|a| a=="--selection").unwrap();
-        args[selection]="--declaration".into();
-        args[selection+1]=fixture.root.join("declaration.json").display().to_string();
-        replace(&mut args,"--profile",if profile==LocalSelectionProfile::Python {"python"} else {"node"});
-        replace(&mut args,"--component",component);
-        let mut both=args.clone(); both.extend(["--selection".into(),fixture.root.join("selection.json").display().to_string()]);
-        invoke(&both,Some("invalid_arguments"));
-        let mut wrong=args.clone();wrong[selection]="--selection".into();
-        invoke(&wrong,Some("invalid_local_selection"));
+    for profile in [LocalSelectionProfile::Python, LocalSelectionProfile::Node] {
+        let fixture = Fixture::new();
+        let (package, declaration, component) = software_documents(profile);
+        fs::write(fixture.root.join("package.json"), package).unwrap();
+        fs::write(fixture.root.join("declaration.json"), &declaration).unwrap();
+        let mut args = fixture.save();
+        let selection = args.iter().position(|a| a == "--selection").unwrap();
+        args[selection] = "--declaration".into();
+        args[selection + 1] = fixture.root.join("declaration.json").display().to_string();
+        replace(
+            &mut args,
+            "--profile",
+            if profile == LocalSelectionProfile::Python {
+                "python"
+            } else {
+                "node"
+            },
+        );
+        replace(&mut args, "--component", component);
+        let mut both = args.clone();
+        both.extend([
+            "--selection".into(),
+            fixture.root.join("selection.json").display().to_string(),
+        ]);
+        invoke(&both, Some("invalid_arguments"));
+        let mut wrong = args.clone();
+        wrong[selection] = "--selection".into();
+        invoke(&wrong, Some("invalid_local_selection"));
         assert!(!fixture.root.join("recipes.sqlite").exists());
-        let saved=invoke(&args,None);
-        assert_eq!(saved["recipe"]["kind"],"local_software_selection");
-        assert_eq!(saved["recipe"]["document_kind"],"local_software_declaration");
+        let saved = invoke(&args, None);
+        assert_eq!(saved["recipe"]["kind"], "local_software_selection");
+        assert_eq!(
+            saved["recipe"]["document_kind"],
+            "local_software_declaration"
+        );
         assert!(saved["recipe"].get("manifest_digest").is_none());
         assert!(saved["recipe"].get("configuration_digest").is_none());
-        assert_eq!(invoke(&args,None),saved);
-        let mut read=fixture.read(saved["recipe"]["digest"].as_str().unwrap());
-        replace(&mut read,"--name",component);
-        let reopened=invoke(&read,None);
-        assert_eq!(reopened["recipe"]["documents"]["declaration_json"],String::from_utf8(declaration).unwrap());
-        assert_eq!(reopened["recipe"]["documents"]["package_json"],std::str::from_utf8(package).unwrap());
-        assert!(reopened["recipe"]["documents"].get("selection_json").is_none());
-        assert_eq!(invoke(&fixture.args("list"),None)["recipes"],json!([saved["recipe"].clone()]));
+        assert_eq!(invoke(&args, None), saved);
+        let mut read = fixture.read(saved["recipe"]["digest"].as_str().unwrap());
+        replace(&mut read, "--name", component);
+        let reopened = invoke(&read, None);
+        assert_eq!(
+            reopened["recipe"]["documents"]["declaration_json"],
+            String::from_utf8(declaration).unwrap()
+        );
+        assert_eq!(
+            reopened["recipe"]["documents"]["package_json"],
+            std::str::from_utf8(package).unwrap()
+        );
+        assert!(
+            reopened["recipe"]["documents"]
+                .get("selection_json")
+                .is_none()
+        );
+        assert_eq!(
+            invoke(&fixture.args("list"), None)["recipes"],
+            json!([saved["recipe"].clone()])
+        );
     }
 }
 

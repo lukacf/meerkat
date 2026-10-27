@@ -78,9 +78,14 @@ impl HostSelection {
     /// owner is gone. Consuming the OnceLock cannot revive a retired lease.
     pub(crate) fn into_continuation_client(self) -> Result<Option<PairedHostClient>, ConnectError> {
         let state = self.state.into_inner().map_err(|_| ended())?;
-        if !state.retired || state.active.is_some() { return Err(ConnectError::InvalidInput(
-            "The previous PairedHost selection has not settled; no continuation connection was created.".into())); }
-        Ok(self.captured.into_inner().map(|host| host.client.into_inner()))
+        if !state.retired || state.active.is_some() {
+            return Err(ConnectError::InvalidInput(
+            "The previous PairedHost selection has not settled; no continuation connection was created.".into()));
+        }
+        Ok(self
+            .captured
+            .into_inner()
+            .map(|host| host.client.into_inner()))
     }
 
     fn retire_request(&self, token: &Arc<()>) {

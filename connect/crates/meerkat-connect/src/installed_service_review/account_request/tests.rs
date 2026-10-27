@@ -99,25 +99,55 @@ fn optional_tool_policy_preserves_legacy_selection_and_cannot_supply_candidate_a
     let base = proposal();
     assert!(parse(&base.to_string()).unwrap().tool_policy.is_none());
     let policy = json!({"tools":[{"name":"actual.alias","consequence":"r1"}],"catalog":"r0"});
-    let mut requested = base.clone(); requested["tool_policy"] = policy.clone();
+    let mut requested = base.clone();
+    requested["tool_policy"] = policy.clone();
     let parsed = parse(&requested.to_string()).unwrap();
-    assert_eq!(serde_json::to_value(parsed.tool_policy.unwrap()).unwrap(), policy);
-    for field in ["member", "provider_id", "candidate", "approval", "lifetime", "catalog_session"] {
-        let mut changed = requested.clone(); changed["tool_policy"][field] = json!("caller-owned");
+    assert_eq!(
+        serde_json::to_value(parsed.tool_policy.unwrap()).unwrap(),
+        policy
+    );
+    for field in [
+        "member",
+        "provider_id",
+        "candidate",
+        "approval",
+        "lifetime",
+        "catalog_session",
+    ] {
+        let mut changed = requested.clone();
+        changed["tool_policy"][field] = json!("caller-owned");
         assert!(parse(&changed.to_string()).is_err(), "{field}");
     }
     let parsed = parse(&base.to_string()).unwrap();
-    let selection = InstalledAccountSelection { agent: parsed.agent, expires_in_ms: parsed.expires_in_ms,
-        operations: parsed.operations.into_iter().map(|(name, operation)| (name, operation.into())).collect(),
-        tool_policy: None };
-    assert!(serde_json::to_value(selection).unwrap().get("tool_policy").is_none());
+    let selection = InstalledAccountSelection {
+        agent: parsed.agent,
+        expires_in_ms: parsed.expires_in_ms,
+        operations: parsed
+            .operations
+            .into_iter()
+            .map(|(name, operation)| (name, operation.into()))
+            .collect(),
+        tool_policy: None,
+    };
+    assert!(
+        serde_json::to_value(selection)
+            .unwrap()
+            .get("tool_policy")
+            .is_none()
+    );
 }
 
 #[test]
 fn captured_consumer_mismatch_returns_exact_model_visible_guidance_without_resolution() {
     let captured = "mk--fixture_cmain";
-    for proposed in ["Fixture assistant", "original", "fixture:main", "mk--fixture_cmain "] {
-        let error = validate_captured_consumer(SETUP_PUBLIC_SERVICE_REQUEST, proposed, captured).unwrap_err();
+    for proposed in [
+        "Fixture assistant",
+        "original",
+        "fixture:main",
+        "mk--fixture_cmain ",
+    ] {
+        let error = validate_captured_consumer(SETUP_PUBLIC_SERVICE_REQUEST, proposed, captured)
+            .unwrap_err();
         let ToolError::InvalidArguments { name, reason } = error else {
             panic!("a validated name mismatch must explain the exact input correction")
         };
@@ -127,9 +157,23 @@ fn captured_consumer_mismatch_returns_exact_model_visible_guidance_without_resol
         assert!(reason.contains("has not entered access review"));
     }
     assert!(validate_captured_consumer(SETUP_PUBLIC_SERVICE_REQUEST, captured, captured).is_ok());
-    assert!(consumer_agent_schema()["description"].as_str().unwrap().contains("not a display name"));
-    let public = serde_json::to_value(public::installed_public_service_request_definition()).unwrap();
+    assert!(
+        consumer_agent_schema()["description"]
+            .as_str()
+            .unwrap()
+            .contains("not a display name")
+    );
+    let public =
+        serde_json::to_value(public::installed_public_service_request_definition()).unwrap();
     let account = serde_json::to_value(installed_account_request_definition()).unwrap();
-    assert!(public.to_string().contains("Exact native member identifier"));
-    assert!(account.to_string().contains("Exact native member identifier"));
+    assert!(
+        public
+            .to_string()
+            .contains("Exact native member identifier")
+    );
+    assert!(
+        account
+            .to_string()
+            .contains("Exact native member identifier")
+    );
 }

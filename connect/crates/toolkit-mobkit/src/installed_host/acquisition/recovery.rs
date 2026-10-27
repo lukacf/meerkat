@@ -144,7 +144,6 @@ impl SetupDeadlineOwner for InstalledAcquisition {
 }
 
 impl InstalledAcquisition {
-
     fn recovery_disclose<T: Send>(&self, value: T) -> Result<T, SetupError> {
         let mut disclosed = None;
         self.host
@@ -174,7 +173,11 @@ impl InstalledAcquisition {
         // A panic or cancellation also stops new recovery work. The
         // normal path below joins entered handles; Drop makes no join claim.
         struct StopOnDrop(Arc<RecoveryControl>);
-        impl Drop for StopOnDrop { fn drop(&mut self) { self.0.stop(); } }
+        impl Drop for StopOnDrop {
+            fn drop(&mut self) {
+                self.0.stop();
+            }
+        }
         let _stop = StopOnDrop(control.clone());
         self.clone().run_recovery_steps(control.clone()).await;
         control.stop();
@@ -198,23 +201,38 @@ impl InstalledAcquisition {
             // Approved fresh instructions share this existing joined worker.
             // Each input uses the same native submission/source owner; no
             // retained completion is reinterpreted as expanded authority.
-            match self.host.originals.step_service_inputs(&self.store, service_after.as_deref(), PAGE_SIZE).await {
+            match self
+                .host
+                .originals
+                .step_service_inputs(&self.store, service_after.as_deref(), PAGE_SIZE)
+                .await
+            {
                 Ok(page) => {
                     service_after = page.next_after_id;
                     sweep_delayed |= page.had_unavailable_records;
-                },
+                }
                 Err(PrivateOriginalError::Denied) => return,
-                Err(_) => { service_after = None; sweep_delayed = true; }
+                Err(_) => {
+                    service_after = None;
+                    sweep_delayed = true;
+                }
             }
-            if !control.enter() { return; }
+            if !control.enter() {
+                return;
+            }
             let page = self.recovery_page(after.as_deref()).await;
             match page {
                 Ok(mut page) => {
                     sweep_delayed |= page.had_unavailable_records;
                     after = page.next_after_id;
                     for operation in page.expiry_operations {
-                        if !control.enter() { return; }
-                        let result = match SetupStore::new_conditional(self.store.as_ref(), self.scope.clone()) {
+                        if !control.enter() {
+                            return;
+                        }
+                        let result = match SetupStore::new_conditional(
+                            self.store.as_ref(),
+                            self.scope.clone(),
+                        ) {
                             Ok(store) => store.expire(&operation, self.as_ref()).await,
                             Err(error) => Err(error),
                         };
@@ -223,7 +241,7 @@ impl InstalledAcquisition {
                             // state and its existing continuation outbox effect.
                             Ok(_) => {
                                 page.operations.push(operation);
-                            },
+                            }
                             Err(SetupError::Denied | SetupError::WrongScope) => return,
                             // A concurrent selection/terminal transition keeps
                             // its CAS winner; the next sweep reads it afresh.

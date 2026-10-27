@@ -79,21 +79,41 @@ pub(crate) fn software_artifact_selection<'a>(
     let invalid = |message| ValidationError::new(error_path, message);
     let selected = validated.declaration();
     if selected.package != package.identity
-        || selected.package_content_digest != package.content_digest()? {
-        return Err(invalid("selected package differs from the validated package"));
+        || selected.package_content_digest != package.content_digest()?
+    {
+        return Err(invalid(
+            "selected package differs from the validated package",
+        ));
     }
     // Cardinality and plain-service restrictions belong to the private proof.
     let component = &selected.components[0];
     let crate::LocalSoftwareExport::ServiceConnector(export) = &selected.exports[0];
     let portable = &selected.portable_mcp_entries[0];
     if &component.id != component_id || component.runtime != runtime {
-        return Err(invalid("selected component or ecosystem differs from the declaration"));
+        return Err(invalid(
+            "selected component or ecosystem differs from the declaration",
+        ));
     }
-    let crate::LocalSoftwareSource::Artifact { location, content_digest,
-        dependencies: ArtifactDependencies::PinnedClosure { artifacts }, entrypoint } = &component.source
-    else { return Err(invalid("software declaration requires a pinned artifact closure")); };
-    Ok(LocalSoftwareArtifactSelection { component, export, portable, location,
-        content_digest, artifacts, entrypoint })
+    let crate::LocalSoftwareSource::Artifact {
+        location,
+        content_digest,
+        dependencies: ArtifactDependencies::PinnedClosure { artifacts },
+        entrypoint,
+    } = &component.source
+    else {
+        return Err(invalid(
+            "software declaration requires a pinned artifact closure",
+        ));
+    };
+    Ok(LocalSoftwareArtifactSelection {
+        component,
+        export,
+        portable,
+        location,
+        content_digest,
+        artifacts,
+        entrypoint,
+    })
 }
 
 pub(crate) fn local_artifact_selection<'a>(

@@ -550,11 +550,19 @@ pub struct PortableMcpEntry {
     /// Optional declared mapping from service operation IDs to raw MCP names.
     /// This is not tools/list evidence, effect classification or authorization.
     /// Omitting it preserves ordinary software installation and portable export.
-    #[serde(default, deserialize_with = "deserialize_operation_tools", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_operation_tools",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub operation_tools: Option<BTreeMap<Id, String>>,
     /// Complete researched secret environment requirements of this local process.
     /// Names only; not credentials, a native account or permission to launch.
-    #[serde(default, deserialize_with = "deserialize_environment_secret_slots", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_environment_secret_slots",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub environment_secret_slots: Option<EnvironmentSecretSlots>,
 }
 
@@ -570,11 +578,16 @@ fn deserialize_operation_tools<'de, D: serde::Deserializer<'de>>(
                 fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                     formatter.write_str("a bounded map of distinct operation IDs to raw MCP names")
                 }
-                fn visit_map<A: serde::de::MapAccess<'de>>(self, mut access: A) -> Result<Names, A::Error> {
+                fn visit_map<A: serde::de::MapAccess<'de>>(
+                    self,
+                    mut access: A,
+                ) -> Result<Names, A::Error> {
                     let mut names = BTreeMap::new();
                     while let Some((id, name)) = access.next_entry::<Id, String>()? {
                         if names.len() >= 128 || names.insert(id, name).is_some() {
-                            return Err(serde::de::Error::custom("duplicate or excessive raw operation mapping"));
+                            return Err(serde::de::Error::custom(
+                                "duplicate or excessive raw operation mapping",
+                            ));
                         }
                     }
                     Ok(Names(names))
@@ -592,7 +605,9 @@ fn deserialize_operation_tools<'de, D: serde::Deserializer<'de>>(
 #[serde(transparent)]
 pub struct EnvironmentSecretSlots(Vec<String>);
 impl EnvironmentSecretSlots {
-    pub fn names(&self) -> &[String] { &self.0 }
+    pub fn names(&self) -> &[String] {
+        &self.0
+    }
 }
 impl<'de> Deserialize<'de> for EnvironmentSecretSlots {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -602,18 +617,31 @@ impl<'de> Deserialize<'de> for EnvironmentSecretSlots {
             fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 formatter.write_str("1-256 distinct secret environment variable names")
             }
-            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut access: A,
+            ) -> Result<Self::Value, A::Error> {
                 let mut names = BTreeSet::new();
                 while let Some(name) = access.next_element::<String>()? {
                     let mut bytes = name.bytes();
-                    if names.len() >= 256 || !(1..=128).contains(&name.len())
-                        || !bytes.next().is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+                    if names.len() >= 256
+                        || !(1..=128).contains(&name.len())
+                        || !bytes
+                            .next()
+                            .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
                         || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-                        || !names.insert(name) {
-                        return Err(serde::de::Error::custom("invalid, duplicate or excessive secret environment name"));
+                        || !names.insert(name)
+                    {
+                        return Err(serde::de::Error::custom(
+                            "invalid, duplicate or excessive secret environment name",
+                        ));
                     }
                 }
-                if names.is_empty() { return Err(serde::de::Error::custom("secret environment names cannot be empty")); }
+                if names.is_empty() {
+                    return Err(serde::de::Error::custom(
+                        "secret environment names cannot be empty",
+                    ));
+                }
                 Ok(EnvironmentSecretSlots(names.into_iter().collect()))
             }
         }

@@ -18,7 +18,6 @@ pub(crate) struct SourceStatusPage {
     pub(crate) next_after: Option<String>,
 }
 
-
 pub(crate) struct ConsoleTaskStatus {
     pub(crate) projection: serde_json::Value,
     pub(crate) visible_members: Vec<meerkat_mobkit::identity_first::AgentIdentity>,
@@ -33,57 +32,104 @@ pub(super) enum SourcePublicationStatus {
 }
 
 impl PrivateOriginals {
-    pub(crate) async fn source_status_page(&self, after: Option<&str>)
-        -> Result<SourceStatusPage, PrivateOriginalError>
-    {
-        self.source_status_page_from(self.store.as_ref(), after).await
+    pub(crate) async fn source_status_page(
+        &self,
+        after: Option<&str>,
+    ) -> Result<SourceStatusPage, PrivateOriginalError> {
+        self.source_status_page_from(self.store.as_ref(), after)
+            .await
     }
 
-    pub(crate) async fn source_status_page_from(&self, store: &dyn ToolkitStore, after: Option<&str>)
-        -> Result<SourceStatusPage, PrivateOriginalError>
-    {
+    pub(crate) async fn source_status_page_from(
+        &self,
+        store: &dyn ToolkitStore,
+        after: Option<&str>,
+    ) -> Result<SourceStatusPage, PrivateOriginalError> {
         self.status_page_records(store, after, false).await
     }
 
-    pub(crate) async fn source_status_page_with_recovery(&self, after: Option<&str>)
-        -> Result<SourceStatusPage, PrivateOriginalError>
-    {
-        self.status_page_records(self.store.as_ref(), after, true).await
+    pub(crate) async fn source_status_page_with_recovery(
+        &self,
+        after: Option<&str>,
+    ) -> Result<SourceStatusPage, PrivateOriginalError> {
+        self.status_page_records(self.store.as_ref(), after, true)
+            .await
     }
 
-    pub(crate) async fn status_page_records(&self, store: &dyn ToolkitStore, after: Option<&str>, recovery: bool)
-        -> Result<SourceStatusPage, PrivateOriginalError>
-    {
+    pub(crate) async fn status_page_records(
+        &self,
+        store: &dyn ToolkitStore,
+        after: Option<&str>,
+        recovery: bool,
+    ) -> Result<SourceStatusPage, PrivateOriginalError> {
         let lifetime = self.status_lifetime()?;
         let mut cursor = after.map(str::to_owned);
         let mut scanned = 0;
         let mut rows = Vec::new();
         while scanned < MAX_STATUS_RECORDS && rows.len() < MAX_STATUS_TASKS {
-            let batch = store.list_records(&self.scope, cursor.as_deref(),
-                (MAX_STATUS_RECORDS - scanned).min(64) as u32).await.map_err(store_error)?;
-            lifetime.validate_current_selection().map_err(|_| PrivateOriginalError::Denied)?;
-            if batch.is_empty() { return Ok(SourceStatusPage { rows, next_after: None }); }
+            let batch = store
+                .list_records(
+                    &self.scope,
+                    cursor.as_deref(),
+                    (MAX_STATUS_RECORDS - scanned).min(64) as u32,
+                )
+                .await
+                .map_err(store_error)?;
+            lifetime
+                .validate_current_selection()
+                .map_err(|_| PrivateOriginalError::Denied)?;
+            if batch.is_empty() {
+                return Ok(SourceStatusPage {
+                    rows,
+                    next_after: None,
+                });
+            }
             for row in batch {
-                if row.key.scope() != self.scope || cursor.as_ref().is_some_and(|last| row.key.id.as_str() <= last.as_str()) {
+                if row.key.scope() != self.scope
+                    || cursor
+                        .as_ref()
+                        .is_some_and(|last| row.key.id.as_str() <= last.as_str())
+                {
                     return Err(PrivateOriginalError::Conflict);
                 }
                 // Advance only through the processed row. A fetched tail is
                 // read again on Next, including when this row fills the page.
                 cursor = Some(row.key.id.clone());
                 scanned += 1;
-                if row.data.schema == SOURCE_SCHEMA || recovery
-                    && crate::installed_host::operator_setup::service_recovery::is_parent_record(&row) { rows.push(row); }
-                if scanned == MAX_STATUS_RECORDS || rows.len() == MAX_STATUS_TASKS { break; }
+                if row.data.schema == SOURCE_SCHEMA
+                    || recovery
+                        && crate::installed_host::operator_setup::service_recovery::is_parent_record(
+                            &row,
+                        )
+                {
+                    rows.push(row);
+                }
+                if scanned == MAX_STATUS_RECORDS || rows.len() == MAX_STATUS_TASKS {
+                    break;
+                }
             }
         }
-        let lookahead = store.list_records(&self.scope, cursor.as_deref(), 1).await.map_err(store_error)?;
-        lifetime.validate_current_selection().map_err(|_| PrivateOriginalError::Denied)?;
-        if lookahead.len() > 1 || lookahead.iter().any(|row| row.key.scope() != self.scope
-            || cursor.as_ref().is_some_and(|last| row.key.id.as_str() <= last.as_str())) {
+        let lookahead = store
+            .list_records(&self.scope, cursor.as_deref(), 1)
+            .await
+            .map_err(store_error)?;
+        lifetime
+            .validate_current_selection()
+            .map_err(|_| PrivateOriginalError::Denied)?;
+        if lookahead.len() > 1
+            || lookahead.iter().any(|row| {
+                row.key.scope() != self.scope
+                    || cursor
+                        .as_ref()
+                        .is_some_and(|last| row.key.id.as_str() <= last.as_str())
+            })
+        {
             return Err(PrivateOriginalError::Conflict);
         }
-        Ok(SourceStatusPage { rows, next_after: (!lookahead.is_empty()).then_some(cursor)
-            .flatten() })
+        Ok(SourceStatusPage {
+            rows,
+            next_after: (!lookahead.is_empty()).then_some(cursor).flatten(),
+        })
     }
 
     /// The eventual native route supplies a verified qualified human and a
@@ -111,12 +157,17 @@ impl PrivateOriginals {
              impl Fn(&MobMemberBinding) -> Result<bool, PrivateOriginalError> + Sync
          ),
     ) -> Result<serde_json::Value, PrivateOriginalError> {
-        self.service_task_status_projection_rows(store, human, current_member_access, None).await
+        self.service_task_status_projection_rows(store, human, current_member_access, None)
+            .await
     }
 
     async fn service_task_status_projection_rows(
-        &self, store: &dyn ToolkitStore, human: &PrincipalRef,
-        current_member_access: &(impl Fn(&MobMemberBinding) -> Result<bool, PrivateOriginalError> + Sync),
+        &self,
+        store: &dyn ToolkitStore,
+        human: &PrincipalRef,
+        current_member_access: &(
+             impl Fn(&MobMemberBinding) -> Result<bool, PrivateOriginalError> + Sync
+         ),
         rows: Option<&[StoredRecord]>,
     ) -> Result<serde_json::Value, PrivateOriginalError> {
         let page_only = rows.is_some();
@@ -146,9 +197,15 @@ impl PrivateOriginals {
             self.status_current(&lifetime, human, &visible_routes, current_member_access)?;
             let limit = (MAX_STATUS_RECORDS - records_read + 1).min(64) as u32;
             let page = if page_only {
-                match selected.take() { Some(rows) => rows, None => break }
+                match selected.take() {
+                    Some(rows) => rows,
+                    None => break,
+                }
             } else {
-                store.list_records(&self.scope, after.as_deref(), limit).await.map_err(store_error)?
+                store
+                    .list_records(&self.scope, after.as_deref(), limit)
+                    .await
+                    .map_err(store_error)?
             };
             self.status_current(&lifetime, human, &visible_routes, current_member_access)?;
             if page.is_empty() {
@@ -202,13 +259,20 @@ impl PrivateOriginals {
                     .map_err(store_error)?
                     .ok_or(PrivateOriginalError::Unavailable)?;
                 self.status_current(&lifetime, human, &visible_routes, current_member_access)?;
-                let parent_cancelled = self.status_parent(human, member, &record, &parent, &link.original_task)?;
+                let parent_cancelled =
+                    self.status_parent(human, member, &record, &parent, &link.original_task)?;
                 // Reuse the acquisition owner's canonical decoder and exact
                 // task match. Do not reinterpret arbitrary stored JSON here.
                 let snapshot = self.service_task_snapshot(&record).await?;
                 self.status_current(&lifetime, human, &visible_routes, current_member_access)?;
-                if record.operation_cancelled || parent_cancelled || Self::status_task_terminal(&snapshot) {
-                    self.status_terminal_records_settled(store, &stored, &parent, &record, &snapshot).await?;
+                if record.operation_cancelled
+                    || parent_cancelled
+                    || Self::status_task_terminal(&snapshot)
+                {
+                    self.status_terminal_records_settled(
+                        store, &stored, &parent, &record, &snapshot,
+                    )
+                    .await?;
                     continue;
                 }
                 if tasks.len() >= MAX_STATUS_TASKS {
@@ -223,9 +287,11 @@ impl PrivateOriginals {
                 self.status_current(&lifetime, human, &visible_routes, current_member_access)?;
                 let status = self.source_publication_status(&reference, &record)?;
                 let (tone, text, next) = if status == SourcePublicationStatus::Unobserved
-                    && snapshot.state().lifecycle_phase == toolkit_catalog::AcquisitionPhase::Preparing
+                    && snapshot.state().lifecycle_phase
+                        == toolkit_catalog::AcquisitionPhase::Preparing
                     && !snapshot.approved_service_was_admitted()
-                    && snapshot.approved_service() == Some(&self.service_selection(&stored, &record)?)
+                    && snapshot.approved_service()
+                        == Some(&self.service_selection(&stored, &record)?)
                 {
                     // Project the exact canonical reservation already read above.
                     // It does not confirm connection readiness or delivery of B.
@@ -275,8 +341,11 @@ impl PrivateOriginals {
     }
 
     fn status_task_terminal(snapshot: &meerkat_toolkit::setup::SetupSnapshot) -> bool {
-        matches!(snapshot.state().lifecycle_phase,
-            toolkit_catalog::AcquisitionPhase::Cancelled | toolkit_catalog::AcquisitionPhase::Expired)
+        matches!(
+            snapshot.state().lifecycle_phase,
+            toolkit_catalog::AcquisitionPhase::Cancelled
+                | toolkit_catalog::AcquisitionPhase::Expired
+        )
     }
 
     fn status_task_open(
@@ -301,16 +370,24 @@ impl PrivateOriginals {
         // recovery. A partially persisted outer cancellation is not settled
         // merely because this acquisition was already terminal.
         let mut records = vec![source.clone(), parent.clone()];
-        let mut next = self.decode_stored(parent)?.approved_task.map(|link| link.parent.clone());
+        let mut next = self
+            .decode_stored(parent)?
+            .approved_task
+            .map(|link| link.parent.clone());
         while let Some(reference) = next {
             let key = self.key(&reference)?;
             if records.iter().any(|before| before.key == key) || records.len() > MAX_STATUS_TASKS {
                 return Err(PrivateOriginalError::Conflict);
             }
-            let stored = store.get(&key).await.map_err(store_error)?
+            let stored = store
+                .get(&key)
+                .await
+                .map_err(store_error)?
                 .ok_or(PrivateOriginalError::Unavailable)?;
             let ancestor = self.decode_record(&stored, &reference)?;
-            if ancestor.source != record.source { return Err(PrivateOriginalError::Conflict); }
+            if ancestor.source != record.source {
+                return Err(PrivateOriginalError::Conflict);
+            }
             next = ancestor.approved_task.map(|link| link.parent.clone());
             records.push(stored);
         }
@@ -320,7 +397,10 @@ impl PrivateOriginals {
         let mut child_cancelled = true;
         let mut partial_cancellation = false;
         for before in &records {
-            let current = store.get(&before.key).await.map_err(store_error)?
+            let current = store
+                .get(&before.key)
+                .await
+                .map_err(store_error)?
                 .ok_or(PrivateOriginalError::Unavailable)?;
             let prior = self.decode_stored(before)?;
             let row = self.decode_stored(&current)?;
@@ -329,25 +409,38 @@ impl PrivateOriginals {
             if row.operation_cancelled && !prior.operation_cancelled {
                 return Err(PrivateOriginalError::Denied);
             }
-            if &current != before { return Err(PrivateOriginalError::Unavailable); }
+            if &current != before {
+                return Err(PrivateOriginalError::Unavailable);
+            }
             partial_cancellation |= row.operation_cancelled && !child_cancelled;
             child_cancelled = row.operation_cancelled;
-            let namespace = meerkat_authorization_contracts::work_association::QualifiedIngressNamespace {
-                realm: row.source.realm.clone(), ingress: row.source.ingress.clone(),
-                occurrence_scope: row.event.occurrence.clone(),
-            };
+            let namespace =
+                meerkat_authorization_contracts::work_association::QualifiedIngressNamespace {
+                    realm: row.source.realm.clone(),
+                    ingress: row.source.ingress.clone(),
+                    occurrence_scope: row.event.occurrence.clone(),
+                };
             let original = meerkat_authorization_contracts::work_association::OriginalWorkRef {
-                authority: row.source.source_authority.clone(), work: row.event.original.clone(),
+                authority: row.source.source_authority.clone(),
+                work: row.event.original.clone(),
             };
-            self.owner.check_status_cancellation(&namespace, &original, row.operation_cancelled,
-                row.final_association.as_ref(), &current)
+            self.owner
+                .check_status_cancellation(
+                    &namespace,
+                    &original,
+                    row.operation_cancelled,
+                    row.final_association.as_ref(),
+                    &current,
+                )
                 .map_err(|error| match error {
                     OriginalWriterError::Conflict => PrivateOriginalError::Conflict,
                     OriginalWriterError::WrongOwner => PrivateOriginalError::Denied,
                     _ => PrivateOriginalError::Unavailable,
                 })?;
         }
-        if partial_cancellation { return Err(PrivateOriginalError::Unavailable); }
+        if partial_cancellation {
+            return Err(PrivateOriginalError::Unavailable);
+        }
         Ok(())
     }
 
@@ -381,13 +474,17 @@ impl PrivateOriginals {
         let source_reference = PrivateOriginalRef {
             route: record.event.route.clone(),
             original: record.event.original.clone(),
-            event_sha256: digest(&canonical_json(&record.event)
-                .map_err(|_| PrivateOriginalError::Conflict)?),
+            event_sha256: digest(
+                &canonical_json(&record.event).map_err(|_| PrivateOriginalError::Conflict)?,
+            ),
         };
         // Preserve the parent's already-validated reference, including an
         // equivalent configured route alias for its historical source row.
-        let parent_reference = &record.approved_task.as_ref()
-            .ok_or(PrivateOriginalError::Conflict)?.parent;
+        let parent_reference = &record
+            .approved_task
+            .as_ref()
+            .ok_or(PrivateOriginalError::Conflict)?
+            .parent;
         let mut current_records = Vec::with_capacity(2);
         for (before, reference) in [(source, &source_reference), (parent, parent_reference)] {
             let prior = self.decode_stored(before)?;
@@ -402,13 +499,17 @@ impl PrivateOriginals {
             if current.operation_cancelled {
                 return Err(PrivateOriginalError::Denied);
             }
-            if current.source != prior.source || current.event != prior.event
+            if current.source != prior.source
+                || current.event != prior.event
                 || current.setup_request != prior.setup_request
                 || current.configured_setup != prior.configured_setup
                 || current.approved_task != prior.approved_task
-                || (prior.final_association.is_some() && current.final_association != prior.final_association)
-                || (prior.bound_service_input.is_some() && current.bound_service_input != prior.bound_service_input)
-                || (prior.service_admission.is_some() && current.service_admission != prior.service_admission)
+                || (prior.final_association.is_some()
+                    && current.final_association != prior.final_association)
+                || (prior.bound_service_input.is_some()
+                    && current.bound_service_input != prior.bound_service_input)
+                || (prior.service_admission.is_some()
+                    && current.service_admission != prior.service_admission)
             {
                 return Err(PrivateOriginalError::Unavailable);
             }
@@ -473,11 +574,16 @@ impl PrivateOriginals {
 
     #[cfg(test)]
     pub(super) async fn service_task_status_page_with_read_probe(
-        &self, store: &dyn ToolkitStore, human: &PrincipalRef,
-        current_member_access: &(impl Fn(&MobMemberBinding) -> Result<bool, PrivateOriginalError> + Sync),
+        &self,
+        store: &dyn ToolkitStore,
+        human: &PrincipalRef,
+        current_member_access: &(
+             impl Fn(&MobMemberBinding) -> Result<bool, PrivateOriginalError> + Sync
+         ),
         rows: &[StoredRecord],
     ) -> Result<serde_json::Value, PrivateOriginalError> {
-        self.service_task_status_projection_rows(store, human, current_member_access, Some(rows)).await
+        self.service_task_status_projection_rows(store, human, current_member_access, Some(rows))
+            .await
     }
 
     pub(crate) fn status_lifetime(&self) -> Result<Arc<NativeHostLifetime>, PrivateOriginalError> {
@@ -624,7 +730,13 @@ impl PrivateOriginals {
             return Err(PrivateOriginalError::Conflict);
         }
         if let Some(pending) = pending.first() {
-            return pending.publication_status(&task.original_task.origin_session_id, task.grants().first().copied().ok_or(PrivateOriginalError::Conflict)?);
+            return pending.publication_status(
+                &task.original_task.origin_session_id,
+                task.grants()
+                    .first()
+                    .copied()
+                    .ok_or(PrivateOriginalError::Conflict)?,
+            );
         }
         let candidate = held.original.association().candidate();
         Ok(
@@ -721,36 +833,52 @@ impl SourcePublicationStatus {
 }
 
 impl PrivateOriginals {
-    pub(crate) async fn console_status_native(&self,
+    pub(crate) async fn console_status_native(
+        &self,
         viewer: &meerkat_mobkit::http_console::ConsoleViewerContext,
         current: &(impl Fn() -> Option<meerkat_mobkit::http_console::ConsoleViewerContext> + Sync),
     ) -> Result<serde_json::Value, PrivateOriginalError> {
-        self.console_status_native_rows(viewer, current, None).await.map(|read| read.projection)
+        self.console_status_native_rows(viewer, current, None)
+            .await
+            .map(|read| read.projection)
     }
 
-    pub(crate) async fn console_status_native_page(&self,
+    pub(crate) async fn console_status_native_page(
+        &self,
         viewer: &meerkat_mobkit::http_console::ConsoleViewerContext,
         current: &(impl Fn() -> Option<meerkat_mobkit::http_console::ConsoleViewerContext> + Sync),
         rows: &[StoredRecord],
     ) -> Result<ConsoleTaskStatus, PrivateOriginalError> {
-        self.console_status_native_rows(viewer, current, Some(rows)).await
+        self.console_status_native_rows(viewer, current, Some(rows))
+            .await
     }
 
-    async fn console_status_native_rows(&self,
+    async fn console_status_native_rows(
+        &self,
         viewer: &meerkat_mobkit::http_console::ConsoleViewerContext,
         current: &(impl Fn() -> Option<meerkat_mobkit::http_console::ConsoleViewerContext> + Sync),
         rows: Option<&[StoredRecord]>,
     ) -> Result<ConsoleTaskStatus, PrivateOriginalError> {
         let human = viewer.human.as_ref().ok_or(PrivateOriginalError::Denied)?;
-        let principal = human.principal().map_err(|_| PrivateOriginalError::Denied)?;
+        let principal = human
+            .principal()
+            .map_err(|_| PrivateOriginalError::Denied)?;
         human.current().map_err(|_| PrivateOriginalError::Denied)?;
         let lifetime = self.status_lifetime()?;
         let runtime = self.bound_identity_runtime()?;
         let mut identities = Vec::new();
         for route in self.routes()? {
-            if !same_source_human(&principal, &route.requester, route.represented_subject.as_ref()) { continue; }
+            if !same_source_human(
+                &principal,
+                &route.requester,
+                route.represented_subject.as_ref(),
+            ) {
+                continue;
+            }
             let member = self.status_route(&lifetime, &principal, route)?;
-            let identity = runtime.owned_identity_for_member_alias(route.grant_target.as_str()).await
+            let identity = runtime
+                .owned_identity_for_member_alias(route.grant_target.as_str())
+                .await
                 .ok_or(PrivateOriginalError::Unavailable)?;
             human.current().map_err(|_| PrivateOriginalError::Denied)?;
             self.status_lifetime()?;
@@ -758,26 +886,58 @@ impl PrivateOriginals {
         }
         let access = |member: &MobMemberBinding| -> Result<bool, PrivateOriginalError> {
             human.current().map_err(|_| PrivateOriginalError::Denied)?;
-            let identity = identities.iter().find(|(selected, _)| selected == member)
-                .map(|(_, identity)| identity).ok_or(PrivateOriginalError::Unavailable)?;
+            let identity = identities
+                .iter()
+                .find(|(selected, _)| selected == member)
+                .map(|(_, identity)| identity)
+                .ok_or(PrivateOriginalError::Unavailable)?;
             let fresh = current().ok_or(PrivateOriginalError::Denied)?;
-            if fresh.human.as_ref().and_then(|human| human.principal().ok()).as_ref() != Some(&principal) { return Err(PrivateOriginalError::Denied); }
-            Ok(fresh.access_view.as_ref().is_none_or(|view| !view.enforced() || view.can_view_agent(identity.as_str())))
+            if fresh
+                .human
+                .as_ref()
+                .and_then(|human| human.principal().ok())
+                .as_ref()
+                != Some(&principal)
+            {
+                return Err(PrivateOriginalError::Denied);
+            }
+            Ok(fresh
+                .access_view
+                .as_ref()
+                .is_none_or(|view| !view.enforced() || view.can_view_agent(identity.as_str())))
         };
         // Retain the exact visibility set used by this read. A later grant of
         // visibility waits for another read; losing it refuses this projection
         // rather than dropping the identity from its final disclosure check.
         let mut selected = Vec::new();
         for (member, identity) in &identities {
-            if access(member)? { selected.push((member.clone(), identity.clone())); }
+            if access(member)? {
+                selected.push((member.clone(), identity.clone()));
+            }
         }
         let selected_access = |member: &MobMemberBinding| {
-            if selected.iter().any(|(held, _)| held == member) { access(member) } else { Ok(false) }
+            if selected.iter().any(|(held, _)| held == member) {
+                access(member)
+            } else {
+                Ok(false)
+            }
         };
-        let projection = self.service_task_status_projection_rows(self.store.as_ref(), &principal, &selected_access, rows).await?;
+        let projection = self
+            .service_task_status_projection_rows(
+                self.store.as_ref(),
+                &principal,
+                &selected_access,
+                rows,
+            )
+            .await?;
         for (member, _) in &selected {
-            if !access(member)? { return Err(PrivateOriginalError::Denied); }
+            if !access(member)? {
+                return Err(PrivateOriginalError::Denied);
+            }
         }
-        Ok(ConsoleTaskStatus { projection, visible_members:selected.into_iter().map(|(_, identity)| identity).collect() })
+        Ok(ConsoleTaskStatus {
+            projection,
+            visible_members: selected.into_iter().map(|(_, identity)| identity).collect(),
+        })
     }
 }

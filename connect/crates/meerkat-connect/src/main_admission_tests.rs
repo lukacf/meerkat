@@ -556,7 +556,6 @@ async fn admission_cancellation_keeps_completed_outcome_and_recorded_exit_intent
     .expect("bounded completion/cancellation race");
 }
 
-
 #[tokio::test]
 async fn administrative_close_busy_returns_the_same_live_owner_and_preserves_accepted_work() {
     tokio::time::timeout(Duration::from_secs(30), async {
@@ -564,19 +563,41 @@ async fn administrative_close_busy_returns_the_same_live_owner_and_preserves_acc
         let temp = tempfile::tempdir().unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let started = Arc::new(Notify::new());
-        let storage = RealmOptions { context_root:temp.path().to_owned(),
-            state_root:Some(temp.path().join("realms")), user_config_root:Some(temp.path().join("home")) }
-            .resolve("quiescent-close").unwrap();
-        let session = ConnectSession::open_with_config(storage, Config::default(), SessionOptions {
-            model:meerkat::CreateSessionModelResolutionRequest { model:Some("gpt-5.4".into()), ..Default::default() },
-            build:SessionBuildOptions { llm_client_override:Some(meerkat::encode_llm_client_override_for_service(
-                Arc::new(StalledClient { inner:meerkat_client::TestClient::for_provider(Provider::OpenAI),
-                    calls:calls.clone(), started:started.clone() }))), ..Default::default() },
-        }).await.unwrap();
+        let storage = RealmOptions {
+            context_root: temp.path().to_owned(),
+            state_root: Some(temp.path().join("realms")),
+            user_config_root: Some(temp.path().join("home")),
+        }
+        .resolve("quiescent-close")
+        .unwrap();
+        let session = ConnectSession::open_with_config(
+            storage,
+            Config::default(),
+            SessionOptions {
+                model: meerkat::CreateSessionModelResolutionRequest {
+                    model: Some("gpt-5.4".into()),
+                    ..Default::default()
+                },
+                build: SessionBuildOptions {
+                    llm_client_override: Some(meerkat::encode_llm_client_override_for_service(
+                        Arc::new(StalledClient {
+                            inner: meerkat_client::TestClient::for_provider(Provider::OpenAI),
+                            calls: calls.clone(),
+                            started: started.clone(),
+                        }),
+                    )),
+                    ..Default::default()
+                },
+            },
+        )
+        .await
+        .unwrap();
         let original = session.id().clone();
-        let (active, active_completion) = session.submit("Actual active input".into()).await.unwrap();
+        let (active, active_completion) =
+            session.submit("Actual active input".into()).await.unwrap();
         started.notified().await;
-        let (queued, queued_completion) = session.submit("Actual queued input".into()).await.unwrap();
+        let (queued, queued_completion) =
+            session.submit("Actual queued input".into()).await.unwrap();
         let active_wait = active_completion.try_wait_with_terminal_outcome();
         let queued_wait = queued_completion.try_wait_with_terminal_outcome();
         tokio::pin!(active_wait, queued_wait);
@@ -584,8 +605,9 @@ async fn administrative_close_busy_returns_the_same_live_owner_and_preserves_acc
             FinalizationClose::Busy(session) => (Some(session), true, false),
             FinalizationClose::Unconfirmed { session, .. } => (Some(session), false, false),
             FinalizationClose::Closed(closed) => {
-                assert!(closed.finish_host_cleanup().await.is_ok()); (None, false, true)
-            },
+                assert!(closed.finish_host_cleanup().await.is_ok());
+                (None, false, true)
+            }
         };
         let mut pending = false;
         let mut same_session = false;
@@ -598,23 +620,38 @@ async fn administrative_close_busy_returns_the_same_live_owner_and_preserves_acc
                     result = active_wait.as_mut() => active_result = Some(result),
                     result = queued_wait.as_mut() => queued_result = Some(result),
                 }
-            }).await.is_err();
+            })
+            .await
+            .is_err();
             // Explicit fixture cleanup, separate from the rejected automatic
             // close. Release/join both inputs before assertions can panic.
             session.cancel(&queued).await.unwrap();
             session.cancel(&active).await.unwrap();
-            if queued_result.is_none() { queued_result = Some(queued_wait.await); }
-            if active_result.is_none() { active_result = Some(active_wait.await); }
+            if queued_result.is_none() {
+                queued_result = Some(queued_wait.await);
+            }
+            if active_result.is_none() {
+                active_result = Some(active_wait.await);
+            }
             session.close().await.unwrap();
         } else {
             queued_result = Some(queued_wait.await);
             active_result = Some(active_wait.await);
         }
-        assert!(queued_result.is_some() && active_result.is_some(), "both actual completions were joined exactly once");
+        assert!(
+            queued_result.is_some() && active_result.is_some(),
+            "both actual completions were joined exactly once"
+        );
         assert!(busy && same_session && pending && !already_cleaned);
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "the queued input was not dispatched or abandoned by Busy");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "the queued input was not dispatched or abandoned by Busy"
+        );
         assert_ne!(input_id(&active), input_id(&queued));
-    }).await.expect("native Busy preserves both accepted inputs and joined fixture cleanup");
+    })
+    .await
+    .expect("native Busy preserves both accepted inputs and joined fixture cleanup");
 }
 
 #[tokio::test]
@@ -626,9 +663,15 @@ async fn administrative_close_releases_a_quiescent_native_owner() {
         let closed = match session.try_close_for_finalization().await {
             FinalizationClose::Closed(closed) => closed.finish_host_cleanup().await.is_ok(),
             FinalizationClose::Busy(session) | FinalizationClose::Unconfirmed { session, .. } => {
-                session.close().await.unwrap(); false
+                session.close().await.unwrap();
+                false
             }
         };
-        assert!(closed, "native Closed and successful host cleanup are both required");
-    }).await.expect("quiescent native cleanup settles");
+        assert!(
+            closed,
+            "native Closed and successful host cleanup are both required"
+        );
+    })
+    .await
+    .expect("quiescent native cleanup settles");
 }

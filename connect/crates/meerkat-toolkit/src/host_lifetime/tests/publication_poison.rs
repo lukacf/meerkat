@@ -37,7 +37,9 @@ fn enter(fixture: &Fixture, entry: CallbackEntry, panic_inside: bool) -> Result<
     };
     match entry {
         CallbackEntry::Setup => fixture.owner.with_current_setup(operation),
-        CallbackEntry::Administration => fixture.owner.with_native_administration_entry(operation)?,
+        CallbackEntry::Administration => {
+            fixture.owner.with_native_administration_entry(operation)?
+        }
         CallbackEntry::GatewayReady => fixture.owner.publish_gateway_ready(&mut operation),
         CallbackEntry::Component => fixture.owner.with_component_open(
             &Id::new("slack-extension").unwrap(),
@@ -85,13 +87,25 @@ fn callback_entry_variants_poison_retained_native_stamps() {
             fixture.owner.current_setup_policy(),
             Err(HostLifetimeError::Unavailable)
         );
-        assert_eq!(enter(&fixture, entry, false), Err(HostLifetimeError::Unavailable));
+        assert_eq!(
+            enter(&fixture, entry, false),
+            Err(HostLifetimeError::Unavailable)
+        );
         if matches!(entry, CallbackEntry::Component) {
-            assert!(fixture.owner.component(&component).unwrap().entry.is_poisoned());
+            assert!(
+                fixture
+                    .owner
+                    .component(&component)
+                    .unwrap()
+                    .entry
+                    .is_poisoned()
+            );
         }
         // Poison cannot manufacture an actual close or settlement receipt.
         assert!(matches!(
-            fixture.owner.begin_close_activation(HostCloseReason::Shutdown),
+            fixture
+                .owner
+                .begin_close_activation(HostCloseReason::Shutdown),
             Err(HostLifetimeError::Unavailable)
         ));
     }
@@ -166,5 +180,8 @@ fn caught_callback_panic_under_native_reservation_keeps_poison_after_return() {
         publication.begin_owner_change(),
         Err(PublicationError::Unavailable)
     ));
-    assert!(matches!(publication.observe(|| ()), Err(PublicationError::Unavailable)));
+    assert!(matches!(
+        publication.observe(|| ()),
+        Err(PublicationError::Unavailable)
+    ));
 }

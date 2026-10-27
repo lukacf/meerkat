@@ -17,58 +17,71 @@ use toolkit_store::{
 };
 
 pub(crate) mod acquisition;
-pub(crate) mod setup_results;
+mod cold_service_admission;
+mod governed_submit;
+pub(crate) mod service_grants;
 mod setup_admission;
 pub(crate) mod setup_helpers;
-pub(crate) mod service_grants;
-mod governed_submit;
-mod cold_service_admission;
+pub(crate) mod setup_results;
 pub(crate) use cold_service_admission::RetainedBoundInput;
 mod cold_setup_admission;
+mod configured_setup;
 mod console_ingress;
 mod controller_setup;
 mod setup_request;
-mod configured_setup;
 pub(crate) use configured_setup::service::ServiceSetupSelection;
 mod setup_targets;
 pub use setup_request::PrivateSetupRequestSelection;
-mod first_input;
 #[cfg(test)]
 mod custody_attempt_tests;
 pub(crate) mod custody_recovery;
+mod first_input;
 mod service_approved_input;
 mod service_input_receipt;
-pub use service_input_receipt::{PrivateServiceInputObservation, PrivateServiceInputReceipt,
-    PrivateServiceInputReport, PrivateReceiptWitness, PrivateReceiptScope};
-pub(crate) mod source_status;
-pub(crate) mod service_recovery;
-pub use service_approved_input::{
-    InstalledServiceTask, PreparedServiceInstruction, ServiceMcpPersistenceProposal,
-    PublicServiceBatchEntry, PreparedPublicServiceBatch, PreparedPublicInstruction,
+pub use service_input_receipt::{
+    PrivateReceiptScope, PrivateReceiptWitness, PrivateServiceInputObservation,
+    PrivateServiceInputReceipt, PrivateServiceInputReport,
 };
-pub use crate::installed_host::tool_policy::{ServiceToolPolicySelection, ServiceToolInvocation,
-    MemberPolicyLifetime, ServiceToolPolicyVersion, ServiceToolPolicyProposal, ServiceToolPolicyApproval,
-    ActiveMemberToolPolicyDecision, ApplicationToolPolicyRecoveryRequest, ApplicationToolPolicyRecoveryDecision,
-    ServiceToolPolicyNativeOutcome, ServiceToolPolicyObservation};
-pub use service_approved_input::application::{ApplicationServicePolicy, ApplicationServicePolicyRequest,
-    ApplicationServicePolicyDecision, ApplicationServicePolicyReservation, InstalledApplicationServicePolicy,
-    ApplicationServicePreparation, PreparedApplicationServiceInstruction};
-pub use service_approved_input::application::{ApplicationServiceParentAuthorizer,
-    ServiceParentAdministrationReservation, ServiceParentAuthorization,
-    ServiceParentAuthorizationProposal, ServiceParentAuthorizationRequest,
-    ApplicationServiceOperation, ApplicationServiceOperationControl, ApplicationServicePreparedStatus,
-    ServiceParentOperationObserver, ServiceParentOperationObservation, ServiceParentOperationOutcome,
-    ServiceParentCustody, ServiceParentOperationReason};
-pub(crate) use service_approved_input::application::{ServiceParentAuthorizationEvidence,
-    ServiceOperationCurrent, ServiceOperationError, ServiceOperationProgress};
+pub(crate) mod service_recovery;
+pub(crate) mod source_status;
+pub use crate::installed_host::tool_policy::{
+    ActiveMemberToolPolicyDecision, ApplicationToolPolicyRecoveryDecision,
+    ApplicationToolPolicyRecoveryRequest, MemberPolicyLifetime, ServiceToolInvocation,
+    ServiceToolPolicyApproval, ServiceToolPolicyNativeOutcome, ServiceToolPolicyObservation,
+    ServiceToolPolicyProposal, ServiceToolPolicySelection, ServiceToolPolicyVersion,
+};
+pub use controller_setup::LocalControllerSetup;
 #[cfg(test)]
 pub(crate) use governed_submit::tests::first_input_tests::FirstFixture as ContinuationFixture;
-pub use controller_setup::LocalControllerSetup;
-pub use governed_submit::{PrivateOriginalSubmission, PrivateOriginalSubmit, PrivateSourceSettlement};
+pub use governed_submit::{
+    PrivateOriginalSubmission, PrivateOriginalSubmit, PrivateSourceSettlement,
+};
+pub use service_approved_input::application::{
+    ApplicationServiceOperation, ApplicationServiceOperationControl,
+    ApplicationServiceParentAuthorizer, ApplicationServicePreparedStatus,
+    ServiceParentAdministrationReservation, ServiceParentAuthorization,
+    ServiceParentAuthorizationProposal, ServiceParentAuthorizationRequest, ServiceParentCustody,
+    ServiceParentOperationObservation, ServiceParentOperationObserver,
+    ServiceParentOperationOutcome, ServiceParentOperationReason,
+};
+pub use service_approved_input::application::{
+    ApplicationServicePolicy, ApplicationServicePolicyDecision, ApplicationServicePolicyRequest,
+    ApplicationServicePolicyReservation, ApplicationServicePreparation,
+    InstalledApplicationServicePolicy, PreparedApplicationServiceInstruction,
+};
+pub(crate) use service_approved_input::application::{
+    ServiceOperationCurrent, ServiceOperationError, ServiceOperationProgress,
+    ServiceParentAuthorizationEvidence,
+};
+pub use service_approved_input::{
+    InstalledServiceTask, PreparedPublicInstruction, PreparedPublicServiceBatch,
+    PreparedServiceInstruction, PublicServiceBatchEntry, ServiceMcpPersistenceProposal,
+};
 pub use service_grants::{
     PrivateAccessChoice, PrivateServiceAccessDecision, PrivateServiceGrantObservation,
     PrivateServiceGrantRef, PrivateServiceGrantState, PrivateServiceMcpAccessDecision,
-    PrivateServiceMcpPermission, PrivateServiceMcpLiveAttachment, PrivateServiceMcpCatalog, ServiceMcpSelection,
+    PrivateServiceMcpCatalog, PrivateServiceMcpLiveAttachment, PrivateServiceMcpPermission,
+    ServiceMcpSelection,
 };
 
 const SOURCE_SCHEMA: &str = "toolkit.authenticated-source-event";
@@ -76,14 +89,16 @@ const SOURCE_VERSION: u32 = 3;
 const CUSTODY_SOURCE_VERSION: u32 = 4;
 
 pub(crate) fn same_source_origin(left: &StoredRecord, right: &StoredRecord) -> bool {
-    let decode = |record: &StoredRecord| -> Option<SourceRecord> {
-        decode_source_record(record).ok()
-    };
+    let decode =
+        |record: &StoredRecord| -> Option<SourceRecord> { decode_source_record(record).ok() };
     match (decode(left), decode(right)) {
-        (Some(left), Some(right)) => left.source == right.source && left.event == right.event
-            && left.approved_task == right.approved_task
-            && left.setup_request == right.setup_request
-            && left.configured_setup == right.configured_setup,
+        (Some(left), Some(right)) => {
+            left.source == right.source
+                && left.event == right.event
+                && left.approved_task == right.approved_task
+                && left.setup_request == right.setup_request
+                && left.configured_setup == right.configured_setup
+        }
         _ => false,
     }
 }
@@ -91,11 +106,12 @@ pub(crate) fn same_source_origin(left: &StoredRecord, right: &StoredRecord) -> b
 // Legacy rows still require all existing exact native restoration evidence.
 // New rows additionally require their canonical recovery decision; this is
 // source custody, not a claim that a withdrawn native input was not admitted.
-pub(crate) fn historical_custody_attempt(record: &StoredRecord)
-    -> Result<Option<crate::original_ingress::custody_attempt::CustodyAttempt>, OriginalWriterError>
-{
+pub(crate) fn historical_custody_attempt(
+    record: &StoredRecord,
+) -> Result<Option<crate::original_ingress::custody_attempt::CustodyAttempt>, OriginalWriterError> {
     if record.data.schema == SOURCE_SCHEMA {
-        return decode_source_record(record).map(|row| row.custody_attempt)
+        return decode_source_record(record)
+            .map(|row| row.custody_attempt)
             .map_err(|_| OriginalWriterError::Conflict);
     }
     crate::original_ingress::helper_originals::historical_custody_attempt(record)
@@ -321,19 +337,32 @@ pub(crate) struct RetainedApplicationInstallation {
 }
 impl RetainedApplicationInstallation {
     fn configuration(&self) -> Result<meerkat_core::McpServerConfig, PrivateOriginalError> {
-        let config: meerkat_core::McpServerConfig = serde_json::from_value(self.configuration.clone())
-            .map_err(|_| PrivateOriginalError::Denied)?;
-        if serde_json::to_value(&config).map_err(|_| PrivateOriginalError::Conflict)? != self.configuration
+        let config: meerkat_core::McpServerConfig =
+            serde_json::from_value(self.configuration.clone())
+                .map_err(|_| PrivateOriginalError::Denied)?;
+        if serde_json::to_value(&config).map_err(|_| PrivateOriginalError::Conflict)?
+            != self.configuration
             || !self.document.is_object()
-            || canonical_json(self).map_err(|_| PrivateOriginalError::Conflict)?.len() > 1024 * 1024
-        { return Err(PrivateOriginalError::Denied); }
+            || canonical_json(self)
+                .map_err(|_| PrivateOriginalError::Conflict)?
+                .len()
+                > 1024 * 1024
+        {
+            return Err(PrivateOriginalError::Denied);
+        }
         Ok(config)
     }
-    fn validate(&self, decision: &PrivateServiceMcpAccessDecision) -> Result<(), PrivateOriginalError> {
+    fn validate(
+        &self,
+        decision: &PrivateServiceMcpAccessDecision,
+    ) -> Result<(), PrivateOriginalError> {
         let config = self.configuration()?;
         if config.name != decision.permission.connection.as_str()
-            || digest(&canonical_json(&config).map_err(|_| PrivateOriginalError::Conflict)?) != decision.connection_revision.as_str()
-        { return Err(PrivateOriginalError::Denied); }
+            || digest(&canonical_json(&config).map_err(|_| PrivateOriginalError::Conflict)?)
+                != decision.connection_revision.as_str()
+        {
+            return Err(PrivateOriginalError::Denied);
+        }
         Ok(())
     }
 }
@@ -344,7 +373,9 @@ pub struct ApplicationInstallationReadback {
     selected: RetainedApplicationInstallation,
 }
 impl ApplicationInstallationReadback {
-    pub fn document(&self) -> &serde_json::Value { &self.selected.document }
+    pub fn document(&self) -> &serde_json::Value {
+        &self.selected.document
+    }
     pub fn configuration(&self) -> Result<meerkat_core::McpServerConfig, PrivateOriginalError> {
         self.selected.configuration()
     }
@@ -352,10 +383,16 @@ impl ApplicationInstallationReadback {
 
 /// One exact product document selected from the actual retained batch review.
 /// Only the operator parent owner can construct this evidence projection.
-pub struct ReviewedBatchInstallation { document: serde_json::Value }
+pub struct ReviewedBatchInstallation {
+    document: serde_json::Value,
+}
 impl ReviewedBatchInstallation {
-    pub(crate) fn new(document: serde_json::Value) -> Self { Self { document } }
-    pub fn document(&self) -> &serde_json::Value { &self.document }
+    pub(crate) fn new(document: serde_json::Value) -> Self {
+        Self { document }
+    }
+    pub fn document(&self) -> &serde_json::Value {
+        &self.document
+    }
 }
 
 /// Distinct retained authorization paths for the same package verifier.
@@ -380,11 +417,16 @@ pub trait ServiceInstallationReadback: Send + Sync {
     ) -> Result<meerkat_core::McpServerConfig, PrivateOriginalError>;
     /// Existing human-review adapters stay unchanged. Application support must
     /// explicitly verify the retained product document and exact configuration.
-    async fn readback_source(&self, source: &ServiceInstallationReadbackSource)
-        -> Result<meerkat_core::McpServerConfig, PrivateOriginalError> {
+    async fn readback_source(
+        &self,
+        source: &ServiceInstallationReadbackSource,
+    ) -> Result<meerkat_core::McpServerConfig, PrivateOriginalError> {
         match source {
             ServiceInstallationReadbackSource::SettledReview(review) => self.readback(review).await,
-            ServiceInstallationReadbackSource::ApplicationPolicy(_) | ServiceInstallationReadbackSource::ReviewedBatchMember(_) => Err(PrivateOriginalError::Denied),
+            ServiceInstallationReadbackSource::ApplicationPolicy(_)
+            | ServiceInstallationReadbackSource::ReviewedBatchMember(_) => {
+                Err(PrivateOriginalError::Denied)
+            }
         }
     }
 }
@@ -404,17 +446,25 @@ pub struct PrivateOriginals {
     controller_pin_source: OnceLock<Weak<dyn meerkat_mobkit::identity_first::ControllerPinSource>>,
     host_lifetime: OnceLock<Weak<meerkat_toolkit::host_lifetime::NativeHostLifetime>>,
     installation_readback: OnceLock<Arc<dyn ServiceInstallationReadback>>,
-    pub(crate) service_tool_policy: OnceLock<Arc<crate::installed_host::tool_policy::service_policy::ServicePolicyOwner>>,
+    pub(crate) service_tool_policy:
+        OnceLock<Arc<crate::installed_host::tool_policy::service_policy::ServicePolicyOwner>>,
 }
 
 impl PrivateOriginals {
-    pub(crate) fn bind_service_tool_policy(&self,
+    pub(crate) fn bind_service_tool_policy(
+        &self,
         owner: Arc<crate::installed_host::tool_policy::service_policy::ServicePolicyOwner>,
     ) -> Result<(), meerkat_toolkit::host_lifetime::control::HostLifetimeError> {
         if let Some(existing) = self.service_tool_policy.get() {
-            return if Arc::ptr_eq(existing, &owner) { Ok(()) } else { Err(meerkat_toolkit::host_lifetime::control::HostLifetimeError::InvalidSelection) };
+            return if Arc::ptr_eq(existing, &owner) {
+                Ok(())
+            } else {
+                Err(meerkat_toolkit::host_lifetime::control::HostLifetimeError::InvalidSelection)
+            };
         }
-        self.service_tool_policy.set(owner).map_err(|_| meerkat_toolkit::host_lifetime::control::HostLifetimeError::InvalidSelection)
+        self.service_tool_policy.set(owner).map_err(|_| {
+            meerkat_toolkit::host_lifetime::control::HostLifetimeError::InvalidSelection
+        })
     }
     /// The existing native owner publication, shared with this host lifetime.
     /// Forwarding it creates neither an issuer nor an independent login epoch.
@@ -484,14 +534,23 @@ impl PrivateOriginals {
     /// Local-only composition uses its stock operator; an installed application
     /// uses the exact configured remote operator over these same owners.
     pub(crate) fn service_operator_setup(
-        &self, lifetime: Arc<meerkat_toolkit::host_lifetime::NativeHostLifetime>,
-    ) -> Result<crate::installed_host::operator_setup::OperatorSetup,
-        meerkat_toolkit::host_lifetime::control::HostLifetimeError>
-    {
-        if lifetime.selected_policy().native_host.as_ref()
-            .and_then(|host| host.remote_operator.as_ref()).is_some() {
+        &self,
+        lifetime: Arc<meerkat_toolkit::host_lifetime::NativeHostLifetime>,
+    ) -> Result<
+        crate::installed_host::operator_setup::OperatorSetup,
+        meerkat_toolkit::host_lifetime::control::HostLifetimeError,
+    > {
+        if lifetime
+            .selected_policy()
+            .native_host
+            .as_ref()
+            .and_then(|host| host.remote_operator.as_ref())
+            .is_some()
+        {
             self.application_operator_setup(lifetime)
-        } else { self.local_operator_setup(lifetime) }
+        } else {
+            self.local_operator_setup(lifetime)
+        }
     }
 
     pub async fn new(
@@ -514,7 +573,9 @@ impl PrivateOriginals {
         owner: Arc<ToolkitOriginalOwner>,
     ) -> Result<Self, PrivateOriginalError> {
         scope.validate().map_err(|_| PrivateOriginalError::Denied)?;
-        store.capabilities().require_durable_contract()
+        store
+            .capabilities()
+            .require_durable_contract()
             .map_err(|_| PrivateOriginalError::Unavailable)?;
         let value = Self {
             custody_recovery: Default::default(),
@@ -534,7 +595,9 @@ impl PrivateOriginals {
         // The host holds its existing store/lifetime exclusion while opening.
         // Audit once before exposing this adapter; no per-event scope scan.
         value.validate_source_format().await?;
-        value.owner.bind_canonical_source(&value.store, &value.scope)
+        value
+            .owner
+            .bind_canonical_source(&value.store, &value.scope)
             .map_err(|error| match error {
                 OriginalWriterError::Unavailable => PrivateOriginalError::Unavailable,
                 _ => PrivateOriginalError::Denied,
@@ -545,16 +608,20 @@ impl PrivateOriginals {
     /// Only the same Rust preparation owner installs these derived facts.
     /// Validation precedes publication; neither a retry nor another owner may
     /// replace routes already used by this source adapter.
-    pub(crate) fn finalize_routes(&self, routes: Vec<PrivateOriginalRoute>)
-        -> Result<(), PrivateOriginalError>
-    {
+    pub(crate) fn finalize_routes(
+        &self,
+        routes: Vec<PrivateOriginalRoute>,
+    ) -> Result<(), PrivateOriginalError> {
         Self::validate_routes(&self.scope, &routes)?;
-        self.routes.set(routes).map_err(|_| PrivateOriginalError::Denied)
+        self.routes
+            .set(routes)
+            .map_err(|_| PrivateOriginalError::Denied)
     }
 
-    fn validate_routes(scope: &StoreScope, routes: &[PrivateOriginalRoute])
-        -> Result<(), PrivateOriginalError>
-    {
+    fn validate_routes(
+        scope: &StoreScope,
+        routes: &[PrivateOriginalRoute],
+    ) -> Result<(), PrivateOriginalError> {
         for (index, route) in routes.iter().enumerate() {
             if [
                 &route.grant_caller,
@@ -581,15 +648,26 @@ impl PrivateOriginals {
     }
 
     #[cfg(test)]
-    pub(crate) fn bound_input_capture_for_test(&self, reference: &PrivateOriginalRef)
-        -> (bool, Option<bool>)
-    {
-        (self.host_lifetime.get().is_some(), self.retained.lock().unwrap().iter()
-            .find(|held| &held.reference == reference).map(|held| held.retain_bound_input))
+    pub(crate) fn bound_input_capture_for_test(
+        &self,
+        reference: &PrivateOriginalRef,
+    ) -> (bool, Option<bool>) {
+        (
+            self.host_lifetime.get().is_some(),
+            self.retained
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|held| &held.reference == reference)
+                .map(|held| held.retain_bound_input),
+        )
     }
 
     pub(crate) fn routes(&self) -> Result<&[PrivateOriginalRoute], PrivateOriginalError> {
-        self.routes.get().map(Vec::as_slice).ok_or(PrivateOriginalError::Unavailable)
+        self.routes
+            .get()
+            .map(Vec::as_slice)
+            .ok_or(PrivateOriginalError::Unavailable)
     }
 
     async fn validate_source_format(&self) -> Result<(), PrivateOriginalError> {
@@ -795,43 +873,67 @@ impl PrivateOriginals {
     /// must retain the foreground write and recheck before Candidate staging.
     /// This method does not persist, enroll or publish source custody.
     pub(crate) fn prepare_custody_enrollment(
-        &self, stored: &StoredRecord, reference: &PrivateOriginalRef,
-        original: &Arc<RetainedToolkitOriginal>, session: &meerkat_core::SessionId,
+        &self,
+        stored: &StoredRecord,
+        reference: &PrivateOriginalRef,
+        original: &Arc<RetainedToolkitOriginal>,
+        session: &meerkat_core::SessionId,
         input: &meerkat_runtime::Input,
     ) -> Result<Transition, PrivateOriginalError> {
         self.prepare_custody_enrollment_from(stored, reference, original, session, input, None)
     }
 
     fn prepare_custody_enrollment_from(
-        &self, stored: &StoredRecord, reference: &PrivateOriginalRef,
-        original: &Arc<RetainedToolkitOriginal>, session: &meerkat_core::SessionId,
+        &self,
+        stored: &StoredRecord,
+        reference: &PrivateOriginalRef,
+        original: &Arc<RetainedToolkitOriginal>,
+        session: &meerkat_core::SessionId,
         input: &meerkat_runtime::Input,
         console: Option<(&console_ingress::ConsoleEntry, &meerkat_runtime::Input)>,
     ) -> Result<Transition, PrivateOriginalError> {
-        self.owner.check_canonical_source(self.store.as_ref(), &self.scope)
+        self.owner
+            .check_canonical_source(self.store.as_ref(), &self.scope)
             .map_err(cold_service_admission::writer_error)?;
-        self.owner.check_bound_source(original).map_err(cold_service_admission::writer_error)?;
+        self.owner
+            .check_bound_source(original)
+            .map_err(cold_service_admission::writer_error)?;
         let record = self.decode_record(stored, reference)?;
-        if record.operation_cancelled || record.final_association.as_ref() != Some(original.association())
-        { return Err(PrivateOriginalError::Conflict); }
+        if record.operation_cancelled
+            || record.final_association.as_ref() != Some(original.association())
+        {
+            return Err(PrivateOriginalError::Conflict);
+        }
         match console {
             Some((entry, raw)) => entry.validate_custody_input(&record, raw, input)?,
             None => {
-                if input.header().idempotency_key.as_ref() != Some(&cold_service_admission::source_event_key(&record)?)
+                if input.header().idempotency_key.as_ref()
+                    != Some(&cold_service_admission::source_event_key(&record)?)
                     || !matches!(input, meerkat_runtime::Input::Prompt(prompt)
                         if matches!(&prompt.content, meerkat_core::ContentInput::Text(text)
                             if digest(text.as_bytes()) == record.event.content_sha256))
-                { return Err(PrivateOriginalError::Conflict); }
+                {
+                    return Err(PrivateOriginalError::Conflict);
+                }
             }
         }
         let mut next = crate::original_ingress::custody_attempt::CustodyAttempt::for_prepared(
-            session, input, original.association()).map_err(cold_service_admission::writer_error)?;
+            session,
+            input,
+            original.association(),
+        )
+        .map_err(cold_service_admission::writer_error)?;
         if let Some(existing) = &record.custody_attempt {
-            if existing.decision() != crate::original_ingress::custody_attempt::CustodyDecision::Pending
+            if existing.decision()
+                != crate::original_ingress::custody_attempt::CustodyDecision::Pending
                 || existing.session() != session
                 || existing.observation_entered()
-                || !existing.matches_input(input).map_err(cold_service_admission::writer_error)?
-            { return Err(PrivateOriginalError::Conflict); }
+                || !existing
+                    .matches_input(input)
+                    .map_err(cold_service_admission::writer_error)?
+            {
+                return Err(PrivateOriginalError::Conflict);
+            }
             // Exact refused-input reuse retains the charged budget and any
             // entered step. It cannot reset or replace the first attempt.
             next = existing.clone();
@@ -843,19 +945,28 @@ impl PrivateOriginals {
     /// SQLite write after caller loss. No Candidate exists until it returns.
     #[cfg(test)]
     async fn persist_first_custody_attempt(
-        &self, held: &Arc<HeldPrivateOriginal>, session: &meerkat_core::SessionId,
+        &self,
+        held: &Arc<HeldPrivateOriginal>,
+        session: &meerkat_core::SessionId,
         input: &meerkat_runtime::Input,
     ) -> Result<(), PrivateOriginalError> {
-        self.persist_first_custody_attempt_from(held, session, input, None).await
+        self.persist_first_custody_attempt_from(held, session, input, None)
+            .await
     }
 
     async fn persist_first_custody_attempt_from(
-        &self, held: &Arc<HeldPrivateOriginal>, session: &meerkat_core::SessionId,
+        &self,
+        held: &Arc<HeldPrivateOriginal>,
+        session: &meerkat_core::SessionId,
         input: &meerkat_runtime::Input,
         console: Option<(&console_ingress::ConsoleEntry, &meerkat_runtime::Input)>,
     ) -> Result<(), PrivateOriginalError> {
         let _writer = self.owner.source_writer().await;
-        let stored = self.store.get(&self.key(&held.reference)?).await.map_err(store_error)?
+        let stored = self
+            .store
+            .get(&self.key(&held.reference)?)
+            .await
+            .map_err(store_error)?
             .ok_or(PrivateOriginalError::Unavailable)?;
         let record = self.decode_record(&stored, &held.reference)?;
         if !held.original.first_binding_for(&stored.key) {
@@ -863,35 +974,62 @@ impl PrivateOriginals {
             return Err(PrivateOriginalError::Unavailable);
         }
         let transition = self.prepare_custody_enrollment_from(
-            &stored, &held.reference, &held.original, session, input, console)?;
+            &stored,
+            &held.reference,
+            &held.original,
+            session,
+            input,
+            console,
+        )?;
         if transition.data != stored.data {
-            self.store.compare_and_swap(transition).await.map_err(store_error)?;
+            self.store
+                .compare_and_swap(transition)
+                .await
+                .map_err(store_error)?;
         }
-        self.owner.check_bound_source(&held.original).map_err(cold_service_admission::writer_error)
+        self.owner
+            .check_bound_source(&held.original)
+            .map_err(cold_service_admission::writer_error)
     }
 
     /// Canonical data transition only. Native evidence, decision arbitration,
     /// entered-write ownership and terminal publication belong to the caller.
     pub(crate) fn prepare_custody_transition(
-        &self, stored: &StoredRecord, reference: &PrivateOriginalRef,
+        &self,
+        stored: &StoredRecord,
+        reference: &PrivateOriginalRef,
         next: crate::original_ingress::custody_attempt::CustodyAttempt,
     ) -> Result<Transition, PrivateOriginalError> {
-        self.owner.check_canonical_source(self.store.as_ref(), &self.scope)
+        self.owner
+            .check_canonical_source(self.store.as_ref(), &self.scope)
             .map_err(cold_service_admission::writer_error)?;
         let record = self.decode_record(stored, reference)?;
-        if record.custody_attempt.is_none() { return Err(PrivateOriginalError::Conflict); }
+        if record.custody_attempt.is_none() {
+            return Err(PrivateOriginalError::Conflict);
+        }
         Self::custody_transition(stored, record, next)
     }
 
-    fn custody_transition(stored: &StoredRecord, mut record: SourceRecord,
+    fn custody_transition(
+        stored: &StoredRecord,
+        mut record: SourceRecord,
         next: crate::original_ingress::custody_attempt::CustodyAttempt,
     ) -> Result<Transition, PrivateOriginalError> {
         crate::original_ingress::custody_attempt::CustodyAttempt::validate_transition(
-            record.custody_attempt.as_ref(), &next).map_err(cold_service_admission::writer_error)?;
+            record.custody_attempt.as_ref(),
+            &next,
+        )
+        .map_err(cold_service_admission::writer_error)?;
         record.custody_attempt = Some(next);
-        Ok(Transition { key: stored.key.clone(), expected_revision: stored.revision,
-            expected_digest: Some(stored.content_digest.clone()), claim: None,
-            data: encode(record)?, events: vec![], effects: vec![] })
+        Ok(Transition {
+            key: stored.key.clone(),
+            expected_revision: stored.revision,
+            expected_digest: Some(stored.content_digest.clone()),
+            claim: None,
+            data: encode(record)?,
+            events: vec![],
+            effects: vec![],
+        })
     }
 
     /// Read immutable source facts for the native binder. This observation is
@@ -910,7 +1048,6 @@ impl PrivateOriginals {
         event.route = reference.route.clone();
         Ok(event)
     }
-
 
     /// Historical binding for explicit authenticated restore/replay. Reading
     /// this value cannot reconstruct source custody or an accepted InputId.
@@ -952,9 +1089,9 @@ impl PrivateOriginals {
         association: &meerkat_authorization_contracts::work_association::InputAuthorityAssociation,
         allow_existing: bool,
     ) -> Result<Option<Arc<StoredRecord>>, OriginalWriterError> {
-        self.persist_or_observe_selected_binding(reference, association, allow_existing).await
+        self.persist_or_observe_selected_binding(reference, association, allow_existing)
+            .await
     }
-
 
     async fn persist_or_observe_selected_binding(
         &self,
@@ -976,23 +1113,37 @@ impl PrivateOriginals {
             .map_err(|_| OriginalWriterError::Conflict)?;
         self.check_source_binding(&record, association)?;
         if let Some(selection) = &record.setup_request {
-            let lifetime = self.host_lifetime.get().and_then(Weak::upgrade)
+            let lifetime = self
+                .host_lifetime
+                .get()
+                .and_then(Weak::upgrade)
                 .ok_or(OriginalWriterError::Unavailable)?;
             // The same canonical approved decision remains exact on replay.
             // Only first binding resolves all newly issued parents; a bound
             // target's currentness belongs to its actual native operation.
             if record.final_association.is_some() && !selection.helper_targets.is_empty() {
                 crate::installed_host::operator_setup::validate_retained_setup_selection(
-                    &lifetime, &self.owner, self.store.as_ref(), selection,
-                ).await
+                    &lifetime,
+                    &self.owner,
+                    self.store.as_ref(),
+                    selection,
+                )
+                .await
             } else {
                 crate::installed_host::operator_setup::validate_setup_selection(
-                    &lifetime, &self.owner, self.store.as_ref(), selection,
-                ).await
-            }.map_err(|_| OriginalWriterError::Unavailable)?;
+                    &lifetime,
+                    &self.owner,
+                    self.store.as_ref(),
+                    selection,
+                )
+                .await
+            }
+            .map_err(|_| OriginalWriterError::Unavailable)?;
         }
         self.check_configured_setup_binding(reference, &record, association)?;
-        if self.approved_task_is_cancelled(&record).await
+        if self
+            .approved_task_is_cancelled(&record)
+            .await
             .map_err(|_| OriginalWriterError::Unavailable)?
         {
             let cancelled = self.persist_source_cancellation(Arc::new(stored)).await?;
@@ -1016,8 +1167,13 @@ impl PrivateOriginals {
         }
         // The same source owner retains the exact entered binding operation
         // before I/O, including when commit succeeds but its reply is lost.
-        self.owner.retain_first_binding_write(self.store.as_ref(), &self.scope, &key,
-            Arc::new(stored.clone()), association)?;
+        self.owner.retain_first_binding_write(
+            self.store.as_ref(),
+            &self.scope,
+            &key,
+            Arc::new(stored.clone()),
+            association,
+        )?;
         record.final_association = Some(association.clone());
         let data = encode(record).map_err(|_| OriginalWriterError::Conflict)?;
         self.store
@@ -1153,7 +1309,8 @@ impl PrivateOriginals {
         &self,
         reference: &PrivateOriginalRef,
     ) -> Result<PrivateOriginalCancellation, PrivateOriginalError> {
-        self.record_cancelled_source_set(reference, None, None, None).await?;
+        self.record_cancelled_source_set(reference, None, None, None)
+            .await?;
         Ok(PrivateOriginalCancellation::OperationsCancelled)
     }
 
@@ -1166,7 +1323,8 @@ impl PrivateOriginals {
         reference: PrivateOriginalRef,
         original: Arc<RetainedToolkitOriginal>,
     ) -> Result<(), PrivateOriginalError> {
-        self.hold_binding_with_mcp(reference, original, Vec::new()).await
+        self.hold_binding_with_mcp(reference, original, Vec::new())
+            .await
     }
 
     async fn hold_binding_with_mcp(
@@ -1185,14 +1343,16 @@ impl PrivateOriginals {
         if record.final_association.as_ref() != Some(original.association()) {
             return Err(PrivateOriginalError::Conflict);
         }
-        let retain_bound_input = record.approved_task.is_some()
-            || self.stock_setup_source(&record, &reference)?;
+        let retain_bound_input =
+            record.approved_task.is_some() || self.stock_setup_source(&record, &reference)?;
         let mut retained = self
             .retained
             .lock()
             .map_err(|_| PrivateOriginalError::Unavailable)?;
         if let Some(previous) = retained.iter().find(|held| held.reference == reference) {
-            return if Arc::ptr_eq(&previous.original, &original) && previous.service_mcp == service_mcp {
+            return if Arc::ptr_eq(&previous.original, &original)
+                && previous.service_mcp == service_mcp
+            {
                 Ok(())
             } else {
                 Err(PrivateOriginalError::Conflict)
@@ -1375,11 +1535,15 @@ fn decode_source_record(stored: &StoredRecord) -> Result<SourceRecord, PrivateOr
     }
     cold_service_admission::validate_retained_input(&value)?;
     configured_setup::service::ServiceSetupChildObservation::validate_set(&value)?;
-    if let Some(task) = &value.approved_task { task.validate()?; }
+    if let Some(task) = &value.approved_task {
+        task.validate()?;
+    }
     if let Some(member) = &value.service_attachment_member {
-        if value.service_attachment_failure.is_none() || !value.operation_cancelled
+        if value.service_attachment_failure.is_none()
+            || !value.operation_cancelled
             || !matches!(&value.approved_task, Some(service_approved_input::ApprovedTaskLink::Batch(batch))
-                if batch.members.iter().any(|selected| &selected.grant == member)) {
+                if batch.members.iter().any(|selected| &selected.grant == member))
+        {
             return Err(PrivateOriginalError::Conflict);
         }
     }
@@ -1388,18 +1552,30 @@ fn decode_source_record(stored: &StoredRecord) -> Result<SourceRecord, PrivateOr
         return Err(PrivateOriginalError::Conflict);
     }
     if value.service_attachment_failure.is_some()
-        && (!value.operation_cancelled || value.approved_task.is_none()
-            || value.final_association.is_some() || value.service_admission.is_some())
-    { return Err(PrivateOriginalError::Conflict); }
+        && (!value.operation_cancelled
+            || value.approved_task.is_none()
+            || value.final_association.is_some()
+            || value.service_admission.is_some())
+    {
+        return Err(PrivateOriginalError::Conflict);
+    }
     Ok(value)
 }
 
 fn validate_custody_record(record: &SourceRecord) -> Result<(), PrivateOriginalError> {
     if let Some(attempt) = &record.custody_attempt {
-        let association = record.final_association.as_ref().ok_or(PrivateOriginalError::Conflict)?;
-        attempt.validate_binding(association).map_err(|_| PrivateOriginalError::Conflict)?;
+        let association = record
+            .final_association
+            .as_ref()
+            .ok_or(PrivateOriginalError::Conflict)?;
+        attempt
+            .validate_binding(association)
+            .map_err(|_| PrivateOriginalError::Conflict)?;
         if let Some(input) = &record.bound_service_input {
-            if !attempt.matches_input(&input.decode()?).map_err(|_| PrivateOriginalError::Conflict)? {
+            if !attempt
+                .matches_input(&input.decode()?)
+                .map_err(|_| PrivateOriginalError::Conflict)?
+            {
                 return Err(PrivateOriginalError::Conflict);
             }
         }
@@ -1411,7 +1587,11 @@ fn encode(record: SourceRecord) -> Result<RecordData, PrivateOriginalError> {
     validate_custody_record(&record)?;
     Ok(RecordData {
         schema: SOURCE_SCHEMA.into(),
-        version: if record.custody_attempt.is_some() { CUSTODY_SOURCE_VERSION } else { SOURCE_VERSION },
+        version: if record.custody_attempt.is_some() {
+            CUSTODY_SOURCE_VERSION
+        } else {
+            SOURCE_VERSION
+        },
         body: serde_json::to_value(record).map_err(|_| PrivateOriginalError::Conflict)?,
     })
 }

@@ -4,7 +4,10 @@
 
 use std::collections::BTreeMap;
 
-use meerkat_core::{McpServerConfig, mcp_config::{McpConnectorBinding, McpConnectorOperation}};
+use meerkat_core::{
+    McpServerConfig,
+    mcp_config::{McpConnectorBinding, McpConnectorOperation},
+};
 
 use crate::service_install::InstalledConnectorSelection;
 
@@ -19,24 +22,45 @@ impl InstallationLogin {
         selected: InstalledConnectorSelection,
         operations: BTreeMap<String, McpConnectorOperation>,
     ) -> Result<Self, &'static str> {
-        selected.check_current().map_err(|_| "installation_unconfirmed")?;
-        if operations.is_empty() || operations.len() > 128
-            || operations.keys().any(|name| !selected.raw_operations.contains(name))
-            || operations.values().any(|op| op.required_scopes.len() > 128
-                || op.required_scopes.iter().any(|s| s.is_empty() || s.len() > 2048
-                    || s.chars().any(char::is_control))
-                || op.destination_origin.len() > 2048) {
+        selected
+            .check_current()
+            .map_err(|_| "installation_unconfirmed")?;
+        if operations.is_empty()
+            || operations.len() > 128
+            || operations
+                .keys()
+                .any(|name| !selected.raw_operations.contains(name))
+            || operations.values().any(|op| {
+                op.required_scopes.len() > 128
+                    || op
+                        .required_scopes
+                        .iter()
+                        .any(|s| s.is_empty() || s.len() > 2048 || s.chars().any(char::is_control))
+                    || op.destination_origin.len() > 2048
+            })
+        {
             return Err("invalid_operation_binding");
         }
-        let entry = selected.native_connector.as_ref().ok_or("unsupported_native_entry")?;
-        let derived = native_launch_configuration(&selected.installed, &selected.configuration, entry)?;
-        Ok(Self { selected, derived, operations })
+        let entry = selected
+            .native_connector
+            .as_ref()
+            .ok_or("unsupported_native_entry")?;
+        let derived =
+            native_launch_configuration(&selected.installed, &selected.configuration, entry)?;
+        Ok(Self {
+            selected,
+            derived,
+            operations,
+        })
     }
 
-    pub(crate) fn check_target(&self, target: &meerkat::ConnectorOAuthTarget)
-        -> Result<(), &'static str>
-    {
-        self.selected.check_current().map_err(|_| "installation_unconfirmed")?;
+    pub(crate) fn check_target(
+        &self,
+        target: &meerkat::ConnectorOAuthTarget,
+    ) -> Result<(), &'static str> {
+        self.selected
+            .check_current()
+            .map_err(|_| "installation_unconfirmed")?;
         if self.selected.installed.realm.realm != target.slot.realm {
             return Err("invalid_binding");
         }
@@ -90,11 +114,15 @@ impl InstallationLogin {
     }
 
     pub(crate) fn check_current(&self) -> Result<(), &'static str> {
-        self.selected.check_current().map_err(|_| "installation_unconfirmed")
+        self.selected
+            .check_current()
+            .map_err(|_| "installation_unconfirmed")
     }
 
     #[cfg(test)]
-    pub(crate) fn original(&self) -> &serde_json::Value { &self.selected.configuration }
+    pub(crate) fn original(&self) -> &serde_json::Value {
+        &self.selected.configuration
+    }
 }
 
 /// Shared mechanical projection of the package owner's verified native entry.
@@ -104,22 +132,47 @@ pub(crate) fn native_launch_configuration(
     configuration: &serde_json::Value,
     entry: &crate::service_install::NativeConnectorEntry,
 ) -> Result<McpServerConfig, &'static str> {
-    let root = installed.mcp_path.parent().and_then(std::path::Path::parent)
+    let root = installed
+        .mcp_path
+        .parent()
+        .and_then(std::path::Path::parent)
         .ok_or("unsupported_native_entry")?;
-    let command = root.join("runtime/bin/python").to_str()
-        .ok_or("unsupported_native_entry")?.to_owned();
-    let path = root.join("configuration/selected.json").to_str()
-        .ok_or("unsupported_native_entry")?.to_owned();
-    let args = vec!["-I".to_owned(), "-m".to_owned(), entry.module.clone(),
-        "serve".to_owned(), entry.configuration_argument.clone(), path];
+    let command = root
+        .join("runtime/bin/python")
+        .to_str()
+        .ok_or("unsupported_native_entry")?
+        .to_owned();
+    let path = root
+        .join("configuration/selected.json")
+        .to_str()
+        .ok_or("unsupported_native_entry")?
+        .to_owned();
+    let args = vec![
+        "-I".to_owned(),
+        "-m".to_owned(),
+        entry.module.clone(),
+        "serve".to_owned(),
+        entry.configuration_argument.clone(),
+        path,
+    ];
     let observed = &configuration["mcpServers"][&installed.server_name];
     let expected = serde_json::json!({"command":command,"args":args});
     if configuration.as_object().is_none_or(|o| o.len() != 1)
-        || configuration["mcpServers"].as_object().is_none_or(|o| o.len() != 1)
-        || observed != &expected { return Err("unsupported_native_entry"); }
+        || configuration["mcpServers"]
+            .as_object()
+            .is_none_or(|o| o.len() != 1)
+        || observed != &expected
+    {
+        return Err("unsupported_native_entry");
+    }
     let mut native_args = args;
     native_args[3] = entry.mode.clone();
-    Ok(McpServerConfig::stdio(&installed.server_name, command, native_args, Default::default()))
+    Ok(McpServerConfig::stdio(
+        &installed.server_name,
+        command,
+        native_args,
+        Default::default(),
+    ))
 }
 
 /// Apply the exact reviewed raw-operation ceiling to a separate native launch
@@ -128,10 +181,20 @@ pub(crate) fn reviewed_configuration(
     installation: &meerkat::ConnectorMcpInstallation,
 ) -> Result<McpServerConfig, &'static str> {
     let mut config = installation.config().clone();
-    let operations = config.connector.as_ref().ok_or("invalid_binding")?
-        .operations.keys().cloned().collect::<Vec<_>>();
-    config.access = Some(meerkat_core::mcp_config::McpServerAccess::allowing(operations));
-    config.validate_access().map_err(|_| "invalid_operation_binding")?;
+    let operations = config
+        .connector
+        .as_ref()
+        .ok_or("invalid_binding")?
+        .operations
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    config.access = Some(meerkat_core::mcp_config::McpServerAccess::allowing(
+        operations,
+    ));
+    config
+        .validate_access()
+        .map_err(|_| "invalid_operation_binding")?;
     Ok(config)
 }
 

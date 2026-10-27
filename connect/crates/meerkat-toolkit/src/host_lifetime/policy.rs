@@ -64,7 +64,9 @@ pub enum ServiceParentAdministration {
 }
 impl ServiceParentAdministration {
     pub fn routes(&self) -> &BTreeSet<Id> {
-        match self { Self::ApplicationPolicyTasks { routes } => routes }
+        match self {
+            Self::ApplicationPolicyTasks { routes } => routes,
+        }
     }
 }
 
@@ -325,37 +327,37 @@ fn validate_channels(
     if components.windows(2).any(|pair| pair[0] >= pair[1]) {
         return Err(HostLifetimeError::InvalidSelection);
     }
-        let mut unique = BTreeSet::new();
-        for row in channels {
-            if !components.contains(&row.component)
-                || [
-                    &row.channel_id,
-                    &row.service_subject,
-                    &row.provider_account,
-                    &row.sender_id,
-                    &row.target_identity,
-                ]
-                .iter()
-                .any(|v| v.is_empty())
-                || row.member.comms_name().is_err()
-                || meerkat_core::mob_realm_id(&row.member.mob_id).as_ref().ok() != Some(&row.realm)
-                || row.requester.validate_qualified().is_err()
-                || row.ingress_actor.validate_qualified().is_err()
-                || row.required_surfaces.is_empty()
-                || row.required_surfaces.windows(2).any(|p| p[0] >= p[1])
-                || row.required_surfaces.iter().any(|s| !valid_surface(s))
-                || !row
-                    .required_surfaces
-                    .contains(&format!("channel:{}", row.channel_id))
-                || !unique.insert((
-                    row.channel_id.clone(),
-                    row.sender_id.clone(),
-                    row.target_identity.clone(),
-                ))
-            {
-                return Err(HostLifetimeError::InvalidSelection);
-            }
+    let mut unique = BTreeSet::new();
+    for row in channels {
+        if !components.contains(&row.component)
+            || [
+                &row.channel_id,
+                &row.service_subject,
+                &row.provider_account,
+                &row.sender_id,
+                &row.target_identity,
+            ]
+            .iter()
+            .any(|v| v.is_empty())
+            || row.member.comms_name().is_err()
+            || meerkat_core::mob_realm_id(&row.member.mob_id).as_ref().ok() != Some(&row.realm)
+            || row.requester.validate_qualified().is_err()
+            || row.ingress_actor.validate_qualified().is_err()
+            || row.required_surfaces.is_empty()
+            || row.required_surfaces.windows(2).any(|p| p[0] >= p[1])
+            || row.required_surfaces.iter().any(|s| !valid_surface(s))
+            || !row
+                .required_surfaces
+                .contains(&format!("channel:{}", row.channel_id))
+            || !unique.insert((
+                row.channel_id.clone(),
+                row.sender_id.clone(),
+                row.target_identity.clone(),
+            ))
+        {
+            return Err(HostLifetimeError::InvalidSelection);
         }
+    }
     Ok(())
 }
 
@@ -382,8 +384,11 @@ pub(crate) fn validate_selection(
         .path
         .canonicalize()
         .map_err(|_| HostLifetimeError::Unavailable)?;
-    if root.join("current").canonicalize()
-        .map_err(|_| HostLifetimeError::Unavailable)? != activation_path
+    if root
+        .join("current")
+        .canonicalize()
+        .map_err(|_| HostLifetimeError::Unavailable)?
+        != activation_path
     {
         return Err(HostLifetimeError::Denied);
     }
@@ -397,9 +402,14 @@ pub(crate) fn validate_selection(
 pub fn validate_candidate_selection(
     selection: &HostBootstrapSelection,
 ) -> Result<(CompiledLocalPolicy, String), HostLifetimeError> {
-    let root = selection.deployment_root.canonicalize()
+    let root = selection
+        .deployment_root
+        .canonicalize()
         .map_err(|_| HostLifetimeError::Unavailable)?;
-    let activation_path = selection.activation.path.canonicalize()
+    let activation_path = selection
+        .activation
+        .path
+        .canonicalize()
         .map_err(|_| HostLifetimeError::Unavailable)?;
     if !activation_path.starts_with(&root) {
         return Err(HostLifetimeError::Denied);
@@ -496,8 +506,12 @@ impl CompiledNativeHost {
     fn validate(&self, policy: &CompiledLocalPolicy) -> Result<(), HostLifetimeError> {
         self.preparation().validate(&policy.channels)?;
         self.application_tool_policy.validate()?;
-        if let Some(setup) = &self.setup { setup.validate()?; }
-        for member in &self.members { member.initial_surface.validate()?; }
+        if let Some(setup) = &self.setup {
+            setup.validate()?;
+        }
+        for member in &self.members {
+            member.initial_surface.validate()?;
+        }
         Ok(())
     }
 
@@ -508,13 +522,17 @@ impl CompiledNativeHost {
             remote_operator: self.remote_operator.clone(),
             service_parent_administration: self.service_parent_administration.clone(),
             ingress_domain: self.ingress_domain.clone(),
-            members: self.members.iter().map(|member| PreparedNativeMember {
-                member: member.member.clone(),
-                logical_owner: member.logical_owner.clone(),
-                context_generation: member.context_generation,
-                audience: member.audience.clone(),
-                setup_capability: member.setup_capability.clone(),
-            }).collect(),
+            members: self
+                .members
+                .iter()
+                .map(|member| PreparedNativeMember {
+                    member: member.member.clone(),
+                    logical_owner: member.logical_owner.clone(),
+                    context_generation: member.context_generation,
+                    audience: member.audience.clone(),
+                    setup_capability: member.setup_capability.clone(),
+                })
+                .collect(),
             routes: self.routes.clone(),
         }
     }
@@ -532,9 +550,10 @@ impl PreparedLocalPolicy {
         policy.deployment == self.deployment
             && policy.components == self.components
             && policy.channels == self.channels
-            && policy.native_host.as_ref().is_some_and(|native| {
-                native.preparation() == self.native_host
-            })
+            && policy
+                .native_host
+                .as_ref()
+                .is_some_and(|native| native.preparation() == self.native_host)
     }
 }
 
@@ -551,9 +570,15 @@ impl PreparedNativeHost {
             return Err(HostLifetimeError::InvalidSelection);
         }
         if let Some(rule) = &self.service_parent_administration {
-            if self.remote_operator.is_none() || rule.routes().is_empty()
-                || rule.routes().iter().any(|id| !self.routes.iter().any(|route| &route.id == id))
-            { return Err(HostLifetimeError::InvalidSelection); }
+            if self.remote_operator.is_none()
+                || rule.routes().is_empty()
+                || rule
+                    .routes()
+                    .iter()
+                    .any(|id| !self.routes.iter().any(|route| &route.id == id))
+            {
+                return Err(HostLifetimeError::InvalidSelection);
+            }
         }
         let mut members = BTreeSet::new();
         for member in &self.members {
@@ -586,7 +611,10 @@ impl PreparedNativeHost {
         }
         for member in &self.members {
             if let Some(capability) = &member.setup_capability {
-                let route = self.routes.iter().find(|route| route.id == capability.route)
+                let route = self
+                    .routes
+                    .iter()
+                    .find(|route| route.id == capability.route)
                     .ok_or(HostLifetimeError::InvalidSelection)?;
                 if capability.parent.validate().is_err()
                     || capability.helper_targets.len() >= meerkat_authorization_contracts::work_association::MAX_ASSOCIATION_REFERENCES

@@ -1,34 +1,39 @@
 mod main_connector;
 use std::{
     future::Future,
-    pin::Pin,
     io::{self, IsTerminal, Write},
     path::PathBuf,
+    pin::Pin,
 };
 
 use clap::{Parser, Subcommand};
 use futures_util::FutureExt;
-use meerkat_runtime::{
-    AcceptOutcome,
-    completion::{CompletionHandle, CompletionObservation, CompletionOutcome, CompletionWaitError},
-    input_state::InputTerminalOutcome,
-};
 use meerkat_connect::{
     ConnectError, ConnectSession, RealmOptions, SessionOptions, SessionStartup,
     approval::{ApprovalPresenter, LocalApprovals, present_approval},
     discover_realms,
     forge::{ForgePresenter, present_forge_selection},
+    host_selection::{HostSelectionPresenter, present_host_selection},
     paired_host_device::OsDeviceStore,
     paired_host_tool::PairedHostFrontend,
-    host_selection::{HostSelectionPresenter, present_host_selection},
     pairing::{pair_paired_host, pair_paired_host_with_store},
     progress::TurnProgress,
     provider_setup::present_provider_setup,
     resources::InstalledResources,
     secret_presenter::SecretEntryPresenter,
     service_preparation::{NativeSetup, ServicePreparationPresenter, present_service_preparation},
-    terminal_connector::{FinalizationNotice, FinalizedInstallation, TerminalConnectors, FinalizedAction},
-    terminal::{TerminalInput, committed_text, display_text, failed_turn_allows_new_input, input_lines, select_realm},
+    terminal::{
+        TerminalInput, committed_text, display_text, failed_turn_allows_new_input, input_lines,
+        select_realm,
+    },
+    terminal_connector::{
+        FinalizationNotice, FinalizedAction, FinalizedInstallation, TerminalConnectors,
+    },
+};
+use meerkat_runtime::{
+    AcceptOutcome,
+    completion::{CompletionHandle, CompletionObservation, CompletionOutcome, CompletionWaitError},
+    input_state::InputTerminalOutcome,
 };
 
 #[derive(Parser)]
@@ -98,8 +103,13 @@ enum CredentialAction {
 
 impl Cli {
     fn check_command_options(&self) -> Result<(), ConnectError> {
-        if self.command.is_some() && (self.stdio || self.model.is_some() || self.choose_model
-            || self.paired_host.is_some() || self.paired_host_memory_only) {
+        if self.command.is_some()
+            && (self.stdio
+                || self.model.is_some()
+                || self.choose_model
+                || self.paired_host.is_some()
+                || self.paired_host_memory_only)
+        {
             return Err(ConnectError::InvalidInput(
                 "Credential commands use the selected local realm and cannot select setup, a model or PairedHost.".into(),
             ));
@@ -115,11 +125,15 @@ fn prompt(text: &str) -> Result<(), ConnectError> {
         .map_err(|e| ConnectError::native("write terminal prompt", e))
 }
 
-fn interaction_error<T>(primary: ConnectError, cancellation: Result<T, ConnectError>) -> ConnectError {
+fn interaction_error<T>(
+    primary: ConnectError,
+    cancellation: Result<T, ConnectError>,
+) -> ConnectError {
     match cancellation {
         Ok(_) => primary,
         Err(cleanup) => ConnectError::Cleanup {
-            primary: Box::new(primary), cleanup: Box::new(cleanup),
+            primary: Box::new(primary),
+            cleanup: Box::new(cleanup),
         },
     }
 }
@@ -215,18 +229,33 @@ async fn run(cli: Cli) -> Result<(), ConnectError> {
         display_text(&storage.locator.state_root.display().to_string())
     );
     if let Some(Command::Credentials { action }) = cli.command {
-        use meerkat_connect::terminal_connector::{ServiceCredentialCommand, run_service_credential_command};
+        use meerkat_connect::terminal_connector::{
+            ServiceCredentialCommand, run_service_credential_command,
+        };
         let command = match action {
             CredentialAction::Status { after } => ServiceCredentialCommand::Status { after },
-            CredentialAction::Set { service, slots } => ServiceCredentialCommand::Set { service, slots },
-            CredentialAction::Remove { service, slots } => ServiceCredentialCommand::Remove { service, slots },
+            CredentialAction::Set { service, slots } => {
+                ServiceCredentialCommand::Set { service, slots }
+            }
+            CredentialAction::Remove { service, slots } => {
+                ServiceCredentialCommand::Remove { service, slots }
+            }
         };
-        return run_service_credential_command(storage, command, &mut lines,
-            &mut io::stdout(), interrupt.as_mut()).await;
+        return run_service_credential_command(
+            storage,
+            command,
+            &mut lines,
+            &mut io::stdout(),
+            interrupt.as_mut(),
+        )
+        .await;
     }
-    println!("Preparing the supplied setup helper. You will review its access before the setup conversation opens; the agent will then help choose your service or frontend.");
+    println!(
+        "Preparing the supplied setup helper. You will review its access before the setup conversation opens; the agent will then help choose your service or frontend."
+    );
     let (prepared, mut round_owner) = InstalledResources::locate()?
-        .prepare_with_local_round_owner(&storage, interrupt.as_mut()).await?;
+        .prepare_with_local_round_owner(&storage, interrupt.as_mut())
+        .await?;
     let artifacts = prepared.artifact_directory.clone();
     let native_session = meerkat::Session::new();
     let session_id = native_session.id().clone();
@@ -234,9 +263,20 @@ async fn run(cli: Cli) -> Result<(), ConnectError> {
     let mut approvals = std::sync::Arc::new(approvals);
     approvals.bind_session(&session_id)?;
     let Some(mut startup) = SessionStartup::prepare_standalone(
-        storage.clone(), native_session, prepared, &approvals, &mut approval_presenter,
-        &mut lines, &mut io::stdout(), interrupt.as_mut(),
-    ).await? else { approvals.retire(); return Ok(()); };
+        storage.clone(),
+        native_session,
+        prepared,
+        &approvals,
+        &mut approval_presenter,
+        &mut lines,
+        &mut io::stdout(),
+        interrupt.as_mut(),
+    )
+    .await?
+    else {
+        approvals.retire();
+        return Ok(());
+    };
     let configured = async {
     let Some(model) = present_provider_setup(
         &mut startup, cli.model, cli.choose_model, &mut lines, &mut io::stdout(),
@@ -297,13 +337,24 @@ async fn run(cli: Cli) -> Result<(), ConnectError> {
         &connectors, approvals.clone(), (forge.clone(), forge_presenter))?;
     Ok::<_, ConnectError>(Some((session_options, setup, connectors, host_presenter, secret_presenter, paired_host, forge)))
     }.await;
-    let (session_options, mut setup, mut connectors, mut host_presenter, mut secret_presenter, mut paired_host, mut forge_frontend) = match configured {
+    let (
+        session_options,
+        mut setup,
+        mut connectors,
+        mut host_presenter,
+        mut secret_presenter,
+        mut paired_host,
+        mut forge_frontend,
+    ) = match configured {
         Ok(Some(value)) => value,
         other => {
             approvals.retire();
             let cleanup = startup.abort_standalone(&mut io::stdout()).await;
             return match (other, cleanup) {
-                (Err(primary), Err(cleanup)) => Err(ConnectError::Cleanup { primary: Box::new(primary), cleanup: Box::new(cleanup) }),
+                (Err(primary), Err(cleanup)) => Err(ConnectError::Cleanup {
+                    primary: Box::new(primary),
+                    cleanup: Box::new(cleanup),
+                }),
                 (Err(error), _) | (_, Err(error)) => Err(error),
                 _ => Ok(()),
             };
@@ -311,15 +362,26 @@ async fn run(cli: Cli) -> Result<(), ConnectError> {
     };
     let continuation = startup.standalone_continuation()?;
     let model_selection = session_options.model.clone();
-    let opened = Box::pin(startup.open_native_setup(session_options, setup.clone(),
-        &approvals, &mut approval_presenter, &mut lines, &mut io::stdout(), interrupt.as_mut())).await;
+    let opened = Box::pin(startup.open_native_setup(
+        session_options,
+        setup.clone(),
+        &approvals,
+        &mut approval_presenter,
+        &mut lines,
+        &mut io::stdout(),
+        interrupt.as_mut(),
+    ))
+    .await;
     let mut session = match opened {
         Ok(Some(session)) => session,
         other => {
             approvals.retire();
             let cleanup = connectors.retire();
             return match (other, cleanup) {
-                (Err(primary), Err(cleanup)) => Err(ConnectError::Cleanup { primary: Box::new(primary), cleanup: Box::new(cleanup) }),
+                (Err(primary), Err(cleanup)) => Err(ConnectError::Cleanup {
+                    primary: Box::new(primary),
+                    cleanup: Box::new(cleanup),
+                }),
                 (Err(error), _) | (_, Err(error)) => Err(error),
                 _ => Ok(()),
             };
@@ -594,22 +656,36 @@ async fn explicit_close_retry(
             Ok(None) => return Ok(false),
             Ok(Some(line)) if line == "/quit" => return Ok(false),
             Ok(Some(_)) => {
-                let _ = writeln!(io::stdout(), "Enter /retry-close or /quit. No service finalization has started.");
+                let _ = writeln!(
+                    io::stdout(),
+                    "Enter /retry-close or /quit. No service finalization has started."
+                );
             }
             Err(primary) => {
-                let _ = writeln!(io::stderr(), "Input is unavailable. Ctrl-C stops setup without finalizing.");
+                let _ = writeln!(
+                    io::stderr(),
+                    "Input is unavailable. Ctrl-C stops setup without finalizing."
+                );
                 // This branch came from input, so the retained interrupt has
                 // not been consumed. Join it once before releasing the owner.
-                let signal = interrupt.as_mut().await.map_err(|error| ConnectError::native("Listen while terminal input is unavailable", error));
+                let signal = interrupt.as_mut().await.map_err(|error| {
+                    ConnectError::native("Listen while terminal input is unavailable", error)
+                });
                 return Err(interaction_error(primary, signal));
             }
         }
     }
 }
 
-fn combine_cleanup(first: Result<(), ConnectError>, second: Result<(), ConnectError>) -> Result<(), ConnectError> {
+fn combine_cleanup(
+    first: Result<(), ConnectError>,
+    second: Result<(), ConnectError>,
+) -> Result<(), ConnectError> {
     match (first, second) {
-        (Err(primary), Err(cleanup)) => Err(ConnectError::Cleanup { primary:Box::new(primary), cleanup:Box::new(cleanup) }),
+        (Err(primary), Err(cleanup)) => Err(ConnectError::Cleanup {
+            primary: Box::new(primary),
+            cleanup: Box::new(cleanup),
+        }),
         (Err(error), _) | (_, Err(error)) => Err(error),
         _ => Ok(()),
     }
@@ -628,17 +704,27 @@ where
     F: FnOnce() -> R,
     R: Future<Output = Result<(), ConnectError>>,
 {
-    Ok(enter_finalization_unless_cancelled(interrupt.as_mut(), finalize).await?.transpose()?.is_some())
+    Ok(
+        enter_finalization_unless_cancelled(interrupt.as_mut(), finalize)
+            .await?
+            .transpose()?
+            .is_some(),
+    )
 }
 
 #[cfg(test)]
 async fn enter_finalization_unless_cancelled<I, F, R, T>(
-    mut interrupt: Pin<&mut I>, finalize: F,
+    mut interrupt: Pin<&mut I>,
+    finalize: F,
 ) -> Result<Option<T>, ConnectError>
-where I: Future<Output = io::Result<()>>, F: FnOnce() -> R, R: Future<Output = T>,
+where
+    I: Future<Output = io::Result<()>>,
+    F: FnOnce() -> R,
+    R: Future<Output = T>,
 {
     if let Some(signal) = interrupt.as_mut().now_or_never() {
-        signal.map_err(|error| ConnectError::native("listen for finalization cancellation", error))?;
+        signal
+            .map_err(|error| ConnectError::native("listen for finalization cancellation", error))?;
         return Ok(None);
     }
     // Retain this exact entered future through settlement. Do not race a
@@ -778,12 +864,22 @@ async fn converse(
     }
     loop {
         let notice = first_notice.take();
-        let message = if notice.is_some() { None } else {
+        let message = if notice.is_some() {
+            None
+        } else {
             prompt("You: ")?;
-            let Some(message) = next_line(lines, interrupt.as_mut()).await? else { return Ok(ConversationExit::Stopped); };
-            if message == "/quit" { return Ok(ConversationExit::Stopped); }
-            if close_pending && message == "/retry-close" { return Ok(ConversationExit::CloseRequested); }
-            if message.trim().is_empty() { continue; }
+            let Some(message) = next_line(lines, interrupt.as_mut()).await? else {
+                return Ok(ConversationExit::Stopped);
+            };
+            if message == "/quit" {
+                return Ok(ConversationExit::Stopped);
+            }
+            if close_pending && message == "/retry-close" {
+                return Ok(ConversationExit::CloseRequested);
+            }
+            if message.trim().is_empty() {
+                continue;
+            }
             Some(message)
         };
         // Observe the retained interrupt before even the event subscription.
@@ -827,7 +923,9 @@ async fn converse(
                 match (notice, message) {
                     (Some(notice), None) => session.submit_finalization(notice).await,
                     (None, Some(message)) => session.submit(message).await,
-                    _ => Err(ConnectError::InvalidInput("Setup input ownership is inconsistent".into())),
+                    _ => Err(ConnectError::InvalidInput(
+                        "Setup input ownership is inconsistent".into(),
+                    )),
                 }
             },
             interrupt.as_mut(),
@@ -981,9 +1079,7 @@ async fn converse(
         };
         // A completed input may win just before a recorded interrupt is
         // observed. Preserve its real outcome while retaining the user's exit.
-        if !exit_requested
-            && let Some(signal) = interrupt.as_mut().now_or_never()
-        {
+        if !exit_requested && let Some(signal) = interrupt.as_mut().now_or_never() {
             exit_requested = true;
             approvals.retire();
             signal.map_err(|error| ConnectError::native("listen for cancellation", error))?;
@@ -997,7 +1093,10 @@ async fn converse(
         if let Some(presenter) = secret_presenter.as_mut() {
             presenter.present_pending(&mut output)?;
         }
-        if service_presenter.as_ref().is_some_and(ServicePreparationPresenter::requires_shutdown) {
+        if service_presenter
+            .as_ref()
+            .is_some_and(ServicePreparationPresenter::requires_shutdown)
+        {
             approvals.retire();
             return Err(ConnectError::InvalidInput(
                 "Service preparation ended without a confirmed handoff. This setup invocation will close without retrying; retained files are not claimed rolled back.".into(),
@@ -1049,7 +1148,10 @@ async fn converse(
                 .map_err(|e| ConnectError::native("write completed setup answer", e))?;
         }
         if connectors.has_reviewed() {
-            if !matches!(input_terminal, Some(InputTerminalOutcome::Consumed | InputTerminalOutcome::Abandoned { .. })) {
+            if !matches!(
+                input_terminal,
+                Some(InputTerminalOutcome::Consumed | InputTerminalOutcome::Abandoned { .. })
+            ) {
                 return Err(ConnectError::InvalidInput("The reviewed installation has no committed terminal input witness. Native finalization was not started.".into()));
             }
             // The exact native turn has settled. Main closes setup before
@@ -1059,7 +1161,6 @@ async fn converse(
     }
 }
 
-
 #[cfg(test)]
 mod main_admission_tests;
 
@@ -1068,7 +1169,10 @@ mod input_handoff_tests {
     use super::*;
     use std::{
         os::unix::net::UnixStream,
-        sync::{Arc, atomic::{AtomicUsize, Ordering}},
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
     use tokio::sync::oneshot;
 
@@ -1094,15 +1198,27 @@ mod input_handoff_tests {
         assert!(interrupt.as_mut().now_or_never().is_none());
         writer.write_all(b"chosen-realm\n").unwrap();
         let selected = select_realm(
-            &options, &[], &mut input, &mut Vec::new(), interrupt.as_mut(),
-        ).await.unwrap().unwrap();
+            &options,
+            &[],
+            &mut input,
+            &mut Vec::new(),
+            interrupt.as_mut(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(selected.locator.realm.as_str(), "chosen-realm");
         assert_eq!(completed.load(Ordering::SeqCst), 0);
         // The signal arrives after the preceding stage returned. Ready input
         // must not win, and no newly registered signal listener is involved.
         cancel.send(()).unwrap();
         writer.write_all(b"must remain unread\n").unwrap();
-        assert!(next_line(&mut input, interrupt.as_mut()).await.unwrap().is_none());
+        assert!(
+            next_line(&mut input, interrupt.as_mut())
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(completed.load(Ordering::SeqCst), 1);
         assert_eq!(input.recv().await.unwrap().unwrap(), "must remain unread");
         input.check_cleanup().unwrap();
@@ -1146,11 +1262,19 @@ mod input_handoff_tests {
         assert!(interrupt.as_mut().now_or_never().is_none());
         writer.write_all(b"ordinary message\n").unwrap();
         assert_eq!(
-            next_line(&mut input, interrupt.as_mut()).await.unwrap().as_deref(),
+            next_line(&mut input, interrupt.as_mut())
+                .await
+                .unwrap()
+                .as_deref(),
             Some("ordinary message"),
         );
         drop(writer);
-        assert!(next_line(&mut input, interrupt.as_mut()).await.unwrap().is_none());
+        assert!(
+            next_line(&mut input, interrupt.as_mut())
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert!(interrupt.as_mut().now_or_never().is_none());
         input.check_cleanup().unwrap();
     }
@@ -1180,8 +1304,13 @@ mod input_handoff_tests {
             drop(writer);
             let interrupt = std::future::pending::<io::Result<()>>();
             tokio::pin!(interrupt);
-            let observed = tokio::time::timeout(std::time::Duration::from_secs(5),
-                explicit_close_retry(&mut input, interrupt.as_mut())).await.unwrap().unwrap();
+            let observed = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                explicit_close_retry(&mut input, interrupt.as_mut()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
             assert_eq!(observed, retry);
             assert!(interrupt.as_mut().now_or_never().is_none());
             input.check_cleanup().unwrap();
@@ -1207,12 +1336,25 @@ mod input_handoff_tests {
         tokio::pin!(reading);
         // Consume the exact failed line through the real reader. Even after
         // that failure, only the explicit retained interrupt can release it.
-        assert!(tokio::time::timeout(std::time::Duration::from_millis(100), reading.as_mut()).await.is_err());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), reading.as_mut())
+                .await
+                .is_err()
+        );
         assert_eq!(completed.load(Ordering::SeqCst), 0);
         cancel.send(()).unwrap();
-        let error = tokio::time::timeout(std::time::Duration::from_secs(5), reading).await.unwrap().unwrap_err();
+        let error = tokio::time::timeout(std::time::Duration::from_secs(5), reading)
+            .await
+            .unwrap()
+            .unwrap_err();
         assert_eq!(completed.load(Ordering::SeqCst), 1);
-        assert!(matches!(error, ConnectError::Native { operation: "Read retained terminal input", .. }));
+        assert!(matches!(
+            error,
+            ConnectError::Native {
+                operation: "Read retained terminal input",
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
@@ -1222,9 +1364,16 @@ mod input_handoff_tests {
         writer.write_all(b"/retry-close\n").unwrap();
         let completed = Arc::new(AtomicUsize::new(0));
         let observed = completed.clone();
-        let interrupt = async move { observed.fetch_add(1, Ordering::SeqCst); Ok(()) };
+        let interrupt = async move {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        };
         tokio::pin!(interrupt);
-        assert!(!explicit_close_retry(&mut input, interrupt.as_mut()).await.unwrap());
+        assert!(
+            !explicit_close_retry(&mut input, interrupt.as_mut())
+                .await
+                .unwrap()
+        );
         assert_eq!(completed.load(Ordering::SeqCst), 1);
         assert_eq!(input.recv().await.unwrap().unwrap(), "/retry-close");
         input.check_cleanup().unwrap();
@@ -1234,7 +1383,10 @@ mod input_handoff_tests {
 #[cfg(test)]
 mod finalization_handoff_tests {
     use super::*;
-    use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
     use tokio::sync::oneshot;
 
     #[tokio::test]
@@ -1263,7 +1415,9 @@ mod finalization_handoff_tests {
         let ran = finalize_unless_cancelled(interrupt.as_mut(), move || async move {
             flag.store(true, Ordering::SeqCst);
             Ok(())
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         assert!(!ran);
         assert!(!entered.load(Ordering::SeqCst));
     }
@@ -1305,7 +1459,8 @@ mod finalization_handoff_tests {
         tokio::pin!(interrupt);
         let result = finalize_unless_cancelled(interrupt.as_mut(), || async {
             panic!("must not enter finalizer after listener failure");
-        }).await;
+        })
+        .await;
         assert!(result.is_err());
     }
 }
@@ -1319,39 +1474,156 @@ mod tests {
     #[test]
     fn credential_commands_are_available_without_setup_options() {
         for arguments in [
-            vec!["meerkat-connect", "--realm", "meta", "credentials", "status"],
-            vec!["meerkat-connect", "--realm", "meta", "credentials", "set", "cards", "--slot", "TOKEN"],
-            vec!["meerkat-connect", "--realm", "meta", "credentials", "remove", "cards", "--slot", "TOKEN"],
+            vec![
+                "meerkat-connect",
+                "--realm",
+                "meta",
+                "credentials",
+                "status",
+            ],
+            vec![
+                "meerkat-connect",
+                "--realm",
+                "meta",
+                "credentials",
+                "set",
+                "cards",
+                "--slot",
+                "TOKEN",
+            ],
+            vec![
+                "meerkat-connect",
+                "--realm",
+                "meta",
+                "credentials",
+                "remove",
+                "cards",
+                "--slot",
+                "TOKEN",
+            ],
         ] {
-            assert!(Cli::try_parse_from(arguments).is_ok(),
-                "credential management must be reachable without starting setup");
+            assert!(
+                Cli::try_parse_from(arguments).is_ok(),
+                "credential management must be reachable without starting setup"
+            );
         }
     }
 
     #[test]
     fn credential_commands_keep_setup_options_out_of_the_direct_route() {
-        let ordinary = Cli::try_parse_from(["meerkat-connect", "--realm", "meta", "--model", "fixture"]).unwrap();
+        let ordinary =
+            Cli::try_parse_from(["meerkat-connect", "--realm", "meta", "--model", "fixture"])
+                .unwrap();
         assert!(ordinary.command.is_none());
         ordinary.check_command_options().unwrap();
         for arguments in [
-            vec!["meerkat-connect", "--model", "fixture", "credentials", "status"],
-            vec!["meerkat-connect", "--model", "fixture", "credentials", "set", "cards", "--slot", "KEY"],
+            vec![
+                "meerkat-connect",
+                "--model",
+                "fixture",
+                "credentials",
+                "status",
+            ],
+            vec![
+                "meerkat-connect",
+                "--model",
+                "fixture",
+                "credentials",
+                "set",
+                "cards",
+                "--slot",
+                "KEY",
+            ],
             vec!["meerkat-connect", "--choose-model", "credentials", "status"],
-            vec!["meerkat-connect", "--paired-host", "https://example.invalid", "credentials", "status"],
+            vec![
+                "meerkat-connect",
+                "--paired-host",
+                "https://example.invalid",
+                "credentials",
+                "status",
+            ],
             vec!["meerkat-connect", "--stdio", "credentials", "status"],
         ] {
-            assert!(Cli::try_parse_from(arguments).unwrap().check_command_options().is_err());
+            assert!(
+                Cli::try_parse_from(arguments)
+                    .unwrap()
+                    .check_command_options()
+                    .is_err()
+            );
         }
-        assert!(Cli::try_parse_from(["meerkat-connect", "credentials", "remove", "cards"]).is_err());
-        assert!(Cli::try_parse_from(["meerkat-connect", "credentials", "remove", "cards", "--slot", "TOKEN", "--value", "not-accepted"]).is_err());
+        assert!(
+            Cli::try_parse_from(["meerkat-connect", "credentials", "remove", "cards"]).is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "meerkat-connect",
+                "credentials",
+                "remove",
+                "cards",
+                "--slot",
+                "TOKEN",
+                "--value",
+                "not-accepted"
+            ])
+            .is_err()
+        );
         assert!(Cli::try_parse_from(["meerkat-connect", "credentials", "set", "cards"]).is_err());
-        assert!(Cli::try_parse_from(["meerkat-connect", "credentials", "set", "cards", "--slot", "TOKEN", "--value", "not-accepted"]).is_err());
-        assert!(Cli::try_parse_from(["meerkat-connect", "credentials", "set", "cards", "--slot", "TOKEN", "not-accepted"]).is_err());
-        let set = Cli::try_parse_from(["meerkat-connect", "--realm", "meta", "credentials", "set", "cards", "--slot", "KEY", "--slot", "TOKEN"]).unwrap();
-        assert!(matches!(set.command, Some(Command::Credentials { action: CredentialAction::Set { service, slots } })
-            if service == "cards" && slots == ["KEY", "TOKEN"]));
-        let selected = Cli::try_parse_from(["meerkat-connect", "--realm", "meta", "credentials", "status"]).unwrap();
-        assert!(matches!(selected.command, Some(Command::Credentials { action: CredentialAction::Status { .. } })));
+        assert!(
+            Cli::try_parse_from([
+                "meerkat-connect",
+                "credentials",
+                "set",
+                "cards",
+                "--slot",
+                "TOKEN",
+                "--value",
+                "not-accepted"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "meerkat-connect",
+                "credentials",
+                "set",
+                "cards",
+                "--slot",
+                "TOKEN",
+                "not-accepted"
+            ])
+            .is_err()
+        );
+        let set = Cli::try_parse_from([
+            "meerkat-connect",
+            "--realm",
+            "meta",
+            "credentials",
+            "set",
+            "cards",
+            "--slot",
+            "KEY",
+            "--slot",
+            "TOKEN",
+        ])
+        .unwrap();
+        assert!(
+            matches!(set.command, Some(Command::Credentials { action: CredentialAction::Set { service, slots } })
+            if service == "cards" && slots == ["KEY", "TOKEN"])
+        );
+        let selected = Cli::try_parse_from([
+            "meerkat-connect",
+            "--realm",
+            "meta",
+            "credentials",
+            "status",
+        ])
+        .unwrap();
+        assert!(matches!(
+            selected.command,
+            Some(Command::Credentials {
+                action: CredentialAction::Status { .. }
+            })
+        ));
     }
 
     #[test]
@@ -1375,16 +1647,8 @@ mod tests {
         ];
         for outcome in &failed {
             for witness in &terminal {
-                assert!(failed_turn_allows_new_input(
-                    outcome,
-                    Some(witness),
-                    false
-                ));
-                assert!(!failed_turn_allows_new_input(
-                    outcome,
-                    Some(witness),
-                    true
-                ));
+                assert!(failed_turn_allows_new_input(outcome, Some(witness), false));
+                assert!(!failed_turn_allows_new_input(outcome, Some(witness), true));
                 assert!(
                     committed_text(outcome).is_err(),
                     "failure never becomes committed assistant text"

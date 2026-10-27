@@ -3,17 +3,20 @@
 //! supplies the decision. Neither channel JSON nor the terminal descriptor is a
 //! native principal. The existing OS facade and same grant owner issue access.
 
-pub(crate) mod setup_presenter;
-mod local_recovery;
 pub mod console_setup;
+mod local_recovery;
+pub(crate) mod setup_presenter;
 pub use console_setup::serve_console_setup;
-pub use setup_presenter::{LocalSetupApprovals, LocalSetupReviews};
 use setup_presenter::{Enrollment, SetupEvent, SetupPresenters};
+pub use setup_presenter::{LocalSetupApprovals, LocalSetupReviews};
 
 use crate::{
     ConnectError,
     application_operator::{review_local_controller_parent, review_local_setup_request},
-    approval::{ApprovalPresenter, ApprovalPrompt, ApprovalPromptOutcome, LocalApprovals, present_approval, present_approval_outcome},
+    approval::{
+        ApprovalPresenter, ApprovalPrompt, ApprovalPromptOutcome, LocalApprovals, present_approval,
+        present_approval_outcome,
+    },
     terminal::TerminalInput,
 };
 use std::{
@@ -42,51 +45,67 @@ impl InheritedOperatorTerminal {
     /// Pass the returned receiver to `serve_local_operator_with_setup`; retain
     /// the creator only in trusted construction of the selected setup helper.
     /// This creates no approval store, session, task or second input reader.
-    pub fn setup_reviews(&self, artifact_parent: PathBuf) -> (LocalSetupApprovals, LocalSetupReviews) {
+    pub fn setup_reviews(
+        &self,
+        artifact_parent: PathBuf,
+    ) -> (LocalSetupApprovals, LocalSetupReviews) {
         setup_presenter::channel(artifact_parent)
     }
 
     pub fn adopt(fd: RawFd, private_read: RawFd, private_write: RawFd) -> io::Result<Self> {
         if fd < 3 || fd == private_read || fd == private_write {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput,
-                "operator terminal must be distinct from RPC and private descriptors"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "operator terminal must be distinct from RPC and private descriptors",
+            ));
         }
         // This source descriptor belongs to the child even if validation fails.
         // The private/RPC descriptors were excluded before taking ownership.
         struct Original(RawFd);
         impl Drop for Original {
-            fn drop(&mut self) { let _ = nix::unistd::close(self.0); }
+            fn drop(&mut self) {
+                let _ = nix::unistd::close(self.0);
+            }
         }
         let original = Original(fd);
         let path = format!("/dev/fd/{fd}");
         let before = std::fs::metadata(&path)?;
         if !before.file_type().is_char_device() {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput,
-                "operator input is not a terminal"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "operator input is not a terminal",
+            ));
         }
         // Reopening an inherited PTY must not make it this process's controlling
         // terminal. A session-leading gateway otherwise receives SIGHUP when
         // its operator closes the master, before owned cleanup can settle.
-        let file = OpenOptions::new().read(true).write(true)
-            .custom_flags(nix::libc::O_NOCTTY).open(path)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(nix::libc::O_NOCTTY)
+            .open(path)?;
         let after = file.metadata()?;
-        if before.dev() != after.dev() || before.ino() != after.ino()
+        if before.dev() != after.dev()
+            || before.ino() != after.ino()
             || before.rdev() != after.rdev()
         {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput,
-                "operator terminal changed during adoption"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "operator terminal changed during adoption",
+            ));
         }
         nix::sys::termios::tcgetattr(&file).map_err(io::Error::from)?;
-        let flags = nix::fcntl::fcntl(&file, nix::fcntl::FcntlArg::F_GETFD)
-            .map_err(io::Error::from)?;
-        if !nix::fcntl::FdFlag::from_bits_truncate(flags)
-            .contains(nix::fcntl::FdFlag::FD_CLOEXEC)
-        {
+        let flags =
+            nix::fcntl::fcntl(&file, nix::fcntl::FcntlArg::F_GETFD).map_err(io::Error::from)?;
+        if !nix::fcntl::FdFlag::from_bits_truncate(flags).contains(nix::fcntl::FdFlag::FD_CLOEXEC) {
             return Err(io::Error::other("operator terminal is not close-on-exec"));
         }
         let input: OwnedFd = file.try_clone()?.into();
         drop(original);
-        Ok(Self { input: TerminalInput::from_owned_fd(input), output: file })
+        Ok(Self {
+            input: TerminalInput::from_owned_fd(input),
+            output: file,
+        })
     }
 }
 
@@ -130,7 +149,10 @@ async fn present_approval_with_review<T>(
     };
     if matches!(&result, ReviewPresentation::Reviewed(_)) {
         if let Err(error) = input.check_cleanup() {
-            return ReviewPresentation::Reviewed(Err(ConnectError::native("restore operator terminal", error)));
+            return ReviewPresentation::Reviewed(Err(ConnectError::native(
+                "restore operator terminal",
+                error,
+            )));
         }
     }
     result
@@ -167,7 +189,15 @@ pub async fn serve_local_operator_with_setup(
     closed: PrivateHostClosed,
     setup: LocalSetupReviews,
 ) -> Result<(), ConnectError> {
-    serve_operator(host, requests, terminal, artifact_parent, closed, Some(setup)).await
+    serve_operator(
+        host,
+        requests,
+        terminal,
+        artifact_parent,
+        closed,
+        Some(setup),
+    )
+    .await
 }
 
 async fn serve_operator(
@@ -216,11 +246,15 @@ async fn serve_operator(
         };
         // This native call is retained to completion even if the parent closes.
         // It returns before input admission and before any human wait starts.
-        let prepared = match host.prepare_local_controller_setup(request.submission).await {
+        let prepared = match host
+            .prepare_local_controller_setup(request.submission)
+            .await
+        {
             Ok(prepared) => prepared,
             Err(_) => {
                 let _ = request.response.send(Err(
-                    meerkat_toolkit::host_lifetime::control::HostLifetimeError::Unavailable));
+                    meerkat_toolkit::host_lifetime::control::HostLifetimeError::Unavailable,
+                ));
                 continue;
             }
         };
@@ -297,15 +331,18 @@ async fn serve_operator(
                 .map_err(|e| ConnectError::native("restore operator terminal", e))?;
             result
         }.await;
-        let wire = result.map_err(|_| {
-            meerkat_toolkit::host_lifetime::control::HostLifetimeError::Unavailable
-        });
+        let wire = result
+            .map_err(|_| meerkat_toolkit::host_lifetime::control::HostLifetimeError::Unavailable);
         // A lost response leaves the native decision and issuance record with
         // their existing owners. It does not cause another attempt or grant.
         let _ = request.response.send(wire);
-        terminal.input.check_cleanup()
+        terminal
+            .input
+            .check_cleanup()
             .map_err(|e| ConnectError::native("restore operator terminal", e))?;
-        if ended { return Ok(()); }
+        if ended {
+            return Ok(());
+        }
     }
 }
 
@@ -326,48 +363,102 @@ async fn present_setup_prompt(
     };
     if let SetupEvent::Credentials(request) = event {
         let result = async {
-            let panel = enrollment.console().ok_or_else(|| ConnectError::InvalidInput(
-                "This credential task has no configured Console presenter".into()))?;
-            panel.present_credentials(enrollment.accounts.as_mut().ok_or_else(|| ConnectError::InvalidInput(
-                "The selected service owner is unavailable".into()))?, request,
-                &mut enrollment.presenter, closed).await
-        }.await;
+            let panel = enrollment.console().ok_or_else(|| {
+                ConnectError::InvalidInput(
+                    "This credential task has no configured Console presenter".into(),
+                )
+            })?;
+            panel
+                .present_credentials(
+                    enrollment.accounts.as_mut().ok_or_else(|| {
+                        ConnectError::InvalidInput(
+                            "The selected service owner is unavailable".into(),
+                        )
+                    })?,
+                    request,
+                    &mut enrollment.presenter,
+                    closed,
+                )
+                .await
+        }
+        .await;
         return finish_account_presentation(setup, enrollment, result);
     }
     if let SetupEvent::Public(request) = event {
         let result = async {
-            let panel = enrollment.console().ok_or_else(|| ConnectError::InvalidInput(
-                "This public service task has no configured Console presenter".into()))?;
-            panel.present_public(enrollment.accounts.as_mut().ok_or_else(|| ConnectError::InvalidInput(
-                "The selected service owner is unavailable".into()))?, request,
-                &mut enrollment.presenter, closed).await
-        }.await;
+            let panel = enrollment.console().ok_or_else(|| {
+                ConnectError::InvalidInput(
+                    "This public service task has no configured Console presenter".into(),
+                )
+            })?;
+            panel
+                .present_public(
+                    enrollment.accounts.as_mut().ok_or_else(|| {
+                        ConnectError::InvalidInput(
+                            "The selected service owner is unavailable".into(),
+                        )
+                    })?,
+                    request,
+                    &mut enrollment.presenter,
+                    closed,
+                )
+                .await
+        }
+        .await;
         return finish_account_presentation(setup, enrollment, result);
     }
     if let SetupEvent::Account(request) = event {
         let result = async {
             if request.console_task().is_some() {
-                let panel = enrollment.console().ok_or_else(|| ConnectError::InvalidInput(
-                    "This Console task has no configured Console presenter".into()))?;
-                panel.present(enrollment.accounts.as_mut().ok_or_else(|| ConnectError::InvalidInput(
-                    "The selected account owner is unavailable".into()))?, request,
-                    &mut enrollment.presenter, closed).await
+                let panel = enrollment.console().ok_or_else(|| {
+                    ConnectError::InvalidInput(
+                        "This Console task has no configured Console presenter".into(),
+                    )
+                })?;
+                panel
+                    .present(
+                        enrollment.accounts.as_mut().ok_or_else(|| {
+                            ConnectError::InvalidInput(
+                                "The selected account owner is unavailable".into(),
+                            )
+                        })?,
+                        request,
+                        &mut enrollment.presenter,
+                        closed,
+                    )
+                    .await
             } else {
                 // Retain start/callback/completion until native cleanup settles.
-                enrollment.accounts.as_mut().ok_or_else(|| ConnectError::InvalidInput(
-                    "The selected account owner is unavailable".into()))?
-                    .present(request, &mut enrollment.presenter, &mut terminal.input,
-                        &mut terminal.output, interrupt).await
+                enrollment
+                    .accounts
+                    .as_mut()
+                    .ok_or_else(|| {
+                        ConnectError::InvalidInput(
+                            "The selected account owner is unavailable".into(),
+                        )
+                    })?
+                    .present(
+                        request,
+                        &mut enrollment.presenter,
+                        &mut terminal.input,
+                        &mut terminal.output,
+                        interrupt,
+                    )
+                    .await
             }
-        }.await;
+        }
+        .await;
         return finish_account_presentation(setup, enrollment, result);
     }
-    let SetupEvent::Approval(prompt) = event else { unreachable!("service requests handled above") };
+    let SetupEvent::Approval(prompt) = event else {
+        unreachable!("service requests handled above")
+    };
     let result = if prompt.console_task().is_some() {
         match enrollment.console() {
             Some(panel) => panel.present_software(prompt, closed).await,
             None => Ok(ApprovalPromptOutcome::Refused(ConnectError::InvalidInput(
-                "This Console task has no configured Console presenter".into()))),
+                "This Console task has no configured Console presenter".into(),
+            ))),
         }
     } else {
         present_approval_outcome(prompt, &mut terminal.input, &mut terminal.output, interrupt).await
@@ -381,7 +472,10 @@ pub(super) fn finish_software_presentation(
     result: Result<ApprovalPromptOutcome, ConnectError>,
 ) -> Result<bool, ConnectError> {
     match result {
-        Ok(ApprovalPromptOutcome::Continue) => { setup.resume(enrollment); Ok(true) }
+        Ok(ApprovalPromptOutcome::Continue) => {
+            setup.resume(enrollment);
+            Ok(true)
+        }
         Ok(ApprovalPromptOutcome::Refused(error)) => {
             // Only the presentation source can identify a request-local result.
             // A decision may already be durable. Native dispatch/settlement
@@ -412,7 +506,10 @@ pub(super) fn finish_account_presentation(
             setup.resume(enrollment);
             Ok(true)
         }
-        Ok(true) => { setup.resume(enrollment); Ok(true) }
+        Ok(true) => {
+            setup.resume(enrollment);
+            Ok(true)
+        }
         result => result,
     }
 }
@@ -426,7 +523,9 @@ mod tests {
         use meerkat_core::*;
         ApprovalRequest {
             requester: ApprovalPrincipalId::new("test-requester").unwrap(),
-            owner: ApprovalOwnerRef::Session { session_id: session },
+            owner: ApprovalOwnerRef::Session {
+                session_id: session,
+            },
             resource: ApprovalResourceRef {
                 kind: ApprovalResourceKind::Runtime,
                 id: ApprovalResourceId::new("application-controller"),
@@ -438,8 +537,12 @@ mod tests {
             },
             risk: ApprovalRisk::High,
             request_body: None,
-            allowed_decisions: [ApprovalDecision::Approve, ApprovalDecision::Deny].into_iter().collect(),
-            expires_at: Some((std::time::SystemTime::now() + std::time::Duration::from_secs(120)).into()),
+            allowed_decisions: [ApprovalDecision::Approve, ApprovalDecision::Deny]
+                .into_iter()
+                .collect(),
+            expires_at: Some(
+                (std::time::SystemTime::now() + std::time::Duration::from_secs(120)).into(),
+            ),
             metadata: Default::default(),
             request_provenance: None,
         }
@@ -447,7 +550,11 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_controller_review_expires_while_shown_and_releases_input() {
-        use std::{future::{Future, poll_fn}, task::Poll, time::{Duration, SystemTime}};
+        use std::{
+            future::{Future, poll_fn},
+            task::Poll,
+            time::{Duration, SystemTime},
+        };
         tokio::time::timeout(Duration::from_secs(2), async {
             let directory = tempfile::tempdir().unwrap();
             let (approvals, mut presenter) = LocalApprovals::create(directory.path()).unwrap();
@@ -484,7 +591,11 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_controller_review_ready_stop_wins_then_joins_the_same_review() {
-        use std::{future::{Future, poll_fn}, task::Poll, time::{Duration, SystemTime}};
+        use std::{
+            future::{Future, poll_fn},
+            task::Poll,
+            time::{Duration, SystemTime},
+        };
         tokio::time::timeout(Duration::from_secs(2), async {
             let directory = tempfile::tempdir().unwrap();
             let (approvals, presenter) = LocalApprovals::create(directory.path()).unwrap();
@@ -495,27 +606,46 @@ mod tests {
             request.expires_at = Some((SystemTime::now() + Duration::from_millis(50)).into());
             let review = approvals.review_access(request);
             tokio::pin!(review);
-            assert!(poll_fn(|cx| Poll::Ready(review.as_mut().poll(cx))).await.is_pending());
+            assert!(
+                poll_fn(|cx| Poll::Ready(review.as_mut().poll(cx)))
+                    .await
+                    .is_pending()
+            );
             let prompt = presenter.as_mut().unwrap().next().await.unwrap();
             let (lines, receive_lines) = tokio::sync::mpsc::channel(1);
             let mut input = TerminalInput::scripted(receive_lines);
             let mut output = Vec::new();
             tokio::time::sleep(Duration::from_millis(60)).await;
-            let result = present_approval_with_review(prompt, &mut input, &mut output,
-                std::future::ready(Ok(())), review.as_mut()).await;
+            let result = present_approval_with_review(
+                prompt,
+                &mut input,
+                &mut output,
+                std::future::ready(Ok(())),
+                review.as_mut(),
+            )
+            .await;
             assert!(matches!(result, ReviewPresentation::Presented(Ok(false))));
-            assert!(retire_presenter_and_join(&approvals, &mut presenter, review).await.is_err());
+            assert!(
+                retire_presenter_and_join(&approvals, &mut presenter, review)
+                    .await
+                    .is_err()
+            );
             assert!(presenter.is_none());
             assert!(approvals.check_session(&session).is_err());
             input.check_cleanup().unwrap();
             lines.send(Ok("input after stop".into())).await.unwrap();
             assert_eq!(input.recv().await.unwrap().unwrap(), "input after stop");
-        }).await.expect("terminal stop did not preserve precedence and joined input cleanup");
+        })
+        .await
+        .expect("terminal stop did not preserve precedence and joined input cleanup");
     }
 
     #[tokio::test]
     async fn shutdown_drops_queued_native_prompt_before_joining_review() {
-        use std::{future::{Future, poll_fn}, task::Poll};
+        use std::{
+            future::{Future, poll_fn},
+            task::Poll,
+        };
         let directory = tempfile::tempdir().unwrap();
         let (approvals, presenter) = LocalApprovals::create(directory.path()).unwrap();
         let mut presenter = Some(presenter);
@@ -525,17 +655,31 @@ mod tests {
         tokio::pin!(review);
         // One poll creates the real native record and queues its prompt, then
         // waits on the one-shot. No presenter.next has consumed the queue.
-        assert!(poll_fn(|cx| Poll::Ready(review.as_mut().poll(cx))).await.is_pending());
+        assert!(
+            poll_fn(|cx| Poll::Ready(review.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
         // Both parent-close and interrupt production branches use this join.
-        let result = tokio::time::timeout(std::time::Duration::from_secs(2),
-            retire_presenter_and_join(&approvals, &mut presenter, review)).await;
-        assert!(result.expect("shutdown waited for the 120-second decision deadline").is_err());
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            retire_presenter_and_join(&approvals, &mut presenter, review),
+        )
+        .await;
+        assert!(
+            result
+                .expect("shutdown waited for the 120-second decision deadline")
+                .is_err()
+        );
         assert!(presenter.is_none());
     }
 
     #[tokio::test]
     async fn shutdown_keeps_work_after_returned_native_decision_joined() {
-        use std::{future::{Future, poll_fn}, task::Poll};
+        use std::{
+            future::{Future, poll_fn},
+            task::Poll,
+        };
         let directory = tempfile::tempdir().unwrap();
         let (approvals, presenter) = LocalApprovals::create(directory.path()).unwrap();
         let mut presenter = Some(presenter);
@@ -543,24 +687,46 @@ mod tests {
         approvals.bind_session(&session).unwrap();
         let review = approvals.review_access(access_request(session));
         tokio::pin!(review);
-        assert!(poll_fn(|cx| Poll::Ready(review.as_mut().poll(cx))).await.is_pending());
-        let mut prompt = tokio::time::timeout(std::time::Duration::from_secs(2),
-            presenter.as_mut().unwrap().next()).await.unwrap().unwrap();
-        prompt.decide(meerkat_core::ApprovalDecision::Approve).unwrap();
-        let decision = tokio::time::timeout(std::time::Duration::from_secs(2), review).await.unwrap().unwrap();
+        assert!(
+            poll_fn(|cx| Poll::Ready(review.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        let mut prompt = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            presenter.as_mut().unwrap().next(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        prompt
+            .decide(meerkat_core::ApprovalDecision::Approve)
+            .unwrap();
+        let decision = tokio::time::timeout(std::time::Duration::from_secs(2), review)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(decision.status, meerkat_core::ApprovalStatus::Approved);
         // An inert post-decision continuation controls settlement. This proves
         // join ownership, not a native grant or physical effect.
         let (release, wait) = tokio::sync::oneshot::channel();
-        let work = async { wait.await.unwrap(); Ok::<_, ConnectError>(decision) };
+        let work = async {
+            wait.await.unwrap();
+            Ok::<_, ConnectError>(decision)
+        };
         let joined = retire_presenter_and_join(&approvals, &mut presenter, work);
         tokio::pin!(joined);
-        let pending = poll_fn(|cx| Poll::Ready(joined.as_mut().poll(cx))).await.is_pending();
+        let pending = poll_fn(|cx| Poll::Ready(joined.as_mut().poll(cx)))
+            .await
+            .is_pending();
         let released = release.send(()).is_ok();
         let result = tokio::time::timeout(std::time::Duration::from_secs(2), joined).await;
         assert!(pending);
         assert!(released);
-        assert_eq!(result.unwrap().unwrap().status, meerkat_core::ApprovalStatus::Approved);
+        assert_eq!(
+            result.unwrap().unwrap().status,
+            meerkat_core::ApprovalStatus::Approved
+        );
     }
 
     #[test]
@@ -568,7 +734,10 @@ mod tests {
         let first = tempfile::tempfile().unwrap();
         let second = tempfile::tempfile().unwrap();
         for fd in [0, 1, 2, first.as_raw_fd(), second.as_raw_fd()] {
-            assert!(InheritedOperatorTerminal::adopt(fd, first.as_raw_fd(), second.as_raw_fd()).is_err());
+            assert!(
+                InheritedOperatorTerminal::adopt(fd, first.as_raw_fd(), second.as_raw_fd())
+                    .is_err()
+            );
         }
         // Collision refusal must not close another channel's descriptor.
         assert!(first.metadata().is_ok());
@@ -585,13 +754,21 @@ mod tests {
     #[test]
     fn owned_terminal_is_retained_close_on_exec_without_a_second_input_owner() {
         let pty = nix::pty::openpty(None, None).unwrap();
-        assert_eq!(nix::sys::termios::tcgetsid(&pty.slave), Err(nix::errno::Errno::ENOTTY));
+        assert_eq!(
+            nix::sys::termios::tcgetsid(&pty.slave),
+            Err(nix::errno::Errno::ENOTTY)
+        );
         let fd = pty.slave.into_raw_fd();
         let terminal = InheritedOperatorTerminal::adopt(fd, fd + 1, fd + 2).unwrap();
         terminal.input.require_terminal().unwrap();
-        assert_eq!(nix::sys::termios::tcgetsid(&terminal.output), Err(nix::errno::Errno::ENOTTY));
+        assert_eq!(
+            nix::sys::termios::tcgetsid(&terminal.output),
+            Err(nix::errno::Errno::ENOTTY)
+        );
         let flags = nix::fcntl::fcntl(&terminal.output, nix::fcntl::FcntlArg::F_GETFD).unwrap();
-        assert!(nix::fcntl::FdFlag::from_bits_truncate(flags).contains(nix::fcntl::FdFlag::FD_CLOEXEC));
+        assert!(
+            nix::fcntl::FdFlag::from_bits_truncate(flags).contains(nix::fcntl::FdFlag::FD_CLOEXEC)
+        );
         drop(terminal);
         drop(pty.master);
     }
@@ -611,9 +788,13 @@ mod tests {
                 .env(CHILD, "child")
                 .output()
                 .unwrap();
-            assert!(output.status.success(), "terminal child {:?}: {}{}",
-                output.status, String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr));
+            assert!(
+                output.status.success(),
+                "terminal child {:?}: {}{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
             return;
         }
         let session = nix::unistd::setsid().unwrap();

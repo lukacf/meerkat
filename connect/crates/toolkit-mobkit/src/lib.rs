@@ -167,11 +167,17 @@ impl FindAndInstallTool {
         admission_timeout: Duration,
     ) -> Result<Self, ToolAdmissionError> {
         Self::validate_timeout(admission_timeout)?;
-        store.capabilities().require_durable_contract()
+        store
+            .capabilities()
+            .require_durable_contract()
             .map_err(|_| ToolAdmissionError::Unavailable)?;
         Ok(Self {
             admission: FindAndInstallAdmission::Direct(AdmissionDependencies {
-                store, conditional_store: None, scope, host, references,
+                store,
+                conditional_store: None,
+                scope,
+                host,
+                references,
             }),
             tools: vec![Arc::new(definition())].into(),
             admission_timeout,
@@ -226,11 +232,20 @@ impl FindAndInstallTool {
         if let Some(acquisition) = &owner.acquisition {
             acquisition.require_native_runtime().map_err(|error| {
                 #[cfg(test)]
-                aa1_failure("leaf.native_runtime", match error {
-                    private_originals::PrivateOriginalError::Denied => "PrivateOriginalError::Denied",
-                    private_originals::PrivateOriginalError::Conflict => "PrivateOriginalError::Conflict",
-                    private_originals::PrivateOriginalError::Unavailable => "PrivateOriginalError::Unavailable",
-                });
+                aa1_failure(
+                    "leaf.native_runtime",
+                    match error {
+                        private_originals::PrivateOriginalError::Denied => {
+                            "PrivateOriginalError::Denied"
+                        }
+                        private_originals::PrivateOriginalError::Conflict => {
+                            "PrivateOriginalError::Conflict"
+                        }
+                        private_originals::PrivateOriginalError::Unavailable => {
+                            "PrivateOriginalError::Unavailable"
+                        }
+                    },
+                );
                 let _ = error;
                 unavailable()
             })?;
@@ -297,39 +312,60 @@ impl FindAndInstallTool {
         let store = match &dependencies.conditional_store {
             Some(store) => SetupStore::new_conditional(store.as_ref(), dependencies.scope.clone()),
             None => SetupStore::new(dependencies.store.as_ref(), dependencies.scope.clone()),
-        }.map_err(|error| {
+        }
+        .map_err(|error| {
             #[cfg(test)]
             aa1_setup_failure("leaf.store", &error);
             let _ = error;
             unavailable()
         })?;
-        let first = store.admit_or_recover(
-            request.clone(), admission.host.clone(), &admission.evidence,
-            &use_context, dependencies.references.as_ref(),
-        ).await;
+        let first = store
+            .admit_or_recover(
+                request.clone(),
+                admission.host.clone(),
+                &admission.evidence,
+                &use_context,
+                dependencies.references.as_ref(),
+            )
+            .await;
         let admitted = match first {
-            Err(SetupError::Store(StoreError::AdmissionConflict)) if dependencies.conditional_store.is_some() => {
+            Err(SetupError::Store(StoreError::AdmissionConflict))
+                if dependencies.conditional_store.is_some() =>
+            {
                 // Two first admissions can observe no acquisition row, then
                 // receive different clock terms. Read the winning terms once
                 // through the same current installed owner. This retries no
                 // work/effect and never changes the canonical raw request.
-                let recovered = dependencies.host.admit_invocation(call.id, context).await
+                let recovered = dependencies
+                    .host
+                    .admit_invocation(call.id, context)
+                    .await
                     .map_err(|error| {
                         #[cfg(test)]
                         aa1_admission_failure("leaf.host_readback", &error);
                         match error {
-                            ToolAdmissionError::Denied => ToolError::AccessDenied { name: FIND_AND_INSTALL.into() },
+                            ToolAdmissionError::Denied => ToolError::AccessDenied {
+                                name: FIND_AND_INSTALL.into(),
+                            },
                             ToolAdmissionError::Unavailable => unavailable(),
                         }
                     })?;
                 if !same_installed_admission(&admission, &recovered) {
-                    return Err(setup_error(SetupError::Store(StoreError::AdmissionConflict)));
+                    return Err(setup_error(SetupError::Store(
+                        StoreError::AdmissionConflict,
+                    )));
                 }
                 admission = recovered;
-                store.admit_or_recover(
-                    request, admission.host.clone(), &admission.evidence,
-                    &admission.context.borrowed(authorization), dependencies.references.as_ref(),
-                ).await.map_err(setup_error)?
+                store
+                    .admit_or_recover(
+                        request,
+                        admission.host.clone(),
+                        &admission.evidence,
+                        &admission.context.borrowed(authorization),
+                        dependencies.references.as_ref(),
+                    )
+                    .await
+                    .map_err(setup_error)?
             }
             result => result.map_err(setup_error)?,
         };
@@ -340,11 +376,16 @@ impl FindAndInstallTool {
                 aa1_failure("leaf.operation_id", "IdError");
                 unavailable()
             })?;
-            Some(acquisition.advance(&operation, call, context).await.map_err(|error| {
-                #[cfg(test)]
-                aa1_setup_failure("leaf.advance", &error);
-                setup_error(error)
-            })?)
+            Some(
+                acquisition
+                    .advance(&operation, call, context)
+                    .await
+                    .map_err(|error| {
+                        #[cfg(test)]
+                        aa1_setup_failure("leaf.advance", &error);
+                        setup_error(error)
+                    })?,
+            )
         } else {
             None
         };
@@ -373,8 +414,10 @@ fn same_installed_admission(first: &HostToolAdmission, replay: &HostToolAdmissio
     let a = first.evidence.constraints();
     let b = replay.evidence.constraints();
     first.evidence.association() == replay.evidence.association()
-        && a.tenant == b.tenant && a.deployment == b.deployment
-        && a.policy_revision == b.policy_revision && a.ceiling == b.ceiling
+        && a.tenant == b.tenant
+        && a.deployment == b.deployment
+        && a.policy_revision == b.policy_revision
+        && a.ceiling == b.ceiling
         && first.host.target == replay.host.target
         && first.host.correlation == replay.host.correlation
         && first.host.parent_operation == replay.host.parent_operation
@@ -425,19 +468,18 @@ impl AgentToolDispatcher for FindAndInstallTool {
         context: &ToolDispatchContext,
     ) -> Result<ToolDispatchOutcome, ToolError> {
         if call.name != FIND_AND_INSTALL {
-            return Err(ToolError::NotFound { name: call.name.into() });
+            return Err(ToolError::NotFound {
+                name: call.name.into(),
+            });
         }
         let owner = self.execution_owner()?;
-        tokio::time::timeout(
-            self.admission_timeout,
-            self.admit(call, context, owner),
-        )
-        .await
-        .map_err(|_| {
-            #[cfg(test)]
-            aa1_failure("leaf.timeout", "Elapsed");
-            unavailable()
-        })?
+        tokio::time::timeout(self.admission_timeout, self.admit(call, context, owner))
+            .await
+            .map_err(|_| {
+                #[cfg(test)]
+                aa1_failure("leaf.timeout", "Elapsed");
+                unavailable()
+            })?
     }
 }
 
@@ -445,7 +487,9 @@ fn request_error(error: RequestError) -> ToolError {
     match error {
         RequestError::EmptyRequest | RequestError::InputLimit => invalid_arguments(),
         RequestError::Encoding(_)
-        | RequestError::Authority(meerkat_toolkit::authority::SetupContextError::InvalidEncoding) => unavailable(),
+        | RequestError::Authority(meerkat_toolkit::authority::SetupContextError::InvalidEncoding) => {
+            unavailable()
+        }
         _ => ToolError::AccessDenied {
             name: FIND_AND_INSTALL.into(),
         },
@@ -473,10 +517,13 @@ fn aa1_failure(stage: &'static str, variant: &'static str) {
 
 #[cfg(test)]
 fn aa1_admission_failure(stage: &'static str, error: &ToolAdmissionError) {
-    aa1_failure(stage, match error {
-        ToolAdmissionError::Denied => "ToolAdmissionError::Denied",
-        ToolAdmissionError::Unavailable => "ToolAdmissionError::Unavailable",
-    });
+    aa1_failure(
+        stage,
+        match error {
+            ToolAdmissionError::Denied => "ToolAdmissionError::Denied",
+            ToolAdmissionError::Unavailable => "ToolAdmissionError::Unavailable",
+        },
+    );
 }
 
 #[cfg(test)]
@@ -574,12 +621,9 @@ impl FindAndInstallTool {
         context: &ToolDispatchContext,
     ) -> Result<ToolDispatchOutcome, ToolError> {
         let owner = self.admission_owner()?;
-        tokio::time::timeout(
-            self.admission_timeout,
-            self.admit(call, context, owner),
-        )
-        .await
-        .map_err(|_| unavailable())?
+        tokio::time::timeout(self.admission_timeout, self.admit(call, context, owner))
+            .await
+            .map_err(|_| unavailable())?
     }
 }
 

@@ -4,19 +4,21 @@
 use super::*;
 use crate::installed_host::operator_setup::{OperatorParentOutcome, OperatorParentPurpose};
 use meerkat_authorization_contracts::constraints::DelegationDepth;
+use meerkat_authorization_contracts::work_association::InputAuthorityAssociation;
 use meerkat_core::{
     ApprovalActionKind, ApprovalDecision, ApprovalOwnerRef, ApprovalPrincipalId,
     ApprovalProposedAction, ApprovalRequest, ApprovalResourceId, ApprovalResourceKind,
     ApprovalResourceRef, ApprovalRisk, ApprovalService,
 };
-use meerkat_authorization_contracts::work_association::InputAuthorityAssociation;
 use meerkat_runtime::input_state::{InputLifecycleState, InputTerminalOutcome, StoredInputState};
 use meerkat_runtime::{LogicalRuntimeId, RuntimeStore};
 use toolkit_store::ToolkitStore;
 
 type Fixture = FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>>;
 
-pub(super) async fn select_reviewed_setup(fixture: &Fixture) -> (LocalControllerSetup, Vec<GrantLineageRef>) {
+pub(super) async fn select_reviewed_setup(
+    fixture: &Fixture,
+) -> (LocalControllerSetup, Vec<GrantLineageRef>) {
     let prepared = fixture
         .source
         .prepare_local_controller_setup(fixture.submission.clone())
@@ -117,30 +119,58 @@ pub(super) async fn consumed_native_input(
     deadline: tokio::time::Instant,
 ) -> StoredInputState {
     let runtime_id = LogicalRuntimeId::for_session(session);
-    assert_eq!(association.candidate().target.context.as_str(), session.to_string());
-    assert_eq!(association.candidate().target.logical_runtime.as_str(), runtime_id.to_string());
+    assert_eq!(
+        association.candidate().target.context.as_str(),
+        session.to_string()
+    );
+    assert_eq!(
+        association.candidate().target.logical_runtime.as_str(),
+        runtime_id.to_string()
+    );
     // Completion notification and canonical input persistence are separate
     // observations. Only the exact admitted row may finish settling here.
     let mut observed_id = expected_input_id.map(str::to_owned);
     tokio::time::timeout_at(deadline, async {
         loop {
-            let mut rows = runtime_store.load_input_states_strict(&runtime_id).await
+            let mut rows = runtime_store
+                .load_input_states_strict(&runtime_id)
+                .await
                 .expect("canonical native input history must decode completely");
-            assert_eq!(rows.len(), 1, "exactly one canonical native input in this session");
+            assert_eq!(
+                rows.len(),
+                1,
+                "exactly one canonical native input in this session"
+            );
             let row = rows.pop().unwrap();
             let input_id = row.state.input_id.to_string();
             match &observed_id {
-                Some(expected) => assert_eq!(&input_id, expected, "canonical native input ID changed"),
+                Some(expected) => {
+                    assert_eq!(&input_id, expected, "canonical native input ID changed")
+                }
                 None => observed_id = Some(input_id),
             }
-            assert_eq!(row.state.authority_contributors.len(), 1, "one exact source association");
+            assert_eq!(
+                row.state.authority_contributors.len(),
+                1,
+                "one exact source association"
+            );
             let authority = &row.state.authority_contributors[0];
             assert_eq!(authority.input_id(), &row.state.input_id);
-            assert_eq!(authority.association(), association, "canonical source association changed");
+            assert_eq!(
+                authority.association(),
+                association,
+                "canonical source association changed"
+            );
             match row.seed.phase {
                 InputLifecycleState::Consumed => {
-                    assert_eq!(row.seed.terminal_outcome, Some(InputTerminalOutcome::Consumed));
-                    assert!(row.seed.last_run_id.is_some(), "completed native run must be retained");
+                    assert_eq!(
+                        row.seed.terminal_outcome,
+                        Some(InputTerminalOutcome::Consumed)
+                    );
+                    assert!(
+                        row.seed.last_run_id.is_some(),
+                        "completed native run must be retained"
+                    );
                     return row;
                 }
                 InputLifecycleState::Accepted
@@ -148,9 +178,15 @@ pub(super) async fn consumed_native_input(
                 | InputLifecycleState::Staged
                 | InputLifecycleState::Applied
                 | InputLifecycleState::AppliedPendingConsumption => {
-                    assert_eq!(row.seed.terminal_outcome, None, "nonterminal phase carried a terminal outcome");
+                    assert_eq!(
+                        row.seed.terminal_outcome, None,
+                        "nonterminal phase carried a terminal outcome"
+                    );
                 }
-                _ => panic!("canonical input did not complete successfully: {:?}", row.seed),
+                _ => panic!(
+                    "canonical input did not complete successfully: {:?}",
+                    row.seed
+                ),
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
@@ -197,13 +233,23 @@ async fn reviewed_original_runs_enrolled_acquisition_and_one_controller_only_hel
             checkpoint("before_helper_cursor");
             let helper_before = fixture.runtime.completion_cursor(&helper).await;
             checkpoint("after_helper_cursor_before_empty_history");
-            assert!(native_history(runtime_store.as_ref(), &helper_session).await.is_empty());
-            assert!(native_history(runtime_store.as_ref(), &fixture.session).await.is_empty());
+            assert!(
+                native_history(runtime_store.as_ref(), &helper_session)
+                    .await
+                    .is_empty()
+            );
+            assert!(
+                native_history(runtime_store.as_ref(), &fixture.session)
+                    .await
+                    .is_empty()
+            );
             checkpoint("before_setup_review");
             let (prepared, parent) = select_reviewed_setup(&fixture).await;
             checkpoint("after_setup_review");
             assert!(
-                native_history(runtime_store.as_ref(), &fixture.session).await.is_empty(),
+                native_history(runtime_store.as_ref(), &fixture.session)
+                    .await
+                    .is_empty(),
                 "review and selection do not submit A"
             );
             assert_eq!(fixture.model_requests(), 0);
@@ -232,11 +278,18 @@ async fn reviewed_original_runs_enrolled_acquisition_and_one_controller_only_hel
             let first = fixture.submit().await;
             checkpoint("after_a_submit");
             let first_input_id = match &first {
-                Ok(PrivateOriginalSubmission::Admitted { session_id, input_id, .. }) => {
+                Ok(PrivateOriginalSubmission::Admitted {
+                    session_id,
+                    input_id,
+                    ..
+                }) => {
                     assert_eq!(session_id, &fixture.session.to_string());
                     input_id.clone()
                 }
-                _ => panic!("actual A admission required: {}", submission_context(&first)),
+                _ => panic!(
+                    "actual A admission required: {}",
+                    submission_context(&first)
+                ),
             };
             checkpoint("before_a_completion");
             fixture.finish(&first).await.unwrap();
@@ -248,13 +301,16 @@ async fn reviewed_original_runs_enrolled_acquisition_and_one_controller_only_hel
                     feedback.len()
                 );
                 for item in &feedback {
-                    let worker_state = serde_json::from_str::<serde_json::Value>(
-                        &item.text_content(),
-                    )
-                    .ok()
-                    .and_then(|reply| {
-                        reply.get("worker")?.get("state")?.as_str().map(str::to_owned)
-                    });
+                    let worker_state =
+                        serde_json::from_str::<serde_json::Value>(&item.text_content())
+                            .ok()
+                            .and_then(|reply| {
+                                reply
+                                    .get("worker")?
+                                    .get("state")?
+                                    .as_str()
+                                    .map(str::to_owned)
+                            });
                     eprintln!(
                         "AA1 feedback: is_error={} worker_state={worker_state:?}",
                         item.is_error
@@ -376,8 +432,13 @@ async fn reviewed_original_runs_enrolled_acquisition_and_one_controller_only_hel
             );
             checkpoint("before_a_consumed");
             let a_history = consumed_native_input(
-                runtime_store.as_ref(), &fixture.session, &binding, Some(&first_input_id), deadline,
-            ).await;
+                runtime_store.as_ref(),
+                &fixture.session,
+                &binding,
+                Some(&first_input_id),
+                deadline,
+            )
+            .await;
             checkpoint("after_a_consumed");
             assert_eq!(a_history.state.input_id.to_string(), first_input_id);
             // The worker reply intentionally omits its input ID. Read the actual
@@ -385,8 +446,13 @@ async fn reviewed_original_runs_enrolled_acquisition_and_one_controller_only_hel
             // joined to its exact retained source; do not reconstruct an ID.
             checkpoint("before_helper_consumed");
             let helper_history = consumed_native_input(
-                runtime_store.as_ref(), &helper_session, helper_binding, None, deadline,
-            ).await;
+                runtime_store.as_ref(),
+                &helper_session,
+                helper_binding,
+                None,
+                deadline,
+            )
+            .await;
             checkpoint("after_helper_consumed");
             let helper_input_id = helper_history.state.input_id.to_string();
             assert_ne!(helper_history.state.input_id, a_history.state.input_id);
@@ -434,17 +500,30 @@ async fn reviewed_original_runs_enrolled_acquisition_and_one_controller_only_hel
             );
             checkpoint("before_a_replay_consumed");
             let a_replay_history = consumed_native_input(
-                runtime_store.as_ref(), &fixture.session, &binding, Some(&first_input_id), deadline,
-            ).await;
+                runtime_store.as_ref(),
+                &fixture.session,
+                &binding,
+                Some(&first_input_id),
+                deadline,
+            )
+            .await;
             checkpoint("after_a_replay_consumed");
             checkpoint("before_helper_replay_consumed");
             let helper_replay_history = consumed_native_input(
-                runtime_store.as_ref(), &helper_session, helper_binding, Some(&helper_input_id), deadline,
-            ).await;
+                runtime_store.as_ref(),
+                &helper_session,
+                helper_binding,
+                Some(&helper_input_id),
+                deadline,
+            )
+            .await;
             checkpoint("after_helper_replay_consumed_before_final_checks");
             assert_eq!(a_replay_history.state.input_id, a_history.state.input_id);
             assert_eq!(a_replay_history.seed, a_history.seed);
-            assert_eq!(helper_replay_history.state.input_id, helper_history.state.input_id);
+            assert_eq!(
+                helper_replay_history.state.input_id,
+                helper_history.state.input_id
+            );
             assert_eq!(helper_replay_history.seed, helper_history.seed);
             assert_eq!(
                 fixture
@@ -469,7 +548,9 @@ async fn reviewed_original_runs_enrolled_acquisition_and_one_controller_only_hel
     match result {
         Ok(Ok(())) => (),
         Err(panic) => std::panic::resume_unwind(panic),
-        _ => panic!("actual approved acquisition turn exceeded the fixture deadline; last stage: {last_stage}"),
+        _ => panic!(
+            "actual approved acquisition turn exceeded the fixture deadline; last stage: {last_stage}"
+        ),
     }
 }
 
@@ -492,7 +573,10 @@ async fn revoked_reviewed_parent_never_enters_acquisition_or_helper() {
             }
             let first = fixture.submit().await;
             assert!(
-                matches!(first, Ok(PrivateOriginalSubmission::NativeOutcomeUnavailable)),
+                matches!(
+                    first,
+                    Ok(PrivateOriginalSubmission::NativeOutcomeUnavailable)
+                ),
                 "revoked setup authority must refuse: {}",
                 submission_context(&first)
             );

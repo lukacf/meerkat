@@ -176,7 +176,8 @@ async fn fault_fixture() -> (ContinuationFixture, Arc<RecoveryStore>) {
         let fault = RecoveryStore::new(store);
         *capture.lock().unwrap() = Some(fault.clone());
         fault
-    })).await;
+    }))
+    .await;
     let store = selected.lock().unwrap().take();
     match store {
         Some(store) => (fixture, store),

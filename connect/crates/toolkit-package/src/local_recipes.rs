@@ -130,7 +130,11 @@ struct SavedDocuments {
     decision: EvidenceReference,
     // Omitted for historical and caller-supplied references. Older readers
     // reject marked rows because SavedDocuments denies unknown fields.
-    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_current_submission")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_current_submission"
+    )]
     current_submission: Option<CurrentSubmission>,
 }
 
@@ -145,7 +149,9 @@ fn deserialize_current_submission<'de, D: serde::Deserializer<'de>>(
 ) -> Result<Option<CurrentSubmission>, D::Error> {
     match String::deserialize(deserializer)?.as_str() {
         "v1" => Ok(Some(CurrentSubmission::V1)),
-        _ => Err(serde::de::Error::custom("unsupported current submission marker")),
+        _ => Err(serde::de::Error::custom(
+            "unsupported current submission marker",
+        )),
     }
 }
 
@@ -177,8 +183,7 @@ fn current_submission_reference(
         owner: Id::new("toolkit.local-recipes.current-submission").map_err(invalid)?,
         record: Id::new(format!("submission/{}", ContentDigest::of_bytes(&address)))
             .map_err(invalid)?,
-        revision: Revision::new(ContentDigest::of_bytes(&revision).to_string())
-            .map_err(invalid)?,
+        revision: Revision::new(ContentDigest::of_bytes(&revision).to_string()).map_err(invalid)?,
     })
 }
 
@@ -638,27 +643,46 @@ pub struct RetainedLocalSoftware {
 
 impl RetainedLocalSoftware {
     pub fn parse(
-        package_json: &[u8], declaration_json: &[u8], profile: LocalSelectionProfile,
-        component: Id, decision: EvidenceReference, verification: Vec<EvidenceReference>,
+        package_json: &[u8],
+        declaration_json: &[u8],
+        profile: LocalSelectionProfile,
+        component: Id,
+        decision: EvidenceReference,
+        verification: Vec<EvidenceReference>,
     ) -> Result<Self, LocalRecipeError> {
-        Self::parse_documents(package_json, declaration_json, profile, None,
-            component, decision, verification)
+        Self::parse_documents(
+            package_json,
+            declaration_json,
+            profile,
+            None,
+            component,
+            decision,
+            verification,
+        )
     }
 
     fn parse_documents(
-        package_json: &[u8], declaration_json: &[u8], profile: LocalSelectionProfile,
-        plugin_source_json: Option<&[u8]>, component: Id, decision: EvidenceReference,
+        package_json: &[u8],
+        declaration_json: &[u8],
+        profile: LocalSelectionProfile,
+        plugin_source_json: Option<&[u8]>,
+        component: Id,
+        decision: EvidenceReference,
         verification: Vec<EvidenceReference>,
     ) -> Result<Self, LocalRecipeError> {
         let invalid = |message| ValidationError::new("local software", message);
-        if package_json.len() > MAX_SELECTION_DOCUMENT || declaration_json.len() > MAX_SELECTION_DOCUMENT
-            || plugin_source_json.is_some_and(|bytes| bytes.len() > MAX_SELECTION_DOCUMENT) {
+        if package_json.len() > MAX_SELECTION_DOCUMENT
+            || declaration_json.len() > MAX_SELECTION_DOCUMENT
+            || plugin_source_json.is_some_and(|bytes| bytes.len() > MAX_SELECTION_DOCUMENT)
+        {
             return Err(invalid("document exceeds the selection read limit").into());
         }
         if profile == LocalSelectionProfile::Mcpb {
             return Err(invalid("plain software supports only Python and Node").into());
         }
-        if let Some(source) = plugin_source_json { validate_plugin_source(source)?; }
+        if let Some(source) = plugin_source_json {
+            validate_plugin_source(source)?;
+        }
         validate_selection_evidence(&verification)?;
         let package: IntegrationPackage = serde_json::from_slice(package_json)
             .map_err(|_| invalid("invalid package document"))?;
@@ -666,43 +690,89 @@ impl RetainedLocalSoftware {
             .map_err(|_| invalid("invalid software document"))?;
         let validated = declaration.validate(&package)?;
         match profile {
-            LocalSelectionProfile::Python => { PythonInstallPlan::from_declaration(&package, &validated, &component)?; }
-            LocalSelectionProfile::Node => { NodeInstallPlan::from_declaration(&package, &validated, &component)?; }
+            LocalSelectionProfile::Python => {
+                PythonInstallPlan::from_declaration(&package, &validated, &component)?;
+            }
+            LocalSelectionProfile::Node => {
+                NodeInstallPlan::from_declaration(&package, &validated, &component)?;
+            }
             LocalSelectionProfile::Mcpb => unreachable!("profile refused above"),
         }
-        let text = |bytes: &[u8]| String::from_utf8(bytes.to_vec())
-            .map_err(|_| invalid("documents must be UTF-8"));
+        let text = |bytes: &[u8]| {
+            String::from_utf8(bytes.to_vec()).map_err(|_| invalid("documents must be UTF-8"))
+        };
         let documents = SavedSoftware {
             document_kind: LocalSoftwareDocumentKind::LocalSoftwareDeclaration,
-            identity: package.identity.clone(), package_content_digest: package.content_digest()?,
+            identity: package.identity.clone(),
+            package_content_digest: package.content_digest()?,
             declaration_digest: validated.digest().clone(),
-            package_json: text(package_json)?, declaration_json: text(declaration_json)?,
+            package_json: text(package_json)?,
+            declaration_json: text(declaration_json)?,
             plugin_source_json: plugin_source_json.map(text).transpose()?,
-            profile, component, decision, verification,
+            profile,
+            component,
+            decision,
+            verification,
         };
-        software_data(&documents)?.validate()
+        software_data(&documents)?
+            .validate()
             .map_err(|_| invalid("retained software exceeds the store record limit"))?;
-        let digest = ContentDigest::of_bytes(&canonical_json(&(
-            LOCAL_RECIPE_SCHEMA, LOCAL_SOFTWARE_VERSION, &documents))
-            .map_err(|_| invalid("cannot encode retained software"))?);
-        Ok(Self { package, validated, documents, digest })
+        let digest = ContentDigest::of_bytes(
+            &canonical_json(&(LOCAL_RECIPE_SCHEMA, LOCAL_SOFTWARE_VERSION, &documents))
+                .map_err(|_| invalid("cannot encode retained software"))?,
+        );
+        Ok(Self {
+            package,
+            validated,
+            documents,
+            digest,
+        })
     }
 
     pub fn with_plugin_source(self, bytes: &[u8]) -> Result<Self, LocalRecipeError> {
-        Self::parse_documents(self.package_json(), self.declaration_json(), self.documents.profile,
-            Some(bytes), self.documents.component.clone(), self.documents.decision.clone(),
-            self.documents.verification.clone())
+        Self::parse_documents(
+            self.package_json(),
+            self.declaration_json(),
+            self.documents.profile,
+            Some(bytes),
+            self.documents.component.clone(),
+            self.documents.decision.clone(),
+            self.documents.verification.clone(),
+        )
     }
-    pub fn package(&self) -> &IntegrationPackage { &self.package }
-    pub fn validated_declaration(&self) -> &ValidatedLocalSoftware { &self.validated }
-    pub fn digest(&self) -> &ContentDigest { &self.digest }
-    pub fn package_json(&self) -> &[u8] { self.documents.package_json.as_bytes() }
-    pub fn declaration_json(&self) -> &[u8] { self.documents.declaration_json.as_bytes() }
-    pub fn plugin_source_json(&self) -> Option<&[u8]> { self.documents.plugin_source_json.as_deref().map(str::as_bytes) }
-    pub fn profile(&self) -> LocalSelectionProfile { self.documents.profile }
-    pub fn component(&self) -> &Id { &self.documents.component }
-    pub fn decision(&self) -> &EvidenceReference { &self.documents.decision }
-    pub fn verification(&self) -> &[EvidenceReference] { &self.documents.verification }
+    pub fn package(&self) -> &IntegrationPackage {
+        &self.package
+    }
+    pub fn validated_declaration(&self) -> &ValidatedLocalSoftware {
+        &self.validated
+    }
+    pub fn digest(&self) -> &ContentDigest {
+        &self.digest
+    }
+    pub fn package_json(&self) -> &[u8] {
+        self.documents.package_json.as_bytes()
+    }
+    pub fn declaration_json(&self) -> &[u8] {
+        self.documents.declaration_json.as_bytes()
+    }
+    pub fn plugin_source_json(&self) -> Option<&[u8]> {
+        self.documents
+            .plugin_source_json
+            .as_deref()
+            .map(str::as_bytes)
+    }
+    pub fn profile(&self) -> LocalSelectionProfile {
+        self.documents.profile
+    }
+    pub fn component(&self) -> &Id {
+        &self.documents.component
+    }
+    pub fn decision(&self) -> &EvidenceReference {
+        &self.documents.decision
+    }
+    pub fn verification(&self) -> &[EvidenceReference] {
+        &self.documents.verification
+    }
 }
 
 /// Explicit public text selected from one exact retained source observation.
@@ -1042,10 +1112,10 @@ fn validate_selection_evidence(verification: &[EvidenceReference]) -> Result<(),
 
 fn software_data(documents: &SavedSoftware) -> Result<RecordData, LocalRecipeError> {
     Ok(RecordData {
-        schema: LOCAL_RECIPE_SCHEMA.into(), version: LOCAL_SOFTWARE_VERSION,
-        body: serde_json::to_value(documents).map_err(|_| {
-            ValidationError::new("local software", "cannot encode saved documents")
-        })?,
+        schema: LOCAL_RECIPE_SCHEMA.into(),
+        version: LOCAL_SOFTWARE_VERSION,
+        body: serde_json::to_value(documents)
+            .map_err(|_| ValidationError::new("local software", "cannot encode saved documents"))?,
     })
 }
 
@@ -1286,22 +1356,32 @@ impl<'a> LocalRecipeStore<'a> {
     /// Save exact software declarations in the same immutable namespace. Old
     /// readers reject version 4; no old record is migrated or overwritten.
     pub async fn save_retained_software(
-        &self, selected: RetainedLocalSoftware,
+        &self,
+        selected: RetainedLocalSoftware,
     ) -> Result<RetainedLocalSoftware, LocalRecipeError> {
         let key = self.key(&selected.package.identity);
         let request = AdmissionRequest {
-            admission_key: key.id.clone(), key,
-            data: software_data(&selected.documents)?, events: Vec::new(), effects: Vec::new(),
+            admission_key: key.id.clone(),
+            key,
+            data: software_data(&selected.documents)?,
+            events: Vec::new(),
+            effects: Vec::new(),
         };
         let record = match self.store.admit(request).await {
             Ok(AdmissionOutcome::Created(record) | AdmissionOutcome::Existing(record)) => record,
-            Err(StoreError::AdmissionConflict | StoreError::AlreadyExists) => return Err(LocalRecipeError::ImmutableConflict),
-            Err(error @ (StoreError::Synchronization | StoreError::Worker)) => return Err(LocalRecipeError::Unconfirmed(error)),
+            Err(StoreError::AdmissionConflict | StoreError::AlreadyExists) => {
+                return Err(LocalRecipeError::ImmutableConflict);
+            }
+            Err(error @ (StoreError::Synchronization | StoreError::Worker)) => {
+                return Err(LocalRecipeError::Unconfirmed(error));
+            }
             Err(error) => return Err(LocalRecipeError::Store(error)),
         };
         let saved = verify_software(&self.scope, &record, Some(&selected.package.identity))?;
         if saved.documents != selected.documents {
-            return Err(LocalRecipeError::Unverified("stored software differs from submitted documents or evidence"));
+            return Err(LocalRecipeError::Unverified(
+                "stored software differs from submitted documents or evidence",
+            ));
         }
         Ok(saved)
     }
@@ -1335,9 +1415,9 @@ impl<'a> LocalRecipeStore<'a> {
     ) -> Result<Option<RetainedLocalSelection>, LocalRecipeError> {
         match self.load_retained_exact(identity, digest).await? {
             Some(RetainedLocalRecipe::Selection(selection)) => Ok(Some(selection)),
-            Some(RetainedLocalRecipe::Recipe(_) | RetainedLocalRecipe::Software(_)) => Err(LocalRecipeError::Unverified(
-                "stored recipe is not a local selection",
-            )),
+            Some(RetainedLocalRecipe::Recipe(_) | RetainedLocalRecipe::Software(_)) => Err(
+                LocalRecipeError::Unverified("stored recipe is not a local selection"),
+            ),
             None => Ok(None),
         }
     }
@@ -1580,32 +1660,56 @@ fn verify_retained(
 }
 
 fn verify_software(
-    scope: &StoreScope, record: &StoredRecord, requested: Option<&PackageIdentity>,
+    scope: &StoreScope,
+    record: &StoredRecord,
+    requested: Option<&PackageIdentity>,
 ) -> Result<RetainedLocalSoftware, LocalRecipeError> {
     if record.key.scope() != *scope {
-        return Err(LocalRecipeError::Unverified("record is from another namespace"));
+        return Err(LocalRecipeError::Unverified(
+            "record is from another namespace",
+        ));
     }
-    if record.data.schema != LOCAL_RECIPE_SCHEMA || record.data.version != LOCAL_SOFTWARE_VERSION
-        || record.data.body.get("plugin_source_json").is_some_and(serde_json::Value::is_null) {
-        return Err(LocalRecipeError::Unverified("unsupported local software format"));
+    if record.data.schema != LOCAL_RECIPE_SCHEMA
+        || record.data.version != LOCAL_SOFTWARE_VERSION
+        || record
+            .data
+            .body
+            .get("plugin_source_json")
+            .is_some_and(serde_json::Value::is_null)
+    {
+        return Err(LocalRecipeError::Unverified(
+            "unsupported local software format",
+        ));
     }
     if record.data.digest().ok().as_deref() != Some(record.content_digest.as_str()) {
-        return Err(LocalRecipeError::Unverified("record digest does not match its content"));
+        return Err(LocalRecipeError::Unverified(
+            "record digest does not match its content",
+        ));
     }
     let documents: SavedSoftware = serde_json::from_value(record.data.body.clone())
         .map_err(|_| LocalRecipeError::Unverified("invalid saved software"))?;
-    if let Some(requested) = requested && documents.identity != *requested {
+    if let Some(requested) = requested
+        && documents.identity != *requested
+    {
         return Err(LocalRecipeError::IdentityMismatch {
-            requested: Box::new(requested.clone()), stored: Box::new(documents.identity),
+            requested: Box::new(requested.clone()),
+            stored: Box::new(documents.identity),
         });
     }
     let software = RetainedLocalSoftware::parse_documents(
-        documents.package_json.as_bytes(), documents.declaration_json.as_bytes(), documents.profile,
-        documents.plugin_source_json.as_deref().map(str::as_bytes), documents.component.clone(),
-        documents.decision.clone(), documents.verification.clone(),
-    ).map_err(|_| LocalRecipeError::Unverified("saved software no longer validates"))?;
+        documents.package_json.as_bytes(),
+        documents.declaration_json.as_bytes(),
+        documents.profile,
+        documents.plugin_source_json.as_deref().map(str::as_bytes),
+        documents.component.clone(),
+        documents.decision.clone(),
+        documents.verification.clone(),
+    )
+    .map_err(|_| LocalRecipeError::Unverified("saved software no longer validates"))?;
     if software.documents != documents || record.key.id != identity_key(&documents.identity) {
-        return Err(LocalRecipeError::Unverified("saved software does not match its recorded identity or digests"));
+        return Err(LocalRecipeError::Unverified(
+            "saved software does not match its recorded identity or digests",
+        ));
     }
     Ok(software)
 }
@@ -1725,13 +1829,14 @@ fn verify(
         ));
     }
     if documents.current_submission == Some(CurrentSubmission::V1)
-        && documents.decision != current_submission_reference(
-            scope,
-            &documents.identity,
-            &documents.plugin_json,
-            documents.mcp_json.as_deref(),
-            &documents.recipes_json,
-        )?
+        && documents.decision
+            != current_submission_reference(
+                scope,
+                &documents.identity,
+                &documents.plugin_json,
+                documents.mcp_json.as_deref(),
+                &documents.recipes_json,
+            )?
     {
         return Err(LocalRecipeError::Unverified(
             "current submission reference does not match its scope, key or documents",

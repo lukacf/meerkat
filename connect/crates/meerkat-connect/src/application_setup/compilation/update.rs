@@ -4,13 +4,18 @@
 //! lease; this module does not establish authorization or currentness.
 use super::{ApplicationSetupCompilationInput, ValidatedApplicationCompilation};
 use crate::{
-    application_acquisition::{ApplicationAcquisitionSelection, SelectedApplicationAcquisition, read_application_acquisition},
+    application_acquisition::{
+        ApplicationAcquisitionSelection, SelectedApplicationAcquisition,
+        read_application_acquisition,
+    },
     application_bootstrap::{InstallerProgress, emit, hash, read_json},
     application_setup::{PreparedApplicationSetup, read_application_input},
 };
 use meerkat_core::CompiledApplicationToolPolicy;
 use meerkat_mob::MobDefinition;
-use meerkat_mobkit::{identity_first::DurableAgentSpec, member_tool_policy::providers_from_canonical_payloads};
+use meerkat_mobkit::{
+    identity_first::DurableAgentSpec, member_tool_policy::providers_from_canonical_payloads,
+};
 use meerkat_toolkit::host_lifetime::{
     control::{HostBootstrapSelection, SelectedHostArtifact},
     policy::{PreparedLocalPolicy, validate_candidate_selection},
@@ -45,7 +50,9 @@ pub struct ValidatedApplicationUpdate {
 
 fn read_pin(pin: &SelectedHostArtifact) -> Result<Vec<u8>, String> {
     let bytes = read_application_input(&pin.path)?;
-    if hash(&bytes) != pin.sha256 { return Err("selected update artifact changed".into()); }
+    if hash(&bytes) != pin.sha256 {
+        return Err("selected update artifact changed".into());
+    }
     Ok(bytes)
 }
 
@@ -56,9 +63,12 @@ impl ApplicationUpdateSelection {
     /// slot. It cannot add members, replace native grant references, reprepare
     /// setup, adopt a candidate or move current. Tool-policy grants may change.
     pub fn validate(self) -> Result<ValidatedApplicationUpdate, String> {
-        if self.update_id.is_empty() { return Err("update ID is empty".into()); }
-        let input: ApplicationSetupCompilationInput = serde_json::from_slice(&read_pin(&self.compilation_input)?)
-            .map_err(|error| error.to_string())?;
+        if self.update_id.is_empty() {
+            return Err("update ID is empty".into());
+        }
+        let input: ApplicationSetupCompilationInput =
+            serde_json::from_slice(&read_pin(&self.compilation_input)?)
+                .map_err(|error| error.to_string())?;
         let compilation = input.validate()?;
         let policy_bytes = read_pin(&self.application_tool_policy)?;
         if policy_bytes != compilation.policy_bytes {
@@ -69,23 +79,36 @@ impl ApplicationUpdateSelection {
 
         // This authenticates selected bytes, not the live current pointer. The
         // caller's original update transaction must supply the predecessor.
-        let (previous, _) = validate_candidate_selection(&self.predecessor)
-            .map_err(|error| error.to_string())?;
-        let native = previous.native_host.as_ref().ok_or("predecessor has no native selection")?;
-        validate_installed_artifacts(native, |reference| read_bundle_artifact(&self.predecessor, reference))
-            .map_err(|error| error.to_string())?;
-        let original = read_application_acquisition(native, |reference| read_bundle_artifact(&self.predecessor, reference))
-            .map_err(|error| error.to_string())?.ok_or("predecessor has no retained setup selection")?;
+        let (previous, _) =
+            validate_candidate_selection(&self.predecessor).map_err(|error| error.to_string())?;
+        let native = previous
+            .native_host
+            .as_ref()
+            .ok_or("predecessor has no native selection")?;
+        validate_installed_artifacts(native, |reference| {
+            read_bundle_artifact(&self.predecessor, reference)
+        })
+        .map_err(|error| error.to_string())?;
+        let original = read_application_acquisition(native, |reference| {
+            read_bundle_artifact(&self.predecessor, reference)
+        })
+        .map_err(|error| error.to_string())?
+        .ok_or("predecessor has no retained setup selection")?;
         let prepared = original.prepared();
-        let owner = prepared.native_owner.as_ref().ok_or("update requires the original schema4 owner selection")?;
+        let owner = prepared
+            .native_owner
+            .as_ref()
+            .ok_or("update requires the original schema4 owner selection")?;
         if !owner.matches(&previous) {
             return Err("predecessor setup differs from its exact owner and source routes".into());
         }
-        let old_policy_bytes = read_bundle_artifact(&self.predecessor, &native.application_tool_policy)
-            .map_err(|error| error.to_string())?;
+        let old_policy_bytes =
+            read_bundle_artifact(&self.predecessor, &native.application_tool_policy)
+                .map_err(|error| error.to_string())?;
         let old_policy = CompiledApplicationToolPolicy::parse_canonical_json(&old_policy_bytes)
             .map_err(|error| error.to_string())?;
-        if policy.provider_id != old_policy.provider_id || policy.policy_id != old_policy.policy_id {
+        if policy.provider_id != old_policy.provider_id || policy.policy_id != old_policy.policy_id
+        {
             return Err("update requires the original provider and policy slot".into());
         }
         // Reuse the actual provider's predecessor revision/digest fence in a
@@ -96,13 +119,16 @@ impl ApplicationUpdateSelection {
             .map_err(|error| error.to_string())?;
 
         let input = &compilation.input;
-        let encode = |value: &super::super::ApplicationSetupRealm| toolkit_package::canonical_json(value)
-            .map_err(|error| error.to_string());
+        let encode = |value: &super::super::ApplicationSetupRealm| {
+            toolkit_package::canonical_json(value).map_err(|error| error.to_string())
+        };
         if encode(&input.realm)? != encode(&prepared.realm)?
             || input.helper.member != prepared.source_helper_member
             || input.helper_profile != prepared.helper_profile
-            || toolkit_package::canonical_json(&input.helper_tools).map_err(|error| error.to_string())?
-                != toolkit_package::canonical_json(&prepared.helper_tools).map_err(|error| error.to_string())?
+            || toolkit_package::canonical_json(&input.helper_tools)
+                .map_err(|error| error.to_string())?
+                != toolkit_package::canonical_json(&prepared.helper_tools)
+                    .map_err(|error| error.to_string())?
         {
             return Err("update changes the original realm or setup resource selection".into());
         }
@@ -117,38 +143,71 @@ impl ApplicationUpdateSelection {
         let mut members = input.members.clone();
         members[compilation.helper_index].member = projection.member().clone();
         if members.len() != owner.native_host.members.len()
-            || members.iter().any(|member| !owner.native_host.members.contains(member))
+            || members
+                .iter()
+                .any(|member| !owner.native_host.members.contains(member))
         {
-            return Err("update changes the original member destination or authority selection".into());
+            return Err(
+                "update changes the original member destination or authority selection".into(),
+            );
         }
         let roster = prepared.project_roster(&input.roster)?;
         let mut definition = compilation.definition.clone();
-        projection.compose_definition(&mut definition).map_err(|error| error.to_string())?;
+        projection
+            .compose_definition(&mut definition)
+            .map_err(|error| error.to_string())?;
         let owner = owner.clone();
-        Ok(ValidatedApplicationUpdate { selection: self, compilation, original, owner,
-            definition, roster, policy })
+        Ok(ValidatedApplicationUpdate {
+            selection: self,
+            compilation,
+            original,
+            owner,
+            definition,
+            roster,
+            policy,
+        })
     }
 }
 
 impl ValidatedApplicationUpdate {
-    pub fn selection(&self) -> &ApplicationUpdateSelection { &self.selection }
-    pub fn compilation_input(&self) -> &ApplicationSetupCompilationInput { &self.compilation.input }
+    pub fn selection(&self) -> &ApplicationUpdateSelection {
+        &self.selection
+    }
+    pub fn compilation_input(&self) -> &ApplicationSetupCompilationInput {
+        &self.compilation.input
+    }
     /// Definition and initial roster with the original helper resource projected
     /// once. Every later actual roster read still needs original_setup().project_roster.
-    pub fn definition(&self) -> &MobDefinition { &self.definition }
-    pub fn roster(&self) -> &[DurableAgentSpec] { &self.roster }
-    pub fn original_owner(&self) -> &PreparedLocalPolicy { &self.owner }
-    pub fn original_setup(&self) -> &PreparedApplicationSetup { self.original.prepared() }
-    pub fn original_acquisition(&self) -> &ApplicationAcquisitionSelection { self.original.configuration() }
-    pub fn tool_policy(&self) -> &CompiledApplicationToolPolicy { &self.policy }
-    pub fn tool_policy_bytes(&self) -> &[u8] { &self.compilation.policy_bytes }
+    pub fn definition(&self) -> &MobDefinition {
+        &self.definition
+    }
+    pub fn roster(&self) -> &[DurableAgentSpec] {
+        &self.roster
+    }
+    pub fn original_owner(&self) -> &PreparedLocalPolicy {
+        &self.owner
+    }
+    pub fn original_setup(&self) -> &PreparedApplicationSetup {
+        self.original.prepared()
+    }
+    pub fn original_acquisition(&self) -> &ApplicationAcquisitionSelection {
+        self.original.configuration()
+    }
+    pub fn tool_policy(&self) -> &CompiledApplicationToolPolicy {
+        &self.policy
+    }
+    pub fn tool_policy_bytes(&self) -> &[u8] {
+        &self.compilation.policy_bytes
+    }
 }
 
 fn receipt(args: &[String], progress: &mut InstallerProgress) -> Result<serde_json::Value, String> {
     let [_, flag, path] = args else {
         return Err("expected --validate-application-update --selection FILE".into());
     };
-    if flag != "--selection" { return Err("invalid update validation arguments".into()); }
+    if flag != "--selection" {
+        return Err("invalid update validation arguments".into());
+    }
     progress.phase = "validation";
     let selected: ApplicationUpdateSelection = read_json(path)?;
     let validated = selected.validate()?;

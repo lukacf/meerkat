@@ -58,7 +58,9 @@ impl CallbackDelivery {
         self.deliver_json_authorized(body, || Ok(()))
     }
 
-    pub(crate) fn deliver_json_authorized(&mut self, body: &[u8],
+    pub(crate) fn deliver_json_authorized(
+        &mut self,
+        body: &[u8],
         before_delivery: impl FnOnce() -> Result<(), ConnectError>,
     ) -> Result<oneshot::Receiver<CallbackResult>, ConnectError> {
         if body.len() > 64 * 1024 {
@@ -69,7 +71,9 @@ impl CallbackDelivery {
         if state != self.expected_state {
             return Err(invalid());
         }
-        if self.send.as_ref().is_none_or(|send| send.is_closed()) { return Err(invalid()); }
+        if self.send.as_ref().is_none_or(|send| send.is_closed()) {
+            return Err(invalid());
+        }
         before_delivery()?;
         let send = self.send.take().ok_or_else(invalid)?;
         let (response, result) = oneshot::channel();
@@ -139,7 +143,9 @@ pub(crate) fn answer_retained(
 }
 
 pub(crate) fn answer_retained_authorized(
-    review_id: u64, exchange: &mut Option<Exchange>, body: &[u8],
+    review_id: u64,
+    exchange: &mut Option<Exchange>,
+    body: &[u8],
     before_delivery: impl FnOnce() -> Result<(), ConnectError>,
 ) -> Result<(), ConnectError> {
     if body.len() > 4096 {
@@ -181,7 +187,9 @@ pub(crate) fn answer_retained_authorized(
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SignInCancellation { review_id: u64 }
+struct SignInCancellation {
+    review_id: u64,
+}
 
 /// Cancel only the provider notice retained by this exact Active review. Each
 /// Active owns at most one account attempt; its id is never reused for another
@@ -189,23 +197,37 @@ struct SignInCancellation { review_id: u64 }
 /// The mounted caller holds callback then prompt custody and authenticates the
 /// same current action before invoking this synchronous delivery.
 pub(crate) fn cancel_retained_sign_in_authorized(
-    review_id: u64, exchange: &mut Option<Exchange>, callback: &mut Option<CallbackDelivery>,
-    body: &[u8], before_delivery: impl FnOnce() -> Result<(), ConnectError>,
+    review_id: u64,
+    exchange: &mut Option<Exchange>,
+    callback: &mut Option<CallbackDelivery>,
+    body: &[u8],
+    before_delivery: impl FnOnce() -> Result<(), ConnectError>,
 ) -> Result<(), ConnectError> {
-    if body.len() > 256 { return Err(invalid()); }
+    if body.len() > 256 {
+        return Err(invalid());
+    }
     let request: SignInCancellation = serde_json::from_slice(body).map_err(|_| invalid())?;
-    if request.review_id == 0 || request.review_id > 9_007_199_254_740_991
+    if request.review_id == 0
+        || request.review_id > 9_007_199_254_740_991
         || request.review_id != review_id
-        || !exchange.as_ref().is_some_and(|exchange|
-            exchange.prompt["kind"].as_str() == Some("provider_browser") && !exchange.response.is_closed())
-    { return Err(invalid()); }
+        || !exchange.as_ref().is_some_and(|exchange| {
+            exchange.prompt["kind"].as_str() == Some("provider_browser")
+                && !exchange.response.is_closed()
+        })
+    {
+        return Err(invalid());
+    }
     before_delivery()?;
     // Remove an undelivered callback so it cannot start completion after this
     // request wins. None also covers an already-entered completion, whose driver
     // retains the same notice receiver and joins cancellation through Control.
     callback.take();
-    exchange.take().expect("matched retained provider notice").response
-        .send(Ok(PromptAnswer::Cancel)).map_err(|_| invalid())
+    exchange
+        .take()
+        .expect("matched retained provider notice")
+        .response
+        .send(Ok(PromptAnswer::Cancel))
+        .map_err(|_| invalid())
 }
 
 fn invalid() -> ConnectError {

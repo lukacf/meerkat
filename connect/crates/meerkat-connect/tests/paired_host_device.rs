@@ -795,10 +795,16 @@ async fn cancellation_waits_for_owned_store_call_then_stops_without_pairing() {
     };
     let (result, ()) = timeout(BOUND, async {
         tokio::join!(
-            pair_paired_host_with_store(&origin, store.clone(), &mut pty.input, &mut output, async {
-                cancelled.await.unwrap();
-                Ok(())
-            }),
+            pair_paired_host_with_store(
+                &origin,
+                store.clone(),
+                &mut pty.input,
+                &mut output,
+                async {
+                    cancelled.await.unwrap();
+                    Ok(())
+                }
+            ),
             human
         )
     })

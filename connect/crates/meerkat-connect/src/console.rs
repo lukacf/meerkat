@@ -60,7 +60,10 @@ impl ConsoleSetupCustomizer {
     /// captured account, including when reconstructing the member. Component
     /// provenance is not account authorization. Submission, secret entry and
     /// activation are not added; the preparation dispatcher's ceiling remains.
-    pub fn paired_host_preparation(selected: AgentIdentity, tools: &PairedHostPreparationTools) -> Self {
+    pub fn paired_host_preparation(
+        selected: AgentIdentity,
+        tools: &PairedHostPreparationTools,
+    ) -> Self {
         Self {
             selected,
             tools: tools.dispatcher(),

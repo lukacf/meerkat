@@ -10,10 +10,9 @@ use meerkat_connect::paired_host::{
     FrontendInventoryRejectionKind, FrontendNewExtensionChange, FrontendNewExtensionPreparation,
     FrontendNewExtensionRequest, FrontendNewExtensionStatus, FrontendNewExtensionSubmission,
     FrontendParticipants, FrontendPreparation, FrontendPreparedChange, FrontendPrerequisiteKind,
-    FrontendRejectionKind,
-    FrontendRouting, FrontendSecretBindingStatus, FrontendSecretPresence, FrontendSubmission,
-    FrontendSubmitter, PairedHostClient, PairedHostError, PairedHostOperation, PairedHostRefusal,
-    PairingCode, TerminalPairingCode, UnconfirmedReason,
+    FrontendRejectionKind, FrontendRouting, FrontendSecretBindingStatus, FrontendSecretPresence,
+    FrontendSubmission, FrontendSubmitter, PairedHostClient, PairedHostError, PairedHostOperation,
+    PairedHostRefusal, PairingCode, TerminalPairingCode, UnconfirmedReason,
 };
 use serde_json::{Value, json};
 use tokio::{
@@ -1218,10 +1217,12 @@ fn new_extension_request() -> FrontendNewExtensionRequest {
             commit: "a".repeat(40),
             package_path: None,
         },
-        configuration: meerkat_connect::paired_host::FrontendExtensionConfiguration::Channel(FrontendExtensionChannel {
-            ingress: FrontendIngress::Polling,
-            approved_groups: vec!["fixture-group".into()],
-        }),
+        configuration: meerkat_connect::paired_host::FrontendExtensionConfiguration::Channel(
+            FrontendExtensionChannel {
+                ingress: FrontendIngress::Polling,
+                approved_groups: vec!["fixture-group".into()],
+            },
+        ),
     }
 }
 
@@ -2156,7 +2157,8 @@ async fn dispatch_review_candidate(
         id,
         meerkat_connect::paired_host_tool::PAIRED_HOST_FRONTEND_PREPARE,
         arguments,
-    ).await
+    )
+    .await
 }
 
 async fn dispatch_review_tool(
@@ -2179,7 +2181,7 @@ async fn dispatch_review_tool(
 #[tokio::test]
 async fn prepared_review_handoff_preserves_both_kinds_and_console_projection() {
     use meerkat_connect::paired_host_tool::{
-        PairedHostFrontend, PairedHostPreparationTools, PAIRED_HOST_FRONTEND_STATUS,
+        PAIRED_HOST_FRONTEND_STATUS, PairedHostFrontend, PairedHostPreparationTools,
     };
     let path = format!("/console/extensions/frontend/review/{CHANGE_DIGEST}");
     for extension in [false, true] {
@@ -2210,7 +2212,8 @@ async fn prepared_review_handoff_preserves_both_kinds_and_console_projection() {
             prepared_draft_reply(&readback, false),
             reply(),
             prepared_draft_reply(&original, true),
-        ]).await;
+        ])
+        .await;
         let binding = PairedHostFrontend::new(PairedHostClient::new(&fixture.origin).unwrap());
         let mut presenter = binding.take_secret_entry_presenter().unwrap();
         let dispatcher = review_dispatcher(&binding);
@@ -2250,17 +2253,31 @@ async fn prepared_review_handoff_preserves_both_kinds_and_console_projection() {
         assert!(repeated.is_empty());
 
         let ordinary = dispatch_review_tool(
-            &*dispatcher, "ordinary-status", PAIRED_HOST_FRONTEND_STATUS,
+            &*dispatcher,
+            "ordinary-status",
+            PAIRED_HOST_FRONTEND_STATUS,
             json!({"change_digest":CHANGE_DIGEST,"show_review":false}),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         let ordinary: Value = serde_json::from_str(&ordinary).unwrap();
-        assert_eq!(ordinary, json!({"state":"prepared","change":original_value,"base_current":true}));
+        assert_eq!(
+            ordinary,
+            json!({"state":"prepared","change":original_value,"base_current":true})
+        );
         presenter.present_pending(&mut repeated).unwrap();
-        assert!(repeated.is_empty(), "ordinary status must not redisplay a link");
+        assert!(
+            repeated.is_empty(),
+            "ordinary status must not redisplay a link"
+        );
         let status = dispatch_review_tool(
-            &*dispatcher, "explicit-review", PAIRED_HOST_FRONTEND_STATUS,
+            &*dispatcher,
+            "explicit-review",
+            PAIRED_HOST_FRONTEND_STATUS,
             json!({"change_digest":CHANGE_DIGEST,"show_review":true}),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         assert!(!status.contains(&path) && !status.contains(&fixture.origin));
         let status: Value = serde_json::from_str(&status).unwrap();
         assert_eq!(status["review_presentation"], "queued");
@@ -2268,25 +2285,41 @@ async fn prepared_review_handoff_preserves_both_kinds_and_console_projection() {
         assert_eq!(status["change"], original_value);
         presenter.present_pending(&mut repeated).unwrap();
         let repeated = String::from_utf8(repeated).unwrap();
-        assert_eq!(repeated.matches(&format!("{}{path}", fixture.origin)).count(), 1);
+        assert_eq!(
+            repeated
+                .matches(&format!("{}{path}", fixture.origin))
+                .count(),
+            1
+        );
 
         let console_binding =
-            PairedHostPreparationTools::new(PairedHostClient::new(&fixture.origin).unwrap()).unwrap();
-        let console = dispatch_review_candidate(&*console_binding.dispatcher(), "console", arguments)
-            .await
-            .unwrap();
+            PairedHostPreparationTools::new(PairedHostClient::new(&fixture.origin).unwrap())
+                .unwrap();
+        let console =
+            dispatch_review_candidate(&*console_binding.dispatcher(), "console", arguments)
+                .await
+                .unwrap();
         let console: Value = serde_json::from_str(&console).unwrap();
         assert_eq!(console["review_url"], path);
         assert!(console.get("review_presentation").is_none());
         let console_status = dispatch_review_tool(
-            &*console_binding.dispatcher(), "console-status", PAIRED_HOST_FRONTEND_STATUS,
+            &*console_binding.dispatcher(),
+            "console-status",
+            PAIRED_HOST_FRONTEND_STATUS,
             json!({"change_digest":CHANGE_DIGEST,"show_review":true}),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         let console_status: Value = serde_json::from_str(&console_status).unwrap();
         assert_eq!(console_status["review_presentation"], "unavailable");
         let requests = fixture.finish().await;
-        assert_eq!(requests.iter().map(|r| r.method.as_str()).collect::<Vec<_>>(),
-            ["POST", "GET", "GET", "POST", "GET"]);
+        assert_eq!(
+            requests
+                .iter()
+                .map(|r| r.method.as_str())
+                .collect::<Vec<_>>(),
+            ["POST", "GET", "GET", "POST", "GET"]
+        );
         assert!(requests.iter().all(|r| if r.method == "POST" {
             r.path == "/console/extensions/frontend/prepare"
         } else {
@@ -2297,25 +2330,41 @@ async fn prepared_review_handoff_preserves_both_kinds_and_console_projection() {
 
 #[tokio::test]
 async fn private_preparation_retains_review_only_for_both_candidate_kinds() {
-    use meerkat_connect::paired_host_tool::{PairedHostPreparationTools, PAIRED_HOST_FRONTEND_STATUS};
+    use meerkat_connect::paired_host_tool::{
+        PAIRED_HOST_FRONTEND_STATUS, PairedHostPreparationTools,
+    };
     let path = format!("/console/extensions/frontend/review/{CHANGE_DIGEST}");
     for extension in [false, true] {
         let (raw, reply, arguments) = if extension {
-            (new_extension_raw(), new_extension_prepared(&new_extension_raw()),
-                json!({"new_extension":new_extension_request()}))
+            (
+                new_extension_raw(),
+                new_extension_prepared(&new_extension_raw()),
+                json!({"new_extension":new_extension_request()}),
+            )
         } else {
-            (change_raw(), prepared_change_reply(&change_raw()), serde_json::to_value(request()).unwrap())
+            (
+                change_raw(),
+                prepared_change_reply(&change_raw()),
+                serde_json::to_value(request()).unwrap(),
+            )
         };
         let fixture = Fixture::new(vec![
             with_review_url(reply, json!(path)),
             prepared_draft_reply(&raw, false),
-            Reply::json(403, json!({"error":"forbidden","code":"console_owner_required"})),
-        ]).await;
+            Reply::json(
+                403,
+                json!({"error":"forbidden","code":"console_owner_required"}),
+            ),
+        ])
+        .await;
         let (binding, mut presenter) = PairedHostPreparationTools::with_review_presenter(
             PairedHostClient::new(&fixture.origin).unwrap(),
-        ).unwrap();
+        )
+        .unwrap();
         let dispatcher = binding.dispatcher();
-        let output = dispatch_review_candidate(&*dispatcher, "prepare", arguments).await.unwrap();
+        let output = dispatch_review_candidate(&*dispatcher, "prepare", arguments)
+            .await
+            .unwrap();
         let value: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(value["review_presentation"], "queued");
         assert!(value.get("review_url").is_none());
@@ -2323,18 +2372,38 @@ async fn private_preparation_retains_review_only_for_both_candidate_kinds() {
         let mut private = Vec::new();
         presenter.present_pending(&mut private).unwrap();
         let private = String::from_utf8(private).unwrap();
-        assert_eq!(private.matches(&format!("{}{path}", fixture.origin)).count(), 1);
-        assert!(private.contains(if extension { "Kind: new_extension" } else { "Kind: channel_config" }));
-        let output = dispatch_review_tool(&*dispatcher, "readback", PAIRED_HOST_FRONTEND_STATUS,
-            json!({"change_digest":CHANGE_DIGEST,"show_review":true})).await.unwrap();
+        assert_eq!(
+            private
+                .matches(&format!("{}{path}", fixture.origin))
+                .count(),
+            1
+        );
+        assert!(private.contains(if extension {
+            "Kind: new_extension"
+        } else {
+            "Kind: channel_config"
+        }));
+        let output = dispatch_review_tool(
+            &*dispatcher,
+            "readback",
+            PAIRED_HOST_FRONTEND_STATUS,
+            json!({"change_digest":CHANGE_DIGEST,"show_review":true}),
+        )
+        .await
+        .unwrap();
         let value: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(value["review_presentation"], "queued");
         assert_eq!(value["base_current"], false);
         let mut repeated = Vec::new();
         presenter.present_pending(&mut repeated).unwrap();
         assert_eq!(repeated, private.as_bytes());
-        let refused = dispatch_review_tool(&*dispatcher, "revoked", PAIRED_HOST_FRONTEND_STATUS,
-            json!({"change_digest":CHANGE_DIGEST,"show_review":true})).await;
+        let refused = dispatch_review_tool(
+            &*dispatcher,
+            "revoked",
+            PAIRED_HOST_FRONTEND_STATUS,
+            json!({"change_digest":CHANGE_DIGEST,"show_review":true}),
+        )
+        .await;
         // A host refusal may be a closed observed rejection or a fixed error;
         // neither permits redisplaying a retained link.
         if let Ok(output) = refused {
@@ -2343,13 +2412,27 @@ async fn private_preparation_retains_review_only_for_both_candidate_kinds() {
         let mut absent = Vec::new();
         presenter.present_pending(&mut absent).unwrap();
         assert!(absent.is_empty());
-        for name in ["paired_host_select_host", "paired_host_frontend_submit",
-            "paired_host_extension_secret_create", "paired_host_extension_secret_status",
-            "paired_host_extension_secret_cancel"] {
-            assert!(dispatch_review_tool(&*dispatcher, "excluded", name, json!({})).await.is_err());
+        for name in [
+            "paired_host_select_host",
+            "paired_host_frontend_submit",
+            "paired_host_extension_secret_create",
+            "paired_host_extension_secret_status",
+            "paired_host_extension_secret_cancel",
+        ] {
+            assert!(
+                dispatch_review_tool(&*dispatcher, "excluded", name, json!({}))
+                    .await
+                    .is_err()
+            );
         }
         let requests = fixture.finish().await;
-        assert_eq!(requests.iter().map(|r| r.method.as_str()).collect::<Vec<_>>(), ["POST","GET","GET"]);
+        assert_eq!(
+            requests
+                .iter()
+                .map(|r| r.method.as_str())
+                .collect::<Vec<_>>(),
+            ["POST", "GET", "GET"]
+        );
     }
 }
 
@@ -2609,10 +2692,18 @@ async fn full_and_disconnected_review_queues_preserve_the_particular_retained_dr
     let output = String::from_utf8(output).unwrap();
     assert!(output.contains(&format!("{}{first_path}", fixture.origin)));
     assert!(!output.contains(&second_digest));
-    let recovered = dispatch_review_tool(&*dispatcher, "recover-second",
+    let recovered = dispatch_review_tool(
+        &*dispatcher,
+        "recover-second",
         meerkat_connect::paired_host_tool::PAIRED_HOST_FRONTEND_STATUS,
-        json!({"change_digest":second_digest,"show_review":true})).await.unwrap();
-    assert_eq!(serde_json::from_str::<Value>(&recovered).unwrap()["review_presentation"], "queued");
+        json!({"change_digest":second_digest,"show_review":true}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&recovered).unwrap()["review_presentation"],
+        "queued"
+    );
     assert!(!recovered.contains(&second_path));
     let mut second_output = Vec::new();
     presenter.present_pending(&mut second_output).unwrap();
@@ -2631,12 +2722,18 @@ async fn full_and_disconnected_review_queues_preserve_the_particular_retained_dr
     assert_eq!(value["review_presentation"], "unavailable");
     assert_eq!(value["change"]["change_digest"], CHANGE_DIGEST);
     let requests = fixture.finish().await;
-    assert_eq!(requests.iter().map(|r| r.method.as_str()).collect::<Vec<_>>(), ["POST", "POST", "GET", "POST"]);
+    assert_eq!(
+        requests
+            .iter()
+            .map(|r| r.method.as_str())
+            .collect::<Vec<_>>(),
+        ["POST", "POST", "GET", "POST"]
+    );
 }
 
 #[tokio::test]
 async fn review_redisplay_requires_retained_path_and_current_host_access() {
-    use meerkat_connect::paired_host_tool::{PairedHostFrontend, PAIRED_HOST_FRONTEND_STATUS};
+    use meerkat_connect::paired_host_tool::{PAIRED_HOST_FRONTEND_STATUS, PairedHostFrontend};
     let path = format!("/console/extensions/frontend/review/{CHANGE_DIGEST}");
     let raw = change_raw();
     let fixture = Fixture::new(vec![
@@ -2652,17 +2749,46 @@ async fn review_redisplay_requires_retained_path_and_current_host_access() {
     let binding = PairedHostFrontend::new(PairedHostClient::new(&fixture.origin).unwrap());
     let mut presenter = binding.take_secret_entry_presenter().unwrap();
     let dispatcher = review_dispatcher(&binding);
-    dispatch_review_candidate(&*dispatcher, "prepare", serde_json::to_value(request()).unwrap()).await.unwrap();
+    dispatch_review_candidate(
+        &*dispatcher,
+        "prepare",
+        serde_json::to_value(request()).unwrap(),
+    )
+    .await
+    .unwrap();
     presenter.present_pending(&mut Vec::new()).unwrap();
     // Unknown fields cannot smuggle a replacement URL or reach the host.
-    assert!(dispatch_review_tool(&*dispatcher, "injected-url", PAIRED_HOST_FRONTEND_STATUS,
-        json!({"change_digest":CHANGE_DIGEST,"show_review":true,"url":"https://wrong.invalid"})).await.is_err());
-    for (id, succeeds) in [("missing", true), ("revoked", false), ("host-unavailable", true), ("wrong-digest", false)] {
-        let result = dispatch_review_tool(&*dispatcher, id, PAIRED_HOST_FRONTEND_STATUS,
-            json!({"change_digest":CHANGE_DIGEST,"show_review":true})).await;
+    assert!(
+        dispatch_review_tool(
+            &*dispatcher,
+            "injected-url",
+            PAIRED_HOST_FRONTEND_STATUS,
+            json!({"change_digest":CHANGE_DIGEST,"show_review":true,"url":"https://wrong.invalid"})
+        )
+        .await
+        .is_err()
+    );
+    for (id, succeeds) in [
+        ("missing", true),
+        ("revoked", false),
+        ("host-unavailable", true),
+        ("wrong-digest", false),
+    ] {
+        let result = dispatch_review_tool(
+            &*dispatcher,
+            id,
+            PAIRED_HOST_FRONTEND_STATUS,
+            json!({"change_digest":CHANGE_DIGEST,"show_review":true}),
+        )
+        .await;
         if succeeds {
-            assert_eq!(serde_json::from_str::<Value>(&result.unwrap()).unwrap()["review_presentation"], "unavailable");
-        } else { assert!(result.is_err()); }
+            assert_eq!(
+                serde_json::from_str::<Value>(&result.unwrap()).unwrap()["review_presentation"],
+                "unavailable"
+            );
+        } else {
+            assert!(result.is_err());
+        }
         let mut output = Vec::new();
         presenter.present_pending(&mut output).unwrap();
         assert!(output.is_empty());
@@ -2672,21 +2798,43 @@ async fn review_redisplay_requires_retained_path_and_current_host_access() {
     let fresh_dispatcher = review_dispatcher(&fresh);
     for prepared_without_link in [false, true] {
         if prepared_without_link {
-            dispatch_review_candidate(&*fresh_dispatcher, "older-host-prepare", serde_json::to_value(request()).unwrap()).await.unwrap();
+            dispatch_review_candidate(
+                &*fresh_dispatcher,
+                "older-host-prepare",
+                serde_json::to_value(request()).unwrap(),
+            )
+            .await
+            .unwrap();
         }
-        let result = dispatch_review_tool(&*fresh_dispatcher, "no-retained-link", PAIRED_HOST_FRONTEND_STATUS,
-            json!({"change_digest":CHANGE_DIGEST,"show_review":true})).await.unwrap();
-        assert_eq!(serde_json::from_str::<Value>(&result).unwrap()["review_presentation"], "unavailable");
+        let result = dispatch_review_tool(
+            &*fresh_dispatcher,
+            "no-retained-link",
+            PAIRED_HOST_FRONTEND_STATUS,
+            json!({"change_digest":CHANGE_DIGEST,"show_review":true}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&result).unwrap()["review_presentation"],
+            "unavailable"
+        );
         let mut output = Vec::new();
         fresh_presenter.present_pending(&mut output).unwrap();
         assert!(output.is_empty());
     }
     let requests = fixture.finish().await;
-    assert_eq!(requests.iter().map(|r| r.method.as_str()).collect::<Vec<_>>(),
-        ["POST", "GET", "GET", "GET", "GET", "GET", "POST", "GET"]);
+    assert_eq!(
+        requests
+            .iter()
+            .map(|r| r.method.as_str())
+            .collect::<Vec<_>>(),
+        ["POST", "GET", "GET", "GET", "GET", "GET", "POST", "GET"]
+    );
     assert!(requests.iter().all(|r| if r.method == "POST" {
         r.path == "/console/extensions/frontend/prepare"
-    } else { r.path == format!("{CHANGES_PATH}/{CHANGE_DIGEST}") }));
+    } else {
+        r.path == format!("{CHANGES_PATH}/{CHANGE_DIGEST}")
+    }));
 }
 
 #[tokio::test]

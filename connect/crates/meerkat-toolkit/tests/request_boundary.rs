@@ -107,7 +107,8 @@ impl Fixture {
             target: self.receiver.clone(),
             correlation: id("logical-call-1"),
             parent_operation: Some(id("business-task-1")),
-            continuation: TaskContinuation { native_original: None,
+            continuation: TaskContinuation {
+                native_original: None,
                 owner: id("runtime-owner"),
                 task: id("business-task-1"),
                 revision: rev("task-1"),

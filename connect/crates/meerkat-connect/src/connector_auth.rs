@@ -1,9 +1,11 @@
 //! Protected host connector controls using one retained native authority.
 //! No value in this module is exposed to model tools or public conversation.
-use std::sync::Arc;
-use meerkat::{ConnectorLoginComplete, ConnectorLoginStart, ConnectorOAuthCallback,
-    ConnectorOAuthTarget, HostAuthError, HostAuthService};
+use meerkat::{
+    ConnectorLoginComplete, ConnectorLoginStart, ConnectorOAuthCallback, ConnectorOAuthTarget,
+    HostAuthError, HostAuthService,
+};
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 pub(crate) mod existing;
 
@@ -20,8 +22,9 @@ impl ConnectorAuth {
         facade: HostAuthService,
         realm: meerkat_core::RealmId,
     ) -> Result<Arc<Self>, crate::ConnectError> {
-        let authority = facade.connector_oauth_authority().map_err(|error|
-            crate::ConnectError::provider_setup("Configure connector authority", error))?;
+        let authority = facade.connector_oauth_authority().map_err(|error| {
+            crate::ConnectError::provider_setup("Configure connector authority", error)
+        })?;
         Ok(Arc::new(Self {
             facade,
             context_provider: Arc::new(meerkat::ConnectorMcpCallContextProvider::live(authority)),
@@ -72,9 +75,9 @@ pub(crate) struct CompletedLogin {
 impl CompletedLogin {
     /// A separately derived host configuration, still awaiting its actual
     /// access decision, realm persistence and native attachment owners.
-    pub(crate) fn prepared_installation(&self)
-        -> Result<&meerkat::ConnectorMcpInstallation, &'static str>
-    {
+    pub(crate) fn prepared_installation(
+        &self,
+    ) -> Result<&meerkat::ConnectorMcpInstallation, &'static str> {
         let LoginSelection::Installed(selection) = &self.selection else {
             return Err("reconnect_has_no_installation");
         };
@@ -97,21 +100,35 @@ fn failure(error: HostAuthError) -> &'static str {
 }
 
 fn absent(error: &HostAuthError) -> bool {
-    matches!(error, HostAuthError::Connector(meerkat::ConnectorLoginError::Flow(
-        meerkat_auth_core::oauth_flow::OAuthFlowError::Missing)))
+    matches!(
+        error,
+        HostAuthError::Connector(meerkat::ConnectorLoginError::Flow(
+            meerkat_auth_core::oauth_flow::OAuthFlowError::Missing
+        ))
+    )
 }
 
 impl Control {
     pub(crate) fn new(auth: Arc<ConnectorAuth>) -> Self {
-        Self { auth, ceremony: None }
+        Self {
+            auth,
+            ceremony: None,
+        }
     }
 
-    pub(crate) fn realm(&self) -> &meerkat_core::RealmId { &self.auth.realm }
+    pub(crate) fn realm(&self) -> &meerkat_core::RealmId {
+        &self.auth.realm
+    }
 
-    pub(crate) fn router(&self) -> meerkat::McpRouter { self.auth.router() }
+    pub(crate) fn router(&self) -> meerkat::McpRouter {
+        self.auth.router()
+    }
 
     pub(crate) fn pending_slot(&self) -> Option<&meerkat_core::CredentialAccountRef> {
-        match &self.ceremony { Some(Ceremony::Started(target, _, _)) => Some(&target.slot), _ => None }
+        match &self.ceremony {
+            Some(Ceremony::Started(target, _, _)) => Some(&target.slot),
+            _ => None,
+        }
     }
 
     /// Borrow the exact completed ceremony. The selected host must still join
@@ -134,20 +151,38 @@ impl Control {
     }
 
     pub(crate) async fn start(
-        &mut self, target: ConnectorOAuthTarget, redirect_uri: String,
+        &mut self,
+        target: ConnectorOAuthTarget,
+        redirect_uri: String,
         selection: crate::connector_install::InstallationLogin,
     ) -> Result<Reply, &'static str> {
-        self.start_selected(target, redirect_uri, LoginSelection::Installed(Arc::new(selection))).await
+        self.start_selected(
+            target,
+            redirect_uri,
+            LoginSelection::Installed(Arc::new(selection)),
+        )
+        .await
     }
 
     pub(crate) async fn start_selected(
-        &mut self, target: ConnectorOAuthTarget, redirect_uri: String, selection: LoginSelection,
+        &mut self,
+        target: ConnectorOAuthTarget,
+        redirect_uri: String,
+        selection: LoginSelection,
     ) -> Result<Reply, &'static str> {
-        if matches!(&self.ceremony, Some(Ceremony::Started(..))) { return Err("busy"); }
-        if target.slot.realm != self.auth.realm { return Err("invalid_binding"); }
+        if matches!(&self.ceremony, Some(Ceremony::Started(..))) {
+            return Err("busy");
+        }
+        if target.slot.realm != self.auth.realm {
+            return Err("invalid_binding");
+        }
         selection.check_target(&target).await?;
-        let started = self.auth.facade.connector_login_start(&target, &redirect_uri)
-            .await.map_err(failure)?;
+        let started = self
+            .auth
+            .facade
+            .connector_login_start(&target, &redirect_uri)
+            .await
+            .map_err(failure)?;
         let mut reply = json!({"authorize_url":started.authorize_url,"state":started.state,
             "redirect_uri":started.redirect_uri});
         if let Some(handle) = &started.host_attempt_handle {
@@ -160,23 +195,40 @@ impl Control {
     }
 
     pub(crate) async fn complete(
-        &mut self, state: String, code: String, host_attempt_handle: Option<String>,
+        &mut self,
+        state: String,
+        code: String,
+        host_attempt_handle: Option<String>,
         retired: &mut tokio::sync::watch::Receiver<bool>,
         cancel: tokio::sync::oneshot::Receiver<()>,
-    ) -> (Result<Reply, &'static str>, Option<Result<(), &'static str>>, bool) {
+    ) -> (
+        Result<Reply, &'static str>,
+        Option<Result<(), &'static str>>,
+        bool,
+    ) {
         let Some(Ceremony::Started(target, started, selection)) = self.ceremony.as_ref() else {
             return (Err("connector_refused"), None, false);
         };
         // Scope chooses this child. The host chooses its retained ceremony;
         // callback bytes never select a target, realm, profile or redirect.
-        if state != started.state { return (Err("connector_refused"), None, false); }
-        if let Err(code) = selection.check_target(target).await { return (Err(code), None, false); }
+        if state != started.state {
+            return (Err("connector_refused"), None, false);
+        }
+        if let Err(code) = selection.check_target(target).await {
+            return (Err(code), None, false);
+        }
         let admitted_target = target.clone();
         let admitted_selection = selection.clone();
         let (completed, cancellation) = {
-            let completion = self.auth.facade.connector_login_complete(target, ConnectorOAuthCallback {
-                redirect_uri: started.redirect_uri.clone(), state, code, host_attempt_handle,
-            });
+            let completion = self.auth.facade.connector_login_complete(
+                target,
+                ConnectorOAuthCallback {
+                    redirect_uri: started.redirect_uri.clone(),
+                    state,
+                    code,
+                    host_attempt_handle,
+                },
+            );
             tokio::pin!(completion);
             tokio::select! {
                 biased;
@@ -194,12 +246,15 @@ impl Control {
                 completed = &mut completion => (completed, None),
             }
         };
-        let cleanup_failed = cancellation.as_ref().is_some_and(|result|
-            matches!(result, Err(error) if !absent(error)));
+        let cleanup_failed = cancellation
+            .as_ref()
+            .is_some_and(|result| matches!(result, Err(error) if !absent(error)));
         // Ok means cancellation won. Missing means the native attempt was
         // already terminal; only the joined completion determines its result.
-        if cancellation.as_ref().is_some_and(|result|
-            result.is_ok() || matches!(result, Err(error) if absent(error))) {
+        if cancellation
+            .as_ref()
+            .is_some_and(|result| result.is_ok() || matches!(result, Err(error) if absent(error)))
+        {
             self.ceremony = None;
         }
         let reply = match completed {
@@ -207,7 +262,9 @@ impl Control {
                 // Take only this admitted ceremony. A lost/changed software
                 // observation cannot erase a known completed native login.
                 let installation = match &admitted_selection {
-                    LoginSelection::Installed(selection) => selection.join(&admitted_target, &completed),
+                    LoginSelection::Installed(selection) => {
+                        selection.join(&admitted_target, &completed)
+                    }
                     LoginSelection::Existing(_) => Err("reconnect_has_no_installation"),
                 };
                 let completed = Arc::new(CompletedLogin {
@@ -221,7 +278,11 @@ impl Control {
             }
             Err(error) => Err(failure(error)),
         };
-        (reply, cancellation.map(|result| result.map_err(failure)), cleanup_failed)
+        (
+            reply,
+            cancellation.map(|result| result.map_err(failure)),
+            cleanup_failed,
+        )
     }
 
     pub(crate) fn cancel(&mut self) -> Result<Reply, &'static str> {
@@ -230,8 +291,15 @@ impl Control {
             // its known result; disconnect requires the native logout owner.
             return Err("connector_refused");
         };
-        match self.auth.facade.connector_login_cancel(&target.slot, &started.state) {
-            Ok(()) => { self.ceremony = None; Ok(Reply::Cancelled) }
+        match self
+            .auth
+            .facade
+            .connector_login_cancel(&target.slot, &started.state)
+        {
+            Ok(()) => {
+                self.ceremony = None;
+                Ok(Reply::Cancelled)
+            }
             Err(error) if absent(&error) => {
                 self.ceremony = None;
                 Err("connector_refused")
@@ -241,7 +309,9 @@ impl Control {
     }
 
     pub(crate) fn retire(&mut self) -> Result<(), &'static str> {
-        if !matches!(&self.ceremony, Some(Ceremony::Started(..))) { return Ok(()); }
+        if !matches!(&self.ceremony, Some(Ceremony::Started(..))) {
+            return Ok(());
+        }
         match self.cancel() {
             Ok(_) => Ok(()),
             Err(_) if self.ceremony.is_none() => Ok(()),

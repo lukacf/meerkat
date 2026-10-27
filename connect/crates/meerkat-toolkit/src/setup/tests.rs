@@ -1476,76 +1476,171 @@ async fn legacy_signed_root_in_current_record_requires_migration() {
 
 mod native_cutover;
 
-
 #[tokio::test]
 async fn installed_terms_recover_exact_original_deadline_and_refuse_foreign_absence() {
     let f = Fixture::new();
     let bridge = f.bridge();
     let context = f.context(200);
     let correlation = &f.request.host().correlation;
-    assert!(bridge.invocation_terms(f.authority.association(), correlation, &context).await.unwrap().is_none());
-    let foreign = native_fixture::association(principal("person-b"), f.destination.clone(), "foreign-work", "foreign-source");
-    assert!(matches!(bridge.invocation_terms(&foreign, correlation, &context).await, Err(SetupError::Denied)));
-    bridge.admit(&f.request, &f.authority, &context, &f.references).await.unwrap();
+    assert!(
+        bridge
+            .invocation_terms(f.authority.association(), correlation, &context)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let foreign = native_fixture::association(
+        principal("person-b"),
+        f.destination.clone(),
+        "foreign-work",
+        "foreign-source",
+    );
+    assert!(matches!(
+        bridge
+            .invocation_terms(&foreign, correlation, &context)
+            .await,
+        Err(SetupError::Denied)
+    ));
+    bridge
+        .admit(&f.request, &f.authority, &context, &f.references)
+        .await
+        .unwrap();
     let later = f.context(700);
-    let saved = bridge.invocation_terms(f.authority.association(), correlation, &later).await.unwrap().unwrap();
+    let saved = bridge
+        .invocation_terms(f.authority.association(), correlation, &later)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(saved.host, *f.request.host());
     assert_eq!(saved.evidence, f.authority);
     assert_eq!(saved.evidence.constraints().issued_at_ms, 100);
     assert_eq!(saved.evidence.constraints().expires_at_ms, 1000);
     assert_eq!(saved.host.limits.deadline_ms, 900);
     let mut changed = f.request.request().clone();
-    changed.request.push_str(" Changed content cannot reuse these terms.");
-    assert!(matches!(bridge.admit_or_recover(changed, saved.host, &saved.evidence, &later, &f.references).await,
-        Err(SetupError::Store(StoreError::AdmissionConflict))));
+    changed
+        .request
+        .push_str(" Changed content cannot reuse these terms.");
+    assert!(matches!(
+        bridge
+            .admit_or_recover(changed, saved.host, &saved.evidence, &later, &f.references)
+            .await,
+        Err(SetupError::Store(StoreError::AdmissionConflict))
+    ));
 }
 
 #[tokio::test]
 async fn canonical_work_input_uses_complete_acquisition_content_and_current_reference_owner() {
     let f = Fixture::new();
     let context = f.context(200);
-    let saved = f.bridge().admit(&f.request, &f.authority, &context, &f.references).await.unwrap();
+    let saved = f
+        .bridge()
+        .admit(&f.request, &f.authority, &context, &f.references)
+        .await
+        .unwrap();
     let request = saved.snapshot.request();
     let reference = canonical_setup_input_reference(request).unwrap();
-    assert_eq!(reference.content_digest, ContentDigest::of_bytes(&toolkit_package::canonical_json(request.request()).unwrap()));
+    assert_eq!(
+        reference.content_digest,
+        ContentDigest::of_bytes(&toolkit_package::canonical_json(request.request()).unwrap())
+    );
     assert_eq!(reference.id.as_str(), saved.snapshot.key().id);
     // The canonical full input does not need an invented external owner. Its
     // embedded external references still use the actual reference owner.
-    super::installed_input::verify_work_input_reference(request, &reference, &f.authority, &context, &f.references).unwrap();
+    super::installed_input::verify_work_input_reference(
+        request,
+        &reference,
+        &f.authority,
+        &context,
+        &f.references,
+    )
+    .unwrap();
     let mut wrong = reference.clone();
     wrong.content_digest = ContentDigest::of_bytes(b"only a summary");
-    assert!(super::installed_input::verify_work_input_reference(request, &wrong, &f.authority, &context, &f.references).is_err());
+    assert!(
+        super::installed_input::verify_work_input_reference(
+            request,
+            &wrong,
+            &f.authority,
+            &context,
+            &f.references
+        )
+        .is_err()
+    );
     f.references.0.store(false, Ordering::SeqCst);
-    assert!(super::installed_input::verify_work_input_reference(request, &reference, &f.authority, &context, &f.references).is_err());
+    assert!(
+        super::installed_input::verify_work_input_reference(
+            request,
+            &reference,
+            &f.authority,
+            &context,
+            &f.references
+        )
+        .is_err()
+    );
 }
 
 #[test]
 fn original_native_work_is_preserved_by_the_existing_request_codec() {
-    use meerkat_core::{RunId, SessionId, lifecycle::InputId,
-        retained_work::{RetainedWorkIdentity, RetainedContributorRef, SelectedInputBinding}};
     use crate::request::{NativeOriginalTask, StoredSetupRequest};
+    use meerkat_core::{
+        RunId, SessionId,
+        lifecycle::InputId,
+        retained_work::{RetainedContributorRef, RetainedWorkIdentity, SelectedInputBinding},
+    };
     let f = Fixture::new();
     let session = SessionId::new();
     let input = InputId::new();
     let native = NativeOriginalTask {
         origin_session_id: session.clone(),
-        retained_work: RetainedWorkIdentity::new(format!("rt:session:{session}"), RunId::new(),
-            vec![RetainedContributorRef { input_id: input.clone(), association_digest: "association-a".into(), submission_digest: "submission-a".into() }],
-            [(input.to_string(), SelectedInputBinding { binding: "exact-native-binding".into(), batch_key: "native-batch".into() })].into(), None),
-        member: Some(meerkat_core::MobMemberBinding { mob_id: "paired_host".into(), role: "research".into(), member: "native-member-a".into() }),
+        retained_work: RetainedWorkIdentity::new(
+            format!("rt:session:{session}"),
+            RunId::new(),
+            vec![RetainedContributorRef {
+                input_id: input.clone(),
+                association_digest: "association-a".into(),
+                submission_digest: "submission-a".into(),
+            }],
+            [(
+                input.to_string(),
+                SelectedInputBinding {
+                    binding: "exact-native-binding".into(),
+                    batch_key: "native-batch".into(),
+                },
+            )]
+            .into(),
+            None,
+        ),
+        member: Some(meerkat_core::MobMemberBinding {
+            mob_id: "paired_host".into(),
+            role: "research".into(),
+            member: "native-member-a".into(),
+        }),
     };
     let mut host = f.request.host().clone();
     host.continuation.native_original = Some(native.clone());
-    let request = validate_request(f.request.request().clone(), host, &f.authority,
-        &f.context(200), &f.references).unwrap();
+    let request = validate_request(
+        f.request.request().clone(),
+        host,
+        &f.authority,
+        &f.context(200),
+        &f.references,
+    )
+    .unwrap();
     let encoded = StoredSetupRequest::capture(&request).unwrap();
     let recovered = encoded.recover().unwrap();
     assert_eq!(recovered.host().continuation.native_original, Some(native));
-    assert_eq!(canonical_json(&recovered).unwrap(), canonical_json(&request).unwrap());
+    assert_eq!(
+        canonical_json(&recovered).unwrap(),
+        canonical_json(&request).unwrap()
+    );
     let mut changed = serde_json::to_value(&encoded).unwrap();
-    changed["host"]["continuation"]["native_original"]["retained_work"]["contributors"][0]["submission_digest"] = "different".into();
+    changed["host"]["continuation"]["native_original"]["retained_work"]["contributors"][0]["submission_digest"] =
+        "different".into();
     let changed: StoredSetupRequest = serde_json::from_value(changed).unwrap();
-    assert!(changed.recover().is_err(), "full native identity is part of the existing immutable input");
+    assert!(
+        changed.recover().is_err(),
+        "full native identity is part of the existing immutable input"
+    );
 }
 
 #[test]
@@ -1553,7 +1648,11 @@ fn generic_request_codec_keeps_old_none_bytes_without_native_authority() {
     use crate::request::StoredSetupRequest;
     let f = Fixture::new();
     let bytes = canonical_json(&f.request).unwrap();
-    assert!(!String::from_utf8(bytes.clone()).unwrap().contains("native_original"));
+    assert!(
+        !String::from_utf8(bytes.clone())
+            .unwrap()
+            .contains("native_original")
+    );
     let stored: StoredSetupRequest = serde_json::from_slice(&bytes).unwrap();
     let recovered = stored.recover().unwrap();
     assert!(recovered.host().continuation.native_original.is_none());
@@ -1563,16 +1662,23 @@ fn generic_request_codec_keeps_old_none_bytes_without_native_authority() {
 #[test]
 fn legacy_admission_timestamp_is_not_reinterpreted_as_observation_time() {
     let evidence = ContinuationAdmissionEvidence {
-        receipt: continuation_receipt(), obligation_digest: ContentDigest::of_bytes(b"obligation"),
-        delivery_identity: ContentDigest::of_bytes(b"delivery"), runtime: id("runtime"), session: id("session"),
-        durable_input: reference("input"), observed_at_ms: 42,
+        receipt: continuation_receipt(),
+        obligation_digest: ContentDigest::of_bytes(b"obligation"),
+        delivery_identity: ContentDigest::of_bytes(b"delivery"),
+        runtime: id("runtime"),
+        session: id("session"),
+        durable_input: reference("input"),
+        observed_at_ms: 42,
     };
     let mut legacy = serde_json::to_value(&evidence).unwrap();
-    let value = legacy.as_object_mut().unwrap().remove("observed_at_ms").unwrap();
+    let value = legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("observed_at_ms")
+        .unwrap();
     legacy["admitted_at_ms"] = value;
     assert!(serde_json::from_value::<ContinuationAdmissionEvidence>(legacy).is_err());
 }
-
 
 #[tokio::test]
 async fn absent_attachment_failure_preserves_legacy_record_and_obligation_bytes() {
@@ -1589,7 +1695,13 @@ async fn absent_attachment_failure_preserves_legacy_record_and_obligation_bytes(
     let obligation = super::continuation_obligation(&decoded, terminal.request()).unwrap();
     let bytes = canonical_json(&obligation).unwrap();
     let mut legacy = serde_json::to_value(&obligation).unwrap();
-    assert!(legacy.as_object_mut().unwrap().remove("service_attachment_failure").is_none());
+    assert!(
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("service_attachment_failure")
+            .is_none()
+    );
     assert!(
         legacy
             .as_object_mut()
@@ -1598,7 +1710,10 @@ async fn absent_attachment_failure_preserves_legacy_record_and_obligation_bytes(
             .is_none()
     );
     assert_eq!(canonical_json(&legacy).unwrap(), bytes);
-    assert_eq!(obligation.digest().unwrap(), ContentDigest::of_bytes(&bytes));
+    assert_eq!(
+        obligation.digest().unwrap(),
+        ContentDigest::of_bytes(&bytes)
+    );
 }
 
 #[tokio::test]
@@ -1607,24 +1722,45 @@ async fn attachment_failure_record_requires_reserved_unavailable_without_readine
     let f = Fixture::new();
     let snapshot = f.admit().await;
     let selected = ApprovedServiceSelection {
-        source: StoreKey { realm: f.tenant.to_string(), owner: f.deployment.to_string(), id: "b".into() },
+        source: StoreKey {
+            realm: f.tenant.to_string(),
+            owner: f.deployment.to_string(),
+            id: "b".into(),
+        },
         original_work: meerkat_authorization_contracts::work_association::OriginalWorkRef {
-            authority: f.request.original_work().authority.clone(), work: meerkat_authorization_contracts::evidence::EvidenceId::new("different-b").unwrap() },
+            authority: f.request.original_work().authority.clone(),
+            work: meerkat_authorization_contracts::evidence::EvidenceId::new("different-b")
+                .unwrap(),
+        },
         source_identity: ContentDigest::of_bytes(b"exact-b-source"),
     };
     // Codec controls construct generated states, not admitted source authority.
-    let (mut reserved, _) = super::apply(&snapshot, AcquisitionInput::RecordSelection {
-        operation_id: snapshot.state().operation_id.clone(), authority_digest: snapshot.state().authority_digest.clone(),
-        expected_revision: snapshot.state().revision, selection_digest: super::digest(&selected).unwrap().to_string(),
-        decision_ref: super::digest(&selected).unwrap().to_string(), now: 201,
-    }).unwrap();
+    let (mut reserved, _) = super::apply(
+        &snapshot,
+        AcquisitionInput::RecordSelection {
+            operation_id: snapshot.state().operation_id.clone(),
+            authority_digest: snapshot.state().authority_digest.clone(),
+            expected_revision: snapshot.state().revision,
+            selection_digest: super::digest(&selected).unwrap().to_string(),
+            decision_ref: super::digest(&selected).unwrap().to_string(),
+            now: 201,
+        },
+    )
+    .unwrap();
     reserved.approved_service = Some(selected.clone());
     let mut reserved_snapshot = snapshot.clone();
     reserved_snapshot.record = reserved.clone();
-    let (mut failed, _) = super::apply_selected_source(&reserved_snapshot, AcquisitionInput::ReportUnavailable {
-        operation_id: reserved.state.operation_id.clone(), authority_digest: reserved.state.authority_digest.clone(),
-        expected_revision: reserved.state.revision, detail_ref: super::digest(&reference("failed")).unwrap().to_string(), now: 202,
-    }).unwrap();
+    let (mut failed, _) = super::apply_selected_source(
+        &reserved_snapshot,
+        AcquisitionInput::ReportUnavailable {
+            operation_id: reserved.state.operation_id.clone(),
+            authority_digest: reserved.state.authority_digest.clone(),
+            expected_revision: reserved.state.revision,
+            detail_ref: super::digest(&reference("failed")).unwrap().to_string(),
+            now: 202,
+        },
+    )
+    .unwrap();
     failed.detail = Some(reference("failed"));
     for failure in [
         ApprovedServiceAttachmentFailure::Failed,
@@ -1666,9 +1802,17 @@ async fn attachment_failure_record_requires_reserved_unavailable_without_readine
     reserved.service_attachment_failure = Some(ApprovedServiceAttachmentFailure::Failed);
     assert!(super::validate_record(&reserved, &f.request).is_err());
     let mut with_ready = failed;
-    with_ready.service_ready = Some(ApprovedServiceReady { selection_digest: super::digest(&selected).unwrap(),
-        selection_generation: 1, observed_at_ms: 202,
-        admission: ApprovedServiceInput { source_admission: reference("input"), runtime: id("runtime"), session: id("session"), input: id("input") } });
+    with_ready.service_ready = Some(ApprovedServiceReady {
+        selection_digest: super::digest(&selected).unwrap(),
+        selection_generation: 1,
+        observed_at_ms: 202,
+        admission: ApprovedServiceInput {
+            source_admission: reference("input"),
+            runtime: id("runtime"),
+            session: id("session"),
+            input: id("input"),
+        },
+    });
     assert!(super::validate_record(&with_ready, &f.request).is_err());
 }
 

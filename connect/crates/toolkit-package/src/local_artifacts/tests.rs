@@ -1353,7 +1353,8 @@ fn aggregate_expansion_dependencies_entries_and_paths_obey_limits() {
 fn raw_artifact_preparation_refuses_python_console_selector_before_materialization() {
     let fixture = Fixture::new();
     let payload = b"inert artifact";
-    let (package, mut manifest) = selection_parts(payload, ArtifactDependencies::SelfContained, "main.py");
+    let (package, mut manifest) =
+        selection_parts(payload, ArtifactDependencies::SelfContained, "main.py");
     manifest.components[0].runtime = RuntimeKind::Python;
     let ComponentSource::Artifact { entrypoint, .. } = &mut manifest.components[0].source else {
         unreachable!()
@@ -1361,8 +1362,11 @@ fn raw_artifact_preparation_refuses_python_console_selector_before_materializati
     entrypoint.python_console_script = Some("serve-it".into());
     let manifest = manifest.validate(&package).unwrap();
     let result = fixture.preparer.prepare(
-        &manifest, &id("component"), LocalArtifactLayout::SingleFile { executable: false },
-        fixture.input(payload), &PreparationLimits::default(),
+        &manifest,
+        &id("component"),
+        LocalArtifactLayout::SingleFile { executable: false },
+        fixture.input(payload),
+        &PreparationLimits::default(),
     );
     assert!(matches!(result, Err(PreparationError::Unsupported(_))));
     assert_eq!(fixture.published(), 0);

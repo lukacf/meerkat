@@ -2,8 +2,8 @@
 //! locally; the configured producer child below supplies correlated A targets.
 //! Neither fixture is a Console approval or account-provider interaction.
 use super::*;
-use crate::installed_host::acquisition::InstalledSetupSelection;
 use crate::installed_host::acquisition::InstalledServiceTaskSource;
+use crate::installed_host::acquisition::InstalledSetupSelection;
 use crate::private_originals::InstalledServiceTask;
 use futures::StreamExt;
 use meerkat_core::{AgentToolDispatcher, ToolCallView, ToolDispatchContext, ToolResult};
@@ -38,24 +38,37 @@ pub(super) struct Report {
 impl Report {
     fn new(inner: Arc<dyn AgentToolDispatcher>) -> Arc<Self> {
         Arc::new(Self {
-            leaf: Arc::new(ReportLeaf { inner, context: Mutex::new(None),
+            leaf: Arc::new(ReportLeaf {
+                inner,
+                context: Mutex::new(None),
                 preparation: Mutex::new(None),
-                arrived: tokio::sync::Notify::new(), released: AtomicBool::new(false),
-                resume: tokio::sync::Notify::new() }),
-            selection: OnceLock::new(), first: AtomicBool::new(true), feedback: Mutex::new(vec![]),
+                arrived: tokio::sync::Notify::new(),
+                released: AtomicBool::new(false),
+                resume: tokio::sync::Notify::new(),
+            }),
+            selection: OnceLock::new(),
+            first: AtomicBool::new(true),
+            feedback: Mutex::new(vec![]),
         })
     }
     pub(super) fn retain_selection(&self, selection: InstalledSetupSelection) {
         assert!(self.selection.set(selection).is_ok());
     }
-    pub(super) fn dispatcher(&self) -> Arc<dyn AgentToolDispatcher> { self.leaf.clone() }
+    pub(super) fn dispatcher(&self) -> Arc<dyn AgentToolDispatcher> {
+        self.leaf.clone()
+    }
     pub(super) fn provider(self: &Arc<Self>, inner: Arc<dyn LlmClient>) -> Arc<dyn LlmClient> {
-        Arc::new(ReportResponse { inner, report: self.clone() })
+        Arc::new(ReportResponse {
+            inner,
+            report: self.clone(),
+        })
     }
     async fn take_context(&self) -> ToolDispatchContext {
         loop {
             let arrived = self.leaf.arrived.notified();
-            if let Some(context) = self.leaf.context.lock().unwrap().take() { return context; }
+            if let Some(context) = self.leaf.context.lock().unwrap().take() {
+                return context;
+            }
             arrived.await;
         }
     }
@@ -66,15 +79,28 @@ impl Report {
     /// Ask the held real leaf to prepare while it still borrows the exact
     /// native call and resolved plan. Copies of those values are not custody.
     async fn prepare_task(
-        &self, source: &InstalledServiceTaskSource, kind: ReportPreparation,
+        &self,
+        source: &InstalledServiceTaskSource,
+        kind: ReportPreparation,
     ) -> Result<InstalledServiceTask, PrivateOriginalError> {
         assert!(!self.leaf.released.load(Ordering::SeqCst));
         let (reply, received) = tokio::sync::oneshot::channel();
-        assert!(self.leaf.preparation.lock().unwrap().replace(ReportPreparationRequest {
-            source: source.clone(), kind, reply,
-        }).is_none());
+        assert!(
+            self.leaf
+                .preparation
+                .lock()
+                .unwrap()
+                .replace(ReportPreparationRequest {
+                    source: source.clone(),
+                    kind,
+                    reply,
+                })
+                .is_none()
+        );
         self.leaf.resume.notify_one();
-        received.await.expect("held report dispatch must settle preparation")?
+        received
+            .await
+            .expect("held report dispatch must settle preparation")?
             .ok_or(PrivateOriginalError::Unavailable)
     }
 }
@@ -215,10 +241,18 @@ impl AgentToolDispatcher for ReportLeaf {
 
 impl ReportLeaf {
     async fn pause(
-        &self, call: ToolCallView<'_>, context: &ToolDispatchContext,
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
         plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
     ) {
-        assert!(self.context.lock().unwrap().replace(context.clone()).is_none());
+        assert!(
+            self.context
+                .lock()
+                .unwrap()
+                .replace(context.clone())
+                .is_none()
+        );
         self.arrived.notify_one();
         loop {
             let resumed = self.resume.notified();
@@ -226,35 +260,69 @@ impl ReportLeaf {
             if let Some(request) = preparation {
                 assert_eq!(call.id, REPORT_CALL);
                 assert_eq!(call.name, SETUP_REPORT);
-                let copied_args = serde_json::value::RawValue::from_string(call.args.get().to_owned()).unwrap();
-                assert!(context.check_tool_authorization(ToolCallView {
-                    id: call.id, name: call.name, args: &copied_args,
-                }, plan).is_err(), "equal argument bytes are not native call custody");
+                let copied_args =
+                    serde_json::value::RawValue::from_string(call.args.get().to_owned()).unwrap();
+                assert!(
+                    context
+                        .check_tool_authorization(
+                            ToolCallView {
+                                id: call.id,
+                                name: call.name,
+                                args: &copied_args,
+                            },
+                            plan
+                        )
+                        .is_err(),
+                    "equal argument bytes are not native call custody"
+                );
                 if let Some(plan) = plan {
                     let copied_plan = plan.clone();
-                    assert!(context.check_tool_authorization(call, Some(&copied_plan)).is_err(),
-                        "equal resolved plan values are not native plan custody");
+                    assert!(
+                        context
+                            .check_tool_authorization(call, Some(&copied_plan))
+                            .is_err(),
+                        "equal resolved plan values are not native plan custody"
+                    );
                 }
                 let result = match context.check_tool_authorization(call, plan) {
                     Err(_) => Err(PrivateOriginalError::Denied),
                     Ok(_) => match request.kind {
-                        ReportPreparation::Software => request.source.prepare_software(call, context, plan).await,
-                        ReportPreparation::CapturedConsumer => request.source.prepare_captured_consumer(call, context, plan).await,
-                        ReportPreparation::ExplicitConsumer => request.source.prepare(call, context, plan, MEMBER).await,
-                        ReportPreparation::PublicService => request.source.prepare_public_service(call, context, plan).await,
+                        ReportPreparation::Software => {
+                            request.source.prepare_software(call, context, plan).await
+                        }
+                        ReportPreparation::CapturedConsumer => {
+                            request
+                                .source
+                                .prepare_captured_consumer(call, context, plan)
+                                .await
+                        }
+                        ReportPreparation::ExplicitConsumer => {
+                            request.source.prepare(call, context, plan, MEMBER).await
+                        }
+                        ReportPreparation::PublicService => {
+                            request
+                                .source
+                                .prepare_public_service(call, context, plan)
+                                .await
+                        }
                     },
                 };
                 // A timed-out test may have dropped its receiver; it still
                 // releases and joins this real dispatch through normal cleanup.
                 let _ = request.reply.send(result);
             }
-            if self.released.load(Ordering::SeqCst) { return; }
+            if self.released.load(Ordering::SeqCst) {
+                return;
+            }
             resumed.await;
         }
     }
 }
 
-struct ReportResponse { inner: Arc<dyn LlmClient>, report: Arc<Report> }
+struct ReportResponse {
+    inner: Arc<dyn LlmClient>,
+    report: Arc<Report>,
+}
 #[async_trait]
 impl LlmClient for ReportResponse {
     async fn prepare_controller_credential(&self) -> Result<(), meerkat_core::auth::AuthError> {
@@ -278,28 +346,45 @@ impl LlmClient for ReportResponse {
     fn stream_prepared<'a>(&'a self, request: &'a PreparedLlmRequest) -> LlmStream<'a> {
         // Only the separate helper profile offers this real registered tool.
         // Model scripting selects a response, never runtime identity/authority.
-        let helper = request.request().tools.iter().any(|tool| tool.name == SETUP_REPORT);
+        let helper = request
+            .request()
+            .tools
+            .iter()
+            .any(|tool| tool.name == SETUP_REPORT);
         if helper {
             let mut feedback = self.report.feedback.lock().unwrap();
             for message in &request.request().messages {
                 if let Message::ToolResults { results, .. } = message {
-                    feedback.extend(results.iter().filter(|result| result.tool_use_id == REPORT_CALL).cloned());
+                    feedback.extend(
+                        results
+                            .iter()
+                            .filter(|result| result.tool_use_id == REPORT_CALL)
+                            .cloned(),
+                    );
                 }
             }
         }
         let first = helper && self.report.first.swap(false, Ordering::SeqCst);
         let stream = self.inner.stream_prepared(request);
-        if !first { return stream; }
-        Box::pin(stream.map(|event| event.map(|event| match event {
-            LlmEvent::TextDelta { .. } => LlmEvent::ToolCallComplete {
-                id: REPORT_CALL.into(), name: SETUP_REPORT.into(),
-                args: serde_json::json!({"kind":"unavailable","detail":DETAIL}), meta: None,
-            },
-            LlmEvent::Done { outcome: LlmDoneOutcome::Success { .. } } => LlmEvent::Done {
-                outcome: LlmDoneOutcome::success(StopReason::ToolUse),
-            },
-            other => other,
-        })))
+        if !first {
+            return stream;
+        }
+        Box::pin(stream.map(|event| {
+            event.map(|event| match event {
+                LlmEvent::TextDelta { .. } => LlmEvent::ToolCallComplete {
+                    id: REPORT_CALL.into(),
+                    name: SETUP_REPORT.into(),
+                    args: serde_json::json!({"kind":"unavailable","detail":DETAIL}),
+                    meta: None,
+                },
+                LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success { .. },
+                } => LlmEvent::Done {
+                    outcome: LlmDoneOutcome::success(StopReason::ToolUse),
+                },
+                other => other,
+            })
+        }))
     }
     fn provider(&self) -> Provider {
         self.inner.provider()
@@ -308,7 +393,6 @@ impl LlmClient for ReportResponse {
         self.inner.health_check().await
     }
 }
-
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn narrow_original_report_scope_refuses_locally_and_helper_turn_completes() {
@@ -364,7 +448,9 @@ async fn narrow_original_report_scope_refuses_locally_and_helper_turn_completes(
     assert!(cleanup.is_ok(), "{cleanup:?}");
     match checked {
         Ok(Ok(())) => (),
-        Ok(Err(_)) => panic!("narrow helper report refusal did not settle before the fixture deadline"),
+        Ok(Err(_)) => {
+            panic!("narrow helper report refusal did not settle before the fixture deadline")
+        }
         Err(payload) => std::panic::resume_unwind(payload),
     }
 }

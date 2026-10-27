@@ -29,15 +29,15 @@ use crate::{ConnectError, terminal::TerminalInput};
 
 #[path = "forge_configuration.rs"]
 mod configuration;
-#[path = "forge_stdio.rs"]
-mod stdio;
 #[path = "forge_descriptor.rs"]
 mod descriptor;
-pub(crate) use stdio::present as present_stdio;
+#[path = "forge_stdio.rs"]
+mod stdio;
 pub use configuration::{
     FORGE_INSPECT, FORGE_PREPARE, FORGE_REAUTHENTICATE, FORGE_STATUS, FORGE_SUBMIT,
 };
 pub(crate) use configuration::{FORGE_TOOLS, HeldForgeAction};
+pub(crate) use stdio::present as present_stdio;
 
 pub const FORGE_SELECT_HOST: &str = "forge_select_host";
 const LIMIT: usize = 256 * 1024;
@@ -564,7 +564,9 @@ impl ForgeFrontend {
     fn with_recipe(recipe: configuration::Recipe) -> (Self, ForgePresenter) {
         let (send, receive) = mpsc::channel(1);
         let binding = Arc::new(Binding {
-            state: Mutex::new(State::Fresh { native_setup_claimed: false }),
+            state: Mutex::new(State::Fresh {
+                native_setup_claimed: false,
+            }),
             prompts: send,
             configuration: Mutex::new(configuration::ConfigurationState::default()),
             enabled: std::sync::atomic::AtomicBool::new(true),
@@ -595,14 +597,21 @@ impl ForgeFrontend {
     /// Claim fresh custody once for a native setup. The same state mutex also
     /// guards selection, so a concurrent selection cannot cross this check.
     /// A failed or unused setup never returns this binding to unclaimed Fresh.
-    pub(crate) fn claim_native_setup(&self, presenter: &ForgePresenter) -> Result<(), ConnectError> {
+    pub(crate) fn claim_native_setup(
+        &self,
+        presenter: &ForgePresenter,
+    ) -> Result<(), ConnectError> {
         self.check_presenter(presenter)?;
-        let unavailable = || ConnectError::InvalidInput(
-            "Native Forge setup requires a fresh binding that has never been handed off".into(),
-        );
+        let unavailable = || {
+            ConnectError::InvalidInput(
+                "Native Forge setup requires a fresh binding that has never been handed off".into(),
+            )
+        };
         let mut state = self.binding.state.lock().map_err(|_| unavailable())?;
         match &mut *state {
-            State::Fresh { native_setup_claimed } if !*native_setup_claimed => {
+            State::Fresh {
+                native_setup_claimed,
+            } if !*native_setup_claimed => {
                 *native_setup_claimed = true;
                 Ok(())
             }
@@ -733,11 +742,15 @@ impl ForgeFrontend {
         let (selected, acknowledge) = receive.await.map_err(|_| ToolError::execution_failed("Protected Forge sign-in ended without a confirmed handoff; do not retry automatically"))?;
         let result = match &selected {
             Ok(captured) => {
-                let mut observation = serde_json::to_value(&captured.support)
-                    .map_err(|_| ToolError::execution_failed("Forge support could not be represented"))?;
-                if let Some(recovery) = self.recovery_selection() { observation["recovery"] = recovery; }
-                let text = serde_json::to_string(&observation)
-                    .map_err(|_| ToolError::execution_failed("Forge support could not be represented"))?;
+                let mut observation = serde_json::to_value(&captured.support).map_err(|_| {
+                    ToolError::execution_failed("Forge support could not be represented")
+                })?;
+                if let Some(recovery) = self.recovery_selection() {
+                    observation["recovery"] = recovery;
+                }
+                let text = serde_json::to_string(&observation).map_err(|_| {
+                    ToolError::execution_failed("Forge support could not be represented")
+                })?;
                 Ok(ToolResult::new(call.id.into(), text, false).into())
             }
             Err(error) => Err(ToolError::execution_failed(error.to_string())),
@@ -752,7 +765,9 @@ impl ForgeFrontend {
                 return Err(ToolError::access_denied(call.name));
             }
             *state = match selected {
-                Ok(captured) => State::Captured { _captured: captured },
+                Ok(captured) => State::Captured {
+                    _captured: captured,
+                },
                 Err(_) => State::Retired,
             };
         }
@@ -795,7 +810,9 @@ impl ForgeSelection {
         self.reply(Ok(captured)).await
     }
     async fn terminal_reply<F: Future<Output = io::Result<()>>>(
-        &mut self, selected: Result<Captured, ForgeError>, interrupted: std::pin::Pin<&mut F>,
+        &mut self,
+        selected: Result<Captured, ForgeError>,
+        interrupted: std::pin::Pin<&mut F>,
     ) -> Result<bool, ConnectError> {
         // The caller acknowledgment may suspend. Keep the original terminal
         // interrupt arbitration through that handoff, for success and refusal.
@@ -853,41 +870,59 @@ async fn present_selection(
     output: &mut impl Write,
     interrupted: impl Future<Output = io::Result<()>>,
 ) -> Result<bool, ConnectError> {
-    input.require_terminal().map_err(|e| ConnectError::native("check protected Forge input", e))?;
+    input
+        .require_terminal()
+        .map_err(|e| ConnectError::native("check protected Forge input", e))?;
     tokio::pin!(interrupted);
     writeln!(output, "Select the running Forge application's local Console. This checks frontend support only. The realm keeps this setup conversation. /quit ends setup.")
         .map_err(|e| ConnectError::native("write Forge selection", e))?;
     let binding = prompt.binding.clone();
     let prior = prompt.prior.clone();
     let deferred = binding.recipe.deferred();
-    let retained = if deferred { binding.continued_client.lock().map_err(|_| ended())?.take() } else { None };
-    let mut client = if let Some(client) = retained { client } else {
+    let retained = if deferred {
+        binding.continued_client.lock().map_err(|_| ended())?.take()
+    } else {
+        None
+    };
+    let mut client = if let Some(client) = retained {
+        client
+    } else {
         let selected = if deferred {
-            prior.as_ref().map(|p| p.client.literal_origin.clone())
+            prior
+                .as_ref()
+                .map(|p| p.client.literal_origin.clone())
                 .or_else(|| binding.recipe.selected_origin().map(str::to_owned))
         } else {
             let selected = tokio::select! { biased;
                 _ = prompt.closed() => return Err(ended()),
                 selected = configuration::select_recovery(&binding, prior.as_ref(), input, output, &mut interrupted) => selected?,
             };
-            let std::ops::ControlFlow::Continue(selected) = selected else { return Ok(false); };
+            let std::ops::ControlFlow::Continue(selected) = selected else {
+                return Ok(false);
+            };
             selected
         };
-        if let Some(origin) = selected { ForgeClient::new(&origin).map_err(protocol)? } else {
+        if let Some(origin) = selected {
+            ForgeClient::new(&origin).map_err(protocol)?
+        } else {
             loop {
                 write!(output, "Forge Console origin (http://127.0.0.1:PORT): ")
-                    .and_then(|_| output.flush()).map_err(|e| ConnectError::native("write Forge selection", e))?;
+                    .and_then(|_| output.flush())
+                    .map_err(|e| ConnectError::native("write Forge selection", e))?;
                 let line = tokio::select! { biased;
                     _ = prompt.closed() => return Err(ended()),
                     signal = &mut interrupted => { signal.map_err(|e| ConnectError::native("interrupt Forge selection", e))?; return Ok(false); },
                     value = input.recv() => value.transpose().map_err(|e| ConnectError::native("read Forge origin", e))?,
                 };
-                input.check_cleanup().map_err(|e| ConnectError::native("restore Forge input", e))?;
+                input
+                    .check_cleanup()
+                    .map_err(|e| ConnectError::native("restore Forge input", e))?;
                 match line.as_deref() {
                     None | Some("/quit") => return Ok(false),
                     Some(value) => match ForgeClient::new(value) {
                         Ok(client) => break client,
-                        Err(error) => writeln!(output, "{error}").map_err(|e| ConnectError::native("write Forge selection", e))?,
+                        Err(error) => writeln!(output, "{error}")
+                            .map_err(|e| ConnectError::native("write Forge selection", e))?,
                     },
                 }
             }
@@ -902,31 +937,77 @@ async fn present_selection(
             signal = &mut interrupted => { signal.map_err(|e| ConnectError::native("interrupt Forge descriptor", e))?; return Ok(false); },
             result = client.descriptor() => result,
         })
-    } else { None };
+    } else {
+        None
+    };
     if observed.is_none() || matches!(&observed, Some(Err(ForgeError::SessionRequired))) {
-        match login_selection(&mut prompt, &mut client, input, output, interrupted.as_mut()).await? {
+        match login_selection(
+            &mut prompt,
+            &mut client,
+            input,
+            output,
+            interrupted.as_mut(),
+        )
+        .await?
+        {
             LoginEnd::Ready => (),
             LoginEnd::Stopped => return Ok(false),
-            LoginEnd::Refused(error) => return refuse_selection(&mut prompt, client, error, false, output, interrupted.as_mut()).await,
+            LoginEnd::Refused(error) => {
+                return refuse_selection(
+                    &mut prompt,
+                    client,
+                    error,
+                    false,
+                    output,
+                    interrupted.as_mut(),
+                )
+                .await;
+            }
         }
         observed = None;
     }
     let support = if deferred {
-        let observed = match observed { Some(result) => result, None => tokio::select! { biased;
-            _ = prompt.closed() => return Err(ended()),
-            signal = &mut interrupted => { signal.map_err(|e| ConnectError::native("interrupt Forge descriptor", e))?; return Ok(false); },
-            result = client.descriptor() => result,
-        }};
+        let observed = match observed {
+            Some(result) => result,
+            None => tokio::select! { biased;
+                _ = prompt.closed() => return Err(ended()),
+                signal = &mut interrupted => { signal.map_err(|e| ConnectError::native("interrupt Forge descriptor", e))?; return Ok(false); },
+                result = client.descriptor() => result,
+            },
+        };
         let descriptor = match observed {
             Ok(descriptor) => descriptor,
-            Err(error) => return refuse_selection(&mut prompt, client, error, true, output, interrupted.as_mut()).await,
+            Err(error) => {
+                return refuse_selection(
+                    &mut prompt,
+                    client,
+                    error,
+                    true,
+                    output,
+                    interrupted.as_mut(),
+                )
+                .await;
+            }
         };
         let host = descriptor.host.clone();
-        writeln!(output, "Application: {}\nHost identity: {}\nLoaded source: {}",
-            crate::terminal::display_text(&host.application_id), host.host_id, host.source_digest)
-            .map_err(|e| ConnectError::native("write Forge application identity", e))?;
+        writeln!(
+            output,
+            "Application: {}\nHost identity: {}\nLoaded source: {}",
+            crate::terminal::display_text(&host.application_id),
+            host.host_id,
+            host.source_digest
+        )
+        .map_err(|e| ConnectError::native("write Forge application identity", e))?;
         if !binding.bind_descriptor(&prompt.token, &client, descriptor)? {
-            return refuse_selection(&mut prompt, client, ForgeError::SourceChanged, true, output, interrupted.as_mut()).await;
+            return refuse_selection(
+                &mut prompt,
+                client,
+                ForgeError::SourceChanged,
+                true,
+                output,
+                interrupted.as_mut(),
+            )
+            .await;
         }
         // Generic recovery is inspected only after authenticated declarations
         // exist. The selected origin cannot be changed by a saved locator.
@@ -934,8 +1015,15 @@ async fn present_selection(
             _ = prompt.closed() => return Err(ended()),
             selected = configuration::select_recovery(&binding, prior.as_ref(), input, output, &mut interrupted) => selected?,
         };
-        let std::ops::ControlFlow::Continue(recovery) = recovery else { return Ok(false); };
-        if recovery.as_deref().is_some_and(|origin| origin != client.literal_origin) { return Err(ended()); }
+        let std::ops::ControlFlow::Continue(recovery) = recovery else {
+            return Ok(false);
+        };
+        if recovery
+            .as_deref()
+            .is_some_and(|origin| origin != client.literal_origin)
+        {
+            return Err(ended());
+        }
         ForgeSupport::Declared { host }
     } else {
         let support = tokio::select! { biased;
@@ -945,38 +1033,88 @@ async fn present_selection(
         };
         match support {
             Ok(support) => support,
-            Err(error) => return refuse_selection(&mut prompt, client, error, false, output, interrupted.as_mut()).await,
+            Err(error) => {
+                return refuse_selection(
+                    &mut prompt,
+                    client,
+                    error,
+                    false,
+                    output,
+                    interrupted.as_mut(),
+                )
+                .await;
+            }
         }
     };
-    if let Err(error) = configuration::selected(&binding, prompt.prior.as_ref(), &client, &support) {
-        return refuse_selection(&mut prompt, client, error, false, output, interrupted.as_mut()).await;
+    if let Err(error) = configuration::selected(&binding, prompt.prior.as_ref(), &client, &support)
+    {
+        return refuse_selection(
+            &mut prompt,
+            client,
+            error,
+            false,
+            output,
+            interrupted.as_mut(),
+        )
+        .await;
     }
     let notice = match &support {
-        ForgeSupport::Unsupported => "Forge sign-in succeeded. This application has not declared frontend management support; no host identity, routing or readiness is inferred.",
-        ForgeSupport::Declared { .. } => "Forge reports frontend management support. Component configuration, activation and readiness have not been checked.",
+        ForgeSupport::Unsupported => {
+            "Forge sign-in succeeded. This application has not declared frontend management support; no host identity, routing or readiness is inferred."
+        }
+        ForgeSupport::Declared { .. } => {
+            "Forge reports frontend management support. Component configuration, activation and readiness have not been checked."
+        }
     };
-    writeln!(output, "{notice}").and_then(|_| output.flush()).map_err(|e| ConnectError::native("write Forge support", e))?;
+    writeln!(output, "{notice}")
+        .and_then(|_| output.flush())
+        .map_err(|e| ConnectError::native("write Forge support", e))?;
     if let ForgeSupport::Declared { host } = &support {
-        writeln!(output, "Selected application: {}", crate::terminal::display_text(&host.application_id))
-            .map_err(|e| ConnectError::native("write Forge application", e))?;
+        writeln!(
+            output,
+            "Selected application: {}",
+            crate::terminal::display_text(&host.application_id)
+        )
+        .map_err(|e| ConnectError::native("write Forge application", e))?;
     }
     if let Some(signal) = interrupted.as_mut().now_or_never() {
-        signal.map_err(|e| ConnectError::native("interrupt Forge handoff", e))?; return Ok(false);
+        signal.map_err(|e| ConnectError::native("interrupt Forge handoff", e))?;
+        return Ok(false);
     }
-    prompt.terminal_reply(Ok(Captured { client, support }), interrupted.as_mut()).await
+    prompt
+        .terminal_reply(Ok(Captured { client, support }), interrupted.as_mut())
+        .await
 }
 
 async fn refuse_selection<F: Future<Output = io::Result<()>>>(
-    prompt: &mut ForgeSelection, client: ForgeClient, error: ForgeError, descriptor_read: bool,
-    output: &mut impl Write, mut interrupted: std::pin::Pin<&mut F>,
+    prompt: &mut ForgeSelection,
+    client: ForgeClient,
+    error: ForgeError,
+    descriptor_read: bool,
+    output: &mut impl Write,
+    mut interrupted: std::pin::Pin<&mut F>,
 ) -> Result<bool, ConnectError> {
     // Descriptor GET failures are safe local refusals, including old wrappers
     // and malformed data. Unsafe login/transport checks keep their fatal path.
-    if !descriptor_read && !matches!(error, ForgeError::SignInRefused | ForgeError::SessionRequired
-        | ForgeError::SourceChanged | ForgeError::Unavailable | ForgeError::DeclarationUnsupported) {
+    if !descriptor_read
+        && !matches!(
+            error,
+            ForgeError::SignInRefused
+                | ForgeError::SessionRequired
+                | ForgeError::SourceChanged
+                | ForgeError::Unavailable
+                | ForgeError::DeclarationUnsupported
+        )
+    {
         return Err(protocol(error));
     }
-    if prompt.response.as_ref().is_none_or(oneshot::Sender::is_closed) { return Err(ended()); }
+    if prompt
+        .response
+        .as_ref()
+        .is_none_or(oneshot::Sender::is_closed)
+    {
+        return Err(ended());
+    }
     if let Some(signal) = interrupted.as_mut().now_or_never() {
         signal.map_err(|e| ConnectError::native("interrupt Forge refusal", e))?;
         return Ok(false);
@@ -985,20 +1123,35 @@ async fn refuse_selection<F: Future<Output = io::Result<()>>>(
     // Failed selection grants no configuration authority and never retries.
     if prompt.binding.recipe.deferred() {
         let state = prompt.binding.state.lock().map_err(|_| ended())?;
-        if !matches!(&*state, State::Pending(active) if Arc::ptr_eq(active, &prompt.token)) { return Err(ended()); }
-        *prompt.binding.continued_client.lock().map_err(|_| ended())? = Some(client);
+        if !matches!(&*state, State::Pending(active) if Arc::ptr_eq(active, &prompt.token)) {
+            return Err(ended());
+        }
+        *prompt
+            .binding
+            .continued_client
+            .lock()
+            .map_err(|_| ended())? = Some(client);
     }
     configuration::refuse_selection(&prompt.binding)?;
     writeln!(output, "Forge selection was refused: {error} The setup conversation can continue; no frontend command was sent.")
         .and_then(|_| output.flush()).map_err(|e| ConnectError::native("write Forge refusal", e))?;
-    prompt.terminal_reply(Err(error), interrupted.as_mut()).await
+    prompt
+        .terminal_reply(Err(error), interrupted.as_mut())
+        .await
 }
 
-enum LoginEnd { Ready, Stopped, Refused(ForgeError) }
+enum LoginEnd {
+    Ready,
+    Stopped,
+    Refused(ForgeError),
+}
 
 async fn login_selection<F: Future<Output = io::Result<()>>>(
-    prompt: &mut ForgeSelection, client: &mut ForgeClient, input: &mut TerminalInput,
-    output: &mut impl Write, mut interrupted: std::pin::Pin<&mut F>,
+    prompt: &mut ForgeSelection,
+    client: &mut ForgeClient,
+    input: &mut TerminalInput,
+    output: &mut impl Write,
+    mut interrupted: std::pin::Pin<&mut F>,
 ) -> Result<LoginEnd, ConnectError> {
     let form = tokio::select! {
         biased;
@@ -1066,7 +1219,6 @@ async fn login_selection<F: Future<Output = io::Result<()>>>(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1082,10 +1234,16 @@ mod tests {
                 source_digest: "b".repeat(64),
             },
             ["PRIVATE_TOKEN".to_owned()].into(),
-        ).unwrap();
+        )
+        .unwrap();
         assert!(reading.check_presenter(&reading_presenter).is_ok());
         assert!(application.check_presenter(&application_presenter).is_ok());
-        assert!(application.clone().check_presenter(&application_presenter).is_ok());
+        assert!(
+            application
+                .clone()
+                .check_presenter(&application_presenter)
+                .is_ok()
+        );
         assert!(reading.check_presenter(&application_presenter).is_err());
         assert!(application.check_presenter(&reading_presenter).is_err());
         // Equal constructor facts still create different prompt owners.
@@ -1097,22 +1255,26 @@ mod tests {
                 source_digest: "b".repeat(64),
             },
             ["PRIVATE_TOKEN".to_owned()].into(),
-        ).unwrap();
+        )
+        .unwrap();
         assert!(other.check_presenter(&other_presenter).is_ok());
         assert!(application.check_presenter(&other_presenter).is_err());
         assert!(other.check_presenter(&application_presenter).is_err());
     }
     #[test]
     fn native_setup_claim_accepts_fresh_clones_once_and_refuses_crossed_pairs() {
-        let application_pair = || ForgeFrontend::for_application(
-            ForgeHost {
-                protocol: 1,
-                host_id: format!("forge:{}", "a".repeat(64)),
-                application_id: "native-application".into(),
-                source_digest: "b".repeat(64),
-            },
-            ["PRIVATE_TOKEN".to_owned()].into(),
-        ).unwrap();
+        let application_pair = || {
+            ForgeFrontend::for_application(
+                ForgeHost {
+                    protocol: 1,
+                    host_id: format!("forge:{}", "a".repeat(64)),
+                    application_id: "native-application".into(),
+                    source_digest: "b".repeat(64),
+                },
+                ["PRIVATE_TOKEN".to_owned()].into(),
+            )
+            .unwrap()
+        };
         let (frontend, presenter) = application_pair();
         let (other, other_presenter) = application_pair();
         // Identical trusted facts are still different owners. A crossed
@@ -1124,8 +1286,12 @@ mod tests {
         // No selection has run. Even this unused, still-Fresh pair is spent.
         assert!(frontend.claim_native_setup(&presenter).is_err());
         assert!(other.clone().claim_native_setup(&other_presenter).is_err());
-        assert!(matches!(*frontend.binding.state.lock().unwrap(),
-            State::Fresh { native_setup_claimed: true }));
+        assert!(matches!(
+            *frontend.binding.state.lock().unwrap(),
+            State::Fresh {
+                native_setup_claimed: true
+            }
+        ));
         // Custody consumption does not change receiver identity.
         assert!(frontend.check_presenter(&presenter).is_ok());
     }
@@ -1148,8 +1314,12 @@ mod tests {
             (left.join(), right.join())
         });
         assert_ne!(outcomes.0.unwrap(), outcomes.1.unwrap());
-        assert!(matches!(*frontend.binding.state.lock().unwrap(),
-            State::Fresh { native_setup_claimed: true }));
+        assert!(matches!(
+            *frontend.binding.state.lock().unwrap(),
+            State::Fresh {
+                native_setup_claimed: true
+            }
+        ));
     }
 
     #[test]
@@ -1175,15 +1345,21 @@ mod tests {
                 let dispatcher = frontend.dispatcher();
                 let args = serde_json::value::RawValue::from_string("{}".into()).unwrap();
                 let mut selection = Box::pin(dispatcher.dispatch(ToolCallView {
-                    id: "forge-fresh-custody", name: FORGE_SELECT_HOST, args: &args,
+                    id: "forge-fresh-custody",
+                    name: FORGE_SELECT_HOST,
+                    args: &args,
                 }));
                 // Both ordinary direct Forge and the first native handoff
                 // retain the existing selection/sole-presenter path.
                 assert!(selection.as_mut().now_or_never().is_none());
-                let ForgePrompt::Selection(mut prompt) = presenter.next().now_or_never()
-                    .flatten().expect("exact queued selection") else {
-                        panic!("host selection reached another prompt kind")
-                    };
+                let ForgePrompt::Selection(mut prompt) = presenter
+                    .next()
+                    .now_or_never()
+                    .flatten()
+                    .expect("exact queued selection")
+                else {
+                    panic!("host selection reached another prompt kind")
+                };
                 assert!(frontend.claim_native_setup(&presenter).is_err());
                 assert!(matches!(&*frontend.binding.state.lock().unwrap(),
                     State::Pending(token) if Arc::ptr_eq(token, &prompt.token)));
@@ -1191,7 +1367,10 @@ mod tests {
                     drop(prompt);
                     assert!(matches!(selection.as_mut().now_or_never(), Some(Err(_))));
                     assert!(frontend.claim_native_setup(&presenter).is_err());
-                    assert!(matches!(*frontend.binding.state.lock().unwrap(), State::Retired));
+                    assert!(matches!(
+                        *frontend.binding.state.lock().unwrap(),
+                        State::Retired
+                    ));
                 } else {
                     // This synthetic captured value exercises the real local
                     // handoff and acknowledgement only. No request is made,
@@ -1199,7 +1378,8 @@ mod tests {
                     let mut client = ForgeClient::new("http://127.0.0.1:1").unwrap();
                     client.session = Some(HeaderValue::from_static("synthetic-prior-session"));
                     let mut handoff = Box::pin(prompt.handoff(Captured {
-                        client, support: ForgeSupport::Unsupported,
+                        client,
+                        support: ForgeSupport::Unsupported,
                     }));
                     assert!(handoff.as_mut().now_or_never().is_none());
                     assert!(matches!(selection.as_mut().now_or_never(), Some(Ok(_))));
@@ -1214,9 +1394,16 @@ mod tests {
                 }
                 // A refused handoff cannot reset the used pair into a fresh
                 // selection, whether the first selection completed or retired.
-                assert!(matches!(dispatcher.dispatch(ToolCallView {
-                    id: "forge-fresh-reuse", name: FORGE_SELECT_HOST, args: &args,
-                }).now_or_never(), Some(Err(_))));
+                assert!(matches!(
+                    dispatcher
+                        .dispatch(ToolCallView {
+                            id: "forge-fresh-reuse",
+                            name: FORGE_SELECT_HOST,
+                            args: &args,
+                        })
+                        .now_or_never(),
+                    Some(Err(_))
+                ));
             }
         }
     }

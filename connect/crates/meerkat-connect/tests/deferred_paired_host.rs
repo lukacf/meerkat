@@ -25,9 +25,12 @@ use meerkat::{LlmClient, LlmError, LlmEvent, LlmRequest};
 use meerkat_connect::{
     ConnectSession, RealmOptions, SessionOptions,
     approval::{ApprovalPresenter, LocalApprovals},
-    paired_host_tool::{PAIRED_HOST_FRONTEND_INVENTORY, PAIRED_HOST_SECRET_CREATE, PairedHostFrontend},
     host_selection::{
-        PAIRED_HOST_SELECT_HOST, HostSelectionPresenter, HostSelectionPrompt, present_host_selection,
+        HostSelectionPresenter, HostSelectionPrompt, PAIRED_HOST_SELECT_HOST,
+        present_host_selection,
+    },
+    paired_host_tool::{
+        PAIRED_HOST_FRONTEND_INVENTORY, PAIRED_HOST_SECRET_CREATE, PairedHostFrontend,
     },
     setup::{PreparedSetupConnection, paired_host_frontend_session},
     terminal::TerminalInput,
@@ -469,7 +472,11 @@ async fn caller_and_session_admission_precede_protected_input_and_unbound_effect
     );
     assert!(
         allowed
-            .call("unbound-effect", PAIRED_HOST_SECRET_CREATE, secret_request())
+            .call(
+                "unbound-effect",
+                PAIRED_HOST_SECRET_CREATE,
+                secret_request()
+            )
             .await
             .is_err()
     );
@@ -692,11 +699,17 @@ async fn settled_frontend_moves_pairing_into_fresh_consent_without_sharing_old_d
     let host = Host::new().await;
     let (binding, mut prompts) = PairedHostFrontend::deferred();
     let gate = Gate::new(&binding, None);
-    let selecting = gate.start("select-for-continuation", PAIRED_HOST_SELECT_HOST, json!({}));
+    let selecting = gate.start(
+        "select-for-continuation",
+        PAIRED_HOST_SELECT_HOST,
+        json!({}),
+    );
     let request = timeout(BOUND, prompts.next()).await.unwrap().unwrap();
     assert!(present(request, &host.state.origin).await);
     timeout(BOUND, selecting).await.unwrap().unwrap().unwrap();
-    gate.call("before-close", PAIRED_HOST_FRONTEND_INVENTORY, json!({})).await.unwrap();
+    gate.call("before-close", PAIRED_HOST_FRONTEND_INVENTORY, json!({}))
+        .await
+        .unwrap();
     assert_eq!(host.count(), 2);
     // The live dispatcher prevents move-only reuse. The original remains
     // usable; no connection, consent or selection clone is manufactured.
@@ -708,22 +721,48 @@ async fn settled_frontend_moves_pairing_into_fresh_consent_without_sharing_old_d
     assert!(binding.clone().continue_after_close().is_err());
     drop(old_dispatcher);
     let (fresh, presenter) = binding.continue_after_close().unwrap();
-    assert!(presenter.is_none(), "the existing paired host needs no repeated selection or pairing");
+    assert!(
+        presenter.is_none(),
+        "the existing paired host needs no repeated selection or pairing"
+    );
     let mut next = Gate::new(&fresh, None);
-    next.call("after-close", PAIRED_HOST_FRONTEND_INVENTORY, json!({})).await.unwrap();
-    assert_eq!(host.count(), 3, "the original private client still supplies its existing host credentials");
+    next.call("after-close", PAIRED_HOST_FRONTEND_INVENTORY, json!({}))
+        .await
+        .unwrap();
+    assert_eq!(
+        host.count(),
+        3,
+        "the original private client still supplies its existing host credentials"
+    );
     let effect = next.start("new-consent", PAIRED_HOST_SECRET_CREATE, secret_request());
-    let decision = timeout(BOUND, next.decisions.next()).await.unwrap().unwrap();
-    assert_eq!(host.count(), 3, "new composition cannot reuse a prior consent");
+    let decision = timeout(BOUND, next.decisions.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        host.count(),
+        3,
+        "new composition cannot reuse a prior consent"
+    );
     next.approvals.retire();
     drop(decision);
     assert!(timeout(BOUND, effect).await.unwrap().unwrap().is_err());
-    drop(next); drop(fresh);
-    assert_eq!(host.finish().await, [
-        ("POST".into(), "/console/pair/terminal".into()),
-        ("GET".into(), "/console/extensions/frontend/inventory".into()),
-        ("GET".into(), "/console/extensions/frontend/inventory".into()),
-    ]);
+    drop(next);
+    drop(fresh);
+    assert_eq!(
+        host.finish().await,
+        [
+            ("POST".into(), "/console/pair/terminal".into()),
+            (
+                "GET".into(),
+                "/console/extensions/frontend/inventory".into()
+            ),
+            (
+                "GET".into(),
+                "/console/extensions/frontend/inventory".into()
+            ),
+        ]
+    );
 }
 
 struct Probe {

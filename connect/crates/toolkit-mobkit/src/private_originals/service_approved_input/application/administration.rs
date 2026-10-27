@@ -25,7 +25,9 @@ pub struct ServiceParentAuthorizationProposal {
 }
 impl ServiceParentAuthorizationProposal {
     pub fn proposal_sha256(&self) -> Result<String, HostLifetimeError> {
-        canonical_json(self).map(|bytes| digest(&bytes)).map_err(|_| HostLifetimeError::InvalidSelection)
+        canonical_json(self)
+            .map(|bytes| digest(&bytes))
+            .map_err(|_| HostLifetimeError::InvalidSelection)
     }
 }
 
@@ -37,9 +39,15 @@ pub struct ServiceParentAuthorizationRequest<'a> {
     pub(super) observation: ServiceParentOperationObserver,
 }
 impl ServiceParentAuthorizationRequest<'_> {
-    pub fn proposal(&self) -> &ServiceParentAuthorizationProposal { self.proposal }
-    pub fn configuration(&self) -> &meerkat_core::McpServerConfig { self.configuration }
-    pub fn observer(&self) -> ServiceParentOperationObserver { self.observation.clone() }
+    pub fn proposal(&self) -> &ServiceParentAuthorizationProposal {
+        self.proposal
+    }
+    pub fn configuration(&self) -> &meerkat_core::McpServerConfig {
+        self.configuration
+    }
+    pub fn observer(&self) -> ServiceParentOperationObserver {
+        self.observation.clone()
+    }
 }
 
 /// A pending producer must observe request.observer().wait_retiring() (and its
@@ -50,8 +58,10 @@ impl ServiceParentAuthorizationRequest<'_> {
 /// to return. The observer may be retained for later completion observation.
 #[async_trait::async_trait]
 pub trait ApplicationServiceParentAuthorizer: Send + Sync {
-    async fn reserve(&self, request: &ServiceParentAuthorizationRequest<'_>)
-        -> Result<ServiceParentAuthorization, HostLifetimeError>;
+    async fn reserve(
+        &self,
+        request: &ServiceParentAuthorizationRequest<'_>,
+    ) -> Result<ServiceParentAuthorization, HostLifetimeError>;
 }
 pub enum ServiceParentAuthorization {
     RequiresHuman,
@@ -66,7 +76,9 @@ pub trait ServiceParentAdministrationReservation: Send + Sync {
     fn proposal_sha256(&self) -> &str;
     fn provenance(&self) -> &serde_json::Map<String, serde_json::Value>;
     fn check_current(&self) -> Result<(), HostLifetimeError>;
-    fn tool_policy_approval(&self) -> Option<&ServiceToolPolicyApproval> { None }
+    fn tool_policy_approval(&self) -> Option<&ServiceToolPolicyApproval> {
+        None
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -76,10 +88,19 @@ pub(crate) struct ServiceParentAuthorizationEvidence {
     pub provenance: serde_json::Map<String, serde_json::Value>,
 }
 impl ServiceParentAuthorizationEvidence {
-    pub(crate) fn validate(&self, proposal: &ServiceParentAuthorizationProposal) -> Result<(), HostLifetimeError> {
-        if self.proposal_sha256 != proposal.proposal_sha256()? || self.provenance.is_empty()
-            || canonical_json(&self.provenance).map_err(|_| HostLifetimeError::InvalidSelection)?.len() > 16 * 1024
-        { return Err(HostLifetimeError::Denied); }
+    pub(crate) fn validate(
+        &self,
+        proposal: &ServiceParentAuthorizationProposal,
+    ) -> Result<(), HostLifetimeError> {
+        if self.proposal_sha256 != proposal.proposal_sha256()?
+            || self.provenance.is_empty()
+            || canonical_json(&self.provenance)
+                .map_err(|_| HostLifetimeError::InvalidSelection)?
+                .len()
+                > 16 * 1024
+        {
+            return Err(HostLifetimeError::Denied);
+        }
         Ok(())
     }
 }

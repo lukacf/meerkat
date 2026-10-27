@@ -9,6 +9,7 @@ use crate::{
     },
     private_originals::{PrivateOriginalError, PrivateOriginalSubmission, PrivateSourceSettlement},
 };
+use meerkat_core::types::ToolCallView;
 use meerkat_toolkit::{
     authority::{SetupProposalConstraints, SetupRequestEvidence},
     request::ValidatedSetupRequest,
@@ -19,7 +20,6 @@ use meerkat_toolkit::{
     },
     work_admission::{SetupWorkAdmissionError, SetupWorkObservationAuthorizer},
 };
-use meerkat_core::types::ToolCallView;
 use meerkat_workgraph::{WorkAdmission, WorkAdmissionOutcome};
 use toolkit_package::{ContentDigest, canonical_json};
 use toolkit_store::{EffectKey, EffectLease, StoreError};
@@ -69,7 +69,8 @@ impl InstalledAcquisition {
                 &current,
                 self.references.as_ref(),
             )
-            .await.map_err(|error| {
+            .await
+            .map_err(|error| {
                 #[cfg(test)]
                 crate::aa1_setup_failure("advance.load", &error);
                 error
@@ -81,9 +82,15 @@ impl InstalledAcquisition {
         // spent admitting/loading is never added back. Both helper paths reuse
         // it. The complete path also retains its existing outer owner timeout;
         // the work lease allocation is not a proof of liveness after storage.
-        let remaining = snapshot.request().host().limits.deadline_ms
-            .checked_sub(current.now_ms).ok_or(SetupError::Rejected)?;
-        let source_deadline = started.checked_add(Duration::from_millis(remaining))
+        let remaining = snapshot
+            .request()
+            .host()
+            .limits
+            .deadline_ms
+            .checked_sub(current.now_ms)
+            .ok_or(SetupError::Rejected)?;
+        let source_deadline = started
+            .checked_add(Duration::from_millis(remaining))
             .ok_or(SetupError::Rejected)?;
         let content = String::from_utf8(canonical_json(snapshot.request().request())?)
             .map_err(|_| SetupError::InvalidRecord)?;
@@ -98,7 +105,8 @@ impl InstalledAcquisition {
                 },
                 context,
             )
-            .await.map_err(|error| {
+            .await
+            .map_err(|error| {
                 #[cfg(test)]
                 crate::aa1_setup_failure("advance.prepare_work", &error);
                 error
@@ -128,7 +136,8 @@ impl InstalledAcquisition {
                 }),
                 &self.work_step,
             )
-            .await.map_err(|error| {
+            .await
+            .map_err(|error| {
                 #[cfg(test)]
                 crate::aa1_setup_failure("advance.work_step", &error);
                 error
@@ -211,7 +220,8 @@ impl InstalledAcquisition {
                 &current,
                 self.references.as_ref(),
             )
-            .await.map_err(|error| {
+            .await
+            .map_err(|error| {
                 #[cfg(test)]
                 crate::aa1_setup_failure("advance.load", &error);
                 error
@@ -234,7 +244,8 @@ impl InstalledAcquisition {
                 },
                 &self.work_backend,
             )
-            .await.map_err(|error| {
+            .await
+            .map_err(|error| {
                 #[cfg(test)]
                 crate::aa1_setup_failure("advance.load_publication", &error);
                 error
@@ -331,11 +342,14 @@ impl NativeSetupWorkOwner for SameHostSetupWorkOwner<'_> {
         &self,
         preparation: &NativeWorkPreparation,
     ) -> Result<Option<NativeWorkObservation<Self::Retained>>, SetupError> {
-        self.acquisition.observe_private_work(preparation).await.map_err(|error| {
-            #[cfg(test)]
-            crate::aa1_setup_failure("observe.private_work", &error);
-            error
-        })
+        self.acquisition
+            .observe_private_work(preparation)
+            .await
+            .map_err(|error| {
+                #[cfg(test)]
+                crate::aa1_setup_failure("observe.private_work", &error);
+                error
+            })
     }
 
     async fn complete(
@@ -371,7 +385,11 @@ impl NativeSetupWorkOwner for SameHostSetupWorkOwner<'_> {
         // No helper runtime is touched until the native graph has selected its
         // exact item. Native preparation owns any session materialization.
         let prepared = originals
-            .prepare_setup_helper(admitted.clone(), self.content.to_owned(), self.source_deadline)
+            .prepare_setup_helper(
+                admitted.clone(),
+                self.content.to_owned(),
+                self.source_deadline,
+            )
             .await
             .map_err(|error| {
                 #[cfg(test)]
@@ -385,8 +403,7 @@ impl NativeSetupWorkOwner for SameHostSetupWorkOwner<'_> {
                 #[cfg(test)]
                 aa1_private_failure("complete.recover_helper", error);
                 source_error(error)
-            })?
-        {
+            })? {
             Some(source) => source,
             None => {
                 // Native must reconcile a child issued before a lost source
@@ -564,11 +581,14 @@ impl NativeSetupWorkOwner for SameHostSetupWorkOwner<'_> {
 
 #[cfg(test)]
 fn aa1_private_failure(stage: &'static str, error: PrivateOriginalError) {
-    crate::aa1_failure(stage, match error {
-        PrivateOriginalError::Denied => "PrivateOriginalError::Denied",
-        PrivateOriginalError::Conflict => "PrivateOriginalError::Conflict",
-        PrivateOriginalError::Unavailable => "PrivateOriginalError::Unavailable",
-    });
+    crate::aa1_failure(
+        stage,
+        match error {
+            PrivateOriginalError::Denied => "PrivateOriginalError::Denied",
+            PrivateOriginalError::Conflict => "PrivateOriginalError::Conflict",
+            PrivateOriginalError::Unavailable => "PrivateOriginalError::Unavailable",
+        },
+    );
 }
 
 fn source_error(error: PrivateOriginalError) -> SetupError {

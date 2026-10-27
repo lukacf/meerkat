@@ -4,8 +4,8 @@
 //! to guess a target nor issue permission. The native grant owner conjoins the
 //! exact resulting tuple with the separately reviewed grant at each boundary.
 
-use meerkat_authorization_contracts::constraints::DomainRestriction;
 use meerkat_authorization::policy::LocalOperationValues;
+use meerkat_authorization_contracts::constraints::DomainRestriction;
 use meerkat_authorization_contracts::constraints::{
     ActionRef, AudienceRef, DelegationDepth, ExactRestriction, ExecutionRestrictions,
     LifetimeRestriction, ProcessorRef, ResourceDomain,
@@ -102,13 +102,20 @@ pub(crate) fn catalog_read(
 /// Explicit host selection for catalog reads by this helper's successors.
 /// Only the selected application receives this one-level parent over its own
 /// domains; the native binder narrows it to the observed helper session.
-pub(crate) fn configured_catalog_parent(application: &PrincipalRef, executor: &PrincipalRef, audience: &AudienceRef)
-    -> ExecutionRestrictions
-{
+pub(crate) fn configured_catalog_parent(
+    application: &PrincipalRef,
+    executor: &PrincipalRef,
+    audience: &AudienceRef,
+) -> ExecutionRestrictions {
     ExecutionRestrictions {
-        actions: ExactRestriction::exact([ActionRef { feature: "toolkit".into(), action: "catalog-read".into() }]),
+        actions: ExactRestriction::exact([ActionRef {
+            feature: "toolkit".into(),
+            action: "catalog-read".into(),
+        }]),
         resource_domains: DomainRestriction::owned_by([application.clone()]),
-        processors: ExactRestriction::exact([ProcessorRef::Principal { principal: executor.clone() }]),
+        processors: ExactRestriction::exact([ProcessorRef::Principal {
+            principal: executor.clone(),
+        }]),
         audiences: ExactRestriction::exact([audience.clone()]),
         lifetime: LifetimeRestriction::unrestricted(),
         delegation_depth: DelegationDepth::remaining(1),
@@ -126,7 +133,9 @@ pub(crate) fn configured_setup_parent(
         // Sessions do not exist at configuration. The selected application may
         // delegate this action only to its own exact session resources.
         resource_domains: DomainRestriction::owned_by([application.clone()]),
-        processors: ExactRestriction::exact([ProcessorRef::Principal { principal: executor.clone() }]),
+        processors: ExactRestriction::exact([ProcessorRef::Principal {
+            principal: executor.clone(),
+        }]),
         audiences: ExactRestriction::exact([audience.clone()]),
         lifetime: LifetimeRestriction::unrestricted(),
         delegation_depth: DelegationDepth::remaining(1),
@@ -134,7 +143,10 @@ pub(crate) fn configured_setup_parent(
 }
 
 fn setup_request_action() -> ActionRef {
-    ActionRef { feature: "toolkit".into(), action: "find-and-install".into() }
+    ActionRef {
+        feature: "toolkit".into(),
+        action: "find-and-install".into(),
+    }
 }
 
 /// Request acquisition from this exact bound agent session. This operation
@@ -197,7 +209,10 @@ pub(crate) fn qualified_setup_resource(
 ) -> Result<ResourceDomain, serde_json::Error> {
     let canonical = toolkit_package::canonical_json(origin)?;
     let coordinate: String = canonical.iter().map(|byte| format!("{byte:02x}")).collect();
-    Ok(ResourceDomain { authority: authority.clone(), namespace: format!("toolkit-{action}-origin/v1/{coordinate}") })
+    Ok(ResourceDomain {
+        authority: authority.clone(),
+        namespace: format!("toolkit-{action}-origin/v1/{coordinate}"),
+    })
 }
 
 /// Report scope can be reviewed before a lazy helper session exists. The
@@ -221,7 +236,13 @@ pub(crate) fn setup_account_request_for_origin(
     audience: &AudienceRef,
     origin: &crate::original_ingress::helper_originals::HelperSetupOrigin,
 ) -> Result<LocalOperationValues, serde_json::Error> {
-    qualified_setup_operation(authority, executor, audience, origin, "setup-account-request")
+    qualified_setup_operation(
+        authority,
+        executor,
+        audience,
+        origin,
+        "setup-account-request",
+    )
 }
 
 /// Request protected review of a public service for the same original. This
@@ -232,7 +253,13 @@ pub(crate) fn setup_public_service_request_for_origin(
     audience: &AudienceRef,
     origin: &crate::original_ingress::helper_originals::HelperSetupOrigin,
 ) -> Result<LocalOperationValues, serde_json::Error> {
-    qualified_setup_operation(authority, executor, audience, origin, "setup-public-service-request")
+    qualified_setup_operation(
+        authority,
+        executor,
+        audience,
+        origin,
+        "setup-public-service-request",
+    )
 }
 
 /// Exact registered server and raw operation supplied by the native live
@@ -255,7 +282,9 @@ pub(crate) fn mcp_operation(
             authority: authority.clone(),
             namespace: format!("mcp-server/{server}"),
         },
-        processor: ProcessorRef::Principal { principal: executor.clone() },
+        processor: ProcessorRef::Principal {
+            principal: executor.clone(),
+        },
         audience: audience.clone(),
     }
 }
@@ -271,7 +300,8 @@ pub(crate) fn mcp_connector_operation(
     connector: &meerkat_core::mcp_config::McpConnectorApproval,
 ) -> LocalOperationValues {
     let mut values = mcp_operation(authority, executor, audience, server, "");
-    values.action = meerkat_authorization::mcp_installation::mcp_connector_action(server, connector);
+    values.action =
+        meerkat_authorization::mcp_installation::mcp_connector_action(server, connector);
     values
 }
 
@@ -283,8 +313,13 @@ pub(crate) fn mcp_live_attachment(
     audience: &AudienceRef,
     selection_digest: &str,
 ) -> LocalOperationValues {
-    tuple(authority, executor, audience, "mcp-live-attach",
-        format!("toolkit-mcp-live/{selection_digest}"))
+    tuple(
+        authority,
+        executor,
+        audience,
+        "mcp-live-attach",
+        format!("toolkit-mcp-live/{selection_digest}"),
+    )
 }
 
 /// Native MCP vocabulary shared by the explicit access decision and use.
@@ -297,8 +332,15 @@ pub(crate) fn mcp_access_restrictions<'a>(
     raw_operations: impl IntoIterator<Item = &'a str>,
     connector: &meerkat_core::mcp_config::McpConnectorApproval,
 ) -> ExecutionRestrictions {
-    mcp_access_restrictions_with_attachment(authority, executor, audience, server,
-        raw_operations, connector, None)
+    mcp_access_restrictions_with_attachment(
+        authority,
+        executor,
+        audience,
+        server,
+        raw_operations,
+        connector,
+        None,
+    )
 }
 
 pub(crate) fn mcp_access_restrictions_with_attachment<'a>(
@@ -310,27 +352,49 @@ pub(crate) fn mcp_access_restrictions_with_attachment<'a>(
     connector: &meerkat_core::mcp_config::McpConnectorApproval,
     attachment: Option<LocalOperationValues>,
 ) -> ExecutionRestrictions {
-    mcp_access_restrictions_with_service_scope(authority, executor, audience, server,
-        raw_operations, connector, attachment, None)
+    mcp_access_restrictions_with_service_scope(
+        authority,
+        executor,
+        audience,
+        server,
+        raw_operations,
+        connector,
+        attachment,
+        None,
+    )
 }
 
 pub(crate) fn mcp_access_restrictions_with_service_scope<'a>(
-    authority: &PrincipalRef, executor: &PrincipalRef, audience: &AudienceRef,
-    server: &str, raw_operations: impl IntoIterator<Item = &'a str>,
+    authority: &PrincipalRef,
+    executor: &PrincipalRef,
+    audience: &AudienceRef,
+    server: &str,
+    raw_operations: impl IntoIterator<Item = &'a str>,
     connector: &meerkat_core::mcp_config::McpConnectorApproval,
-    attachment: Option<LocalOperationValues>, catalog: Option<LocalOperationValues>,
+    attachment: Option<LocalOperationValues>,
+    catalog: Option<LocalOperationValues>,
 ) -> ExecutionRestrictions {
     let operation = mcp_operation(authority, executor, audience, server, "");
-    let actions = raw_operations.into_iter().map(|raw| ActionRef { feature: "mcp".into(), action: raw.into() });
+    let actions = raw_operations.into_iter().map(|raw| ActionRef {
+        feature: "mcp".into(),
+        action: raw.into(),
+    });
     let approval = meerkat_authorization::mcp_installation::mcp_connector_action(server, connector);
-    let connector_domain = meerkat_authorization::mcp_installation::mcp_connector_domain(authority, server, connector);
+    let connector_domain =
+        meerkat_authorization::mcp_installation::mcp_connector_domain(authority, server, connector);
     ExecutionRestrictions {
-        actions: ExactRestriction::exact(actions.chain(std::iter::once(approval))
-            .chain(attachment.iter().map(|value| value.action.clone()))
-            .chain(catalog.iter().map(|value| value.action.clone()))),
-        resource_domains: DomainRestriction::exact([operation.resource_domain, connector_domain].into_iter()
-            .chain(attachment.iter().map(|value| value.resource_domain.clone()))
-            .chain(catalog.iter().map(|value| value.resource_domain.clone()))),
+        actions: ExactRestriction::exact(
+            actions
+                .chain(std::iter::once(approval))
+                .chain(attachment.iter().map(|value| value.action.clone()))
+                .chain(catalog.iter().map(|value| value.action.clone())),
+        ),
+        resource_domains: DomainRestriction::exact(
+            [operation.resource_domain, connector_domain]
+                .into_iter()
+                .chain(attachment.iter().map(|value| value.resource_domain.clone()))
+                .chain(catalog.iter().map(|value| value.resource_domain.clone())),
+        ),
         processors: ExactRestriction::exact([operation.processor]),
         audiences: ExactRestriction::exact([operation.audience]),
         lifetime: LifetimeRestriction::unrestricted(),

@@ -8,9 +8,7 @@ use futures_util::FutureExt;
 use meerkat_core::ResolvedStorage;
 
 use crate::{
-    ConnectError,
-    resources::InstalledResources,
-    service_preparation::ServicePreparationPresenter,
+    ConnectError, resources::InstalledResources, service_preparation::ServicePreparationPresenter,
 };
 
 use super::PromptBridge;
@@ -74,7 +72,9 @@ pub(super) async fn run(
         // arbitrary host response. It retains its entered child and joins it
         // when either retirement or the exact native waiter closes. Its native
         // handoff must also acknowledge before the worker continues.
-        let result = request.prepare_installed(resources, &storage, interrupted).await;
+        let result = request
+            .prepare_installed(resources, &storage, interrupted)
+            .await;
         match result {
             Ok(true) => {}
             Ok(false) if bridge.retired() => return Ok(()),
@@ -113,14 +113,16 @@ mod tests {
 
     async fn request(dispatcher: Arc<dyn AgentToolDispatcher>) {
         let args = serde_json::value::to_raw_value(&serde_json::json!({})).unwrap();
-        assert!(dispatcher
-            .dispatch(ToolCallView {
-                id: "prepare",
-                name: TOOLKIT_PREPARE_SERVICES,
-                args: &args,
-            })
-            .await
-            .is_err());
+        assert!(
+            dispatcher
+                .dispatch(ToolCallView {
+                    id: "prepare",
+                    name: TOOLKIT_PREPARE_SERVICES,
+                    args: &args,
+                })
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -135,7 +137,9 @@ mod tests {
         let (bridge, stop) = bridge();
         stop.send_replace(true);
         run(presenter, storage, bridge).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(1), pending).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), pending)
+            .await
+            .unwrap();
         assert!(!lazy.owner().accepted());
         assert!(!artifacts.exists());
     }
@@ -152,7 +156,8 @@ mod tests {
         drop(pending);
         let (bridge, _stop) = bridge();
         let result = tokio::time::timeout(Duration::from_secs(1), run(presenter, storage, bridge))
-            .await.unwrap();
+            .await
+            .unwrap();
         assert!(result.is_err());
         assert!(!lazy.owner().accepted());
         assert!(!artifacts.exists());
@@ -169,7 +174,10 @@ mod tests {
         let mut worker = Box::pin(run(presenter, storage, bridge));
         assert!(worker.as_mut().now_or_never().is_none());
         stop.send_replace(true);
-        tokio::time::timeout(Duration::from_secs(1), worker).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(1), worker)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(!artifacts.exists());
     }
 }

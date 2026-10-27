@@ -45,40 +45,61 @@ impl PrivateOriginals {
         server: McpServerConfig,
     ) -> Result<Arc<McpAttachmentControlRequest>, PrivateOriginalError> {
         let publication = self.capture_service_mcp_publication(store)?;
-        self.prepare_service_mcp_control_at(reference, server, publication).await
+        self.prepare_service_mcp_control_at(reference, server, publication)
+            .await
     }
 
     /// Production recovery captures currentness before package readback as well
     /// as canonical task reads. A changed owner never refreshes this old stamp.
     pub(crate) async fn prepare_service_mcp_installation(
-        self: &Arc<Self>, store: &Arc<SqliteStore>, reference: &PrivateOriginalRef,
+        self: &Arc<Self>,
+        store: &Arc<SqliteStore>,
+        reference: &PrivateOriginalRef,
     ) -> Result<Arc<McpAttachmentControlRequest>, PrivateOriginalError> {
-        let stored = self.store.get(&self.key(reference)?).await.map_err(store_error)?
+        let stored = self
+            .store
+            .get(&self.key(reference)?)
+            .await
+            .map_err(store_error)?
             .ok_or(PrivateOriginalError::Unavailable)?;
         let record = self.decode_record(&stored, reference)?;
-        let grant = record.approved_task.as_ref().ok_or(PrivateOriginalError::Denied)?.singleton_grant()?.clone();
-        self.prepare_service_mcp_installation_member(store, reference, &grant).await
+        let grant = record
+            .approved_task
+            .as_ref()
+            .ok_or(PrivateOriginalError::Denied)?
+            .singleton_grant()?
+            .clone();
+        self.prepare_service_mcp_installation_member(store, reference, &grant)
+            .await
     }
 
     pub(crate) async fn prepare_service_mcp_installation_member(
-        self: &Arc<Self>, store: &Arc<SqliteStore>, reference: &PrivateOriginalRef, grant: &PrivateServiceGrantRef,
+        self: &Arc<Self>,
+        store: &Arc<SqliteStore>,
+        reference: &PrivateOriginalRef,
+        grant: &PrivateServiceGrantRef,
     ) -> Result<Arc<McpAttachmentControlRequest>, PrivateOriginalError> {
         attachment_preparation_diagnostic::<()>("capture_publication", None);
         let publication = self.capture_service_mcp_publication(store);
         attachment_preparation_diagnostic("capture_publication", Some(&publication));
         let publication = publication?;
         attachment_preparation_diagnostic::<()>("installation_readback", None);
-        let server = self.read_service_installation_member(reference, grant).await;
+        let server = self
+            .read_service_installation_member(reference, grant)
+            .await;
         attachment_preparation_diagnostic("installation_readback", Some(&server));
         let server = server?;
         attachment_preparation_diagnostic::<()>("canonical_control", None);
-        let control = self.prepare_service_mcp_control_at(reference, server, publication).await;
+        let control = self
+            .prepare_service_mcp_control_at(reference, server, publication)
+            .await;
         attachment_preparation_diagnostic("canonical_control", Some(&control));
         control
     }
 
     fn capture_service_mcp_publication(
-        self: &Arc<Self>, store: &Arc<SqliteStore>,
+        self: &Arc<Self>,
+        store: &Arc<SqliteStore>,
     ) -> Result<LocalPublicationStamp, PrivateOriginalError> {
         let source_store: Arc<dyn ToolkitStore> = store.clone();
         let publication_owner: Arc<dyn RecordChangePublication> = self.owner.clone();
@@ -99,7 +120,9 @@ impl PrivateOriginals {
     }
 
     async fn prepare_service_mcp_control_at(
-        self: &Arc<Self>, reference: &PrivateOriginalRef, server: McpServerConfig,
+        self: &Arc<Self>,
+        reference: &PrivateOriginalRef,
+        server: McpServerConfig,
         publication: LocalPublicationStamp,
     ) -> Result<Arc<McpAttachmentControlRequest>, PrivateOriginalError> {
         attachment_preparation_diagnostic::<()>("canonical_records", None);
@@ -130,14 +153,13 @@ impl PrivateOriginals {
             .map_err(store_error)?
             .ok_or(PrivateOriginalError::Unavailable)?;
         let parent_record = self.decode_record(&parent_stored, &task.parent)?;
-        let parent = parent_record
-            .final_association
-            .ok_or_else(|| {
-                attachment_preparation_diagnostic::<()>(
-                    "canonical_parent_association", Some(&Err(PrivateOriginalError::Unavailable)),
-                );
-                PrivateOriginalError::Unavailable
-            })?;
+        let parent = parent_record.final_association.ok_or_else(|| {
+            attachment_preparation_diagnostic::<()>(
+                "canonical_parent_association",
+                Some(&Err(PrivateOriginalError::Unavailable)),
+            );
+            PrivateOriginalError::Unavailable
+        })?;
         let access_stored = self
             .store
             .get(&self.access_key(&grant)?)
@@ -175,7 +197,8 @@ impl PrivateOriginals {
         let binding = control.effect_binding(McpAttachmentEffect::Apply);
         // Reuse the existing canonical task decoder and A-completed checks,
         // including cancellation ancestors and exact reviewed descriptor.
-        let observation = self.observe_service_mcp_attachment(reference, &control, &binding)
+        let observation = self
+            .observe_service_mcp_attachment(reference, &control, &binding)
             .await;
         attachment_preparation_diagnostic("canonical_task_observation", Some(&observation));
         observation?;
@@ -193,11 +216,19 @@ impl PrivateOriginals {
     }
 
     pub(in crate::private_originals) fn service_control_grant<'a>(
-        &self, control: &'a McpAttachmentControlRequest,
+        &self,
+        control: &'a McpAttachmentControlRequest,
     ) -> Result<&'a PrivateServiceGrantRef, PrivateOriginalError> {
-        let held = control.evidence::<ServiceMcpControl>().ok_or(PrivateOriginalError::Denied)?;
-        let source = held.source.upgrade().ok_or(PrivateOriginalError::Unavailable)?;
-        if !std::ptr::eq(self, source.as_ref()) { return Err(PrivateOriginalError::Denied); }
+        let held = control
+            .evidence::<ServiceMcpControl>()
+            .ok_or(PrivateOriginalError::Denied)?;
+        let source = held
+            .source
+            .upgrade()
+            .ok_or(PrivateOriginalError::Unavailable)?;
+        if !std::ptr::eq(self, source.as_ref()) {
+            return Err(PrivateOriginalError::Denied);
+        }
         Ok(&held.grant)
     }
 
@@ -221,14 +252,13 @@ impl PrivateOriginals {
         if !std::ptr::eq(self, source.as_ref()) || now_ms >= held.before_ms {
             return Err(PrivateOriginalError::Denied);
         }
-        held.publication
-            .check_current()
-            .map_err(|_| {
-                attachment_preparation_diagnostic::<()>(
-                    "control_publication_before", Some(&Err(PrivateOriginalError::Unavailable)),
-                );
-                PrivateOriginalError::Unavailable
-            })?;
+        held.publication.check_current().map_err(|_| {
+            attachment_preparation_diagnostic::<()>(
+                "control_publication_before",
+                Some(&Err(PrivateOriginalError::Unavailable)),
+            );
+            PrivateOriginalError::Unavailable
+        })?;
         let apply = control.effect_binding(McpAttachmentEffect::Apply);
         let facts = binding.facts();
         let server = control.server_target();
@@ -281,7 +311,8 @@ impl PrivateOriginals {
         }
         let IssuanceObservation::Issued { lineage } = &held.access.issuance else {
             attachment_preparation_diagnostic::<()>(
-                "control_issued_lineage", Some(&Err(PrivateOriginalError::Unavailable)),
+                "control_issued_lineage",
+                Some(&Err(PrivateOriginalError::Unavailable)),
             );
             return Err(PrivateOriginalError::Unavailable);
         };
@@ -294,14 +325,13 @@ impl PrivateOriginals {
                 route.represented_subject.as_ref(),
             )
             .map_err(|_| PrivateOriginalError::Denied)?;
-        resolved
-            .check_current()
-            .map_err(|_| {
-                attachment_preparation_diagnostic::<()>(
-                    "control_lineage_currentness", Some(&Err(PrivateOriginalError::Unavailable)),
-                );
-                PrivateOriginalError::Unavailable
-            })?;
+        resolved.check_current().map_err(|_| {
+            attachment_preparation_diagnostic::<()>(
+                "control_lineage_currentness",
+                Some(&Err(PrivateOriginalError::Unavailable)),
+            );
+            PrivateOriginalError::Unavailable
+        })?;
         let values = selection
             .attachment_operation(route, decision)?
             .ok_or(PrivateOriginalError::Denied)?;
@@ -315,14 +345,13 @@ impl PrivateOriginals {
         if now_ms >= expires_at_ms {
             return Err(PrivateOriginalError::Denied);
         }
-        held.publication
-            .check_current()
-            .map_err(|_| {
-                attachment_preparation_diagnostic::<()>(
-                    "control_publication_after", Some(&Err(PrivateOriginalError::Unavailable)),
-                );
-                PrivateOriginalError::Unavailable
-            })?;
+        held.publication.check_current().map_err(|_| {
+            attachment_preparation_diagnostic::<()>(
+                "control_publication_after",
+                Some(&Err(PrivateOriginalError::Unavailable)),
+            );
+            PrivateOriginalError::Unavailable
+        })?;
         Ok(CurrentServiceMcpControl {
             connection: decision.permission.connection.clone(),
             resource: decision.permission.resource.clone(),

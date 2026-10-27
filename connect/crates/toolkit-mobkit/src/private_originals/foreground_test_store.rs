@@ -35,9 +35,12 @@ impl ForegroundTestStore {
     }
 
     fn arm(&self, mode: u8) {
-        assert!(self.mode.compare_exchange(
-            NEUTRAL, mode, Ordering::SeqCst, Ordering::SeqCst,
-        ).is_ok(), "a foreground fault is already armed");
+        assert!(
+            self.mode
+                .compare_exchange(NEUTRAL, mode, Ordering::SeqCst, Ordering::SeqCst,)
+                .is_ok(),
+            "a foreground fault is already armed"
+        );
     }
 }
 
@@ -74,9 +77,11 @@ impl ToolkitStore for ForegroundTestStore {
             } else {
                 ATTEMPT_LOST_REPLY
             };
-            if self.mode.compare_exchange(
-                mode, NEUTRAL, Ordering::SeqCst, Ordering::SeqCst,
-            ).is_ok() {
+            if self
+                .mode
+                .compare_exchange(mode, NEUTRAL, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
                 if mode == ASSOCIATION_NO_COMMIT {
                     self.association_refusals.fetch_add(1, Ordering::SeqCst);
                     return Err(StoreError::OwnerUnavailable);

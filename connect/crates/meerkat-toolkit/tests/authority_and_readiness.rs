@@ -1007,13 +1007,19 @@ fn native_intent_requester_decode_preserves_native_validation_and_rejects_duplic
     let roundtrip = serde_json::from_str::<BindingIntent>(&raw).unwrap();
     assert_eq!(roundtrip, intent);
     roundtrip.requester.validate_qualified().unwrap();
-    assert_eq!(serde_json::to_string(&roundtrip.requester).unwrap(), requester);
+    assert_eq!(
+        serde_json::to_string(&roundtrip.requester).unwrap(),
+        requester
+    );
     assert_no_operation_authority(&f.native);
 
     let needle = format!("\"requester\":{requester}");
     assert_eq!(raw.matches(&needle).count(), 1);
     for (field, value) in [
-        ("kind", serde_json::to_string(&intent.requester.kind).unwrap()),
+        (
+            "kind",
+            serde_json::to_string(&intent.requester.kind).unwrap(),
+        ),
         ("id", serde_json::to_string(&intent.requester.id).unwrap()),
         (
             "qualification",

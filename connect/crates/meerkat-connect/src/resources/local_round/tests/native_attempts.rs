@@ -322,7 +322,9 @@ async fn run(
     let cleanup = AssertUnwindSafe(async {
         let failures = case.cleanup().await;
         assert!(failures.is_empty(), "cleanup failures: {failures:?}");
-    }).catch_unwind().await;
+    })
+    .catch_unwind()
+    .await;
     // Check cleanup on every exit; its panic hook reports any secondary failure
     // before the original test failure is resumed.
     if let Err(panic) = result {

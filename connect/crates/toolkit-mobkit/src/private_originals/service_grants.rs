@@ -6,9 +6,9 @@
 //! and audience. The row below is immutable decision/binding evidence; native
 //! LocalGrantAuthority remains the sole current grant owner.
 
-use meerkat_authorization_contracts::constraints::DomainRestriction;
 use super::*;
 use meerkat_authorization::grants::GrantRefusal;
+use meerkat_authorization_contracts::constraints::DomainRestriction;
 use meerkat_authorization_contracts::{
     constraints::{
         ActionRef, DelegationDepth, ExactRestriction, ExecutionRestrictions, LifetimeRestriction,
@@ -24,16 +24,21 @@ use toolkit_store::AdmissionOutcome;
 
 const SCHEMA: &str = "toolkit.authenticated-service-access-decision";
 
-pub(crate) mod console;
-pub(crate) mod recovery;
-mod mcp;
-pub(crate) mod catalog;
 mod batch;
-pub use mcp::{PrivateServiceMcpAccessDecision, PrivateServiceMcpPermission, PrivateServiceMcpLiveAttachment, PrivateServiceMcpCatalog, ServiceMcpSelection};
+pub(crate) mod catalog;
+pub(crate) mod console;
+mod mcp;
+pub(crate) mod recovery;
+use super::service_approved_input::application::{
+    ApplicationServiceDecision, ApplicationServiceEvidence, ServiceOperationCurrent,
+    ServiceOperationError, ServiceOperationProgress,
+};
 pub(crate) use mcp::RetainedServiceMcpAccess;
 use mcp::StoredServiceMcpSelection;
-use super::service_approved_input::application::{ApplicationServiceEvidence, ApplicationServiceDecision,
-    ServiceOperationCurrent, ServiceOperationError, ServiceOperationProgress};
+pub use mcp::{
+    PrivateServiceMcpAccessDecision, PrivateServiceMcpCatalog, PrivateServiceMcpLiveAttachment,
+    PrivateServiceMcpPermission, ServiceMcpSelection,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -98,7 +103,9 @@ enum ServiceIssueError {
     Current(ServiceOperationError),
 }
 impl From<GrantRefusal> for ServiceIssueError {
-    fn from(error: GrantRefusal) -> Self { Self::Native(error) }
+    fn from(error: GrantRefusal) -> Self {
+        Self::Native(error)
+    }
 }
 fn observe_progress(record: &AccessRecord, progress: Option<&ServiceOperationProgress>) {
     if let Some(progress) = progress {
@@ -106,7 +113,7 @@ fn observe_progress(record: &AccessRecord, progress: Option<&ServiceOperationPro
             IssuanceObservation::Issued { .. } => progress.effect(),
             IssuanceObservation::PendingNativeIssuance => progress.uncertain(),
             IssuanceObservation::NativeRefused => progress.native_refused(),
-            IssuanceObservation::ApprovalDenied => {},
+            IssuanceObservation::ApprovalDenied => {}
         }
     }
 }
@@ -119,11 +126,33 @@ pub(crate) enum AccessDecision {
     Catalog(catalog::ServiceCatalogDecision),
 }
 impl AccessDecision {
-    pub(crate) fn route(&self) -> &Id { match self { Self::Legacy(d) => &d.route, Self::Mcp(d) => &d.route, Self::Catalog(d) => &d.route } }
-    fn id(&self) -> &Id { match self { Self::Legacy(d) => &d.decision, Self::Mcp(d) => &d.decision, Self::Catalog(d) => &d.decision } }
-    fn choice(&self) -> PrivateAccessChoice { match self { Self::Legacy(d) => d.choice, Self::Mcp(d) => d.choice, Self::Catalog(_) => PrivateAccessChoice::Approve } }
+    pub(crate) fn route(&self) -> &Id {
+        match self {
+            Self::Legacy(d) => &d.route,
+            Self::Mcp(d) => &d.route,
+            Self::Catalog(d) => &d.route,
+        }
+    }
+    fn id(&self) -> &Id {
+        match self {
+            Self::Legacy(d) => &d.decision,
+            Self::Mcp(d) => &d.decision,
+            Self::Catalog(d) => &d.decision,
+        }
+    }
+    fn choice(&self) -> PrivateAccessChoice {
+        match self {
+            Self::Legacy(d) => d.choice,
+            Self::Mcp(d) => d.choice,
+            Self::Catalog(_) => PrivateAccessChoice::Approve,
+        }
+    }
     fn lifetime(&self) -> &meerkat_toolkit::authority::RoleLifetime {
-        match self { Self::Legacy(d) => &d.permission.lifetime, Self::Mcp(d) => &d.permission.lifetime, Self::Catalog(d) => &d.lifetime }
+        match self {
+            Self::Legacy(d) => &d.permission.lifetime,
+            Self::Mcp(d) => &d.permission.lifetime,
+            Self::Catalog(d) => &d.lifetime,
+        }
     }
 }
 
@@ -199,21 +228,31 @@ fn restrictions(
 }
 
 impl PrivateOriginals {
-    pub(super) fn service_mcp_reference(decision: &PrivateServiceMcpAccessDecision,
-        selection: &ServiceMcpSelection) -> Result<PrivateServiceGrantRef, PrivateOriginalError>
-    {
-        Ok(PrivateServiceGrantRef { route: decision.route.clone(), decision: decision.decision.clone(),
-            decision_sha256: decision_digest(&AccessDecision::Mcp(decision.clone()), Some(&selection.0))? })
+    pub(super) fn service_mcp_reference(
+        decision: &PrivateServiceMcpAccessDecision,
+        selection: &ServiceMcpSelection,
+    ) -> Result<PrivateServiceGrantRef, PrivateOriginalError> {
+        Ok(PrivateServiceGrantRef {
+            route: decision.route.clone(),
+            decision: decision.decision.clone(),
+            decision_sha256: decision_digest(
+                &AccessDecision::Mcp(decision.clone()),
+                Some(&selection.0),
+            )?,
+        })
     }
 
     /// Only an access intent bound to this exact approved parent belongs to
     /// its compensation. Another approval for the same task may share the
     /// decision ID; that earlier approval's child must remain untouched.
-    pub(super) async fn service_compensation_child(&self, reference: &PrivateServiceGrantRef,
-        parent: &GrantLineageRef) -> Result<Option<(PrincipalRef, GrantLineageRef)>, PrivateOriginalError>
-    {
+    pub(super) async fn service_compensation_child(
+        &self,
+        reference: &PrivateServiceGrantRef,
+        parent: &GrantLineageRef,
+    ) -> Result<Option<(PrincipalRef, GrantLineageRef)>, PrivateOriginalError> {
         let key = self.access_key(reference)?;
-        let child_id = EvidenceId::new(format!("access-{}", key.id)).map_err(|_| PrivateOriginalError::Conflict)?;
+        let child_id = EvidenceId::new(format!("access-{}", key.id))
+            .map_err(|_| PrivateOriginalError::Conflict)?;
         let Some(stored) = self.store.get(&key).await.map_err(store_error)? else {
             // Issuance requires this intent first. A missing intent alongside
             // native issuance is inconsistent, never proof that cleanup ended.
@@ -224,33 +263,50 @@ impl PrivateOriginals {
         };
         let decoded: AccessRecord = serde_json::from_value(stored.data.body.clone())
             .map_err(|_| PrivateOriginalError::Conflict)?;
-        let actual_ref = PrivateServiceGrantRef { route: decoded.decision.route().clone(),
+        let actual_ref = PrivateServiceGrantRef {
+            route: decoded.decision.route().clone(),
             decision: decoded.decision.id().clone(),
-            decision_sha256: decision_digest(&decoded.decision, decoded.mcp.as_ref())? };
+            decision_sha256: decision_digest(&decoded.decision, decoded.mcp.as_ref())?,
+        };
         let record = self.decode_access(&stored, &actual_ref)?;
-        if record.parent.as_slice() != [parent.clone()] { return Ok(None); }
-        if &actual_ref != reference || record.application_policy.is_some()
-            || record.caller != self.route(&reference.route)?.grant_caller {
+        if record.parent.as_slice() != [parent.clone()] {
+            return Ok(None);
+        }
+        if &actual_ref != reference
+            || record.application_policy.is_some()
+            || record.caller != self.route(&reference.route)?.grant_caller
+        {
             return Err(PrivateOriginalError::Conflict);
         }
-        let leaf = self.owner.grants().issued_reference(&child_id)
+        let leaf = self
+            .owner
+            .grants()
+            .issued_reference(&child_id)
             .map_err(|_| PrivateOriginalError::Unavailable)?;
         match (&record.issuance, &leaf) {
-            (IssuanceObservation::PendingNativeIssuance, _) => {},
-            (IssuanceObservation::Issued { lineage }, Some(leaf)) if lineage.last() == Some(leaf) => {},
-            (IssuanceObservation::NativeRefused | IssuanceObservation::ApprovalDenied, None) => {},
+            (IssuanceObservation::PendingNativeIssuance, _) => {}
+            (IssuanceObservation::Issued { lineage }, Some(leaf))
+                if lineage.last() == Some(leaf) => {}
+            (IssuanceObservation::NativeRefused | IssuanceObservation::ApprovalDenied, None) => {}
             _ => return Err(PrivateOriginalError::Unavailable),
         }
         Ok(leaf.map(|leaf| (record.caller, leaf)))
     }
 
-    pub(super) async fn require_service_grant_issued(&self, reference: &PrivateServiceGrantRef)
-        -> Result<(), PrivateOriginalError>
-    {
-        let stored = self.store.get(&self.access_key(reference)?).await.map_err(store_error)?
+    pub(super) async fn require_service_grant_issued(
+        &self,
+        reference: &PrivateServiceGrantRef,
+    ) -> Result<(), PrivateOriginalError> {
+        let stored = self
+            .store
+            .get(&self.access_key(reference)?)
+            .await
+            .map_err(store_error)?
             .ok_or(PrivateOriginalError::Unavailable)?;
         let record = self.decode_access(&stored, reference)?;
-        if self.access_observation(reference.clone(), &record)?.state != PrivateServiceGrantState::GrantIssued {
+        if self.access_observation(reference.clone(), &record)?.state
+            != PrivateServiceGrantState::GrantIssued
+        {
             return Err(PrivateOriginalError::Unavailable);
         }
         Ok(())
@@ -285,22 +341,31 @@ impl PrivateOriginals {
         }
         let record: AccessRecord = serde_json::from_value(stored.data.body.clone())
             .map_err(|_| PrivateOriginalError::Conflict)?;
-        if !matches!((&record.decision, &record.mcp, &record.application_policy, stored.data.version),
-                (AccessDecision::Legacy(_), None, None, 2) | (AccessDecision::Mcp(_), Some(_), None, 3)
+        if !matches!(
+            (
+                &record.decision,
+                &record.mcp,
+                &record.application_policy,
+                stored.data.version
+            ),
+            (AccessDecision::Legacy(_), None, None, 2)
+                | (AccessDecision::Mcp(_), Some(_), None, 3)
                 | (AccessDecision::Mcp(_), Some(_), Some(_), 4 | 5)
-                | (AccessDecision::Catalog(_), None, None, 6))
-            || (record.application_policy.as_ref().is_some_and(|evidence| evidence.service_parent.is_some())
-                != (stored.data.version == 5))
+                | (AccessDecision::Catalog(_), None, None, 6)
+        ) || (record
+            .application_policy
+            .as_ref()
+            .is_some_and(|evidence| evidence.service_parent.is_some())
+            != (stored.data.version == 5))
             || canonical_json(&record).map_err(|_| PrivateOriginalError::Conflict)?
-            != canonical_json(&stored.data.body).map_err(|_| PrivateOriginalError::Conflict)?
+                != canonical_json(&stored.data.body).map_err(|_| PrivateOriginalError::Conflict)?
             || record.caller.validate_qualified().is_err()
             || record.parent.is_empty()
             || record.parent.len()
                 >= meerkat_authorization_contracts::work_association::MAX_ASSOCIATION_REFERENCES
             || record.decision.route() != &reference.route
             || record.decision.id() != &reference.decision
-            || decision_digest(&record.decision, record.mcp.as_ref())?
-                != reference.decision_sha256
+            || decision_digest(&record.decision, record.mcp.as_ref())? != reference.decision_sha256
         {
             return Err(PrivateOriginalError::Conflict);
         }
@@ -334,52 +399,102 @@ impl PrivateOriginals {
         &self,
         decision: PrivateServiceAccessDecision,
     ) -> Result<PrivateServiceGrantObservation, PrivateOriginalError> {
-        self.apply_service_access(AccessDecision::Legacy(decision), None, None, None, None, Arc::new(|| Ok(()))).await
+        self.apply_service_access(
+            AccessDecision::Legacy(decision),
+            None,
+            None,
+            None,
+            None,
+            Arc::new(|| Ok(())),
+        )
+        .await
     }
 
     pub(crate) async fn apply_mcp_service_access_decision(
         &self,
         approved: crate::installed_host::operator_setup::ReviewedServiceMcpParent,
     ) -> Result<PrivateServiceGrantObservation, PrivateOriginalError> {
-        self.apply_mcp_service_access_decision_current(approved, Arc::new(|| true)).await
+        self.apply_mcp_service_access_decision_current(approved, Arc::new(|| true))
+            .await
     }
 
     pub(crate) async fn apply_mcp_service_access_decision_current(
-        &self, approved: crate::installed_host::operator_setup::ReviewedServiceMcpParent,
+        &self,
+        approved: crate::installed_host::operator_setup::ReviewedServiceMcpParent,
         presented: Arc<dyn Fn() -> bool + Send + Sync>,
     ) -> Result<PrivateServiceGrantObservation, PrivateOriginalError> {
         let (decision, selection, parent, lifetime) = approved.into_parts(&self.owner)?;
-        self.apply_service_access(AccessDecision::Mcp(decision), Some(selection.0), Some(parent), Some(lifetime), None,
-            Arc::new(move || if presented() { Ok(()) } else { Err(PrivateOriginalError::Denied) })).await
+        self.apply_service_access(
+            AccessDecision::Mcp(decision),
+            Some(selection.0),
+            Some(parent),
+            Some(lifetime),
+            None,
+            Arc::new(move || {
+                if presented() {
+                    Ok(())
+                } else {
+                    Err(PrivateOriginalError::Denied)
+                }
+            }),
+        )
+        .await
     }
 
     pub(in crate::private_originals) async fn apply_application_service_access(
-        &self, approved: ApplicationServiceDecision,
+        &self,
+        approved: ApplicationServiceDecision,
         current: Arc<dyn Fn() -> Result<(), PrivateOriginalError> + Send + Sync>,
     ) -> Result<PrivateServiceGrantObservation, PrivateOriginalError> {
-        self.apply_application_service_access_owned(approved, Arc::new(move || current().map_err(Into::into)), None)
-            .await.map_err(ServiceOperationError::source)
+        self.apply_application_service_access_owned(
+            approved,
+            Arc::new(move || current().map_err(Into::into)),
+            None,
+        )
+        .await
+        .map_err(ServiceOperationError::source)
     }
 
     pub(in crate::private_originals) async fn apply_application_service_access_owned(
-        &self, approved: ApplicationServiceDecision, current: ServiceOperationCurrent,
+        &self,
+        approved: ApplicationServiceDecision,
+        current: ServiceOperationCurrent,
         progress: Option<Arc<ServiceOperationProgress>>,
     ) -> Result<PrivateServiceGrantObservation, ServiceOperationError> {
         let (decision, selection, parent, lifetime, evidence) = approved.into_parts(self)?;
         current()?;
-        self.apply_service_access_owned(AccessDecision::Mcp(decision), Some(selection.0), Some(parent),
-            Some(lifetime), Some(evidence), current, progress).await
+        self.apply_service_access_owned(
+            AccessDecision::Mcp(decision),
+            Some(selection.0),
+            Some(parent),
+            Some(lifetime),
+            Some(evidence),
+            current,
+            progress,
+        )
+        .await
     }
 
     async fn apply_service_access(
-        &self, decision: AccessDecision, mcp: Option<StoredServiceMcpSelection>,
-        reviewed_parent: Option<Vec<GrantLineageRef>>, mcp_lifetime: Option<std::sync::Weak<NativeHostLifetime>>,
+        &self,
+        decision: AccessDecision,
+        mcp: Option<StoredServiceMcpSelection>,
+        reviewed_parent: Option<Vec<GrantLineageRef>>,
+        mcp_lifetime: Option<std::sync::Weak<NativeHostLifetime>>,
         application_policy: Option<ApplicationServiceEvidence>,
         presented: Arc<dyn Fn() -> Result<(), PrivateOriginalError> + Send + Sync>,
     ) -> Result<PrivateServiceGrantObservation, PrivateOriginalError> {
-        self.apply_service_access_owned(decision, mcp, reviewed_parent, mcp_lifetime,
-            application_policy, Arc::new(move || presented().map_err(Into::into)), None)
-            .await.map_err(ServiceOperationError::source)
+        self.apply_service_access_owned(
+            decision,
+            mcp,
+            reviewed_parent,
+            mcp_lifetime,
+            application_policy,
+            Arc::new(move || presented().map_err(Into::into)),
+            None,
+        )
+        .await
+        .map_err(ServiceOperationError::source)
     }
 
     async fn apply_service_access_owned(
@@ -394,19 +509,34 @@ impl PrivateOriginals {
     ) -> Result<PrivateServiceGrantObservation, ServiceOperationError> {
         let route = self.route(decision.route())?;
         if let Some(evidence) = &application_policy {
-            let AccessDecision::Mcp(ref proposal) = decision else { return Err(PrivateOriginalError::Denied.into()); };
+            let AccessDecision::Mcp(ref proposal) = decision else {
+                return Err(PrivateOriginalError::Denied.into());
+            };
             evidence.validate(route, proposal, &self.scope.owner)?;
             if evidence.service_parent.is_some() {
-                let lifetime = mcp_lifetime.as_ref().and_then(Weak::upgrade).ok_or(PrivateOriginalError::Unavailable)?;
-                evidence.check_parent(&lifetime, route, reviewed_parent.as_deref().ok_or(PrivateOriginalError::Denied)?)?;
+                let lifetime = mcp_lifetime
+                    .as_ref()
+                    .and_then(Weak::upgrade)
+                    .ok_or(PrivateOriginalError::Unavailable)?;
+                evidence.check_parent(
+                    &lifetime,
+                    route,
+                    reviewed_parent
+                        .as_deref()
+                        .ok_or(PrivateOriginalError::Denied)?,
+                )?;
             } else if reviewed_parent.as_ref() != route.application_parent.as_ref() {
                 return Err(PrivateOriginalError::Denied.into());
             }
         }
         match (&decision, &mcp, &reviewed_parent, &mcp_lifetime) {
             (AccessDecision::Legacy(_), None, None, None) => {}
-            (AccessDecision::Mcp(decision), Some(mcp), Some(_), Some(_)) => mcp.validate(route, decision)?,
-            (AccessDecision::Catalog(decision), None, Some(_), Some(_)) => { decision.restrictions(route, 0)?; }
+            (AccessDecision::Mcp(decision), Some(mcp), Some(_), Some(_)) => {
+                mcp.validate(route, decision)?
+            }
+            (AccessDecision::Catalog(decision), None, Some(_), Some(_)) => {
+                decision.restrictions(route, 0)?;
+            }
             _ => return Err(PrivateOriginalError::Denied.into()),
         }
         if matches!(&decision.lifetime().scope, LifetimeScope::Deployment { deployment }
@@ -424,13 +554,22 @@ impl PrivateOriginals {
         // expires. Observation re-resolves issued grants but never reissues.
         if let Some(stored) = self.store.get(&key).await.map_err(store_error)? {
             let record = self.decode_access(&stored, &reference)?;
-            if reviewed_parent.as_ref().is_some_and(|parent| parent != &record.parent) {
+            if reviewed_parent
+                .as_ref()
+                .is_some_and(|parent| parent != &record.parent)
+            {
                 return Err(PrivateOriginalError::Conflict.into());
             }
-            if record.application_policy != application_policy { return Err(PrivateOriginalError::Conflict.into()); }
+            if record.application_policy != application_policy {
+                return Err(PrivateOriginalError::Conflict.into());
+            }
             observe_progress(&record, progress.as_deref());
-            if progress.is_some() { presented()?; }
-            return self.access_observation(reference, &record).map_err(Into::into);
+            if progress.is_some() {
+                presented()?;
+            }
+            return self
+                .access_observation(reference, &record)
+                .map_err(Into::into);
         }
         let now_ms = self
             .owner
@@ -439,12 +578,15 @@ impl PrivateOriginals {
             .map_err(|_| PrivateOriginalError::Unavailable)?
             .unix_ms;
         let bounds = access_restrictions(route, &decision, mcp.as_ref(), now_ms)?;
-        let parent = reviewed_parent.or_else(|| route.application_parent.clone())
+        let parent = reviewed_parent
+            .or_else(|| route.application_parent.clone())
             .ok_or(PrivateOriginalError::Unavailable)?;
         if parent.is_empty() {
             return Err(PrivateOriginalError::Unavailable.into());
         }
-        if progress.is_some() { presented()?; }
+        if progress.is_some() {
+            presented()?;
+        }
         let initial = AccessRecord {
             caller: route.grant_caller.clone(),
             parent,
@@ -469,16 +611,22 @@ impl PrivateOriginals {
             .map_err(store_error)?;
         let stored = admitted.record();
         let mut record = self.decode_access(stored, &reference)?;
-        if ((initial.mcp.is_some() || matches!(initial.decision, AccessDecision::Catalog(_))) && record.parent != initial.parent)
-            || record.application_policy != initial.application_policy {
+        if ((initial.mcp.is_some() || matches!(initial.decision, AccessDecision::Catalog(_)))
+            && record.parent != initial.parent)
+            || record.application_policy != initial.application_policy
+        {
             return Err(PrivateOriginalError::Conflict.into());
         }
         if !matches!(&admitted, AdmissionOutcome::Created(_))
             || record.decision.choice() == PrivateAccessChoice::Deny
         {
             observe_progress(&record, progress.as_deref());
-            if progress.is_some() { presented()?; }
-            return self.access_observation(reference, &record).map_err(Into::into);
+            if progress.is_some() {
+                presented()?;
+            }
+            return self
+                .access_observation(reference, &record)
+                .map_err(Into::into);
         }
         let grants = self.owner.grants();
         let caller = record.caller.clone();
@@ -486,7 +634,9 @@ impl PrivateOriginals {
         let grantee = route.logical_executor.clone();
         let represented = route.represented_subject.clone();
         let mcp_check = match (&record.mcp, &record.decision) {
-            (Some(selection), AccessDecision::Mcp(decision)) => Some((selection.clone(), route.clone(), decision.clone())),
+            (Some(selection), AccessDecision::Mcp(decision)) => {
+                Some((selection.clone(), route.clone(), decision.clone()))
+            }
             _ => None,
         };
         let grant_id = EvidenceId::new(format!("access-{}", key.id))
@@ -501,7 +651,9 @@ impl PrivateOriginals {
                 // host-open mutation. Native issuance repeats currentness,
                 // grantee/caller, depth and attenuation checks.
                 let resolved = grants.resolve_lineage(&parent, &caller, represented.as_ref())?;
-                resolved.check_current().map_err(|_| GrantRefusal::Unavailable)?;
+                resolved
+                    .check_current()
+                    .map_err(|_| GrantRefusal::Unavailable)?;
                 if let Some((selection, route, decision)) = &mcp_check {
                     selection.check_grant(route, decision, &resolved, now_ms)?;
                 }
@@ -509,20 +661,31 @@ impl PrivateOriginals {
                 // Recheck the exact accepted action in this worker after the
                 // store and scheduler waits, immediately before native entry.
                 presented().map_err(ServiceIssueError::Current)?;
-                if let Some(progress) = &worker_progress { progress.entering(); }
-                grants.issue_child(&caller, leaf, grant_id, grantee, bounds).map_err(ServiceIssueError::Native)
+                if let Some(progress) = &worker_progress {
+                    progress.entering();
+                }
+                grants
+                    .issue_child(&caller, leaf, grant_id, grantee, bounds)
+                    .map_err(ServiceIssueError::Native)
             };
             match mcp_lifetime {
                 Some(lifetime) => {
                     let lifetime = lifetime.upgrade().ok_or(GrantRefusal::Unavailable)?;
                     // No fence spans store awaits. Close either wins here, or
                     // waits for this entered synchronous native mutation.
-                    lifetime.with_current_setup(|| Ok(issue()))
-                        .map_err(|error| if owned_operation { ServiceIssueError::Current(error.into()) }
-                            else { ServiceIssueError::Native(match error {
-                                HostLifetimeError::Unavailable | HostLifetimeError::NotSettled => GrantRefusal::Unavailable,
-                                _ => GrantRefusal::Denied,
-                            }) })?
+                    lifetime
+                        .with_current_setup(|| Ok(issue()))
+                        .map_err(|error| {
+                            if owned_operation {
+                                ServiceIssueError::Current(error.into())
+                            } else {
+                                ServiceIssueError::Native(match error {
+                                    HostLifetimeError::Unavailable
+                                    | HostLifetimeError::NotSettled => GrantRefusal::Unavailable,
+                                    _ => GrantRefusal::Denied,
+                                })
+                            }
+                        })?
                 }
                 None => issue(), // Unchanged legacy access path.
             }
@@ -531,29 +694,43 @@ impl PrivateOriginals {
         let mut current_refusal = None;
         record.issuance = match issued {
             Ok(Ok(reference)) => {
-                if let Some(progress) = &progress { progress.effect(); }
+                if let Some(progress) = &progress {
+                    progress.effect();
+                }
                 let mut lineage = record.parent.clone();
                 lineage.push(reference);
                 IssuanceObservation::Issued { lineage }
             }
             Ok(Err(ServiceIssueError::Native(GrantRefusal::Denied))) => {
-                if let Some(progress) = &progress { progress.native_refused(); }
+                if let Some(progress) = &progress {
+                    progress.native_refused();
+                }
                 IssuanceObservation::NativeRefused
-            },
-            Ok(Err(ServiceIssueError::Current(error @ (ServiceOperationError::Source(PrivateOriginalError::Denied)
-                | ServiceOperationError::Authority(HostLifetimeError::Denied | HostLifetimeError::WrongOwner | HostLifetimeError::InvalidSelection)
-                | ServiceOperationError::Cancelled)))) => {
+            }
+            Ok(Err(ServiceIssueError::Current(
+                error @ (ServiceOperationError::Source(PrivateOriginalError::Denied)
+                | ServiceOperationError::Authority(
+                    HostLifetimeError::Denied
+                    | HostLifetimeError::WrongOwner
+                    | HostLifetimeError::InvalidSelection,
+                )
+                | ServiceOperationError::Cancelled),
+            ))) => {
                 current_refusal = Some(error);
                 IssuanceObservation::NativeRefused
             }
             // The exact attempt is already Pending. Unknown currentness is
             // not a definitive native refusal and never permits reissuance.
             Ok(Err(ServiceIssueError::Current(error))) => {
-                if let Some(progress) = &progress { progress.uncertain(); }
+                if let Some(progress) = &progress {
+                    progress.uncertain();
+                }
                 return Err(error);
-            },
+            }
             _ => {
-                if let Some(progress) = &progress { progress.uncertain(); }
+                if let Some(progress) = &progress {
+                    progress.uncertain();
+                }
                 return Ok(PrivateServiceGrantObservation {
                     grant: reference,
                     state: PrivateServiceGrantState::PendingReconciliation,
@@ -576,14 +753,19 @@ impl PrivateOriginals {
         {
             // Even an uncertain store response is not grounds to issue again.
             // An exact retry reads the saved row and may recover its lineage.
-            if let Some(progress) = &progress { progress.uncertain(); }
+            if let Some(progress) = &progress {
+                progress.uncertain();
+            }
             return Ok(PrivateServiceGrantObservation {
                 grant: reference,
                 state: PrivateServiceGrantState::PendingReconciliation,
             });
         }
-        if let Some(error) = current_refusal { return Err(error); }
-        self.access_observation(reference, &record).map_err(Into::into)
+        if let Some(error) = current_refusal {
+            return Err(error);
+        }
+        self.access_observation(reference, &record)
+            .map_err(Into::into)
     }
 
     fn access_observation(
@@ -618,18 +800,30 @@ impl PrivateOriginals {
                             return Err(PrivateOriginalError::Unavailable);
                         }
                         if let Some(evidence) = &record.application_policy {
-                            let lifetime = self.host_lifetime.get().and_then(Weak::upgrade)
+                            let lifetime = self
+                                .host_lifetime
+                                .get()
+                                .and_then(Weak::upgrade)
                                 .ok_or(PrivateOriginalError::Unavailable)?;
-                            lifetime.validate_current_selection().map_err(|_| PrivateOriginalError::Unavailable)?;
+                            lifetime
+                                .validate_current_selection()
+                                .map_err(|_| PrivateOriginalError::Unavailable)?;
                             let selected = lifetime.selected_policy();
                             evidence.check_parent(&lifetime, route, &record.parent)?;
                             if evidence.deployment != selected.deployment
                                 || evidence.source_policy_sha256 != selected.source_policy_sha256
-                                || selected.native_host.as_ref().is_none_or(|native| native.grant_administrator != evidence.owner)
-                            { return Err(PrivateOriginalError::Unavailable); }
+                                || selected.native_host.as_ref().is_none_or(|native| {
+                                    native.grant_administrator != evidence.owner
+                                })
+                            {
+                                return Err(PrivateOriginalError::Unavailable);
+                            }
                         }
-                        if let (Some(selection), AccessDecision::Mcp(decision)) = (&record.mcp, &record.decision) {
-                            selection.check_grant(route, decision, &resolved, now_ms)
+                        if let (Some(selection), AccessDecision::Mcp(decision)) =
+                            (&record.mcp, &record.decision)
+                        {
+                            selection
+                                .check_grant(route, decision, &resolved, now_ms)
                                 .map_err(|_| PrivateOriginalError::Unavailable)?;
                         }
                         let parent = self
@@ -646,7 +840,12 @@ impl PrivateOriginals {
                             .map_err(|_| PrivateOriginalError::Unavailable)?;
                         parent
                             .restrictions()
-                            .for_child(&access_restrictions(route, &record.decision, record.mcp.as_ref(), now_ms)?)
+                            .for_child(&access_restrictions(
+                                route,
+                                &record.decision,
+                                record.mcp.as_ref(),
+                                now_ms,
+                            )?)
                             .map_err(|_| PrivateOriginalError::Unavailable)
                     })();
                     match expected {
@@ -720,28 +919,41 @@ impl PrivateOriginals {
                 _ => PrivateOriginalError::Unavailable,
             })?;
         let mcp = match (decision.decision, decision.mcp) {
-            (AccessDecision::Mcp(decision), Some(selection)) => Some(RetainedServiceMcpAccess { decision, selection }),
+            (AccessDecision::Mcp(decision), Some(selection)) => Some(RetainedServiceMcpAccess {
+                decision,
+                selection,
+            }),
             (AccessDecision::Legacy(_), None) => None,
             _ => return Err(PrivateOriginalError::Conflict),
         };
-        self.hold_binding_with_mcp(source.clone(), retained.clone(), mcp.into_iter().collect()).await?;
+        self.hold_binding_with_mcp(source.clone(), retained.clone(), mcp.into_iter().collect())
+            .await?;
         Ok(retained)
     }
 
     /// Historical B decision join only. No current permission, fresh issuance
     /// or task-revoke issuer is recovered from this recorded lineage.
     pub(super) async fn historical_task_access(
-        &self, source: &PrivateOriginalRef, grant: &PrivateServiceGrantRef,
+        &self,
+        source: &PrivateOriginalRef,
+        grant: &PrivateServiceGrantRef,
         association: &meerkat_authorization_contracts::work_association::InputAuthorityAssociation,
     ) -> Result<RetainedServiceMcpAccess, PrivateOriginalError> {
-        let stored = self.store.get(&self.access_key(grant)?).await.map_err(store_error)?
+        let stored = self
+            .store
+            .get(&self.access_key(grant)?)
+            .await
+            .map_err(store_error)?
             .ok_or(PrivateOriginalError::Unavailable)?;
         let record = self.decode_access(&stored, grant)?;
         let claims = association.candidate();
-        if source.route != grant.route || source.original != claims.original_work.work
+        if source.route != grant.route
+            || source.original != claims.original_work.work
             || !matches!(&record.decision.lifetime().scope,
                 LifetimeScope::Task { task } if task.as_str() == source.original.as_str())
-        { return Err(PrivateOriginalError::Conflict); }
+        {
+            return Err(PrivateOriginalError::Conflict);
+        }
         let IssuanceObservation::Issued { lineage } = record.issuance else {
             return Err(PrivateOriginalError::Unavailable);
         };
@@ -749,7 +961,10 @@ impl PrivateOriginals {
             return Err(PrivateOriginalError::Conflict);
         }
         match (record.decision, record.mcp) {
-            (AccessDecision::Mcp(decision), Some(selection)) => Ok(RetainedServiceMcpAccess { decision, selection }),
+            (AccessDecision::Mcp(decision), Some(selection)) => Ok(RetainedServiceMcpAccess {
+                decision,
+                selection,
+            }),
             _ => Err(PrivateOriginalError::Unavailable),
         }
     }
@@ -798,7 +1013,8 @@ fn decision_digest(
     let bytes = match mcp {
         None => canonical_json(decision),
         Some(selection) => canonical_json(&(decision, selection)),
-    }.map_err(|_| PrivateOriginalError::Conflict)?;
+    }
+    .map_err(|_| PrivateOriginalError::Conflict)?;
     Ok(digest(&bytes))
 }
 
@@ -810,7 +1026,9 @@ fn access_restrictions(
 ) -> Result<ExecutionRestrictions, PrivateOriginalError> {
     match (decision, mcp) {
         (AccessDecision::Legacy(decision), None) => restrictions(route, decision, now_ms),
-        (AccessDecision::Mcp(decision), Some(selection)) => selection.restrictions(route, decision, now_ms),
+        (AccessDecision::Mcp(decision), Some(selection)) => {
+            selection.restrictions(route, decision, now_ms)
+        }
         (AccessDecision::Catalog(decision), None) => decision.restrictions(route, now_ms),
         _ => Err(PrivateOriginalError::Denied),
     }
@@ -819,9 +1037,21 @@ fn access_restrictions(
 fn encode_access(record: &AccessRecord) -> Result<RecordData, PrivateOriginalError> {
     Ok(RecordData {
         schema: SCHEMA.into(),
-        version: if matches!(record.decision, AccessDecision::Catalog(_)) { 6 }
-            else if record.application_policy.as_ref().is_some_and(|evidence| evidence.service_parent.is_some()) { 5 }
-            else if record.application_policy.is_some() { 4 } else if record.mcp.is_some() { 3 } else { 2 },
+        version: if matches!(record.decision, AccessDecision::Catalog(_)) {
+            6
+        } else if record
+            .application_policy
+            .as_ref()
+            .is_some_and(|evidence| evidence.service_parent.is_some())
+        {
+            5
+        } else if record.application_policy.is_some() {
+            4
+        } else if record.mcp.is_some() {
+            3
+        } else {
+            2
+        },
         body: serde_json::to_value(record).map_err(|_| PrivateOriginalError::Denied)?,
     })
 }
@@ -901,7 +1131,11 @@ pub(crate) mod tests {
     ) -> Arc<PrivateOriginals> {
         let mut adapter =
             crate::original_ingress::tests::private_originals(owner.clone(), path).await;
-        let route = &mut Arc::get_mut(&mut adapter).unwrap().routes.get_mut().unwrap()[0];
+        let route = &mut Arc::get_mut(&mut adapter)
+            .unwrap()
+            .routes
+            .get_mut()
+            .unwrap()[0];
         let parent = owner
             .grants()
             .issue_root(
@@ -925,7 +1159,11 @@ pub(crate) mod tests {
         parent: Vec<GrantLineageRef>,
     ) -> Arc<PrivateOriginals> {
         let mut adapter = crate::original_ingress::tests::private_originals(owner, path).await;
-        let route = &mut Arc::get_mut(&mut adapter).unwrap().routes.get_mut().unwrap()[0];
+        let route = &mut Arc::get_mut(&mut adapter)
+            .unwrap()
+            .routes
+            .get_mut()
+            .unwrap()[0];
         route.grant_caller = app();
         route.application_parent = Some(parent);
         adapter
@@ -961,14 +1199,20 @@ pub(crate) mod tests {
             .unwrap();
         let resolved = owner
             .grants()
-            .resolve_lineage(&lineage, &adapter.routes.get().unwrap()[0].logical_executor, None)
+            .resolve_lineage(
+                &lineage,
+                &adapter.routes.get().unwrap()[0].logical_executor,
+                None,
+            )
             .unwrap();
         let bounds = resolved.restrictions();
         let now_ms = owner.clock().now().unwrap().unix_ms;
         let values = OperationRestrictionValues {
             action: first(&bounds.actions),
             resource_domain: match bounds.resource_domains.bound() {
-                meerkat_authorization_contracts::constraints::DomainBound::Exact(domains) => domains.first().unwrap(),
+                meerkat_authorization_contracts::constraints::DomainBound::Exact(domains) => {
+                    domains.first().unwrap()
+                }
                 _ => panic!("the selected service child must name an exact domain"),
             },
             processor: first(&bounds.processors),
@@ -1009,7 +1253,10 @@ pub(crate) mod tests {
             PrivateServiceGrantState::GrantIssued
         );
         assert_eq!(std::fs::read(&path).unwrap(), native_bytes);
-        let parent = adapter.routes.get().unwrap()[0].application_parent.clone().unwrap();
+        let parent = adapter.routes.get().unwrap()[0]
+            .application_parent
+            .clone()
+            .unwrap();
         drop(adapter);
         drop(owner);
         let owner = Arc::new(
@@ -1133,7 +1380,12 @@ pub(crate) mod tests {
         );
         assert_eq!(std::fs::read(&path).unwrap(), before);
         let wrong_caller = adapter.routes.get().unwrap()[0].requester.clone();
-        Arc::get_mut(&mut adapter).unwrap().routes.get_mut().unwrap()[0].grant_caller = wrong_caller;
+        Arc::get_mut(&mut adapter)
+            .unwrap()
+            .routes
+            .get_mut()
+            .unwrap()[0]
+            .grant_caller = wrong_caller;
         let mut approved = decision();
         approved.decision = Id::new("different-decision").unwrap();
         assert_eq!(
@@ -1164,7 +1416,10 @@ pub(crate) mod tests {
         let key = adapter.access_key(&reference).unwrap();
         let pending = AccessRecord {
             caller: adapter.routes.get().unwrap()[0].grant_caller.clone(),
-            parent: adapter.routes.get().unwrap()[0].application_parent.clone().unwrap(),
+            parent: adapter.routes.get().unwrap()[0]
+                .application_parent
+                .clone()
+                .unwrap(),
             decision: AccessDecision::Legacy(request.clone()),
             issuance: IssuanceObservation::PendingNativeIssuance,
             mcp: None,
@@ -1259,7 +1514,10 @@ pub(crate) mod tests {
             .apply_service_access_decision(request.clone())
             .await
             .unwrap();
-        let old_parent = adapter.routes.get().unwrap()[0].application_parent.clone().unwrap();
+        let old_parent = adapter.routes.get().unwrap()[0]
+            .application_parent
+            .clone()
+            .unwrap();
         let operator = crate::original_ingress::tests::principal("admin");
         let replacement = owner
             .grants()
@@ -1271,7 +1529,12 @@ pub(crate) mod tests {
                 ExecutionRestrictions::unrestricted(),
             )
             .unwrap();
-        Arc::get_mut(&mut adapter).unwrap().routes.get_mut().unwrap()[0].application_parent = Some(vec![replacement]);
+        Arc::get_mut(&mut adapter)
+            .unwrap()
+            .routes
+            .get_mut()
+            .unwrap()[0]
+            .application_parent = Some(vec![replacement]);
         let before = std::fs::read(&path).unwrap();
         assert_eq!(
             adapter
@@ -1295,7 +1558,12 @@ pub(crate) mod tests {
                 == old_parent
         );
         assert_eq!(std::fs::read(&path).unwrap(), before);
-        Arc::get_mut(&mut adapter).unwrap().routes.get_mut().unwrap()[0].application_parent = None;
+        Arc::get_mut(&mut adapter)
+            .unwrap()
+            .routes
+            .get_mut()
+            .unwrap()[0]
+            .application_parent = None;
         let mut new = request;
         new.decision = Id::new("no-selected-parent").unwrap();
         assert!(matches!(
@@ -1375,20 +1643,31 @@ pub(crate) mod tests {
         assert!(
             owner
                 .grants()
-                .resolve_lineage(&lineages[0], &adapter.routes.get().unwrap()[0].logical_executor, None)
+                .resolve_lineage(
+                    &lineages[0],
+                    &adapter.routes.get().unwrap()[0].logical_executor,
+                    None
+                )
                 .is_err()
         );
         assert!(
             owner
                 .grants()
-                .resolve_lineage(&lineages[1], &adapter.routes.get().unwrap()[0].logical_executor, None)
+                .resolve_lineage(
+                    &lineages[1],
+                    &adapter.routes.get().unwrap()[0].logical_executor,
+                    None
+                )
                 .is_ok()
         );
         assert!(
             owner
                 .grants()
                 .resolve_lineage(
-                    adapter.routes.get().unwrap()[0].application_parent.as_ref().unwrap(),
+                    adapter.routes.get().unwrap()[0]
+                        .application_parent
+                        .as_ref()
+                        .unwrap(),
                     &app(),
                     None
                 )
@@ -1399,14 +1678,21 @@ pub(crate) mod tests {
             .grants()
             .revoke(
                 &crate::original_ingress::tests::principal("admin"),
-                &adapter.routes.get().unwrap()[0].application_parent.as_ref().unwrap()[0],
+                &adapter.routes.get().unwrap()[0]
+                    .application_parent
+                    .as_ref()
+                    .unwrap()[0],
                 &mut custody,
             )
             .unwrap();
         assert!(
             owner
                 .grants()
-                .resolve_lineage(&lineages[1], &adapter.routes.get().unwrap()[0].logical_executor, None)
+                .resolve_lineage(
+                    &lineages[1],
+                    &adapter.routes.get().unwrap()[0].logical_executor,
+                    None
+                )
                 .is_err()
         );
         // This checks native permission revocation only. No run was admitted,

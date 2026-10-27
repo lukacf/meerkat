@@ -331,12 +331,15 @@ impl BatchScript {
                 if let Some(result) = feedback {
                     if result.is_error {
                         let kind = native_public_failure(result);
-                        eprintln!("{}", serde_json::json!({
-                            "event": "batch_fixture_public_refusal",
-                            "phase": state.phase,
-                            "choice": state.choices,
-                            "public_class": kind,
-                        }));
+                        eprintln!(
+                            "{}",
+                            serde_json::json!({
+                                "event": "batch_fixture_public_refusal",
+                                "phase": state.phase,
+                                "choice": state.choices,
+                                "public_class": kind,
+                            })
+                        );
                         if state.phase == 1 && self.revoke {
                             assert_eq!(kind, "authorization_refused");
                             state.results.push(result.clone());

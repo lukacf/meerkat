@@ -40,7 +40,9 @@ impl WorkAdmissionResult {
     }
 }
 
-fn admitted_or_conflict(outcome: WorkAdmissionOutcome) -> Result<WorkAdmissionResult, WorkGraphError> {
+fn admitted_or_conflict(
+    outcome: WorkAdmissionOutcome,
+) -> Result<WorkAdmissionResult, WorkGraphError> {
     match outcome {
         WorkAdmissionOutcome::Created(item) => Ok(WorkAdmissionResult::Created(item)),
         WorkAdmissionOutcome::Replayed(item) => Ok(WorkAdmissionResult::Existing(item)),
@@ -372,10 +374,8 @@ pub(crate) async fn admit_setup_work_available(
 #[async_trait]
 pub trait SetupWorkObservationAuthorizer<Request: Sync = SetupWorkAdmission>: Send + Sync {
     /// Preliminary screening before private I/O, not disclosure permission.
-    async fn authorize_observation(
-        &self,
-        request: &Request,
-    ) -> Result<(), SetupWorkAdmissionError>;
+    async fn authorize_observation(&self, request: &Request)
+    -> Result<(), SetupWorkAdmissionError>;
 
     /// Recheck this same owner's independent observation authority against the
     /// exact request and canonical admission, then invoke disclosure once while

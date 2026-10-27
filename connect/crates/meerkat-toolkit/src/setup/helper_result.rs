@@ -179,25 +179,41 @@ impl SetupStore<'_> {
             // Fence cancellation at the same write boundary as the terminal
             // acquisition and continuation outbox. A later source reread cannot
             // undo a canonical result already committed for a cancelled caller.
-            let deadline = current.request().host().limits.deadline_ms
+            let deadline = current
+                .request()
+                .host()
+                .limits
+                .deadline_ms
                 .min(current.request().constraints().expires_at_ms)
                 .min(exact.child().constraints().expires_at_ms);
             let mut direct = vec![access.source.clone()];
-            direct.extend(access.contributor_sources.iter().map(|(_, source)| source.clone()));
+            direct.extend(
+                access
+                    .contributor_sources
+                    .iter()
+                    .map(|(_, source)| source.clone()),
+            );
             let conditions = result_conditions(direct, access.ancestor_sources)?;
             validate_record(&record, current.request())?;
             let (events, effects) = handoffs(&record, effects)?;
             let before_ms = i64::try_from(deadline).map_err(|_| SetupError::InvalidRecord)?;
-            let stored = self.conditional_store
+            let stored = self
+                .conditional_store
                 .ok_or(SetupError::NativeExecutionUnavailable)?
                 .compare_and_swap_conditionally(toolkit_store::ConditionalTransition {
                     transition: Transition {
-                        key: current.key().clone(), expected_revision: current.stored.revision,
+                        key: current.key().clone(),
+                        expected_revision: current.stored.revision,
                         expected_digest: Some(current.stored.content_digest.clone()),
-                        claim: Some(lease.clone()), data: encode_record(&record)?, events, effects,
+                        claim: Some(lease.clone()),
+                        data: encode_record(&record)?,
+                        events,
+                        effects,
                     },
-                    conditions, before_ms,
-                }).await?;
+                    conditions,
+                    before_ms,
+                })
+                .await?;
             let saved = self.recover(stored)?;
             control_receipt(&saved)
         }
@@ -264,8 +280,11 @@ impl SetupStore<'_> {
         for (index, (association, expected)) in access.contributor_sources.iter().enumerate() {
             if association != &access.contributors[index]
                 || expected.key == access.source.key
-                || access.contributor_sources[..index].iter().any(|(_, prior)| prior.key == expected.key)
-                || expected.claim.is_some() || expected.dispatch_claim.is_some()
+                || access.contributor_sources[..index]
+                    .iter()
+                    .any(|(_, prior)| prior.key == expected.key)
+                || expected.claim.is_some()
+                || expected.dispatch_claim.is_some()
             {
                 return Err(SetupError::Denied);
             }
@@ -273,9 +292,18 @@ impl SetupStore<'_> {
         // Publication remains historical. Reopen every captured source and
         // approved-task ancestor; the final transaction checks these same rows.
         let mut direct = vec![access.source.clone()];
-        direct.extend(access.contributor_sources.iter().map(|(_, source)| source.clone()));
+        direct.extend(
+            access
+                .contributor_sources
+                .iter()
+                .map(|(_, source)| source.clone()),
+        );
         for expected in result_conditions(direct, access.ancestor_sources)? {
-            let actual = self.store.get(&expected.key).await?.ok_or(StoreError::NotFound)?;
+            let actual = self
+                .store
+                .get(&expected.key)
+                .await?
+                .ok_or(StoreError::NotFound)?;
             if actual.revision != expected.revision
                 || actual.content_digest != expected.content_digest
                 || actual.content_digest != actual.data.digest()?
@@ -293,7 +321,8 @@ impl SetupStore<'_> {
 // Multiple callers may share an approved-task ancestor. Identical predicates
 // collapse; conflicting snapshots of the same row must never select a winner.
 fn result_conditions(
-    mut direct: Vec<RecordCondition>, ancestors: &[RecordCondition],
+    mut direct: Vec<RecordCondition>,
+    ancestors: &[RecordCondition],
 ) -> Result<Vec<RecordCondition>, SetupError> {
     direct.extend_from_slice(ancestors);
     let mut conditions: Vec<RecordCondition> = Vec::with_capacity(direct.len());
@@ -302,7 +331,9 @@ fn result_conditions(
             return Err(SetupError::Denied);
         }
         if let Some(prior) = conditions.iter().find(|prior| prior.key == condition.key) {
-            if prior != &condition { return Err(SetupError::Denied); }
+            if prior != &condition {
+                return Err(SetupError::Denied);
+            }
         } else {
             conditions.push(condition);
         }

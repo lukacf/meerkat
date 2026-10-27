@@ -209,10 +209,16 @@ impl ValidatedApplicationCompilation {
         }
         let resources = PreparedApplicationResources {
             artifact_directory: prepared.artifact_directory,
-            handoff: SelectedHostArtifact { path: handoff_path, sha256: hash(&bytes) },
+            handoff: SelectedHostArtifact {
+                path: handoff_path,
+                sha256: hash(&bytes),
+            },
         };
         let resource = Arc::new(super::resource::SetupResourceSelection::from_preparation(
-            &input, source_helper_member.clone(), resources.clone(), projection.server().clone(),
+            &input,
+            source_helper_member.clone(),
+            resources.clone(),
+            projection.server().clone(),
         ));
         let phase = ApplicationSetupCompilation {
             input,
@@ -275,8 +281,12 @@ impl ApplicationSetupCompilation {
     /// This does not configure a gateway or authorize a successor by itself.
     #[cfg(all(unix, feature = "console"))]
     pub fn retain_local_round_owner(
-        &mut self, owner: crate::resources::LocalRoundOwner,
-    ) -> Result<Arc<crate::resources::LocalRoundAttempts>, (crate::resources::LocalRoundOwner, String)> {
+        &mut self,
+        owner: crate::resources::LocalRoundOwner,
+    ) -> Result<
+        Arc<crate::resources::LocalRoundAttempts>,
+        (crate::resources::LocalRoundOwner, String),
+    > {
         self.resource.retain_local_round(owner)
     }
     pub fn definition(&self) -> &MobDefinition {
@@ -285,19 +295,26 @@ impl ApplicationSetupCompilation {
     pub fn helper(&self) -> &InstalledSetupSelection {
         &self.input.helper
     }
-    pub(crate) fn project_policy(&self, mut selected: meerkat_toolkit::host_lifetime::policy::PreparedLocalPolicy)
-        -> Result<meerkat_toolkit::host_lifetime::policy::PreparedLocalPolicy, String>
-    {
+    pub(crate) fn project_policy(
+        &self,
+        mut selected: meerkat_toolkit::host_lifetime::policy::PreparedLocalPolicy,
+    ) -> Result<meerkat_toolkit::host_lifetime::policy::PreparedLocalPolicy, String> {
         let mut expected = self.input.members.clone();
-        let helper = expected.iter_mut().find(|member| member.member == self.input.helper.member)
+        let helper = expected
+            .iter_mut()
+            .find(|member| member.member == self.input.helper.member)
             .ok_or("selected helper is missing")?;
         helper.member = self.source_helper_member.clone();
-        if selected.native_host.members != expected || selected.native_host.realm.as_str() != self.input.realm.realm_id {
+        if selected.native_host.members != expected
+            || selected.native_host.realm.as_str() != self.input.realm.realm_id
+        {
             return Err("early host selection differs from the actual compilation input".into());
         }
         selected.native_host.members = self.input.members.clone();
         for channel in &mut selected.channels {
-            if channel.member == self.source_helper_member { channel.member = self.input.helper.member.clone(); }
+            if channel.member == self.source_helper_member {
+                channel.member = self.input.helper.member.clone();
+            }
         }
         for route in &mut selected.native_host.routes {
             if let meerkat_toolkit::host_lifetime::policy::CompiledNativeSourceOrigin::LocalConsole { member, .. } = &mut route.origin {
@@ -308,7 +325,10 @@ impl ApplicationSetupCompilation {
         Ok(selected)
     }
     /// Existing preparation paths already have their final helper selection.
-    pub(crate) fn retain_owner(&self, selected: meerkat_toolkit::host_lifetime::policy::PreparedLocalPolicy) -> Result<(), String> {
+    pub(crate) fn retain_owner(
+        &self,
+        selected: meerkat_toolkit::host_lifetime::policy::PreparedLocalPolicy,
+    ) -> Result<(), String> {
         self.retain_authorities(selected, self.input.helper.clone())
     }
 
@@ -317,7 +337,8 @@ impl ApplicationSetupCompilation {
     /// identity and every existing operation selection remain unchanged. The
     /// helper-access entry below admits only the separately requested additions.
     pub(crate) fn retain_authorities(
-        &self, selected: meerkat_toolkit::host_lifetime::policy::PreparedLocalPolicy,
+        &self,
+        selected: meerkat_toolkit::host_lifetime::policy::PreparedLocalPolicy,
         helper: InstalledSetupSelection,
     ) -> Result<(), String> {
         self.retain_authorities_with_helper_mcp(selected, helper, None)
@@ -327,7 +348,8 @@ impl ApplicationSetupCompilation {
     /// server target. All early base/target selections remain byte-identical;
     /// the compiler does not derive or authorize any native grant itself.
     pub(crate) fn retain_authorities_with_helper_mcp(
-        &self, selected: meerkat_toolkit::host_lifetime::policy::PreparedLocalPolicy,
+        &self,
+        selected: meerkat_toolkit::host_lifetime::policy::PreparedLocalPolicy,
         helper: InstalledSetupSelection,
         request: Option<&toolkit_mobkit::installed_host::preparation::PreparedHelperMcpRequest>,
     ) -> Result<(), String> {
@@ -337,7 +359,8 @@ impl ApplicationSetupCompilation {
     /// Retain only the separately requested catalog base and MCP target. An
     /// occupied base is never replaced, and unrelated targets remain exact.
     pub(crate) fn retain_authorities_with_helper_access(
-        &self, selected: meerkat_toolkit::host_lifetime::policy::PreparedLocalPolicy,
+        &self,
+        selected: meerkat_toolkit::host_lifetime::policy::PreparedLocalPolicy,
         helper: InstalledSetupSelection,
         mcp: Option<&toolkit_mobkit::installed_host::preparation::PreparedHelperMcpRequest>,
         catalog: Option<&toolkit_mobkit::installed_host::preparation::PreparedHelperCatalogRequest>,
@@ -345,28 +368,45 @@ impl ApplicationSetupCompilation {
         selected.validate().map_err(|error| error.to_string())?;
         if selected.native_host.members.len() != self.input.members.len()
             || selected.native_host.realm.as_str() != self.input.realm.realm_id
-        { return Err("resolved owner differs from prepared members".into()); }
+        {
+            return Err("resolved owner differs from prepared members".into());
+        }
         for (actual, early) in selected.native_host.members.iter().zip(&self.input.members) {
             let mut unchanged = actual.clone();
-            if early.setup_capability.is_some() && actual.setup_capability != early.setup_capability {
+            if early.setup_capability.is_some() && actual.setup_capability != early.setup_capability
+            {
                 return Err("resolved owner replaces an existing setup capability".into());
             }
             unchanged.setup_capability = early.setup_capability.clone();
-            if &unchanged != early { return Err("resolved owner changes a prepared destination".into()); }
+            if &unchanged != early {
+                return Err("resolved owner changes a prepared destination".into());
+            }
         }
         let early = &self.input.helper;
-        if (!early.controller_parent.is_empty() && helper.controller_parent != early.controller_parent)
-            || (early.report_capability.is_some() && helper.report_capability != early.report_capability)
-            || (early.catalog_capability.is_some() && helper.catalog_capability != early.catalog_capability)
-        { return Err("resolved helper replaces an existing parent".into()); }
+        if (!early.controller_parent.is_empty()
+            && helper.controller_parent != early.controller_parent)
+            || (early.report_capability.is_some()
+                && helper.report_capability != early.report_capability)
+            || (early.catalog_capability.is_some()
+                && helper.catalog_capability != early.catalog_capability)
+        {
+            return Err("resolved helper replaces an existing parent".into());
+        }
         let mut unchanged = helper.clone();
         unchanged.controller_parent = early.controller_parent.clone();
         unchanged.report_capability = early.report_capability.clone();
         if helper.catalog_capability != early.catalog_capability {
             use toolkit_mobkit::installed_host::preparation::PreparedHelperCatalogScope;
             let request = catalog.ok_or("unrequested helper catalog successor parent")?;
-            let added = helper.catalog_capability.as_ref().ok_or("resolved helper drops catalog parent")?;
-            let operator = selected.native_host.remote_operator.as_ref().ok_or("missing helper operator")?;
+            let added = helper
+                .catalog_capability
+                .as_ref()
+                .ok_or("resolved helper drops catalog parent")?;
+            let operator = selected
+                .native_host
+                .remote_operator
+                .as_ref()
+                .ok_or("missing helper operator")?;
             if request.scope != PreparedHelperCatalogScope::CurrentHelperSuccessors
                 || !matches!(early.operation_basis, meerkat_authorization_contracts::work_association::WorkAuthorityBasis::TargetedGrantLineages { base: None, .. })
                 || added.parent.len() != 1 || added.parent[0].validate().is_err()
@@ -378,55 +418,97 @@ impl ApplicationSetupCompilation {
             self.validate_helper_access_insertion(&selected, early, &helper, mcp, catalog)?;
             unchanged.operation_basis = early.operation_basis.clone();
         }
-        if unchanged != *early { return Err("resolved helper changes the prepared selection".into()); }
-        self.final_authorities.set(FinalAuthoritySelection { owner: selected, helper })
+        if unchanged != *early {
+            return Err("resolved helper changes the prepared selection".into());
+        }
+        self.final_authorities
+            .set(FinalAuthoritySelection {
+                owner: selected,
+                helper,
+            })
             .map_err(|_| "resolved owner already retained".into())
     }
     fn validate_helper_access_insertion(
-        &self, selected: &meerkat_toolkit::host_lifetime::policy::PreparedLocalPolicy,
-        early: &InstalledSetupSelection, helper: &InstalledSetupSelection,
+        &self,
+        selected: &meerkat_toolkit::host_lifetime::policy::PreparedLocalPolicy,
+        early: &InstalledSetupSelection,
+        helper: &InstalledSetupSelection,
         mcp: Option<&toolkit_mobkit::installed_host::preparation::PreparedHelperMcpRequest>,
         catalog: Option<&toolkit_mobkit::installed_host::preparation::PreparedHelperCatalogRequest>,
     ) -> Result<(), String> {
         use meerkat_authorization_contracts::work_association::{GrantTarget, WorkAuthorityBasis};
-        let operator = selected.native_host.remote_operator.as_ref().ok_or("missing helper operator")?;
-        let target = GrantTarget::McpServer { server: self.server().name.clone() };
-        let (WorkAuthorityBasis::TargetedGrantLineages { base: old_base, targets: old },
-            WorkAuthorityBasis::TargetedGrantLineages { base: new_base, targets: new }) =
-            (&early.operation_basis, &helper.operation_basis) else {
-                return Err("helper operation authority changed selection kind".into());
-            };
+        let operator = selected
+            .native_host
+            .remote_operator
+            .as_ref()
+            .ok_or("missing helper operator")?;
+        let target = GrantTarget::McpServer {
+            server: self.server().name.clone(),
+        };
+        let (
+            WorkAuthorityBasis::TargetedGrantLineages {
+                base: old_base,
+                targets: old,
+            },
+            WorkAuthorityBasis::TargetedGrantLineages {
+                base: new_base,
+                targets: new,
+            },
+        ) = (&early.operation_basis, &helper.operation_basis)
+        else {
+            return Err("helper operation authority changed selection kind".into());
+        };
         if old_base != new_base {
             let request = catalog.ok_or("unrequested helper catalog base")?;
             if request.scope != toolkit_mobkit::installed_host::preparation::PreparedHelperCatalogScope::ExactSession {
                 return Err("successor catalog parent is not an executable base".into());
             }
             let added = new_base.as_ref().ok_or("resolved helper drops its base")?;
-            if old_base.is_some() || added.len() != 1 || added[0].validate().is_err()
-                || added[0].grant_id != request.issuance_id || &added[0].root_authority != operator
-            { return Err("resolved helper replaces or widens its selected base".into()); }
+            if old_base.is_some()
+                || added.len() != 1
+                || added[0].validate().is_err()
+                || added[0].grant_id != request.issuance_id
+                || &added[0].root_authority != operator
+            {
+                return Err("resolved helper replaces or widens its selected base".into());
+            }
         }
-        if old == new { return Ok(()); }
+        if old == new {
+            return Ok(());
+        }
         let request = mcp.ok_or("unrequested helper operation target")?;
         if old.iter().any(|row| row.target == target) || new.len() != old.len() + 1 {
             return Err("resolved helper replaces existing operation authority".into());
         }
         let mut unchanged = new.clone();
-        let at = unchanged.binary_search_by(|row| row.target.cmp(&target))
+        let at = unchanged
+            .binary_search_by(|row| row.target.cmp(&target))
             .map_err(|_| "missing exact bundled helper operation target")?;
         let added = unchanged.remove(at);
-        if unchanged != *old || added.lineage.len() != 1
-            || added.lineage[0].validate().is_err() || added.lineage[0].grant_id != request.issuance_id
+        if unchanged != *old
+            || added.lineage.len() != 1
+            || added.lineage[0].validate().is_err()
+            || added.lineage[0].grant_id != request.issuance_id
             || &added.lineage[0].root_authority != operator
-        { return Err("resolved helper operation target differs from the retained request".into()); }
+        {
+            return Err(
+                "resolved helper operation target differs from the retained request".into(),
+            );
+        }
         Ok(())
     }
 
-    pub(crate) fn server(&self) -> &McpServerConfig { self.resource.server() }
-    pub(crate) fn resource_selection(&self) -> Arc<super::resource::SetupResourceSelection> { self.resource.clone() }
-    pub(crate) fn selected_destination(&self, identity: &MemberRuntimeBuildIdentity,
-        destination: &MemberDestinationSelection) -> Result<(), MobError>
-    {
+    pub(crate) fn server(&self) -> &McpServerConfig {
+        self.resource.server()
+    }
+    pub(crate) fn resource_selection(&self) -> Arc<super::resource::SetupResourceSelection> {
+        self.resource.clone()
+    }
+    pub(crate) fn selected_destination(
+        &self,
+        identity: &MemberRuntimeBuildIdentity,
+        destination: &MemberDestinationSelection,
+    ) -> Result<(), MobError> {
         self.resource.selected_destination(identity, destination)
     }
     pub(crate) fn helper_projection(&self) -> Result<PreparedSetupHelper, String> {
@@ -436,9 +518,11 @@ impl ApplicationSetupCompilation {
     /// Driver composition reuses the exact policy-bound resource selected
     /// before the reserved definition was captured. It cannot expand it later.
     pub(crate) fn prepare_helper_bootstrap(
-        &self, spec: meerkat_mobkit::mob_handle_runtime::MobBootstrapSpec,
+        &self,
+        spec: meerkat_mobkit::mob_handle_runtime::MobBootstrapSpec,
     ) -> Result<meerkat_mobkit::mob_handle_runtime::MobBootstrapSpec, String> {
-        let helper = self.helper_projection()?
+        let helper = self
+            .helper_projection()?
             .with_public_research_from_policy(self.policy.compiled());
         if helper.server() != &self.server {
             return Err("prepared helper ceiling differs from its compiled policy".into());
@@ -497,13 +581,19 @@ impl ApplicationSetupCompilation {
     }
 
     #[cfg(test)]
-    fn capture(&self, index: usize, surface: &PreparedToolSurface) -> Result<ToolSurfaceSelection, String> {
+    fn capture(
+        &self,
+        index: usize,
+        surface: &PreparedToolSurface,
+    ) -> Result<ToolSurfaceSelection, String> {
         // Inert compiler fixtures have no native session observation.
         self.capture_selected(index, surface, None)
     }
 
     fn capture_selected(
-        &self, index: usize, surface: &PreparedToolSurface,
+        &self,
+        index: usize,
+        surface: &PreparedToolSurface,
         session: Option<meerkat_core::SessionId>,
     ) -> Result<ToolSurfaceSelection, String> {
         let row = &self.input.members[index];
@@ -565,21 +655,40 @@ impl ApplicationSetupCompilation {
     /// from the same native held completion while publication remains withheld.
     pub fn validate_finished<'a>(
         &self,
-        finished: impl IntoIterator<Item = (&'a meerkat_mobkit::identity_first::AgentIdentity, &'a ToolSurfaceSelection)>,
+        finished: impl IntoIterator<
+            Item = (
+                &'a meerkat_mobkit::identity_first::AgentIdentity,
+                &'a ToolSurfaceSelection,
+            ),
+        >,
     ) -> Result<(), String> {
-        let captured = self.captured.lock().map_err(|_| "compiler output owner unavailable")?;
+        let captured = self
+            .captured
+            .lock()
+            .map_err(|_| "compiler output owner unavailable")?;
         let mut observed = BTreeSet::new();
         for (identity, selection) in finished {
-            let index = self.input.roster.iter().position(|spec| &spec.identity == identity)
+            let index = self
+                .input
+                .roster
+                .iter()
+                .position(|spec| &spec.identity == identity)
                 .ok_or("finished native identity is absent from the selected roster")?;
             if !observed.insert(index) {
                 return Err("finished native inventory repeats an identity".into());
             }
-            let member = self.input.members.iter().position(|member| {
-                matching_roster(&self.input.roster, &member.member).ok() == Some(index)
-            }).ok_or("finished native identity has no selected member")?;
+            let member = self
+                .input
+                .members
+                .iter()
+                .position(|member| {
+                    matching_roster(&self.input.roster, &member.member).ok() == Some(index)
+                })
+                .ok_or("finished native identity has no selected member")?;
             if captured.get(&member).map(|output| &output.selection) != Some(selection) {
-                return Err("native finish differs from this construction's captured selection".into());
+                return Err(
+                    "native finish differs from this construction's captured selection".into(),
+                );
             }
         }
         if observed.len() != self.input.roster.len() || captured.len() != self.input.members.len() {
@@ -592,22 +701,35 @@ impl ApplicationSetupCompilation {
     /// after the complete held inventory has matched its finished surfaces.
     pub(crate) fn held_helper_session<'a>(
         &self,
-        finished: impl IntoIterator<Item = (&'a meerkat_mobkit::identity_first::AgentIdentity, &'a ToolSurfaceSelection)>,
+        finished: impl IntoIterator<
+            Item = (
+                &'a meerkat_mobkit::identity_first::AgentIdentity,
+                &'a ToolSurfaceSelection,
+            ),
+        >,
     ) -> Result<meerkat_core::SessionId, String> {
         self.validate_finished(finished)?;
-        let index = self.input.members.iter().position(|row| row.member == self.input.helper.member)
+        let index = self
+            .input
+            .members
+            .iter()
+            .position(|row| row.member == self.input.helper.member)
             .ok_or("selected helper is absent")?;
-        self.captured.lock().map_err(|_| "compiler output owner unavailable")?
-            .get(&index).and_then(|member| member.session.clone())
+        self.captured
+            .lock()
+            .map_err(|_| "compiler output owner unavailable")?
+            .get(&index)
+            .and_then(|member| member.session.clone())
             .ok_or_else(|| "actual native helper session was not captured".into())
     }
 
     /// The exact roster identity for a selected, projected member. The Driver
     /// uses this same association after validating the full finished inventory.
     /// A matching role or an unselected member alias is insufficient.
-    pub(crate) fn held_member_identity(&self, member: &MobMemberBinding)
-        -> Result<&meerkat_mobkit::identity_first::AgentIdentity, String>
-    {
+    pub(crate) fn held_member_identity(
+        &self,
+        member: &MobMemberBinding,
+    ) -> Result<&meerkat_mobkit::identity_first::AgentIdentity, String> {
         if !self.input.members.iter().any(|row| &row.member == member) {
             return Err("controller target is not a selected prepared member".into());
         }
@@ -625,7 +747,9 @@ impl ApplicationSetupCompilation {
         if !output.is_absolute() {
             return Err("compiler output must be absolute".into());
         }
-        let authorities = self.final_authorities.get()
+        let authorities = self
+            .final_authorities
+            .get()
             .ok_or("schema4 authority selections were not finalized")?;
         let parent = output
             .parent()
@@ -642,12 +766,17 @@ impl ApplicationSetupCompilation {
         }
         let mut native_members = Vec::with_capacity(self.input.members.len());
         for index in 0..self.input.members.len() {
-            let mut member = captured.get(&index)
-                .ok_or("selected member has no native surface output")?.member.clone();
+            let mut member = captured
+                .get(&index)
+                .ok_or("selected member has no native surface output")?
+                .member
+                .clone();
             // Capture proves the actual surface. Final authority comes from
             // the same preparation owner's resolved selection, never the
             // setup_capability clone taken before held route observation.
-            member.setup_capability = authorities.owner.native_host.members[index].setup_capability.clone();
+            member.setup_capability = authorities.owner.native_host.members[index]
+                .setup_capability
+                .clone();
             native_members.push(member);
         }
         let setup = PreparedApplicationSetup {
@@ -701,7 +830,8 @@ impl MemberRuntimeRegistrationHook for ApplicationSetupCompilation {
         let index = self.selected(identity).map_err(MobError::WiringError)?;
         let session = meerkat_core::SessionId::parse(identity.session_document().as_str())
             .map_err(|error| MobError::WiringError(error.to_string()))?;
-        self.capture_selected(index, surface, Some(session)).map_err(MobError::WiringError)
+        self.capture_selected(index, surface, Some(session))
+            .map_err(MobError::WiringError)
     }
     async fn verify_member_surface(
         &self,
@@ -716,8 +846,14 @@ impl MemberRuntimeRegistrationHook for ApplicationSetupCompilation {
         let output = captured.get(&index).ok_or_else(|| {
             MobError::WiringError("member was not prepared by this compiler".into())
         })?;
-        if output.session.as_ref().is_some_and(|session| session.to_string() != identity.session_document().as_str()) {
-            return Err(MobError::WiringError("finished member has a different captured native session".into()));
+        if output
+            .session
+            .as_ref()
+            .is_some_and(|session| session.to_string() != identity.session_document().as_str())
+        {
+            return Err(MobError::WiringError(
+                "finished member has a different captured native session".into(),
+            ));
         }
         if surface
             .iter()

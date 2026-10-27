@@ -2,8 +2,8 @@
 //! A browser login never imports the terminal's OS-user device credential.
 use crate::{
     ConnectError,
-    paired_host::{PairedHostClient, PairedHostError, PairingCode, TerminalPairingCode},
     host_selection::HostSelectionPrompt,
+    paired_host::{PairedHostClient, PairedHostError, PairingCode, TerminalPairingCode},
     stdio::{PairingMethod, PromptAnswer, PromptBridge},
 };
 use futures_util::FutureExt;

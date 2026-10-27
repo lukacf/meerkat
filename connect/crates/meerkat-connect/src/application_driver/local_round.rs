@@ -30,7 +30,10 @@ impl LocalRoundCleanup {
                 McpGuardCompletion::Completed | McpGuardCompletion::Cancelled => (),
                 McpGuardCompletion::Held | McpGuardCompletion::TimedOut => pending = true,
                 McpGuardCompletion::Failed | McpGuardCompletion::Panicked => self.failed = true,
-                _ => { self.failed = true; pending = true; },
+                _ => {
+                    self.failed = true;
+                    pending = true;
+                }
             }
         }
         self.native_drained = before_deadline && !pending;
@@ -61,8 +64,9 @@ impl LocalRoundCleanup {
         guards: &McpAttemptGuards,
     ) -> Result<(), GatewayHostError> {
         loop {
-            let result = self.join(attempts, guards,
-                tokio::time::Instant::now() + JOIN_BOUND).await;
+            let result = self
+                .join(attempts, guards, tokio::time::Instant::now() + JOIN_BOUND)
+                .await;
             if self.native_drained && self.owner_clean {
                 return result;
             }
@@ -82,8 +86,9 @@ impl LocalRoundCleanup {
 impl Driver {
     pub(super) async fn join_local_round(&self) -> Result<(), GatewayHostError> {
         let mut cleanup = self.local_round_cleanup.lock().await;
-        cleanup.join_until_settled(&self.local_round_attempts,
-            &self.attempt_guards).await
+        cleanup
+            .join_until_settled(&self.local_round_attempts, &self.attempt_guards)
+            .await
     }
 }
 

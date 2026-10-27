@@ -20,8 +20,11 @@ pub fn canonical_setup_input_reference(
     request: &ValidatedSetupRequest,
 ) -> Result<ContextReference, SetupError> {
     Ok(ContextReference {
-        owner: Id::new(format!("toolkit/acquisition/{}", request.constraints().deployment))
-            .map_err(|_| SetupError::InvalidRecord)?,
+        owner: Id::new(format!(
+            "toolkit/acquisition/{}",
+            request.constraints().deployment
+        ))
+        .map_err(|_| SetupError::InvalidRecord)?,
         id: operation_id(request)?,
         revision: Revision::new(format!("input/{}", request.input_digest()))
             .map_err(|_| SetupError::InvalidRecord)?,
@@ -52,15 +55,20 @@ impl SetupStore<'_> {
         // Native retained-work identity uses this JSON codec, not its binary codec.
         let digest = ContentDigest::of_bytes(&serde_json::to_vec(association)?);
         if !context.authorization.retained_work().is_some_and(|work| {
-            work.contributors().iter().any(|source| source.association_digest == digest.as_str())
+            work.contributors()
+                .iter()
+                .any(|source| source.association_digest == digest.as_str())
         }) {
             return Err(SetupError::Denied);
         }
         let digest = crate::request::invocation_correlation_digest(
-            association, &self.scope.tenant, &self.scope.deployment, correlation,
+            association,
+            &self.scope.tenant,
+            &self.scope.deployment,
+            correlation,
         )?;
-        let operation = Id::new(format!("setup-{digest}"))
-            .map_err(|_| SetupError::InvalidRecord)?;
+        let operation =
+            Id::new(format!("setup-{digest}")).map_err(|_| SetupError::InvalidRecord)?;
         let Some(stored) = self.store.get(&self.scope.key(&operation)).await? else {
             return Ok(None);
         };
@@ -71,7 +79,9 @@ impl SetupStore<'_> {
         {
             return Err(SetupError::Denied);
         }
-        request.evidence().check_proposal(Action::FindAndInstall, &request.host().target, context)
+        request
+            .evidence()
+            .check_proposal(Action::FindAndInstall, &request.host().target, context)
             .map_err(RequestError::from)?;
         Ok(Some(SetupInvocationTerms {
             host: request.host().clone(),

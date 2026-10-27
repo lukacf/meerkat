@@ -122,8 +122,7 @@ fn read_failure_diagnostic(origin: &str, error: DeviceStoreError) {
     // One observation, bounded by the existing 25-second fixture process owner.
     // Null means unknown, not absent. Never read a secret or repeat the adapter.
     'observe: {
-        let Ok(service) =
-            SecretService::connect_with_max_prompt_timeout(EncryptionType::Dh, 0)
+        let Ok(service) = SecretService::connect_with_max_prompt_timeout(EncryptionType::Dh, 0)
         else {
             break 'observe;
         };

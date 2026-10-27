@@ -258,107 +258,206 @@ async fn helper_result_accepts_exact_custody_progress_and_refuses_changed_source
     let script = acquisition_denial::Script::for_approved();
     let report = Report::new(script.tools().result_tool());
     let (fixture, _) = Fixture::for_configured_helper_report(script.clone(), report.clone()).await;
-    let checked = std::panic::AssertUnwindSafe(tokio::time::timeout(WAIT, Box::pin(async {
-        fixture.source.start_custody_recovery(
-            fixture.native.mob_runtime().continuation_source_announcer(),
-        ).unwrap();
-        let first = fixture.submit().await;
-        fixture.finish(&first).await.unwrap();
-        let context = report.take_context().await;
-        let session = context.origin_session_id().unwrap();
-        // This is the actual helper's selected native context, not a fabricated
-        // source or controller. The old exact-revision guard fails this lookup.
-        let source = fixture.source.setup_result_source(
-            &context, report.selection.get().unwrap()).await.unwrap();
-        let held = fixture.source.helper_sources.lock().unwrap().iter()
-            .find(|held| held.original().association() == &source.helper).unwrap().clone();
-        assert_eq!(held.source_record().data.version, 3);
-        assert_eq!(held.source_record().revision, 2);
-        let saved = loop {
-            let saved = fixture.store.get(&source.source.key).await.unwrap().unwrap();
-            assert_eq!(saved.data.version, 5);
-            if saved.data.body["custody_attempt"]["decision"] == "promoted" { break saved; }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        };
-        assert!(saved.revision >= 4);
-        let source = fixture.source.setup_result_source(
-            &context, report.selection.get().unwrap()).await.unwrap();
-        assert_eq!(source.source.revision, saved.revision);
-        assert_eq!(source.source.content_digest, saved.content_digest);
-        assert!(held.check_result_record(&saved, session).is_ok());
-        let (initial, retained_input, changed_input, changed_attempt) = {
-            let pending = held.first_custody.lock().unwrap();
-            let pending = pending.as_ref().unwrap();
-            let initial = CustodyAttempt::for_prepared(
-                &pending.session, &pending.input, held.original().association()).unwrap();
-            let mut changed = pending.input.clone();
-            let meerkat_runtime::Input::Prompt(prompt) = &mut changed else { unreachable!() };
-            prompt.content = meerkat_core::ContentInput::Text("different retained helper input".into());
-            let attempt = CustodyAttempt::for_prepared(
-                &pending.session, &changed, held.original().association()).unwrap()
-                .changed(CustodyChange::Promote).unwrap();
-            (initial, crate::private_originals::RetainedBoundInput::from_bound(&pending.input).unwrap(), changed, attempt)
-        };
-        let mut changed_facts = saved.clone();
-        changed_facts.data.body["facts"]["operation"]["effect"] = serde_json::json!("different-effect");
-        changed_facts.content_digest = changed_facts.data.digest().unwrap();
-        let mut changed_input_row = saved.clone();
-        changed_input_row.data.body["bound_input"] = serde_json::to_value(&changed_input).unwrap();
-        changed_input_row.data.body["custody_attempt"] = serde_json::to_value(changed_attempt).unwrap();
-        changed_input_row.content_digest = changed_input_row.data.digest().unwrap();
-        let mut withdrawn = saved.clone();
-        withdrawn.data.body["custody_attempt"] = serde_json::to_value(
-            initial.changed(CustodyChange::Withdraw).unwrap()).unwrap();
-        withdrawn.content_digest = withdrawn.data.digest().unwrap();
-        // A reader with a later actual source snapshot must reject a
-        // regressing row and changed content under the same revision.
-        let retained_current = crate::original_ingress::helper_originals::RetainedHelperSource {
-            original: held.source.original.clone(),
-            source_record: Arc::new(saved.clone()),
-            event_key: held.source.event_key.clone(),
-            authentication: held.source.authentication.clone(),
-        };
-        let mut regressed = saved.clone(); regressed.revision -= 1;
-        let mut same_revision = saved.clone();
-        same_revision.data.body["custody_attempt"]["spent_steps"] = serde_json::json!(1);
-        same_revision.content_digest = same_revision.data.digest().unwrap();
-        for changed in [&regressed, &same_revision] {
-            assert!(retained_current.check_result_record(changed,
-                Some((&retained_input, session))).is_err());
-        }
-        let mut wrong_key = saved.clone(); wrong_key.key.id.push_str("-other");
-        let mut wrong_schema = saved.clone(); wrong_schema.data.schema.push_str("-other");
-        wrong_schema.content_digest = wrong_schema.data.digest().unwrap();
-        let mut bad_digest = saved.clone(); bad_digest.content_digest = held.source_record().content_digest.clone();
-        for (label, changed) in [
-            ("immutable facts", changed_facts.clone()), ("self-consistent changed input/attempt", changed_input_row),
-            ("withdrawal", withdrawn),
-            ("source key", wrong_key), ("schema", wrong_schema), ("digest", bad_digest),
-        ] {
-            assert!(matches!(held.check_result_record(&changed, session), Err(PrivateOriginalError::Conflict)), "{label}");
-        }
-        // Exercise the actual canonical read as well as the narrow comparator.
-        let changed = fixture.store.compare_and_swap(toolkit_store::Transition {
-            key: saved.key.clone(), expected_revision: saved.revision,
-            expected_digest: Some(saved.content_digest.clone()), data: changed_facts.data,
-            claim: None, events: vec![], effects: vec![],
-        }).await.unwrap();
-        assert!(matches!(fixture.source.setup_result_source(
-            &context, report.selection.get().unwrap()).await, Err(PrivateOriginalError::Conflict)));
-        let restored = fixture.store.compare_and_swap(toolkit_store::Transition {
-            key: changed.key, expected_revision: changed.revision,
-            expected_digest: Some(changed.content_digest), data: saved.data,
-            claim: None, events: vec![], effects: vec![],
-        }).await.unwrap();
-        let current = fixture.source.setup_result_source(
-            &context, report.selection.get().unwrap()).await.unwrap();
-        assert_eq!(current.source.revision, restored.revision);
-        // Matching helper accounting never overrides the real contributor's
-        // cancellation. This invokes the existing source cancellation owner.
-        fixture.source.record_operation_cancelled(&fixture.submission.original).await.unwrap();
-        assert!(matches!(fixture.source.setup_result_source(
-            &context, report.selection.get().unwrap()).await, Err(PrivateOriginalError::Denied)));
-    }))).catch_unwind().await;
+    let checked = std::panic::AssertUnwindSafe(tokio::time::timeout(
+        WAIT,
+        Box::pin(async {
+            fixture
+                .source
+                .start_custody_recovery(
+                    fixture.native.mob_runtime().continuation_source_announcer(),
+                )
+                .unwrap();
+            let first = fixture.submit().await;
+            fixture.finish(&first).await.unwrap();
+            let context = report.take_context().await;
+            let session = context.origin_session_id().unwrap();
+            // This is the actual helper's selected native context, not a fabricated
+            // source or controller. The old exact-revision guard fails this lookup.
+            let source = fixture
+                .source
+                .setup_result_source(&context, report.selection.get().unwrap())
+                .await
+                .unwrap();
+            let held = fixture
+                .source
+                .helper_sources
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|held| held.original().association() == &source.helper)
+                .unwrap()
+                .clone();
+            assert_eq!(held.source_record().data.version, 3);
+            assert_eq!(held.source_record().revision, 2);
+            let saved = loop {
+                let saved = fixture
+                    .store
+                    .get(&source.source.key)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(saved.data.version, 5);
+                if saved.data.body["custody_attempt"]["decision"] == "promoted" {
+                    break saved;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            };
+            assert!(saved.revision >= 4);
+            let source = fixture
+                .source
+                .setup_result_source(&context, report.selection.get().unwrap())
+                .await
+                .unwrap();
+            assert_eq!(source.source.revision, saved.revision);
+            assert_eq!(source.source.content_digest, saved.content_digest);
+            assert!(held.check_result_record(&saved, session).is_ok());
+            let (initial, retained_input, changed_input, changed_attempt) = {
+                let pending = held.first_custody.lock().unwrap();
+                let pending = pending.as_ref().unwrap();
+                let initial = CustodyAttempt::for_prepared(
+                    &pending.session,
+                    &pending.input,
+                    held.original().association(),
+                )
+                .unwrap();
+                let mut changed = pending.input.clone();
+                let meerkat_runtime::Input::Prompt(prompt) = &mut changed else {
+                    unreachable!()
+                };
+                prompt.content =
+                    meerkat_core::ContentInput::Text("different retained helper input".into());
+                let attempt = CustodyAttempt::for_prepared(
+                    &pending.session,
+                    &changed,
+                    held.original().association(),
+                )
+                .unwrap()
+                .changed(CustodyChange::Promote)
+                .unwrap();
+                (
+                    initial,
+                    crate::private_originals::RetainedBoundInput::from_bound(&pending.input)
+                        .unwrap(),
+                    changed,
+                    attempt,
+                )
+            };
+            let mut changed_facts = saved.clone();
+            changed_facts.data.body["facts"]["operation"]["effect"] =
+                serde_json::json!("different-effect");
+            changed_facts.content_digest = changed_facts.data.digest().unwrap();
+            let mut changed_input_row = saved.clone();
+            changed_input_row.data.body["bound_input"] =
+                serde_json::to_value(&changed_input).unwrap();
+            changed_input_row.data.body["custody_attempt"] =
+                serde_json::to_value(changed_attempt).unwrap();
+            changed_input_row.content_digest = changed_input_row.data.digest().unwrap();
+            let mut withdrawn = saved.clone();
+            withdrawn.data.body["custody_attempt"] =
+                serde_json::to_value(initial.changed(CustodyChange::Withdraw).unwrap()).unwrap();
+            withdrawn.content_digest = withdrawn.data.digest().unwrap();
+            // A reader with a later actual source snapshot must reject a
+            // regressing row and changed content under the same revision.
+            let retained_current =
+                crate::original_ingress::helper_originals::RetainedHelperSource {
+                    original: held.source.original.clone(),
+                    source_record: Arc::new(saved.clone()),
+                    event_key: held.source.event_key.clone(),
+                    authentication: held.source.authentication.clone(),
+                };
+            let mut regressed = saved.clone();
+            regressed.revision -= 1;
+            let mut same_revision = saved.clone();
+            same_revision.data.body["custody_attempt"]["spent_steps"] = serde_json::json!(1);
+            same_revision.content_digest = same_revision.data.digest().unwrap();
+            for changed in [&regressed, &same_revision] {
+                assert!(
+                    retained_current
+                        .check_result_record(changed, Some((&retained_input, session)))
+                        .is_err()
+                );
+            }
+            let mut wrong_key = saved.clone();
+            wrong_key.key.id.push_str("-other");
+            let mut wrong_schema = saved.clone();
+            wrong_schema.data.schema.push_str("-other");
+            wrong_schema.content_digest = wrong_schema.data.digest().unwrap();
+            let mut bad_digest = saved.clone();
+            bad_digest.content_digest = held.source_record().content_digest.clone();
+            for (label, changed) in [
+                ("immutable facts", changed_facts.clone()),
+                ("self-consistent changed input/attempt", changed_input_row),
+                ("withdrawal", withdrawn),
+                ("source key", wrong_key),
+                ("schema", wrong_schema),
+                ("digest", bad_digest),
+            ] {
+                assert!(
+                    matches!(
+                        held.check_result_record(&changed, session),
+                        Err(PrivateOriginalError::Conflict)
+                    ),
+                    "{label}"
+                );
+            }
+            // Exercise the actual canonical read as well as the narrow comparator.
+            let changed = fixture
+                .store
+                .compare_and_swap(toolkit_store::Transition {
+                    key: saved.key.clone(),
+                    expected_revision: saved.revision,
+                    expected_digest: Some(saved.content_digest.clone()),
+                    data: changed_facts.data,
+                    claim: None,
+                    events: vec![],
+                    effects: vec![],
+                })
+                .await
+                .unwrap();
+            assert!(matches!(
+                fixture
+                    .source
+                    .setup_result_source(&context, report.selection.get().unwrap())
+                    .await,
+                Err(PrivateOriginalError::Conflict)
+            ));
+            let restored = fixture
+                .store
+                .compare_and_swap(toolkit_store::Transition {
+                    key: changed.key,
+                    expected_revision: changed.revision,
+                    expected_digest: Some(changed.content_digest),
+                    data: saved.data,
+                    claim: None,
+                    events: vec![],
+                    effects: vec![],
+                })
+                .await
+                .unwrap();
+            let current = fixture
+                .source
+                .setup_result_source(&context, report.selection.get().unwrap())
+                .await
+                .unwrap();
+            assert_eq!(current.source.revision, restored.revision);
+            // Matching helper accounting never overrides the real contributor's
+            // cancellation. This invokes the existing source cancellation owner.
+            fixture
+                .source
+                .record_operation_cancelled(&fixture.submission.original)
+                .await
+                .unwrap();
+            assert!(matches!(
+                fixture
+                    .source
+                    .setup_result_source(&context, report.selection.get().unwrap())
+                    .await,
+                Err(PrivateOriginalError::Denied)
+            ));
+        }),
+    ))
+    .catch_unwind()
+    .await;
     fixture.source.stop_custody_recovery();
     report.release();
     report.leaf.context.lock().unwrap().take();

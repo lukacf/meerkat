@@ -122,13 +122,20 @@ pub(super) struct ConnectorProfile {
 }
 impl ConnectorProfiles {
     pub fn into_native(self) -> Vec<meerkat::ConnectorClientAuthProfile> {
-        self.profiles.into_iter().map(|p| meerkat::ConnectorClientAuthProfile {
-            id:p.id, issuer:p.issuer, client:p.client,
-            // The trusted private wire carries inline configuration only.
-            client_secret:p.client_secret.map(meerkat::ConnectorClientSecret::Inline),
-            authorize_params:p.authorize_params, resource_indicator:p.resource_indicator,
-            protocol:p.protocol, registered_redirect_uris:p.registered_redirect_uris,
-        }).collect()
+        self.profiles
+            .into_iter()
+            .map(|p| meerkat::ConnectorClientAuthProfile {
+                id: p.id,
+                issuer: p.issuer,
+                client: p.client,
+                // The trusted private wire carries inline configuration only.
+                client_secret: p.client_secret.map(meerkat::ConnectorClientSecret::Inline),
+                authorize_params: p.authorize_params,
+                resource_indicator: p.resource_indicator,
+                protocol: p.protocol,
+                registered_redirect_uris: p.registered_redirect_uris,
+            })
+            .collect()
     }
 }
 #[derive(Deserialize)]
@@ -145,16 +152,21 @@ pub(crate) struct ConnectorTarget {
     client_auth_profile: Option<String>,
 }
 impl ConnectorTarget {
-    pub fn into_native(self, realm: meerkat_core::RealmId)
-        -> Result<meerkat::ConnectorOAuthTarget, &'static str>
-    {
+    pub fn into_native(
+        self,
+        realm: meerkat_core::RealmId,
+    ) -> Result<meerkat::ConnectorOAuthTarget, &'static str> {
         let account = meerkat_core::CredentialAccountId::parse(&self.slot_id)
             .map_err(|_| "invalid_binding")?;
         Ok(meerkat::ConnectorOAuthTarget {
             slot: meerkat_core::CredentialAccountRef { realm, account },
-            issuer:self.issuer, client:self.client, resource:self.resource, scopes:self.scopes,
-            strategy_id:self.strategy_id, account:self.account_selection,
-            client_auth_profile:self.client_auth_profile,
+            issuer: self.issuer,
+            client: self.client,
+            resource: self.resource,
+            scopes: self.scopes,
+            strategy_id: self.strategy_id,
+            account: self.account_selection,
+            client_auth_profile: self.client_auth_profile,
         })
     }
 }
@@ -165,8 +177,8 @@ pub(super) struct ConnectorStart {
     pub job_id: String,
     pub connector: ConnectorTarget,
     pub redirect_uri: String,
-    pub operations: std::collections::BTreeMap<String,
-        meerkat_core::mcp_config::McpConnectorOperation>,
+    pub operations:
+        std::collections::BTreeMap<String, meerkat_core::mcp_config::McpConnectorOperation>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -179,7 +191,9 @@ pub(super) struct ConnectorComplete {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct ConnectorCancel { pub scope: String }
+pub(super) struct ConnectorCancel {
+    pub scope: String,
+}
 
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -393,44 +407,70 @@ impl Initialize {
                 })
         });
         let composition_valid = match self.adapter {
-            Adapter::ForgeApplication => self.protocol_version == 4 && port.is_some()
-                && self.paired_host.is_none() && self.services.is_none() && self.connector_auth.is_none()
-                && self.forge.as_ref().is_some_and(|selection|
-                    selection.host.matches_application_id(&self.application.application_id)),
-            Adapter::ForgeReading => self.protocol_version <= 2 && port.is_some()
-                && self.paired_host.as_ref().is_none_or(|h| h.credential.is_none()),
-            Adapter::PairedHost => self.protocol_version == 2
-                && self.model.is_some()
-                && self.auth_binding.as_ref().is_some_and(|auth| {
-                    opaque(&auth.realm) && opaque(&auth.binding)
-                        && auth.profile.as_ref().is_none_or(|profile| opaque(profile))
-                })
-                && self.viewer.principal_id.strip_prefix("paired-device:")
-                    .is_some_and(opaque)
-                && self.paired_host.as_ref().is_some_and(|paired_host| {
-                    paired_host.targets.len() == 1
-                        && paired_host.targets[0].origin == self.application.origin
-                        && paired_host.credential.as_ref().is_some_and(|credential| {
-                            credential.header == "x-paired-host-presenter-credential"
-                                && credential.expires_at_ms == self.viewer.expires_at_ms
-                                && crate::paired_host::PairedHostClient::for_presenter(
-                                    &self.application.origin, &credential.value,
-                                ).is_ok()
-                        })
-                }),
-            Adapter::ForgeServices | Adapter::Services => self.protocol_version == 3
-                && (if self.adapter == Adapter::ForgeServices {
-                    port.is_some()
-                } else {
-                    canonical(&self.application.origin)
-                })
-                && self.paired_host.is_none()
-                && self.services.as_ref().is_some_and(|services| {
-                    matches!(services.preparation, ServicePermission::Permitted)
-                        && services.resource_manifest_sha256.len() == 64
-                        && services.resource_manifest_sha256.bytes()
-                            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
-                }),
+            Adapter::ForgeApplication => {
+                self.protocol_version == 4
+                    && port.is_some()
+                    && self.paired_host.is_none()
+                    && self.services.is_none()
+                    && self.connector_auth.is_none()
+                    && self.forge.as_ref().is_some_and(|selection| {
+                        selection
+                            .host
+                            .matches_application_id(&self.application.application_id)
+                    })
+            }
+            Adapter::ForgeReading => {
+                self.protocol_version <= 2
+                    && port.is_some()
+                    && self
+                        .paired_host
+                        .as_ref()
+                        .is_none_or(|h| h.credential.is_none())
+            }
+            Adapter::PairedHost => {
+                self.protocol_version == 2
+                    && self.model.is_some()
+                    && self.auth_binding.as_ref().is_some_and(|auth| {
+                        opaque(&auth.realm)
+                            && opaque(&auth.binding)
+                            && auth.profile.as_ref().is_none_or(|profile| opaque(profile))
+                    })
+                    && self
+                        .viewer
+                        .principal_id
+                        .strip_prefix("paired-device:")
+                        .is_some_and(opaque)
+                    && self.paired_host.as_ref().is_some_and(|paired_host| {
+                        paired_host.targets.len() == 1
+                            && paired_host.targets[0].origin == self.application.origin
+                            && paired_host.credential.as_ref().is_some_and(|credential| {
+                                credential.header == "x-paired-host-presenter-credential"
+                                    && credential.expires_at_ms == self.viewer.expires_at_ms
+                                    && crate::paired_host::PairedHostClient::for_presenter(
+                                        &self.application.origin,
+                                        &credential.value,
+                                    )
+                                    .is_ok()
+                            })
+                    })
+            }
+            Adapter::ForgeServices | Adapter::Services => {
+                self.protocol_version == 3
+                    && (if self.adapter == Adapter::ForgeServices {
+                        port.is_some()
+                    } else {
+                        canonical(&self.application.origin)
+                    })
+                    && self.paired_host.is_none()
+                    && self.services.as_ref().is_some_and(|services| {
+                        matches!(services.preparation, ServicePermission::Permitted)
+                            && services.resource_manifest_sha256.len() == 64
+                            && services
+                                .resource_manifest_sha256
+                                .bytes()
+                                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+                    })
+            }
         };
         matches!(self.protocol_version, 1 | 2 | 3 | 4)
             && targets_valid
@@ -569,12 +609,16 @@ pub(super) fn valid_answer(prompt: &Value, answer: &Answer) -> bool {
         (Some("approval"), Answer::Approval { .. }) => true,
         (Some("provider_target"), Answer::ProviderTarget { choice_id }) => {
             prompt["choices"].as_array().is_some_and(|choices| {
-                choices.iter().any(|choice| choice["choice_id"].as_str() == Some(choice_id))
+                choices
+                    .iter()
+                    .any(|choice| choice["choice_id"].as_str() == Some(choice_id))
             })
         }
         (Some("provider_action"), Answer::ProviderAction { action }) => {
             serde_json::to_value(action).ok().is_some_and(|action| {
-                prompt["actions"].as_array().is_some_and(|actions| actions.contains(&action))
+                prompt["actions"]
+                    .as_array()
+                    .is_some_and(|actions| actions.contains(&action))
             })
         }
         (Some("provider_api_key"), Answer::ProviderApiKey { key }) => {
@@ -591,7 +635,9 @@ pub(super) fn valid_answer(prompt: &Value, answer: &Answer) -> bool {
         (Some("paired_host_pairing_code"), Answer::PairedHostPairingCode { code }) => {
             match prompt["method"].as_str() {
                 Some("request") => crate::paired_host::PairingCode::new(code.clone()).is_ok(),
-                Some("terminal") => crate::paired_host::TerminalPairingCode::new(code.clone()).is_ok(),
+                Some("terminal") => {
+                    crate::paired_host::TerminalPairingCode::new(code.clone()).is_ok()
+                }
                 _ => false,
             }
         }

@@ -13,8 +13,7 @@ use meerkat_core::{
 };
 use std::time::{Duration, SystemTime};
 use toolkit_mobkit::{
-    host_gateway::ToolkitGatewayHost,
-    installed_host::operator_setup::OperatorParentOutcome,
+    host_gateway::ToolkitGatewayHost, installed_host::operator_setup::OperatorParentOutcome,
     private_originals::LocalControllerSetup,
 };
 
@@ -39,7 +38,8 @@ pub async fn review_local_controller_parent(
 ) -> Result<OperatorParentOutcome, ConnectError> {
     // Check the actual source-owner Arc before extracting any route/client or
     // asking the human. Equal route names across installations are not a join.
-    let owner = host.local_operator_setup_for(&prepared)
+    let owner = host
+        .local_operator_setup_for(&prepared)
         .map_err(|error| ConnectError::native("retain local application operator owner", error))?;
     review_controller_parent(owner, prepared, approvals, None).await
 }
@@ -52,7 +52,8 @@ pub(crate) async fn review_application_controller_parent(
     approvals: &LocalApprovals,
     login_scope: &str,
 ) -> Result<OperatorParentOutcome, ConnectError> {
-    let owner = host.application_operator_setup_for(&prepared)
+    let owner = host
+        .application_operator_setup_for(&prepared)
         .map_err(|error| ConnectError::native("retain application operator owner", error))?;
     review_controller_parent(owner, prepared, approvals, Some(login_scope)).await
 }
@@ -65,21 +66,30 @@ async fn review_controller_parent(
 ) -> Result<OperatorParentOutcome, ConnectError> {
     let (original, native_session, controller) = prepared.into_parts();
     let route = original.route;
-    let facts = controller.plain_facts()
+    let facts = controller
+        .plain_facts()
         .map_err(|error| ConnectError::native("observe retained application controller", error))?;
-    if let Some(selected) = owner.selected_controller_parent(&route, &facts)
-        .map_err(|error| ConnectError::native("check selected application controller access", error))?
+    if let Some(selected) = owner
+        .selected_controller_parent(&route, &facts)
+        .map_err(|error| {
+            ConnectError::native("check selected application controller access", error)
+        })?
     {
         return Ok(selected);
     }
-    let expires = SystemTime::now().checked_add(Duration::from_secs(120))
-        .ok_or_else(|| ConnectError::InvalidInput("The operator review deadline is invalid".into()))?;
+    let expires = SystemTime::now()
+        .checked_add(Duration::from_secs(120))
+        .ok_or_else(|| {
+            ConnectError::InvalidInput("The operator review deadline is invalid".into())
+        })?;
     let request = ApprovalRequest {
         // Attribution only. The already selected operator owner supplies
         // the native caller, never this label or the approval actor.
         requester: ApprovalPrincipalId::new("connect-setup-agent")
             .map_err(|error| ConnectError::native("identify setup review requester", error))?,
-        owner: ApprovalOwnerRef::Session { session_id: native_session },
+        owner: ApprovalOwnerRef::Session {
+            session_id: native_session,
+        },
         resource: ApprovalResourceRef {
             kind: ApprovalResourceKind::Runtime,
             id: ApprovalResourceId::new("application-controller"),
@@ -91,30 +101,41 @@ async fn review_controller_parent(
         },
         risk: ApprovalRisk::High,
         request_body: None,
-        allowed_decisions: [ApprovalDecision::Approve, ApprovalDecision::Deny].into_iter().collect(),
+        allowed_decisions: [ApprovalDecision::Approve, ApprovalDecision::Deny]
+            .into_iter()
+            .collect(),
         expires_at: Some(expires.into()),
         metadata: meerkat_core::SurfaceMetadata {
-            app_context: login_scope.map(|scope| serde_json::json!({"protected_login_scope":scope})),
+            app_context: login_scope
+                .map(|scope| serde_json::json!({"protected_login_scope":scope})),
             ..Default::default()
         },
         request_provenance: None,
     };
-    let proposal = owner.prepare_controller_parent_review(route, &facts, request)
-        .map_err(|error| ConnectError::native("retain exact application controller review", error))?;
+    let proposal = owner
+        .prepare_controller_parent_review(route, &facts, request)
+        .map_err(|error| {
+            ConnectError::native("retain exact application controller review", error)
+        })?;
     let approval = approvals.review_access(proposal.request().clone()).await?;
     // Never substitute another model client after the human has reviewed.
     // There is no credential refresh, provider call or new resolver here.
     if approval.status == meerkat_core::ApprovalStatus::Approved {
-        let current = controller.plain_facts()
-            .map_err(|error| ConnectError::native("recheck retained application controller", error))?;
+        let current = controller.plain_facts().map_err(|error| {
+            ConnectError::native("recheck retained application controller", error)
+        })?;
         if current.route_key() != facts.route_key() {
             return Err(ConnectError::InvalidInput(
                 "The application controller changed after its review; no grant was issued".into(),
             ));
         }
     }
-    owner.apply_parent_decision(proposal, approval).await
-        .map_err(|error| ConnectError::native("record reviewed application controller selection", error))
+    owner
+        .apply_parent_decision(proposal, approval)
+        .await
+        .map_err(|error| {
+            ConnectError::native("record reviewed application controller selection", error)
+        })
 }
 
 /// A separate protected review of setup requests for one pending original.
@@ -122,51 +143,73 @@ async fn review_controller_parent(
 /// The same source owner retains the approved selection before the first bind;
 /// no compiler publication/restart or policy mutation is needed for this task.
 pub async fn review_local_setup_request(
-    host: &ToolkitGatewayHost, prepared: LocalControllerSetup, approvals: &LocalApprovals,
+    host: &ToolkitGatewayHost,
+    prepared: LocalControllerSetup,
+    approvals: &LocalApprovals,
 ) -> Result<OperatorParentOutcome, ConnectError> {
-    let owner = host.local_operator_setup_for(&prepared)
+    let owner = host
+        .local_operator_setup_for(&prepared)
         .map_err(|error| ConnectError::native("retain local setup-request owner", error))?;
     review_setup_request(owner, prepared, approvals, None).await
 }
 
 pub(crate) async fn review_application_setup_request(
-    host: &ToolkitGatewayHost, prepared: LocalControllerSetup, approvals: &LocalApprovals,
+    host: &ToolkitGatewayHost,
+    prepared: LocalControllerSetup,
+    approvals: &LocalApprovals,
     login_scope: &str,
 ) -> Result<OperatorParentOutcome, ConnectError> {
-    let owner = host.application_operator_setup_for(&prepared)
+    let owner = host
+        .application_operator_setup_for(&prepared)
         .map_err(|error| ConnectError::native("retain application setup-request owner", error))?;
     review_setup_request(owner, prepared, approvals, Some(login_scope)).await
 }
 
 async fn review_setup_request(
     owner: toolkit_mobkit::installed_host::operator_setup::OperatorSetup,
-    prepared: LocalControllerSetup, approvals: &LocalApprovals, login_scope: Option<&str>,
+    prepared: LocalControllerSetup,
+    approvals: &LocalApprovals,
+    login_scope: Option<&str>,
 ) -> Result<OperatorParentOutcome, ConnectError> {
-    let expires = SystemTime::now().checked_add(Duration::from_secs(120))
+    let expires = SystemTime::now()
+        .checked_add(Duration::from_secs(120))
         .ok_or_else(|| ConnectError::InvalidInput("The setup review deadline is invalid".into()))?;
     let request = ApprovalRequest {
         requester: ApprovalPrincipalId::new("connect-setup-agent")
             .map_err(|error| ConnectError::native("identify setup review requester", error))?,
-        owner: ApprovalOwnerRef::Session { session_id: prepared.session_id().clone() },
+        owner: ApprovalOwnerRef::Session {
+            session_id: prepared.session_id().clone(),
+        },
         resource: ApprovalResourceRef {
-            kind: ApprovalResourceKind::Runtime, id: ApprovalResourceId::new("original-setup-request"),
+            kind: ApprovalResourceKind::Runtime,
+            id: ApprovalResourceId::new("original-setup-request"),
         },
         proposed_action: ApprovalProposedAction {
             kind: ApprovalActionKind::Other,
-            summary: "Allow this original task to request connector setup".into(), body: None,
+            summary: "Allow this original task to request connector setup".into(),
+            body: None,
         },
-        risk: ApprovalRisk::High, request_body: None,
-        allowed_decisions: [ApprovalDecision::Approve, ApprovalDecision::Deny].into_iter().collect(),
+        risk: ApprovalRisk::High,
+        request_body: None,
+        allowed_decisions: [ApprovalDecision::Approve, ApprovalDecision::Deny]
+            .into_iter()
+            .collect(),
         expires_at: Some(expires.into()),
         metadata: meerkat_core::SurfaceMetadata {
-            app_context: login_scope.map(|scope| serde_json::json!({"protected_login_scope":scope})),
+            app_context: login_scope
+                .map(|scope| serde_json::json!({"protected_login_scope":scope})),
             ..Default::default()
-        }, request_provenance: None,
+        },
+        request_provenance: None,
     };
     // Both terminal and protected application reviews delegate the complete
     // recover/review/select sequence to its existing decision/source owner.
-    owner.review_original_setup_request(prepared, request, |request| async {
-        approvals.review_access(request).await
-            .map_err(|_| meerkat_toolkit::host_lifetime::control::HostLifetimeError::Unavailable)
-    }).await.map_err(|error| ConnectError::native("review or recover original setup selection", error))
+    owner
+        .review_original_setup_request(prepared, request, |request| async {
+            approvals.review_access(request).await.map_err(|_| {
+                meerkat_toolkit::host_lifetime::control::HostLifetimeError::Unavailable
+            })
+        })
+        .await
+        .map_err(|error| ConnectError::native("review or recover original setup selection", error))
 }

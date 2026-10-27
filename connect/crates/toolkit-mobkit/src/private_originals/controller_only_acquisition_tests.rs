@@ -29,7 +29,9 @@ pub(super) struct Script {
     first_response_release: tokio::sync::Semaphore,
 }
 impl Script {
-    pub(super) fn for_approved() -> Arc<Self> { Self::new() }
+    pub(super) fn for_approved() -> Arc<Self> {
+        Self::new()
+    }
     pub(super) fn for_expiring_setup(timeout_ms: u64) -> Arc<Self> {
         let mut script = Self::new();
         Arc::get_mut(&mut script).unwrap().setup_timeout_ms = Some(timeout_ms);
@@ -37,13 +39,17 @@ impl Script {
     }
     pub(super) fn setup_limits(&self) -> crate::installed_host::acquisition::InstalledSetupLimits {
         let mut limits = crate::installed_host::acquisition::InstalledSetupLimits::default();
-        if let Some(timeout) = self.setup_timeout_ms { limits.setup_timeout_ms = timeout; }
+        if let Some(timeout) = self.setup_timeout_ms {
+            limits.setup_timeout_ms = timeout;
+        }
         limits
     }
     pub(super) fn installed_owner(&self) -> Arc<InstalledAcquisition> {
         self.owner.lock().unwrap().as_ref().unwrap().clone()
     }
-    pub(super) fn paused_for_helper_entry() -> Arc<Self> { Self::new_with_hold(true) }
+    pub(super) fn paused_for_helper_entry() -> Arc<Self> {
+        Self::new_with_hold(true)
+    }
     pub(super) fn paused_for_expiring_helper_entry(timeout_ms: u64) -> Arc<Self> {
         let mut script = Self::new_with_hold(true);
         Arc::get_mut(&mut script).unwrap().setup_timeout_ms = Some(timeout_ms);
@@ -58,10 +64,15 @@ impl Script {
         self.first_response_release.add_permits(1);
     }
     pub(super) fn observations(&self) -> (Vec<ToolResult>, usize, usize) {
-        (self.results.lock().unwrap().clone(), self.dispatch.resolved.load(Ordering::SeqCst),
-            self.dispatch.entered.load(Ordering::SeqCst))
+        (
+            self.results.lock().unwrap().clone(),
+            self.dispatch.resolved.load(Ordering::SeqCst),
+            self.dispatch.entered.load(Ordering::SeqCst),
+        )
     }
-    fn new() -> Arc<Self> { Self::new_with_hold(false) }
+    fn new() -> Arc<Self> {
+        Self::new_with_hold(false)
+    }
     fn new_with_hold(hold_first_response: bool) -> Arc<Self> {
         let tools = InstalledAcquisitionTools::new(Duration::from_secs(10)).unwrap();
         let dispatch = Arc::new(ObservedLeaf {
@@ -94,7 +105,11 @@ impl Script {
     // Durable fixture teardown calls this only after its actual close joins.
     // Drop our retained acquisition owner, never native or source-owned state.
     pub(super) fn release_owner_after_close(&self) {
-        let owner = self.owner.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
+        let owner = self
+            .owner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
         drop(owner);
     }
     pub(super) fn provider(self: &Arc<Self>, inner: Arc<dyn LlmClient>) -> Arc<dyn LlmClient> {
@@ -188,7 +203,9 @@ impl AgentToolDispatcher for ObservedLeaf {
     ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
         self.entered.fetch_add(1, Ordering::SeqCst);
         let probe = self.probe.lock().unwrap().clone();
-        if let Some(probe) = probe { probe.inspect(call, context).await; }
+        if let Some(probe) = probe {
+            probe.inspect(call, context).await;
+        }
         self.inner.dispatch_with_context(call, context).await
     }
     async fn dispatch_resolved_with_context(
@@ -199,7 +216,9 @@ impl AgentToolDispatcher for ObservedLeaf {
     ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
         self.entered.fetch_add(1, Ordering::SeqCst);
         let probe = self.probe.lock().unwrap().clone();
-        if let Some(probe) = probe { probe.inspect(call, context).await; }
+        if let Some(probe) = probe {
+            probe.inspect(call, context).await;
+        }
         self.inner
             .dispatch_resolved_with_context(call, context, plan)
             .await
@@ -289,15 +308,21 @@ impl LlmClient for AcquisitionResponse {
             return stream;
         }
         let script = self.script.clone();
-        Box::pin(futures::stream::once(async move {
-            if script.hold_first_response {
-                // Hold only physical scripted output. Native authorization and
-                // input admission remain on their ordinary owner paths.
-                script.first_response_entered.notify_one();
-                script.first_response_release.acquire().await.unwrap().forget();
-            }
-            stream.map(|event| {
-            event.map(|event| match event {
+        Box::pin(
+            futures::stream::once(async move {
+                if script.hold_first_response {
+                    // Hold only physical scripted output. Native authorization and
+                    // input admission remain on their ordinary owner paths.
+                    script.first_response_entered.notify_one();
+                    script
+                        .first_response_release
+                        .acquire()
+                        .await
+                        .unwrap()
+                        .forget();
+                }
+                stream.map(|event| {
+                    event.map(|event| match event {
                 LlmEvent::TextDelta { .. } => LlmEvent::ToolCallComplete {
                     id: CALL.into(),
                     name: crate::FIND_AND_INSTALL.into(),
@@ -311,8 +336,10 @@ impl LlmClient for AcquisitionResponse {
                 },
                 other => other,
             })
+                })
             })
-        }).flatten())
+            .flatten(),
+        )
     }
     fn provider(&self) -> Provider {
         self.inner.provider()

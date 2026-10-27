@@ -211,9 +211,15 @@ impl PrivateOriginals {
             }
             retained.capability.clone()
         } else {
-            let Some(selection) = &facts.selection else { return Ok(None); };
-            if !self.configured_parent_current(&facts, &selection.parent)? { return Ok(None); }
-            self.retain_configured_setup(reference, session, selection.clone()).await?.capability
+            let Some(selection) = &facts.selection else {
+                return Ok(None);
+            };
+            if !self.configured_parent_current(&facts, &selection.parent)? {
+                return Ok(None);
+            }
+            self.retain_configured_setup(reference, session, selection.clone())
+                .await?
+                .capability
         };
         let origin = self.setup_origin_for(reference)?;
         let selected_targets = selection.helper_targets.clone();
@@ -268,9 +274,15 @@ impl PrivateOriginals {
                         Ok(lineage)
                     };
                     let lineage = issue().map_err(|_| HostLifetimeError::Unavailable)?;
-                    let targets = super::setup_targets::issue_targets(&owner, &facts.application,
-                        &facts.route.logical_executor, facts.route.represented_subject.as_ref(),
-                        &origin, &child_id, &selected_targets)?;
+                    let targets = super::setup_targets::issue_targets(
+                        &owner,
+                        &facts.application,
+                        &facts.route.logical_executor,
+                        facts.route.represented_subject.as_ref(),
+                        &origin,
+                        &child_id,
+                        &selected_targets,
+                    )?;
                     super::setup_targets::project(lineage, targets)
                 })
             })
@@ -282,52 +294,101 @@ impl PrivateOriginals {
     }
 
     #[cfg(test)]
-    pub(super) async fn configured_setup_lineage(&self, record: &SourceRecord,
-        reference: &PrivateOriginalRef, session: &meerkat_core::SessionId,
-        console: Option<super::console_ingress::ConsoleEntry>)
-        -> Result<Option<Vec<GrantLineageRef>>, PrivateOriginalError>
-    {
-        self.configured_setup_basis(record, reference, session, console).await?.map(|basis|
-            super::setup_targets::find_lineage(&basis).map(<[GrantLineageRef]>::to_vec)
-                .ok_or(PrivateOriginalError::Conflict)).transpose()
+    pub(super) async fn configured_setup_lineage(
+        &self,
+        record: &SourceRecord,
+        reference: &PrivateOriginalRef,
+        session: &meerkat_core::SessionId,
+        console: Option<super::console_ingress::ConsoleEntry>,
+    ) -> Result<Option<Vec<GrantLineageRef>>, PrivateOriginalError> {
+        self.configured_setup_basis(record, reference, session, console)
+            .await?
+            .map(|basis| {
+                super::setup_targets::find_lineage(&basis)
+                    .map(<[GrantLineageRef]>::to_vec)
+                    .ok_or(PrivateOriginalError::Conflict)
+            })
+            .transpose()
     }
 
-    pub(super) async fn retain_configured_setup(&self, reference: &PrivateOriginalRef,
-        session: &meerkat_core::SessionId, capability: CompiledAgentSetupCapability)
-        -> Result<ConfiguredSetupSelection, PrivateOriginalError>
-    {
-        crate::installed_host::operator_setup::setup_targets::validate_compiled(&capability.helper_targets)
-            .map_err(|_| PrivateOriginalError::Denied)?;
-        let selection = ConfiguredSetupSelection { capability, session_id: session.clone() };
+    pub(super) async fn retain_configured_setup(
+        &self,
+        reference: &PrivateOriginalRef,
+        session: &meerkat_core::SessionId,
+        capability: CompiledAgentSetupCapability,
+    ) -> Result<ConfiguredSetupSelection, PrivateOriginalError> {
+        crate::installed_host::operator_setup::setup_targets::validate_compiled(
+            &capability.helper_targets,
+        )
+        .map_err(|_| PrivateOriginalError::Denied)?;
+        let selection = ConfiguredSetupSelection {
+            capability,
+            session_id: session.clone(),
+        };
         let route = self.route(&reference.route)?;
         let original = meerkat_authorization_contracts::work_association::OriginalWorkRef {
-            authority: route.source_authority.clone(), work: reference.original.clone(),
+            authority: route.source_authority.clone(),
+            work: reference.original.clone(),
         };
-        self.owner.with_unbound_source_selection(&route.realm, &original, || async {
-            let key = self.key(reference)?;
-            let saved = self.store.get(&key).await.map_err(store_error)?.ok_or(PrivateOriginalError::Unavailable)?;
-            let mut record = self.decode_record(&saved, reference)?;
-            if record.operation_cancelled || record.final_association.is_some() || record.setup_request.is_some()
-                || record.approved_task.is_some() || record.service_admission.is_some()
-            { return Err(PrivateOriginalError::Denied); }
-            if let Some(prior) = record.configured_setup {
-                return if prior == selection { Ok(prior) } else { Err(PrivateOriginalError::Conflict) };
-            }
-            // A legacy or damaged row cannot use a previously entered child
-            // as permission to adopt a wider present-day target selection.
-            if !selection.capability.helper_targets.is_empty()
-                && self.owner.grants().issued_reference(&self.configured_child_id(reference)?)
-                    .map_err(|_| PrivateOriginalError::Unavailable)?.is_some()
-            { return Err(PrivateOriginalError::Conflict); }
-            record.configured_setup = Some(selection.clone());
-            self.store.compare_and_swap(Transition { key, expected_revision: saved.revision,
-                expected_digest: Some(saved.content_digest), claim: None, data: encode(record)?,
-                events: vec![], effects: vec![], }).await.map_err(store_error)?;
-            Ok(selection)
-        }).await.map_err(|error| match error {
-            OriginalWriterError::Conflict | OriginalWriterError::OperationCancelled => PrivateOriginalError::Denied,
-            _ => PrivateOriginalError::Unavailable,
-        })?
+        self.owner
+            .with_unbound_source_selection(&route.realm, &original, || async {
+                let key = self.key(reference)?;
+                let saved = self
+                    .store
+                    .get(&key)
+                    .await
+                    .map_err(store_error)?
+                    .ok_or(PrivateOriginalError::Unavailable)?;
+                let mut record = self.decode_record(&saved, reference)?;
+                if record.operation_cancelled
+                    || record.final_association.is_some()
+                    || record.setup_request.is_some()
+                    || record.approved_task.is_some()
+                    || record.service_admission.is_some()
+                {
+                    return Err(PrivateOriginalError::Denied);
+                }
+                if let Some(prior) = record.configured_setup {
+                    return if prior == selection {
+                        Ok(prior)
+                    } else {
+                        Err(PrivateOriginalError::Conflict)
+                    };
+                }
+                // A legacy or damaged row cannot use a previously entered child
+                // as permission to adopt a wider present-day target selection.
+                if !selection.capability.helper_targets.is_empty()
+                    && self
+                        .owner
+                        .grants()
+                        .issued_reference(&self.configured_child_id(reference)?)
+                        .map_err(|_| PrivateOriginalError::Unavailable)?
+                        .is_some()
+                {
+                    return Err(PrivateOriginalError::Conflict);
+                }
+                record.configured_setup = Some(selection.clone());
+                self.store
+                    .compare_and_swap(Transition {
+                        key,
+                        expected_revision: saved.revision,
+                        expected_digest: Some(saved.content_digest),
+                        claim: None,
+                        data: encode(record)?,
+                        events: vec![],
+                        effects: vec![],
+                    })
+                    .await
+                    .map_err(store_error)?;
+                Ok(selection)
+            })
+            .await
+            .map_err(|error| match error {
+                OriginalWriterError::Conflict | OriginalWriterError::OperationCancelled => {
+                    PrivateOriginalError::Denied
+                }
+                _ => PrivateOriginalError::Unavailable,
+            })?
     }
 
     /// Runs after the canonical read under the existing original mutation
@@ -357,15 +418,21 @@ impl PrivateOriginals {
             let session = meerkat_core::SessionId::parse(claims.target.context.as_str())
                 .map_err(|_| PrivateOriginalError::Conflict)?;
             if let Some(saved) = &record.final_association {
-                if saved != association { return Err(PrivateOriginalError::Conflict); }
+                if saved != association {
+                    return Err(PrivateOriginalError::Conflict);
+                }
             }
             if let Some(retained) = &record.configured_setup {
                 if retained.session_id != session || retained.capability.route != reference.route {
                     return Err(PrivateOriginalError::Conflict);
                 }
-                super::setup_targets::check_structure(std::slice::from_ref(&retained.capability.parent),
-                    &self.configured_child_id(reference)?, &retained.capability.helper_targets,
-                    &claims.authority_basis).map_err(|_| PrivateOriginalError::Conflict)?;
+                super::setup_targets::check_structure(
+                    std::slice::from_ref(&retained.capability.parent),
+                    &self.configured_child_id(reference)?,
+                    &retained.capability.helper_targets,
+                    &claims.authority_basis,
+                )
+                .map_err(|_| PrivateOriginalError::Conflict)?;
                 if record.final_association.is_none() {
                     let lineage = super::setup_targets::find_lineage(&claims.authority_basis)
                         .ok_or(PrivateOriginalError::Conflict)?;

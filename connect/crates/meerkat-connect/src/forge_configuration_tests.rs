@@ -361,16 +361,25 @@ async fn forge_recovery_menu_user_exit_preserves_locator_without_host_or_approva
         let mut saved = reference();
         saved.origin = format!("http://{}", listener.local_addr().unwrap());
         recovery::save(previous.path(), &saved).unwrap();
-        let locator = std::fs::read_dir(previous.path()).unwrap().next().unwrap().unwrap().path();
+        let locator = std::fs::read_dir(previous.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
         let original_locator = std::fs::read(&locator).unwrap();
         let (front, mut presenter) = ForgeFrontend::new();
         front.artifacts(current.path()).unwrap();
         let caller = front.clone();
         let task = tokio::spawn(async move {
             let args = RawValue::from_string("{}".into()).unwrap();
-            caller.dispatch(ToolCallView {
-                id: "exit-recovery-menu", name: FORGE_SELECT_HOST, args: &args,
-            }).await
+            caller
+                .dispatch(ToolCallView {
+                    id: "exit-recovery-menu",
+                    name: FORGE_SELECT_HOST,
+                    args: &args,
+                })
+                .await
         });
         let prompt = presenter.next().await.unwrap();
         let pty = nix::pty::openpty(None, None).unwrap();
@@ -385,24 +394,44 @@ async fn forge_recovery_menu_user_exit_preserves_locator_without_host_or_approva
                 interrupted.await.unwrap()
             });
             tokio::pin!(presentation);
-            assert!(timeout(Duration::from_millis(25), &mut presentation).await.is_err());
+            assert!(
+                timeout(Duration::from_millis(25), &mut presentation)
+                    .await
+                    .is_err()
+            );
             match stop {
-                "quit" => { nix::unistd::write(&pty.master, b"/quit\n").unwrap(); }
-                "eof" => { nix::unistd::write(&pty.master, b"\x04").unwrap(); }
+                "quit" => {
+                    nix::unistd::write(&pty.master, b"/quit\n").unwrap();
+                }
+                "eof" => {
+                    nix::unistd::write(&pty.master, b"\x04").unwrap();
+                }
                 "interrupt" => signal.send(Ok(())).unwrap(),
-                "signal_error" => signal.send(Err(io::Error::other("fixture signal failure"))).unwrap(),
+                "signal_error" => signal
+                    .send(Err(io::Error::other("fixture signal failure")))
+                    .unwrap(),
                 "waiter_closed" => task.abort(),
                 _ => unreachable!(),
             }
             let result = timeout(Duration::from_secs(2), presentation).await.unwrap();
             if stop == "signal_error" {
-                assert!(matches!(result, Err(ConnectError::Native {
-                    operation: "interrupt Forge recovery", ..
-                })));
+                assert!(matches!(
+                    result,
+                    Err(ConnectError::Native {
+                        operation: "interrupt Forge recovery",
+                        ..
+                    })
+                ));
             } else if stop == "waiter_closed" {
-                assert!(result.is_err(), "a lost native handoff must remain a failure");
+                assert!(
+                    result.is_err(),
+                    "a lost native handoff must remain a failure"
+                );
             } else {
-                assert!(!result.unwrap(), "intentional menu exit must request normal CLI stop");
+                assert!(
+                    !result.unwrap(),
+                    "intentional menu exit must request normal CLI stop"
+                );
             }
         }
         let dispatched = timeout(Duration::from_secs(2), task).await.unwrap();
@@ -411,9 +440,18 @@ async fn forge_recovery_menu_user_exit_preserves_locator_without_host_or_approva
         } else {
             assert!(dispatched.unwrap().is_err());
         }
-        assert_eq!(nix::sys::termios::tcgetattr(&observer).unwrap(), original_mode);
-        assert_eq!(nix::fcntl::fcntl(&observer, nix::fcntl::FcntlArg::F_GETFL).unwrap(), original_flags);
-        assert!(matches!(*front.binding.state.lock().unwrap(), State::Retired));
+        assert_eq!(
+            nix::sys::termios::tcgetattr(&observer).unwrap(),
+            original_mode
+        );
+        assert_eq!(
+            nix::fcntl::fcntl(&observer, nix::fcntl::FcntlArg::F_GETFL).unwrap(),
+            original_flags
+        );
+        assert!(matches!(
+            *front.binding.state.lock().unwrap(),
+            State::Retired
+        ));
         let state = front.binding.configuration.lock().unwrap();
         assert!(state.recovered.is_none() && state.references.is_empty());
         assert!(state.prepared.is_empty() && state.armed.is_none());
@@ -422,8 +460,12 @@ async fn forge_recovery_menu_user_exit_preserves_locator_without_host_or_approva
         assert_eq!(std::fs::read(&locator).unwrap(), original_locator);
         assert_eq!(std::fs::read_dir(previous.path()).unwrap().count(), 1);
         assert_eq!(std::fs::read_dir(current.path()).unwrap().count(), 0);
-        assert!(timeout(Duration::from_millis(25), listener.accept()).await.is_err(),
-                "leaving recovery must not enter login, prepare or submit HTTP");
+        assert!(
+            timeout(Duration::from_millis(25), listener.accept())
+                .await
+                .is_err(),
+            "leaving recovery must not enter login, prepare or submit HTTP"
+        );
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("Previous Forge changes"));
         assert!(!output.contains("Forge Console origin") && !output.contains("password"));

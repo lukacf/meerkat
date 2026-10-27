@@ -114,7 +114,9 @@ impl InstalledResources {
                 "preparation_sha256": digest(&preparation),
             }),
             #[cfg(feature = "console")]
-            handoff_sha256: digest(&exact_file(&prepared.artifact_directory.join("prepare.stdout"))?),
+            handoff_sha256: digest(&exact_file(
+                &prepared.artifact_directory.join("prepare.stdout"),
+            )?),
             poisoned: false,
             process: None,
             #[cfg(test)]
@@ -127,13 +129,16 @@ impl InstalledResources {
 impl LocalRoundOwner {
     #[cfg(feature = "console")]
     pub(crate) fn matches_preparation(
-        &self, resources: &crate::application_setup::PreparedApplicationResources,
+        &self,
+        resources: &crate::application_setup::PreparedApplicationResources,
     ) -> Result<(), String> {
-        if self.poisoned || self.has_pending_round()
+        if self.poisoned
+            || self.has_pending_round()
             || self.artifacts != resources.artifact_directory
             || resources.handoff.path != self.artifacts.join("prepare.stdout")
             || resources.handoff.sha256 != self.handoff_sha256
-            || digest(&exact_file(&resources.handoff.path).map_err(|e| e.to_string())?) != self.handoff_sha256
+            || digest(&exact_file(&resources.handoff.path).map_err(|e| e.to_string())?)
+                != self.handoff_sha256
         {
             return Err("local round owner differs from the ordinary preparation".into());
         }

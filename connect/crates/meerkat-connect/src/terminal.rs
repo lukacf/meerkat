@@ -386,7 +386,8 @@ impl TerminalInput {
     /// Service credentials go only to the retained protected installation.
     /// Slot labels are separately validated names. No secret enters recv().
     pub(crate) async fn read_service_secret(
-        &mut self, output: &mut impl Write,
+        &mut self,
+        output: &mut impl Write,
     ) -> io::Result<Option<ServiceSecret>> {
         let fd = self.descriptor()?;
         self.pending.clear();
@@ -399,9 +400,12 @@ impl TerminalInput {
                 Ok(None) => break Ok(None),
                 Ok(Some(line)) if line == "/quit" => break Ok(None),
                 Ok(Some(line)) if line.is_empty() || line.contains('\0') => {
-                    writeln!(output, "\nThe credential must be nonempty and contain no NUL. Enter it again, or /quit.")?;
+                    writeln!(
+                        output,
+                        "\nThe credential must be nonempty and contain no NUL. Enter it again, or /quit."
+                    )?;
                     output.flush()?;
-                },
+                }
                 Ok(Some(line)) => break ServiceSecret::from_hidden_input(line).map(Some),
                 Err(error) => break Err(error),
             }
@@ -415,7 +419,8 @@ impl TerminalInput {
     /// Connector client secrets go directly to the native update value, never
     /// to recv(), a model tool, or a Debug/serializable host value.
     pub(crate) async fn read_connector_client_secret(
-        &mut self, output: &mut impl Write,
+        &mut self,
+        output: &mut impl Write,
     ) -> io::Result<Option<meerkat::ConnectorClientSecretUpdate>> {
         let fd = self.descriptor()?;
         self.pending.clear();
@@ -428,7 +433,10 @@ impl TerminalInput {
                 Ok(None) => break Ok(None),
                 Ok(Some(line)) if line == "/quit" => break Ok(None),
                 Ok(Some(line)) if line.is_empty() => {
-                    writeln!(output, "\nThe client secret is empty. Enter it again, or /quit.")?;
+                    writeln!(
+                        output,
+                        "\nThe client secret is empty. Enter it again, or /quit."
+                    )?;
                     output.flush()?;
                 }
                 Ok(Some(line)) => break Ok(Some(meerkat::ConnectorClientSecretUpdate::Set(line))),
@@ -842,11 +850,16 @@ pub(crate) struct ServiceSecret(String);
 impl ServiceSecret {
     pub(crate) fn from_hidden_input(value: String) -> io::Result<Self> {
         if value.is_empty() || value.len() > 16 * 1024 || value.contains('\0') {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "The hidden service credential is invalid"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "The hidden service credential is invalid",
+            ));
         }
         Ok(Self(value))
     }
-    pub(crate) fn expose(&self) -> &str { &self.0 }
+    pub(crate) fn expose(&self) -> &str {
+        &self.0
+    }
 }
 
 #[cfg(test)]
@@ -864,9 +877,9 @@ mod tests {
     #[tokio::test]
     async fn service_secret_entry_is_hidden_and_cancel_restores_the_same_input() {
         use futures_util::FutureExt;
-        use nix::{pty::openpty,unistd::write};
-        tokio::time::timeout(std::time::Duration::from_secs(5),async {
-            let pair = openpty(None,None).unwrap();
+        use nix::{pty::openpty, unistd::write};
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let pair = openpty(None, None).unwrap();
             let observer = pair.slave.try_clone().unwrap();
             let original = tcgetattr(&observer).unwrap();
             let mut input = TerminalInput::from_owned_fd(pair.slave);
@@ -874,25 +887,37 @@ mod tests {
             let value = {
                 let mut reading = Box::pin(input.read_service_secret(&mut output));
                 assert!(reading.as_mut().now_or_never().is_none());
-                assert!(!tcgetattr(&observer).unwrap().local_flags.contains(LocalFlags::ECHO));
-                write(&pair.master,b"synthetic-service-value\n").unwrap();
+                assert!(
+                    !tcgetattr(&observer)
+                        .unwrap()
+                        .local_flags
+                        .contains(LocalFlags::ECHO)
+                );
+                write(&pair.master, b"synthetic-service-value\n").unwrap();
                 reading.await.unwrap().unwrap()
             };
-            assert_eq!(value.expose(),"synthetic-service-value");
+            assert_eq!(value.expose(), "synthetic-service-value");
             assert!(!String::from_utf8_lossy(&output).contains(value.expose()));
-            assert_eq!(tcgetattr(&observer).unwrap(),original);
+            assert_eq!(tcgetattr(&observer).unwrap(), original);
             input.check_cleanup().unwrap();
             {
                 let mut reading = Box::pin(input.read_service_secret(&mut output));
                 assert!(reading.as_mut().now_or_never().is_none());
-                assert!(!tcgetattr(&observer).unwrap().local_flags.contains(LocalFlags::ECHO));
+                assert!(
+                    !tcgetattr(&observer)
+                        .unwrap()
+                        .local_flags
+                        .contains(LocalFlags::ECHO)
+                );
                 drop(reading);
             }
-            assert_eq!(tcgetattr(&observer).unwrap(),original);
+            assert_eq!(tcgetattr(&observer).unwrap(), original);
             input.check_cleanup().unwrap();
-            write(&pair.master,b"ordinary next input\n").unwrap();
-            assert_eq!(input.recv().await.unwrap().unwrap(),"ordinary next input");
-        }).await.expect("protected entry and input restoration must settle");
+            write(&pair.master, b"ordinary next input\n").unwrap();
+            assert_eq!(input.recv().await.unwrap().unwrap(), "ordinary next input");
+        })
+        .await
+        .expect("protected entry and input restoration must settle");
     }
 
     async fn retain_bytes(input: &mut TerminalInput, expected: &[u8]) {

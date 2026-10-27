@@ -11,6 +11,9 @@ use std::{
 
 #[path = "forge_application.rs"]
 mod application;
+#[cfg(test)]
+#[path = "forge_descriptor_tests.rs"]
+mod descriptor_tests;
 #[path = "forge_reading.rs"]
 mod reading;
 #[path = "forge_recovery.rs"]
@@ -18,9 +21,6 @@ mod recovery;
 #[cfg(test)]
 #[path = "forge_configuration_tests.rs"]
 mod tests;
-#[cfg(test)]
-#[path = "forge_descriptor_tests.rs"]
-mod descriptor_tests;
 
 pub const FORGE_INSPECT: &str = "forge_frontend_inspect";
 pub const FORGE_PREPARE: &str = "forge_frontend_prepare";
@@ -84,21 +84,34 @@ fn reference(call: ToolCallView<'_>) -> Result<String, ToolError> {
 /// only by the protected authenticated selection, never tool or locator fields.
 pub(super) enum Recipe {
     Reading,
-    Application { expected: ForgeHost, private_fields: BTreeSet<String> },
+    Application {
+        expected: ForgeHost,
+        private_fields: BTreeSet<String>,
+    },
     DeferredApplication(std::sync::OnceLock<super::descriptor::Selected>),
 }
 impl Recipe {
     fn application(&self) -> Result<(&ForgeHost, &BTreeSet<String>), ForgeError> {
         match self {
-            Self::Application { expected, private_fields } => Ok((expected, private_fields)),
-            Self::DeferredApplication(selected) => selected.get()
-                .map(|s| (&s.descriptor.host, &s.descriptor.private_fields)).ok_or(ForgeError::Unavailable),
+            Self::Application {
+                expected,
+                private_fields,
+            } => Ok((expected, private_fields)),
+            Self::DeferredApplication(selected) => selected
+                .get()
+                .map(|s| (&s.descriptor.host, &s.descriptor.private_fields))
+                .ok_or(ForgeError::Unavailable),
             Self::Reading => Err(invalid()),
         }
     }
-    pub(super) fn deferred(&self) -> bool { matches!(self, Self::DeferredApplication(_)) }
+    pub(super) fn deferred(&self) -> bool {
+        matches!(self, Self::DeferredApplication(_))
+    }
     pub(super) fn selected_origin(&self) -> Option<&str> {
-        match self { Self::DeferredApplication(selected) => selected.get().map(|s| s.origin.as_str()), _ => None }
+        match self {
+            Self::DeferredApplication(selected) => selected.get().map(|s| s.origin.as_str()),
+            _ => None,
+        }
     }
     fn host(&self, actual: &ForgeHost) -> Result<(), ForgeError> {
         if !matches!(self, Self::Reading) && self.application()?.0 != actual {
@@ -106,8 +119,12 @@ impl Recipe {
         }
         Ok(())
     }
-    fn private_fields(&self) -> Option<&BTreeSet<String>> { self.application().ok().map(|(_, fields)| fields) }
-    fn reference_schema(&self) -> u8 { if matches!(self, Self::Reading) { 1 } else { 2 } }
+    fn private_fields(&self) -> Option<&BTreeSet<String>> {
+        self.application().ok().map(|(_, fields)| fields)
+    }
+    fn reference_schema(&self) -> u8 {
+        if matches!(self, Self::Reading) { 1 } else { 2 }
+    }
     fn inventory(&self, value: &Value) -> Result<(), ForgeError> {
         match self {
             Self::Reading => reading::inventory(value),
@@ -117,25 +134,37 @@ impl Recipe {
     fn prepare(&self, raw: &str, inventory: &Value) -> Result<OperationRequest, ForgeError> {
         match self {
             Self::Reading => Ok(OperationRequest::Prepare {
-                body: reading::prepare_body(raw, inventory)?, principal: inventory["owner_principal"].clone(),
+                body: reading::prepare_body(raw, inventory)?,
+                principal: inventory["owner_principal"].clone(),
             }),
             _ => {
                 let fields = self.application()?.1;
                 application::observation(inventory, fields)?;
-                Ok(OperationRequest::ApplicationPrepare { body: application::prepare(raw, fields)? })
+                Ok(OperationRequest::ApplicationPrepare {
+                    body: application::prepare(raw, fields)?,
+                })
             }
         }
     }
-    fn proposal(&self, proposal: &Value, request: &OperationRequest, host: &ForgeHost) -> Result<(), ForgeError> {
+    fn proposal(
+        &self,
+        proposal: &Value,
+        request: &OperationRequest,
+        host: &ForgeHost,
+    ) -> Result<(), ForgeError> {
         self.host(host)?;
         match (self, request) {
             (Self::Reading, OperationRequest::Prepare { body, principal }) => {
                 reading::proposal(proposal, body, host)?;
-                if proposal["principal"] != *principal { return Err(invalid()); }
+                if proposal["principal"] != *principal {
+                    return Err(invalid());
+                }
                 Ok(())
             }
-            (Self::Application { .. } | Self::DeferredApplication(_), OperationRequest::ApplicationPrepare { .. }) =>
-                application::proposal(proposal, self.application()?.1),
+            (
+                Self::Application { .. } | Self::DeferredApplication(_),
+                OperationRequest::ApplicationPrepare { .. },
+            ) => application::proposal(proposal, self.application()?.1),
             _ => Err(invalid()),
         }
     }
@@ -145,28 +174,45 @@ impl Recipe {
             Self::Reading if reference.schema == 1 => Ok(()),
             Self::Application { .. } | Self::DeferredApplication(_) => {
                 let (expected, fields) = self.application()?;
-                let shape = reference.schema == 2 && reference.application_private_fields.as_ref() == Some(fields);
+                let shape = reference.schema == 2
+                    && reference.application_private_fields.as_ref() == Some(fields);
                 // The standalone CLI also retains Reading's already-issued
                 // schema1 status locators. Their bytes pass reading::retained;
                 // they do not select a recipe or authorize a new submission.
                 let legacy_status = self.deferred() && reference.schema == 1;
-                if (shape || legacy_status) && stable(expected, &reference.host)
-                    && self.selected_origin().is_none_or(|origin| origin == reference.origin) {
+                if (shape || legacy_status)
+                    && stable(expected, &reference.host)
+                    && self
+                        .selected_origin()
+                        .is_none_or(|origin| origin == reference.origin)
+                {
                     Ok(())
-                } else { Err(invalid()) }
+                } else {
+                    Err(invalid())
+                }
             }
             _ => Err(invalid()),
         }
     }
-    fn submission(&self, observation: &Value, reference: &RecoveryReference) -> Result<(), ForgeError> {
+    fn submission(
+        &self,
+        observation: &Value,
+        reference: &RecoveryReference,
+    ) -> Result<(), ForgeError> {
         self.reference(reference)?;
         match self {
             Self::Reading => reading::submission(observation, reference),
             _ => application::observation(observation, self.application()?.1),
         }
     }
-    fn status(&self, observation: &Value, reference: &RecoveryReference, current: &ForgeHost) -> Result<(), ForgeError> {
-        self.reference(reference)?; self.host(current)?;
+    fn status(
+        &self,
+        observation: &Value,
+        reference: &RecoveryReference,
+        current: &ForgeHost,
+    ) -> Result<(), ForgeError> {
+        self.reference(reference)?;
+        self.host(current)?;
         match self {
             Self::Reading => reading::status(observation, reference, current),
             Self::DeferredApplication(_) if reference.schema == 1 => {
@@ -265,14 +311,24 @@ pub(super) struct ConfigurationState {
 
 impl ConfigurationState {
     pub(super) fn into_continuation(self) -> Result<Self, ConnectError> {
-        if self.busy { return Err(ended()); }
+        if self.busy {
+            return Err(ended());
+        }
         // Move denial/history facts only. Fresh capture and current declarations
         // are still required; no prepared proposal, proof, arm or path survives.
-        let recovered = self.recovered.or_else(|| self.uncertain.as_ref()
-            .and_then(|id| id.as_ref()).and_then(|id| self.references.get(id).cloned()));
+        let recovered = self.recovered.or_else(|| {
+            self.uncertain
+                .as_ref()
+                .and_then(|id| id.as_ref())
+                .and_then(|id| self.references.get(id).cloned())
+        });
         Ok(Self {
-            references:self.references, recovered, spent_calls:self.spent_calls,
-            submitted:self.submitted, uncertain:self.uncertain, ..Default::default()
+            references: self.references,
+            recovered,
+            spent_calls: self.spent_calls,
+            submitted: self.submitted,
+            uncertain: self.uncertain,
+            ..Default::default()
         })
     }
 }
@@ -298,7 +354,9 @@ pub(super) fn tools(recipe: &Recipe) -> Vec<Arc<ToolDef>> {
             },
             match recipe {
                 Recipe::Reading => reading::schema(),
-                Recipe::Application { .. } | Recipe::DeferredApplication(_) => application::schema(),
+                Recipe::Application { .. } | Recipe::DeferredApplication(_) => {
+                    application::schema()
+                }
             },
         )),
         Arc::new(ToolDef::new(
@@ -515,7 +573,10 @@ impl ForgeFrontend {
                 {
                     return Err(refused(call.name));
                 }
-                self.binding.current_declarations(&captured.client).await.map_err(error)?;
+                self.binding
+                    .current_declarations(&captured.client)
+                    .await
+                    .map_err(error)?;
                 let response = captured
                     .client
                     .management(reqwest::Method::GET, SUPPORT_PATH, None)
@@ -537,7 +598,9 @@ impl ForgeFrontend {
                     .inventory = Some(value.clone());
                 match &self.binding.recipe {
                     Recipe::Reading => json!({"host":host,"observation":value}),
-                    Recipe::Application { .. } | Recipe::DeferredApplication(_) => json!({"host":host,"observation_json":raw.get()}),
+                    Recipe::Application { .. } | Recipe::DeferredApplication(_) => {
+                        json!({"host":host,"observation_json":raw.get()})
+                    }
                 }
             }
             FORGE_STATUS => {
@@ -563,7 +626,10 @@ impl ForgeFrontend {
                         .cloned()
                         .ok_or_else(|| refused(call.name))?
                 };
-                self.binding.current_declarations(&captured.client).await.map_err(error)?;
+                self.binding
+                    .current_declarations(&captured.client)
+                    .await
+                    .map_err(error)?;
                 let response = captured
                     .client
                     .management(
@@ -713,7 +779,8 @@ impl ForgeClient {
         path: &str,
         body: Option<String>,
     ) -> Result<Envelope, ForgeError> {
-        self.management_offering_outcome(method, path, body, false).await
+        self.management_offering_outcome(method, path, body, false)
+            .await
     }
     async fn management_offering_outcome(
         &self,
@@ -781,7 +848,10 @@ impl ForgeClient {
             }
             // Explicit null is malformed, not the old producer's absent field.
             if shape.get("submission_outcome").is_some()
-                && value.submission_outcome.as_ref().is_none_or(|outcome| !id(&outcome.change_id))
+                && value
+                    .submission_outcome
+                    .as_ref()
+                    .is_none_or(|outcome| !id(&outcome.change_id))
             {
                 return Err(invalid());
             }
@@ -893,7 +963,10 @@ impl ForgeOperation {
         self.entered = true;
         let (path, body) = request.wire()?;
         let offer_outcome = matches!(&request, OperationRequest::Submit(_))
-            && matches!(&self.binding.recipe, Recipe::Application { .. } | Recipe::DeferredApplication(_));
+            && matches!(
+                &self.binding.recipe,
+                Recipe::Application { .. } | Recipe::DeferredApplication(_)
+            );
         let result = self
             .client
             .management_offering_outcome(reqwest::Method::POST, &path, Some(body), offer_outcome)
@@ -997,7 +1070,10 @@ fn submission_reply(
     recipe.host(host)?;
     let observation: Value = parse(raw.get())?;
     recipe.submission(&observation, reference)?;
-    if matches!(recipe, Recipe::Application { .. } | Recipe::DeferredApplication(_)) {
+    if matches!(
+        recipe,
+        Recipe::Application { .. } | Recipe::DeferredApplication(_)
+    ) {
         let mut reply = json!({"host":host,"change_id":reference.change_id,
             "observation_json":raw.get(),"recovery_only":true});
         if let Some(outcome) = outcome {
@@ -1007,7 +1083,8 @@ fn submission_reply(
                 || state.auth_required
                 || state.recovered.is_some()
                 || state.armed.is_some()
-                || state.uncertain.as_ref().and_then(|id| id.as_deref()) != Some(reference.change_id.as_str())
+                || state.uncertain.as_ref().and_then(|id| id.as_deref())
+                    != Some(reference.change_id.as_str())
                 || !state.submitted.contains(&reference.change_id)
             {
                 return Err(invalid());
@@ -1063,10 +1140,16 @@ pub(super) async fn present_operation(
         checked = prompt.binding.current_declarations(&prompt.client) => checked,
     };
     if let Some(signal) = interrupted.as_mut().now_or_never() {
-        signal.map_err(|e| ConnectError::native("interrupt Forge configuration", e))?; return Ok(false);
+        signal.map_err(|e| ConnectError::native("interrupt Forge configuration", e))?;
+        return Ok(false);
     }
-    if response.is_closed() { return Err(ended()); }
-    if let Err(error) = checked { let _ = response.send(Err(error)); return Ok(true); }
+    if response.is_closed() {
+        return Err(ended());
+    }
+    if let Err(error) = checked {
+        let _ = response.send(Err(error));
+        return Ok(true);
+    }
     let (result, mut cancelled) = {
         let operation = prompt.perform();
         tokio::pin!(operation);
@@ -1107,13 +1190,22 @@ pub(super) async fn select_recovery<F: Future<Output = io::Result<()>>>(
 ) -> Result<ControlFlow<(), Option<String>>, ConnectError> {
     if let Some(prior) = prior {
         writeln!(output,"Sign in again at the same selected Forge Console. Previous approvals will not be restored.").map_err(|e|ConnectError::native("write Forge recovery",e))?;
-        return Ok(ControlFlow::Continue(Some(prior.client.literal_origin.clone())));
+        return Ok(ControlFlow::Continue(Some(
+            prior.client.literal_origin.clone(),
+        )));
     }
     let retained = {
         let state = binding.configuration.lock().map_err(|_| ended())?;
         if state.uncertain.is_some() || state.recovered.is_some() {
-            Some(state.recovered.as_ref().map(|reference| reference.origin.clone()))
-        } else { None }
+            Some(
+                state
+                    .recovered
+                    .as_ref()
+                    .map(|reference| reference.origin.clone()),
+            )
+        } else {
+            None
+        }
     };
     if let Some(origin) = retained {
         writeln!(output, "The previous Forge operation remains restricted to its retained status record. No proposal or submission approval was restored.")
@@ -1320,8 +1412,13 @@ pub(super) async fn browser_operation(
         _ = response.closed() => return Err(ended()),
         checked = prompt.binding.current_declarations(&prompt.client) => checked,
     };
-    if response.is_closed() || bridge.retired() { return Err(ended()); }
-    if let Err(error) = checked { let _ = response.send(Err(error)); return Ok(()); }
+    if response.is_closed() || bridge.retired() {
+        return Err(ended());
+    }
+    if let Err(error) = checked {
+        let _ = response.send(Err(error));
+        return Ok(());
+    }
     let result = {
         let operation = prompt.perform();
         tokio::pin!(operation);
@@ -1336,8 +1433,10 @@ pub(super) async fn browser_operation(
             }
         }
     };
-    let _=response.send(result);
-    if bridge.retired(){return Err(ended());}
+    let _ = response.send(result);
+    if bridge.retired() {
+        return Err(ended());
+    }
     Ok(())
 }
 
@@ -1349,7 +1448,9 @@ impl Binding {
             state.inventory = None;
             state.prepared.clear();
             state.armed = None;
-            if matches!(error, ForgeError::SessionRequired) { state.auth_required = true; }
+            if matches!(error, ForgeError::SessionRequired) {
+                state.auth_required = true;
+            }
         }
         checked
     }

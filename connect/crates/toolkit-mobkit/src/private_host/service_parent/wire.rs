@@ -1,8 +1,8 @@
 //! Values on the existing protected parent connection. These are attribution
 //! and correlation, never authentication or a reusable administrative grant.
+use crate::private_originals::ServiceParentAuthorizationProposal;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use crate::private_originals::ServiceParentAuthorizationProposal;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]

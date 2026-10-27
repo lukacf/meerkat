@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use meerkat_core::{
-    ToolDef, ToolError, ToolProvenance, ToolResult, ToolSourceKind,
-    ops::ToolDispatchOutcome, types::ToolCallView,
+    ToolDef, ToolError, ToolProvenance, ToolResult, ToolSourceKind, ops::ToolDispatchOutcome,
+    types::ToolCallView,
 };
 use toolkit_package::{
     FRONTEND_CATALOG_MAX_BYTES, PackageCatalog, bundled_discovery_catalog,

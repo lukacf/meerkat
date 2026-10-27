@@ -849,12 +849,24 @@ async fn foreign_or_changed_backend_responses_never_acknowledge_the_requested_se
 // Explicit software declaration fixture, independent of ActivationManifest.
 fn software_documents(profile: LocalSelectionProfile) -> (&'static [u8], Vec<u8>, &'static str) {
     let (bytes, runtime, component, strategy, location, executable, artifacts) = match profile {
-        LocalSelectionProfile::Python => (PYTHON_PACKAGE, "python", "python-server", "python-local",
-            "https://example.invalid/fixture_server-1.0-py3-none-any.whl", "fixture_server/__main__.py",
-            json!({"requirements":"2".repeat(64),"dependency_one-1.0-py3-none-any.whl":"3".repeat(64)})),
-        LocalSelectionProfile::Node => (NODE_PACKAGE, "node", "node-server", "node-local",
-            "https://example.invalid/node-server.tgz", "dist/index.js",
-            json!({"package-json":"2".repeat(64),"package-lock":"3".repeat(64),"dependency-archive":"4".repeat(64)})),
+        LocalSelectionProfile::Python => (
+            PYTHON_PACKAGE,
+            "python",
+            "python-server",
+            "python-local",
+            "https://example.invalid/fixture_server-1.0-py3-none-any.whl",
+            "fixture_server/__main__.py",
+            json!({"requirements":"2".repeat(64),"dependency_one-1.0-py3-none-any.whl":"3".repeat(64)}),
+        ),
+        LocalSelectionProfile::Node => (
+            NODE_PACKAGE,
+            "node",
+            "node-server",
+            "node-local",
+            "https://example.invalid/node-server.tgz",
+            "dist/index.js",
+            json!({"package-json":"2".repeat(64),"package-lock":"3".repeat(64),"dependency-archive":"4".repeat(64)}),
+        ),
         LocalSelectionProfile::Mcpb => panic!("full MCPB path only"),
     };
     let package: IntegrationPackage = serde_json::from_slice(bytes).unwrap();
@@ -875,108 +887,252 @@ fn software_documents(profile: LocalSelectionProfile) -> (&'static [u8], Vec<u8>
 
 #[tokio::test]
 async fn software_records_reopen_exact_documents_without_fabricating_legacy_proofs() {
-    let temp=tempfile::tempdir().unwrap();
-    let path=temp.path().join("recipes.sqlite");
-    let mut saved_records=Vec::new();
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("recipes.sqlite");
+    let mut saved_records = Vec::new();
     {
-        let store=SqliteStore::open(&path).unwrap();
-        let recipes=LocalRecipeStore::new(&store,scope("alice")).unwrap();
-        for profile in [LocalSelectionProfile::Python,LocalSelectionProfile::Node] {
-            let (package,declaration,component)=software_documents(profile);
-            let software=RetainedLocalSoftware::parse(package,&declaration,profile,id(component),evidence("decision"),observations()).unwrap();
-            let saved=recipes.save_retained_software(software.clone()).await.unwrap();
-            let before=store.list_records(&scope("alice"),None,10).await.unwrap();
-            assert_eq!(recipes.save_retained_software(software).await.unwrap().digest(),saved.digest());
-            assert_eq!(store.list_records(&scope("alice"),None,10).await.unwrap(),before);
-            let record=before.iter().find(|r| r.data.body["identity"]==json!(saved.package().identity)).unwrap();
-            assert_eq!(record.data.version,4);
-            assert_eq!(record.data.body["document_kind"],"local_software_declaration");
+        let store = SqliteStore::open(&path).unwrap();
+        let recipes = LocalRecipeStore::new(&store, scope("alice")).unwrap();
+        for profile in [LocalSelectionProfile::Python, LocalSelectionProfile::Node] {
+            let (package, declaration, component) = software_documents(profile);
+            let software = RetainedLocalSoftware::parse(
+                package,
+                &declaration,
+                profile,
+                id(component),
+                evidence("decision"),
+                observations(),
+            )
+            .unwrap();
+            let saved = recipes
+                .save_retained_software(software.clone())
+                .await
+                .unwrap();
+            let before = store.list_records(&scope("alice"), None, 10).await.unwrap();
+            assert_eq!(
+                recipes
+                    .save_retained_software(software)
+                    .await
+                    .unwrap()
+                    .digest(),
+                saved.digest()
+            );
+            assert_eq!(
+                store.list_records(&scope("alice"), None, 10).await.unwrap(),
+                before
+            );
+            let record = before
+                .iter()
+                .find(|r| r.data.body["identity"] == json!(saved.package().identity))
+                .unwrap();
+            assert_eq!(record.data.version, 4);
+            assert_eq!(
+                record.data.body["document_kind"],
+                "local_software_declaration"
+            );
             assert!(record.data.body.get("manifest_digest").is_none());
-            assert!(store.list_effects(&record.key,None,10).await.unwrap().is_empty());
-            assert_ne!(saved.digest(),saved.validated_declaration().digest());
+            assert!(
+                store
+                    .list_effects(&record.key, None, 10)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_ne!(saved.digest(), saved.validated_declaration().digest());
             saved_records.push(saved);
         }
     }
-    let store=SqliteStore::open_existing(&path).unwrap();
-    let recipes=LocalRecipeStore::new(&store,scope("alice")).unwrap();
+    let store = SqliteStore::open_existing(&path).unwrap();
+    let recipes = LocalRecipeStore::new(&store, scope("alice")).unwrap();
     for saved in saved_records {
-        let reopened=recipes.load_retained_exact(&saved.package().identity,saved.digest()).await.unwrap().unwrap();
-        let summary=reopened.summary().unwrap();
-        assert_eq!(summary["kind"],"local_software_selection");
-        assert_eq!(summary["declaration_digest"],json!(saved.validated_declaration().digest()));
+        let reopened = recipes
+            .load_retained_exact(&saved.package().identity, saved.digest())
+            .await
+            .unwrap()
+            .unwrap();
+        let summary = reopened.summary().unwrap();
+        assert_eq!(summary["kind"], "local_software_selection");
+        assert_eq!(
+            summary["declaration_digest"],
+            json!(saved.validated_declaration().digest())
+        );
         assert!(summary.get("manifest_digest").is_none());
         assert!(summary.get("configuration_digest").is_none());
-        let RetainedLocalRecipe::Software(actual)=reopened else { panic!("software record"); };
-        assert_eq!(actual.package_json(),saved.package_json());
-        assert_eq!(actual.declaration_json(),saved.declaration_json());
-        assert_eq!(actual.verification(),saved.verification());
-        assert!(recipes.load_selection_exact(&saved.package().identity,saved.digest()).await.is_err());
-        for other in [scope("bob"),StoreScope {realm:"other".into(),owner:"alice".into()}] {
-            assert!(LocalRecipeStore::new(&store,other).unwrap().load_retained_exact(
-                &saved.package().identity,saved.digest()).await.unwrap().is_none());
+        let RetainedLocalRecipe::Software(actual) = reopened else {
+            panic!("software record");
+        };
+        assert_eq!(actual.package_json(), saved.package_json());
+        assert_eq!(actual.declaration_json(), saved.declaration_json());
+        assert_eq!(actual.verification(), saved.verification());
+        assert!(
+            recipes
+                .load_selection_exact(&saved.package().identity, saved.digest())
+                .await
+                .is_err()
+        );
+        for other in [
+            scope("bob"),
+            StoreScope {
+                realm: "other".into(),
+                owner: "alice".into(),
+            },
+        ] {
+            assert!(
+                LocalRecipeStore::new(&store, other)
+                    .unwrap()
+                    .load_retained_exact(&saved.package().identity, saved.digest())
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
         }
-        let mut changed=saved.declaration_json().to_vec(); changed.push(b'\n');
-        let replacement=RetainedLocalSoftware::parse(saved.package_json(),&changed,saved.profile(),saved.component().clone(),
-            saved.decision().clone(),saved.verification().to_vec()).unwrap();
-        assert_ne!(replacement.digest(),saved.digest());
-        assert!(matches!(recipes.save_retained_software(replacement).await,Err(LocalRecipeError::ImmutableConflict)));
+        let mut changed = saved.declaration_json().to_vec();
+        changed.push(b'\n');
+        let replacement = RetainedLocalSoftware::parse(
+            saved.package_json(),
+            &changed,
+            saved.profile(),
+            saved.component().clone(),
+            saved.decision().clone(),
+            saved.verification().to_vec(),
+        )
+        .unwrap();
+        assert_ne!(replacement.digest(), saved.digest());
+        assert!(matches!(
+            recipes.save_retained_software(replacement).await,
+            Err(LocalRecipeError::ImmutableConflict)
+        ));
     }
-    assert_eq!(recipes.list_retained().await.unwrap().verified.len(),2);
+    assert_eq!(recipes.list_retained().await.unwrap().verified.len(), 2);
     assert!(recipes.list_retained().await.unwrap().unverified.is_empty());
 }
 
 #[tokio::test]
 async fn software_reopen_rechecks_document_kind_digest_scope_and_exact_retention() {
-    for change in ["kind","dual-digest","digest","version","null-source","declaration","evidence"] {
-        let temp=tempfile::tempdir().unwrap(); let path=temp.path().join("recipes.sqlite");
-        let (package,declaration,component)=software_documents(LocalSelectionProfile::Python);
-        let software=RetainedLocalSoftware::parse(package,&declaration,LocalSelectionProfile::Python,
-            id(component),evidence("decision"),observations()).unwrap();
+    for change in [
+        "kind",
+        "dual-digest",
+        "digest",
+        "version",
+        "null-source",
+        "declaration",
+        "evidence",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("recipes.sqlite");
+        let (package, declaration, component) = software_documents(LocalSelectionProfile::Python);
+        let software = RetainedLocalSoftware::parse(
+            package,
+            &declaration,
+            LocalSelectionProfile::Python,
+            id(component),
+            evidence("decision"),
+            observations(),
+        )
+        .unwrap();
         {
-            let store=SqliteStore::open(&path).unwrap();
-            LocalRecipeStore::new(&store,scope("alice")).unwrap().save_retained_software(software.clone()).await.unwrap();
+            let store = SqliteStore::open(&path).unwrap();
+            LocalRecipeStore::new(&store, scope("alice"))
+                .unwrap()
+                .save_retained_software(software.clone())
+                .await
+                .unwrap();
         }
-        tamper(&path,|data| match change {
-            "kind" => data.body["document_kind"]=json!("activation_manifest"),
-            "dual-digest" => data.body["manifest_digest"]=json!("c".repeat(64)),
-            "digest" => data.body["declaration_digest"]=json!("c".repeat(64)),
-            "version" => data.version=2,
-            "null-source" => data.body["plugin_source_json"]=Value::Null,
-            "declaration" => data.body["declaration_json"]=json!("{}"),
-            "evidence" => data.body["decision"]["record"]=json!("changed"),
-            _ => unreachable!(),
-        },true);
-        let store=SqliteStore::open_existing(&path).unwrap();
-        let recipes=LocalRecipeStore::new(&store,scope("alice")).unwrap();
-        assert!(recipes.load_retained_exact(&software.package().identity,software.digest()).await.is_err(),"{change}");
-        let listing=recipes.list_retained().await.unwrap();
-        if change=="evidence" {
-            assert_eq!(listing.verified.len(),1);
-            assert_ne!(listing.verified[0].digest(),software.digest());
-        } else { assert!(listing.verified.is_empty(),"{change}"); }
+        tamper(
+            &path,
+            |data| match change {
+                "kind" => data.body["document_kind"] = json!("activation_manifest"),
+                "dual-digest" => data.body["manifest_digest"] = json!("c".repeat(64)),
+                "digest" => data.body["declaration_digest"] = json!("c".repeat(64)),
+                "version" => data.version = 2,
+                "null-source" => data.body["plugin_source_json"] = Value::Null,
+                "declaration" => data.body["declaration_json"] = json!("{}"),
+                "evidence" => data.body["decision"]["record"] = json!("changed"),
+                _ => unreachable!(),
+            },
+            true,
+        );
+        let store = SqliteStore::open_existing(&path).unwrap();
+        let recipes = LocalRecipeStore::new(&store, scope("alice")).unwrap();
+        assert!(
+            recipes
+                .load_retained_exact(&software.package().identity, software.digest())
+                .await
+                .is_err(),
+            "{change}"
+        );
+        let listing = recipes.list_retained().await.unwrap();
+        if change == "evidence" {
+            assert_eq!(listing.verified.len(), 1);
+            assert_ne!(listing.verified[0].digest(), software.digest());
+        } else {
+            assert!(listing.verified.is_empty(), "{change}");
+        }
     }
 }
 
 #[tokio::test]
 async fn software_unknown_save_outcome_requires_readback_without_blind_retry() {
-    let temp=tempfile::tempdir().unwrap(); let path=temp.path().join("recipes.sqlite");
-    let (package,declaration,component)=software_documents(LocalSelectionProfile::Python);
-    let software=RetainedLocalSoftware::parse(package,&declaration,LocalSelectionProfile::Python,
-        id(component),evidence("decision"),observations()).unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("recipes.sqlite");
+    let (package, declaration, component) = software_documents(LocalSelectionProfile::Python);
+    let software = RetainedLocalSoftware::parse(
+        package,
+        &declaration,
+        LocalSelectionProfile::Python,
+        id(component),
+        evidence("decision"),
+        observations(),
+    )
+    .unwrap();
     {
-        let faulty=FaultyStore {inner:SqliteStore::open(&path).unwrap(),fault:Fault::AfterCommit};
-        assert!(matches!(LocalRecipeStore::new(&faulty,scope("alice")).unwrap()
-            .save_retained_software(software.clone()).await,Err(LocalRecipeError::Unconfirmed(_))));
+        let faulty = FaultyStore {
+            inner: SqliteStore::open(&path).unwrap(),
+            fault: Fault::AfterCommit,
+        };
+        assert!(matches!(
+            LocalRecipeStore::new(&faulty, scope("alice"))
+                .unwrap()
+                .save_retained_software(software.clone())
+                .await,
+            Err(LocalRecipeError::Unconfirmed(_))
+        ));
     }
-    let store=SqliteStore::open_existing(&path).unwrap();
-    let before=store.list_records(&scope("alice"),None,10).await.unwrap();
-    let recipes=LocalRecipeStore::new(&store,scope("alice")).unwrap();
-    let RetainedLocalRecipe::Software(reopened)=recipes.load_retained_exact(&software.package().identity,
-        software.digest()).await.unwrap().unwrap() else { panic!("software record"); };
-    assert_eq!(reopened.declaration_json(),declaration);
-    assert_eq!(store.list_records(&scope("alice"),None,10).await.unwrap(),before);
-    assert_eq!(before.len(),1);
-    assert!(store.list_effects(&before[0].key,None,10).await.unwrap().is_empty());
-    assert!(matches!(recipes.save_selection(PYTHON_PACKAGE,PYTHON_SELECTION,LocalSelectionProfile::Python,
-        id(component),evidence("decision"),observations()).await,Err(LocalRecipeError::ImmutableConflict)));
+    let store = SqliteStore::open_existing(&path).unwrap();
+    let before = store.list_records(&scope("alice"), None, 10).await.unwrap();
+    let recipes = LocalRecipeStore::new(&store, scope("alice")).unwrap();
+    let RetainedLocalRecipe::Software(reopened) = recipes
+        .load_retained_exact(&software.package().identity, software.digest())
+        .await
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("software record");
+    };
+    assert_eq!(reopened.declaration_json(), declaration);
+    assert_eq!(
+        store.list_records(&scope("alice"), None, 10).await.unwrap(),
+        before
+    );
+    assert_eq!(before.len(), 1);
+    assert!(
+        store
+            .list_effects(&before[0].key, None, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(matches!(
+        recipes
+            .save_selection(
+                PYTHON_PACKAGE,
+                PYTHON_SELECTION,
+                LocalSelectionProfile::Python,
+                id(component),
+                evidence("decision"),
+                observations()
+            )
+            .await,
+        Err(LocalRecipeError::ImmutableConflict)
+    ));
 }

@@ -49,7 +49,10 @@ async fn approved_source(
     ));
     let bootstrap = Arc::new(Mutex::new(bootstrap));
     let task = report
-        .prepare_task(&InstalledServiceTaskSource::new(&bootstrap), ReportPreparation::PublicService)
+        .prepare_task(
+            &InstalledServiceTaskSource::new(&bootstrap),
+            ReportPreparation::PublicService,
+        )
         .await
         .unwrap();
     assert!(task.has_configured_setup());

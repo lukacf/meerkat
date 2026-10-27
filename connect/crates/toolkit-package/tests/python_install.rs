@@ -41,10 +41,20 @@ fn software_fixture(package: &IntegrationPackage) -> Value {
     })
 }
 
-fn software_plan(package: &IntegrationPackage, value: Value) -> Result<PythonInstallPlan, ValidationError> {
-    let declaration: LocalSoftwareDeclaration = serde_json::from_value(value)
-        .map_err(|_| ValidationError { path: "fixture".into(), message: "invalid document".into() })?;
-    PythonInstallPlan::from_declaration(package, &declaration.validate(package)?, &id("python-server"))
+fn software_plan(
+    package: &IntegrationPackage,
+    value: Value,
+) -> Result<PythonInstallPlan, ValidationError> {
+    let declaration: LocalSoftwareDeclaration =
+        serde_json::from_value(value).map_err(|_| ValidationError {
+            path: "fixture".into(),
+            message: "invalid document".into(),
+        })?;
+    PythonInstallPlan::from_declaration(
+        package,
+        &declaration.validate(package)?,
+        &id("python-server"),
+    )
 }
 
 fn plan(
@@ -155,7 +165,7 @@ fn shared_selection_gate_refuses_unsupported_compositions() {
             }
             "absent-portable" => selection.portable_mcp_entries.clear(),
             "extra-portable" => selection.portable_mcp_entries.push(PortableMcpEntry {
-            environment_secret_slots: None,
+                environment_secret_slots: None,
                 operation_tools: None,
                 name: id("second-name"),
                 component: id("python-server"),
@@ -256,8 +266,10 @@ fn module_projection_preserves_explicit_script_and_literal_arguments() {
 
 #[test]
 fn explicit_console_script_projects_primary_module_without_inferred_effects() {
-    for (path, module) in [("outside_server/__init__.py", "outside_server"),
-                           ("outside_server/server.py", "outside_server.server")] {
+    for (path, module) in [
+        ("outside_server/__init__.py", "outside_server"),
+        ("outside_server/server.py", "outside_server.server"),
+    ] {
         let (package, mut value) = fixture();
         let entry = entrypoint(&mut value);
         entry.executable = path.into();
@@ -269,7 +281,8 @@ fn explicit_console_script_projects_primary_module_without_inferred_effects() {
         assert!(selected.get("authorized").is_none());
 
         let mut declaration = software_fixture(&package);
-        let prior = serde_json::to_value(software_plan(&package, declaration.clone()).unwrap()).unwrap();
+        let prior =
+            serde_json::to_value(software_plan(&package, declaration.clone()).unwrap()).unwrap();
         declaration["components"][0]["source"]["entrypoint"] = json!({
             "executable":path, "python_console_script":"serve-it", "arguments":["literal;argument"]
         });
@@ -282,7 +295,16 @@ fn explicit_console_script_projects_primary_module_without_inferred_effects() {
 
 #[test]
 fn console_script_selection_refuses_invalid_names_runtime_and_root_initializer() {
-    for name in ["", "../serve", "/serve", "a/b", "a;b", "a:b", "with space", "x\0y"] {
+    for name in [
+        "",
+        "../serve",
+        "/serve",
+        "a/b",
+        "a;b",
+        "a:b",
+        "with space",
+        "x\0y",
+    ] {
         let (package, mut value) = fixture();
         entrypoint(&mut value).python_console_script = Some(name.into());
         assert!(plan(&package, value).is_err(), "accepted {name:?}");
@@ -291,7 +313,11 @@ fn console_script_selection_refuses_invalid_names_runtime_and_root_initializer()
     entrypoint(&mut value).python_console_script = Some("serve-it".into());
     entrypoint(&mut value).executable = "__init__.py".into();
     assert!(plan(&package, value).is_err());
-    for runtime in [RuntimeKind::Node, RuntimeKind::Native, RuntimeKind::Container] {
+    for runtime in [
+        RuntimeKind::Node,
+        RuntimeKind::Native,
+        RuntimeKind::Container,
+    ] {
         let (package, mut value) = fixture();
         entrypoint(&mut value).python_console_script = Some("serve-it".into());
         value.components[0].runtime = runtime;
@@ -299,7 +325,11 @@ fn console_script_selection_refuses_invalid_names_runtime_and_root_initializer()
     }
     let (package, value) = fixture();
     let selected = serde_json::to_value(plan(&package, value).unwrap()).unwrap();
-    assert!(selected["entrypoint"].get("python_console_script").is_none());
+    assert!(
+        selected["entrypoint"]
+            .get("python_console_script")
+            .is_none()
+    );
 }
 
 #[test]
@@ -443,21 +473,36 @@ fn explicit_raw_names_preserve_declaration_origin_and_legacy_projection() {
     let legacy = serde_json::to_value(plan(&package, selection.clone()).unwrap()).unwrap();
     assert!(legacy.get("declared_service").is_none());
     let legacy_manifest = serde_json::to_value(&selection).unwrap();
-    assert!(legacy_manifest["portable_mcp_entries"][0].get("operation_tools").is_none());
-    selection.portable_mcp_entries[0].operation_tools = Some(BTreeMap::from([
-        (id("fixture-read"), "read_items_from_server".to_owned()),
-    ]));
+    assert!(
+        legacy_manifest["portable_mcp_entries"][0]
+            .get("operation_tools")
+            .is_none()
+    );
+    selection.portable_mcp_entries[0].operation_tools = Some(BTreeMap::from([(
+        id("fixture-read"),
+        "read_items_from_server".to_owned(),
+    )]));
     let declared = serde_json::to_value(plan(&package, selection.clone()).unwrap()).unwrap();
-    assert_eq!(declared["declared_service"], json!({"authentication":{"kind":"none"},
-        "operation_tools":{"fixture-read":"read_items_from_server"}}));
+    assert_eq!(
+        declared["declared_service"],
+        json!({"authentication":{"kind":"none"},
+        "operation_tools":{"fixture-read":"read_items_from_server"}})
+    );
     assert_ne!(declared["manifest_digest"], legacy["manifest_digest"]);
-    let Export::ServiceConnector(service) = &mut selection.exports[0] else { panic!("service fixture"); };
+    let Export::ServiceConnector(service) = &mut selection.exports[0] else {
+        panic!("service fixture");
+    };
     service.authentication = AuthenticationRequirement::Binding {
-        owner: id("process-owner"), requirement: id("key"), credential_audience: id("service"),
+        owner: id("process-owner"),
+        requirement: id("key"),
+        credential_audience: id("service"),
     };
     let binding = serde_json::to_value(plan(&package, selection).unwrap()).unwrap();
-    assert_eq!(binding["declared_service"]["authentication"], json!({"kind":"binding",
-        "owner":"process-owner","requirement":"key","credential_audience":"service"}));
+    assert_eq!(
+        binding["declared_service"]["authentication"],
+        json!({"kind":"binding",
+        "owner":"process-owner","requirement":"key","credential_audience":"service"})
+    );
     assert_ne!(binding["manifest_digest"], declared["manifest_digest"]);
 }
 
@@ -467,7 +512,9 @@ fn raw_mapping_rejects_duplicate_json_keys_before_last_value_can_win() {
     let mut raw = serde_json::to_value(selection).unwrap();
     raw["portable_mcp_entries"][0]["operation_tools"] = json!({"fixture-read":"marker"});
     let bytes = serde_json::to_string(&raw).unwrap().replace(
-        "\"fixture-read\":\"marker\"", "\"fixture-read\":\"first_raw\",\"fixture-read\":\"second_raw\"");
+        "\"fixture-read\":\"marker\"",
+        "\"fixture-read\":\"first_raw\",\"fixture-read\":\"second_raw\"",
+    );
     assert!(serde_json::from_str::<ActivationManifest>(&bytes).is_err());
 }
 
@@ -478,14 +525,25 @@ fn explicit_raw_mapping_cannot_alias_omit_or_add_declared_operations() {
         let mut names = BTreeMap::from([(id("fixture-read"), "raw_read".to_owned())]);
         match mode {
             "empty" => names.clear(),
-            "extra" => { names.insert(id("unselected"), "raw_extra".into()); },
-            "missing" => { names.remove(&id("fixture-read")); names.insert(id("unselected"), "raw_read".into()); },
-            "raw-control" => { names.insert(id("fixture-read"), "raw\nread".into()); },
+            "extra" => {
+                names.insert(id("unselected"), "raw_extra".into());
+            }
+            "missing" => {
+                names.remove(&id("fixture-read"));
+                names.insert(id("unselected"), "raw_read".into());
+            }
+            "raw-control" => {
+                names.insert(id("fixture-read"), "raw\nread".into());
+            }
             "duplicate" => {
-                let Export::ServiceConnector(service) = &mut selection.exports[0] else { panic!("service fixture"); };
-                let mut extra = service.operations[0].clone(); extra.id = id("second-read");
-                service.operations.push(extra); names.insert(id("second-read"), "raw_read".into());
-            },
+                let Export::ServiceConnector(service) = &mut selection.exports[0] else {
+                    panic!("service fixture");
+                };
+                let mut extra = service.operations[0].clone();
+                extra.id = id("second-read");
+                service.operations.push(extra);
+                names.insert(id("second-read"), "raw_read".into());
+            }
             _ => unreachable!(),
         }
         selection.portable_mcp_entries[0].operation_tools = Some(names);
@@ -564,14 +622,23 @@ mod cli {
         let mut args = fixture.arguments();
         args[2] = "--declaration".into();
         let output = run(&args);
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         assert!(output.stderr.is_empty());
-        assert_eq!(serde_json::from_slice::<Value>(&output.stdout).unwrap(),
-            serde_json::to_value(software_plan(&package, declaration.clone()).unwrap()).unwrap());
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+            serde_json::to_value(software_plan(&package, declaration.clone()).unwrap()).unwrap()
+        );
         assert_eq!(fs::read(&fixture.selection).unwrap(), bytes);
         assert_eq!(refused(run(&fixture.arguments())), "invalid_selection\n");
         let mut both = args.clone();
-        both.extend(["--selection".into(), fixture.selection.display().to_string()]);
+        both.extend([
+            "--selection".into(),
+            fixture.selection.display().to_string(),
+        ]);
         assert_eq!(refused(run(&both)), "invalid_arguments\n");
         let mut changed = declaration;
         changed["package_content_digest"] = json!("0".repeat(64));
@@ -657,17 +724,31 @@ mod cli {
 fn software_declaration_projects_package_bytes_without_a_host_selection() {
     let (mut package, _) = fixture();
     let raw = software_fixture(&package);
-    let proof = serde_json::from_value::<LocalSoftwareDeclaration>(raw.clone()).unwrap()
-        .validate(&package).unwrap();
+    let proof = serde_json::from_value::<LocalSoftwareDeclaration>(raw.clone())
+        .unwrap()
+        .validate(&package)
+        .unwrap();
     let plan = PythonInstallPlan::from_declaration(&package, &proof, &id("python-server")).unwrap();
     let value = serde_json::to_value(&plan).unwrap();
     assert_eq!(value["document_kind"], "local_software_declaration");
     assert_eq!(value["declaration_digest"], json!(proof.digest()));
-    assert_eq!(value["artifact_filename"], "fixture_server-1.0-py3-none-any.whl");
+    assert_eq!(
+        value["artifact_filename"],
+        "fixture_server-1.0-py3-none-any.whl"
+    );
     assert_eq!(value["module"], "fixture_server.__main__");
-    assert_eq!(value["declared_service"], json!({"authentication":{"kind":"none"},
-        "operation_tools":{"fixture-read":"actual_read"}}));
-    for key in ["manifest_digest", "configuration", "policy", "ready", "authorized"] {
+    assert_eq!(
+        value["declared_service"],
+        json!({"authentication":{"kind":"none"},
+        "operation_tools":{"fixture-read":"actual_read"}})
+    );
+    for key in [
+        "manifest_digest",
+        "configuration",
+        "policy",
+        "ready",
+        "authorized",
+    ] {
         assert!(value.get(key).is_none(), "{key}");
     }
     assert!(PythonInstallPlan::from_declaration(&package, &proof, &id("other")).is_err());
@@ -680,82 +761,191 @@ fn software_declaration_projects_package_bytes_without_a_host_selection() {
     binding["exports"][0]["authentication"] = json!({"kind":"binding", "owner":"package-process",
         "requirement":"service-key", "credential_audience":"remote-service"});
     let declared = serde_json::to_value(software_plan(&package, binding.clone()).unwrap()).unwrap();
-    assert_eq!(declared["declared_service"]["authentication"], binding["exports"][0]["authentication"]);
+    assert_eq!(
+        declared["declared_service"]["authentication"],
+        binding["exports"][0]["authentication"]
+    );
     assert_ne!(declared["declaration_digest"], value["declaration_digest"]);
-    binding["portable_mcp_entries"][0].as_object_mut().unwrap().remove("operation_tools");
-    assert!(serde_json::to_value(software_plan(&package, binding).unwrap()).unwrap()
-        .get("declared_service").is_none());
+    binding["portable_mcp_entries"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("operation_tools");
+    assert!(
+        serde_json::to_value(software_plan(&package, binding).unwrap())
+            .unwrap()
+            .get("declared_service")
+            .is_none()
+    );
 }
 
 #[test]
 fn software_declaration_cannot_discard_custom_requirements_or_claim_a_host_contract() {
-    for mutation in ["known-requirement", "unresolved", "role", "strategy", "resource", "events",
-        "configuration", "policy", "lifecycle", "enforcement", "host-service", "dependency",
-        "remote", "extra-component", "extra-export", "wrong-component", "wrong-package", "wrong-kind"] {
+    for mutation in [
+        "known-requirement",
+        "unresolved",
+        "role",
+        "strategy",
+        "resource",
+        "events",
+        "configuration",
+        "policy",
+        "lifecycle",
+        "enforcement",
+        "host-service",
+        "dependency",
+        "remote",
+        "extra-component",
+        "extra-export",
+        "wrong-component",
+        "wrong-package",
+        "wrong-kind",
+    ] {
         let (mut package, _) = fixture();
         let mut value = software_fixture(&package);
         match mutation {
-            "known-requirement" => package.strategies[0].known_requirements.push(HostServiceRequirement {
-                name:id("custom-host"), version:VersionRequirement { major:1, minimum_minor:0 },
-                authority:[id("isolate")].into(), availability:RequirementAvailability::Required,
-            }),
-            "unresolved" => package.strategies[0].unresolved_details.push("Needs operator-owned resource isolation".into()),
+            "known-requirement" => {
+                package.strategies[0]
+                    .known_requirements
+                    .push(HostServiceRequirement {
+                        name: id("custom-host"),
+                        version: VersionRequirement {
+                            major: 1,
+                            minimum_minor: 0,
+                        },
+                        authority: [id("isolate")].into(),
+                        availability: RequirementAvailability::Required,
+                    })
+            }
+            "unresolved" => package.strategies[0]
+                .unresolved_details
+                .push("Needs operator-owned resource isolation".into()),
             "role" => package.known_exports[0].role = ExportRole::AgentFrontend,
             "strategy" => package.strategies[0].kind = StrategyKind::NativeAdapter,
-            "resource" => value["exports"][0]["operations"][0]["resources"] = json!({"kind":"selected",
-                "selector":"one-repository", "enforcement_owner":"custom-owner"}),
+            "resource" => {
+                value["exports"][0]["operations"][0]["resources"] = json!({"kind":"selected",
+                "selector":"one-repository", "enforcement_owner":"custom-owner"})
+            }
             "events" => value["exports"][0]["events"] = json!([]),
             "configuration" | "policy" => value[mutation] = json!({"owner":"invented"}),
-            "lifecycle" => value["components"][0]["readiness"] = json!({"owner":"invented","checks":["ready"]}),
-            "enforcement" => value["exports"][0]["enforcement_contract"] = json!({"name":"custom-host"}),
+            "lifecycle" => {
+                value["components"][0]["readiness"] = json!({"owner":"invented","checks":["ready"]})
+            }
+            "enforcement" => {
+                value["exports"][0]["enforcement_contract"] = json!({"name":"custom-host"})
+            }
             "host-service" => value["components"][0]["host_services"] = json!([]),
             "dependency" => value["components"][0]["dependencies"] = json!([]),
             "remote" => value["components"][0]["runtime"] = json!("remote"),
-            "extra-component" => { let extra=value["components"][0].clone(); value["components"].as_array_mut().unwrap().push(extra); },
-            "extra-export" => { let extra=value["exports"][0].clone(); value["exports"].as_array_mut().unwrap().push(extra); },
-            "wrong-component" => value["portable_mcp_entries"][0]["component"] = json!("unselected"),
+            "extra-component" => {
+                let extra = value["components"][0].clone();
+                value["components"].as_array_mut().unwrap().push(extra);
+            }
+            "extra-export" => {
+                let extra = value["exports"][0].clone();
+                value["exports"].as_array_mut().unwrap().push(extra);
+            }
+            "wrong-component" => {
+                value["portable_mcp_entries"][0]["component"] = json!("unselected")
+            }
             "wrong-package" => value["package"]["name"] = json!("other"),
             "wrong-kind" => value["document_kind"] = json!("activation_manifest"),
             _ => unreachable!(),
         }
         // Requirement refusal must not merely fail due to an outdated package hash.
         value["package_content_digest"] = json!(package.content_digest().unwrap());
-        assert!(software_plan(&package, value).is_err(), "accepted {mutation}");
+        assert!(
+            software_plan(&package, value).is_err(),
+            "accepted {mutation}"
+        );
     }
 }
 
 #[test]
 fn software_declaration_reuses_artifact_operation_and_raw_name_checks() {
-    for mutation in ["unsafe-entry", "not-module", "credentials-url", "self-contained", "missing-closure",
-        "closure-alias", "no-operations", "duplicate-operation", "zero-bound", "map-missing", "map-extra",
-        "map-control", "map-duplicate"] {
+    for mutation in [
+        "unsafe-entry",
+        "not-module",
+        "credentials-url",
+        "self-contained",
+        "missing-closure",
+        "closure-alias",
+        "no-operations",
+        "duplicate-operation",
+        "zero-bound",
+        "map-missing",
+        "map-extra",
+        "map-control",
+        "map-duplicate",
+    ] {
         let (package, _) = fixture();
         let mut value = software_fixture(&package);
         match mutation {
-            "unsafe-entry" => value["components"][0]["source"]["entrypoint"]["executable"] = json!("../run.py"),
-            "not-module" => value["components"][0]["source"]["entrypoint"]["executable"] = json!("run.sh"),
-            "credentials-url" => value["components"][0]["source"]["location"] = json!("https://name:secret@example.invalid/a.whl"),
-            "self-contained" => value["components"][0]["source"]["dependencies"] = json!({"kind":"self_contained"}),
-            "missing-closure" => { value["components"][0]["source"]["dependencies"]["artifacts"].as_object_mut().unwrap().remove("requirements"); },
-            "closure-alias" => value["components"][0]["source"]["dependencies"]["artifacts"]["DEPENDENCY_one-1.0-py3-none-any.whl"] = json!("4".repeat(64)),
+            "unsafe-entry" => {
+                value["components"][0]["source"]["entrypoint"]["executable"] = json!("../run.py")
+            }
+            "not-module" => {
+                value["components"][0]["source"]["entrypoint"]["executable"] = json!("run.sh")
+            }
+            "credentials-url" => {
+                value["components"][0]["source"]["location"] =
+                    json!("https://name:secret@example.invalid/a.whl")
+            }
+            "self-contained" => {
+                value["components"][0]["source"]["dependencies"] = json!({"kind":"self_contained"})
+            }
+            "missing-closure" => {
+                value["components"][0]["source"]["dependencies"]["artifacts"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("requirements");
+            }
+            "closure-alias" => {
+                value["components"][0]["source"]["dependencies"]["artifacts"]["DEPENDENCY_one-1.0-py3-none-any.whl"] =
+                    json!("4".repeat(64))
+            }
             "no-operations" => value["exports"][0]["operations"] = json!([]),
-            "duplicate-operation" => { let op=value["exports"][0]["operations"][0].clone(); value["exports"][0]["operations"].as_array_mut().unwrap().push(op); },
-            "zero-bound" => value["exports"][0]["operations"][0]["result_limits"]["maximum_bytes"] = json!(0),
+            "duplicate-operation" => {
+                let op = value["exports"][0]["operations"][0].clone();
+                value["exports"][0]["operations"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(op);
+            }
+            "zero-bound" => {
+                value["exports"][0]["operations"][0]["result_limits"]["maximum_bytes"] = json!(0)
+            }
             "map-missing" => value["portable_mcp_entries"][0]["operation_tools"] = json!({}),
-            "map-extra" => value["portable_mcp_entries"][0]["operation_tools"]["extra"] = json!("raw_extra"),
-            "map-control" => value["portable_mcp_entries"][0]["operation_tools"]["fixture-read"] = json!("raw\nread"),
+            "map-extra" => {
+                value["portable_mcp_entries"][0]["operation_tools"]["extra"] = json!("raw_extra")
+            }
+            "map-control" => {
+                value["portable_mcp_entries"][0]["operation_tools"]["fixture-read"] =
+                    json!("raw\nread")
+            }
             "map-duplicate" => {
-                let mut op=value["exports"][0]["operations"][0].clone(); op["id"]=json!("other-read");
-                value["exports"][0]["operations"].as_array_mut().unwrap().push(op);
-                value["portable_mcp_entries"][0]["operation_tools"]["other-read"]=json!("actual_read");
-            },
+                let mut op = value["exports"][0]["operations"][0].clone();
+                op["id"] = json!("other-read");
+                value["exports"][0]["operations"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(op);
+                value["portable_mcp_entries"][0]["operation_tools"]["other-read"] =
+                    json!("actual_read");
+            }
             _ => unreachable!(),
         }
-        assert!(software_plan(&package, value).is_err(), "accepted {mutation}");
+        assert!(
+            software_plan(&package, value).is_err(),
+            "accepted {mutation}"
+        );
     }
     let (package, _) = fixture();
-    let raw = serde_json::to_string(&software_fixture(&package)).unwrap().replace(
-        "\"fixture-read\":\"actual_read\"", "\"fixture-read\":\"first\",\"fixture-read\":\"second\"");
+    let raw = serde_json::to_string(&software_fixture(&package))
+        .unwrap()
+        .replace(
+            "\"fixture-read\":\"actual_read\"",
+            "\"fixture-read\":\"first\",\"fixture-read\":\"second\"",
+        );
     assert!(serde_json::from_str::<LocalSoftwareDeclaration>(&raw).is_err());
 }
 
@@ -763,56 +953,104 @@ fn software_declaration_reuses_artifact_operation_and_raw_name_checks() {
 fn secret_environment_declarations_bind_both_software_document_forms() {
     let (package, mut selected) = fixture();
     let source: Value = serde_json::from_slice(SELECTION).unwrap();
-    assert_eq!(serde_json::to_value(&selected.portable_mcp_entries).unwrap(), source["portable_mcp_entries"]);
-    selected.portable_mcp_entries[0].operation_tools = Some(BTreeMap::from([(id("fixture-read"), "actual_read".into())]));
-    let Export::ServiceConnector(service) = &mut selected.exports[0] else { panic!("service") };
-    service.authentication = AuthenticationRequirement::Binding { owner:id("process-owner"), requirement:id("api-key"), credential_audience:id("service") };
+    assert_eq!(
+        serde_json::to_value(&selected.portable_mcp_entries).unwrap(),
+        source["portable_mcp_entries"]
+    );
+    selected.portable_mcp_entries[0].operation_tools =
+        Some(BTreeMap::from([(id("fixture-read"), "actual_read".into())]));
+    let Export::ServiceConnector(service) = &mut selected.exports[0] else {
+        panic!("service")
+    };
+    service.authentication = AuthenticationRequirement::Binding {
+        owner: id("process-owner"),
+        requirement: id("api-key"),
+        credential_audience: id("service"),
+    };
     let before = serde_json::to_value(plan(&package, selected.clone()).unwrap()).unwrap();
-    assert!(before["declared_service"].get("environment_secret_slots").is_none());
-    selected.portable_mcp_entries[0].environment_secret_slots = Some(serde_json::from_value(json!(["TOKEN", "API_KEY"])).unwrap());
+    assert!(
+        before["declared_service"]
+            .get("environment_secret_slots")
+            .is_none()
+    );
+    selected.portable_mcp_entries[0].environment_secret_slots =
+        Some(serde_json::from_value(json!(["TOKEN", "API_KEY"])).unwrap());
     let after = serde_json::to_value(plan(&package, selected.clone()).unwrap()).unwrap();
-    assert_eq!(after["declared_service"]["environment_secret_slots"], json!(["API_KEY", "TOKEN"]));
+    assert_eq!(
+        after["declared_service"]["environment_secret_slots"],
+        json!(["API_KEY", "TOKEN"])
+    );
     assert_ne!(before["manifest_digest"], after["manifest_digest"]);
     assert_eq!(before["entrypoint"], after["entrypoint"]);
     let mut software = software_fixture(&package);
     software["exports"][0]["authentication"] = after["declared_service"]["authentication"].clone();
-    let plain_before = serde_json::to_value(software_plan(&package,software.clone()).unwrap()).unwrap();
+    let plain_before =
+        serde_json::to_value(software_plan(&package, software.clone()).unwrap()).unwrap();
     software["portable_mcp_entries"][0]["environment_secret_slots"] = json!(["TOKEN", "API_KEY"]);
-    let plain_after = serde_json::to_value(software_plan(&package,software).unwrap()).unwrap();
-    assert_eq!(plain_after["declared_service"]["environment_secret_slots"], after["declared_service"]["environment_secret_slots"]);
-    assert_ne!(plain_before["declaration_digest"], plain_after["declaration_digest"]);
+    let plain_after = serde_json::to_value(software_plan(&package, software).unwrap()).unwrap();
+    assert_eq!(
+        plain_after["declared_service"]["environment_secret_slots"],
+        after["declared_service"]["environment_secret_slots"]
+    );
+    assert_ne!(
+        plain_before["declaration_digest"],
+        plain_after["declaration_digest"]
+    );
     assert_eq!(plain_before["entrypoint"], plain_after["entrypoint"]);
 }
 
 #[test]
 fn secret_environment_declarations_reject_ambiguity_and_authentication_downgrades() {
     let (package, selected) = fixture();
-    let bad = vec![Value::Null, json!([]), json!(["TOKEN","TOKEN"]), json!(["invalid-name"]),
-        json!(["1TOKEN"]), json!(["TOKEN",7]), json!(["TOKEN\n"]), json!(["x".repeat(129)]),
-        json!((0..257).map(|index| format!("KEY_{index}")).collect::<Vec<_>>())];
+    let bad = vec![
+        Value::Null,
+        json!([]),
+        json!(["TOKEN", "TOKEN"]),
+        json!(["invalid-name"]),
+        json!(["1TOKEN"]),
+        json!(["TOKEN", 7]),
+        json!(["TOKEN\n"]),
+        json!(["x".repeat(129)]),
+        json!(
+            (0..257)
+                .map(|index| format!("KEY_{index}"))
+                .collect::<Vec<_>>()
+        ),
+    ];
     for slots in bad {
         let mut full = serde_json::to_value(&selected).unwrap();
         full["portable_mcp_entries"][0]["environment_secret_slots"] = slots.clone();
         assert!(serde_json::from_value::<ActivationManifest>(full).is_err());
         let mut plain = software_fixture(&package);
         plain["portable_mcp_entries"][0]["environment_secret_slots"] = slots;
-        assert!(software_plan(&package,plain).is_err());
+        assert!(software_plan(&package, plain).is_err());
     }
-    for no_auth in [true,false] {
+    for no_auth in [true, false] {
         let mut full = selected.clone();
-        full.portable_mcp_entries[0].environment_secret_slots = Some(serde_json::from_value(json!(["TOKEN"])).unwrap());
+        full.portable_mcp_entries[0].environment_secret_slots =
+            Some(serde_json::from_value(json!(["TOKEN"])).unwrap());
         let mut plain = software_fixture(&package);
         plain["portable_mcp_entries"][0]["environment_secret_slots"] = json!(["TOKEN"]);
         if no_auth {
-            full.portable_mcp_entries[0].operation_tools = Some(BTreeMap::from([(id("fixture-read"),"actual_read".into())]));
+            full.portable_mcp_entries[0].operation_tools =
+                Some(BTreeMap::from([(id("fixture-read"), "actual_read".into())]));
         } else {
-            let auth = AuthenticationRequirement::Binding {owner:id("process"),requirement:id("key"),credential_audience:id("service")};
-            let Export::ServiceConnector(service) = &mut full.exports[0] else { panic!("service") };
+            let auth = AuthenticationRequirement::Binding {
+                owner: id("process"),
+                requirement: id("key"),
+                credential_audience: id("service"),
+            };
+            let Export::ServiceConnector(service) = &mut full.exports[0] else {
+                panic!("service")
+            };
             service.authentication = auth.clone();
             plain["exports"][0]["authentication"] = serde_json::to_value(auth).unwrap();
-            plain["portable_mcp_entries"][0].as_object_mut().unwrap().remove("operation_tools");
+            plain["portable_mcp_entries"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("operation_tools");
         }
-        assert!(plan(&package,full).is_err());
-        assert!(software_plan(&package,plain).is_err());
+        assert!(plan(&package, full).is_err());
+        assert!(software_plan(&package, plain).is_err());
     }
 }

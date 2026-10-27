@@ -77,9 +77,18 @@ async fn helper_fixture(
     NativeHelperSource,
 ) {
     helper_fixture_with_authority(
-        f, preparation, observation,
-        f.authority.association().candidate().ingress_namespace.ingress.authority.clone(),
-    ).await
+        f,
+        preparation,
+        observation,
+        f.authority
+            .association()
+            .candidate()
+            .ingress_namespace
+            .ingress
+            .authority
+            .clone(),
+    )
+    .await
 }
 async fn helper_fixture_with_authority(
     f: &Fixture,
@@ -252,14 +261,23 @@ async fn helper_publication_refuses_parent_or_foreign_source_authority() {
         // Keep the proposed child, source row and publication association equal.
         // Only the authority differs from this helper source owner's ingress.
         let (proposal, child, fact) = helper_fixture_with_authority(
-            &f, &preparation, &observed,
+            &f,
+            &preparation,
+            &observed,
             principal(authority, PrincipalKind::ServiceAccount),
-        ).await;
+        )
+        .await;
         assert!(matches!(
-            f.bridge(&f.store).publish_prepared_helper_work(
-                &f.snapshot, &proposal, child, fact.clone(),
-                f.access(&f.context(f.now)), conditions(&f, &fact, &f.lease),
-            ).await,
+            f.bridge(&f.store)
+                .publish_prepared_helper_work(
+                    &f.snapshot,
+                    &proposal,
+                    child,
+                    fact.clone(),
+                    f.access(&f.context(f.now)),
+                    conditions(&f, &fact, &f.lease),
+                )
+                .await,
             Err(SetupError::InvalidRecord)
         ));
         assert!(f.store.get(proposal.key()).await.unwrap().is_none());
@@ -788,8 +806,11 @@ impl SetupWorkPreparer for StepInputPreparer<'_> {
         &self,
         request: &ValidatedSetupRequest,
     ) -> Result<SetupWorkPreparation, SetupWorkAdmissionError> {
-        let mut value = UnboundPreparer { title: "exact stored input", expires: self.expires }
-            .prepare(request)?;
+        let mut value = UnboundPreparer {
+            title: "exact stored input",
+            expires: self.expires,
+        }
+        .prepare(request)?;
         if self.kind != "external" {
             value.input_reference = canonical_setup_input_reference(request).unwrap();
             match self.kind {
@@ -810,26 +831,68 @@ async fn native_step_accepts_canonical_inline_input_with_denied_external_owner()
     let bridge = f.bridge(&f.store);
     let context = f.context(f.now);
     let denied = DeniedStepReferences(AtomicUsize::new(0));
-    let access = || SetupAccess { evidence: &f.authority, context: &context, references: &denied };
-    let preparation = bridge.prepare_native_work(&f.snapshot, access(),
-        &StepInputPreparer { kind: "canonical", expires: f.deadline }, &f.backend).await.unwrap();
-    assert!(preparation.input_reference() == &canonical_setup_input_reference(f.snapshot.request()).unwrap());
+    let access = || SetupAccess {
+        evidence: &f.authority,
+        context: &context,
+        references: &denied,
+    };
+    let preparation = bridge
+        .prepare_native_work(
+            &f.snapshot,
+            access(),
+            &StepInputPreparer {
+                kind: "canonical",
+                expires: f.deadline,
+            },
+            &f.backend,
+        )
+        .await
+        .unwrap();
+    assert!(
+        preparation.input_reference()
+            == &canonical_setup_input_reference(f.snapshot.request()).unwrap()
+    );
     release_fixture_claim(&f).await;
-    let owner = Owner { fixture: &f, fail_after_graph: AtomicBool::new(false), completes: AtomicUsize::new(0) };
-    assert!(matches!(bridge.step_native_work_admission(&preparation, &owner, Some(access()), &options())
-        .await.unwrap(), NativeWorkStep::RetrySafe));
+    let owner = Owner {
+        fixture: &f,
+        fail_after_graph: AtomicBool::new(false),
+        completes: AtomicUsize::new(0),
+    };
+    assert!(matches!(
+        bridge
+            .step_native_work_admission(&preparation, &owner, Some(access()), &options())
+            .await
+            .unwrap(),
+        NativeWorkStep::RetrySafe
+    ));
     assert_eq!(owner.completes.load(Ordering::SeqCst), 0);
     let NativeWorkStep::Completed(done) = bridge
-        .step_native_work_admission(&preparation, &owner, Some(access()), &options()).await.unwrap()
-    else { panic!("canonical input did not complete the actual owner protocol") };
+        .step_native_work_admission(&preparation, &owner, Some(access()), &options())
+        .await
+        .unwrap()
+    else {
+        panic!("canonical input did not complete the actual owner protocol")
+    };
     let NativeWorkStep::Completed(replay) = bridge
-        .step_native_work_admission(&preparation, &owner, Some(access()), &options()).await.unwrap()
-    else { panic!("completed input did not replay") };
+        .step_native_work_admission(&preparation, &owner, Some(access()), &options())
+        .await
+        .unwrap()
+    else {
+        panic!("completed input did not replay")
+    };
     assert_eq!(done.item, replay.item);
     assert_eq!(done.admission, replay.admission);
     assert_eq!(owner.completes.load(Ordering::SeqCst), 1);
     assert_eq!(denied.0.load(Ordering::SeqCst), 0);
-    assert_eq!(f.store.get_effect(preparation.effect_key()).await.unwrap().unwrap().status, EffectStatus::Succeeded);
+    assert_eq!(
+        f.store
+            .get_effect(preparation.effect_key())
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        EffectStatus::Succeeded
+    );
     assert!(f.store.get(preparation.key()).await.unwrap().is_some());
 }
 
@@ -842,20 +905,62 @@ async fn native_step_preserves_changed_descriptor_and_external_owner_refusal() {
         // The external fixture owner permitted this exact preparation earlier.
         // Revoking that owner must prevent the next Dispatch claim; the
         // initial uncertain fixture claim is reconciled without fresh authority.
-        let preparation = bridge.prepare_native_work(&f.snapshot, f.access(&context),
-            &StepInputPreparer { kind, expires: f.deadline }, &f.backend).await.unwrap();
+        let preparation = bridge
+            .prepare_native_work(
+                &f.snapshot,
+                f.access(&context),
+                &StepInputPreparer {
+                    kind,
+                    expires: f.deadline,
+                },
+                &f.backend,
+            )
+            .await
+            .unwrap();
         release_fixture_claim(&f).await;
-        let owner = Owner { fixture: &f, fail_after_graph: AtomicBool::new(false), completes: AtomicUsize::new(0) };
+        let owner = Owner {
+            fixture: &f,
+            fail_after_graph: AtomicBool::new(false),
+            completes: AtomicUsize::new(0),
+        };
         let denied = DeniedStepReferences(AtomicUsize::new(0));
-        let access = || SetupAccess { evidence: &f.authority, context: &context, references: &denied };
-        assert!(matches!(bridge.step_native_work_admission(&preparation, &owner, Some(access()), &options())
-            .await.unwrap(), NativeWorkStep::RetrySafe));
-        let before = f.store.get_effect(preparation.effect_key()).await.unwrap().unwrap();
-        assert!(matches!(bridge.step_native_work_admission(&preparation, &owner, Some(access()), &options()).await,
-            Err(SetupError::Request(RequestError::ContextUnavailable))), "{kind}");
+        let access = || SetupAccess {
+            evidence: &f.authority,
+            context: &context,
+            references: &denied,
+        };
+        assert!(matches!(
+            bridge
+                .step_native_work_admission(&preparation, &owner, Some(access()), &options())
+                .await
+                .unwrap(),
+            NativeWorkStep::RetrySafe
+        ));
+        let before = f
+            .store
+            .get_effect(preparation.effect_key())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(
+                bridge
+                    .step_native_work_admission(&preparation, &owner, Some(access()), &options())
+                    .await,
+                Err(SetupError::Request(RequestError::ContextUnavailable))
+            ),
+            "{kind}"
+        );
         assert_eq!(denied.0.load(Ordering::SeqCst), 1, "{kind}");
         assert_eq!(owner.completes.load(Ordering::SeqCst), 0, "{kind}");
-        assert_eq!(f.store.get_effect(preparation.effect_key()).await.unwrap().unwrap(), before);
+        assert_eq!(
+            f.store
+                .get_effect(preparation.effect_key())
+                .await
+                .unwrap()
+                .unwrap(),
+            before
+        );
         assert!(owner.observe(&preparation).await.unwrap().is_none());
         assert!(f.store.get(preparation.key()).await.unwrap().is_none());
     }
@@ -867,22 +972,55 @@ async fn native_step_rejects_changed_canonical_content_before_owner_completion()
     let bridge = f.bridge(&f.store);
     let context = f.context(f.now);
     let denied = DeniedStepReferences(AtomicUsize::new(0));
-    let access = || SetupAccess { evidence: &f.authority, context: &context, references: &denied };
-    let mut preparation = bridge.prepare_native_work(&f.snapshot, access(),
-        &StepInputPreparer { kind: "canonical", expires: f.deadline }, &f.backend).await.unwrap();
+    let access = || SetupAccess {
+        evidence: &f.authority,
+        context: &context,
+        references: &denied,
+    };
+    let mut preparation = bridge
+        .prepare_native_work(
+            &f.snapshot,
+            access(),
+            &StepInputPreparer {
+                kind: "canonical",
+                expires: f.deadline,
+            },
+            &f.backend,
+        )
+        .await
+        .unwrap();
     // Corrupt only the held descriptor. The exact stored input remains intact.
     preparation.work.input_reference.content_digest = ContentDigest::of_bytes(b"changed content");
-    let owner = Owner { fixture: &f, fail_after_graph: AtomicBool::new(false), completes: AtomicUsize::new(0) };
-    let before = f.store.get_effect(preparation.effect_key()).await.unwrap().unwrap();
-    assert!(matches!(bridge.step_native_work_admission(&preparation, &owner, Some(access()), &options()).await,
-        Err(SetupError::InvalidRecord)));
+    let owner = Owner {
+        fixture: &f,
+        fail_after_graph: AtomicBool::new(false),
+        completes: AtomicUsize::new(0),
+    };
+    let before = f
+        .store
+        .get_effect(preparation.effect_key())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        bridge
+            .step_native_work_admission(&preparation, &owner, Some(access()), &options())
+            .await,
+        Err(SetupError::InvalidRecord)
+    ));
     assert_eq!(denied.0.load(Ordering::SeqCst), 0);
     assert_eq!(owner.completes.load(Ordering::SeqCst), 0);
-    assert_eq!(f.store.get_effect(preparation.effect_key()).await.unwrap().unwrap(), before);
+    assert_eq!(
+        f.store
+            .get_effect(preparation.effect_key())
+            .await
+            .unwrap()
+            .unwrap(),
+        before
+    );
     assert!(owner.observe(&preparation).await.unwrap().is_none());
     assert!(f.store.get(preparation.key()).await.unwrap().is_none());
 }
-
 
 #[tokio::test]
 async fn retained_input_and_final_publication_use_distinct_local_admissions() {
@@ -891,7 +1029,12 @@ async fn retained_input_and_final_publication_use_distinct_local_admissions() {
     let input_key = preparation.input_record.as_ref().unwrap().key.clone();
     let input = f.store.get(&input_key).await.unwrap().unwrap();
     let native_key = preparation.admission_key().clone();
-    let effect = f.store.get_effect(preparation.effect_key()).await.unwrap().unwrap();
+    let effect = f
+        .store
+        .get_effect(preparation.effect_key())
+        .await
+        .unwrap()
+        .unwrap();
     let observed = graph_admit(&f, &preparation).await;
     let (proposal, child, fact) = helper_fixture(&f, &preparation, &observed).await;
     assert_eq!(input.key.realm, proposal.key.realm);
@@ -904,36 +1047,67 @@ async fn retained_input_and_final_publication_use_distinct_local_admissions() {
     );
     // The input already reserves the historical raw native key in this owner.
     assert!(matches!(
-        f.store.admit(AdmissionRequest {
-            key: input.key.clone(),
-            admission_key: native_key.as_str().to_owned(),
-            data: input.data.clone(),
-            events: vec![],
-            effects: vec![],
-        }).await.unwrap(),
+        f.store
+            .admit(AdmissionRequest {
+                key: input.key.clone(),
+                admission_key: native_key.as_str().to_owned(),
+                data: input.data.clone(),
+                events: vec![],
+                effects: vec![],
+            })
+            .await
+            .unwrap(),
         AdmissionOutcome::Existing(_)
     ));
     let bridge = f.bridge(&f.store);
     let context = f.context(f.now);
-    let published = bridge.publish_prepared_helper_work(
-        &f.snapshot, &proposal, child.clone(), fact.clone(),
-        f.access(&context), conditions(&f, &fact, &f.lease),
-    ).await.unwrap();
+    let published = bridge
+        .publish_prepared_helper_work(
+            &f.snapshot,
+            &proposal,
+            child.clone(),
+            fact.clone(),
+            f.access(&context),
+            conditions(&f, &fact, &f.lease),
+        )
+        .await
+        .unwrap();
     let saved = f.store.get(published.key()).await.unwrap().unwrap();
-    let replay = bridge.publish_prepared_helper_work(
-        &f.snapshot, &proposal, child, fact.clone(),
-        f.access(&context), conditions(&f, &fact, &f.lease),
-    ).await.unwrap();
+    let replay = bridge
+        .publish_prepared_helper_work(
+            &f.snapshot,
+            &proposal,
+            child,
+            fact.clone(),
+            f.access(&context),
+            conditions(&f, &fact, &f.lease),
+        )
+        .await
+        .unwrap();
     assert_eq!(published.key(), replay.key());
     assert_eq!(published.digest(), replay.digest());
     assert_eq!(f.store.get(published.key()).await.unwrap().unwrap(), saved);
     assert_eq!(f.store.get(&input_key).await.unwrap().unwrap(), input);
     assert_eq!(preparation.admission_key(), &native_key);
     assert_eq!(published.helper_source().unwrap().admission.key, native_key);
-    assert_eq!(f.store.get_effect(preparation.effect_key()).await.unwrap().unwrap(), effect);
-    let current = f.backend.service().observe_admission(
-        preparation.admission_key().clone(), admitted_request(&preparation),
-    ).await.unwrap().unwrap();
+    assert_eq!(
+        f.store
+            .get_effect(preparation.effect_key())
+            .await
+            .unwrap()
+            .unwrap(),
+        effect
+    );
+    let current = f
+        .backend
+        .service()
+        .observe_admission(
+            preparation.admission_key().clone(),
+            admitted_request(&preparation),
+        )
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(current.item().unwrap().id, observed.item);
 }
 
@@ -963,19 +1137,34 @@ async fn legacy_raw_key_final_publication_replays_without_new_admission() {
         key: proposal.key.clone(),
         admission_key: proposal.admission_key.clone(),
         data: RecordData {
-            schema: SCHEMA.into(), version: VERSION,
+            schema: SCHEMA.into(),
+            version: VERSION,
             body: serde_json::to_value(record).unwrap(),
         },
-        events: vec![], effects: vec![],
+        events: vec![],
+        effects: vec![],
     };
-    let saved = f.store.admit(legacy_request).await.unwrap().record().clone();
+    let saved = f
+        .store
+        .admit(legacy_request)
+        .await
+        .unwrap()
+        .record()
+        .clone();
     let reopened = SqliteStore::open(f.directory.path().join("store.sqlite")).unwrap();
     let mut prior_conditions = f.conditions();
     prior_conditions.before_ms = 1;
-    let replay = f.bridge(&reopened).publish_prepared_work(
-        &f.snapshot, &proposal, child.clone(), f.access(&f.context(f.now)),
-        prior_conditions,
-    ).await.unwrap();
+    let replay = f
+        .bridge(&reopened)
+        .publish_prepared_work(
+            &f.snapshot,
+            &proposal,
+            child.clone(),
+            f.access(&f.context(f.now)),
+            prior_conditions,
+        )
+        .await
+        .unwrap();
     assert_eq!(replay.key(), &saved.key);
     assert_eq!(replay.digest().to_string(), saved.content_digest);
     assert_eq!(replay.child(), &child);
@@ -984,11 +1173,17 @@ async fn legacy_raw_key_final_publication_replays_without_new_admission() {
     let mut probe_key = proposal.key.clone();
     probe_key.id = "new-key-remains-unused".into();
     assert!(matches!(
-        reopened.admit(AdmissionRequest {
-            key: probe_key,
-            admission_key: publication_admission_key(&proposal.key, &proposal.admission_key).unwrap(),
-            data: f.policy.data.clone(), events: vec![], effects: vec![],
-        }).await.unwrap(),
+        reopened
+            .admit(AdmissionRequest {
+                key: probe_key,
+                admission_key: publication_admission_key(&proposal.key, &proposal.admission_key)
+                    .unwrap(),
+                data: f.policy.data.clone(),
+                events: vec![],
+                effects: vec![],
+            })
+            .await
+            .unwrap(),
         AdmissionOutcome::Created(_)
     ));
 }
@@ -999,20 +1194,37 @@ async fn unrelated_publication_admission_conflict_is_not_missing_record() {
     let proposal = f.propose("conflicting local admission").await;
     let mut foreign_key = proposal.key.clone();
     foreign_key.id = "different-publication".into();
-    let foreign = f.store.admit(AdmissionRequest {
-        key: foreign_key,
-        admission_key: publication_admission_key(&proposal.key, &proposal.admission_key).unwrap(),
-        data: f.policy.data.clone(), events: vec![], effects: vec![],
-    }).await.unwrap().record().clone();
+    let foreign = f
+        .store
+        .admit(AdmissionRequest {
+            key: foreign_key,
+            admission_key: publication_admission_key(&proposal.key, &proposal.admission_key)
+                .unwrap(),
+            data: f.policy.data.clone(),
+            events: vec![],
+            effects: vec![],
+        })
+        .await
+        .unwrap()
+        .record()
+        .clone();
     let effect = f.store.get_effect(&f.lease.key).await.unwrap().unwrap();
     assert!(matches!(
-        f.bridge(&f.store).publish_prepared_work(
-            &f.snapshot, &proposal, f.child_evidence(&proposal, f.now),
-            f.access(&f.context(f.now)), f.conditions(),
-        ).await,
+        f.bridge(&f.store)
+            .publish_prepared_work(
+                &f.snapshot,
+                &proposal,
+                f.child_evidence(&proposal, f.now),
+                f.access(&f.context(f.now)),
+                f.conditions(),
+            )
+            .await,
         Err(SetupError::Store(StoreError::AdmissionConflict))
     ));
     assert!(f.store.get(proposal.key()).await.unwrap().is_none());
     assert_eq!(f.store.get(&foreign.key).await.unwrap().unwrap(), foreign);
-    assert_eq!(f.store.get_effect(&f.lease.key).await.unwrap().unwrap(), effect);
+    assert_eq!(
+        f.store.get_effect(&f.lease.key).await.unwrap().unwrap(),
+        effect
+    );
 }

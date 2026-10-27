@@ -24,32 +24,44 @@ impl ObservedBridge {
     ) -> Result<GovernedDelivery, BridgeAdmissionError> {
         if self.fault.mode.helper_reprepare() {
             if self.fault.helper_session.get() != Some(session_id) {
-                return self.delegate_governed_delivery(runtime_id, session_id, input, custody, internal).await;
+                return self
+                    .delegate_governed_delivery(runtime_id, session_id, input, custody, internal)
+                    .await;
             }
-            return self.observe_helper_reprepare(runtime_id, session_id, input, custody, internal).await;
+            return self
+                .observe_helper_reprepare(runtime_id, session_id, input, custody, internal)
+                .await;
         }
         if matches!(self.fault.mode, DeliveryMode::RefuseSecondBeforeLookup)
             && self.fault.accepted.load(Ordering::SeqCst) >= 1
         {
             // The real B binder and evidence write completed, but the actual
             // native bridge has not been called for B. No admission is invented.
-            return Err(BridgeAdmissionError::GovernedInput(GovernedInputError::AdmissionUnresolved {
-                detail: "injected refusal before second native lookup".into(),
-            }));
+            return Err(BridgeAdmissionError::GovernedInput(
+                GovernedInputError::AdmissionUnresolved {
+                    detail: "injected refusal before second native lookup".into(),
+                },
+            ));
         }
-        let helper_control = matches!(self.fault.mode,
-            DeliveryMode::HoldHelperBeforeLookup | DeliveryMode::HoldHelperAcceptedReply);
+        let helper_control = matches!(
+            self.fault.mode,
+            DeliveryMode::HoldHelperBeforeLookup | DeliveryMode::HoldHelperAcceptedReply
+        );
         if helper_control {
             if self.fault.helper_session.get() != Some(session_id) {
-                return self.delegate_governed_delivery(runtime_id, session_id, input, custody, internal).await;
+                return self
+                    .delegate_governed_delivery(runtime_id, session_id, input, custody, internal)
+                    .await;
             }
             // The production helper binder already returned its real input and
             // fence. Preserve both, and hold just before the native bridge's
             // member lookups; the native bridge performs those lookups itself.
             {
                 let mut captured = self.fault.helper_input.lock().unwrap();
-                assert!(captured.replace(input.id().clone()).is_none(),
-                    "one actual helper delivery at this boundary");
+                assert!(
+                    captured.replace(input.id().clone()).is_none(),
+                    "one actual helper delivery at this boundary"
+                );
             }
             if matches!(self.fault.mode, DeliveryMode::HoldHelperBeforeLookup) {
                 self.fault.entered.notify_one();
@@ -72,10 +84,14 @@ impl ObservedBridge {
         }
         let accepted = self.fault.accepted.fetch_add(1, Ordering::SeqCst) + 1;
         match self.fault.mode {
-            DeliveryMode::Normal | DeliveryMode::HoldHelperBeforeLookup | DeliveryMode::RefuseSecondBeforeLookup
-                | DeliveryMode::HelperPolicyChangesOnce | DeliveryMode::HelperPolicyChangesAlways
-                | DeliveryMode::HelperPolicyChangesThenUnresolved | DeliveryMode::HelperPolicyChangesThenRetirement
-                | DeliveryMode::HelperPolicyChangesThenDeadline => {}
+            DeliveryMode::Normal
+            | DeliveryMode::HoldHelperBeforeLookup
+            | DeliveryMode::RefuseSecondBeforeLookup
+            | DeliveryMode::HelperPolicyChangesOnce
+            | DeliveryMode::HelperPolicyChangesAlways
+            | DeliveryMode::HelperPolicyChangesThenUnresolved
+            | DeliveryMode::HelperPolicyChangesThenRetirement
+            | DeliveryMode::HelperPolicyChangesThenDeadline => {}
             DeliveryMode::HoldAccepted | DeliveryMode::HoldHelperAcceptedReply => {
                 // Native admission is real and its reply is retained unchanged.
                 // IdentityRuntime owns the entry permit and finishes it only
@@ -83,16 +99,23 @@ impl ObservedBridge {
                 self.fault.entered.notify_one();
                 self.fault.release.acquire().await.unwrap().forget();
             }
-            DeliveryMode::LoseAcceptedAnswer | DeliveryMode::LoseSecondAcceptedAnswer if accepted >= 2
-                || matches!(self.fault.mode, DeliveryMode::LoseAcceptedAnswer) => {
+            DeliveryMode::LoseAcceptedAnswer | DeliveryMode::LoseSecondAcceptedAnswer
+                if accepted >= 2 || matches!(self.fault.mode, DeliveryMode::LoseAcceptedAnswer) =>
+            {
                 return Err(BridgeAdmissionError::GovernedInput(
                     GovernedInputError::AdmissionUnresolved {
                         detail: "injected loss after native fresh acceptance".into(),
                     },
                 ));
             }
-            DeliveryMode::PoisonPublicationAfterAcceptance | DeliveryMode::PoisonPublicationAfterSecondAcceptance
-                if accepted >= 2 || matches!(self.fault.mode, DeliveryMode::PoisonPublicationAfterAcceptance) => {
+            DeliveryMode::PoisonPublicationAfterAcceptance
+            | DeliveryMode::PoisonPublicationAfterSecondAcceptance
+                if accepted >= 2
+                    || matches!(
+                        self.fault.mode,
+                        DeliveryMode::PoisonPublicationAfterAcceptance
+                    ) =>
+            {
                 // Poison this real publication only after native accepted.
                 // Its ordinary source-publication path must report failure;
                 // this adapter never manufactures an admission or settlement.
@@ -102,8 +125,10 @@ impl ObservedBridge {
                 }));
                 assert!(poisoned.is_err());
             }
-            DeliveryMode::LoseAcceptedAnswer | DeliveryMode::LoseSecondAcceptedAnswer
-                | DeliveryMode::PoisonPublicationAfterAcceptance | DeliveryMode::PoisonPublicationAfterSecondAcceptance => {}
+            DeliveryMode::LoseAcceptedAnswer
+            | DeliveryMode::LoseSecondAcceptedAnswer
+            | DeliveryMode::PoisonPublicationAfterAcceptance
+            | DeliveryMode::PoisonPublicationAfterSecondAcceptance => {}
         }
         real
     }
@@ -125,18 +150,33 @@ impl ObservedBridge {
         if ordinal == 1 {
             *self.fault.helper_input.lock().unwrap() = Some(input.id().clone());
         }
-        let _change_arm = if ordinal == 1
-            || matches!(self.fault.mode, DeliveryMode::HelperPolicyChangesAlways)
-        {
-            let association = input.header().authority_association.as_ref()
-                .expect("actual bound helper association").clone();
-            assert_eq!(association.candidate().target.context.as_str(), session_id.to_string());
-            assert!(self.fault.helper_admission_change.lock().unwrap().replace(association).is_none());
-            Some(AdmissionChangeArm(self.fault.clone()))
-        } else {
-            None
-        };
-        let real = self.delegate_governed_delivery(runtime_id, session_id, input, custody, internal).await;
+        let _change_arm =
+            if ordinal == 1 || matches!(self.fault.mode, DeliveryMode::HelperPolicyChangesAlways) {
+                let association = input
+                    .header()
+                    .authority_association
+                    .as_ref()
+                    .expect("actual bound helper association")
+                    .clone();
+                assert_eq!(
+                    association.candidate().target.context.as_str(),
+                    session_id.to_string()
+                );
+                assert!(
+                    self.fault
+                        .helper_admission_change
+                        .lock()
+                        .unwrap()
+                        .replace(association)
+                        .is_none()
+                );
+                Some(AdmissionChangeArm(self.fault.clone()))
+            } else {
+                None
+            };
+        let real = self
+            .delegate_governed_delivery(runtime_id, session_id, input, custody, internal)
+            .await;
         self.fault.helper_returns.fetch_add(1, Ordering::SeqCst);
         // Only closed native result fields are retained. The adapter neither
         // creates a refusal nor substitutes the desired reason for another one.
@@ -150,20 +190,28 @@ impl ObservedBridge {
                 observed["admission_present"] = serde_json::json!(delivery.admission.is_some());
                 if let Some(admission) = &delivery.admission {
                     observed["deduplicated"] = serde_json::json!(admission.deduplicated);
-                    observed["session_matches"] = serde_json::json!(&admission.session_id == session_id);
+                    observed["session_matches"] =
+                        serde_json::json!(&admission.session_id == session_id);
                 }
             }
             Err(BridgeAdmissionError::GovernedInput(GovernedInputError::Mob(error))) => {
                 observed["category"] = serde_json::json!("mob_error");
-                if let meerkat_mob::MobError::MemberInputRefused { session_id: actual, error } = error.as_ref() {
+                if let meerkat_mob::MobError::MemberInputRefused {
+                    session_id: actual,
+                    error,
+                } = error.as_ref()
+                {
                     observed["category"] = serde_json::json!("member_input_refused");
                     observed["session_matches"] = serde_json::json!(actual == session_id);
                     match error {
-                        meerkat_runtime::RuntimeDriverError::ControllerReadinessUnavailable { reason } => {
+                        meerkat_runtime::RuntimeDriverError::ControllerReadinessUnavailable {
+                            reason,
+                        } => {
                             observed["readiness"] = serde_json::json!(format!("{reason:?}"));
                         }
                         meerkat_runtime::RuntimeDriverError::InputRefused { refusal } => {
-                            observed["refusal_kind"] = serde_json::json!(format!("{:?}", refusal.kind()));
+                            observed["refusal_kind"] =
+                                serde_json::json!(format!("{:?}", refusal.kind()));
                         }
                         _ => {}
                     }
@@ -181,21 +229,33 @@ impl ObservedBridge {
                 },
             } if refused_session == session_id));
         if policy_changed {
-            self.fault.helper_policy_changed.fetch_add(1, Ordering::SeqCst);
+            self.fault
+                .helper_policy_changed
+                .fetch_add(1, Ordering::SeqCst);
             self.fault.refused.fetch_add(1, Ordering::SeqCst);
         }
-        let fresh = matches!(&real, Ok(GovernedDelivery { admission: Some(a), .. }) if !a.deduplicated);
-        if fresh { self.fault.accepted.fetch_add(1, Ordering::SeqCst); }
+        let fresh =
+            matches!(&real, Ok(GovernedDelivery { admission: Some(a), .. }) if !a.deduplicated);
+        if fresh {
+            self.fault.accepted.fetch_add(1, Ordering::SeqCst);
+        }
         if ordinal == 1 {
             // The test inspects the actual return before allowing re-entry. A
             // wrong return still reaches this gate and fails the owning checks.
             self.fault.entered.notify_one();
             self.fault.release.acquire().await.unwrap().forget();
         }
-        if fresh && matches!(self.fault.mode, DeliveryMode::HelperPolicyChangesThenUnresolved) {
-            return Err(BridgeAdmissionError::GovernedInput(GovernedInputError::AdmissionUnresolved {
-                detail: "injected loss after actual helper fresh acceptance".into(),
-            }));
+        if fresh
+            && matches!(
+                self.fault.mode,
+                DeliveryMode::HelperPolicyChangesThenUnresolved
+            )
+        {
+            return Err(BridgeAdmissionError::GovernedInput(
+                GovernedInputError::AdmissionUnresolved {
+                    detail: "injected loss after actual helper fresh acceptance".into(),
+                },
+            ));
         }
         real
     }
@@ -224,7 +284,9 @@ impl ObservedBridge {
 /// including cancellation before the operation owner consumes it.
 struct AdmissionChangeArm(Arc<DeliveryFault>);
 impl Drop for AdmissionChangeArm {
-    fn drop(&mut self) { self.0.helper_admission_change.lock().unwrap().take(); }
+    fn drop(&mut self) {
+        self.0.helper_admission_change.lock().unwrap().take();
+    }
 }
 
 /// Forward the real policy unchanged, then invalidate its enclosing native
@@ -242,10 +304,17 @@ impl OperationPolicyOwner for AdmissionChangingOwner {
         facts: &meerkat_core::ControllerModelFacts,
         now_ms: u64,
     ) -> Result<ControllerAdmissionAllowance, meerkat_core::OperationAuthorizationError> {
-        let allowance = self.inner.authorize_controller_admission(association, facts, now_ms)?;
+        let allowance = self
+            .inner
+            .authorize_controller_admission(association, facts, now_ms)?;
         let selected = {
             let mut selected = self.fault.helper_admission_change.lock().unwrap();
-            if selected.as_ref() == Some(association) { selected.take(); true } else { false }
+            if selected.as_ref() == Some(association) {
+                selected.take();
+                true
+            } else {
+                false
+            }
         };
         if selected {
             // No semantic policy fact is changed. This bounded fault advances
@@ -254,43 +323,65 @@ impl OperationPolicyOwner for AdmissionChangingOwner {
             match self.publication.try_begin_owner_change() {
                 Ok(change) => {
                     drop(change);
-                    self.fault.publication_changes.fetch_add(1, Ordering::SeqCst);
+                    self.fault
+                        .publication_changes
+                        .fetch_add(1, Ordering::SeqCst);
                 }
-                Err(_) => { self.fault.publication_change_failures.fetch_add(1, Ordering::SeqCst); }
+                Err(_) => {
+                    self.fault
+                        .publication_change_failures
+                        .fetch_add(1, Ordering::SeqCst);
+                }
             }
         }
         Ok(allowance)
     }
 
     fn authorize_tool_application(
-        &self, control: &meerkat_core::ToolApplicationControlRequest,
-        binding: &PreparedAuthorizationBinding, now_ms: u64,
+        &self,
+        control: &meerkat_core::ToolApplicationControlRequest,
+        binding: &PreparedAuthorizationBinding,
+        now_ms: u64,
     ) -> Result<LocalPolicyAllowance, meerkat_core::OperationAuthorizationError> {
-        self.inner.authorize_tool_application(control, binding, now_ms)
+        self.inner
+            .authorize_tool_application(control, binding, now_ms)
     }
     fn authorize_context_control(
-        &self, control: &meerkat_core::service::SystemContextControlRequest,
-        binding: &PreparedAuthorizationBinding, now_ms: u64,
+        &self,
+        control: &meerkat_core::service::SystemContextControlRequest,
+        binding: &PreparedAuthorizationBinding,
+        now_ms: u64,
     ) -> Result<LocalPolicyAllowance, meerkat_core::OperationAuthorizationError> {
-        self.inner.authorize_context_control(control, binding, now_ms)
+        self.inner
+            .authorize_context_control(control, binding, now_ms)
     }
     fn authorize_mcp_attachment(
-        &self, control: &meerkat_core::mcp_attachment_control::McpAttachmentControlRequest,
-        binding: &PreparedAuthorizationBinding, now_ms: u64,
+        &self,
+        control: &meerkat_core::mcp_attachment_control::McpAttachmentControlRequest,
+        binding: &PreparedAuthorizationBinding,
+        now_ms: u64,
     ) -> Result<LocalPolicyAllowance, meerkat_core::OperationAuthorizationError> {
-        self.inner.authorize_mcp_attachment(control, binding, now_ms)
+        self.inner
+            .authorize_mcp_attachment(control, binding, now_ms)
     }
     fn authorize_operation(
-        &self, association: &InputAuthorityAssociation,
-        binding: &PreparedAuthorizationBinding, purpose: LocalPolicyPurpose, now_ms: u64,
+        &self,
+        association: &InputAuthorityAssociation,
+        binding: &PreparedAuthorizationBinding,
+        purpose: LocalPolicyPurpose,
+        now_ms: u64,
     ) -> Result<LocalPolicyAllowance, meerkat_core::OperationAuthorizationError> {
-        self.inner.authorize_operation(association, binding, purpose, now_ms)
+        self.inner
+            .authorize_operation(association, binding, purpose, now_ms)
     }
     fn review_action_account(
-        &self, association: &InputAuthorityAssociation,
-        binding: &PreparedAuthorizationBinding, now_ms: u64,
+        &self,
+        association: &InputAuthorityAssociation,
+        binding: &PreparedAuthorizationBinding,
+        now_ms: u64,
     ) -> Result<Option<String>, meerkat_core::OperationAuthorizationError> {
-        self.inner.review_action_account(association, binding, now_ms)
+        self.inner
+            .review_action_account(association, binding, now_ms)
     }
 }
 

@@ -1,12 +1,24 @@
 //! In-process enrollment in the gateway's one terminal presenter.
 
-use std::{path::PathBuf, sync::{Arc, OnceLock}};
+use std::{
+    path::PathBuf,
+    sync::{Arc, OnceLock},
+};
 
 use futures_util::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 
-use crate::installed_service_review::{InstalledServiceReview, account_request::{InstalledAccountRequest, InstalledAccountRequests, InstalledRequest, public::InstalledPublicRequest}};
-use crate::{ConnectError, approval::{ApprovalPresenter, ApprovalPrompt, LocalApprovals}};
+use crate::installed_service_review::{
+    InstalledServiceReview,
+    account_request::{
+        InstalledAccountRequest, InstalledAccountRequests, InstalledRequest,
+        public::InstalledPublicRequest,
+    },
+};
+use crate::{
+    ConnectError,
+    approval::{ApprovalPresenter, ApprovalPrompt, LocalApprovals},
+};
 
 // Resource bounds only. Neither capacity nor enrollment is native permission.
 const MAX_PRESENTERS: usize = 8;
@@ -31,30 +43,46 @@ impl LocalSetupApprovals {
     /// Configuration-time check of this exact enrollment receiver. Construction
     /// and every entered review still enforce their own current custody.
     pub(crate) fn check_open(&self) -> Result<(), ConnectError> {
-        if self.sender.is_closed() { Err(unavailable()) } else { Ok(()) }
+        if self.sender.is_closed() {
+            Err(unavailable())
+        } else {
+            Ok(())
+        }
     }
 
     pub(crate) fn with_console(mut self, console: super::console_setup::ConsoleSetup) -> Self {
-        self.console = Some(Arc::new(OnceLock::from(console))); self
+        self.console = Some(Arc::new(OnceLock::from(console)));
+        self
     }
 
     /// The same enrollment owner is constructed before native held members.
     /// The final private host supplies its actual Console binding once, before
     /// any member can publish. No prompt may select a different presenter.
     pub(crate) fn with_pending_console(mut self) -> Self {
-        self.console = Some(Arc::new(OnceLock::new())); self
+        self.console = Some(Arc::new(OnceLock::new()));
+        self
     }
 
-    pub(crate) fn adopt_console(&self, console: super::console_setup::ConsoleSetup)
-        -> Result<(), ConnectError>
-    {
-        self.console.as_ref().ok_or_else(unavailable)?.set(console).map_err(|_| unavailable())
+    pub(crate) fn adopt_console(
+        &self,
+        console: super::console_setup::ConsoleSetup,
+    ) -> Result<(), ConnectError> {
+        self.console
+            .as_ref()
+            .ok_or_else(unavailable)?
+            .set(console)
+            .map_err(|_| unavailable())
     }
-    pub(crate) fn has_console(&self) -> bool { self.console.is_some() }
+    pub(crate) fn has_console(&self) -> bool {
+        self.console.is_some()
+    }
 
     fn approval_pair(&self) -> Result<(LocalApprovals, ApprovalPresenter), ConnectError> {
-        if self.console.is_some() { LocalApprovals::create_console_setup(&self.artifact_parent) }
-        else { LocalApprovals::create(&self.artifact_parent) }
+        if self.console.is_some() {
+            LocalApprovals::create_console_setup(&self.artifact_parent)
+        } else {
+            LocalApprovals::create(&self.artifact_parent)
+        }
     }
 
     /// Create the existing approval owner and its sole presenter together.
@@ -69,12 +97,22 @@ impl LocalSetupApprovals {
         if self.sender.is_closed() {
             return Err(unavailable());
         }
-        let permit = self.capacity.clone().try_acquire_owned().map_err(|_| unavailable())?;
+        let permit = self
+            .capacity
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| unavailable())?;
         let (approvals, presenter) = self.approval_pair()?;
         let approvals = Arc::new(approvals);
         // Failed transfer drops the actual presenter and retires this same
         // owner before returning. No session or decision has been invented.
-        self.sender.try_send(Enrollment { console: self.console.clone(), presenter: Some(presenter), accounts: None, _permit: permit })
+        self.sender
+            .try_send(Enrollment {
+                console: self.console.clone(),
+                presenter: Some(presenter),
+                accounts: None,
+                _permit: permit,
+            })
             .map_err(|_| unavailable())?;
         Ok(approvals)
     }
@@ -98,29 +136,47 @@ impl LocalSetupApprovals {
     pub(crate) fn create_installed_selected(
         &self,
         tasks: Option<toolkit_mobkit::installed_host::acquisition::InstalledServiceTaskSource>,
-        selected: Option<Arc<crate::application_acquisition::selected_policy::SelectedPolicyBinding>>,
+        selected: Option<
+            Arc<crate::application_acquisition::selected_policy::SelectedPolicyBinding>,
+        >,
         build: impl FnOnce(Arc<LocalApprovals>) -> Result<InstalledServiceReview, ConnectError>,
     ) -> Result<Arc<dyn meerkat_core::AgentToolDispatcher>, ConnectError> {
-        if self.sender.is_closed() { return Err(unavailable()); }
-        let permit = self.capacity.clone().try_acquire_owned().map_err(|_| unavailable())?;
+        if self.sender.is_closed() {
+            return Err(unavailable());
+        }
+        let permit = self
+            .capacity
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| unavailable())?;
         let (approvals, presenter) = match &selected {
             Some(selected) => {
                 let (approvals, presenter) = LocalApprovals::create_for_selected_policy(
-                    &self.artifact_parent, selected.clone(), Some(self.console.is_some()))?;
+                    &self.artifact_parent,
+                    selected.clone(),
+                    Some(self.console.is_some()),
+                )?;
                 (approvals, presenter.ok_or_else(unavailable)?)
             }
             None => self.approval_pair()?,
         };
         let review = build(Arc::new(approvals.with_service_tasks(tasks.clone())))?;
         let (dispatcher, accounts) = match selected {
-            Some(selected) => InstalledAccountRequests::with_selected_policy(review, tasks, selected),
+            Some(selected) => {
+                InstalledAccountRequests::with_selected_policy(review, tasks, selected)
+            }
             None => InstalledAccountRequests::with_tasks(review, tasks),
         };
-        self.sender.try_send(Enrollment { console: self.console.clone(), presenter: Some(presenter), accounts: Some(accounts), _permit: permit })
+        self.sender
+            .try_send(Enrollment {
+                console: self.console.clone(),
+                presenter: Some(presenter),
+                accounts: Some(accounts),
+                _permit: permit,
+            })
             .map_err(|_| unavailable())?;
         Ok(dispatcher)
     }
-
 }
 
 fn unavailable() -> ConnectError {
@@ -129,12 +185,15 @@ fn unavailable() -> ConnectError {
 
 pub(crate) fn channel(artifact_parent: PathBuf) -> (LocalSetupApprovals, LocalSetupReviews) {
     let (sender, receiver) = mpsc::channel(1);
-    (LocalSetupApprovals {
-        artifact_parent,
-        sender,
-        capacity: Arc::new(Semaphore::new(MAX_PRESENTERS)),
-        console: None,
-    }, LocalSetupReviews(receiver))
+    (
+        LocalSetupApprovals {
+            artifact_parent,
+            sender,
+            capacity: Arc::new(Semaphore::new(MAX_PRESENTERS)),
+            console: None,
+        },
+        LocalSetupReviews(receiver),
+    )
 }
 
 pub(super) struct Enrollment {
@@ -154,7 +213,9 @@ pub(super) enum SetupEvent {
     Approval(ApprovalPrompt),
     Account(InstalledAccountRequest),
     Public(InstalledPublicRequest),
-    Credentials(crate::installed_service_review::account_request::credentials::InstalledCredentialRequest),
+    Credentials(
+        crate::installed_service_review::account_request::credentials::InstalledCredentialRequest,
+    ),
 }
 type NextPrompt = BoxFuture<'static, (Enrollment, Option<SetupEvent>)>;
 
@@ -168,11 +229,16 @@ pub(super) struct SetupPresenters {
 
 impl SetupPresenters {
     pub(super) fn new(reviews: LocalSetupReviews) -> Self {
-        Self { incoming: Some(reviews.0), waiting: FuturesUnordered::new() }
+        Self {
+            incoming: Some(reviews.0),
+            waiting: FuturesUnordered::new(),
+        }
     }
 
     pub(super) fn resume(&mut self, mut enrollment: Enrollment) {
-        if enrollment.presenter.is_none() { return; }
+        if enrollment.presenter.is_none() {
+            return;
+        }
         self.waiting.push(Box::pin(async move {
             let event = if let Some(accounts) = enrollment.accounts.as_mut() {
                 tokio::select! { biased;

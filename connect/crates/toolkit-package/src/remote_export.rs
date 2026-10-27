@@ -50,7 +50,6 @@ pub struct RemoteExportComponent {
     pub rollback: RollbackContract,
 }
 
-
 /// A remote source declaration cannot name a host configuration revision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -71,27 +70,52 @@ pub(crate) struct ValidatedRemoteExportDeclaration {
 }
 
 impl ValidatedRemoteExportDeclaration {
-    pub(crate) fn declaration(&self) -> &RemoteExportDeclaration { &self.declaration }
-    pub(crate) fn digest(&self) -> &ContentDigest { &self.digest }
+    pub(crate) fn declaration(&self) -> &RemoteExportDeclaration {
+        &self.declaration
+    }
+    pub(crate) fn digest(&self) -> &ContentDigest {
+        &self.digest
+    }
 }
 
 impl RemoteExportDeclaration {
-    pub(crate) fn validate(self, package: &IntegrationPackage)
-        -> Result<ValidatedRemoteExportDeclaration, ValidationError>
-    {
+    pub(crate) fn validate(
+        self,
+        package: &IntegrationPackage,
+    ) -> Result<ValidatedRemoteExportDeclaration, ValidationError> {
         if self.selection_kind != REMOTE_EXPORT_DECLARATION
-            || self.components.len() != 1 || self.exports.len() != 1
+            || self.components.len() != 1
+            || self.exports.len() != 1
             || !matches!(&self.exports[0], Export::ServiceConnector(_))
         {
-            return Err(ValidationError::new("remote_declaration",
-                "remote declaration requires its explicit kind, one component and one service export"));
+            return Err(ValidationError::new(
+                "remote_declaration",
+                "remote declaration requires its explicit kind, one component and one service export",
+            ));
         }
-        let components = self.components.iter().map(crate::manifest::ComponentContract::from).collect::<Vec<_>>();
-        crate::manifest::validate_selection_contract(self.schema_version, &self.package,
-            &self.package_content_digest, &self.strategy, &components, &self.exports,
-            &self.required_contracts, &self.host_services, &self.portable_mcp_entries, package)?;
-        let digest = ContentDigest::of_bytes(&canonical_json(&self)
-            .map_err(|_| ValidationError::new("remote_declaration", "canonical serialization failed"))?);
-        Ok(ValidatedRemoteExportDeclaration { declaration: self, digest })
+        let components = self
+            .components
+            .iter()
+            .map(crate::manifest::ComponentContract::from)
+            .collect::<Vec<_>>();
+        crate::manifest::validate_selection_contract(
+            self.schema_version,
+            &self.package,
+            &self.package_content_digest,
+            &self.strategy,
+            &components,
+            &self.exports,
+            &self.required_contracts,
+            &self.host_services,
+            &self.portable_mcp_entries,
+            package,
+        )?;
+        let digest = ContentDigest::of_bytes(&canonical_json(&self).map_err(|_| {
+            ValidationError::new("remote_declaration", "canonical serialization failed")
+        })?);
+        Ok(ValidatedRemoteExportDeclaration {
+            declaration: self,
+            digest,
+        })
     }
 }

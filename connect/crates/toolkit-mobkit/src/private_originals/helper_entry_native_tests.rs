@@ -123,18 +123,35 @@ async fn issued_helper(
     assert_eq!(current.revision, retained.revision + 1);
     assert_eq!(current.content_digest, current.data.digest().unwrap());
     let mut unchanged = current.data.body.clone();
-    let actual_attempt = unchanged.as_object_mut().unwrap()
-        .remove("custody_attempt").unwrap();
-    assert_eq!(actual_attempt["session_id"], serde_json::to_value(helper_session).unwrap());
-    assert_eq!(actual_attempt["input_id"],
-        serde_json::to_value(fault.helper_input.lock().unwrap().as_ref().unwrap()).unwrap());
+    let actual_attempt = unchanged
+        .as_object_mut()
+        .unwrap()
+        .remove("custody_attempt")
+        .unwrap();
+    assert_eq!(
+        actual_attempt["session_id"],
+        serde_json::to_value(helper_session).unwrap()
+    );
+    assert_eq!(
+        actual_attempt["input_id"],
+        serde_json::to_value(fault.helper_input.lock().unwrap().as_ref().unwrap()).unwrap()
+    );
     let attempt: crate::original_ingress::custody_attempt::CustodyAttempt =
         serde_json::from_value(actual_attempt).unwrap();
     attempt.validate_binding(binding).unwrap();
     let retained_input: meerkat_runtime::Input = serde_json::from_value(
-        unchanged.as_object_mut().unwrap().remove("bound_input").unwrap()).unwrap();
+        unchanged
+            .as_object_mut()
+            .unwrap()
+            .remove("bound_input")
+            .unwrap(),
+    )
+    .unwrap();
     assert!(attempt.matches_input(&retained_input).unwrap());
-    assert_eq!(retained_input.header().authority_association.as_ref(), Some(binding));
+    assert_eq!(
+        retained_input.header().authority_association.as_ref(),
+        Some(binding)
+    );
     if let Some(actual) = fault.helper_inputs.lock().unwrap().first() {
         let input: meerkat_runtime::Input = serde_json::from_value(actual.clone()).unwrap();
         assert!(attempt.matches_input(&input).unwrap());
@@ -179,26 +196,84 @@ async fn exercise(mode: DeliveryMode) {
             let helper_member = MemberIdentity::from(installed::HELPER);
             let original_member = MemberIdentity::from(MEMBER);
             let definition = handle.definition();
-            assert!(definition.profiles.get(&ProfileName::from("worker"))
-                .unwrap().as_inline().unwrap().external_addressable);
-            assert!(!definition.profiles.get(&ProfileName::from(installed::PRIVATE_HELPER_PROFILE))
-                .unwrap().as_inline().unwrap().external_addressable);
-            let selected = fixture.lifetime().selected_policy().native_host.as_ref().unwrap();
-            let compiled_helper = selected.members.iter()
-                .find(|member| member.member.member == installed::HELPER).unwrap();
-            assert_eq!(compiled_helper.member.role, installed::PRIVATE_HELPER_PROFILE);
-            assert!(handle.effective_member_profile(&original_member).await.unwrap().external_addressable);
-            assert!(!handle.effective_member_profile(&helper_member).await.unwrap().external_addressable);
+            assert!(
+                definition
+                    .profiles
+                    .get(&ProfileName::from("worker"))
+                    .unwrap()
+                    .as_inline()
+                    .unwrap()
+                    .external_addressable
+            );
+            assert!(
+                !definition
+                    .profiles
+                    .get(&ProfileName::from(installed::PRIVATE_HELPER_PROFILE))
+                    .unwrap()
+                    .as_inline()
+                    .unwrap()
+                    .external_addressable
+            );
+            let selected = fixture
+                .lifetime()
+                .selected_policy()
+                .native_host
+                .as_ref()
+                .unwrap();
+            let compiled_helper = selected
+                .members
+                .iter()
+                .find(|member| member.member.member == installed::HELPER)
+                .unwrap();
+            assert_eq!(
+                compiled_helper.member.role,
+                installed::PRIVATE_HELPER_PROFILE
+            );
+            assert!(
+                handle
+                    .effective_member_profile(&original_member)
+                    .await
+                    .unwrap()
+                    .external_addressable
+            );
+            assert!(
+                !handle
+                    .effective_member_profile(&helper_member)
+                    .await
+                    .unwrap()
+                    .external_addressable
+            );
             assert_eq!(fixture.model_requests(), 0);
             let public_helper = handle.member(&helper_member).await.unwrap();
-            match public_helper.send("public helper ingress must refuse", meerkat_core::types::HandlingMode::Queue).await {
-                Err(meerkat_mob::MobError::NotExternallyAddressable(identity)) => assert_eq!(identity, helper_member),
-                Err(error) => panic!("expected exact public helper addressability refusal: {error}"),
+            match public_helper
+                .send(
+                    "public helper ingress must refuse",
+                    meerkat_core::types::HandlingMode::Queue,
+                )
+                .await
+            {
+                Err(meerkat_mob::MobError::NotExternallyAddressable(identity)) => {
+                    assert_eq!(identity, helper_member)
+                }
+                Err(error) => {
+                    panic!("expected exact public helper addressability refusal: {error}")
+                }
                 Ok(_) => panic!("public external work entered the private helper"),
             }
-            assert!(acquisition_approved::native_history(history.as_ref(), &helper_session).await.is_empty());
-            assert_eq!(fixture.runtime.completion_cursor(&helper).await, helper_before);
-            assert_eq!(fixture.model_requests(), 0, "public refusal must not enter a model");
+            assert!(
+                acquisition_approved::native_history(history.as_ref(), &helper_session)
+                    .await
+                    .is_empty()
+            );
+            assert_eq!(
+                fixture.runtime.completion_cursor(&helper).await,
+                helper_before
+            );
+            assert_eq!(
+                fixture.model_requests(),
+                0,
+                "public refusal must not enter a model"
+            );
             let (_prepared, parent) = acquisition_approved::select_reviewed_setup(&fixture).await;
             let first = fixture.submit().await;
             let Ok(PrivateOriginalSubmission::Admitted {
@@ -227,11 +302,18 @@ async fn exercise(mode: DeliveryMode) {
             fault.entered.notified().await;
             // This is after actual issuance, source publication and helper binding.
             let held = issued_helper(&fixture, &helper_session, &binding, &fault).await;
-            assert!(held.handoffs_for_test().is_empty(),
-                "the actual native foreground still owns the helper settlement Box");
+            assert!(
+                held.handoffs_for_test().is_empty(),
+                "the actual native foreground still owns the helper settlement Box"
+            );
             let helper_input = fault.helper_input.lock().unwrap().clone().unwrap();
             assert_ne!(helper_input.to_string(), *original_input);
-            let saved_helper = fixture.store.get(&held.source_record().key).await.unwrap().unwrap();
+            let saved_helper = fixture
+                .store
+                .get(&held.source_record().key)
+                .await
+                .unwrap()
+                .unwrap();
             let mut retirement = logins.fixture_retire(1).unwrap();
             assert!(
                 login.check().is_err(),
@@ -341,8 +423,10 @@ async fn exercise(mode: DeliveryMode) {
                 deadline,
             )
             .await;
-            assert!(held.handoffs_for_test().is_empty(),
-                "definite nonadmission or successful callback leaves no transferred Box");
+            assert!(
+                held.handoffs_for_test().is_empty(),
+                "definite nonadmission or successful callback leaves no transferred Box"
+            );
             assert_eq!(fixture.binding().await.unwrap(), Some(binding));
             assert_eq!(
                 fixture.store.get(&saved_helper.key).await.unwrap().unwrap(),
@@ -562,12 +646,14 @@ async fn exercise_helper_reprepare(mode: DeliveryMode) {
     script.release_first_response();
     fault.release.add_permits(1);
     let cleanup = fixture.shutdown().await;
-    assert!(fault.helper_admission_change.lock().unwrap().is_none(),
-        "no pending admission fault after actual owner cleanup");
+    assert!(
+        fault.helper_admission_change.lock().unwrap().is_none(),
+        "no pending admission fault after actual owner cleanup"
+    );
     assert_eq!(fault.publication_change_failures.load(Ordering::SeqCst), 0);
     assert!(cleanup.is_ok(), "{cleanup:?}");
     match checked {
-        Ok(Ok(())) => {},
+        Ok(Ok(())) => {}
         Ok(Err(_)) => panic!("actual helper reprepare control timed out"),
         Err(payload) => std::panic::resume_unwind(payload),
     }
@@ -575,23 +661,38 @@ async fn exercise_helper_reprepare(mode: DeliveryMode) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn helper_policy_change_reprepares_same_input_once_after_native_nonadmission() {
-    Box::pin(exercise_helper_reprepare(DeliveryMode::HelperPolicyChangesOnce)).await;
+    Box::pin(exercise_helper_reprepare(
+        DeliveryMode::HelperPolicyChangesOnce,
+    ))
+    .await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn persistent_helper_policy_change_is_bounded_without_duplicate_work_or_input() {
-    Box::pin(exercise_helper_reprepare(DeliveryMode::HelperPolicyChangesAlways)).await;
+    Box::pin(exercise_helper_reprepare(
+        DeliveryMode::HelperPolicyChangesAlways,
+    ))
+    .await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lost_helper_acceptance_after_reprepare_stays_uncertain_without_third_dispatch() {
-    Box::pin(exercise_helper_reprepare(DeliveryMode::HelperPolicyChangesThenUnresolved)).await;
+    Box::pin(exercise_helper_reprepare(
+        DeliveryMode::HelperPolicyChangesThenUnresolved,
+    ))
+    .await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retired_contributor_between_helper_attempts_refuses_reentry() {
-    Box::pin(exercise_helper_reprepare(DeliveryMode::HelperPolicyChangesThenRetirement)).await;
+    Box::pin(exercise_helper_reprepare(
+        DeliveryMode::HelperPolicyChangesThenRetirement,
+    ))
+    .await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn original_helper_deadline_between_attempts_refuses_reentry_without_extension() {
-    Box::pin(exercise_helper_reprepare(DeliveryMode::HelperPolicyChangesThenDeadline)).await;
+    Box::pin(exercise_helper_reprepare(
+        DeliveryMode::HelperPolicyChangesThenDeadline,
+    ))
+    .await;
 }
 
 const CATALOG_SEARCH: &str = "reset-helper-search";
@@ -601,49 +702,80 @@ const CATALOG_LOAD: &str = "reset-helper-load";
 /// source binding, grant owner and native input execute both catalog calls.
 pub(super) struct CatalogProbe {
     pub(super) successor: bool,
-    pub(super) selected_helper: std::sync::OnceLock<crate::installed_host::acquisition::InstalledSetupSelection>,
+    pub(super) selected_helper:
+        std::sync::OnceLock<crate::installed_host::acquisition::InstalledSetupSelection>,
     calls: AtomicUsize,
     feedback: std::sync::Mutex<BTreeMap<String, meerkat_core::ToolResult>>,
 }
 impl CatalogProbe {
     fn new(successor: bool) -> Arc<Self> {
-        Arc::new(Self { successor, selected_helper: Default::default(), calls: AtomicUsize::new(0), feedback: Default::default() })
+        Arc::new(Self {
+            successor,
+            selected_helper: Default::default(),
+            calls: AtomicUsize::new(0),
+            feedback: Default::default(),
+        })
     }
     pub(super) fn provider(self: &Arc<Self>, inner: Arc<dyn LlmClient>) -> Arc<dyn LlmClient> {
-        Arc::new(CatalogResponse { inner, probe: self.clone() })
+        Arc::new(CatalogResponse {
+            inner,
+            probe: self.clone(),
+        })
     }
 }
 
-struct CatalogResponse { inner: Arc<dyn LlmClient>, probe: Arc<CatalogProbe> }
+struct CatalogResponse {
+    inner: Arc<dyn LlmClient>,
+    probe: Arc<CatalogProbe>,
+}
 #[async_trait]
 impl LlmClient for CatalogResponse {
     async fn prepare_controller_credential(&self) -> Result<(), meerkat_core::auth::AuthError> {
         self.inner.prepare_controller_credential().await
     }
-    fn plain_model_route(&self, model: &str) -> Result<PlainModelRoute, meerkat_core::ControllerFactsUnavailable> {
+    fn plain_model_route(
+        &self,
+        model: &str,
+    ) -> Result<PlainModelRoute, meerkat_core::ControllerFactsUnavailable> {
         self.inner.plain_model_route(model)
     }
-    fn controller_model_selection(&self) -> Option<ControllerModelSelection> { self.inner.controller_model_selection() }
+    fn controller_model_selection(&self) -> Option<ControllerModelSelection> {
+        self.inner.controller_model_selection()
+    }
     fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
         self.inner.project_replay_messages(messages)
     }
-    fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> { self.inner.stream(request) }
+    fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+        self.inner.stream(request)
+    }
     fn stream_prepared<'a>(&'a self, request: &'a PreparedLlmRequest) -> LlmStream<'a> {
         use futures::StreamExt;
         // Original has this exact fixture question. Helper receives the actual
         // governed acquisition input. This selects scripted model output only.
-        let first_user = request.request().messages.iter().find_map(|message| match message {
-            Message::User(user) => Some(user.text_content()), _ => None,
-        });
+        let first_user = request
+            .request()
+            .messages
+            .iter()
+            .find_map(|message| match message {
+                Message::User(user) => Some(user.text_content()),
+                _ => None,
+            });
         let stream = self.inner.stream_prepared(request);
-        if first_user.as_deref() == Some(PROMPT) { return stream; }
-        assert!(first_user.is_some(), "the actual helper input must be present");
+        if first_user.as_deref() == Some(PROMPT) {
+            return stream;
+        }
+        assert!(
+            first_user.is_some(),
+            "the actual helper input must be present"
+        );
         let mut feedback = self.probe.feedback.lock().unwrap();
         for message in &request.request().messages {
             if let Message::ToolResults { results, .. } = message {
-                for result in results.iter().filter(|result|
-                    result.tool_use_id == CATALOG_SEARCH || result.tool_use_id == CATALOG_LOAD) {
-                    if let Some(prior) = feedback.insert(result.tool_use_id.clone(), result.clone()) {
+                for result in results.iter().filter(|result| {
+                    result.tool_use_id == CATALOG_SEARCH || result.tool_use_id == CATALOG_LOAD
+                }) {
+                    if let Some(prior) = feedback.insert(result.tool_use_id.clone(), result.clone())
+                    {
                         assert_eq!(prior.text_content(), result.text_content());
                         assert_eq!(prior.is_error, result.is_error);
                     }
@@ -651,42 +783,79 @@ impl LlmClient for CatalogResponse {
             }
         }
         let choice = if !feedback.contains_key(CATALOG_SEARCH) {
-            Some((0, CATALOG_SEARCH, "tool_catalog_search", serde_json::json!({"query":"peers"})))
+            Some((
+                0,
+                CATALOG_SEARCH,
+                "tool_catalog_search",
+                serde_json::json!({"query":"peers"}),
+            ))
         } else if !feedback.contains_key(CATALOG_LOAD) {
-            Some((1, CATALOG_LOAD, "tool_catalog_load", serde_json::json!({"names":["peers"]})))
-        } else { None };
+            Some((
+                1,
+                CATALOG_LOAD,
+                "tool_catalog_load",
+                serde_json::json!({"names":["peers"]}),
+            ))
+        } else {
+            None
+        };
         drop(feedback);
-        let Some((ordinal, id, name, args)) = choice else { return stream; };
+        let Some((ordinal, id, name, args)) = choice else {
+            return stream;
+        };
         assert!(request.request().tools.iter().any(|tool| tool.name == name));
         let mut emitted = false;
-        Box::pin(stream.map(move |event| event.map(|event| match event {
-            LlmEvent::TextDelta { .. } => {
-                assert!(!emitted); emitted = true;
-                assert_eq!(self.probe.calls.fetch_add(1, Ordering::SeqCst), ordinal,
-                    "a missing/refused result must not silently retry a catalog call");
-                LlmEvent::ToolCallComplete { id: id.into(), name: name.into(), args: args.clone(), meta: None }
-            }
-            LlmEvent::Done { outcome: LlmDoneOutcome::Success { .. } } => LlmEvent::Done {
-                outcome: LlmDoneOutcome::success(StopReason::ToolUse),
-            },
-            other => other,
-        })))
+        Box::pin(stream.map(move |event| {
+            event.map(|event| match event {
+                LlmEvent::TextDelta { .. } => {
+                    assert!(!emitted);
+                    emitted = true;
+                    assert_eq!(
+                        self.probe.calls.fetch_add(1, Ordering::SeqCst),
+                        ordinal,
+                        "a missing/refused result must not silently retry a catalog call"
+                    );
+                    LlmEvent::ToolCallComplete {
+                        id: id.into(),
+                        name: name.into(),
+                        args: args.clone(),
+                        meta: None,
+                    }
+                }
+                LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success { .. },
+                } => LlmEvent::Done {
+                    outcome: LlmDoneOutcome::success(StopReason::ToolUse),
+                },
+                other => other,
+            })
+        }))
     }
-    fn provider(&self) -> Provider { self.inner.provider() }
-    async fn health_check(&self) -> Result<(), LlmError> { self.inner.health_check().await }
+    fn provider(&self) -> Provider {
+        self.inner.provider()
+    }
+    async fn health_check(&self) -> Result<(), LlmError> {
+        self.inner.health_check().await
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fresh_helper_reset_catalog_calls_require_explicit_successor_parent() {
-    use crate::installed_host::{application_operations, operator_setup::{AgentSetupCapabilityRequest, SetupTargetRequest}};
-    use meerkat_authorization_contracts::constraints::{DelegationDepth, OperationRestrictionValues};
+    use crate::installed_host::{
+        application_operations,
+        operator_setup::{AgentSetupCapabilityRequest, SetupTargetRequest},
+    };
+    use meerkat_authorization_contracts::constraints::{
+        DelegationDepth, OperationRestrictionValues,
+    };
     use meerkat_authorization_contracts::work_association::GrantTarget;
     // The legacy exact-session selection is a behavioral negative control on
     // the same public reset path. Only the explicit successor mode succeeds.
     for successor in [false, true] {
         let script = acquisition_denial::Script::for_approved();
         let probe = CatalogProbe::new(successor);
-        let (fixture, history) = Fixture::for_catalog_successor(script.clone(), probe.clone()).await;
+        let (fixture, history) =
+            Fixture::for_catalog_successor(script.clone(), probe.clone()).await;
         let deadline = tokio::time::Instant::now() + WAIT;
         let checked = std::panic::AssertUnwindSafe(tokio::time::timeout_at(deadline, Box::pin(async {
             use crate::installed_host::controller_first_input_fixture as installed;
@@ -803,7 +972,7 @@ async fn fresh_helper_reset_catalog_calls_require_explicit_successor_parent() {
         let cleanup = fixture.shutdown().await;
         assert!(cleanup.is_ok(), "{cleanup:?}");
         match checked {
-            Ok(Ok(())) => {},
+            Ok(Ok(())) => {}
             Ok(Err(_)) => panic!("actual catalog reset control timed out"),
             Err(payload) => std::panic::resume_unwind(payload),
         }
@@ -815,14 +984,25 @@ async fn fresh_helper_reset_catalog_calls_require_explicit_successor_parent() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn helper_native_acceptance_publication_failure_retains_exact_handoff() {
     let script = acquisition_denial::Script::paused_for_helper_entry();
-    let fault = Arc::new(DeliveryFault::new(DeliveryMode::PoisonPublicationAfterSecondAcceptance));
+    let fault = Arc::new(DeliveryFault::new(
+        DeliveryMode::PoisonPublicationAfterSecondAcceptance,
+    ));
     let (fixture, history) = Fixture::for_helper_entry(script.clone(), fault.clone()).await;
     let checked = std::panic::AssertUnwindSafe(tokio::time::timeout(WAIT, async {
         acquisition_approved::select_reviewed_setup(&fixture).await;
         let first = fixture.submit().await;
-        assert!(matches!(first, Ok(PrivateOriginalSubmission::Admitted {
-            deduplicated: false, source_settlement: PrivateSourceSettlement::FreshAcceptancePromoted, ..
-        })), "{}", submission_context(&first));
+        assert!(
+            matches!(
+                first,
+                Ok(PrivateOriginalSubmission::Admitted {
+                    deduplicated: false,
+                    source_settlement: PrivateSourceSettlement::FreshAcceptancePromoted,
+                    ..
+                })
+            ),
+            "{}",
+            submission_context(&first)
+        );
         script.first_response_waiting().await;
         script.release_first_response();
         let (held, handed) = loop {
@@ -835,35 +1015,56 @@ async fn helper_native_acceptance_publication_failure_retains_exact_handoff() {
                 let mut handoffs = held.handoffs_for_test();
                 if !handoffs.is_empty() {
                     assert_eq!(handoffs.len(), 1);
-                    let handed = handoffs.pop().unwrap().expect("actual callback kept typed custody");
+                    let handed = handoffs
+                        .pop()
+                        .unwrap()
+                        .expect("actual callback kept typed custody");
                     break (held, handed);
                 }
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         };
-        assert_eq!(fault.accepted.load(Ordering::SeqCst), 2,
-            "one actual Original and one actual helper fresh admission");
+        assert_eq!(
+            fault.accepted.load(Ordering::SeqCst),
+            2,
+            "one actual Original and one actual helper fresh admission"
+        );
         assert!(handed.first_candidate);
         assert_eq!(handed.source_acknowledged, Some(false));
-        let actual = handed.native_admission.as_ref().expect("matching native callback receipt retained");
+        let actual = handed
+            .native_admission
+            .as_ref()
+            .expect("matching native callback receipt retained");
         assert!(!actual.deduplicated);
         assert_eq!(actual.session_id, handed.session);
         let input: meerkat_runtime::Input = serde_json::from_value(handed.input).unwrap();
         assert_eq!(&actual.input_id, input.id());
-        assert_eq!(input.header().authority_association.as_ref(), Some(held.original().association()));
+        assert_eq!(
+            input.header().authority_association.as_ref(),
+            Some(held.original().association())
+        );
         let rows = acquisition_approved::native_history(history.as_ref(), &handed.session).await;
-        assert_eq!(rows.len(), 1, "source publication failure cannot resubmit native work");
+        assert_eq!(
+            rows.len(),
+            1,
+            "source publication failure cannot resubmit native work"
+        );
         assert_eq!(rows[0].state.input_id, actual.input_id);
         assert_eq!(rows[0].state.authority_contributors.len(), 1);
-        assert_eq!(rows[0].state.authority_contributors[0].association(), held.original().association());
+        assert_eq!(
+            rows[0].state.authority_contributors[0].association(),
+            held.original().association()
+        );
         // This poisoned-source control proves admission retention, not a
         // successful helper turn or recovered source publication.
-    })).catch_unwind().await;
+    }))
+    .catch_unwind()
+    .await;
     script.release_first_response();
     let cleanup = fixture.shutdown().await;
     assert!(cleanup.is_ok(), "actual owner cleanup failed: {cleanup:?}");
     match checked {
-        Ok(Ok(())) => {},
+        Ok(Ok(())) => {}
         Ok(Err(_)) => panic!("actual helper publication failure handoff timed out"),
         Err(payload) => std::panic::resume_unwind(payload),
     }

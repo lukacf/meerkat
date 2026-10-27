@@ -3,13 +3,13 @@
 //! effect execution or resumed run is exercised by these component tests.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use meerkat_authorization_contracts::constraints::DomainRestriction;
 use super::operator_setup::{
     OperatorOwnerStartup, OperatorParentOutcome, OperatorParentProposal, OperatorParentPurpose,
     OperatorSetup,
 };
 use super::*;
 use meerkat_authorization::grant_policy::GrantBackedWorkPolicy;
+use meerkat_authorization_contracts::constraints::DomainRestriction;
 use meerkat_authorization_contracts::{
     constraints::{ActionRef, AudienceRef, DelegationDepth, ExactRestriction, ProcessorRef},
     evidence::{EvidenceDigest, EvidenceId, HistoricalEvidenceRef},
@@ -26,8 +26,8 @@ use meerkat_core::{
     ApprovalResourceKind, ApprovalResourceRef, ApprovalRisk, ApprovalService, ControllerModelFacts,
     ControllerModelSelection, Provider, SessionId, SessionLlmIdentity,
     authorization::{
-        ModelAuthorizationFacts, OperationAuthorizationFacts,
-        SourceAuthorizationFacts, WorkAuthorizationContext,
+        ModelAuthorizationFacts, OperationAuthorizationFacts, SourceAuthorizationFacts,
+        WorkAuthorizationContext,
     },
     connection::{AuthCredentialIdentity, CredentialAccountId, CredentialAccountRef},
     exact_operation::OperationExecutionScope,
@@ -209,7 +209,8 @@ impl Fixture {
         setup_request_review: bool,
         frontend_source: bool,
     ) -> Self {
-        Self::with_operations_review_basis(bounds, setup_request_review, frontend_source, false).await
+        Self::with_operations_review_basis(bounds, setup_request_review, frontend_source, false)
+            .await
     }
 
     async fn with_operations_review_basis(
@@ -225,19 +226,35 @@ impl Fixture {
             let (member, requester, actor, realm) = {
                 let native = local.native_host.as_ref().unwrap();
                 let (member, requester, actor) = native.routes[0].source_binding(&local).unwrap();
-                (member.clone(), requester.clone(), actor.clone(), native.realm.clone())
+                (
+                    member.clone(),
+                    requester.clone(),
+                    actor.clone(),
+                    native.realm.clone(),
+                )
             };
             let component = toolkit_package::Id::new("frontend").unwrap();
             local.components = vec![component.clone()];
-            local.channels = vec![meerkat_toolkit::host_lifetime::policy::CompiledChannelBinding {
-                component, channel_id: "fixture-channel".into(), service_subject: "fixture-service".into(),
-                provider_account: "fixture-account".into(), sender_id: "fixture-sender".into(),
-                requester, ingress_actor: actor, target_identity: "agent".into(),
-                member, realm, required_surfaces: vec!["channel:fixture-channel".into()],
-            }];
+            local.channels = vec![
+                meerkat_toolkit::host_lifetime::policy::CompiledChannelBinding {
+                    component,
+                    channel_id: "fixture-channel".into(),
+                    service_subject: "fixture-service".into(),
+                    provider_account: "fixture-account".into(),
+                    sender_id: "fixture-sender".into(),
+                    requester,
+                    ingress_actor: actor,
+                    target_identity: "agent".into(),
+                    member,
+                    realm,
+                    required_surfaces: vec!["channel:fixture-channel".into()],
+                },
+            ];
             local.native_host.as_mut().unwrap().routes[0].origin =
                 meerkat_toolkit::host_lifetime::policy::CompiledNativeSourceOrigin::ProviderEvent {
-                    channel_id: "fixture-channel".into(), sender_id: "fixture-sender".into(), target_identity: "agent".into(),
+                    channel_id: "fixture-channel".into(),
+                    sender_id: "fixture-sender".into(),
+                    target_identity: "agent".into(),
                 };
             super::tests::replace_local(&mut selection, &local);
         }
@@ -298,19 +315,28 @@ impl Fixture {
         let operation_parent = issue(
             &setup,
             operation_proposal,
-            if setup_request_review { OperatorParentPurpose::SetupRequest } else { OperatorParentPurpose::Operations },
+            if setup_request_review {
+                OperatorParentPurpose::SetupRequest
+            } else {
+                OperatorParentPurpose::Operations
+            },
         )
         .await;
         // The component fixture selects a populated base and a distinct find
         // target from independently reviewed native parents. Full configured
         // setup production is exercised by the existing selection controls.
         let base_parent = if targeted_setup {
-            let proposal = setup.prepare_parent_review(
-                toolkit_package::Id::new("console").unwrap(),
-                memory_bounds(native, &session), request(),
-            ).unwrap();
+            let proposal = setup
+                .prepare_parent_review(
+                    toolkit_package::Id::new("console").unwrap(),
+                    memory_bounds(native, &session),
+                    request(),
+                )
+                .unwrap();
             Some(issue(&setup, proposal, OperatorParentPurpose::Operations).await)
-        } else { None };
+        } else {
+            None
+        };
         // Release actual operator owner/store exclusion before ordinary restore.
         drop(setup);
         native.routes[0].application_parent = Some(operation_parent.clone());
@@ -336,7 +362,9 @@ impl Fixture {
             .unwrap();
         let lifetime = Arc::new(lifetime);
         if frontend_source {
-            lifetime.open_component(&toolkit_package::Id::new("frontend").unwrap()).unwrap();
+            lifetime
+                .open_component(&toolkit_package::Id::new("frontend").unwrap())
+                .unwrap();
         }
         let route = &native.routes[0];
         let (_, requester, actor) = route.source_binding(&local).unwrap();
@@ -399,7 +427,11 @@ impl Fixture {
                     lineage: operation_lineage,
                 }],
             }
-        } else { WorkAuthorityBasis::GrantLineage { lineage: operation_lineage } };
+        } else {
+            WorkAuthorityBasis::GrantLineage {
+                lineage: operation_lineage,
+            }
+        };
         let selected_parent = source
             .grants()
             .resolve_lineage(selected_controller, &native.grant_administrator, None)
@@ -470,7 +502,11 @@ impl Fixture {
             controller_grant_lineage: controller_lineage,
             controller_model: Some(selected(&facts)),
             controller_ceiling,
-            admitted_ceiling: if targeted_setup { ExecutionRestrictions::unrestricted() } else { operations },
+            admitted_ceiling: if targeted_setup {
+                ExecutionRestrictions::unrestricted()
+            } else {
+                operations
+            },
             source_observations: vec![],
             ingress_namespace: QualifiedIngressNamespace {
                 realm: native.realm.clone(),
@@ -497,7 +533,10 @@ impl Fixture {
             )
             .await
             .unwrap();
-        originals.hold_binding(reference.clone(), retained.clone()).await.unwrap();
+        originals
+            .hold_binding(reference.clone(), retained.clone())
+            .await
+            .unwrap();
         let application = Arc::new(InstalledApplicationPolicy {
             originals,
             lifetime: lifetime.clone(),
@@ -1208,46 +1247,84 @@ impl SetupBundleCall {
 async fn retained_targeted_setup_preserves_native_target_and_controller_authority() {
     let f = Fixture::with_targeted_setup().await;
     let claims = f.association.candidate();
-    let WorkAuthorityBasis::TargetedGrantLineages { base: Some(base), targets } = &claims.authority_basis
-        else { panic!("expected separately issued base and targeted setup authority") };
+    let WorkAuthorityBasis::TargetedGrantLineages {
+        base: Some(base),
+        targets,
+    } = &claims.authority_basis
+    else {
+        panic!("expected separately issued base and targeted setup authority")
+    };
     assert_eq!(base.len(), 2);
     assert_eq!(targets.len(), 1);
     assert_eq!(targets[0].lineage.len(), 2);
     assert_ne!(base, &targets[0].lineage);
     assert_eq!(f.retained.association(), &f.association);
-    f.application.authorize_invocation(&f.ingress(), &f.association).unwrap();
-    f.policy.validate_controller_admission(&f.association, &plain(&f.facts)).unwrap();
+    f.application
+        .authorize_invocation(&f.ingress(), &f.association)
+        .unwrap();
+    f.policy
+        .validate_controller_admission(&f.association, &plain(&f.facts))
+        .unwrap();
 
     let call = SetupBundleCall::new(crate::FIND_AND_INSTALL_BUNDLE, crate::FIND_AND_INSTALL);
     let find = call.binding(&f);
     let memory = f.memory(f.session.clone(), SourceAuthorizationUse::Read);
     let controller = f.model_binding(f.facts.clone());
     for binding in [&find, &memory, &controller] {
-        f.context.authorization().prepare(binding).unwrap().check_current(binding).unwrap();
+        f.context
+            .authorization()
+            .prepare(binding)
+            .unwrap()
+            .check_current(binding)
+            .unwrap();
     }
     // Neither a valid base nor the selected find target permits this sibling.
-    let report = SetupBundleCall::new(meerkat_toolkit::setup::SETUP_RESULTS_BUNDLE,
-        meerkat_toolkit::setup::SETUP_REPORT);
+    let report = SetupBundleCall::new(
+        meerkat_toolkit::setup::SETUP_RESULTS_BUNDLE,
+        meerkat_toolkit::setup::SETUP_REPORT,
+    );
     denied(f.context.authorization().prepare(&report.binding(&f)));
-    denied(f.context.authorization().prepare(&CatalogCall::new("tool_catalog_load").binding(&f)));
+    denied(
+        f.context
+            .authorization()
+            .prepare(&CatalogCall::new("tool_catalog_load").binding(&f)),
+    );
 
     // Revoke only the actual find leaf under native mutation custody. The same
     // real installed policy is installed in this idle native machine; no input
     // is admitted and no operation is executed by this component control.
-    let machine = meerkat_runtime::MeerkatMachine::ephemeral().with_local_grant_authorization(
-        f.source.configuration(ScopedInvocation::from_policy(f.application.clone()),
-            f.application.clone(), None),
-    ).unwrap();
+    let machine = meerkat_runtime::MeerkatMachine::ephemeral()
+        .with_local_grant_authorization(f.source.configuration(
+            ScopedInvocation::from_policy(f.application.clone()),
+            f.application.clone(),
+            None,
+        ))
+        .unwrap();
     {
         let mut custody = machine.try_controller_grant_mutation().unwrap();
-        f.source.grants().revoke(&f.application.native.grant_administrator,
-            targets[0].lineage.last().unwrap(), &mut custody).unwrap();
+        f.source
+            .grants()
+            .revoke(
+                &f.application.native.grant_administrator,
+                targets[0].lineage.last().unwrap(),
+                &mut custody,
+            )
+            .unwrap();
     }
     denied(f.context.authorization().prepare(&find));
-    f.application.authorize_invocation(&f.ingress(), &f.association).unwrap();
-    f.policy.validate_controller_admission(&f.association, &plain(&f.facts)).unwrap();
+    f.application
+        .authorize_invocation(&f.ingress(), &f.association)
+        .unwrap();
+    f.policy
+        .validate_controller_admission(&f.association, &plain(&f.facts))
+        .unwrap();
     for binding in [&memory, &controller] {
-        f.context.authorization().prepare(binding).unwrap().check_current(binding).unwrap();
+        f.context
+            .authorization()
+            .prepare(binding)
+            .unwrap()
+            .check_current(binding)
+            .unwrap();
     }
     assert_eq!(call.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     assert_eq!(report.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
@@ -1256,12 +1333,19 @@ async fn retained_targeted_setup_preserves_native_target_and_controller_authorit
 #[tokio::test]
 async fn targeted_setup_requires_exact_retained_source_and_refuses_non_grant_bases() {
     let f = Fixture::with_targeted_setup().await;
-    f.application.authorize_invocation(&f.ingress(), &f.association).unwrap();
+    f.application
+        .authorize_invocation(&f.ingress(), &f.association)
+        .unwrap();
     for altered_target in [true, false] {
         let mut claim = f.association.candidate().clone();
         if altered_target {
-            let WorkAuthorityBasis::TargetedGrantLineages { base: Some(base), targets } = &mut claim.authority_basis
-                else { unreachable!() };
+            let WorkAuthorityBasis::TargetedGrantLineages {
+                base: Some(base),
+                targets,
+            } = &mut claim.authority_basis
+            else {
+                unreachable!()
+            };
             targets[0].lineage = base.clone();
         } else {
             claim.original_work.work = id("unretained-targeted-original");
@@ -1269,26 +1353,46 @@ async fn targeted_setup_requires_exact_retained_source_and_refuses_non_grant_bas
         let changed = InputAuthorityAssociation::new(claim).unwrap();
         // Valid shape/native grant references do not create source custody.
         operation_unavailable(f.application.member(&changed));
-        operation_unavailable(f.policy.validate_controller_admission(&changed, &plain(&f.facts)));
-        let context = f.policy.work_context(vec![changed].into(), scope(&f.session)).unwrap();
-        operation_unavailable(context.authorization().prepare(&f.model_binding(f.facts.clone())));
+        operation_unavailable(
+            f.policy
+                .validate_controller_admission(&changed, &plain(&f.facts)),
+        );
+        let context = f
+            .policy
+            .work_context(vec![changed].into(), scope(&f.session))
+            .unwrap();
+        operation_unavailable(
+            context
+                .authorization()
+                .prepare(&f.model_binding(f.facts.clone())),
+        );
     }
     let claims = f.association.candidate();
     for basis in [
-        WorkAuthorityBasis::HostPolicy { policy: claims.original_authentication.clone() },
+        WorkAuthorityBasis::HostPolicy {
+            policy: claims.original_authentication.clone(),
+        },
         WorkAuthorityBasis::ServiceMandate {
             mandate: claims.original_authentication.clone(),
-            commissioning_actor: claims.requester.clone(), occurrence: id("foreign-mandate"),
+            commissioning_actor: claims.requester.clone(),
+            occurrence: id("foreign-mandate"),
         },
     ] {
         let mut claim = claims.clone();
         claim.authority_basis = basis;
         let changed = InputAuthorityAssociation::new(claim).unwrap();
         denied(f.application.member(&changed));
-        denied(f.policy.validate_controller_admission(&changed, &plain(&f.facts)));
+        denied(
+            f.policy
+                .validate_controller_admission(&changed, &plain(&f.facts)),
+        );
     }
-    f.application.authorize_invocation(&f.ingress(), &f.association).unwrap();
-    f.policy.validate_controller_admission(&f.association, &plain(&f.facts)).unwrap();
+    f.application
+        .authorize_invocation(&f.ingress(), &f.association)
+        .unwrap();
+    f.policy
+        .validate_controller_admission(&f.association, &plain(&f.facts))
+        .unwrap();
 }
 
 #[tokio::test]
@@ -1335,11 +1439,12 @@ async fn registered_setup_request_uses_the_same_operator_review_and_native_opera
     );
     // Account presentation comes from the actual registration owner. It
     // neither replaces a missing operation grant nor invalidates an R1 grant.
-    let account = meerkat_core::OperationAccount::selected(
-        "https://account-fixture.invalid",
-        "fixture-user",
-    );
-    assert!(matches!(&account, meerkat_core::OperationAccount::Selected(_)));
+    let account =
+        meerkat_core::OperationAccount::selected("https://account-fixture.invalid", "fixture-user");
+    assert!(matches!(
+        &account,
+        meerkat_core::OperationAccount::Selected(_)
+    ));
     let selected = SetupBundleCall::with_account(
         crate::FIND_AND_INSTALL_BUNDLE,
         crate::FIND_AND_INSTALL,
@@ -1499,14 +1604,24 @@ fn mcp_policy_binding(
 ) -> PreparedAuthorizationBinding {
     let call = CatalogCall::new("tool_catalog_search");
     let plan = meerkat_core::ToolExecutionContract::default()
-        .resolve_default(catalog_deadlines()).unwrap();
-    let catalog_witness = call.plan().owner_witnesses().iter()
-        .find(|witness| witness.operation_target().is_some()).unwrap();
+        .resolve_default(catalog_deadlines())
+        .unwrap();
+    let catalog_witness = call
+        .plan()
+        .owner_witnesses()
+        .iter()
+        .find(|witness| witness.operation_target().is_some())
+        .unwrap();
     let witness = meerkat_core::ToolExecutionOwnerWitness::new(
-        "synthetic-mcp-policy-fixture", "exact-server-operation",
+        "synthetic-mcp-policy-fixture",
+        "exact-server-operation",
         catalog_witness.binding_fingerprint().clone(),
-    ).unwrap().with_operation_target(meerkat_core::ToolOperationTarget::McpServerOperation {
-        server: server.into(), connection_generation: generation, raw_operation: raw_operation.into(),
+    )
+    .unwrap()
+    .with_operation_target(meerkat_core::ToolOperationTarget::McpServerOperation {
+        server: server.into(),
+        connection_generation: generation,
+        raw_operation: raw_operation.into(),
         connector: meerkat_core::mcp_config::McpConnectorApproval::NoConnector,
         account: Arc::new(meerkat_core::OperationAccount::Unavailable),
     });
@@ -1519,49 +1634,87 @@ fn mcp_policy_binding(
 async fn mcp_policy_preserves_exact_registration_raw_action_executor_and_audience() {
     let fixture = Fixture::with_operations(|native, _| {
         let mut bounds = application_operations::mcp_access_restrictions(
-            &native.grant_administrator, &native.routes[0].logical_executor,
-            &native.members[0].audience, "reviewed-connector", ["read"],
+            &native.grant_administrator,
+            &native.routes[0].logical_executor,
+            &native.members[0].audience,
+            "reviewed-connector",
+            ["read"],
             &meerkat_core::mcp_config::McpConnectorApproval::NoConnector,
         );
         bounds.delegation_depth = DelegationDepth::remaining(1);
         bounds
-    }).await;
+    })
+    .await;
     for generation in [1, 2] {
         let binding = mcp_policy_binding(&fixture, "reviewed-connector", "read", generation);
-        let allowance = fixture.application.authorize_operation(
-            &fixture.association, &binding, LocalPolicyPurpose::Operation, 5,
-        ).unwrap();
+        let allowance = fixture
+            .application
+            .authorize_operation(
+                &fixture.association,
+                &binding,
+                LocalPolicyPurpose::Operation,
+                5,
+            )
+            .unwrap();
         assert_eq!(allowance.operation_values.len(), 2);
-        assert_eq!(allowance.operation_values[1].action,
+        assert_eq!(
+            allowance.operation_values[1].action,
             meerkat_authorization::mcp_installation::mcp_connector_action(
-                "reviewed-connector", &meerkat_core::mcp_config::McpConnectorApproval::NoConnector,
-            ));
+                "reviewed-connector",
+                &meerkat_core::mcp_config::McpConnectorApproval::NoConnector,
+            )
+        );
         let values = &allowance.operation_values[0];
         assert_eq!(values.action.feature, "mcp");
         assert_eq!(values.action.action, "read");
-        assert_eq!(values.resource_domain.namespace, "mcp-server/reviewed-connector");
-        assert_eq!(values.resource_domain.authority, fixture.application.native.grant_administrator);
-        assert_eq!(values.processor, ProcessorRef::Principal {
-            principal: fixture.association.candidate().logical_executor.clone(),
-        });
-        assert_eq!(values.audience, fixture.association.candidate().target.audience);
-        fixture.context.authorization().prepare(&binding).unwrap()
-            .check_current(&binding).unwrap();
+        assert_eq!(
+            values.resource_domain.namespace,
+            "mcp-server/reviewed-connector"
+        );
+        assert_eq!(
+            values.resource_domain.authority,
+            fixture.application.native.grant_administrator
+        );
+        assert_eq!(
+            values.processor,
+            ProcessorRef::Principal {
+                principal: fixture.association.candidate().logical_executor.clone(),
+            }
+        );
+        assert_eq!(
+            values.audience,
+            fixture.association.candidate().target.audience
+        );
+        fixture
+            .context
+            .authorization()
+            .prepare(&binding)
+            .unwrap()
+            .check_current(&binding)
+            .unwrap();
     }
     for (server, operation) in [("other-connector", "read"), ("reviewed-connector", "write")] {
-        denied(fixture.context.authorization().prepare(
-            &mcp_policy_binding(&fixture, server, operation, 1),
-        ));
+        denied(
+            fixture
+                .context
+                .authorization()
+                .prepare(&mcp_policy_binding(&fixture, server, operation, 1)),
+        );
     }
     // Mapping raw MCP tuples does not enlarge catalog grants or authorize the
     // registered setup request. Both require their separately reviewed tuples.
-    denied(fixture.context.authorization().prepare(
-        &CatalogCall::new("tool_catalog_search").binding(&fixture),
-    ));
-    denied(fixture.context.authorization().prepare(
-        &SetupBundleCall::new(crate::FIND_AND_INSTALL_BUNDLE, crate::FIND_AND_INSTALL)
-            .binding(&fixture),
-    ));
+    denied(
+        fixture
+            .context
+            .authorization()
+            .prepare(&CatalogCall::new("tool_catalog_search").binding(&fixture)),
+    );
+    denied(
+        fixture.context.authorization().prepare(
+            &SetupBundleCall::new(crate::FIND_AND_INSTALL_BUNDLE, crate::FIND_AND_INSTALL)
+                .binding(&fixture),
+        ),
+    );
 }
 
 #[tokio::test]
@@ -1569,10 +1722,13 @@ async fn mcp_policy_wildcard_parent_does_not_invent_no_connector_approval() {
     let fixture = Fixture::with_operations(|_, _| ExecutionRestrictions {
         delegation_depth: DelegationDepth::remaining(1),
         ..ExecutionRestrictions::unrestricted()
-    }).await;
+    })
+    .await;
     let binding = mcp_policy_binding(&fixture, "reviewed-connector", "read", 1);
-    assert!(matches!(fixture.context.authorization().prepare(&binding),
-        Err(OperationAuthorizationError::Unavailable)));
+    assert!(matches!(
+        fixture.context.authorization().prepare(&binding),
+        Err(OperationAuthorizationError::Unavailable)
+    ));
 }
 
 #[tokio::test]
@@ -1588,17 +1744,32 @@ async fn internal_helper_policy_stops_when_its_flattened_frontend_ancestor_close
     let private = &fixture.application.originals;
     let component = toolkit_package::Id::new("frontend").unwrap();
     fixture.lifetime.open_component(&component).unwrap();
-    fixture.application.current_invocation(&fixture.association).unwrap();
+    fixture
+        .application
+        .current_invocation(&fixture.association)
+        .unwrap();
 
     let controller_parent = native.routes[0].controller_parent.clone().unwrap();
     let operation_parent = native.routes[0].application_parent.clone().unwrap();
     let executor = native.routes[0].logical_executor.clone();
     let child_grant = |parent: &[GrantLineageRef], label: &str| {
-        let leaf = fixture.source.grants().issue_child(
-            &native.grant_administrator, parent.last().unwrap(), id(label), executor.clone(),
-            ExecutionRestrictions { delegation_depth: DelegationDepth::remaining(0), ..ExecutionRestrictions::unrestricted() },
-        ).unwrap();
-        let mut lineage = parent.to_vec(); lineage.push(leaf); lineage
+        let leaf = fixture
+            .source
+            .grants()
+            .issue_child(
+                &native.grant_administrator,
+                parent.last().unwrap(),
+                id(label),
+                executor.clone(),
+                ExecutionRestrictions {
+                    delegation_depth: DelegationDepth::remaining(0),
+                    ..ExecutionRestrictions::unrestricted()
+                },
+            )
+            .unwrap();
+        let mut lineage = parent.to_vec();
+        lineage.push(leaf);
+        lineage
     };
     // Distinct native-issued helper children from explicitly selected operator
     // parents. No original operation/controller leaf is copied into the helper.
@@ -1611,57 +1782,102 @@ async fn internal_helper_policy_stops_when_its_flattened_frontend_ancestor_close
         helper: super::acquisition::InstalledSetupSelection {
             catalog_capability: None,
             report_capability: None,
-            member: member.member.clone(), ingress_actor: super::tests::principal("helper-owner"),
-            logical_executor: executor, represented_subject: None,
-            controller_parent, operation_basis: basis.clone(),
+            member: member.member.clone(),
+            ingress_actor: super::tests::principal("helper-owner"),
+            logical_executor: executor,
+            represented_subject: None,
+            controller_parent,
+            operation_basis: basis.clone(),
         },
-        member, grant_caller: native.grant_administrator.clone(),
+        member,
+        grant_caller: native.grant_administrator.clone(),
     };
     let binding = HelperNativeBinding {
         ingress_actor: selection.helper.ingress_actor.clone(),
-        logical_executor: selection.helper.logical_executor.clone(), represented_subject: None,
-        target: fixture.association.candidate().target.clone(), authority_basis: basis,
-        controller_grant_lineage: controller, controller_model: selected(&fixture.facts),
+        logical_executor: selection.helper.logical_executor.clone(),
+        represented_subject: None,
+        target: fixture.association.candidate().target.clone(),
+        authority_basis: basis,
+        controller_grant_lineage: controller,
+        controller_model: selected(&fixture.facts),
         controller_ceiling: fixture.association.candidate().controller_ceiling.clone(),
         admitted_ceiling: fixture.association.candidate().admitted_ceiling.clone(),
     };
     let service = WorkGraphService::with_namespace_grant(
-        Arc::new(SqliteWorkGraphStore::open(fixture._directory.path().join("helper-policy-work.sqlite3")).unwrap()),
+        Arc::new(
+            SqliteWorkGraphStore::open(
+                fixture._directory.path().join("helper-policy-work.sqlite3"),
+            )
+            .unwrap(),
+        ),
         WorkGraphNamespaceGrant::new(native.realm.to_string(), "setup").unwrap(),
-    ).unwrap();
+    )
+    .unwrap();
     let source_scope = StoreScope {
-        realm: native.realm.to_string(), owner: fixture.application.selected.deployment.to_string(),
+        realm: native.realm.to_string(),
+        owner: fixture.application.selected.deployment.to_string(),
     };
     // First retain a real internal child of the frontend source. The outer
     // helper then retains both this child and its exact flattened ancestor.
-    assert!(fixture.association.candidate().original_work.authority != native.ingress_domain.authority);
+    assert!(
+        fixture.association.candidate().original_work.authority != native.ingress_domain.authority
+    );
     let inner = retained_policy_fixture(
-        &fixture.source, private.canonical_store_for_policy_fixture(), source_scope.clone(),
-        &service, "source-policy-inner", fixture.retained.clone(), vec![fixture.retained.clone()],
-        selection.clone(), binding.clone(),
-    ).await;
+        &fixture.source,
+        private.canonical_store_for_policy_fixture(),
+        source_scope.clone(),
+        &service,
+        "source-policy-inner",
+        fixture.retained.clone(),
+        vec![fixture.retained.clone()],
+        selection.clone(),
+        binding.clone(),
+    )
+    .await;
     let held_child = inner.original.clone();
     let child = held_child.association().clone();
     assert!(child.candidate().original_work.authority == native.ingress_domain.authority);
-    assert!(child.candidate().original_work.authority != fixture.association.candidate().original_work.authority);
-    assert!(inner.policy_source().unwrap().origin.original_authority
-        == fixture.association.candidate().original_work.authority);
+    assert!(
+        child.candidate().original_work.authority
+            != fixture.association.candidate().original_work.authority
+    );
+    assert!(
+        inner.policy_source().unwrap().origin.original_authority
+            == fixture.association.candidate().original_work.authority
+    );
     private.retain_helper_policy_fixture(inner);
     let retained = retained_policy_fixture(
-        &fixture.source, private.canonical_store_for_policy_fixture(), source_scope,
-        &service, "source-policy-outer", held_child.clone(), vec![held_child, fixture.retained.clone()],
-        selection, binding,
-    ).await;
+        &fixture.source,
+        private.canonical_store_for_policy_fixture(),
+        source_scope,
+        &service,
+        "source-policy-outer",
+        held_child.clone(),
+        vec![held_child, fixture.retained.clone()],
+        selection,
+        binding,
+    )
+    .await;
     let helper = retained.original.association().clone();
-    assert!(retained.policy_source().unwrap().origin.original_authority == child.candidate().original_work.authority);
-    assert_eq!(helper.candidate().contributing_work, vec![
-        child.candidate().original_work.clone(), fixture.association.candidate().original_work.clone(),
-    ]);
+    assert!(
+        retained.policy_source().unwrap().origin.original_authority
+            == child.candidate().original_work.authority
+    );
+    assert_eq!(
+        helper.candidate().contributing_work,
+        vec![
+            child.candidate().original_work.clone(),
+            fixture.association.candidate().original_work.clone(),
+        ]
+    );
     private.retain_helper_policy_fixture(retained);
     // The helper is an internal source with no external route of its own.
     assert!(private.route_for_binding(&helper).is_err());
     fixture.application.current_invocation(&helper).unwrap();
-    fixture.lifetime.begin_close_component(&component, HostCloseReason::OperatorDisable).unwrap();
+    fixture
+        .lifetime
+        .begin_close_component(&component, HostCloseReason::OperatorDisable)
+        .unwrap();
     fixture.lifetime.validate_native_entry(None).unwrap();
     denied(fixture.application.current_invocation(&helper));
     denied(fixture.application.current_invocation(&child));

@@ -8,8 +8,8 @@
 use crate::installed_host::operator_setup::OperatorParentOutcome;
 use crate::private_originals::{
     PrivateAuthenticatedEvent, PrivateOriginalCancellation, PrivateOriginalError,
-    PrivateOriginalRef, PrivateOriginalRetention, PrivateOriginals, PrivateServiceAccessDecision,
-    PrivateServiceGrantObservation, PrivateOriginalSubmit, PrivateOriginalSubmission,
+    PrivateOriginalRef, PrivateOriginalRetention, PrivateOriginalSubmission, PrivateOriginalSubmit,
+    PrivateOriginals, PrivateServiceAccessDecision, PrivateServiceGrantObservation,
     PrivateServiceInputObservation,
 };
 use meerkat_authorization::publication::LocalAuthorizationPublication;
@@ -36,11 +36,15 @@ use tokio::{
 use toolkit_package::Id;
 
 mod console_login;
-pub use console_login::{ConsoleLoginHandle, ConsoleLoginRefusal, ConsoleLoginReservation,
-    ConsoleLoginRetirement, ConsoleLoginSelection, ConsoleLogins};
+pub use console_login::{
+    ConsoleLoginHandle, ConsoleLoginRefusal, ConsoleLoginReservation, ConsoleLoginRetirement,
+    ConsoleLoginSelection, ConsoleLogins,
+};
 mod service_parent;
-pub use service_parent::{ServiceParentEndpoint, ServiceParentCommand, ServiceParentResponse,
-    ServiceParentAdministrationRequest, ServiceParentDecision, ServiceParentDecisionSource};
+pub use service_parent::{
+    ServiceParentAdministrationRequest, ServiceParentCommand, ServiceParentDecision,
+    ServiceParentDecisionSource, ServiceParentEndpoint, ServiceParentResponse,
+};
 mod startup;
 pub use startup::{ApplicationUpdateStartup, PrivateHostStartup, PrivateHostStartupIntent};
 
@@ -74,13 +78,21 @@ struct Request {
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Command {
-    PrepareApplication { plan: SelectedHostArtifact },
-    ReplaceApplication { startup: ApplicationUpdateStartup },
+    PrepareApplication {
+        plan: SelectedHostArtifact,
+    },
+    ReplaceApplication {
+        startup: ApplicationUpdateStartup,
+    },
     Bootstrap {
         selection: HostBootstrapSelection,
     },
-    EnrollConsoleLogin { login: ConsoleLoginSelection },
-    RetireConsoleLogin { enrollment_id: u64 },
+    EnrollConsoleLogin {
+        login: ConsoleLoginSelection,
+    },
+    RetireConsoleLogin {
+        enrollment_id: u64,
+    },
     OpenComponent {
         component: Id,
     },
@@ -100,23 +112,40 @@ enum Command {
     ReviewControllerParent {
         submission: PrivateOriginalSubmit,
     },
-    ReviewSetupRequest { submission: PrivateOriginalSubmit },
-    ReviewRemoteSetupRequest { submission: PrivateOriginalSubmit, login: RemoteControllerLogin },
+    ReviewSetupRequest {
+        submission: PrivateOriginalSubmit,
+    },
+    ReviewRemoteSetupRequest {
+        submission: PrivateOriginalSubmit,
+        login: RemoteControllerLogin,
+    },
     ReviewRemoteControllerParent {
         submission: PrivateOriginalSubmit,
         login: RemoteControllerLogin,
     },
-    ObserveControllerReview { review_id: u64 },
+    ObserveControllerReview {
+        review_id: u64,
+    },
     AnswerControllerReview {
         review_id: u64,
         approval_id: String,
         decision: RemoteReviewDecision,
     },
-    RetireControllerReview { review_id: u64 },
+    RetireControllerReview {
+        review_id: u64,
+    },
     NextServiceParentAdministration,
-    SubmitServiceParentAdministration { exchange_id: u64, proposal_sha256: String, decision: ServiceParentDecision },
-    ResultServiceParentAdministration { exchange_id: u64 },
-    RetireServiceParentAdministration { exchange_id: u64 },
+    SubmitServiceParentAdministration {
+        exchange_id: u64,
+        proposal_sha256: String,
+        decision: ServiceParentDecision,
+    },
+    ResultServiceParentAdministration {
+        exchange_id: u64,
+    },
+    RetireServiceParentAdministration {
+        exchange_id: u64,
+    },
     SubmitAuthenticatedOriginal {
         submission: PrivateOriginalSubmit,
     },
@@ -126,7 +155,9 @@ enum Command {
     CancelOriginalOperation {
         original: PrivateOriginalRef,
     },
-    ObserveServiceInputReceipt { original: PrivateOriginalRef },
+    ObserveServiceInputReceipt {
+        original: PrivateOriginalRef,
+    },
     ApplyServiceAccessDecision {
         decision: PrivateServiceAccessDecision,
     },
@@ -143,20 +174,43 @@ struct Response {
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Reply {
-    ApplicationPrepared { manifest: SelectedHostArtifact },
+    ApplicationPrepared {
+        manifest: SelectedHostArtifact,
+    },
     BootstrapAccepted,
-    ConsoleLoginEnrolled { enrollment_id: u64 },
-    ConsoleLoginRetired { enrollment_id: u64, observation: ConsoleLoginRetirement },
+    ConsoleLoginEnrolled {
+        enrollment_id: u64,
+    },
+    ConsoleLoginRetired {
+        enrollment_id: u64,
+        observation: ConsoleLoginRetirement,
+    },
     ControllerParentReviewed {
         outcome: OperatorParentOutcome,
     },
-    SetupRequestReviewed { outcome: OperatorParentOutcome },
-    ControllerReview { review_id: u64, status: RemoteReviewStatus },
-    ServiceParentAdministrationRequest { exchange_id: u64, proposal_sha256: String,
-        proposal: crate::private_originals::ServiceParentAuthorizationProposal },
-    ServiceParentAdministrationSubmitted { exchange_id: u64 },
-    ServiceParentAdministrationResult { exchange_id: u64, observation: crate::private_originals::ServiceParentOperationObservation },
-    ServiceParentAdministrationRetired { exchange_id: u64, observation: crate::private_originals::ServiceParentOperationObservation },
+    SetupRequestReviewed {
+        outcome: OperatorParentOutcome,
+    },
+    ControllerReview {
+        review_id: u64,
+        status: RemoteReviewStatus,
+    },
+    ServiceParentAdministrationRequest {
+        exchange_id: u64,
+        proposal_sha256: String,
+        proposal: crate::private_originals::ServiceParentAuthorizationProposal,
+    },
+    ServiceParentAdministrationSubmitted {
+        exchange_id: u64,
+    },
+    ServiceParentAdministrationResult {
+        exchange_id: u64,
+        observation: crate::private_originals::ServiceParentOperationObservation,
+    },
+    ServiceParentAdministrationRetired {
+        exchange_id: u64,
+        observation: crate::private_originals::ServiceParentOperationObservation,
+    },
     ServiceAccessDecisionApplied {
         observation: PrivateServiceGrantObservation,
     },
@@ -172,7 +226,10 @@ enum Reply {
         original: PrivateOriginalRef,
         state: PrivateOriginalCancellation,
     },
-    ServiceInputReceipt { original: PrivateOriginalRef, observation: PrivateServiceInputObservation },
+    ServiceInputReceipt {
+        original: PrivateOriginalRef,
+        observation: PrivateServiceInputObservation,
+    },
     Component {
         observation: HostComponentObservation,
     },
@@ -240,7 +297,11 @@ fn private_reply_fits(reply: &Response) -> bool {
 }
 fn service_parent_response(id: u64, result: Result<Reply, HostLifetimeError>) -> Response {
     let reply = response(id, result);
-    if private_reply_fits(&reply) { reply } else { response(id, Err(HostLifetimeError::Unavailable)) }
+    if private_reply_fits(&reply) {
+        reply
+    } else {
+        response(id, Err(HostLifetimeError::Unavailable))
+    }
 }
 
 fn service_receipt_wire_value(value: &serde_json::Value, containers: usize) -> bool {
@@ -254,14 +315,24 @@ fn service_receipt_wire_value(value: &serde_json::Value, containers: usize) -> b
             } else {
                 // An f64 such as 1e20 is integral to JavaScript too. Checking
                 // only serde's integer variants would still break its decoder.
-                number.as_f64().is_some_and(|value| value.is_finite()
-                    && (value.fract() != 0.0 || value.abs() <= MAX_SAFE_INTEGER as f64))
+                number.as_f64().is_some_and(|value| {
+                    value.is_finite()
+                        && (value.fract() != 0.0 || value.abs() <= MAX_SAFE_INTEGER as f64)
+                })
             }
         }
-        serde_json::Value::Array(values) => containers < 128
-            && values.iter().all(|value| service_receipt_wire_value(value, containers + 1)),
-        serde_json::Value::Object(values) => containers < 128
-            && values.values().all(|value| service_receipt_wire_value(value, containers + 1)),
+        serde_json::Value::Array(values) => {
+            containers < 128
+                && values
+                    .iter()
+                    .all(|value| service_receipt_wire_value(value, containers + 1))
+        }
+        serde_json::Value::Object(values) => {
+            containers < 128
+                && values
+                    .values()
+                    .all(|value| service_receipt_wire_value(value, containers + 1))
+        }
         _ => true,
     }
 }
@@ -426,8 +497,7 @@ fn duplicate_endpoint(fd: RawFd, writing: bool) -> Result<File, PrivateHostError
         // AF_UNIX; getpeername refuses unconnected endpoints.
         let _: UnixAddr = getsockname(file.as_raw_fd()).map_err(|_| PrivateHostError::Protocol)?;
         let _: UnixAddr = getpeername(file.as_raw_fd()).map_err(|_| PrivateHostError::Protocol)?;
-        if getsockopt(&file, sockopt::SockType).map_err(io::Error::from)? != SockType::Stream
-        {
+        if getsockopt(&file, sockopt::SockType).map_err(io::Error::from)? != SockType::Stream {
             return Err(PrivateHostError::Protocol);
         }
     }
@@ -491,7 +561,9 @@ impl PrivateHostClosed {
     }
 
     /// Read-only presenter closure observation; it grants no admission.
-    pub fn is_closed_for_presenter(&self) -> bool { self.is_closed() }
+    pub fn is_closed_for_presenter(&self) -> bool {
+        self.is_closed()
+    }
 
     pub async fn wait_closed(&self) {
         let mut closed = self.0.clone();
@@ -511,7 +583,10 @@ impl PrivateHostClosed {
 /// native pin and operator view; no operator identity or decision is accepted
 /// from the parent. Dropping the response cannot cancel already admitted work.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum ParentReviewKind { Controller, SetupRequest }
+pub enum ParentReviewKind {
+    Controller,
+    SetupRequest,
+}
 
 pub struct LocalControllerReviewRequest {
     pub purpose: ParentReviewKind,
@@ -538,12 +613,17 @@ pub struct RemoteControllerLogin {
 }
 #[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RemoteReviewDecision { Approve, Deny }
+pub enum RemoteReviewDecision {
+    Approve,
+    Deny,
+}
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RemoteReviewStatus {
     AwaitingPrompt,
-    Prompt { prompt: serde_json::Value },
+    Prompt {
+        prompt: serde_json::Value,
+    },
     /// Forwarded to the native presenter, not yet a grant or accepted decision.
     AnswerForwarded,
     Retired,
@@ -560,28 +640,45 @@ pub enum RemoteControllerCommand {
         login: RemoteControllerLogin,
         response: oneshot::Sender<Result<OperatorParentOutcome, HostLifetimeError>>,
     },
-    Observe { review_id: u64, response: RemoteReviewReply },
-    Answer {
-        review_id: u64, approval_id: String, decision: RemoteReviewDecision,
+    Observe {
+        review_id: u64,
         response: RemoteReviewReply,
     },
-    Retire { review_id: u64, response: RemoteReviewReply },
+    Answer {
+        review_id: u64,
+        approval_id: String,
+        decision: RemoteReviewDecision,
+        response: RemoteReviewReply,
+    },
+    Retire {
+        review_id: u64,
+        response: RemoteReviewReply,
+    },
 }
 impl RemoteControllerCommand {
     pub async fn refuse(self) {
         match self {
             Self::ServiceParent(command) => command.refuse().await,
-            Self::Begin { response, .. } => { let _ = response.send(Err(HostLifetimeError::Unavailable)); }
-            Self::Observe { response, .. } | Self::Answer { response, .. }
-            | Self::Retire { response, .. } => { let _ = response.send(Err(HostLifetimeError::Unavailable)); }
+            Self::Begin { response, .. } => {
+                let _ = response.send(Err(HostLifetimeError::Unavailable));
+            }
+            Self::Observe { response, .. }
+            | Self::Answer { response, .. }
+            | Self::Retire { response, .. } => {
+                let _ = response.send(Err(HostLifetimeError::Unavailable));
+            }
         }
     }
 }
 pub struct RemoteControllerReviews(mpsc::Receiver<RemoteControllerCommand>);
 impl RemoteControllerReviews {
     /// Transfer the one receiver to the existing protected presenter loop.
-    pub fn into_receiver(self) -> mpsc::Receiver<RemoteControllerCommand> { self.0 }
-    pub async fn next(&mut self) -> Option<RemoteControllerCommand> { self.0.recv().await }
+    pub fn into_receiver(self) -> mpsc::Receiver<RemoteControllerCommand> {
+        self.0
+    }
+    pub async fn next(&mut self) -> Option<RemoteControllerCommand> {
+        self.0.recv().await
+    }
 }
 
 // Owns the existing pipe-close watch and forwards its mutations through the
@@ -597,13 +694,17 @@ impl PrivateHostClosePublisher {
     fn close(&self) -> Result<(), HostLifetimeError> {
         // Invoke only after host phase mutation returns. Acquiring publication
         // before host_lost/begin_close_activation would invert their lock order.
-        let publication = self.publication.as_ref()
+        let publication = self
+            .publication
+            .as_ref()
             .map(LocalAuthorizationPublication::begin_owner_change)
             .transpose();
         // A poisoned/exhausted publication already refuses every observation.
         // Pipe loss is still a real fact, even when that or host cleanup fails.
         self.closed.send_replace(true);
-        publication.map(|_| ()).map_err(|_| HostLifetimeError::Unavailable)
+        publication
+            .map(|_| ())
+            .map_err(|_| HostLifetimeError::Unavailable)
     }
 }
 
@@ -651,9 +752,12 @@ impl PrivateHostConnection {
         pipes: InheritedHostPipes,
         factory: impl FnOnce(HostBootstrapSelection) -> Result<O, HostLifetimeError>,
     ) -> Result<(Arc<O>, Self), PrivateHostError> {
-        let (owner, _, connection) = Self::bootstrap_composed(pipes, |selection| async move {
-            factory(selection).map(|owner| (owner, None))
-        }, None, None)
+        let (owner, _, connection) = Self::bootstrap_composed(
+            pipes,
+            |selection| async move { factory(selection).map(|owner| (owner, None)) },
+            None,
+            None,
+        )
         .await?;
         Ok((owner, connection))
     }
@@ -669,13 +773,17 @@ impl PrivateHostConnection {
         O: PrivateHostLifetimeControl + 'static,
         F: std::future::Future<Output = Result<(O, Arc<PrivateOriginals>), HostLifetimeError>>,
     {
-        let (owner, originals, connection) =
-            Self::bootstrap_composed(pipes, |selection| async move {
+        let (owner, originals, connection) = Self::bootstrap_composed(
+            pipes,
+            |selection| async move {
                 factory(selection)
                     .await
                     .map(|(owner, originals)| (owner, Some(originals)))
-            }, None, None)
-            .await?;
+            },
+            None,
+            None,
+        )
+        .await?;
         Ok((
             owner,
             originals.ok_or(PrivateHostError::Protocol)?,
@@ -698,13 +806,20 @@ impl PrivateHostConnection {
         let (owner, originals, connection) = Self::bootstrap_composed(
             pipes,
             |selection| async move {
-                factory(selection).await.map(|(owner, originals)| (owner, Some(originals)))
+                factory(selection)
+                    .await
+                    .map(|(owner, originals)| (owner, Some(originals)))
             },
             Some(send),
             None,
-        ).await?;
-        Ok((owner, originals.ok_or(PrivateHostError::Protocol)?, connection,
-            LocalControllerReviews(receive)))
+        )
+        .await?;
+        Ok((
+            owner,
+            originals.ok_or(PrivateHostError::Protocol)?,
+            connection,
+            LocalControllerReviews(receive),
+        ))
     }
 
     /// Existing executable composition with both protected presenter surfaces.
@@ -712,18 +827,40 @@ impl PrivateHostConnection {
     pub async fn bootstrap_with_controller_reviews<O, F>(
         pipes: InheritedHostPipes,
         factory: impl FnOnce(HostBootstrapSelection) -> F,
-    ) -> Result<(Arc<O>, Arc<PrivateOriginals>, Self, LocalControllerReviews, RemoteControllerReviews), PrivateHostError>
+    ) -> Result<
+        (
+            Arc<O>,
+            Arc<PrivateOriginals>,
+            Self,
+            LocalControllerReviews,
+            RemoteControllerReviews,
+        ),
+        PrivateHostError,
+    >
     where
         O: PrivateHostLifetimeControl + 'static,
         F: std::future::Future<Output = Result<(O, Arc<PrivateOriginals>), HostLifetimeError>>,
     {
         let (local, local_receive) = mpsc::channel(1);
         let (remote, remote_receive) = mpsc::channel(1);
-        let (owner, originals, connection) = Self::bootstrap_composed(pipes, |selection| async move {
-            factory(selection).await.map(|(owner, originals)| (owner, Some(originals)))
-        }, Some(local), Some(remote)).await?;
-        Ok((owner, originals.ok_or(PrivateHostError::Protocol)?, connection,
-            LocalControllerReviews(local_receive), RemoteControllerReviews(remote_receive)))
+        let (owner, originals, connection) = Self::bootstrap_composed(
+            pipes,
+            |selection| async move {
+                factory(selection)
+                    .await
+                    .map(|(owner, originals)| (owner, Some(originals)))
+            },
+            Some(local),
+            Some(remote),
+        )
+        .await?;
+        Ok((
+            owner,
+            originals.ok_or(PrivateHostError::Protocol)?,
+            connection,
+            LocalControllerReviews(local_receive),
+            RemoteControllerReviews(remote_receive),
+        ))
     }
 
     async fn bootstrap_composed<O, F>(
@@ -748,18 +885,40 @@ impl PrivateHostConnection {
     pub async fn bootstrap_from_startup_with_controller_reviews<O, F>(
         startup: PrivateHostStartup,
         factory: impl FnOnce(HostBootstrapSelection) -> F,
-    ) -> Result<(Arc<O>, Arc<PrivateOriginals>, Self, LocalControllerReviews, RemoteControllerReviews), PrivateHostError>
+    ) -> Result<
+        (
+            Arc<O>,
+            Arc<PrivateOriginals>,
+            Self,
+            LocalControllerReviews,
+            RemoteControllerReviews,
+        ),
+        PrivateHostError,
+    >
     where
         O: PrivateHostLifetimeControl + 'static,
         F: std::future::Future<Output = Result<(O, Arc<PrivateOriginals>), HostLifetimeError>>,
     {
         let (local, local_receive) = mpsc::channel(1);
         let (remote, remote_receive) = mpsc::channel(1);
-        let (owner, originals, connection) = Self::bootstrap_started(startup, |selection| async move {
-            factory(selection).await.map(|(owner, originals)| (owner, Some(originals)))
-        }, Some(local), Some(remote)).await?;
-        Ok((owner, originals.ok_or(PrivateHostError::Protocol)?, connection,
-            LocalControllerReviews(local_receive), RemoteControllerReviews(remote_receive)))
+        let (owner, originals, connection) = Self::bootstrap_started(
+            startup,
+            |selection| async move {
+                factory(selection)
+                    .await
+                    .map(|(owner, originals)| (owner, Some(originals)))
+            },
+            Some(local),
+            Some(remote),
+        )
+        .await?;
+        Ok((
+            owner,
+            originals.ok_or(PrivateHostError::Protocol)?,
+            connection,
+            LocalControllerReviews(local_receive),
+            RemoteControllerReviews(remote_receive),
+        ))
     }
 
     async fn bootstrap_started<O, F>(
@@ -770,12 +929,18 @@ impl PrivateHostConnection {
     ) -> Result<(Arc<O>, Option<Arc<PrivateOriginals>>, Self), PrivateHostError>
     where
         O: PrivateHostLifetimeControl + 'static,
-        F: std::future::Future<Output = Result<(O, Option<Arc<PrivateOriginals>>), HostLifetimeError>>,
+        F: std::future::Future<
+                Output = Result<(O, Option<Arc<PrivateOriginals>>), HostLifetimeError>,
+            >,
     {
         let (owner, originals, connection, ()) = Self::bootstrap_started_with_finish(
-            startup, factory, operator_reviews, remote_reviews,
+            startup,
+            factory,
+            operator_reviews,
+            remote_reviews,
             |_, _, _, _| async { Ok(()) },
-        ).await?;
+        )
+        .await?;
         Ok((owner, originals, connection))
     }
 
@@ -795,12 +960,24 @@ impl PrivateHostConnection {
         let (local, local_receive) = mpsc::channel(1);
         let (remote, remote_receive) = mpsc::channel(1);
         let (_, originals, connection, installed) = Self::bootstrap_started_with_finish(
-            startup, |selection| async move {
-                factory(selection).await.map(|(owner, originals)| (owner, Some(originals)))
-            }, Some(local), Some(remote), move |owner, closed, logins, _| finish(owner, closed, logins),
-        ).await?;
+            startup,
+            |selection| async move {
+                factory(selection)
+                    .await
+                    .map(|(owner, originals)| (owner, Some(originals)))
+            },
+            Some(local),
+            Some(remote),
+            move |owner, closed, logins, _| finish(owner, closed, logins),
+        )
+        .await?;
         originals.ok_or(PrivateHostError::Protocol)?;
-        Ok((installed, connection, LocalControllerReviews(local_receive), RemoteControllerReviews(remote_receive)))
+        Ok((
+            installed,
+            connection,
+            LocalControllerReviews(local_receive),
+            RemoteControllerReviews(remote_receive),
+        ))
     }
 
     /// Same final owner and connection, with its existing remote actor endpoint.
@@ -810,21 +987,40 @@ impl PrivateHostConnection {
         factory: impl FnOnce(HostBootstrapSelection) -> F,
         finish: impl FnOnce(Arc<O>, PrivateHostClosed, ConsoleLogins, ServiceParentEndpoint) -> C,
     ) -> Result<(T, Self, LocalControllerReviews, RemoteControllerReviews), PrivateHostError>
-    where O: PrivateHostLifetimeControl + 'static,
+    where
+        O: PrivateHostLifetimeControl + 'static,
         F: std::future::Future<Output = Result<(O, Arc<PrivateOriginals>), HostLifetimeError>>,
         C: std::future::Future<Output = Result<T, HostLifetimeError>>,
     {
         let (local, local_receive) = mpsc::channel(1);
         let (remote, remote_receive) = mpsc::channel(1);
         let (_, originals, connection, installed) = Self::bootstrap_started_with_finish(
-            startup, |selection| async move {
-                factory(selection).await.map(|(owner, originals)| (owner, Some(originals)))
-            }, Some(local), Some(remote), move |owner, closed, logins, endpoint| async move {
-                finish(owner, closed, logins, endpoint.ok_or(HostLifetimeError::Unavailable)?).await
+            startup,
+            |selection| async move {
+                factory(selection)
+                    .await
+                    .map(|(owner, originals)| (owner, Some(originals)))
             },
-        ).await?;
+            Some(local),
+            Some(remote),
+            move |owner, closed, logins, endpoint| async move {
+                finish(
+                    owner,
+                    closed,
+                    logins,
+                    endpoint.ok_or(HostLifetimeError::Unavailable)?,
+                )
+                .await
+            },
+        )
+        .await?;
         originals.ok_or(PrivateHostError::Protocol)?;
-        Ok((installed, connection, LocalControllerReviews(local_receive), RemoteControllerReviews(remote_receive)))
+        Ok((
+            installed,
+            connection,
+            LocalControllerReviews(local_receive),
+            RemoteControllerReviews(remote_receive),
+        ))
     }
 
     async fn bootstrap_started_with_finish<O, F, T, C>(
@@ -832,11 +1028,18 @@ impl PrivateHostConnection {
         factory: impl FnOnce(HostBootstrapSelection) -> F,
         operator_reviews: Option<mpsc::Sender<LocalControllerReviewRequest>>,
         remote_reviews: Option<mpsc::Sender<RemoteControllerCommand>>,
-        finish: impl FnOnce(Arc<O>, PrivateHostClosed, ConsoleLogins, Option<ServiceParentEndpoint>) -> C,
+        finish: impl FnOnce(
+            Arc<O>,
+            PrivateHostClosed,
+            ConsoleLogins,
+            Option<ServiceParentEndpoint>,
+        ) -> C,
     ) -> Result<(Arc<O>, Option<Arc<PrivateOriginals>>, Self, T), PrivateHostError>
     where
         O: PrivateHostLifetimeControl + 'static,
-        F: std::future::Future<Output = Result<(O, Option<Arc<PrivateOriginals>>), HostLifetimeError>>,
+        F: std::future::Future<
+                Output = Result<(O, Option<Arc<PrivateOriginals>>), HostLifetimeError>,
+            >,
         C: std::future::Future<Output = Result<T, HostLifetimeError>>,
     {
         let (reader, mut responses, request_id, selection) = startup.into_installed()?;
@@ -849,7 +1052,9 @@ impl PrivateHostConnection {
         };
         let erased: Arc<dyn PrivateHostLifetimeControl> = owner.clone();
         let (closed_tx, closed) = watch::channel(false);
-        let publication = originals.as_ref().map(|source| source.authorization_publication());
+        let publication = originals
+            .as_ref()
+            .map(|source| source.authorization_publication());
         let close_publisher = PrivateHostClosePublisher {
             closed: closed_tx,
             publication: publication.clone(),
@@ -861,15 +1066,30 @@ impl PrivateHostConnection {
         };
         let console_logins = ConsoleLogins::new(PrivateHostClosed(closed.clone()), publication);
         let service_parent = remote_reviews.clone().map(|sender| ServiceParentEndpoint {
-            sender, owner: erased.clone(), closed: PrivateHostClosed(closed.clone()), logins: console_logins.clone(),
+            sender,
+            owner: erased.clone(),
+            closed: PrivateHostClosed(closed.clone()),
+            logins: console_logins.clone(),
         });
-        let installed = finish(owner.clone(), PrivateHostClosed(closed.clone()), console_logins.clone(), service_parent.clone()).await;
+        let installed = finish(
+            owner.clone(),
+            PrivateHostClosed(closed.clone()),
+            console_logins.clone(),
+            service_parent.clone(),
+        )
+        .await;
         let (installed, acknowledged) = match installed {
-            Ok(installed) => (Some(installed), write_response(
-                &mut responses, &response(request_id, Ok(Reply::BootstrapAccepted)),
-            ).await),
+            Ok(installed) => (
+                Some(installed),
+                write_response(
+                    &mut responses,
+                    &response(request_id, Ok(Reply::BootstrapAccepted)),
+                )
+                .await,
+            ),
             Err(error) => {
-                let response = write_response(&mut responses, &response(request_id, Err(error))).await;
+                let response =
+                    write_response(&mut responses, &response(request_id, Err(error))).await;
                 (None, response.and(Err(error.into())))
             }
         };
@@ -927,10 +1147,14 @@ impl PrivateHostConnection {
     /// Share this exact connection owner with the installed native ingress and presenter.
     /// Enrollment labels alone do not authenticate either caller.
     pub fn service_parent_endpoint(&self) -> Result<ServiceParentEndpoint, HostLifetimeError> {
-        self.service_parent.clone().ok_or(HostLifetimeError::Unavailable)
+        self.service_parent
+            .clone()
+            .ok_or(HostLifetimeError::Unavailable)
     }
 
-    pub fn console_logins(&self) -> ConsoleLogins { self.console_logins.clone() }
+    pub fn console_logins(&self) -> ConsoleLogins {
+        self.console_logins.clone()
+    }
 
     pub fn closed_observer(&self) -> PrivateHostClosed {
         PrivateHostClosed(self.closed.clone())
@@ -1031,7 +1255,14 @@ async fn serve<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin + Send + 'static>(
                 Err(error) => break (false, Some(error)),
             }
         };
-        if request.id != next_id || matches!(&request.command, Command::Bootstrap { .. } | Command::PrepareApplication { .. } | Command::ReplaceApplication { .. }) {
+        if request.id != next_id
+            || matches!(
+                &request.command,
+                Command::Bootstrap { .. }
+                    | Command::PrepareApplication { .. }
+                    | Command::ReplaceApplication { .. }
+            )
+        {
             break (false, Some(PrivateHostError::Protocol));
         }
         let Some(next) = next_id.checked_add(1) else {
@@ -1041,8 +1272,11 @@ async fn serve<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin + Send + 'static>(
         let outcome = match request.command {
             Command::EnrollConsoleLogin { login } => {
                 owner.validate_current_selection().and_then(|()| {
-                    console_logins.enroll(request.id, login)
-                        .map(|()| Reply::ConsoleLoginEnrolled { enrollment_id: request.id })
+                    console_logins
+                        .enroll(request.id, login)
+                        .map(|()| Reply::ConsoleLoginEnrolled {
+                            enrollment_id: request.id,
+                        })
                 })
             }
             Command::RetireConsoleLogin { enrollment_id } => {
@@ -1050,8 +1284,17 @@ async fn serve<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin + Send + 'static>(
                 // Even a duplicate/full waiter response occurs after the fence.
                 match console_logins.retire(enrollment_id) {
                     Ok(wait) if retirements.len() < 256 => {
-                        retirements.spawn(async move { response(request.id, wait.drain().await
-                            .map(|observation| Reply::ConsoleLoginRetired { enrollment_id, observation })) });
+                        retirements.spawn(async move {
+                            response(
+                                request.id,
+                                wait.drain()
+                                    .await
+                                    .map(|observation| Reply::ConsoleLoginRetired {
+                                        enrollment_id,
+                                        observation,
+                                    }),
+                            )
+                        });
                         continue;
                     }
                     Ok(_) => Err(HostLifetimeError::NotSettled),
@@ -1091,10 +1334,15 @@ async fn serve<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin + Send + 'static>(
                     continue;
                 }
             }
-            command @ (Command::ReviewControllerParent { .. } | Command::ReviewSetupRequest { .. }) => {
+            command @ (Command::ReviewControllerParent { .. }
+            | Command::ReviewSetupRequest { .. }) => {
                 let (purpose, submission) = match command {
-                    Command::ReviewControllerParent { submission } => (ParentReviewKind::Controller, submission),
-                    Command::ReviewSetupRequest { submission } => (ParentReviewKind::SetupRequest, submission),
+                    Command::ReviewControllerParent { submission } => {
+                        (ParentReviewKind::Controller, submission)
+                    }
+                    Command::ReviewSetupRequest { submission } => {
+                        (ParentReviewKind::SetupRequest, submission)
+                    }
                     _ => unreachable!(),
                 };
                 let selected = if *closed.closed.borrow() {
@@ -1108,140 +1356,316 @@ async fn serve<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin + Send + 'static>(
                     }
                     continue;
                 }
-                if let Some(presenter) = operator_reviews.as_ref()
+                if let Some(presenter) = operator_reviews
+                    .as_ref()
                     .filter(|_| joins.len() < MAX_PENDING_JOINS)
                 {
                     let (send, receive) = oneshot::channel();
-                    if presenter.try_send(LocalControllerReviewRequest {
-                        purpose, submission, response: send,
-                    }).is_ok() {
+                    if presenter
+                        .try_send(LocalControllerReviewRequest {
+                            purpose,
+                            submission,
+                            response: send,
+                        })
+                        .is_ok()
+                    {
                         // The same JoinSet retains this call through parent
                         // loss. The presenter observes closed and retires any
                         // undecided approval, but joins admitted issuance.
                         joins.spawn(async move {
-                            response(request.id, receive.await
-                                .unwrap_or(Err(HostLifetimeError::Unavailable))
-                                .map(|outcome| match purpose {
-                                    ParentReviewKind::Controller => Reply::ControllerParentReviewed { outcome },
-                                    ParentReviewKind::SetupRequest => Reply::SetupRequestReviewed { outcome },
-                                }))
+                            response(
+                                request.id,
+                                receive
+                                    .await
+                                    .unwrap_or(Err(HostLifetimeError::Unavailable))
+                                    .map(|outcome| match purpose {
+                                        ParentReviewKind::Controller => {
+                                            Reply::ControllerParentReviewed { outcome }
+                                        }
+                                        ParentReviewKind::SetupRequest => {
+                                            Reply::SetupRequestReviewed { outcome }
+                                        }
+                                    }),
+                            )
                         });
                         continue;
                     }
                 }
                 Err(HostLifetimeError::Unavailable)
             }
-            command @ (Command::ReviewRemoteControllerParent { .. } | Command::ReviewRemoteSetupRequest { .. }) => {
+            command @ (Command::ReviewRemoteControllerParent { .. }
+            | Command::ReviewRemoteSetupRequest { .. }) => {
                 let (purpose, submission, login) = match command {
-                    Command::ReviewRemoteControllerParent { submission, login } => (ParentReviewKind::Controller, submission, login),
-                    Command::ReviewRemoteSetupRequest { submission, login } => (ParentReviewKind::SetupRequest, submission, login),
+                    Command::ReviewRemoteControllerParent { submission, login } => {
+                        (ParentReviewKind::Controller, submission, login)
+                    }
+                    Command::ReviewRemoteSetupRequest { submission, login } => {
+                        (ParentReviewKind::SetupRequest, submission, login)
+                    }
                     _ => unreachable!(),
                 };
-                let selected = if *closed.closed.borrow() { Err(HostLifetimeError::Denied) }
-                    else { owner.validate_current_selection() };
+                let selected = if *closed.closed.borrow() {
+                    Err(HostLifetimeError::Denied)
+                } else {
+                    owner.validate_current_selection()
+                };
                 if let Err(error) = selected {
                     if reply_tx.try_send(response(request.id, Err(error))).is_err() {
                         break (false, Some(PrivateHostError::Protocol));
                     }
                     continue;
                 }
-                if let Some(presenter) = remote_reviews.as_ref().filter(|_| joins.len() < MAX_PENDING_JOINS) {
+                if let Some(presenter) = remote_reviews
+                    .as_ref()
+                    .filter(|_| joins.len() < MAX_PENDING_JOINS)
+                {
                     let (send, receive) = oneshot::channel();
-                    if presenter.try_send(RemoteControllerCommand::Begin {
-                        purpose, review_id: request.id, submission, login, response: send,
-                    }).is_ok() {
-                        joins.spawn(async move { response(request.id, receive.await
-                            .unwrap_or(Err(HostLifetimeError::Unavailable))
-                            .map(|outcome| match purpose {
-                                ParentReviewKind::Controller => Reply::ControllerParentReviewed { outcome },
-                                ParentReviewKind::SetupRequest => Reply::SetupRequestReviewed { outcome },
-                            })) });
+                    if presenter
+                        .try_send(RemoteControllerCommand::Begin {
+                            purpose,
+                            review_id: request.id,
+                            submission,
+                            login,
+                            response: send,
+                        })
+                        .is_ok()
+                    {
+                        joins.spawn(async move {
+                            response(
+                                request.id,
+                                receive
+                                    .await
+                                    .unwrap_or(Err(HostLifetimeError::Unavailable))
+                                    .map(|outcome| match purpose {
+                                        ParentReviewKind::Controller => {
+                                            Reply::ControllerParentReviewed { outcome }
+                                        }
+                                        ParentReviewKind::SetupRequest => {
+                                            Reply::SetupRequestReviewed { outcome }
+                                        }
+                                    }),
+                            )
+                        });
                         continue;
                     }
                 }
                 Err(HostLifetimeError::Unavailable)
             }
             command @ (Command::ObserveControllerReview { .. }
-                | Command::AnswerControllerReview { .. } | Command::RetireControllerReview { .. }) => {
+            | Command::AnswerControllerReview { .. }
+            | Command::RetireControllerReview { .. }) => {
                 let selected = if matches!(&command, Command::AnswerControllerReview { .. }) {
-                    if *closed.closed.borrow() { Err(HostLifetimeError::Denied) } else { owner.validate_current_selection() }
-                } else { Ok(()) };
+                    if *closed.closed.borrow() {
+                        Err(HostLifetimeError::Denied)
+                    } else {
+                        owner.validate_current_selection()
+                    }
+                } else {
+                    Ok(())
+                };
                 if let Err(error) = selected {
                     if reply_tx.try_send(response(request.id, Err(error))).is_err() {
                         break (false, Some(PrivateHostError::Protocol));
                     }
                     continue;
                 }
-                if let Some(presenter) = remote_reviews.as_ref().filter(|_| joins.len() < MAX_PENDING_JOINS) {
+                if let Some(presenter) = remote_reviews
+                    .as_ref()
+                    .filter(|_| joins.len() < MAX_PENDING_JOINS)
+                {
                     let (send, receive) = oneshot::channel();
                     let (review_id, control) = match command {
-                        Command::ObserveControllerReview { review_id } => (review_id, RemoteControllerCommand::Observe { review_id, response: send }),
-                        Command::AnswerControllerReview { review_id, approval_id, decision } => (review_id, RemoteControllerCommand::Answer { review_id, approval_id, decision, response: send }),
-                        Command::RetireControllerReview { review_id } => (review_id, RemoteControllerCommand::Retire { review_id, response: send }),
+                        Command::ObserveControllerReview { review_id } => (
+                            review_id,
+                            RemoteControllerCommand::Observe {
+                                review_id,
+                                response: send,
+                            },
+                        ),
+                        Command::AnswerControllerReview {
+                            review_id,
+                            approval_id,
+                            decision,
+                        } => (
+                            review_id,
+                            RemoteControllerCommand::Answer {
+                                review_id,
+                                approval_id,
+                                decision,
+                                response: send,
+                            },
+                        ),
+                        Command::RetireControllerReview { review_id } => (
+                            review_id,
+                            RemoteControllerCommand::Retire {
+                                review_id,
+                                response: send,
+                            },
+                        ),
                         _ => unreachable!(),
                     };
                     if presenter.try_send(control).is_ok() {
-                        joins.spawn(async move { response(request.id, receive.await
-                            .unwrap_or(Err(HostLifetimeError::Unavailable))
-                            .map(|status| Reply::ControllerReview { review_id, status })) });
+                        joins.spawn(async move {
+                            response(
+                                request.id,
+                                receive
+                                    .await
+                                    .unwrap_or(Err(HostLifetimeError::Unavailable))
+                                    .map(|status| Reply::ControllerReview { review_id, status }),
+                            )
+                        });
                         continue;
                     }
                 }
                 Err(HostLifetimeError::Unavailable)
             }
             command @ (Command::NextServiceParentAdministration
-                | Command::SubmitServiceParentAdministration { .. }
-                | Command::ResultServiceParentAdministration { .. }
-                | Command::RetireServiceParentAdministration { .. }) => {
-                let selected = if matches!(&command, Command::SubmitServiceParentAdministration { .. }) {
-                    if *closed.closed.borrow() { Err(HostLifetimeError::Denied) } else { owner.validate_current_selection() }
-                } else { Ok(()) };
+            | Command::SubmitServiceParentAdministration { .. }
+            | Command::ResultServiceParentAdministration { .. }
+            | Command::RetireServiceParentAdministration { .. }) => {
+                let selected =
+                    if matches!(&command, Command::SubmitServiceParentAdministration { .. }) {
+                        if *closed.closed.borrow() {
+                            Err(HostLifetimeError::Denied)
+                        } else {
+                            owner.validate_current_selection()
+                        }
+                    } else {
+                        Ok(())
+                    };
                 if let Err(error) = selected {
                     if reply_tx.try_send(response(request.id, Err(error))).is_err() {
                         break (false, Some(PrivateHostError::Protocol));
                     }
                     continue;
                 }
-                let controlling = matches!(&command, Command::SubmitServiceParentAdministration { .. }
-                    | Command::RetireServiceParentAdministration { .. });
-                let capacity = if controlling { retirements.len() < 256 } else { joins.len() < MAX_PENDING_JOINS };
+                let controlling = matches!(
+                    &command,
+                    Command::SubmitServiceParentAdministration { .. }
+                        | Command::RetireServiceParentAdministration { .. }
+                );
+                let capacity = if controlling {
+                    retirements.len() < 256
+                } else {
+                    joins.len() < MAX_PENDING_JOINS
+                };
                 if let Some(sender) = remote_reviews.as_ref().filter(|_| capacity) {
                     // Existing reserved control waiters keep answer/retirement
                     // deliverable when ordinary result observations are full.
-                    let service_waiters = if controlling { &mut retirements } else { &mut joins };
+                    let service_waiters = if controlling {
+                        &mut retirements
+                    } else {
+                        &mut joins
+                    };
                     // Each task is only a response waiter. Actual operation and
                     // answer custody stay on the one remote actor through EOF.
                     match command {
                         Command::NextServiceParentAdministration => {
                             let (send, receive) = oneshot::channel();
-                            if sender.try_send(RemoteControllerCommand::ServiceParent(ServiceParentCommand::Next { response: send })).is_ok() {
-                                service_waiters.spawn(async move { service_parent_response(request.id, receive.await.unwrap_or(Err(HostLifetimeError::Unavailable))
-                                    .map(|request| Reply::ServiceParentAdministrationRequest { exchange_id: request.exchange_id,
-                                        proposal_sha256: request.proposal_sha256, proposal: request.proposal })) });
+                            if sender
+                                .try_send(RemoteControllerCommand::ServiceParent(
+                                    ServiceParentCommand::Next { response: send },
+                                ))
+                                .is_ok()
+                            {
+                                service_waiters.spawn(async move {
+                                    service_parent_response(
+                                        request.id,
+                                        receive
+                                            .await
+                                            .unwrap_or(Err(HostLifetimeError::Unavailable))
+                                            .map(|request| {
+                                                Reply::ServiceParentAdministrationRequest {
+                                                    exchange_id: request.exchange_id,
+                                                    proposal_sha256: request.proposal_sha256,
+                                                    proposal: request.proposal,
+                                                }
+                                            }),
+                                    )
+                                });
                                 continue;
                             }
                         }
-                        Command::SubmitServiceParentAdministration { exchange_id, proposal_sha256, decision } => {
+                        Command::SubmitServiceParentAdministration {
+                            exchange_id,
+                            proposal_sha256,
+                            decision,
+                        } => {
                             let (send, receive) = oneshot::channel();
-                            if sender.try_send(RemoteControllerCommand::ServiceParent(ServiceParentCommand::Submit { exchange_id, proposal_sha256, decision, response: send })).is_ok() {
-                                service_waiters.spawn(async move { service_parent_response(request.id, receive.await.unwrap_or(Err(HostLifetimeError::Unavailable))
-                                    .map(|()| Reply::ServiceParentAdministrationSubmitted { exchange_id })) });
+                            if sender
+                                .try_send(RemoteControllerCommand::ServiceParent(
+                                    ServiceParentCommand::Submit {
+                                        exchange_id,
+                                        proposal_sha256,
+                                        decision,
+                                        response: send,
+                                    },
+                                ))
+                                .is_ok()
+                            {
+                                service_waiters.spawn(async move {
+                                    service_parent_response(
+                                        request.id,
+                                        receive
+                                            .await
+                                            .unwrap_or(Err(HostLifetimeError::Unavailable))
+                                            .map(|()| {
+                                                Reply::ServiceParentAdministrationSubmitted {
+                                                    exchange_id,
+                                                }
+                                            }),
+                                    )
+                                });
                                 continue;
                             }
                         }
                         other => {
                             let (send, receive) = oneshot::channel();
                             let (exchange_id, retiring) = match other {
-                                Command::ResultServiceParentAdministration { exchange_id } => (exchange_id, false),
-                                Command::RetireServiceParentAdministration { exchange_id } => (exchange_id, true),
+                                Command::ResultServiceParentAdministration { exchange_id } => {
+                                    (exchange_id, false)
+                                }
+                                Command::RetireServiceParentAdministration { exchange_id } => {
+                                    (exchange_id, true)
+                                }
                                 _ => unreachable!(),
                             };
-                            let command = if retiring { ServiceParentCommand::Retire { exchange_id, response: send } }
-                                else { ServiceParentCommand::Result { exchange_id, response: send } };
-                            if sender.try_send(RemoteControllerCommand::ServiceParent(command)).is_ok() {
-                                service_waiters.spawn(async move { service_parent_response(request.id, receive.await.unwrap_or(Err(HostLifetimeError::Unavailable))
-                                    .map(|observation| if retiring { Reply::ServiceParentAdministrationRetired { exchange_id, observation } }
-                                        else { Reply::ServiceParentAdministrationResult { exchange_id, observation } })) });
+                            let command = if retiring {
+                                ServiceParentCommand::Retire {
+                                    exchange_id,
+                                    response: send,
+                                }
+                            } else {
+                                ServiceParentCommand::Result {
+                                    exchange_id,
+                                    response: send,
+                                }
+                            };
+                            if sender
+                                .try_send(RemoteControllerCommand::ServiceParent(command))
+                                .is_ok()
+                            {
+                                service_waiters.spawn(async move {
+                                    service_parent_response(
+                                        request.id,
+                                        receive
+                                            .await
+                                            .unwrap_or(Err(HostLifetimeError::Unavailable))
+                                            .map(|observation| {
+                                                if retiring {
+                                                    Reply::ServiceParentAdministrationRetired {
+                                                        exchange_id,
+                                                        observation,
+                                                    }
+                                                } else {
+                                                    Reply::ServiceParentAdministrationResult {
+                                                        exchange_id,
+                                                        observation,
+                                                    }
+                                                }
+                                            }),
+                                    )
+                                });
                                 continue;
                             }
                         }
@@ -1253,12 +1677,22 @@ async fn serve<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin + Send + 'static>(
                 // Historical observation remains available independently of
                 // execution admission. The inherited channel and canonical
                 // source namespace select the reader; no grant is restored.
-                if let Some(originals) = originals.as_ref().filter(|_| joins.len() < MAX_PENDING_JOINS) {
+                if let Some(originals) = originals
+                    .as_ref()
+                    .filter(|_| joins.len() < MAX_PENDING_JOINS)
+                {
                     let originals = originals.clone();
                     joins.spawn(async move {
-                        service_input_response(request.id,
-                            originals.observe_service_input_receipt(&original).await
-                                .map(|observation| Reply::ServiceInputReceipt { original, observation }))
+                        service_input_response(
+                            request.id,
+                            originals
+                                .observe_service_input_receipt(&original)
+                                .await
+                                .map(|observation| Reply::ServiceInputReceipt {
+                                    original,
+                                    observation,
+                                }),
+                        )
                     });
                     continue;
                 }
@@ -1287,9 +1721,10 @@ async fn serve<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin + Send + 'static>(
                         let original = submission.original.clone();
                         original_response(
                             request.id,
-                            originals.submit_authenticated_original(submission).await.map(
-                                |outcome| Reply::OriginalSubmitted { original, outcome },
-                            ),
+                            originals
+                                .submit_authenticated_original(submission)
+                                .await
+                                .map(|outcome| Reply::OriginalSubmitted { original, outcome }),
                         )
                     });
                     continue;
@@ -1394,7 +1829,11 @@ async fn serve<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin + Send + 'static>(
                 }
                 Err(HostLifetimeError::Unavailable)
             }
-            Command::Bootstrap { .. } | Command::PrepareApplication { .. } | Command::ReplaceApplication { .. } => break (false, Some(PrivateHostError::Protocol)),
+            Command::Bootstrap { .. }
+            | Command::PrepareApplication { .. }
+            | Command::ReplaceApplication { .. } => {
+                break (false, Some(PrivateHostError::Protocol));
+            }
         };
         // Backpressure cannot prevent EOF observation or admission closure.
         if reply_tx.try_send(response(request.id, outcome)).is_err() {
@@ -1429,7 +1868,9 @@ async fn serve<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin + Send + 'static>(
     }
     while let Some(joined) = retirements.join_next().await {
         match joined {
-            Ok(reply) if normal_close => { let _ = reply_tx.try_send(reply); }
+            Ok(reply) if normal_close => {
+                let _ = reply_tx.try_send(reply);
+            }
             Ok(_) => {}
             Err(_) => failure = Some(PrivateHostError::OwnerTask),
         }
@@ -1468,22 +1909,33 @@ mod tests {
     use uuid::Uuid;
 
     fn numeric_service_receipt(args: serde_json::Value) -> Reply {
-        use crate::private_originals::{PrivateServiceInputReceipt, PrivateServiceInputReport,
-            PrivateReceiptWitness, PrivateReceiptScope};
+        use crate::private_originals::{
+            PrivateReceiptScope, PrivateReceiptWitness, PrivateServiceInputReceipt,
+            PrivateServiceInputReport,
+        };
         // Serialization/framing control only, not a native finalized receipt.
         Reply::ServiceInputReceipt {
             original: controller_review_submission().original,
             observation: PrivateServiceInputObservation::Admitted {
-                session_id: "session".into(), input_id: "input".into(),
+                session_id: "session".into(),
+                input_id: "input".into(),
                 receipt: Some(PrivateServiceInputReceipt {
                     source: PrivateReceiptWitness::LiveRuntime,
                     report: PrivateServiceInputReport::Finalized {
-                        input_id: "input".into(), terminal: meerkat_runtime::input_state::InputTerminalOutcome::Consumed,
-                        attempt_count: 1, scope: PrivateReceiptScope::Run { run_id: "run".into() }, run_id: Some("run".into()),
-                        owner_input_id: "input".into(), recipient_input_ids: vec!["input".into()],
+                        input_id: "input".into(),
+                        terminal: meerkat_runtime::input_state::InputTerminalOutcome::Consumed,
+                        attempt_count: 1,
+                        scope: PrivateReceiptScope::Run {
+                            run_id: "run".into(),
+                        },
+                        run_id: Some("run".into()),
+                        owner_input_id: "input".into(),
+                        recipient_input_ids: vec!["input".into()],
                         outcome: meerkat_runtime::completion::CompletionOutcome::CallbackPending {
-                            tool_use_id: "call".into(), tool_name: "read".into(),
-                            args, dedupe_key: None,
+                            tool_use_id: "call".into(),
+                            tool_name: "read".into(),
+                            args,
+                            dedupe_key: None,
                         },
                     },
                 }),
@@ -1496,18 +1948,32 @@ mod tests {
         let supported = serde_json::json!({"offset": -0.5, "values": [1.25, -7, 1.0],
             "limits": [-9_007_199_254_740_991i64, 9_007_199_254_740_991u64], "negative_zero": -0.0});
         let next = service_input_response(3, Ok(numeric_service_receipt(supported.clone())));
-        let expected = serde_json::to_vec(&original_response(3,
-            Ok(numeric_service_receipt(supported)))).unwrap();
+        let expected = serde_json::to_vec(&original_response(
+            3,
+            Ok(numeric_service_receipt(supported)),
+        ))
+        .unwrap();
         // Supported arbitrary numeric data is emitted unchanged, never rounded
         // or normalized to private protocol counter syntax.
         assert_eq!(serde_json::to_vec(&next).unwrap(), expected);
         // The complete serialized reply, including its newline, may fill the
         // shared limit. One extra payload byte must remain a local refusal.
-        let empty = original_response(2, Ok(numeric_service_receipt(serde_json::json!({"value": ""}))));
-        let payload_limit = MAX_FRAME_BYTES as usize - 1 - serde_json::to_vec(&empty).unwrap().len();
-        let at_limit = service_input_response(2, Ok(numeric_service_receipt(
-            serde_json::json!({"value": "x".repeat(payload_limit)}))));
-        assert!(matches!(&at_limit.result, Reply::ServiceInputReceipt { .. }));
+        let empty = original_response(
+            2,
+            Ok(numeric_service_receipt(serde_json::json!({"value": ""}))),
+        );
+        let payload_limit =
+            MAX_FRAME_BYTES as usize - 1 - serde_json::to_vec(&empty).unwrap().len();
+        let at_limit = service_input_response(
+            2,
+            Ok(numeric_service_receipt(
+                serde_json::json!({"value": "x".repeat(payload_limit)}),
+            )),
+        );
+        assert!(matches!(
+            &at_limit.result,
+            Reply::ServiceInputReceipt { .. }
+        ));
         let mut exact_frame = Vec::new();
         write_response(&mut exact_frame, &at_limit).await.unwrap();
         assert_eq!(exact_frame.len(), MAX_FRAME_BYTES as usize);
@@ -1522,15 +1988,26 @@ mod tests {
             serde_json::json!({"value": -1e20f64}),
         ] {
             let bounded = service_input_response(2, Ok(numeric_service_receipt(unsupported)));
-            assert!(matches!(&bounded.result, Reply::Error { error: WireError::Unavailable }));
+            assert!(matches!(
+                &bounded.result,
+                Reply::Error {
+                    error: WireError::Unavailable
+                }
+            ));
             let mut writer = Vec::new();
             write_response(&mut writer, &bounded).await.unwrap();
             write_response(&mut writer, &next).await.unwrap();
-            let lines: Vec<_> = writer.split(|byte| *byte == b'\n').filter(|line| !line.is_empty()).collect();
+            let lines: Vec<_> = writer
+                .split(|byte| *byte == b'\n')
+                .filter(|line| !line.is_empty())
+                .collect();
             assert_eq!(lines.len(), 2);
             assert!(lines[0].len() + 1 <= MAX_FRAME_BYTES as usize);
             assert_eq!(lines[1], expected);
-            assert_eq!(serde_json::from_slice::<serde_json::Value>(lines[0]).unwrap()["result"]["error"], "unavailable");
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(lines[0]).unwrap()["result"]["error"],
+                "unavailable"
+            );
         }
     }
 
@@ -1540,17 +2017,33 @@ mod tests {
             // Response/result/observation/receipt/report/outcome are six
             // containers. Scalar args add none; each array below adds one.
             let mut args = serde_json::Value::Null;
-            for _ in 6..depth { args = serde_json::Value::Array(vec![args]); }
-            let reply = service_input_response(2, Ok(numeric_service_receipt(args)));
-            assert_eq!(matches!(&reply.result, Reply::ServiceInputReceipt { .. }), depth == 128);
-            if depth == 129 {
-                assert!(matches!(&reply.result, Reply::Error { error: WireError::Unavailable }));
+            for _ in 6..depth {
+                args = serde_json::Value::Array(vec![args]);
             }
-            let next = service_input_response(3, Ok(numeric_service_receipt(serde_json::json!({"value": 1.25}))));
+            let reply = service_input_response(2, Ok(numeric_service_receipt(args)));
+            assert_eq!(
+                matches!(&reply.result, Reply::ServiceInputReceipt { .. }),
+                depth == 128
+            );
+            if depth == 129 {
+                assert!(matches!(
+                    &reply.result,
+                    Reply::Error {
+                        error: WireError::Unavailable
+                    }
+                ));
+            }
+            let next = service_input_response(
+                3,
+                Ok(numeric_service_receipt(serde_json::json!({"value": 1.25}))),
+            );
             let mut writer = Vec::new();
             write_response(&mut writer, &reply).await.unwrap();
             write_response(&mut writer, &next).await.unwrap();
-            let lines: Vec<_> = writer.split(|byte| *byte == b'\n').filter(|line| !line.is_empty()).collect();
+            let lines: Vec<_> = writer
+                .split(|byte| *byte == b'\n')
+                .filter(|line| !line.is_empty())
+                .collect();
             assert_eq!(lines.len(), 2);
             assert!(lines[0].len() + 1 <= MAX_FRAME_BYTES as usize);
             assert_eq!(lines[1], serde_json::to_vec(&next).unwrap());
@@ -1560,7 +2053,8 @@ mod tests {
     #[test]
     fn service_receipt_command_accepts_only_the_original_reference() {
         let original = controller_review_submission().original;
-        let command = serde_json::json!({"kind": "observe_service_input_receipt", "original": original});
+        let command =
+            serde_json::json!({"kind": "observe_service_input_receipt", "original": original});
         assert!(serde_json::from_value::<Command>(command.clone()).is_ok());
         for name in ["session_id", "input_id", "grant", "completed"] {
             let mut changed = command.clone();
@@ -1681,7 +2175,9 @@ mod tests {
         }
         fn host_lost(&self) -> Result<HostCloseObservation, HostLifetimeError> {
             self.lost.store(true, Ordering::Release);
-            if self.fail_host_loss { return Err(HostLifetimeError::Unavailable); }
+            if self.fail_host_loss {
+                return Err(HostLifetimeError::Unavailable);
+            }
             self.begin_close_activation(HostCloseReason::HostLost)
         }
     }
@@ -1696,15 +2192,21 @@ mod tests {
         let (_, prior) = publication.observe(|| !closed.is_closed()).unwrap();
         drop(HostLossGuard {
             owner: owner.clone(),
-            closed: PrivateHostClosePublisher { closed: send, publication: Some(publication) },
+            closed: PrivateHostClosePublisher {
+                closed: send,
+                publication: Some(publication),
+            },
             armed: true,
         });
         assert!(owner.lost.load(Ordering::Acquire));
         assert!(closed.is_closed());
         assert!(prior.check_current().is_err());
         assert!(!owner.closed.load(Ordering::Acquire));
-        assert_eq!(owner.joining.load(Ordering::Acquire), 0,
-            "pipe loss does not manufacture a successful close handle or settlement");
+        assert_eq!(
+            owner.joining.load(Ordering::Acquire),
+            0,
+            "pipe loss does not manufacture a successful close handle or settlement"
+        );
     }
 
     #[test]
@@ -1718,7 +2220,10 @@ mod tests {
         assert!(failure.is_err());
         let (send, receive) = watch::channel(false);
         let closed = PrivateHostClosed(receive);
-        let publisher = PrivateHostClosePublisher { closed: send, publication: Some(publication) };
+        let publisher = PrivateHostClosePublisher {
+            closed: send,
+            publication: Some(publication),
+        };
         assert_eq!(publisher.close(), Err(HostLifetimeError::Unavailable));
         assert!(closed.is_closed());
         assert!(prior.check_current().is_err());
@@ -2395,9 +2900,13 @@ for name in os.listdir('/dev/fd'):
 
     #[test]
     fn controller_review_command_cannot_supply_operator_or_human_decision() {
-        let request = Request { version: 1, id: 2, command: Command::ReviewControllerParent {
-            submission: controller_review_submission(),
-        }};
+        let request = Request {
+            version: 1,
+            id: 2,
+            command: Command::ReviewControllerParent {
+                submission: controller_review_submission(),
+            },
+        };
         let value = serde_json::to_value(request).unwrap();
         for field in ["operator", "approved", "lineage", "controller", "viewer"] {
             let mut supplied = value.clone();
@@ -2410,32 +2919,77 @@ for name in os.listdir('/dev/fd'):
     async fn absent_local_presenter_refuses_review_without_closing_other_commands() {
         let (pipes, command_file, response_file) = pipes();
         let mut commands = tokio::net::unix::pipe::Sender::from_file(command_file).unwrap();
-        let mut responses = BufReader::new(tokio::net::unix::pipe::Receiver::from_file(response_file).unwrap());
+        let mut responses =
+            BufReader::new(tokio::net::unix::pipe::Receiver::from_file(response_file).unwrap());
         let mut connection = None;
         let scenario = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            send(&mut commands, 1, Command::Bootstrap { selection: selection() }).await;
-            let (_, opened) = PrivateHostConnection::bootstrap(pipes, |_| Ok(ProbeOwner::new(true)))
-                .await.map_err(|error| error.to_string())?;
+            send(
+                &mut commands,
+                1,
+                Command::Bootstrap {
+                    selection: selection(),
+                },
+            )
+            .await;
+            let (_, opened) =
+                PrivateHostConnection::bootstrap(pipes, |_| Ok(ProbeOwner::new(true)))
+                    .await
+                    .map_err(|error| error.to_string())?;
             connection = Some(opened);
             let mut line = String::new();
-            responses.read_line(&mut line).await.map_err(|error| error.to_string())?;
-            send(&mut commands, 2, Command::ReviewControllerParent { submission: controller_review_submission() }).await;
-            line.clear(); responses.read_line(&mut line).await.map_err(|error| error.to_string())?;
-            let refused: serde_json::Value = serde_json::from_str(&line).map_err(|error| error.to_string())?;
-            send(&mut commands, 3, Command::OpenComponent { component: Id::new("existing").unwrap() }).await;
-            line.clear(); responses.read_line(&mut line).await.map_err(|error| error.to_string())?;
-            let component: serde_json::Value = serde_json::from_str(&line).map_err(|error| error.to_string())?;
+            responses
+                .read_line(&mut line)
+                .await
+                .map_err(|error| error.to_string())?;
+            send(
+                &mut commands,
+                2,
+                Command::ReviewControllerParent {
+                    submission: controller_review_submission(),
+                },
+            )
+            .await;
+            line.clear();
+            responses
+                .read_line(&mut line)
+                .await
+                .map_err(|error| error.to_string())?;
+            let refused: serde_json::Value =
+                serde_json::from_str(&line).map_err(|error| error.to_string())?;
+            send(
+                &mut commands,
+                3,
+                Command::OpenComponent {
+                    component: Id::new("existing").unwrap(),
+                },
+            )
+            .await;
+            line.clear();
+            responses
+                .read_line(&mut line)
+                .await
+                .map_err(|error| error.to_string())?;
+            let component: serde_json::Value =
+                serde_json::from_str(&line).map_err(|error| error.to_string())?;
             Ok::<_, String>((refused, component))
-        }).await;
+        })
+        .await;
         // Close endpoints and attempt bounded owner cleanup before assertions.
         drop(commands);
         let cleanup = match connection.take() {
-            Some(connection) => Some(tokio::time::timeout(std::time::Duration::from_secs(2), connection.finish()).await),
+            Some(connection) => Some(
+                tokio::time::timeout(std::time::Duration::from_secs(2), connection.finish()).await,
+            ),
             None => None,
         };
         drop(responses);
-        let (refused, component) = scenario.expect("private review scenario timed out").unwrap();
-        cleanup.expect("bootstrap did not return a connection").expect("private cleanup timed out").unwrap();
+        let (refused, component) = scenario
+            .expect("private review scenario timed out")
+            .unwrap();
+        cleanup
+            .expect("bootstrap did not return a connection")
+            .expect("private cleanup timed out")
+            .unwrap();
         assert_eq!(refused["id"], 2);
         assert_eq!(refused["result"]["error"], "unavailable");
         assert_eq!(component["result"]["kind"], "component");
@@ -2446,21 +3000,51 @@ for name in os.listdir('/dev/fd'):
         // Transport custody test only. This response is not native issuance.
         let (pipes, command_file, response_file) = pipes();
         let mut commands = Some(tokio::net::unix::pipe::Sender::from_file(command_file).unwrap());
-        let mut responses = BufReader::new(tokio::net::unix::pipe::Receiver::from_file(response_file).unwrap());
+        let mut responses =
+            BufReader::new(tokio::net::unix::pipe::Receiver::from_file(response_file).unwrap());
         let (send_review, mut reviews) = mpsc::channel(1);
         let mut connection = None;
         let mut held = None;
         let mut finish = None;
         let scenario = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            send(commands.as_mut().unwrap(), 1, Command::Bootstrap { selection: selection() }).await;
+            send(
+                commands.as_mut().unwrap(),
+                1,
+                Command::Bootstrap {
+                    selection: selection(),
+                },
+            )
+            .await;
             let (owner, _, opened) = PrivateHostConnection::bootstrap_composed(
-                pipes, |_| async { Ok((ProbeOwner::new(true), None)) }, Some(send_review), None,
-            ).await.map_err(|error| error.to_string())?;
+                pipes,
+                |_| async { Ok((ProbeOwner::new(true), None)) },
+                Some(send_review),
+                None,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
             connection = Some(opened);
-            let mut line = String::new(); responses.read_line(&mut line).await.map_err(|error| error.to_string())?;
-            send(commands.as_mut().unwrap(), 2, Command::ReviewControllerParent { submission: controller_review_submission() }).await;
+            let mut line = String::new();
+            responses
+                .read_line(&mut line)
+                .await
+                .map_err(|error| error.to_string())?;
+            send(
+                commands.as_mut().unwrap(),
+                2,
+                Command::ReviewControllerParent {
+                    submission: controller_review_submission(),
+                },
+            )
+            .await;
             held = reviews.recv().await;
-            let route = held.as_ref().ok_or("review receiver closed")?.submission.original.route.clone();
+            let route = held
+                .as_ref()
+                .ok_or("review receiver closed")?
+                .submission
+                .original
+                .route
+                .clone();
             drop(commands.take());
             connection.as_ref().unwrap().wait_closed().await;
             let lost = owner.lost.load(Ordering::Acquire);
@@ -2470,14 +3054,21 @@ for name in os.listdir('/dev/fd'):
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             let pending = !finish.as_ref().unwrap().is_finished();
             Ok::<_, String>((route, lost, closed, pending))
-        }).await;
+        })
+        .await;
         // Release the held response unconditionally, even if an earlier
         // observation timed out, before any assertion or final owner join.
-        let released = held.take().map(|held| held.response.send(Ok(OperatorParentOutcome::Denied)).is_ok());
+        let released = held.take().map(|held| {
+            held.response
+                .send(Ok(OperatorParentOutcome::Denied))
+                .is_ok()
+        });
         drop(commands.take());
         drop(reviews);
         if finish.is_none() {
-            finish = connection.take().map(|connection| tokio::spawn(connection.finish()));
+            finish = connection
+                .take()
+                .map(|connection| tokio::spawn(connection.finish()));
         }
         let cleanup = if let Some(mut task) = finish {
             match tokio::time::timeout(std::time::Duration::from_secs(2), &mut task).await {
@@ -2488,10 +3079,16 @@ for name in os.listdir('/dev/fd'):
                     None
                 }
             }
-        } else { None };
+        } else {
+            None
+        };
         drop(responses);
-        let (route, lost, closed, pending) = scenario.expect("private EOF scenario timed out").unwrap();
-        cleanup.expect("private EOF cleanup timed out").unwrap().unwrap();
+        let (route, lost, closed, pending) =
+            scenario.expect("private EOF scenario timed out").unwrap();
+        cleanup
+            .expect("private EOF cleanup timed out")
+            .unwrap()
+            .unwrap();
         assert_eq!(route, Id::new("fixture-route").unwrap());
         assert!(lost && closed);
         assert!(pending, "private close discarded the retained review");
@@ -2596,7 +3193,8 @@ for name in os.listdir('/dev/fd'):
             let mut bytes = serde_json::to_vec(&serde_json::json!({
                 "version": PRIVATE_HOST_PROTOCOL_VERSION, "id": 2,
                 "command": {"kind": "open_component", "component": "fixture"},
-            })).unwrap();
+            }))
+            .unwrap();
             bytes.resize(MAX_FRAME_BYTES as usize - 1 + extra, b' ');
             bytes.push(b'\n');
             let (mut writer, reader) = tokio::io::duplex((MAX_FRAME_BYTES + 1) as usize);
@@ -2665,30 +3263,67 @@ for name in os.listdir('/dev/fd'):
     async fn preparation_reply_and_final_adoption_use_one_reader_and_distinct_requests() {
         let (pipes, command_file, response_file) = pipes();
         let mut commands = tokio::net::unix::pipe::Sender::from_file(command_file).unwrap();
-        let mut responses = BufReader::new(tokio::net::unix::pipe::Receiver::from_file(response_file).unwrap());
-        let artifact = SelectedHostArtifact { path: "/component-control/plan.json".into(), sha256: "a".repeat(64) };
-        send(&mut commands, 1, Command::PrepareApplication { plan: artifact.clone() }).await;
+        let mut responses =
+            BufReader::new(tokio::net::unix::pipe::Receiver::from_file(response_file).unwrap());
+        let artifact = SelectedHostArtifact {
+            path: "/component-control/plan.json".into(),
+            sha256: "a".repeat(64),
+        };
+        send(
+            &mut commands,
+            1,
+            Command::PrepareApplication {
+                plan: artifact.clone(),
+            },
+        )
+        .await;
         let startup = PrivateHostStartup::read(pipes).await.unwrap();
-        assert!(matches!(startup.intent(), PrivateHostStartupIntent::PrepareApplication(plan) if plan == &artifact));
+        assert!(
+            matches!(startup.intent(), PrivateHostStartupIntent::PrepareApplication(plan) if plan == &artifact)
+        );
         let next = tokio::spawn(startup.application_prepared(artifact.clone()));
         let mut line = String::new();
         responses.read_line(&mut line).await.unwrap();
         let reply: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(reply["id"], 1);
         assert_eq!(reply["result"]["kind"], "application_prepared");
-        assert_eq!(reply["result"]["manifest"], serde_json::to_value(&artifact).unwrap());
+        assert_eq!(
+            reply["result"]["manifest"],
+            serde_json::to_value(&artifact).unwrap()
+        );
         assert!(!next.is_finished(), "final adoption still needs request 2");
-        send(&mut commands, 2, Command::Bootstrap { selection: selection() }).await;
+        send(
+            &mut commands,
+            2,
+            Command::Bootstrap {
+                selection: selection(),
+            },
+        )
+        .await;
         let startup = next.await.unwrap().unwrap();
         let (owner, _, connection) = PrivateHostConnection::bootstrap_started(
-            startup, |_| async { Ok((ProbeOwner::new(true), None)) }, None, None,
-        ).await.unwrap();
-        line.clear(); responses.read_line(&mut line).await.unwrap();
+            startup,
+            |_| async { Ok((ProbeOwner::new(true), None)) },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        line.clear();
+        responses.read_line(&mut line).await.unwrap();
         let reply: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(reply["id"], 2);
         assert_eq!(reply["result"]["kind"], "bootstrap_accepted");
-        send(&mut commands, 3, Command::OpenComponent { component: Id::new("next").unwrap() }).await;
-        line.clear(); responses.read_line(&mut line).await.unwrap();
+        send(
+            &mut commands,
+            3,
+            Command::OpenComponent {
+                component: Id::new("next").unwrap(),
+            },
+        )
+        .await;
+        line.clear();
+        responses.read_line(&mut line).await.unwrap();
         let reply: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(reply["id"], 3);
         drop(commands);
@@ -2703,52 +3338,148 @@ for name in os.listdir('/dev/fd'):
     async fn preparation_refuses_early_bootstrap_without_creating_a_private_owner() {
         let (pipes, command_file, _response_file) = pipes();
         let mut commands = tokio::net::unix::pipe::Sender::from_file(command_file).unwrap();
-        let artifact = SelectedHostArtifact { path: "/component-control/plan.json".into(), sha256: "a".repeat(64) };
-        send(&mut commands, 1, Command::PrepareApplication { plan: artifact.clone() }).await;
+        let artifact = SelectedHostArtifact {
+            path: "/component-control/plan.json".into(),
+            sha256: "a".repeat(64),
+        };
+        send(
+            &mut commands,
+            1,
+            Command::PrepareApplication {
+                plan: artifact.clone(),
+            },
+        )
+        .await;
         let mut startup = PrivateHostStartup::read(pipes).await.unwrap();
-        send(&mut commands, 2, Command::Bootstrap { selection: selection() }).await;
-        assert!(matches!(startup.wait_lost().await, PrivateHostError::Protocol));
-        assert!(matches!(startup.intent(), PrivateHostStartupIntent::PrepareApplication(_)));
-        assert!(matches!(startup.application_prepared(artifact).await, Err(PrivateHostError::Protocol)));
+        send(
+            &mut commands,
+            2,
+            Command::Bootstrap {
+                selection: selection(),
+            },
+        )
+        .await;
+        assert!(matches!(
+            startup.wait_lost().await,
+            PrivateHostError::Protocol
+        ));
+        assert!(matches!(
+            startup.intent(),
+            PrivateHostStartupIntent::PrepareApplication(_)
+        ));
+        assert!(matches!(
+            startup.application_prepared(artifact).await,
+            Err(PrivateHostError::Protocol)
+        ));
     }
 
     #[tokio::test]
     async fn console_retirement_fences_through_full_native_join_capacity_and_keeps_reader_live() {
         let (pipes, command_file, response_file) = pipes();
         let mut commands = tokio::net::unix::pipe::Sender::from_file(command_file).unwrap();
-        let mut responses = BufReader::new(tokio::net::unix::pipe::Receiver::from_file(response_file).unwrap());
-        send(&mut commands, 1, Command::Bootstrap { selection: selection() }).await;
-        let (owner, connection) = PrivateHostConnection::bootstrap(pipes, |_| Ok(ProbeOwner::new(false))).await.unwrap();
+        let mut responses =
+            BufReader::new(tokio::net::unix::pipe::Receiver::from_file(response_file).unwrap());
+        send(
+            &mut commands,
+            1,
+            Command::Bootstrap {
+                selection: selection(),
+            },
+        )
+        .await;
+        let (owner, connection) =
+            PrivateHostConnection::bootstrap(pipes, |_| Ok(ProbeOwner::new(false)))
+                .await
+                .unwrap();
         let mut line = String::new();
         responses.read_line(&mut line).await.unwrap();
-        let expiry = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 + 60_000;
-        send(&mut commands, 2, Command::EnrollConsoleLogin { login: ConsoleLoginSelection {
-            issuer: "issuer".into(), subject: "sub".into(), login_scope_id: "a".into(), expires_at_ms: expiry,
-        }}).await;
-        line.clear(); responses.read_line(&mut line).await.unwrap();
+        let expiry = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 60_000;
+        send(
+            &mut commands,
+            2,
+            Command::EnrollConsoleLogin {
+                login: ConsoleLoginSelection {
+                    issuer: "issuer".into(),
+                    subject: "sub".into(),
+                    login_scope_id: "a".into(),
+                    expires_at_ms: expiry,
+                },
+            },
+        )
+        .await;
+        line.clear();
+        responses.read_line(&mut line).await.unwrap();
         let reply: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(reply["result"]["enrollment_id"], 2);
-        let retained = connection.console_logins().resolve("issuer", "sub", "a").unwrap();
+        let retained = connection
+            .console_logins()
+            .resolve("issuer", "sub", "a")
+            .unwrap();
         let reservation = retained.reserve().unwrap();
-        for id in 3..19 { send(&mut commands, id, Command::JoinClose { handle: owner.close.clone() }).await; }
+        for id in 3..19 {
+            send(
+                &mut commands,
+                id,
+                Command::JoinClose {
+                    handle: owner.close.clone(),
+                },
+            )
+            .await;
+        }
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            while owner.joining.load(Ordering::Acquire) < MAX_PENDING_JOINS { tokio::task::yield_now().await; }
-        }).await.unwrap();
-        send(&mut commands, 19, Command::RetireConsoleLogin { enrollment_id: 2 }).await;
-        assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(2), retained.closed()).await.unwrap(), ConsoleLoginRefusal::Retired);
-        assert!(matches!(retained.reserve(), Err(ConsoleLoginRefusal::Retired)));
+            while owner.joining.load(Ordering::Acquire) < MAX_PENDING_JOINS {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        send(
+            &mut commands,
+            19,
+            Command::RetireConsoleLogin { enrollment_id: 2 },
+        )
+        .await;
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), retained.closed())
+                .await
+                .unwrap(),
+            ConsoleLoginRefusal::Retired
+        );
+        assert!(matches!(
+            retained.reserve(),
+            Err(ConsoleLoginRefusal::Retired)
+        ));
         // The same reader can process another command while this drain is held.
-        send(&mut commands, 20, Command::OpenComponent { component: Id::new("next").unwrap() }).await;
-        line.clear(); responses.read_line(&mut line).await.unwrap();
+        send(
+            &mut commands,
+            20,
+            Command::OpenComponent {
+                component: Id::new("next").unwrap(),
+            },
+        )
+        .await;
+        line.clear();
+        responses.read_line(&mut line).await.unwrap();
         let reply: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(reply["id"], 20);
         reservation.settled();
-        line.clear(); responses.read_line(&mut line).await.unwrap();
+        line.clear();
+        responses.read_line(&mut line).await.unwrap();
         let reply: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(reply["id"], 19);
-        assert_eq!(reply["result"]["observation"], serde_json::json!({"fenced":true,"reservations_drained":true,"uncertain":false}));
+        assert_eq!(
+            reply["result"]["observation"],
+            serde_json::json!({"fenced":true,"reservations_drained":true,"uncertain":false})
+        );
         owner.settle();
-        for _ in 0..MAX_PENDING_JOINS { line.clear(); responses.read_line(&mut line).await.unwrap(); }
+        for _ in 0..MAX_PENDING_JOINS {
+            line.clear();
+            responses.read_line(&mut line).await.unwrap();
+        }
         drop(commands);
         connection.finish().await.unwrap();
     }
@@ -2757,32 +3488,78 @@ for name in os.listdir('/dev/fd'):
     async fn replacement_keeps_request_one_and_same_owner_until_real_private_close() {
         let (pipes, command_file, response_file) = pipes();
         let mut commands = tokio::net::unix::pipe::Sender::from_file(command_file).unwrap();
-        let mut responses = BufReader::new(tokio::net::unix::pipe::Receiver::from_file(response_file).unwrap());
+        let mut responses =
+            BufReader::new(tokio::net::unix::pipe::Receiver::from_file(response_file).unwrap());
         let selected = ApplicationUpdateStartup {
-            selection: SelectedHostArtifact { path: "/component-control/update.json".into(), sha256: "a".repeat(64) },
-            prior_tool_policy: SelectedHostArtifact { path: "/component-control/prior.json".into(), sha256: "b".repeat(64) },
+            selection: SelectedHostArtifact {
+                path: "/component-control/update.json".into(),
+                sha256: "a".repeat(64),
+            },
+            prior_tool_policy: SelectedHostArtifact {
+                path: "/component-control/prior.json".into(),
+                sha256: "b".repeat(64),
+            },
             association_directory: "/component-control/output".into(),
         };
-        send(&mut commands, 1, Command::ReplaceApplication { startup: selected.clone() }).await;
+        send(
+            &mut commands,
+            1,
+            Command::ReplaceApplication {
+                startup: selected.clone(),
+            },
+        )
+        .await;
         let pending = PrivateHostStartup::read(pipes).await.unwrap();
-        assert!(matches!(pending.intent(), PrivateHostStartupIntent::ReplaceApplication(actual) if actual == &selected));
+        assert!(
+            matches!(pending.intent(), PrivateHostStartupIntent::ReplaceApplication(actual) if actual == &selected)
+        );
         // This inert protocol fixture stands in only for already completed
         // trusted input validation, never a native update or finish result.
         let pending = pending.replace_with_original(selection()).unwrap();
         let (owner, _, connection) = PrivateHostConnection::bootstrap_started(
-            pending, |actual| async move { assert_eq!(actual, selection()); Ok((ProbeOwner::new(true), None)) }, None, None,
-        ).await.unwrap();
-        let mut line = String::new(); responses.read_line(&mut line).await.unwrap();
+            pending,
+            |actual| async move {
+                assert_eq!(actual, selection());
+                Ok((ProbeOwner::new(true), None))
+            },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let mut line = String::new();
+        responses.read_line(&mut line).await.unwrap();
         let reply: serde_json::Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(reply["id"], 1); assert_eq!(reply["result"], serde_json::json!({"kind":"bootstrap_accepted"}));
-        send(&mut commands, 2, Command::OpenComponent { component: Id::new("next").unwrap() }).await;
-        line.clear(); responses.read_line(&mut line).await.unwrap();
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&line).unwrap()["id"], 2);
+        assert_eq!(reply["id"], 1);
+        assert_eq!(
+            reply["result"],
+            serde_json::json!({"kind":"bootstrap_accepted"})
+        );
+        send(
+            &mut commands,
+            2,
+            Command::OpenComponent {
+                component: Id::new("next").unwrap(),
+            },
+        )
+        .await;
+        line.clear();
+        responses.read_line(&mut line).await.unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&line).unwrap()["id"],
+            2
+        );
         // Replacement is initial-only, not an update command on a live owner.
-        send(&mut commands, 3, Command::ReplaceApplication { startup: selected }).await;
-        tokio::time::timeout(std::time::Duration::from_secs(2), connection.wait_closed()).await.unwrap();
+        send(
+            &mut commands,
+            3,
+            Command::ReplaceApplication { startup: selected },
+        )
+        .await;
+        tokio::time::timeout(std::time::Duration::from_secs(2), connection.wait_closed())
+            .await
+            .unwrap();
         assert!(connection.finish().await.is_err());
         assert!(owner.lost.load(Ordering::Acquire));
     }
-
 }

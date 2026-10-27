@@ -478,8 +478,13 @@ fn explicitly_unauthenticated_recipe_survives_save_reopen_and_portable_export() 
 
     // Exact declared raw names need not equal logical operation IDs. This is
     // synthetic source evidence, not an observation of the hosted service.
-    selected["portable_mcp_entries"][0]["operation_tools"] = json!({"fixture-read":"actual.lookup"});
-    fs::write(&selection_path, serde_json::to_vec_pretty(&selected).unwrap()).unwrap();
+    selected["portable_mcp_entries"][0]["operation_tools"] =
+        json!({"fixture-read":"actual.lookup"});
+    fs::write(
+        &selection_path,
+        serde_json::to_vec_pretty(&selected).unwrap(),
+    )
+    .unwrap();
     let declared_destination = fixture._temp.path().join("public-declared-export");
     let declared = success(&fixture.export(digest, &selection_path, &declared_destination));
     let expected = json!({
@@ -493,11 +498,18 @@ fn explicitly_unauthenticated_recipe_survives_save_reopen_and_portable_export() 
     assert_eq!(checked["declared_remote_service"], expected);
     assert_eq!(checked["export_check"]["state"], "matches");
     for name in ["plugin.json", "mcp.json"] {
-        assert_eq!(fs::read(destination.join(name)).unwrap(), fs::read(declared_destination.join(name)).unwrap());
+        assert_eq!(
+            fs::read(destination.join(name)).unwrap(),
+            fs::read(declared_destination.join(name)).unwrap()
+        );
     }
     // Metadata is returned even when files are missing, but cannot be mistaken
     // for an exported configuration or connection readiness.
-    let absent = success(&fixture.check_export(digest, &selection_path, &fixture._temp.path().join("absent")));
+    let absent = success(&fixture.check_export(
+        digest,
+        &selection_path,
+        &fixture._temp.path().join("absent"),
+    ));
     assert_eq!(absent["declared_remote_service"], expected);
     assert_eq!(absent["export_check"]["state"], "missing");
     let actual: Value =
@@ -523,29 +535,63 @@ fn remote_declared_service_uses_canonical_selection_for_export_and_readback() {
     let saved = success(&fixture.save());
     let digest = saved["recipe"]["digest"].as_str().unwrap();
     let mut selected = fixture.selection(0);
-    selected["portable_mcp_entries"][0]["operation_tools"] = json!({"fixture-read":"provider.read"});
+    selected["portable_mcp_entries"][0]["operation_tools"] =
+        json!({"fixture-read":"provider.read"});
     let path = fixture._temp.path().join("selected.json");
     fs::write(&path, serde_json::to_vec(&selected).unwrap()).unwrap();
     let destination = fixture._temp.path().join("binding-export");
     let exported = success(&fixture.export(digest, &path, &destination));
     let checked = success(&fixture.check_export(digest, &path, &destination));
-    assert_eq!(exported["declared_remote_service"], checked["declared_remote_service"]);
-    assert_eq!(exported["declared_remote_service"]["authentication"], selected["exports"][0]["authentication"]);
-    assert_eq!(exported["declared_remote_service"]["authentication"]["kind"], "binding");
-    assert_eq!(exported["declared_remote_service"]["operation_tools"], json!({"fixture-read":"provider.read"}));
+    assert_eq!(
+        exported["declared_remote_service"],
+        checked["declared_remote_service"]
+    );
+    assert_eq!(
+        exported["declared_remote_service"]["authentication"],
+        selected["exports"][0]["authentication"]
+    );
+    assert_eq!(
+        exported["declared_remote_service"]["authentication"]["kind"],
+        "binding"
+    );
+    assert_eq!(
+        exported["declared_remote_service"]["operation_tools"],
+        json!({"fixture-read":"provider.read"})
+    );
     let original = fs::read(destination.join("mcp.json")).unwrap();
-    for mode in ["empty", "wrong-id", "extra-id", "bad-name", "duplicate-name", "wrong-auth", "wrong-server"] {
+    for mode in [
+        "empty",
+        "wrong-id",
+        "extra-id",
+        "bad-name",
+        "duplicate-name",
+        "wrong-auth",
+        "wrong-server",
+    ] {
         let mut changed = selected.clone();
         match mode {
             "empty" => changed["portable_mcp_entries"][0]["operation_tools"] = json!({}),
-            "wrong-id" => changed["portable_mcp_entries"][0]["operation_tools"] = json!({"other":"provider.read"}),
-            "extra-id" => changed["portable_mcp_entries"][0]["operation_tools"]["other"] = json!("provider.other"),
-            "bad-name" => changed["portable_mcp_entries"][0]["operation_tools"]["fixture-read"] = json!("not a raw name"),
+            "wrong-id" => {
+                changed["portable_mcp_entries"][0]["operation_tools"] =
+                    json!({"other":"provider.read"})
+            }
+            "extra-id" => {
+                changed["portable_mcp_entries"][0]["operation_tools"]["other"] =
+                    json!("provider.other")
+            }
+            "bad-name" => {
+                changed["portable_mcp_entries"][0]["operation_tools"]["fixture-read"] =
+                    json!("not a raw name")
+            }
             "duplicate-name" => {
                 let mut second = changed["exports"][0]["operations"][0].clone();
                 second["id"] = json!("other");
-                changed["exports"][0]["operations"].as_array_mut().unwrap().push(second);
-                changed["portable_mcp_entries"][0]["operation_tools"]["other"] = json!("provider.read");
+                changed["exports"][0]["operations"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(second);
+                changed["portable_mcp_entries"][0]["operation_tools"]["other"] =
+                    json!("provider.read");
             }
             "wrong-auth" => changed["exports"][0]["authentication"] = json!({"kind":"none"}),
             "wrong-server" => changed["portable_mcp_entries"][0]["name"] = json!("other-server"),
@@ -553,9 +599,15 @@ fn remote_declared_service_uses_canonical_selection_for_export_and_readback() {
         }
         fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
         let refused = fixture._temp.path().join(format!("refused-{mode}"));
-        failure(&fixture.export(digest, &path, &refused), "portable_export_refused");
+        failure(
+            &fixture.export(digest, &path, &refused),
+            "portable_export_refused",
+        );
         assert!(!refused.exists());
-        failure(&fixture.check_export(digest, &path, &destination), "portable_export_refused");
+        failure(
+            &fixture.check_export(digest, &path, &destination),
+            "portable_export_refused",
+        );
         assert_eq!(fs::read(destination.join("mcp.json")).unwrap(), original);
     }
 }
@@ -1099,12 +1151,19 @@ fn omitted_decision_uses_durable_submission_provenance_across_fresh_processes() 
     let saved = success(&args);
     assert_eq!(saved["status"], "retained");
     assert_eq!(saved["recipe"]["origin"]["kind"], "local_investigation");
-    assert_eq!(saved["recipe"]["origin"]["decision"]["owner"], "toolkit.local-recipes.current-submission");
+    assert_eq!(
+        saved["recipe"]["origin"]["decision"]["owner"],
+        "toolkit.local-recipes.current-submission"
+    );
     assert_eq!(success(&args), saved);
     // A new set of source files gives the same durable identity and reference.
     let fresh = fixture._temp.path().join("fresh-inputs");
     fs::create_dir(&fresh).unwrap();
-    for (flag, source) in [("--plugin", &fixture.plugin), ("--mcp", &fixture.mcp), ("--recipes", &fixture.recipes)] {
+    for (flag, source) in [
+        ("--plugin", &fixture.plugin),
+        ("--mcp", &fixture.mcp),
+        ("--recipes", &fixture.recipes),
+    ] {
         let destination = fresh.join(source.file_name().unwrap());
         fs::copy(source, &destination).unwrap();
         let index = args.iter().position(|arg| arg == flag).unwrap() + 1;
@@ -1116,16 +1175,24 @@ fn omitted_decision_uses_durable_submission_provenance_across_fresh_processes() 
     let digest = saved["recipe"]["digest"].as_str().unwrap();
     let loaded = success(&fixture.read("host-realm", "alice", digest));
     assert_eq!(loaded["recipe"]["origin"], saved["recipe"]["origin"]);
-    assert_eq!(loaded["recipe"]["documents"]["mcp_json"], std::str::from_utf8(MCP).unwrap());
+    assert_eq!(
+        loaded["recipe"]["documents"]["mcp_json"],
+        std::str::from_utf8(MCP).unwrap()
+    );
     for (realm, owner) in [("other-realm", "alice"), ("host-realm", "bob")] {
-        assert_eq!(success(&fixture.read(realm, owner, digest))["status"], "not_found");
+        assert_eq!(
+            success(&fixture.read(realm, owner, digest))["status"],
+            "not_found"
+        );
     }
 }
 
 #[test]
 fn a_partial_decision_is_not_silently_replaced_with_submission_provenance() {
-    for supplied in [vec!["--decision-owner", "external"],
-                     vec!["--decision-record", "record", "--decision-revision", "1"]] {
+    for supplied in [
+        vec!["--decision-owner", "external"],
+        vec!["--decision-record", "record", "--decision-revision", "1"],
+    ] {
         let fixture = Fixture::new();
         let mut args = fixture.save();
         args.truncate(args.len() - 6);
@@ -1143,37 +1210,79 @@ fn inert_declaration_exports_and_reopens_without_activation_references() {
     let mut declaration = fixture.selection(0);
     declaration.as_object_mut().unwrap().remove("configuration");
     declaration.as_object_mut().unwrap().remove("policy");
-    declaration["components"][0]["source"].as_object_mut().unwrap().remove("configuration_revision");
+    declaration["components"][0]["source"]
+        .as_object_mut()
+        .unwrap()
+        .remove("configuration_revision");
     declaration["selection_kind"] = json!("remote_declaration");
-    declaration["portable_mcp_entries"][0]["operation_tools"] = json!({"fixture-read":"provider.read"});
+    declaration["portable_mcp_entries"][0]["operation_tools"] =
+        json!({"fixture-read":"provider.read"});
     let raw = serde_json::to_vec(&declaration).unwrap();
-    let path = fixture._temp.path().join("declaration.json"); fs::write(&path, &raw).unwrap();
+    let path = fixture._temp.path().join("declaration.json");
+    fs::write(&path, &raw).unwrap();
     let destination = fixture._temp.path().join("inert-export");
-    let with_declaration = |mut args:Vec<String>| {
+    let with_declaration = |mut args: Vec<String>| {
         let at = args.iter().position(|arg| arg == "--selection").unwrap();
-        args[at] = "--declaration".into(); args
+        args[at] = "--declaration".into();
+        args
     };
-    let exported = success(&with_declaration(fixture.export(digest, &path, &destination)));
-    let checked = success(&with_declaration(fixture.check_export(digest, &path, &destination)));
+    let exported = success(&with_declaration(fixture.export(
+        digest,
+        &path,
+        &destination,
+    )));
+    let checked = success(&with_declaration(fixture.check_export(
+        digest,
+        &path,
+        &destination,
+    )));
     assert_eq!(exported["selection_kind"], "remote_declaration");
     assert_eq!(checked["selection_kind"], exported["selection_kind"]);
-    assert_eq!(exported["declared_remote_service"], checked["declared_remote_service"]);
-    assert_eq!(exported["declared_remote_service"]["declaration_digest"], exported["selection_digest"]);
-    assert_eq!(exported["declared_remote_service"]["selection_kind"], "remote_declaration");
-    assert!(exported["declared_remote_service"].get("manifest_digest").is_none());
-    let typed:toolkit_package::RemoteExportDeclaration = serde_json::from_slice(&raw).unwrap();
-    assert_eq!(exported["selection_digest"], json!(ContentDigest::of_bytes(&canonical_json(&typed).unwrap())));
+    assert_eq!(
+        exported["declared_remote_service"],
+        checked["declared_remote_service"]
+    );
+    assert_eq!(
+        exported["declared_remote_service"]["declaration_digest"],
+        exported["selection_digest"]
+    );
+    assert_eq!(
+        exported["declared_remote_service"]["selection_kind"],
+        "remote_declaration"
+    );
+    assert!(
+        exported["declared_remote_service"]
+            .get("manifest_digest")
+            .is_none()
+    );
+    let typed: toolkit_package::RemoteExportDeclaration = serde_json::from_slice(&raw).unwrap();
+    assert_eq!(
+        exported["selection_digest"],
+        json!(ContentDigest::of_bytes(&canonical_json(&typed).unwrap()))
+    );
     assert_eq!(fs::read(&path).unwrap(), raw);
-    assert_eq!(success(&fixture.read("host-realm", "alice", digest))["recipe"]["digest"], saved["recipe"]["digest"]);
+    assert_eq!(
+        success(&fixture.read("host-realm", "alice", digest))["recipe"]["digest"],
+        saved["recipe"]["digest"]
+    );
     let refused = fixture._temp.path().join("refused-form");
-    failure(&fixture.export(digest, &path, &refused), "invalid_selection");
+    failure(
+        &fixture.export(digest, &path, &refused),
+        "invalid_selection",
+    );
     let mut both = with_declaration(fixture.export(digest, &path, &refused));
     both.extend(["--selection".into(), path.to_str().unwrap().into()]);
     failure(&both, "invalid_arguments");
     assert!(!refused.exists());
     declaration["components"][0]["source"]["endpoint"] = json!("https://substituted.invalid/mcp");
     fs::write(&path, serde_json::to_vec(&declaration).unwrap()).unwrap();
-    failure(&with_declaration(fixture.export(digest, &path, &refused)), "portable_export_refused");
-    failure(&with_declaration(fixture.check_export(digest, &path, &destination)), "portable_export_refused");
+    failure(
+        &with_declaration(fixture.export(digest, &path, &refused)),
+        "portable_export_refused",
+    );
+    failure(
+        &with_declaration(fixture.check_export(digest, &path, &destination)),
+        "portable_export_refused",
+    );
     assert!(!refused.exists());
 }

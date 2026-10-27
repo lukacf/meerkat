@@ -2,10 +2,12 @@
 //! The installer invokes this owner against frozen documents; serialized output
 //! is not authorization or an independently trusted validation receipt.
 
-use crate::local_install::{DeclaredMcpService, local_artifact_selection, software_artifact_selection};
+use crate::local_install::{
+    DeclaredMcpService, local_artifact_selection, software_artifact_selection,
+};
 use crate::{
-    ContentDigest, Entrypoint, Id, IntegrationPackage, PackageIdentity, RuntimeKind,
-    ValidatedManifest, ValidatedLocalSoftware, LocalSoftwareDocumentKind, ValidationError,
+    ContentDigest, Entrypoint, Id, IntegrationPackage, LocalSoftwareDocumentKind, PackageIdentity,
+    RuntimeKind, ValidatedLocalSoftware, ValidatedManifest, ValidationError,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -60,7 +62,8 @@ impl PythonInstallPlan {
             "python_install",
         )?;
         let selected = validated.manifest();
-        let (artifact_filename, module) = python_artifact(local.location, local.artifacts, local.entrypoint)?;
+        let (artifact_filename, module) =
+            python_artifact(local.location, local.artifacts, local.entrypoint)?;
         Ok(Self {
             schema_version: 1,
             package: package.identity.clone(),
@@ -88,10 +91,16 @@ impl PythonInstallPlan {
         validated: &ValidatedLocalSoftware,
         component_id: &Id,
     ) -> Result<Self, ValidationError> {
-        let local = software_artifact_selection(package, validated, component_id,
-            RuntimeKind::Python, "python_install")?;
+        let local = software_artifact_selection(
+            package,
+            validated,
+            component_id,
+            RuntimeKind::Python,
+            "python_install",
+        )?;
         let selected = validated.declaration();
-        let (artifact_filename, module) = python_artifact(local.location, local.artifacts, local.entrypoint)?;
+        let (artifact_filename, module) =
+            python_artifact(local.location, local.artifacts, local.entrypoint)?;
         Ok(Self {
             schema_version: 1,
             package: package.identity.clone(),
@@ -114,18 +123,16 @@ impl PythonInstallPlan {
 }
 
 fn python_artifact(
-    location: &url::Url, artifacts: &BTreeMap<Id, ContentDigest>, entrypoint: &Entrypoint,
+    location: &url::Url,
+    artifacts: &BTreeMap<Id, ContentDigest>,
+    entrypoint: &Entrypoint,
 ) -> Result<(String, String), ValidationError> {
     let artifact_filename = location
         .path_segments()
         .and_then(|mut parts| parts.next_back())
         .filter(|name| wheel_filename(name))
         .ok_or_else(|| invalid("artifact URL must end in a safe original wheel filename"))?;
-    if artifacts.len() > 256
-        || !artifacts
-            .keys()
-            .any(|id| id.as_str() == "requirements")
-    {
+    if artifacts.len() > 256 || !artifacts.keys().any(|id| id.as_str() == "requirements") {
         return Err(invalid(
             "closure must include requirements within its limit",
         ));
@@ -162,7 +169,10 @@ fn wheel_filename(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
 }
 
-fn module_from_entrypoint(executable: &str, console_script: bool) -> Result<String, ValidationError> {
+fn module_from_entrypoint(
+    executable: &str,
+    console_script: bool,
+) -> Result<String, ValidationError> {
     let path = executable
         .strip_suffix(".py")
         .ok_or_else(|| invalid("Python entrypoint must be a relative .py module path"))?;

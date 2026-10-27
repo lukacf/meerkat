@@ -38,13 +38,9 @@ fn fixture() -> Fixture {
     };
     let (approvals, presenter) = LocalApprovals::create(directory.path()).unwrap();
     let approvals = Arc::new(approvals);
-    let (composer, reviews) = SelectedReviewComposer::new(
-        selected.clone(),
-        facade,
-        realm.clone(),
-        approvals.clone(),
-    )
-    .unwrap();
+    let (composer, reviews) =
+        SelectedReviewComposer::new(selected.clone(), facade, realm.clone(), approvals.clone())
+            .unwrap();
     Fixture {
         _directory: directory,
         _runtime: runtime,
@@ -73,14 +69,27 @@ async fn gateway_member_realm_refuses_a_foreign_selection_before_review_binding(
     for name in ["meta", "mob.other-application"] {
         let mut wrong = fixture.realm.clone();
         wrong.realm = RealmId::parse(name).unwrap();
-        assert!(matches!(require_gateway_member_realm(&fixture.selected, &wrong),
-            Err(HostLifetimeError::WrongOwner)));
+        assert!(matches!(
+            require_gateway_member_realm(&fixture.selected, &wrong),
+            Err(HostLifetimeError::WrongOwner)
+        ));
     }
-    let foreign = MobMemberBinding { mob_id: "other-application".into(), ..fixture.selected.clone() };
-    assert!(matches!(require_gateway_member_realm(&foreign, &fixture.realm),
-        Err(HostLifetimeError::WrongOwner)));
-    assert!(matches!(fixture.reviews.try_recv(), Err(TryRecvError::Empty)));
-    fixture.composer.compose(&adapter(), &session, Some(&fixture.selected)).unwrap();
+    let foreign = MobMemberBinding {
+        mob_id: "other-application".into(),
+        ..fixture.selected.clone()
+    };
+    assert!(matches!(
+        require_gateway_member_realm(&foreign, &fixture.realm),
+        Err(HostLifetimeError::WrongOwner)
+    ));
+    assert!(matches!(
+        fixture.reviews.try_recv(),
+        Err(TryRecvError::Empty)
+    ));
+    fixture
+        .composer
+        .compose(&adapter(), &session, Some(&fixture.selected))
+        .unwrap();
     let review = fixture.reviews.try_recv().unwrap();
     assert_eq!(review.realm, fixture.realm);
     assert_eq!(review.auth.realm, fixture.realm.realm);
@@ -113,7 +122,10 @@ async fn exact_native_construction_transfers_the_same_checked_review() {
     let raw: Arc<dyn AgentToolDispatcher> = adapter;
     assert!(!Arc::ptr_eq(&dispatcher, &raw));
     assert!(fixture.approvals.check_session(&session).is_ok());
-    assert!(matches!(fixture.reviews.try_recv(), Err(TryRecvError::Empty)));
+    assert!(matches!(
+        fixture.reviews.try_recv(),
+        Err(TryRecvError::Empty)
+    ));
     drop(review);
     assert!(fixture.approvals.check_session(&session).is_err());
 }
@@ -143,7 +155,10 @@ async fn unrelated_and_non_member_constructions_keep_the_exact_adapter() {
             .unwrap();
         assert!(Arc::ptr_eq(&dispatcher, &raw));
     }
-    assert!(matches!(fixture.reviews.try_recv(), Err(TryRecvError::Empty)));
+    assert!(matches!(
+        fixture.reviews.try_recv(),
+        Err(TryRecvError::Empty)
+    ));
     // Pass-through did not consume the selected private owner.
     assert!(
         fixture
@@ -168,7 +183,10 @@ async fn selected_member_under_a_different_role_refuses_without_binding() {
                 .is_err()
         );
     }
-    assert!(matches!(fixture.reviews.try_recv(), Err(TryRecvError::Empty)));
+    assert!(matches!(
+        fixture.reviews.try_recv(),
+        Err(TryRecvError::Empty)
+    ));
     assert!(
         fixture
             .composer
@@ -194,7 +212,10 @@ async fn a_rebuild_cannot_rebind_or_replace_the_existing_review() {
                 .is_err()
         );
         assert!(fixture.approvals.check_session(&session).is_ok());
-        assert!(matches!(fixture.reviews.try_recv(), Err(TryRecvError::Empty)));
+        assert!(matches!(
+            fixture.reviews.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
     }
     drop(review);
     assert!(
@@ -253,6 +274,9 @@ async fn prebound_or_retired_private_owners_are_not_rearmed() {
                 .compose(&adapter(), &session, Some(&fixture.selected))
                 .is_err()
         );
-        assert!(matches!(fixture.reviews.try_recv(), Err(TryRecvError::Empty)));
+        assert!(matches!(
+            fixture.reviews.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
     }
 }

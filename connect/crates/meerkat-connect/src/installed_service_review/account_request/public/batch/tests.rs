@@ -14,30 +14,51 @@ fn batch_arguments_require_one_finite_exact_set_and_explicit_policy() {
     let valid = proposal();
     assert!(parse_batch(&valid.to_string()).is_ok());
     let mut eight = valid.clone();
-    eight["services"] = json!((0..8).map(|index| json!({"job_id":format!("job-{index}"),
-        "operations":["read"]})).collect::<Vec<_>>());
+    eight["services"] = json!(
+        (0..8)
+            .map(|index| json!({"job_id":format!("job-{index}"),
+        "operations":["read"]}))
+            .collect::<Vec<_>>()
+    );
     assert!(parse_batch(&eight.to_string()).is_ok());
     for n in [0, 1, 9] {
-        let mut invalid = eight.clone(); invalid["services"] = json!((0..n).map(|index|
-            json!({"job_id":format!("job-{index}"),"operations":["read"]})).collect::<Vec<_>>());
+        let mut invalid = eight.clone();
+        invalid["services"] = json!(
+            (0..n)
+                .map(|index| json!({"job_id":format!("job-{index}"),"operations":["read"]}))
+                .collect::<Vec<_>>()
+        );
         assert!(parse_batch(&invalid.to_string()).is_err());
     }
     for field in ["services", "agent", "expires_in_ms", "tool_policy"] {
-        let mut invalid = valid.clone(); invalid.as_object_mut().unwrap().remove(field);
+        let mut invalid = valid.clone();
+        invalid.as_object_mut().unwrap().remove(field);
         assert!(parse_batch(&invalid.to_string()).is_err(), "{field}");
     }
-    for (field, value) in [("job_id", json!("singleton")), ("operations", json!(["read"])),
-        ("command", json!("/bin/sh")), ("credentials", json!({})), ("authority", json!({}))] {
-        let mut invalid = valid.clone(); invalid[field] = value;
+    for (field, value) in [
+        ("job_id", json!("singleton")),
+        ("operations", json!(["read"])),
+        ("command", json!("/bin/sh")),
+        ("credentials", json!({})),
+        ("authority", json!({})),
+    ] {
+        let mut invalid = valid.clone();
+        invalid[field] = value;
         assert!(parse_batch(&invalid.to_string()).is_err(), "{field}");
     }
-    let mut duplicate = valid.clone(); duplicate["services"][1] = duplicate["services"][0].clone();
+    let mut duplicate = valid.clone();
+    duplicate["services"][1] = duplicate["services"][0].clone();
     assert!(parse_batch(&duplicate.to_string()).is_err());
-    let mut repeated_operation = valid.clone(); repeated_operation["services"][0]["operations"] = json!(["read", "read"]);
+    let mut repeated_operation = valid.clone();
+    repeated_operation["services"][0]["operations"] = json!(["read", "read"]);
     assert!(parse_batch(&repeated_operation.to_string()).is_err());
-    let mut no_catalog = valid.clone(); no_catalog["tool_policy"]["catalog"] = Value::Null;
+    let mut no_catalog = valid.clone();
+    no_catalog["tool_policy"]["catalog"] = Value::Null;
     assert!(parse_batch(&no_catalog.to_string()).is_err());
-    let duplicate_key = valid.to_string().replacen("\"agent\":", "\"agent\":\"other\",\"agent\":", 1);
+    let duplicate_key =
+        valid
+            .to_string()
+            .replacen("\"agent\":", "\"agent\":\"other\",\"agent\":", 1);
     assert!(parse_batch(&duplicate_key).is_err());
 }
 
@@ -48,11 +69,24 @@ fn public_tool_schema_preserves_provider_object_root_and_both_argument_forms() {
     assert_eq!(schema["type"], "object");
     assert_eq!(schema["additionalProperties"], false);
     assert!(schema.get("oneOf").is_none() && schema.get("anyOf").is_none());
-    for field in ["job_id", "operations", "agent", "expires_in_ms", "tool_policy", "services"] {
+    for field in [
+        "job_id",
+        "operations",
+        "agent",
+        "expires_in_ms",
+        "tool_policy",
+        "services",
+    ] {
         assert!(schema["properties"].get(field).is_some(), "{field}");
     }
-    assert!(parse(&json!({"job_id":"old-job","operations":["read"],
-        "agent":"original","expires_in_ms":null}).to_string()).is_ok());
+    assert!(
+        parse(
+            &json!({"job_id":"old-job","operations":["read"],
+        "agent":"original","expires_in_ms":null})
+            .to_string()
+        )
+        .is_ok()
+    );
     assert!(parse_batch(&proposal().to_string()).is_ok());
     assert!(parse(&proposal().to_string()).is_err());
 }
@@ -185,9 +219,11 @@ fn batch_members_keep_exact_raw_operation_and_bounded_identity_validation() {
     let mut valid = proposal();
     valid["services"][0]["operations"] = json!(["read.v1_with-dash", "x".repeat(128)]);
     assert!(parse_batch(&valid.to_string()).is_ok());
-    valid["services"][0]["operations"] = json!((0..128)
-        .map(|index| format!("read_{index}"))
-        .collect::<Vec<_>>());
+    valid["services"][0]["operations"] = json!(
+        (0..128)
+            .map(|index| format!("read_{index}"))
+            .collect::<Vec<_>>()
+    );
     assert!(parse_batch(&valid.to_string()).is_ok());
 
     for operations in [
@@ -204,9 +240,11 @@ fn batch_members_keep_exact_raw_operation_and_bounded_identity_validation() {
         json!(["read\n"]),
         json!(["r\u{00e9}ad"]),
         json!(["x".repeat(129)]),
-        json!((0..129)
-            .map(|index| format!("read_{index}"))
-            .collect::<Vec<_>>()),
+        json!(
+            (0..129)
+                .map(|index| format!("read_{index}"))
+                .collect::<Vec<_>>()
+        ),
     ] {
         let mut invalid = proposal();
         invalid["services"][0]["operations"] = operations;

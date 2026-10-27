@@ -3,10 +3,13 @@
 //! terminal source write are controlled. Restoration is a component callback,
 //! not a second helper submission, continuation delivery or process-kill claim.
 use super::*;
-use toolkit_store::*;
 use crate::original_ingress::custody_attempt::{CustodyAttempt, CustodyDecision};
-use meerkat_runtime::{Input, input_state::{InputLifecycleState, verify_exact_replay}};
+use meerkat_runtime::{
+    Input,
+    input_state::{InputLifecycleState, verify_exact_replay},
+};
 use std::sync::Mutex;
+use toolkit_store::*;
 
 type ColdHelper = FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>>;
 
@@ -17,16 +20,31 @@ struct HelperStore {
 }
 #[async_trait::async_trait]
 impl ToolkitStore for HelperStore {
-    fn capabilities(&self) -> StoreCapabilities { self.inner.capabilities() }
-    async fn now_ms(&self) -> StoreResult<i64> { self.inner.now_ms().await }
-    async fn admit(&self, request: AdmissionRequest) -> StoreResult<AdmissionOutcome> { self.inner.admit(request).await }
-    async fn get(&self, key: &StoreKey) -> StoreResult<Option<StoredRecord>> { self.inner.get(key).await }
-    async fn list_records(&self, scope: &StoreScope, after: Option<&str>, limit: u32) -> StoreResult<Vec<StoredRecord>> {
+    fn capabilities(&self) -> StoreCapabilities {
+        self.inner.capabilities()
+    }
+    async fn now_ms(&self) -> StoreResult<i64> {
+        self.inner.now_ms().await
+    }
+    async fn admit(&self, request: AdmissionRequest) -> StoreResult<AdmissionOutcome> {
+        self.inner.admit(request).await
+    }
+    async fn get(&self, key: &StoreKey) -> StoreResult<Option<StoredRecord>> {
+        self.inner.get(key).await
+    }
+    async fn list_records(
+        &self,
+        scope: &StoreScope,
+        after: Option<&str>,
+        limit: u32,
+    ) -> StoreResult<Vec<StoredRecord>> {
         self.inner.list_records(scope, after, limit).await
     }
     async fn compare_and_swap(&self, transition: Transition) -> StoreResult<StoredRecord> {
-        if self.fail_terminal && transition.data.schema == "meerkat_toolkit.helper_original"
-            && transition.data.body["custody_attempt"]["decision"] == "promoted" {
+        if self.fail_terminal
+            && transition.data.schema == "meerkat_toolkit.helper_original"
+            && transition.data.body["custody_attempt"]["decision"] == "promoted"
+        {
             self.terminal_calls.fetch_add(1, Ordering::SeqCst);
             return Err(StoreError::OwnerUnavailable);
         }
@@ -103,28 +121,47 @@ impl ToolkitStore for HelperStore {
 }
 
 #[derive(Clone, Copy)]
-enum Case { Pending, Promoted, PendingTampered }
+enum Case {
+    Pending,
+    Promoted,
+    PendingTampered,
+}
 
 fn attempt(row: &StoredRecord) -> CustodyAttempt {
     serde_json::from_value(row.data.body["custody_attempt"].clone()).unwrap()
 }
-async fn change_body(fixture: &ColdHelper, before: &StoredRecord, data: RecordData) -> StoredRecord {
-    fixture.store.compare_and_swap(Transition {
-        key: before.key.clone(), expected_revision: before.revision,
-        expected_digest: Some(before.content_digest.clone()), data,
-        claim: None, events: vec![], effects: vec![],
-    }).await.unwrap()
+async fn change_body(
+    fixture: &ColdHelper,
+    before: &StoredRecord,
+    data: RecordData,
+) -> StoredRecord {
+    fixture
+        .store
+        .compare_and_swap(Transition {
+            key: before.key.clone(),
+            expected_revision: before.revision,
+            expected_digest: Some(before.content_digest.clone()),
+            data,
+            claim: None,
+            events: vec![],
+            effects: vec![],
+        })
+        .await
+        .unwrap()
 }
 fn tampered_data(row: &StoredRecord) -> RecordData {
     let mut data = row.data.clone();
     let mut input: Input = serde_json::from_value(data.body["bound_input"].clone()).unwrap();
-    let Input::Prompt(prompt) = &mut input else { panic!("actual helper prompt") };
+    let Input::Prompt(prompt) = &mut input else {
+        panic!("actual helper prompt")
+    };
     prompt.content = meerkat_core::ContentInput::Text("changed canonical helper payload".into());
     data.body["bound_input"] = serde_json::to_value(&input).unwrap();
     // Deliberately repair the source fingerprint as well as the real store
     // digest. Native's retained replay witness must still reject these bytes.
     data.body["custody_attempt"]["prepared_input_sha256"] = serde_json::json!(digest(
-        &canonical_json(&("toolkit.prepared-original-input.v1", &input)).unwrap()));
+        &canonical_json(&("toolkit.prepared-original-input.v1", &input)).unwrap()
+    ));
     data
 }
 
@@ -135,12 +172,20 @@ async fn exercise(case: Case) {
     let selected_in = selected.clone();
     let fail_terminal = !matches!(case, Case::Promoted);
     let (fixture, history, retained) = ColdHelper::for_durable_helper_recovery(
-        first_script.clone(), Some(fault.clone()), None, Some(Box::new(move |inner| {
-            let wrapper = Arc::new(HelperStore { inner, fail_terminal, terminal_calls: AtomicUsize::new(0) });
+        first_script.clone(),
+        Some(fault.clone()),
+        None,
+        Some(Box::new(move |inner| {
+            let wrapper = Arc::new(HelperStore {
+                inner,
+                fail_terminal,
+                terminal_calls: AtomicUsize::new(0),
+            });
             *selected_in.lock().unwrap() = Some(wrapper.clone());
             wrapper
         })),
-    ).await;
+    )
+    .await;
     let mut wrapper = selected.lock().unwrap().take();
     drop(selected);
     let mut active = Some(Arc::new(fixture));
@@ -148,7 +193,13 @@ async fn exercise(case: Case) {
     let mut carrier = Some(retained);
     let mut script = Some(first_script);
     let mut close = Some(active.as_ref().unwrap().retained_close_for_test());
-    let mut release_round = Some(active.as_ref().unwrap().source.hold_first_custody_round_for_test());
+    let mut release_round = Some(
+        active
+            .as_ref()
+            .unwrap()
+            .source
+            .hold_first_custody_round_for_test(),
+    );
     // Own the actual reopen future outside the body observer. Its caught
     // outcome is removed before use, so a completed panic is never repolled.
     let mut reopen = None;
@@ -337,7 +388,9 @@ async fn exercise(case: Case) {
 
     drop(release_round.take());
     fault.release.add_permits(1);
-    if let Some(script) = &script { script.release_first_response(); }
+    if let Some(script) = &script {
+        script.release_first_response();
+    }
     let mut reopen_panicked = false;
     if let Some(mut opening) = reopen.take() {
         // The outer observer may have expired in startup or its own failure
@@ -356,29 +409,57 @@ async fn exercise(case: Case) {
     }
     let cleanup = if let Some(fixture) = &active {
         fixture.source.stop_custody_recovery();
-        let (native, source) = tokio::join!(close.as_mut().unwrap().join(), fixture.source.join_custody_recovery());
+        let (native, source) = tokio::join!(
+            close.as_mut().unwrap().join(),
+            fixture.source.join_custody_recovery()
+        );
         Some((native, source))
-    } else { None };
+    } else {
+        None
+    };
     // Also release the fixture backedge after failed bodies and returned reopen
     // owners. Preserve every actual close result above for the assertions below.
-    if let Some(script) = &script { script.release_owner_after_close(); }
+    if let Some(script) = &script {
+        script.release_owner_after_close();
+    }
     match checked {
         Ok(Ok(())) => {
-            assert!(!reopen_panicked, "retained reopen panicked after the body observer");
+            assert!(
+                !reopen_panicked,
+                "retained reopen panicked after the body observer"
+            );
             let (native, source) = cleanup.unwrap();
             assert!(native.is_ok(), "actual native/local cleanup: {native:?}");
-            assert!(if matches!(case, Case::PendingTampered) {
-                matches!(source, Err(PrivateOriginalError::Unavailable))
-            } else { source.is_ok() }, "actual source cleanup: {source:?}");
+            assert!(
+                if matches!(case, Case::PendingTampered) {
+                    matches!(source, Err(PrivateOriginalError::Unavailable))
+                } else {
+                    source.is_ok()
+                },
+                "actual source cleanup: {source:?}"
+            );
         }
-        Ok(Err(_)) => panic!("cold helper control timed out; reopen_panicked={reopen_panicked}; cleanup={cleanup:?}"),
-        Err(payload) => { eprintln!("cold helper cleanup after primary failure: reopen_panicked={reopen_panicked}; cleanup={cleanup:?}"); std::panic::resume_unwind(payload); }
+        Ok(Err(_)) => panic!(
+            "cold helper control timed out; reopen_panicked={reopen_panicked}; cleanup={cleanup:?}"
+        ),
+        Err(payload) => {
+            eprintln!(
+                "cold helper cleanup after primary failure: reopen_panicked={reopen_panicked}; cleanup={cleanup:?}"
+            );
+            std::panic::resume_unwind(payload);
+        }
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cold_pending_helper_settles_retired_input_without_resubmission() { Box::pin(exercise(Case::Pending)).await; }
+async fn cold_pending_helper_settles_retired_input_without_resubmission() {
+    Box::pin(exercise(Case::Pending)).await;
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cold_promoted_helper_restores_exact_input_and_refuses_tampered_or_legacy_bytes() { Box::pin(exercise(Case::Promoted)).await; }
+async fn cold_promoted_helper_restores_exact_input_and_refuses_tampered_or_legacy_bytes() {
+    Box::pin(exercise(Case::Promoted)).await;
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cold_pending_helper_retains_native_evidence_when_source_payload_is_tampered() { Box::pin(exercise(Case::PendingTampered)).await; }
+async fn cold_pending_helper_retains_native_evidence_when_source_payload_is_tampered() {
+    Box::pin(exercise(Case::PendingTampered)).await;
+}

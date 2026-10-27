@@ -10,15 +10,16 @@ impl ToolkitOriginalOwner {
     /// Every pass runs the same complete strict check as check_admitted_helper;
     /// Candidate is never usable contributor authority. No guard crosses await.
     pub(crate) async fn wait_admitted_helper(
-        self: &Arc<Self>, admitted: &AdmittedHelperWork, deadline: Instant,
+        self: &Arc<Self>,
+        admitted: &AdmittedHelperWork,
+        deadline: Instant,
     ) -> Result<(), OriginalWriterError> {
         if !Arc::ptr_eq(self, &admitted.owner) {
             return Err(OriginalWriterError::WrongOwner);
         }
         loop {
-            let observed = self.observe_helper_sources(
-                &admitted.contributor, &admitted.contributors, &[],
-            )?;
+            let observed =
+                self.observe_helper_sources(&admitted.contributor, &admitted.contributors, &[])?;
             if Instant::now() >= deadline {
                 return Err(OriginalWriterError::Unavailable);
             }
@@ -29,8 +30,10 @@ impl ToolkitOriginalOwner {
             // A short timer yields without depending on the tool turn or an
             // acceptance callback channel; the same source owner is reread.
             tokio::time::sleep_until(std::cmp::min(
-                deadline, Instant::now() + Duration::from_millis(1),
-            )).await;
+                deadline,
+                Instant::now() + Duration::from_millis(1),
+            ))
+            .await;
         }
     }
 }

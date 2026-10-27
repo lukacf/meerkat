@@ -2,18 +2,22 @@
 
 #[cfg(unix)]
 fn main() -> std::process::ExitCode {
+    use meerkat_connect::application_gateway::{
+        InheritedOperatorTerminal, serve_local_operator, serve_local_operator_with_setup,
+    };
+    use meerkat_connect::application_remote::serve_remote_operator_with_service_parent;
     use meerkat_mobkit::{
         gateway_composition::gateway_tokio_runtime, rpc_gateway::run_persistent_with_host,
     };
     use std::sync::Arc;
-    use meerkat_connect::application_gateway::{InheritedOperatorTerminal, serve_local_operator, serve_local_operator_with_setup};
-    use meerkat_connect::application_remote::serve_remote_operator_with_service_parent;
-    use toolkit_mobkit::{
-        private_host::{InheritedHostPipes, PrivateHostConnection, PrivateHostStartup, PrivateHostStartupIntent},
+    use toolkit_mobkit::private_host::{
+        InheritedHostPipes, PrivateHostConnection, PrivateHostStartup, PrivateHostStartupIntent,
     };
 
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if let Some(result) = meerkat_connect::application_bootstrap::run(&args) { return result; }
+    if let Some(result) = meerkat_connect::application_bootstrap::run(&args) {
+        return result;
+    }
     if args.as_slice() == ["--version"] || args.as_slice() == ["-V"] {
         println!(
             "toolkit_gateway {} (local Toolkit host over MobKit SDK RPC)",
@@ -30,7 +34,10 @@ fn main() -> std::process::ExitCode {
     };
     // This optional input is transferred by the application composition, not
     // by public RPC/bootstrap JSON. Adopt before Tokio or any child can spawn.
-    let operator_terminal = match operator_fd.map(|fd| InheritedOperatorTerminal::adopt(fd, read_fd, write_fd)).transpose() {
+    let operator_terminal = match operator_fd
+        .map(|fd| InheritedOperatorTerminal::adopt(fd, read_fd, write_fd))
+        .transpose()
+    {
         Ok(terminal) => terminal,
         Err(error) => {
             eprintln!("toolkit_gateway: {error}");
@@ -281,9 +288,13 @@ fn parse_args(
             "--persistent" if !persistent => persistent = true,
             "--initialize-native-owner" if !initialize => initialize = true,
             "--operator-terminal-fd" if operator_fd.is_none() => {
-                operator_fd = Some(args.next().ok_or("missing inherited operator terminal descriptor")?
-                    .parse::<i32>().map_err(|_| "invalid inherited operator terminal descriptor")?);
-            },
+                operator_fd = Some(
+                    args.next()
+                        .ok_or("missing inherited operator terminal descriptor")?
+                        .parse::<i32>()
+                        .map_err(|_| "invalid inherited operator terminal descriptor")?,
+                );
+            }
             "--host-control-read-fd" if read_fd.is_none() => {
                 read_fd = Some(
                     args.next()
@@ -350,7 +361,13 @@ mod tests {
     }
     #[test]
     fn operator_terminal_is_optional_and_cannot_reuse_existing_descriptors() {
-        let base = args(&["--persistent", "--host-control-read-fd", "3", "--host-control-write-fd", "4"]);
+        let base = args(&[
+            "--persistent",
+            "--host-control-read-fd",
+            "3",
+            "--host-control-write-fd",
+            "4",
+        ]);
         assert_eq!(parse_args(&base).unwrap().4, None);
         for descriptor in ["0", "1", "2", "3", "4", "-1"] {
             let mut values = base.clone();

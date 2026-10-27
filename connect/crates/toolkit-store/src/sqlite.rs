@@ -36,7 +36,11 @@ fn lock_physical_owner(file: &File, exclusive: bool) -> StoreResult<()> {
         l_start: 0,
         l_len: 1,
         l_pid: 0,
-        l_type: if exclusive { libc::F_WRLCK } else { libc::F_RDLCK },
+        l_type: if exclusive {
+            libc::F_WRLCK
+        } else {
+            libc::F_RDLCK
+        },
         l_whence: libc::SEEK_SET as i16,
     };
     // SAFETY: file retains a valid descriptor for this synchronous call. The
@@ -44,7 +48,11 @@ fn lock_physical_owner(file: &File, exclusive: bool) -> StoreResult<()> {
     // retaining the pointer. Byte zero, length one is a valid nonnegative range;
     // the real libc constant selects open-description custody, not process locks.
     let result = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_OFD_SETLK, &lock) };
-    if result == -1 { Err(StoreError::OwnerUnavailable) } else { Ok(()) }
+    if result == -1 {
+        Err(StoreError::OwnerUnavailable)
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -52,7 +60,8 @@ fn lock_physical_owner(file: &File, exclusive: bool) -> StoreResult<()> {
     if exclusive {
         file.try_lock().map_err(|_| StoreError::OwnerUnavailable)
     } else {
-        file.try_lock_shared().map_err(|_| StoreError::OwnerUnavailable)
+        file.try_lock_shared()
+            .map_err(|_| StoreError::OwnerUnavailable)
     }
 }
 
@@ -90,17 +99,27 @@ impl SqliteStore {
     }
 
     pub fn record_publication_is(&self, publication: &Arc<dyn RecordChangePublication>) -> bool {
-        self.record_publication.as_ref().is_some_and(|bound| Arc::ptr_eq(bound, publication))
+        self.record_publication
+            .as_ref()
+            .is_some_and(|bound| Arc::ptr_eq(bound, publication))
     }
 
-    fn open_mode(path: &Path, create: bool, publication: Option<Arc<dyn RecordChangePublication>>) -> StoreResult<Self> {
+    fn open_mode(
+        path: &Path,
+        create: bool,
+        publication: Option<Arc<dyn RecordChangePublication>>,
+    ) -> StoreResult<Self> {
         if path.as_os_str().is_empty() || path == Path::new(":memory:") {
             return Err(StoreError::Invalid(
                 "SqliteStore requires a persistent filesystem path".into(),
             ));
         }
-        let physical_owner = OpenOptions::new().read(true).write(true).create(create)
-            .open(path).map_err(|_| StoreError::OwnerUnavailable)?;
+        let physical_owner = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(create)
+            .open(path)
+            .map_err(|_| StoreError::OwnerUnavailable)?;
         lock_physical_owner(&physical_owner, publication.is_some())?;
         check_database_identity(path, &physical_owner)?;
         let mut flags = rusqlite::OpenFlags::default();
@@ -170,7 +189,10 @@ impl SqliteStore {
         )?;
         tx.commit()?;
         Ok(Self {
-            connection: Arc::new(Mutex::new(OwnedConnection { connection, _physical_owner: physical_owner })),
+            connection: Arc::new(Mutex::new(OwnedConnection {
+                connection,
+                _physical_owner: physical_owner,
+            })),
             store_id,
             record_publication: publication,
         })
@@ -506,7 +528,9 @@ fn admit_in_transaction(
 }
 
 fn validate_conditions(
-    target: &StoreKey, conditions: &[RecordCondition], before_ms: i64,
+    target: &StoreKey,
+    conditions: &[RecordCondition],
+    before_ms: i64,
 ) -> StoreResult<()> {
     if conditions.is_empty() || conditions.len() > 64 || before_ms <= 0 {
         return Err(StoreError::Invalid(
@@ -602,15 +626,16 @@ fn check_final_condition_time(
     }
     if target_claim.is_some_and(|lease| lease.expires_at_ms <= time)
         || conditions.iter().any(|condition| {
-        condition
-            .claim
-            .as_ref()
-            .is_some_and(|lease| lease.expires_at_ms <= time)
-            || condition
-                .dispatch_claim
+            condition
+                .claim
                 .as_ref()
                 .is_some_and(|lease| lease.expires_at_ms <= time)
-    }) {
+                || condition
+                    .dispatch_claim
+                    .as_ref()
+                    .is_some_and(|lease| lease.expires_at_ms <= time)
+        })
+    {
         return Err(StoreError::Fenced);
     }
     Ok(())
@@ -623,7 +648,11 @@ impl ConditionalAdmissionStore for SqliteStore {
         request: ConditionalAdmission,
     ) -> StoreResult<AdmissionOutcome> {
         validate_admission(&request.admission)?;
-        validate_conditions(&request.admission.key, &request.conditions, request.before_ms)?;
+        validate_conditions(
+            &request.admission.key,
+            &request.conditions,
+            request.before_ms,
+        )?;
         self.with(move |connection, store_id| {
             let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if let Some(record) = existing_admission(&tx, &request.admission)? {
@@ -653,10 +682,17 @@ impl ConditionalAdmissionStore for SqliteStore {
         transition.data.validate()?;
         integer(transition.expected_revision)?;
         validate_effects_and_events(&transition.effects, &transition.events)?;
-        if transition.expected_revision == 0 || !transition.expected_digest.as_ref().is_some_and(|digest| {
-            digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        }) {
-            return Err(StoreError::Invalid("conditional transition requires exact target revision and digest".into()));
+        if transition.expected_revision == 0
+            || !transition.expected_digest.as_ref().is_some_and(|digest| {
+                digest.len() == 64
+                    && digest
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
+        {
+            return Err(StoreError::Invalid(
+                "conditional transition requires exact target revision and digest".into(),
+            ));
         }
         validate_conditions(&transition.key, &request.conditions, request.before_ms)?;
         let publication = self.record_publication.clone();

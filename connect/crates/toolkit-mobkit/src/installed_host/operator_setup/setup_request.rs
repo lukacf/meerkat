@@ -29,8 +29,12 @@ impl OperatorSetup {
             request,
         )?;
         let origin = crate::original_ingress::helper_originals::HelperSetupOrigin {
-            realm: self.native.realm.clone(), source_owner: self.native.ingress_domain.clone(),
-            original_authority: self.route(&prepared.original().route)?.source_authority.clone(),
+            realm: self.native.realm.clone(),
+            source_owner: self.native.ingress_domain.clone(),
+            original_authority: self
+                .route(&prepared.original().route)?
+                .source_authority
+                .clone(),
             original: prepared.original().clone(),
         };
         let targets = self.original_helper_targets(&origin)?;
@@ -53,9 +57,18 @@ impl OperatorSetup {
                     .map_err(|_| HostLifetimeError::InvalidSelection)?,
             );
         if let Some(intent) = &proposal.setup_request {
-            proposal.request.proposed_action.body.as_mut().and_then(serde_json::Value::as_object_mut)
-                .ok_or(HostLifetimeError::InvalidSelection)?.insert("correlated_helper_targets".into(),
-                    serde_json::to_value(intent).map_err(|_| HostLifetimeError::InvalidSelection)?);
+            proposal
+                .request
+                .proposed_action
+                .body
+                .as_mut()
+                .and_then(serde_json::Value::as_object_mut)
+                .ok_or(HostLifetimeError::InvalidSelection)?
+                .insert(
+                    "correlated_helper_targets".into(),
+                    serde_json::to_value(intent)
+                        .map_err(|_| HostLifetimeError::InvalidSelection)?,
+                );
         }
         Ok(proposal)
     }
@@ -76,15 +89,20 @@ pub(crate) async fn validate_setup_selection(
 /// Reopen the same canonical approved selection without resolving unrelated
 /// target currentness. The caller must already have its exact bound source.
 pub(crate) async fn validate_retained_setup_selection(
-    lifetime: &NativeHostLifetime, source: &ToolkitOriginalOwner, store: &dyn ToolkitStore,
+    lifetime: &NativeHostLifetime,
+    source: &ToolkitOriginalOwner,
+    store: &dyn ToolkitStore,
     selection: &PrivateSetupRequestSelection,
 ) -> Result<ExecutionRestrictions, HostLifetimeError> {
     validate_selection(lifetime, source, store, selection, false).await
 }
 
 async fn validate_selection(
-    lifetime: &NativeHostLifetime, source: &ToolkitOriginalOwner, store: &dyn ToolkitStore,
-    selection: &PrivateSetupRequestSelection, require_current: bool,
+    lifetime: &NativeHostLifetime,
+    source: &ToolkitOriginalOwner,
+    store: &dyn ToolkitStore,
+    selection: &PrivateSetupRequestSelection,
+    require_current: bool,
 ) -> Result<ExecutionRestrictions, HostLifetimeError> {
     lifetime.validate_current_selection()?;
     let policy = lifetime.selected_policy();
@@ -132,12 +150,17 @@ async fn validate_selection(
     if !super::setup_recovery::decision_key_matches(lifetime, native, &key, &record)?
         || record.route != selection.original.route
         || record.purpose != OperatorParentPurpose::SetupRequest
-        || !record.setup_request.as_ref().is_some_and(|intent|
-            intent.session_id == selection.session_id && intent.original.as_ref() == Some(&selection.original)
-                && (intent.targets.is_empty() && intent.origin.is_none() || intent.origin.as_ref().is_some_and(|origin|
-                    origin.realm == native.realm && origin.source_owner == native.ingress_domain
-                        && origin.original_authority == route.source_authority
-                        && origin.original == selection.original)))
+        || !record.setup_request.as_ref().is_some_and(|intent| {
+            intent.session_id == selection.session_id
+                && intent.original.as_ref() == Some(&selection.original)
+                && (intent.targets.is_empty() && intent.origin.is_none()
+                    || intent.origin.as_ref().is_some_and(|origin| {
+                        origin.realm == native.realm
+                            && origin.source_owner == native.ingress_domain
+                            && origin.original_authority == route.source_authority
+                            && origin.original == selection.original
+                    }))
+        })
         || setup_targets::compiled_targets(&record)? != selection.helper_targets
         || record.operator != selection.parent[0].root_authority
         || record.application != native.grant_administrator
@@ -173,10 +196,20 @@ async fn validate_selection(
             .check_current()
             .map_err(|_| HostLifetimeError::Unavailable)?;
         for target in &selection.helper_targets {
-            let current = source.grants().resolve_lineage(std::slice::from_ref(&target.parent),
-                &native.grant_administrator, route.represented_subject.as_ref()).map_err(|_| HostLifetimeError::Denied)?;
-            if current.restrictions() != &target.restrictions { return Err(HostLifetimeError::Denied); }
-            current.check_current().map_err(|_| HostLifetimeError::Unavailable)?;
+            let current = source
+                .grants()
+                .resolve_lineage(
+                    std::slice::from_ref(&target.parent),
+                    &native.grant_administrator,
+                    route.represented_subject.as_ref(),
+                )
+                .map_err(|_| HostLifetimeError::Denied)?;
+            if current.restrictions() != &target.restrictions {
+                return Err(HostLifetimeError::Denied);
+            }
+            current
+                .check_current()
+                .map_err(|_| HostLifetimeError::Unavailable)?;
         }
     }
     lifetime.validate_current_selection()?;
@@ -184,30 +217,52 @@ async fn validate_selection(
 }
 
 impl OperatorSetup {
-    fn original_helper_targets(&self, origin: &crate::original_ingress::helper_originals::HelperSetupOrigin)
-        -> Result<Vec<setup_targets::SetupTargetIntent>, HostLifetimeError>
-    {
-        use meerkat_authorization_contracts::work_association::WorkAuthorityBasis;
-        use meerkat_authorization_contracts::constraints::DelegationDepth;
+    fn original_helper_targets(
+        &self,
+        origin: &crate::original_ingress::helper_originals::HelperSetupOrigin,
+    ) -> Result<Vec<setup_targets::SetupTargetIntent>, HostLifetimeError> {
         use crate::installed_host::acquisition::ConfiguredHelperReportCapability;
-        let Some(helper) = &self.helper_selection else { return Ok(vec![]); };
+        use meerkat_authorization_contracts::constraints::DelegationDepth;
+        use meerkat_authorization_contracts::work_association::WorkAuthorityBasis;
+        let Some(helper) = &self.helper_selection else {
+            return Ok(vec![]);
+        };
         let member = helper.selected_member(&self.native)?;
-        let WorkAuthorityBasis::TargetedGrantLineages { base, targets } = &helper.operation_basis else {
+        let WorkAuthorityBasis::TargetedGrantLineages { base, targets } = &helper.operation_basis
+        else {
             return Err(HostLifetimeError::InvalidSelection);
         };
-        let mut selected = targets.iter().map(|target| Some(target.target.clone())).collect::<Vec<_>>();
-        if base.is_some() || helper.catalog_capability.is_some() { selected.push(None); }
+        let mut selected = targets
+            .iter()
+            .map(|target| Some(target.target.clone()))
+            .collect::<Vec<_>>();
+        if base.is_some() || helper.catalog_capability.is_some() {
+            selected.push(None);
+        }
         if let Some(report) = &helper.report_capability {
             selected.push(Some(ConfiguredHelperReportCapability::target()));
-            if report.account_parent.is_some() { selected.push(Some(ConfiguredHelperReportCapability::account_target())); }
-            if report.public_parent.is_some() { selected.push(Some(ConfiguredHelperReportCapability::public_target())); }
+            if report.account_parent.is_some() {
+                selected.push(Some(ConfiguredHelperReportCapability::account_target()));
+            }
+            if report.public_parent.is_some() {
+                selected.push(Some(ConfiguredHelperReportCapability::public_target()));
+            }
         }
         selected.sort();
-        let mut intents = setup_targets::helper_intents(&self.source, helper,
-            &self.native.grant_administrator, &member.audience, selected)?;
+        let mut intents = setup_targets::helper_intents(
+            &self.source,
+            helper,
+            &self.native.grant_administrator,
+            &member.audience,
+            selected,
+        )?;
         for intent in &mut intents {
-            intent.requested = setup_targets::child_bounds(&self.native.grant_administrator, origin,
-                &intent.target, &intent.requested)?;
+            intent.requested = setup_targets::child_bounds(
+                &self.native.grant_administrator,
+                origin,
+                &intent.target,
+                &intent.requested,
+            )?;
             intent.requested.delegation_depth = DelegationDepth::remaining(1);
         }
         Ok(intents)

@@ -13,8 +13,8 @@ use futures_util::FutureExt;
 use crate::{
     ConnectError,
     paired_host::{
-        FrontendInventoryRead, PairedHostClient, PairedHostError, PairedHostOperation, PairedHostRefusal,
-        PairingCode, TerminalPairingCode,
+        FrontendInventoryRead, PairedHostClient, PairedHostError, PairedHostOperation,
+        PairedHostRefusal, PairingCode, TerminalPairingCode,
     },
     paired_host_device::{self, DeviceStore, DeviceStoreError, LoadedDevice, StoreJob},
     terminal::{TerminalInput, display_text},
@@ -227,9 +227,9 @@ async fn device_choice<F: Future<Output = io::Result<()>>>(
             signal = &mut interrupted => signal.map(|()| None),
             line = input.recv() => line.transpose(),
         };
-        input
-            .check_cleanup()
-            .map_err(|error| ConnectError::native("restore PairedHost device choice input", error))?;
+        input.check_cleanup().map_err(|error| {
+            ConnectError::native("restore PairedHost device choice input", error)
+        })?;
         let Some(choice) =
             choice.map_err(|error| ConnectError::native("read PairedHost device choice", error))?
         else {

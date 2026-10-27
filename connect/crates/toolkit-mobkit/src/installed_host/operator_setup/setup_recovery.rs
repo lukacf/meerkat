@@ -90,7 +90,9 @@ impl OperatorSetup {
                             original: prepared.original().clone(),
                             session_id: prepared.session_id().clone(),
                             helper_targets: {
-                                let saved = self.retained_setup_decision(prepared.original()).await?
+                                let saved = self
+                                    .retained_setup_decision(prepared.original())
+                                    .await?
                                     .ok_or(HostLifetimeError::Unavailable)?;
                                 setup_targets::compiled_targets(&decode(&saved, &saved.key)?)?
                             },
@@ -207,7 +209,9 @@ impl OperatorSetup {
         mut record: OperatorDecision,
     ) -> Result<OperatorParentOutcome, HostLifetimeError> {
         if !matches!(record.issued, ParentIssuance::Pending) {
-            return self.complete_setup_targets(saved, record, Arc::new(|| true)).await;
+            return self
+                .complete_setup_targets(saved, record, Arc::new(|| true))
+                .await;
         }
         if !approved(&record)
             || !decision_key_matches(&self.lifetime, &self.native, &saved.key, &record)?
@@ -230,9 +234,16 @@ impl OperatorSetup {
             lineage: vec![parent],
         };
         let current = self.source.grants().resolve_lineage(
-            match &record.issued { ParentIssuance::Issued { lineage } => lineage, _ => unreachable!() },
-            &record.application, record.represented_subject.as_ref());
-        if !current.is_ok_and(|grant| grant.restrictions() == &record.requested && grant.check_current().is_ok()) {
+            match &record.issued {
+                ParentIssuance::Issued { lineage } => lineage,
+                _ => unreachable!(),
+            },
+            &record.application,
+            record.represented_subject.as_ref(),
+        );
+        if !current.is_ok_and(|grant| {
+            grant.restrictions() == &record.requested && grant.check_current().is_ok()
+        }) {
             return Ok(OperatorParentOutcome::Unavailable);
         }
         match self
@@ -248,7 +259,10 @@ impl OperatorSetup {
             })
             .await
         {
-            Ok(saved) => self.complete_setup_targets(saved, record, Arc::new(|| true)).await,
+            Ok(saved) => {
+                self.complete_setup_targets(saved, record, Arc::new(|| true))
+                    .await
+            }
             Err(_) => Ok(OperatorParentOutcome::PendingReconciliation),
         }
     }
@@ -305,10 +319,18 @@ fn decision_id(
     record: &OperatorDecision,
 ) -> Result<String, HostLifetimeError> {
     if let Some(member) = &record.batch_member {
-        return Ok(format!("operator-batch-parent-{}", digest(
-            &canonical_json(&("toolkit.public-service-batch-parent.v1", &record.route,
-                &record.approval.approval_id, member))
-                .map_err(|_| HostLifetimeError::InvalidSelection)?)));
+        return Ok(format!(
+            "operator-batch-parent-{}",
+            digest(
+                &canonical_json(&(
+                    "toolkit.public-service-batch-parent.v1",
+                    &record.route,
+                    &record.approval.approval_id,
+                    member
+                ))
+                .map_err(|_| HostLifetimeError::InvalidSelection)?
+            )
+        ));
     }
     if approved(record) && record.purpose == OperatorParentPurpose::SetupRequest {
         if let Some(original) = record

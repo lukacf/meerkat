@@ -10,32 +10,53 @@ async fn deadline_recovery_pages_due_rows_without_authorizing_or_repeating_expir
     for correlation in ["due-one", "due-two", "due-three"] {
         let mut host = f.request.host().clone();
         host.correlation = id(correlation);
-        f.request = validate_request(f.request.request().clone(), host, &f.authority,
-            &f.context(200), &f.references).unwrap();
+        f.request = validate_request(
+            f.request.request().clone(),
+            host,
+            &f.authority,
+            &f.context(200),
+            &f.references,
+        )
+        .unwrap();
         due.push(f.admit().await);
     }
     let mut before = Vec::new();
-    for snapshot in &due { before.push(f.store.get(snapshot.key()).await.unwrap()); }
+    for snapshot in &due {
+        before.push(f.store.get(snapshot.key()).await.unwrap());
+    }
     // A valid future request in the same scope must not enter expiry work.
     let future_deadline = u64::try_from(f.store.now_ms().await.unwrap()).unwrap() + 60_000;
     let mut constraints = f.authority.constraints().clone();
     constraints.expires_at_ms = future_deadline;
-    f.authority = SetupRequestEvidence::new(f.authority.association().clone(), constraints).unwrap();
+    f.authority =
+        SetupRequestEvidence::new(f.authority.association().clone(), constraints).unwrap();
     let mut host = f.request.host().clone();
     host.correlation = id("future");
     host.limits.deadline_ms = future_deadline;
-    f.request = validate_request(f.request.request().clone(), host, &f.authority,
-        &f.context(200), &f.references).unwrap();
+    f.request = validate_request(
+        f.request.request().clone(),
+        host,
+        &f.authority,
+        &f.context(200),
+        &f.references,
+    )
+    .unwrap();
     let future = f.admit().await;
     let mut after = None;
     let mut observed = Vec::new();
     loop {
-        let page = f.bridge().continuation_recovery_page(after.as_deref(), 1).await.unwrap();
+        let page = f
+            .bridge()
+            .continuation_recovery_page(after.as_deref(), 1)
+            .await
+            .unwrap();
         assert!(page.operations.is_empty());
         assert!(!page.had_unavailable_records);
         observed.extend(page.expiry_operations);
         after = page.next_after_id;
-        if after.is_none() { break; }
+        if after.is_none() {
+            break;
+        }
     }
     let mut expected: Vec<_> = due.iter().map(|s| id(&s.key().id)).collect();
     expected.sort();
@@ -44,11 +65,15 @@ async fn deadline_recovery_pages_due_rows_without_authorizing_or_repeating_expir
     for (snapshot, previous) in due.iter().zip(before) {
         assert!(f.store.get(snapshot.key()).await.unwrap() == previous);
     }
-    let foreign = SetupStore::new(&f.store, SetupScope::new(id("other"), f.deployment.clone())).unwrap();
+    let foreign =
+        SetupStore::new(&f.store, SetupScope::new(id("other"), f.deployment.clone())).unwrap();
     let page = foreign.continuation_recovery_page(None, 32).await.unwrap();
     assert!(page.expiry_operations.is_empty());
     let operation = id(&due[0].key().id);
-    assert!(matches!(f.bridge().expire(&operation, &DeadlineOwner(false)).await, Err(SetupError::Denied)));
+    assert!(matches!(
+        f.bridge().expire(&operation, &DeadlineOwner(false)).await,
+        Err(SetupError::Denied)
+    ));
     // Race the existing canonical CAS, never renew the expired request token.
     let store = f.bridge();
     let (first, second) = tokio::join!(
@@ -59,13 +84,25 @@ async fn deadline_recovery_pages_due_rows_without_authorizing_or_repeating_expir
     let expired = first.or(second).unwrap();
     assert_eq!(expired.state().lifecycle_phase, AcquisitionPhase::Expired);
     let delivery = Delivery::new(0);
-    assert!(matches!(step(&f, &expired, &delivery).await.unwrap(), ContinuationStep::Acknowledged(_)));
+    assert!(matches!(
+        step(&f, &expired, &delivery).await.unwrap(),
+        ContinuationStep::Acknowledged(_)
+    ));
     let settled = f.store.get(expired.key()).await.unwrap();
-    let page = f.bridge().continuation_recovery_page(None, 32).await.unwrap();
+    let page = f
+        .bridge()
+        .continuation_recovery_page(None, 32)
+        .await
+        .unwrap();
     assert!(!page.expiry_operations.contains(&operation));
     assert!(!page.operations.contains(&operation));
     assert_eq!(delivery.dispatches.load(Ordering::SeqCst), 1);
-    assert!(f.bridge().expire(&operation, &DeadlineOwner(true)).await.is_err());
+    assert!(
+        f.bridge()
+            .expire(&operation, &DeadlineOwner(true))
+            .await
+            .is_err()
+    );
     assert!(f.store.get(expired.key()).await.unwrap() == settled);
 }
 
@@ -137,7 +174,9 @@ impl SetupContinuationOwner for Delivery {
         }
         let mut saved = self.admission.lock().unwrap().clone();
         if self.advance_observation.load(Ordering::SeqCst) {
-            if let Some(saved) = &mut saved { saved.observed_at_ms += call as u64; }
+            if let Some(saved) = &mut saved {
+                saved.observed_at_ms += call as u64;
+            }
         }
         if let Some(saved) = &saved {
             assert!(saved.receipt == *receipt);
@@ -1088,12 +1127,24 @@ async fn later_observation_authenticates_without_rewriting_the_first_receipt() {
     let ended = terminal(&f, AcquisitionPhase::Cancelled).await;
     let owner = Delivery::new(0);
     owner.advance_observation.store(true, Ordering::SeqCst);
-    assert!(matches!(step(&f, &ended, &owner).await.unwrap(), ContinuationStep::Acknowledged(_)));
+    assert!(matches!(
+        step(&f, &ended, &owner).await.unwrap(),
+        ContinuationStep::Acknowledged(_)
+    ));
     let first = f.store.get(ended.key()).await.unwrap().unwrap();
-    assert!(matches!(step(&f, &ended, &owner).await.unwrap(), ContinuationStep::Acknowledged(_)));
+    assert!(matches!(
+        step(&f, &ended, &owner).await.unwrap(),
+        ContinuationStep::Acknowledged(_)
+    ));
     assert_eq!(first, f.store.get(ended.key()).await.unwrap().unwrap());
     owner.advance_observation.store(false, Ordering::SeqCst);
-    owner.admission.lock().unwrap().as_mut().unwrap().observed_at_ms = 0;
+    owner
+        .admission
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .observed_at_ms = 0;
     assert!(step(&f, &ended, &owner).await.is_err());
 }
 
@@ -1101,14 +1152,36 @@ async fn later_observation_authenticates_without_rewriting_the_first_receipt() {
 async fn committed_source_reads_only_the_existing_terminal_record() {
     let f = Fixture::new();
     let fresh = f.admit().await;
-    assert!(f.bridge().committed_continuation(&id(&fresh.key().id)).await.unwrap().is_none());
+    assert!(
+        f.bridge()
+            .committed_continuation(&id(&fresh.key().id))
+            .await
+            .unwrap()
+            .is_none()
+    );
     let ended = terminal(&f, AcquisitionPhase::Cancelled).await;
-    let canonical = f.bridge().committed_continuation(&id(&ended.key().id)).await.unwrap().unwrap();
+    let canonical = f
+        .bridge()
+        .committed_continuation(&id(&ended.key().id))
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(canonical.operation().as_str(), ended.key().id);
-    assert_eq!(canonical.digest().unwrap(), continuation_obligation(&ended.record, &ended.request).unwrap().digest().unwrap());
-    assert!(f.bridge().committed_continuation(&id("missing-operation")).await.unwrap().is_none());
+    assert_eq!(
+        canonical.digest().unwrap(),
+        continuation_obligation(&ended.record, &ended.request)
+            .unwrap()
+            .digest()
+            .unwrap()
+    );
+    assert!(
+        f.bridge()
+            .committed_continuation(&id("missing-operation"))
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
-
 
 #[tokio::test]
 async fn recovery_refuses_failed_effect_with_non_rejection_observation() {
@@ -1117,17 +1190,30 @@ async fn recovery_refuses_failed_effect_with_non_rejection_observation() {
     let owner = Delivery::new(2);
     assert!(step(&f, &ended, &owner).await.is_err());
     owner.reconciliation.store(3, Ordering::SeqCst);
-    assert!(matches!(step(&f, &ended, &owner).await.unwrap(), ContinuationStep::OwnerRejected));
-    let page = f.bridge().continuation_recovery_page(None, 32).await.unwrap();
+    assert!(matches!(
+        step(&f, &ended, &owner).await.unwrap(),
+        ContinuationStep::OwnerRejected
+    ));
+    let page = f
+        .bridge()
+        .continuation_recovery_page(None, 32)
+        .await
+        .unwrap();
     assert!(page.operations.is_empty());
     assert!(!page.had_unavailable_records);
     let saved = effect(&f, &ended).await;
     for kind in ["owner_pending", "safe_to_retry"] {
         let mut changed = saved.clone();
-        let Some(EffectOutcome::Failed { evidence }) = &mut changed.outcome else { panic!("failed fixture"); };
+        let Some(EffectOutcome::Failed { evidence }) = &mut changed.outcome else {
+            panic!("failed fixture");
+        };
         evidence.body["kind"]["kind"] = serde_json::Value::String(kind.into());
         corrupt_effect(&f, &changed);
-        let page = f.bridge().continuation_recovery_page(None, 32).await.unwrap();
+        let page = f
+            .bridge()
+            .continuation_recovery_page(None, 32)
+            .await
+            .unwrap();
         assert!(page.operations.is_empty());
         assert!(page.had_unavailable_records, "{kind}");
     }
@@ -1138,29 +1224,48 @@ async fn recovery_requires_matching_completed_admission_with_local_observation_t
     let f = Fixture::new();
     let ended = terminal(&f, AcquisitionPhase::Failed).await;
     let owner = Delivery::new(0);
-    assert!(matches!(step(&f, &ended, &owner).await.unwrap(), ContinuationStep::Acknowledged(_)));
+    assert!(matches!(
+        step(&f, &ended, &owner).await.unwrap(),
+        ContinuationStep::Acknowledged(_)
+    ));
     let saved = effect(&f, &ended).await;
-    let page = f.bridge().continuation_recovery_page(None, 32).await.unwrap();
+    let page = f
+        .bridge()
+        .continuation_recovery_page(None, 32)
+        .await
+        .unwrap();
     assert!(page.operations.is_empty());
     assert!(!page.had_unavailable_records);
     let mut later = saved.clone();
-    let Some(EffectOutcome::Succeeded { receipt }) = &mut later.outcome else { panic!("succeeded fixture"); };
+    let Some(EffectOutcome::Succeeded { receipt }) = &mut later.outcome else {
+        panic!("succeeded fixture");
+    };
     let at = receipt.body["observed_at_ms"].as_u64().unwrap();
     receipt.body["observed_at_ms"] = serde_json::json!(at + 1);
     corrupt_effect(&f, &later);
-    let page = f.bridge().continuation_recovery_page(None, 32).await.unwrap();
+    let page = f
+        .bridge()
+        .continuation_recovery_page(None, 32)
+        .await
+        .unwrap();
     assert!(page.operations.is_empty());
     assert!(!page.had_unavailable_records);
     for field in ["runtime", "session", "receipt", "durable_input"] {
         let mut changed = saved.clone();
-        let Some(EffectOutcome::Succeeded { receipt }) = &mut changed.outcome else { unreachable!(); };
+        let Some(EffectOutcome::Succeeded { receipt }) = &mut changed.outcome else {
+            unreachable!();
+        };
         if matches!(field, "runtime" | "session") {
             receipt.body[field] = serde_json::Value::String("another-valid-id".into());
         } else {
             receipt.body[field]["id"] = serde_json::Value::String("another-valid-id".into());
         }
         corrupt_effect(&f, &changed);
-        let page = f.bridge().continuation_recovery_page(None, 32).await.unwrap();
+        let page = f
+            .bridge()
+            .continuation_recovery_page(None, 32)
+            .await
+            .unwrap();
         assert!(page.operations.is_empty());
         assert!(page.had_unavailable_records, "{field}");
     }

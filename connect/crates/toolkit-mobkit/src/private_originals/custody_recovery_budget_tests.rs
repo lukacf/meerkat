@@ -3,47 +3,77 @@
 //! It exercises the final allowed step and zero-new-step rule against real
 //! admission, SQLite terminal writes, lost replies and a cancelled join observer.
 use super::*;
-use toolkit_store::*;
-use std::sync::{OnceLock, atomic::AtomicBool};
 use crate::original_ingress::custody_attempt::{CustodyChange, CustodyDecision};
 use crate::private_originals::custody_recovery::HandoffPhase;
+use std::sync::{OnceLock, atomic::AtomicBool};
+use toolkit_store::*;
 
 struct BudgetStore {
-    inner: Arc<dyn ToolkitStore>, fault: Arc<DeliveryFault>,
+    inner: Arc<dyn ToolkitStore>,
+    fault: Arc<DeliveryFault>,
     fail_read: AtomicBool,
-    hold_read: AtomicBool, entered: tokio::sync::Notify, release: tokio::sync::Semaphore,
-    hold_terminal: AtomicBool, terminal_entered: tokio::sync::Notify,
-    terminal_release: tokio::sync::Semaphore, terminal_commits: AtomicUsize,
+    hold_read: AtomicBool,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Semaphore,
+    hold_terminal: AtomicBool,
+    terminal_entered: tokio::sync::Notify,
+    terminal_release: tokio::sync::Semaphore,
+    terminal_commits: AtomicUsize,
     terminal_returned: AtomicUsize,
 }
 impl BudgetStore {
     fn new(inner: Arc<dyn ToolkitStore>, fault: Arc<DeliveryFault>) -> Self {
-        Self { inner, fault, fail_read: AtomicBool::new(false), hold_read: AtomicBool::new(true), entered: tokio::sync::Notify::new(),
-            release: tokio::sync::Semaphore::new(0), hold_terminal: AtomicBool::new(true),
-            terminal_entered: tokio::sync::Notify::new(), terminal_release: tokio::sync::Semaphore::new(0),
-            terminal_commits: AtomicUsize::new(0), terminal_returned: AtomicUsize::new(0) }
+        Self {
+            inner,
+            fault,
+            fail_read: AtomicBool::new(false),
+            hold_read: AtomicBool::new(true),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Semaphore::new(0),
+            hold_terminal: AtomicBool::new(true),
+            terminal_entered: tokio::sync::Notify::new(),
+            terminal_release: tokio::sync::Semaphore::new(0),
+            terminal_commits: AtomicUsize::new(0),
+            terminal_returned: AtomicUsize::new(0),
+        }
     }
 }
 #[async_trait::async_trait]
 impl ToolkitStore for BudgetStore {
-    fn capabilities(&self) -> StoreCapabilities { self.inner.capabilities() }
-    async fn now_ms(&self) -> StoreResult<i64> { self.inner.now_ms().await }
-    async fn admit(&self, request: AdmissionRequest) -> StoreResult<AdmissionOutcome> { self.inner.admit(request).await }
+    fn capabilities(&self) -> StoreCapabilities {
+        self.inner.capabilities()
+    }
+    async fn now_ms(&self) -> StoreResult<i64> {
+        self.inner.now_ms().await
+    }
+    async fn admit(&self, request: AdmissionRequest) -> StoreResult<AdmissionOutcome> {
+        self.inner.admit(request).await
+    }
     async fn get(&self, key: &StoreKey) -> StoreResult<Option<StoredRecord>> {
-        if self.fault.accepted.load(Ordering::SeqCst) > 0 && self.hold_read.swap(false, Ordering::SeqCst) {
+        if self.fault.accepted.load(Ordering::SeqCst) > 0
+            && self.hold_read.swap(false, Ordering::SeqCst)
+        {
             // Gate only after the actual bridge accepted. Foreground binding
             // has finished its source writes; the recovery read is now entered.
             self.entered.notify_one();
             self.release.acquire().await.unwrap().forget();
         }
-        if self.fail_read.load(Ordering::SeqCst) { return Err(StoreError::OwnerUnavailable); }
+        if self.fail_read.load(Ordering::SeqCst) {
+            return Err(StoreError::OwnerUnavailable);
+        }
         self.inner.get(key).await
     }
-    async fn list_records(&self, scope: &StoreScope, after: Option<&str>, limit: u32) -> StoreResult<Vec<StoredRecord>> {
+    async fn list_records(
+        &self,
+        scope: &StoreScope,
+        after: Option<&str>,
+        limit: u32,
+    ) -> StoreResult<Vec<StoredRecord>> {
         self.inner.list_records(scope, after, limit).await
     }
     async fn compare_and_swap(&self, transition: Transition) -> StoreResult<StoredRecord> {
-        let terminal = transition.data.body["custody_attempt"]["decision"].as_str()
+        let terminal = transition.data.body["custody_attempt"]["decision"]
+            .as_str()
             .is_some_and(|value| value == "promoted" || value == "withdrawn");
         if terminal && self.hold_terminal.swap(false, Ordering::SeqCst) {
             self.inner.compare_and_swap(transition).await?;
@@ -128,11 +158,16 @@ impl ToolkitStore for BudgetStore {
 async fn exercise(final_step: bool) {
     let capture = Arc::new(OnceLock::<Arc<BudgetStore>>::new());
     let slot = capture.clone();
-    let fixture = Fixture::with_source_store(DeliveryMode::LoseAcceptedAnswer, false,
+    let fixture = Fixture::with_source_store(
+        DeliveryMode::LoseAcceptedAnswer,
+        false,
         Some(Box::new(move |inner, fault| {
             let selected = Arc::new(BudgetStore::new(inner, fault));
-            assert!(slot.set(selected.clone()).is_ok()); selected
-        }))).await;
+            assert!(slot.set(selected.clone()).is_ok());
+            selected
+        })),
+    )
+    .await;
     let store = capture.get().unwrap().clone();
     // Keep the same native shutdown future if the body observer is cancelled;
     // a completed result is checked again without a second shutdown call.
@@ -229,13 +264,17 @@ async fn exercise(final_step: bool) {
     })).catch_unwind().await;
     fixture.source.stop_custody_recovery();
     store.fail_read.store(false, Ordering::SeqCst);
-    store.release.add_permits(1); store.terminal_release.add_permits(1);
+    store.release.add_permits(1);
+    store.terminal_release.add_permits(1);
     let native = match native_cleanup {
         Some(completed) => completed,
         None => native_shutdown.as_mut().await,
     };
     let source = fixture.source.join_custody_recovery().await;
-    assert!(native.is_ok() && source.is_ok(), "actual cleanup: native={native:?}, source={source:?}");
+    assert!(
+        native.is_ok() && source.is_ok(),
+        "actual cleanup: native={native:?}, source={source:?}"
+    );
     match checked {
         Ok(Ok(())) => (),
         Ok(Err(_)) => panic!("bounded recovery control timed out"),
@@ -244,6 +283,10 @@ async fn exercise(final_step: bool) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn final_prepaid_step_promotes_actual_native_input_and_joins_lost_terminal_reply() { exercise(true).await; }
+async fn final_prepaid_step_promotes_actual_native_input_and_joins_lost_terminal_reply() {
+    exercise(true).await;
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn exhausted_budget_withdraws_source_without_new_native_read_or_nonadmission_claim() { exercise(false).await; }
+async fn exhausted_budget_withdraws_source_without_new_native_read_or_nonadmission_claim() {
+    exercise(false).await;
+}

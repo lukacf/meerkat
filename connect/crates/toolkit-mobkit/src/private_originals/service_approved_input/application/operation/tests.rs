@@ -2,92 +2,206 @@
 //! administrator below are explicit fixture producers. The invocation marker
 //! is mechanical custody, NOT a genuine native ReviewedEntry or Console login.
 use super::*;
-use crate::private_originals::service_approved_input::admission_tests::{acquisition, reviewed_config};
+use crate::private_originals::service_approved_input::admission_tests::{
+    acquisition, reviewed_config,
+};
 use futures::FutureExt;
 use meerkat_runtime::SessionServiceRuntimeExt;
 use std::{panic::AssertUnwindSafe, sync::atomic::AtomicUsize, time::Duration};
 
 const WAIT: Duration = Duration::from_secs(10);
-fn id(value: &str) -> Id { Id::new(value).unwrap() }
+fn id(value: &str) -> Id {
+    Id::new(value).unwrap()
+}
 
 #[derive(Clone, Copy)]
-enum Case { Positive, RequiresHuman, WrongProposal, CancelPrepared, LateDenied, LateUnavailable,
-    LateNotSettled, LostParentReceipt }
+enum Case {
+    Positive,
+    RequiresHuman,
+    WrongProposal,
+    CancelPrepared,
+    LateDenied,
+    LateUnavailable,
+    LateNotSettled,
+    LostParentReceipt,
+}
 
-struct FixtureService { owner: PrincipalRef, original: PrivateOriginalRef, acquisition: StoreKey,
-    fresh: EvidenceId, config_sha256: String, expiry: u64 }
-struct ServiceReservation { owner: PrincipalRef, provenance: serde_json::Map<String, serde_json::Value> }
+struct FixtureService {
+    owner: PrincipalRef,
+    original: PrivateOriginalRef,
+    acquisition: StoreKey,
+    fresh: EvidenceId,
+    config_sha256: String,
+    expiry: u64,
+}
+struct ServiceReservation {
+    owner: PrincipalRef,
+    provenance: serde_json::Map<String, serde_json::Value>,
+}
 impl ApplicationServicePolicy for FixtureService {
-    fn reserve(&self, request: &ApplicationServicePolicyRequest<'_>) -> Result<ApplicationServicePolicyDecision, HostLifetimeError> {
-        if request.owner != &self.owner || request.original != &self.original || request.acquisition != &self.acquisition
-            || request.fresh_original != &self.fresh || digest(&canonical_json(request.configuration).unwrap()) != self.config_sha256
+    fn reserve(
+        &self,
+        request: &ApplicationServicePolicyRequest<'_>,
+    ) -> Result<ApplicationServicePolicyDecision, HostLifetimeError> {
+        if request.owner != &self.owner
+            || request.original != &self.original
+            || request.acquisition != &self.acquisition
+            || request.fresh_original != &self.fresh
+            || digest(&canonical_json(request.configuration).unwrap()) != self.config_sha256
             || request.permission.operations != [id("read")].into()
             || request.permission.lifetime.expires_at_ms != Some(self.expiry)
-        { return Err(HostLifetimeError::Denied); }
-        Ok(ApplicationServicePolicyDecision::Permit(Box::new(ServiceReservation {
-            owner: self.owner.clone(), provenance: [("fixture_service".into(), "exact-task-v1".into())].into_iter().collect(),
-        })))
+        {
+            return Err(HostLifetimeError::Denied);
+        }
+        Ok(ApplicationServicePolicyDecision::Permit(Box::new(
+            ServiceReservation {
+                owner: self.owner.clone(),
+                provenance: [("fixture_service".into(), "exact-task-v1".into())]
+                    .into_iter()
+                    .collect(),
+            },
+        )))
     }
 }
 impl ApplicationServicePolicyReservation for ServiceReservation {
-    fn owner(&self) -> &PrincipalRef { &self.owner }
-    fn provenance(&self) -> &serde_json::Map<String, serde_json::Value> { &self.provenance }
-    fn check_current(&self) -> Result<(), HostLifetimeError> { Ok(()) }
+    fn owner(&self) -> &PrincipalRef {
+        &self.owner
+    }
+    fn provenance(&self) -> &serde_json::Map<String, serde_json::Value> {
+        &self.provenance
+    }
+    fn check_current(&self) -> Result<(), HostLifetimeError> {
+        Ok(())
+    }
 }
 struct UnavailableService;
 impl ApplicationServicePolicy for UnavailableService {
-    fn reserve(&self, _: &ApplicationServicePolicyRequest<'_>) -> Result<ApplicationServicePolicyDecision, HostLifetimeError> {
+    fn reserve(
+        &self,
+        _: &ApplicationServicePolicyRequest<'_>,
+    ) -> Result<ApplicationServicePolicyDecision, HostLifetimeError> {
         Err(HostLifetimeError::Unavailable)
     }
 }
 
-struct FixtureAdmin { operator: PrincipalRef, rule: ServiceParentAdministration, deployment: Id,
-    original: PrivateOriginalRef, acquisition: StoreKey, config_sha256: String,
-    source_path: std::path::PathBuf, case: Case, active: Arc<AtomicBool>, calls: Arc<AtomicUsize>, gate: Option<Arc<WorkerGate>> }
-struct AdminReservation { operator: PrincipalRef, rule: ServiceParentAdministration, proposal_sha256: String,
-    provenance: serde_json::Map<String, serde_json::Value>, source_path: std::path::PathBuf,
-    child: String, parent: String, case: Case, active: Arc<AtomicBool>, gate: Option<Arc<WorkerGate>> }
+struct FixtureAdmin {
+    operator: PrincipalRef,
+    rule: ServiceParentAdministration,
+    deployment: Id,
+    original: PrivateOriginalRef,
+    acquisition: StoreKey,
+    config_sha256: String,
+    source_path: std::path::PathBuf,
+    case: Case,
+    active: Arc<AtomicBool>,
+    calls: Arc<AtomicUsize>,
+    gate: Option<Arc<WorkerGate>>,
+}
+struct AdminReservation {
+    operator: PrincipalRef,
+    rule: ServiceParentAdministration,
+    proposal_sha256: String,
+    provenance: serde_json::Map<String, serde_json::Value>,
+    source_path: std::path::PathBuf,
+    child: String,
+    parent: String,
+    case: Case,
+    active: Arc<AtomicBool>,
+    gate: Option<Arc<WorkerGate>>,
+}
 #[async_trait::async_trait]
 impl ApplicationServiceParentAuthorizer for FixtureAdmin {
-    async fn reserve(&self, request: &ServiceParentAuthorizationRequest<'_>) -> Result<ServiceParentAuthorization, HostLifetimeError> {
+    async fn reserve(
+        &self,
+        request: &ServiceParentAuthorizationRequest<'_>,
+    ) -> Result<ServiceParentAuthorization, HostLifetimeError> {
         let proposal = request.proposal();
-        if proposal.operator != self.operator || proposal.rule != self.rule || proposal.original != self.original
+        if proposal.operator != self.operator
+            || proposal.rule != self.rule
+            || proposal.original != self.original
             || proposal.deployment != self.deployment
-            || proposal.acquisition != self.acquisition || proposal.decision.connection_revision.as_str() != self.config_sha256
+            || proposal.acquisition != self.acquisition
+            || proposal.decision.connection_revision.as_str() != self.config_sha256
             || proposal.decision.permission.operations != [id("read")].into()
             || proposal.decision.live_attachment.is_none()
-        { return Err(HostLifetimeError::Denied); }
+        {
+            return Err(HostLifetimeError::Denied);
+        }
         self.calls.fetch_add(1, Ordering::SeqCst);
-        if matches!(self.case, Case::RequiresHuman) { return Ok(ServiceParentAuthorization::RequiresHuman); }
-        let proposal_sha256 = if matches!(self.case, Case::WrongProposal) { "0".repeat(64) }
-            else { proposal.proposal_sha256()? };
-        Ok(ServiceParentAuthorization::Reserved(Box::new(AdminReservation {
-            operator: self.operator.clone(), rule: self.rule.clone(), proposal_sha256,
-            provenance: [("fixture_administrator".into(), "actual-selected-root-exact-rule-v1".into())].into_iter().collect(),
-            source_path: self.source_path.clone(), child: proposal.decision.decision.to_string(),
-            parent: proposal.issuance_id.as_str().to_owned(), case: self.case, active: self.active.clone(), gate: self.gate.clone(),
-        })))
+        if matches!(self.case, Case::RequiresHuman) {
+            return Ok(ServiceParentAuthorization::RequiresHuman);
+        }
+        let proposal_sha256 = if matches!(self.case, Case::WrongProposal) {
+            "0".repeat(64)
+        } else {
+            proposal.proposal_sha256()?
+        };
+        Ok(ServiceParentAuthorization::Reserved(Box::new(
+            AdminReservation {
+                operator: self.operator.clone(),
+                rule: self.rule.clone(),
+                proposal_sha256,
+                provenance: [(
+                    "fixture_administrator".into(),
+                    "actual-selected-root-exact-rule-v1".into(),
+                )]
+                .into_iter()
+                .collect(),
+                source_path: self.source_path.clone(),
+                child: proposal.decision.decision.to_string(),
+                parent: proposal.issuance_id.as_str().to_owned(),
+                case: self.case,
+                active: self.active.clone(),
+                gate: self.gate.clone(),
+            },
+        )))
     }
 }
 impl ServiceParentAdministrationReservation for AdminReservation {
-    fn operator(&self) -> &PrincipalRef { &self.operator }
-    fn rule(&self) -> &ServiceParentAdministration { &self.rule }
-    fn proposal_sha256(&self) -> &str { &self.proposal_sha256 }
-    fn provenance(&self) -> &serde_json::Map<String, serde_json::Value> { &self.provenance }
+    fn operator(&self) -> &PrincipalRef {
+        &self.operator
+    }
+    fn rule(&self) -> &ServiceParentAdministration {
+        &self.rule
+    }
+    fn proposal_sha256(&self) -> &str {
+        &self.proposal_sha256
+    }
+    fn provenance(&self) -> &serde_json::Map<String, serde_json::Value> {
+        &self.provenance
+    }
     fn check_current(&self) -> Result<(), HostLifetimeError> {
-        if let Some(gate) = &self.gate { gate.at_parent_worker(&self.source_path, &self.parent)?; }
-        if !self.active.load(Ordering::SeqCst) || !matches!(self.case, Case::LateDenied | Case::LateUnavailable | Case::LateNotSettled) {
+        if let Some(gate) = &self.gate {
+            gate.at_parent_worker(&self.source_path, &self.parent)?;
+        }
+        if !self.active.load(Ordering::SeqCst)
+            || !matches!(
+                self.case,
+                Case::LateDenied | Case::LateUnavailable | Case::LateNotSettled
+            )
+        {
             return Ok(());
         }
-        let sql = rusqlite::Connection::open(&self.source_path).map_err(|_| HostLifetimeError::Unavailable)?;
-        let pending: i64 = sql.query_row("SELECT count(*) FROM toolkit_records WHERE \
+        let sql = rusqlite::Connection::open(&self.source_path)
+            .map_err(|_| HostLifetimeError::Unavailable)?;
+        let pending: i64 = sql
+            .query_row(
+                "SELECT count(*) FROM toolkit_records WHERE \
             json_extract(data, '$.schema') = 'toolkit.authenticated-service-access-decision' AND \
             json_extract(data, '$.body.decision.decision') = ?1 AND \
             json_extract(data, '$.body.issuance.state') = 'pending_native_issuance'",
-            [&self.child], |row| row.get(0)).map_err(|_| HostLifetimeError::Unavailable)?;
-        if pending == 0 { return Ok(()); }
-        Err(match self.case { Case::LateDenied => HostLifetimeError::Denied,
-            Case::LateNotSettled => HostLifetimeError::NotSettled, _ => HostLifetimeError::Unavailable })
+                [&self.child],
+                |row| row.get(0),
+            )
+            .map_err(|_| HostLifetimeError::Unavailable)?;
+        if pending == 0 {
+            return Ok(());
+        }
+        Err(match self.case {
+            Case::LateDenied => HostLifetimeError::Denied,
+            Case::LateNotSettled => HostLifetimeError::NotSettled,
+            _ => HostLifetimeError::Unavailable,
+        })
     }
 }
 
@@ -95,38 +209,106 @@ async fn actual_task(fixture: &ContinuationFixture) -> InstalledServiceTask {
     let a = fixture.submit().await;
     fixture.finish(&a).await.unwrap();
     let dispatch = fixture.probe.as_ref().unwrap().captured();
-    tokio::time::timeout(WAIT, fixture.machine.wait_run_settled(&fixture.session,
-        dispatch.retained_work().unwrap().run_id())).await.unwrap();
+    tokio::time::timeout(
+        WAIT,
+        fixture
+            .machine
+            .wait_run_settled(&fixture.session, dispatch.retained_work().unwrap().run_id()),
+    )
+    .await
+    .unwrap();
     let snapshot = acquisition(fixture, &dispatch).await;
-    let member = snapshot.request().host().continuation.native_original.as_ref().unwrap().member.as_ref().unwrap().member.clone();
-    fixture.source.prepare_service_task(fixture.store.clone(), snapshot, "owned-parent", &member).await.unwrap().unwrap()
+    let member = snapshot
+        .request()
+        .host()
+        .continuation
+        .native_original
+        .as_ref()
+        .unwrap()
+        .member
+        .as_ref()
+        .unwrap()
+        .member
+        .clone();
+    fixture
+        .source
+        .prepare_service_task(fixture.store.clone(), snapshot, "owned-parent", &member)
+        .await
+        .unwrap()
+        .unwrap()
 }
 
-fn policy(task: &InstalledServiceTask, fixture: &ContinuationFixture, config: &meerkat_core::McpServerConfig,
-    case: Case, gate: Option<Arc<WorkerGate>>) -> (Arc<InstalledApplicationServicePolicy>, Arc<AtomicBool>, Arc<AtomicUsize>) {
+fn policy(
+    task: &InstalledServiceTask,
+    fixture: &ContinuationFixture,
+    config: &meerkat_core::McpServerConfig,
+    case: Case,
+    gate: Option<Arc<WorkerGate>>,
+) -> (
+    Arc<InstalledApplicationServicePolicy>,
+    Arc<AtomicBool>,
+    Arc<AtomicUsize>,
+) {
     let lifetime = fixture.lifetime().clone();
     let native = lifetime.selected_policy().native_host.as_ref().unwrap();
     let config_sha256 = digest(&canonical_json(config).unwrap());
-    let service = FixtureService { owner: native.grant_administrator.clone(), original: task.parent.clone(),
-        acquisition: task.acquisition.clone(), fresh: task.fresh.clone(), config_sha256: config_sha256.clone(), expiry: task.before_ms };
+    let service = FixtureService {
+        owner: native.grant_administrator.clone(),
+        original: task.parent.clone(),
+        acquisition: task.acquisition.clone(),
+        fresh: task.fresh.clone(),
+        config_sha256: config_sha256.clone(),
+        expiry: task.before_ms,
+    };
     let active = Arc::new(AtomicBool::new(true));
     let calls = Arc::new(AtomicUsize::new(0));
-    let admin = FixtureAdmin { operator: native.remote_operator.clone().unwrap(),
+    let admin = FixtureAdmin {
+        operator: native.remote_operator.clone().unwrap(),
         deployment: lifetime.selected_policy().deployment.clone(),
-        rule: native.service_parent_administration.clone().unwrap(), original: task.parent.clone(),
-        acquisition: task.acquisition.clone(), config_sha256, source_path: fixture.source_path.clone(),
-        case, active: active.clone(), calls: calls.clone(), gate };
-    (Arc::new(InstalledApplicationServicePolicy::with_task_parent_provisioning(lifetime,
-        Arc::new(service), Arc::new(admin)).unwrap()), active, calls)
+        rule: native.service_parent_administration.clone().unwrap(),
+        original: task.parent.clone(),
+        acquisition: task.acquisition.clone(),
+        config_sha256,
+        source_path: fixture.source_path.clone(),
+        case,
+        active: active.clone(),
+        calls: calls.clone(),
+        gate,
+    };
+    (
+        Arc::new(
+            InstalledApplicationServicePolicy::with_task_parent_provisioning(
+                lifetime,
+                Arc::new(service),
+                Arc::new(admin),
+            )
+            .unwrap(),
+        ),
+        active,
+        calls,
+    )
 }
-fn begin(task: InstalledServiceTask, policy: Arc<InstalledApplicationServicePolicy>, config: &meerkat_core::McpServerConfig)
-    -> ApplicationServiceOperation {
+fn begin(
+    task: InstalledServiceTask,
+    policy: Arc<InstalledApplicationServicePolicy>,
+    config: &meerkat_core::McpServerConfig,
+) -> ApplicationServiceOperation {
     match meerkat::ConnectorMcpInstallation::from_config(config) {
-        Some(installation) => task.begin_application_connector(policy, installation.unwrap(), [id("read")].into(), None),
-        None => task.begin_application_no_connector(policy, config.clone(), [id("read")].into(), None),
-    }.unwrap()
+        Some(installation) => task.begin_application_connector(
+            policy,
+            installation.unwrap(),
+            [id("read")].into(),
+            None,
+        ),
+        None => {
+            task.begin_application_no_connector(policy, config.clone(), [id("read")].into(), None)
+        }
+    }
+    .unwrap()
 }
-async fn prepare(operation: &mut ApplicationServiceOperation) -> Result<ApplicationServicePreparedStatus, PrivateOriginalError> {
+async fn prepare(
+    operation: &mut ApplicationServiceOperation,
+) -> Result<ApplicationServicePreparedStatus, PrivateOriginalError> {
     let control = operation.control();
     tokio::select! {
         prepared = control.prepared() => prepared,
@@ -315,16 +497,24 @@ async fn exercise(case: Case, connector: bool) {
         }
     }).catch_unwind().await;
     // Assertions/timeouts cannot abandon the operation's retained work.
-    if let Some(operation) = operation.as_mut() { operation.retire().await; }
+    if let Some(operation) = operation.as_mut() {
+        operation.retire().await;
+    }
     let cleanup = fixture.shutdown().await;
     assert!(cleanup.is_ok(), "{cleanup:?}");
-    if let Err(panic) = result { std::panic::resume_unwind(panic); }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fresh_connector_parent_child_and_fresh_native_source() { exercise(Case::Positive, true).await; }
+async fn fresh_connector_parent_child_and_fresh_native_source() {
+    exercise(Case::Positive, true).await;
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fresh_no_connector_parent_child_and_fresh_native_source() { exercise(Case::Positive, false).await; }
+async fn fresh_no_connector_parent_child_and_fresh_native_source() {
+    exercise(Case::Positive, false).await;
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn standing_parent_accepts_canonical_acquisition_scope_and_rejects_other_scopes() {
     let fixture = ContinuationFixture::for_task_parent_service_input().await;
@@ -332,37 +522,76 @@ async fn standing_parent_accepts_canonical_acquisition_scope_and_rejects_other_s
         let task = actual_task(&fixture).await;
         // The key came from an admitted SetupStore snapshot, not a fixture-only owner.
         assert_eq!(task.acquisition.realm, fixture.scope.realm);
-        assert_eq!(task.acquisition.owner, format!("toolkit/acquisition/{}", fixture.scope.owner));
+        assert_eq!(
+            task.acquisition.owner,
+            format!("toolkit/acquisition/{}", fixture.scope.owner)
+        );
         assert_ne!(task.acquisition.owner, fixture.scope.owner);
-        let operator = fixture.source.application_operator_setup(fixture.lifetime().clone()).unwrap();
+        let operator = fixture
+            .source
+            .application_operator_setup(fixture.lifetime().clone())
+            .unwrap();
         let fresh = id(task.fresh.as_str());
-        assert!(operator.service_parent_rule(&task.parent, &task.acquisition, &fresh).is_ok(),
-            "the canonical acquisition key must be accepted for its selected deployment");
-        for (field, value) in [("realm", "other-realm"), ("owner", fixture.scope.owner.as_str()),
-            ("owner", "toolkit/acquisition/other-deployment")] {
+        assert!(
+            operator
+                .service_parent_rule(&task.parent, &task.acquisition, &fresh)
+                .is_ok(),
+            "the canonical acquisition key must be accepted for its selected deployment"
+        );
+        for (field, value) in [
+            ("realm", "other-realm"),
+            ("owner", fixture.scope.owner.as_str()),
+            ("owner", "toolkit/acquisition/other-deployment"),
+        ] {
             let mut wrong = task.acquisition.clone();
-            match field { "realm" => wrong.realm = value.into(), _ => wrong.owner = value.into() };
-            assert!(operator.service_parent_rule(&task.parent, &wrong, &fresh).is_err(), "{field}={value}");
+            match field {
+                "realm" => wrong.realm = value.into(),
+                _ => wrong.owner = value.into(),
+            };
+            assert!(
+                operator
+                    .service_parent_rule(&task.parent, &wrong, &fresh)
+                    .is_err(),
+                "{field}={value}"
+            );
         }
-    }).catch_unwind().await;
+    })
+    .catch_unwind()
+    .await;
     let cleanup = fixture.shutdown().await;
     assert!(cleanup.is_ok(), "{cleanup:?}");
-    if let Err(panic) = result { std::panic::resume_unwind(panic); }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn administrative_requires_human_never_issues() { exercise(Case::RequiresHuman, false).await; }
+async fn administrative_requires_human_never_issues() {
+    exercise(Case::RequiresHuman, false).await;
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn wrong_administrative_proposal_never_issues() { exercise(Case::WrongProposal, false).await; }
+async fn wrong_administrative_proposal_never_issues() {
+    exercise(Case::WrongProposal, false).await;
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn retiring_prepared_operation_never_enters_grants() { exercise(Case::CancelPrepared, false).await; }
+async fn retiring_prepared_operation_never_enters_grants() {
+    exercise(Case::CancelPrepared, false).await;
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn parent_issued_then_child_denied_is_joined_partial_failure() { exercise(Case::LateDenied, false).await; }
+async fn parent_issued_then_child_denied_is_joined_partial_failure() {
+    exercise(Case::LateDenied, false).await;
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn late_administrative_unavailable_preserves_pending_without_reissue() { exercise(Case::LateUnavailable, false).await; }
+async fn late_administrative_unavailable_preserves_pending_without_reissue() {
+    exercise(Case::LateUnavailable, false).await;
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn late_administrative_not_settled_retains_typed_reason() { exercise(Case::LateNotSettled, false).await; }
+async fn late_administrative_not_settled_retains_typed_reason() {
+    exercise(Case::LateNotSettled, false).await;
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn lost_parent_receipt_recovers_actual_native_identity_once() { exercise(Case::LostParentReceipt, false).await; }
+async fn lost_parent_receipt_recovers_actual_native_identity_once() {
+    exercise(Case::LostParentReceipt, false).await;
+}
 
 /// Blocks the actual parent spawn_blocking worker's final policy predicate,
 /// after its durable Pending write and under its native setup fence. It does
@@ -375,33 +604,76 @@ struct WorkerGate {
 }
 impl WorkerGate {
     fn release(&self) {
-        if let Ok(mut open) = self.open.lock() { *open = true; self.changed.notify_all(); }
+        if let Ok(mut open) = self.open.lock() {
+            *open = true;
+            self.changed.notify_all();
+        }
     }
-    fn at_parent_worker(&self, path: &std::path::Path, parent: &str) -> Result<(), HostLifetimeError> {
-        if self.once.load(Ordering::SeqCst) { return Ok(()); }
+    fn at_parent_worker(
+        &self,
+        path: &std::path::Path,
+        parent: &str,
+    ) -> Result<(), HostLifetimeError> {
+        if self.once.load(Ordering::SeqCst) {
+            return Ok(());
+        }
         let sql = rusqlite::Connection::open(path).map_err(|_| HostLifetimeError::Unavailable)?;
-        let pending: i64 = sql.query_row("SELECT count(*) FROM toolkit_records WHERE id = ?1 AND \
+        let pending: i64 = sql
+            .query_row(
+                "SELECT count(*) FROM toolkit_records WHERE id = ?1 AND \
             json_extract(data, '$.schema') = 'toolkit.operator-application-parent' AND \
-            json_extract(data, '$.body.issued.state') = 'pending'", [parent], |row| row.get(0))
+            json_extract(data, '$.body.issued.state') = 'pending'",
+                [parent],
+                |row| row.get(0),
+            )
             .map_err(|_| HostLifetimeError::Unavailable)?;
-        if pending == 0 || self.once.swap(true, Ordering::SeqCst) { return Ok(()); }
-        if let Some(sender) = self.entered.lock().map_err(|_| HostLifetimeError::Unavailable)?.take() { let _ = sender.send(()); }
-        let mut open = self.open.lock().map_err(|_| HostLifetimeError::Unavailable)?;
-        while !*open { open = self.changed.wait(open).map_err(|_| HostLifetimeError::Unavailable)?; }
+        if pending == 0 || self.once.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
+        if let Some(sender) = self
+            .entered
+            .lock()
+            .map_err(|_| HostLifetimeError::Unavailable)?
+            .take()
+        {
+            let _ = sender.send(());
+        }
+        let mut open = self
+            .open
+            .lock()
+            .map_err(|_| HostLifetimeError::Unavailable)?;
+        while !*open {
+            open = self
+                .changed
+                .wait(open)
+                .map_err(|_| HostLifetimeError::Unavailable)?;
+        }
         Ok(())
     }
 }
 struct ReleaseGate(Arc<WorkerGate>);
-impl Drop for ReleaseGate { fn drop(&mut self) { self.0.release(); } }
+impl Drop for ReleaseGate {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
 struct MechanicalCaller(Arc<AtomicUsize>);
-impl Drop for MechanicalCaller { fn drop(&mut self) { self.0.fetch_add(1, Ordering::SeqCst); } }
+impl Drop for MechanicalCaller {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dropped_drive_waiter_retains_actual_parent_worker_until_retired_join() {
     let fixture = ContinuationFixture::for_task_parent_service_input().await;
     let (entered, entered_receive) = oneshot::channel();
-    let gate = Arc::new(WorkerGate { once: AtomicBool::new(false), entered: Mutex::new(Some(entered)),
-        open: Mutex::new(false), changed: std::sync::Condvar::new() });
+    let gate = Arc::new(WorkerGate {
+        once: AtomicBool::new(false),
+        entered: Mutex::new(Some(entered)),
+        open: Mutex::new(false),
+        changed: std::sync::Condvar::new(),
+    });
     let release = ReleaseGate(gate.clone());
     let dropped = Arc::new(AtomicUsize::new(0));
     let mut operation = None;
@@ -437,10 +709,14 @@ async fn dropped_drive_waiter_retains_actual_parent_worker_until_retired_join() 
         assert_eq!(dropped.load(Ordering::SeqCst), 1);
     }).catch_unwind().await;
     drop(release);
-    if let Some(operation) = operation.as_mut() { operation.retire().await; }
+    if let Some(operation) = operation.as_mut() {
+        operation.retire().await;
+    }
     let cleanup = fixture.shutdown().await;
     assert!(cleanup.is_ok(), "{cleanup:?}");
-    if let Err(panic) = result { std::panic::resume_unwind(panic); }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 #[test]
@@ -451,7 +727,9 @@ fn joined_native_refusal_is_distinct_from_an_unknown_entered_outcome() {
     let refused = Err(ServiceOperationError::Source(PrivateOriginalError::Denied));
     assert!(operation_outcome(&refused, &progress) == ServiceParentOperationOutcome::Uncertain);
     progress.native_refused();
-    assert!(operation_outcome(&refused, &progress) == ServiceParentOperationOutcome::RefusedBeforeEntry);
+    assert!(
+        operation_outcome(&refused, &progress) == ServiceParentOperationOutcome::RefusedBeforeEntry
+    );
 }
 
 struct AwaitRetirement {
@@ -460,9 +738,19 @@ struct AwaitRetirement {
 }
 #[async_trait::async_trait]
 impl ApplicationServiceParentAuthorizer for AwaitRetirement {
-    async fn reserve(&self, request: &ServiceParentAuthorizationRequest<'_>) -> Result<ServiceParentAuthorization, HostLifetimeError> {
+    async fn reserve(
+        &self,
+        request: &ServiceParentAuthorizationRequest<'_>,
+    ) -> Result<ServiceParentAuthorization, HostLifetimeError> {
         let actual = self.inner.reserve(request).await?;
-        if let Some(entered) = self.entered.lock().map_err(|_| HostLifetimeError::Unavailable)?.take() { let _ = entered.send(()); }
+        if let Some(entered) = self
+            .entered
+            .lock()
+            .map_err(|_| HostLifetimeError::Unavailable)?
+            .take()
+        {
+            let _ = entered.send(());
+        }
         request.observer().wait_retiring().await;
         drop(actual); // The fixture's real pending producer has now settled.
         Err(HostLifetimeError::Denied)
@@ -503,10 +791,14 @@ async fn native_rust_authorizer_observes_retirement_before_entry() {
         assert!(!fixture.store.list_records(&fixture.scope, None, 256).await.unwrap().iter()
             .any(|row| row.data.schema == "toolkit.operator-application-parent" && row.data.version == 3));
     }).catch_unwind().await;
-    if let Some(operation) = operation.as_mut() { operation.retire().await; }
+    if let Some(operation) = operation.as_mut() {
+        operation.retire().await;
+    }
     let cleanup = fixture.shutdown().await;
     assert!(cleanup.is_ok(), "{cleanup:?}");
-    if let Err(panic) = result { std::panic::resume_unwind(panic); }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 // The package callback is an exact test double only for filesystem readback.
@@ -520,11 +812,16 @@ struct ApplicationPackageReadback {
 }
 #[async_trait::async_trait]
 impl ServiceInstallationReadback for ApplicationPackageReadback {
-    async fn readback(&self, _: &ApprovalRecord) -> Result<meerkat_core::McpServerConfig, PrivateOriginalError> {
+    async fn readback(
+        &self,
+        _: &ApprovalRecord,
+    ) -> Result<meerkat_core::McpServerConfig, PrivateOriginalError> {
         panic!("standing application decision must not become a human approval")
     }
-    async fn readback_source(&self, source: &ServiceInstallationReadbackSource)
-        -> Result<meerkat_core::McpServerConfig, PrivateOriginalError> {
+    async fn readback_source(
+        &self,
+        source: &ServiceInstallationReadbackSource,
+    ) -> Result<meerkat_core::McpServerConfig, PrivateOriginalError> {
         let ServiceInstallationReadbackSource::ApplicationPolicy(source) = source else {
             panic!("expected the retained application decision")
         };
@@ -534,10 +831,18 @@ impl ServiceInstallationReadback for ApplicationPackageReadback {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if let Some((key, data)) = self.change_during_readback.lock().await.take() {
             let current = self.store.get(&key).await.unwrap().unwrap();
-            self.store.compare_and_swap(toolkit_store::Transition { key,
-                expected_revision: current.revision, expected_digest: Some(current.content_digest),
-                claim: None, data, events: vec![], effects: vec![],
-            }).await.unwrap();
+            self.store
+                .compare_and_swap(toolkit_store::Transition {
+                    key,
+                    expected_revision: current.revision,
+                    expected_digest: Some(current.content_digest),
+                    claim: None,
+                    data,
+                    events: vec![],
+                    effects: vec![],
+                })
+                .await
+                .unwrap();
         }
         Ok(self.config.clone())
     }
@@ -627,10 +932,14 @@ async fn application_installation_readback_case(include_source: bool) {
         assert!(fixture.source.decode_record(&fixture.store.get(&source.key).await.unwrap().unwrap(), &b)
             .unwrap().service_admission.is_none());
     }).catch_unwind().await;
-    if let Some(operation) = operation.as_mut() { operation.retire().await; }
+    if let Some(operation) = operation.as_mut() {
+        operation.retire().await;
+    }
     let cleanup = fixture.shutdown().await;
     assert!(cleanup.is_ok(), "{cleanup:?}");
-    if let Err(panic) = result { std::panic::resume_unwind(panic); }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

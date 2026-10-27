@@ -1,12 +1,15 @@
 //! A bounded alternative on the existing public request tool. The helper
 //! chooses every reconciled job; the host authenticates the same waiting task.
 use super::*;
-use toolkit_mobkit::private_originals::PublicServiceBatchEntry;
 use toolkit_mobkit::installed_host::operator_setup::MAX_PUBLIC_SERVICE_BATCH;
+use toolkit_mobkit::private_originals::PublicServiceBatchEntry;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct BatchMemberProposal { job_id: String, operations: Vec<String> }
+struct BatchMemberProposal {
+    job_id: String,
+    operations: Vec<String>,
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -25,7 +28,11 @@ struct Member {
 }
 impl Member {
     fn current(&self) -> bool {
-        self.selected.public_configuration(&self.selection.operations).ok().as_ref() == Some(&self.configuration)
+        self.selected
+            .public_configuration(&self.selection.operations)
+            .ok()
+            .as_ref()
+            == Some(&self.configuration)
     }
 }
 
@@ -45,67 +52,127 @@ fn invalid_batch() -> ToolError {
 }
 
 fn parse_batch(raw: &str) -> Result<BatchProposal, ToolError> {
-    if raw.len() > 64 * 1024 { return Err(invalid_batch()); }
+    if raw.len() > 64 * 1024 {
+        return Err(invalid_batch());
+    }
     serde_json::from_str::<crate::forge::UniqueJson>(raw).map_err(|_| invalid_batch())?;
     let value: Value = serde_json::from_str(raw).map_err(|_| invalid_batch())?;
-    if value.get("expires_in_ms").is_none() { return Err(invalid_batch()); }
+    if value.get("expires_in_ms").is_none() {
+        return Err(invalid_batch());
+    }
     let proposal: BatchProposal = serde_json::from_str(raw).map_err(|_| invalid_batch())?;
-    if proposal.services.len() < 2 || proposal.services.len() > MAX_PUBLIC_SERVICE_BATCH
+    if proposal.services.len() < 2
+        || proposal.services.len() > MAX_PUBLIC_SERVICE_BATCH
         || proposal.tool_policy.catalog.is_none()
-        || proposal.services.iter().map(|member| &member.job_id).collect::<BTreeSet<_>>().len() != proposal.services.len()
-    { return Err(invalid_batch()); }
+        || proposal
+            .services
+            .iter()
+            .map(|member| &member.job_id)
+            .collect::<BTreeSet<_>>()
+            .len()
+            != proposal.services.len()
+    {
+        return Err(invalid_batch());
+    }
     // Preserve the existing singleton validation for each exact job/operation
     // proposal. This does not enter review or construct an approval record.
     for member in &proposal.services {
-        parse(&serde_json::to_string(&json!({"job_id":member.job_id,"operations":member.operations,
-            "agent":proposal.agent,"expires_in_ms":proposal.expires_in_ms})).map_err(|_| invalid_batch())?)?;
+        parse(
+            &serde_json::to_string(
+                &json!({"job_id":member.job_id,"operations":member.operations,
+            "agent":proposal.agent,"expires_in_ms":proposal.expires_in_ms}),
+            )
+            .map_err(|_| invalid_batch())?,
+        )?;
     }
     Ok(proposal)
 }
 
-pub(super) async fn dispatch(owner: &RequestTool, call: ToolCallView<'_>,
-    context: &ToolDispatchContext, plan: Option<&ResolvedToolExecutionPlan>,
+pub(super) async fn dispatch(
+    owner: &RequestTool,
+    call: ToolCallView<'_>,
+    context: &ToolDispatchContext,
+    plan: Option<&ResolvedToolExecutionPlan>,
 ) -> Result<ToolDispatchOutcome, ToolError> {
     if context.origin_session_id() != Some(&owner.session)
-        || context.work_authorization().is_none() || context.retained_work().is_none()
-    { return Err(ToolError::access_denied(call.name)); }
-    let mut current = context.check_tool_authorization(call, plan)?.unwrap_or_else(|| context.clone());
+        || context.work_authorization().is_none()
+        || context.retained_work().is_none()
+    {
+        return Err(ToolError::access_denied(call.name));
+    }
+    let mut current = context
+        .check_tool_authorization(call, plan)?
+        .unwrap_or_else(|| context.clone());
     let proposal = parse_batch(call.args.get())?;
     let mut members = Vec::with_capacity(proposal.services.len());
     for member in proposal.services {
-        let selected = select_public_job(&owner.checked, &owner.realm, &owner.session, &member.job_id)?;
+        let selected =
+            select_public_job(&owner.checked, &owner.realm, &owner.session, &member.job_id)?;
         let operations: BTreeSet<_> = member.operations.into_iter().collect();
         if !operations.is_subset(&selected.public_operations().map_err(|_| unavailable())?) {
             return Err(invalid_batch());
         }
-        let configuration = selected.public_configuration(&operations).map_err(|_| unavailable())?;
-        require_console_tool_policy(call.name, &configuration, &operations, Some(&proposal.tool_policy))?;
-        members.push(Member { selected, configuration, selection: PublicSelection {
-            operations, agent: proposal.agent.clone(), expires_in_ms: proposal.expires_in_ms,
-            tool_policy: None,
-        } });
+        let configuration = selected
+            .public_configuration(&operations)
+            .map_err(|_| unavailable())?;
+        require_console_tool_policy(
+            call.name,
+            &configuration,
+            &operations,
+            Some(&proposal.tool_policy),
+        )?;
+        members.push(Member {
+            selected,
+            configuration,
+            selection: PublicSelection {
+                operations,
+                agent: proposal.agent.clone(),
+                expires_in_ms: proposal.expires_in_ms,
+                tool_policy: None,
+            },
+        });
     }
     members.sort_by(|left, right| left.configuration.name.cmp(&right.configuration.name));
-    if members.windows(2).any(|pair| pair[0].configuration.name == pair[1].configuration.name) {
+    if members
+        .windows(2)
+        .any(|pair| pair[0].configuration.name == pair[1].configuration.name)
+    {
         return Err(invalid_batch());
     }
-    let task = owner.tasks.as_ref().ok_or_else(|| ToolError::access_denied(call.name))?
-        .prepare_public_service(call, &current, plan).await
-        .map_err(|_| unavailable())?.ok_or_else(|| ToolError::access_denied(call.name))?;
+    let task = owner
+        .tasks
+        .as_ref()
+        .ok_or_else(|| ToolError::access_denied(call.name))?
+        .prepare_public_service(call, &current, plan)
+        .await
+        .map_err(|_| unavailable())?
+        .ok_or_else(|| ToolError::access_denied(call.name))?;
     require_captured_consumer(call.name, &proposal.agent, &task)?;
     // This new set shape deliberately uses one real protected Console review.
     // Existing singleton application policy behavior remains its own path.
     if task.console_login().is_none() || members.iter().any(|member| !member.current()) {
         return Err(ToolError::access_denied(call.name));
     }
-    if let Some(refreshed) = current.check_tool_authorization(call, plan)? { current = refreshed; }
+    if let Some(refreshed) = current.check_tool_authorization(call, plan)? {
+        current = refreshed;
+    }
     let entry = current.reviewed_entry_ticket(call, plan)?;
     let (checks, mut requests) = mpsc::channel::<oneshot::Sender<bool>>(1);
     let (response, receive) = oneshot::channel();
-    owner.public_requests.as_ref().ok_or_else(unavailable)?.try_send(InstalledPublicRequest::Batch(
-        InstalledPublicBatchRequest { members, expires_in_ms: proposal.expires_in_ms, policy: proposal.tool_policy,
-            task: Some(task), entry, current: CurrentRequest(checks), response }
-    )).map_err(|_| unavailable())?;
+    owner
+        .public_requests
+        .as_ref()
+        .ok_or_else(unavailable)?
+        .try_send(InstalledPublicRequest::Batch(InstalledPublicBatchRequest {
+            members,
+            expires_in_ms: proposal.expires_in_ms,
+            policy: proposal.tool_policy,
+            task: Some(task),
+            entry,
+            current: CurrentRequest(checks),
+            response,
+        }))
+        .map_err(|_| unavailable())?;
     tokio::pin!(receive);
     let response = loop {
         tokio::select! { biased;
@@ -121,14 +188,19 @@ pub(super) async fn dispatch(owner: &RequestTool, call: ToolCallView<'_>,
     };
     current.check_tool_authorization(call, plan)?;
     serde_json::to_string(&response.map_err(|_| unavailable())?)
-        .map(|body| ToolResult::new(call.id.into(), body, false).into()).map_err(|_| unavailable())
+        .map(|body| ToolResult::new(call.id.into(), body, false).into())
+        .map_err(|_| unavailable())
 }
 
 impl InstalledAccountRequests {
     pub(super) async fn present_public_batch_console<F: Future<Output = ()>>(
-        &mut self, mut request: InstalledPublicBatchRequest,
-        presenter: &mut Option<ApprovalPresenter>, bridge: PromptBridge,
-        refresh: &console::Refresh<'_>, decision: &console::CaptureDecision<'_>, closed: F,
+        &mut self,
+        mut request: InstalledPublicBatchRequest,
+        presenter: &mut Option<ApprovalPresenter>,
+        bridge: PromptBridge,
+        refresh: &console::Refresh<'_>,
+        decision: &console::CaptureDecision<'_>,
+        closed: F,
     ) -> Result<bool, ConnectError> {
         let owner_closed = AtomicBool::new(false);
         let result = async {
@@ -191,68 +263,148 @@ impl InstalledAccountRequests {
 }
 
 impl InstalledServiceReview {
-    async fn review_public_batch(&self, members: &[Member], expires_in_ms: Option<u64>, policy: ServiceToolPolicySelection,
-        task: InstalledServiceTask, current: &CurrentRequest, refresh: &console::Refresh<'_>,
-        capture_decision: &console::CaptureDecision<'_>, cancellation: ReviewCancellation,
+    async fn review_public_batch(
+        &self,
+        members: &[Member],
+        expires_in_ms: Option<u64>,
+        policy: ServiceToolPolicySelection,
+        task: InstalledServiceTask,
+        current: &CurrentRequest,
+        refresh: &console::Refresh<'_>,
+        capture_decision: &console::CaptureDecision<'_>,
+        cancellation: ReviewCancellation,
     ) -> Result<PublicReply, ConnectError> {
         let check = || -> Result<(), ConnectError> {
             self.approvals.check_session(&self.session)?;
             cancellation.check()?;
-            if members.iter().any(|member| !member.current()) { return Err(refused("The selected public service set changed")); }
+            if members.iter().any(|member| !member.current()) {
+                return Err(refused("The selected public service set changed"));
+            }
             Ok(())
         };
-        check()?; refresh().await?;
-        if !current.check().await { return Err(refused("The public service set is no longer current")); }
+        check()?;
+        refresh().await?;
+        if !current.check().await {
+            return Err(refused("The public service set is no longer current"));
+        }
         let mut entries = Vec::with_capacity(members.len());
         let mut documents = Vec::with_capacity(members.len());
         for member in members {
-            let document = public_review_body(&member.selected, &member.configuration, &member.selection)?;
+            let document =
+                public_review_body(&member.selected, &member.configuration, &member.selection)?;
             let mut request = batch_request(&member.selected, document.clone());
             request.proposed_action.summary = "Review one member of the public service set".into();
             documents.push(document);
-            entries.push(PublicServiceBatchEntry { configuration: member.configuration.clone(),
-                operations: member.selection.operations.iter().cloned().map(toolkit_package::Id::new)
-                    .collect::<Result<_, _>>().map_err(|_| refused("The public operations are invalid"))?, request });
+            entries.push(PublicServiceBatchEntry {
+                configuration: member.configuration.clone(),
+                operations: member
+                    .selection
+                    .operations
+                    .iter()
+                    .cloned()
+                    .map(toolkit_package::Id::new)
+                    .collect::<Result<_, _>>()
+                    .map_err(|_| refused("The public operations are invalid"))?,
+                request,
+            });
         }
-        let request = batch_request(&members.first().ok_or_else(|| refused("The public set is empty"))?.selected,
+        let request = batch_request(
+            &members
+                .first()
+                .ok_or_else(|| refused("The public set is empty"))?
+                .selected,
             json!({"phase":"installed_public_service_batch_access","services":documents,
-                "tool_policy":policy,"notice":"One exact set, one fresh instruction only after every required attachment is current and Ready. Partial effects are retained and reconciled individually; approval is not readiness or rollback."}));
-        let prepared = task.prepare_public_batch(entries, expires_in_ms, request, policy).await
-            .map_err(|_| refused("The waiting task cannot be offered for this public service set"))?;
+                "tool_policy":policy,"notice":"One exact set, one fresh instruction only after every required attachment is current and Ready. Partial effects are retained and reconciled individually; approval is not readiness or rollback."}),
+        );
+        let prepared = task
+            .prepare_public_batch(entries, expires_in_ms, request, policy)
+            .await
+            .map_err(|_| {
+                refused("The waiting task cannot be offered for this public service set")
+            })?;
         check()?;
-        let record = self.approvals.review_access_cancellable(prepared.request().clone(), cancellation.cancelled(),
-            |id| cancellation.approval_created(id)).await?;
+        let record = self
+            .approvals
+            .review_access_cancellable(prepared.request().clone(), cancellation.cancelled(), |id| {
+                cancellation.approval_created(id)
+            })
+            .await?;
         let decision_current = capture_decision()?;
         check()?;
-        if record.status == ApprovalStatus::Denied { return Ok(PublicReply { state: PublicState::Denied,
-            access_reviewed: true, grant_issued: false, fresh_instruction_retained: false, ready: false }); }
-        if record.status != ApprovalStatus::Approved { return Err(refused("The public set has no matching decision")); }
-        if !current.check().await { return Err(refused("The public service set is no longer current")); }
-        refresh().await?; check()?;
-        let selected: Vec<_> = members.iter().map(|member| (member.selected.clone(), member.configuration.clone(), member.selection.operations.clone())).collect();
-        let approvals = self.approvals.clone(); let session = self.session.clone(); let cancelled = cancellation.clone();
-        let retained = prepared.approve(record, move || approvals.check_session(&session).is_ok()
-            && cancelled.check().is_ok() && decision_current()
-            && selected.iter().all(|(selection, config, operations)| selection.public_configuration(operations).ok().as_ref() == Some(config)))
-            .await.map_err(|_| refused("The approved public service set could not be retained"))?;
+        if record.status == ApprovalStatus::Denied {
+            return Ok(PublicReply {
+                state: PublicState::Denied,
+                access_reviewed: true,
+                grant_issued: false,
+                fresh_instruction_retained: false,
+                ready: false,
+            });
+        }
+        if record.status != ApprovalStatus::Approved {
+            return Err(refused("The public set has no matching decision"));
+        }
+        if !current.check().await {
+            return Err(refused("The public service set is no longer current"));
+        }
+        refresh().await?;
         check()?;
-        Ok(PublicReply { state: PublicState::Reviewed, access_reviewed: true, grant_issued: retained,
-            fresh_instruction_retained: retained, ready: false })
+        let selected: Vec<_> = members
+            .iter()
+            .map(|member| {
+                (
+                    member.selected.clone(),
+                    member.configuration.clone(),
+                    member.selection.operations.clone(),
+                )
+            })
+            .collect();
+        let approvals = self.approvals.clone();
+        let session = self.session.clone();
+        let cancelled = cancellation.clone();
+        let retained = prepared
+            .approve(record, move || {
+                approvals.check_session(&session).is_ok()
+                    && cancelled.check().is_ok()
+                    && decision_current()
+                    && selected.iter().all(|(selection, config, operations)| {
+                        selection.public_configuration(operations).ok().as_ref() == Some(config)
+                    })
+            })
+            .await
+            .map_err(|_| refused("The approved public service set could not be retained"))?;
+        check()?;
+        Ok(PublicReply {
+            state: PublicState::Reviewed,
+            access_reviewed: true,
+            grant_issued: retained,
+            fresh_instruction_retained: retained,
+            ready: false,
+        })
     }
 }
 
 fn batch_request(selected: &PublicServiceSelection, body: Value) -> ApprovalRequest {
     ApprovalRequest {
-        requester: ApprovalPrincipalId::new("connect-installed-setup-agent").expect("fixed principal"),
-        owner: ApprovalOwnerRef::Session { session_id: selected.session().clone() },
-        resource: ApprovalResourceRef { kind: ApprovalResourceKind::Runtime,
-            id: ApprovalResourceId::new("selected-installed-public-service-set") },
-        proposed_action: ApprovalProposedAction { kind: ApprovalActionKind::Other,
-            summary: "Review this exact public service set for the task".into(), body: Some(body.clone()) },
-        risk: ApprovalRisk::Medium, request_body: Some(body),
+        requester: ApprovalPrincipalId::new("connect-installed-setup-agent")
+            .expect("fixed principal"),
+        owner: ApprovalOwnerRef::Session {
+            session_id: selected.session().clone(),
+        },
+        resource: ApprovalResourceRef {
+            kind: ApprovalResourceKind::Runtime,
+            id: ApprovalResourceId::new("selected-installed-public-service-set"),
+        },
+        proposed_action: ApprovalProposedAction {
+            kind: ApprovalActionKind::Other,
+            summary: "Review this exact public service set for the task".into(),
+            body: Some(body.clone()),
+        },
+        risk: ApprovalRisk::Medium,
+        request_body: Some(body),
         allowed_decisions: [ApprovalDecision::Approve, ApprovalDecision::Deny].into(),
         expires_at: Some((SystemTime::now() + Duration::from_secs(120)).into()),
-        metadata: Default::default(), request_provenance: None,
+        metadata: Default::default(),
+        request_provenance: None,
     }
 }
 

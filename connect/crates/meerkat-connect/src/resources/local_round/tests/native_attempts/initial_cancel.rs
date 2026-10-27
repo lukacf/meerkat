@@ -6,152 +6,225 @@ use meerkat_mcp::{McpAttemptCancelCause, McpServerCloseOutcome, McpStdioLeaderOu
 
 fn initial_cancel(case: &NativeCase, report: usize) -> &meerkat_mcp::McpAttemptDisposition {
     let report = &case.reports[report];
-    assert!(report.is_settled() && report.guards_completed(), "{report:?}");
-    let record = report.guards().iter().find(|record| record.stage == McpGuardStage::Cancel)
+    assert!(
+        report.is_settled() && report.guards_completed(),
+        "{report:?}"
+    );
+    let record = report
+        .guards()
+        .iter()
+        .find(|record| record.stage == McpGuardStage::Cancel)
         .expect("the actual initial guard has a native cancellation completion");
-    assert_eq!(record.completion, McpGuardCompletion::Completed, "{record:?}");
+    assert_eq!(
+        record.completion,
+        McpGuardCompletion::Completed,
+        "{record:?}"
+    );
     let disposition = record.disposition.as_ref().unwrap();
     assert_eq!(disposition.key, case.probe.requests.lock().unwrap()[0].key);
-    assert!(matches!(disposition.open, McpAttemptOpenOutcome::Cancelled { .. }));
+    assert!(matches!(
+        disposition.open,
+        McpAttemptOpenOutcome::Cancelled { .. }
+    ));
     disposition
 }
 
 #[tokio::test]
 async fn native_unspawned_initial_cancellation_returns_unused_preparation() {
-    run("ready", "normal", false, |case| Box::pin(async move {
-        let session = case.fixture.register().await;
-        case.probe.hold_first.send_replace(true);
-        let first = case.route(&session);
-        case.add(first, ExternalToolDeltaPhase::Failed).await;
-        assert!(case.probe.held.load(Ordering::SeqCst));
-        assert!(case.native_pids().is_empty() && case.protocol.pids().is_empty());
+    run("ready", "normal", false, |case| {
+        Box::pin(async move {
+            let session = case.fixture.register().await;
+            case.probe.hold_first.send_replace(true);
+            let first = case.route(&session);
+            case.add(first, ExternalToolDeltaPhase::Failed).await;
+            assert!(case.probe.held.load(Ordering::SeqCst));
+            assert!(case.native_pids().is_empty() && case.protocol.pids().is_empty());
 
-        // A new actual registration cannot take the outstanding old guard,
-        // even though its native begin has stopped waiting for the late return.
-        case.fixture.retire(&session).await;
-        let next_session = case.fixture.register().await;
-        assert_ne!(session, next_session);
-        let blocked = case.route(&next_session);
-        case.add(blocked, ExternalToolDeltaPhase::Failed).await;
-        let closed = case.close(blocked).await;
-        let report = &case.reports[closed];
-        assert!(report.is_settled() && report.guards_completed(), "{report:?}");
-        assert!(report.guards().iter().any(|record| {
-            record.stage == McpGuardStage::Begin
-                && record.completion == McpGuardCompletion::Cancelled
-                && record.disposition.as_ref().is_some_and(|disposition| {
-                    matches!(disposition.open, McpAttemptOpenOutcome::Refused {
-                        refusal: meerkat_mcp::McpAttemptRefusal::PriorGuardUnsettled,
-                    }) && matches!(disposition.process, McpAttemptProcessEnd::NotSpawned)
-                })
-        }), "{report:?}");
-        // Core groups this member's guards across sessions and refuses before
-        // calling the factory while the first begin remains held.
-        assert_eq!(case.probe.requests.lock().unwrap().len(), 1);
-        assert!(case.native_pids().is_empty());
+            // A new actual registration cannot take the outstanding old guard,
+            // even though its native begin has stopped waiting for the late return.
+            case.fixture.retire(&session).await;
+            let next_session = case.fixture.register().await;
+            assert_ne!(session, next_session);
+            let blocked = case.route(&next_session);
+            case.add(blocked, ExternalToolDeltaPhase::Failed).await;
+            let closed = case.close(blocked).await;
+            let report = &case.reports[closed];
+            assert!(
+                report.is_settled() && report.guards_completed(),
+                "{report:?}"
+            );
+            assert!(
+                report.guards().iter().any(|record| {
+                    record.stage == McpGuardStage::Begin
+                        && record.completion == McpGuardCompletion::Cancelled
+                        && record.disposition.as_ref().is_some_and(|disposition| {
+                            matches!(
+                                disposition.open,
+                                McpAttemptOpenOutcome::Refused {
+                                    refusal: meerkat_mcp::McpAttemptRefusal::PriorGuardUnsettled,
+                                }
+                            ) && matches!(disposition.process, McpAttemptProcessEnd::NotSpawned)
+                        })
+                }),
+                "{report:?}"
+            );
+            // Core groups this member's guards across sessions and refuses before
+            // calling the factory while the first begin remains held.
+            assert_eq!(case.probe.requests.lock().unwrap().len(), 1);
+            assert!(case.native_pids().is_empty());
 
-        case.probe.hold_first.send_replace(false);
-        let closed = case.close(first).await;
-        let disposition = initial_cancel(case, closed);
-        assert!(matches!(disposition.open, McpAttemptOpenOutcome::Cancelled {
-            cause: McpAttemptCancelCause::BeginBound,
-        }));
-        assert!(matches!(disposition.process, McpAttemptProcessEnd::NotSpawned));
+            case.probe.hold_first.send_replace(false);
+            let closed = case.close(first).await;
+            let disposition = initial_cancel(case, closed);
+            assert!(matches!(
+                disposition.open,
+                McpAttemptOpenOutcome::Cancelled {
+                    cause: McpAttemptCancelCause::BeginBound,
+                }
+            ));
+            assert!(matches!(
+                disposition.process,
+                McpAttemptProcessEnd::NotSpawned
+            ));
 
-        let stale = case.route(&session);
-        case.add(stale, ExternalToolDeltaPhase::Failed).await;
-        case.close(stale).await;
-        assert!(case.native_pids().is_empty(), "restoring preparation does not restore the old session");
-        let next = case.route(&next_session);
-        case.add(next, ExternalToolDeltaPhase::Applied).await;
-        let requests = case.probe.requests.lock().unwrap();
-        assert_eq!(requests.len(), 3);
-        assert_eq!(requests[1].owner.session_id, session);
-        assert_eq!(requests[2].owner.session_id, next_session);
-        assert_ne!(requests[0].key, requests[2].key);
-        drop(requests);
-        assert_eq!(case.native_pids().len(), 1);
-        assert!(case.protocol.pids().is_empty(), "unused initial descriptor needs no successor offer");
-        let closed = case.close(next).await;
-        case.assert_settled(closed);
-    })).await;
+            let stale = case.route(&session);
+            case.add(stale, ExternalToolDeltaPhase::Failed).await;
+            case.close(stale).await;
+            assert!(
+                case.native_pids().is_empty(),
+                "restoring preparation does not restore the old session"
+            );
+            let next = case.route(&next_session);
+            case.add(next, ExternalToolDeltaPhase::Applied).await;
+            let requests = case.probe.requests.lock().unwrap();
+            assert_eq!(requests.len(), 3);
+            assert_eq!(requests[1].owner.session_id, session);
+            assert_eq!(requests[2].owner.session_id, next_session);
+            assert_ne!(requests[0].key, requests[2].key);
+            drop(requests);
+            assert_eq!(case.native_pids().len(), 1);
+            assert!(
+                case.protocol.pids().is_empty(),
+                "unused initial descriptor needs no successor offer"
+            );
+            let closed = case.close(next).await;
+            case.assert_settled(closed);
+        })
+    })
+    .await;
 }
 
 #[tokio::test]
 async fn native_closed_initial_cancellation_uses_the_existing_successor_offer() {
-    run("ready", "initialize_hold", false, |case| Box::pin(async move {
-        let session = case.fixture.register().await;
-        let first = case.route(&session);
-        let config = case.fixture.server().clone();
-        let router = case.routers[first].as_mut().unwrap();
-        router.stage_add(config).unwrap();
-        router.apply_staged().await.unwrap();
-        tokio::time::timeout(BOUND, async {
-            loop {
-                if case.native_pids().iter().any(|pid| case.protocol.output
-                    .join(format!("{pid}.native-initializing")).exists()) { break; }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        }).await.expect("actual child waits inside native initialization");
-        assert_eq!(case.native_pids().len(), 1);
-        assert!(case.protocol.pids().is_empty());
+    run("ready", "initialize_hold", false, |case| {
+        Box::pin(async move {
+            let session = case.fixture.register().await;
+            let first = case.route(&session);
+            let config = case.fixture.server().clone();
+            let router = case.routers[first].as_mut().unwrap();
+            router.stage_add(config).unwrap();
+            router.apply_staged().await.unwrap();
+            tokio::time::timeout(BOUND, async {
+                loop {
+                    if case.native_pids().iter().any(|pid| {
+                        case.protocol
+                            .output
+                            .join(format!("{pid}.native-initializing"))
+                            .exists()
+                    }) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("actual child waits inside native initialization");
+            assert_eq!(case.native_pids().len(), 1);
+            assert!(case.protocol.pids().is_empty());
 
-        let closed = case.close(first).await;
-        let disposition = initial_cancel(case, closed);
-        assert!(matches!(disposition.open, McpAttemptOpenOutcome::Cancelled {
-            cause: McpAttemptCancelCause::RouterClosed,
-        }));
-        let McpAttemptProcessEnd::Closed(receipt) = &disposition.process else {
-            panic!("native custody must supply the actual child close: {disposition:?}");
-        };
-        assert!(McpServerCloseOutcome::Stdio(receipt.clone()).is_settled());
-        assert!(matches!(&receipt.leader, McpStdioLeaderOutcome::Reaped(status) if status.success()));
-        assert!(receipt.sigterm.is_none() && receipt.sigkill.is_none());
+            let closed = case.close(first).await;
+            let disposition = initial_cancel(case, closed);
+            assert!(matches!(
+                disposition.open,
+                McpAttemptOpenOutcome::Cancelled {
+                    cause: McpAttemptCancelCause::RouterClosed,
+                }
+            ));
+            let McpAttemptProcessEnd::Closed(receipt) = &disposition.process else {
+                panic!("native custody must supply the actual child close: {disposition:?}");
+            };
+            assert!(McpServerCloseOutcome::Stdio(receipt.clone()).is_settled());
+            assert!(
+                matches!(&receipt.leader, McpStdioLeaderOutcome::Reaped(status) if status.success())
+            );
+            assert!(receipt.sigterm.is_none() && receipt.sigkill.is_none());
 
-        case.fixture.retire(&session).await;
-        let next_session = case.fixture.register().await;
-        assert_ne!(session, next_session);
-        fs::write(case.protocol.output.join("native-mode"), "normal").unwrap();
-        let next = case.route(&next_session);
-        case.add(next, ExternalToolDeltaPhase::Applied).await;
-        assert_eq!(case.native_pids().len(), 2);
-        assert_eq!(case.protocol.pids().len(), 1, "a spawned initial child requires the real next-round owner");
-        assert_eq!(case.probe.requests.lock().unwrap()[1].owner.session_id, next_session);
-        let closed = case.close(next).await;
-        case.assert_settled(closed);
-    })).await;
+            case.fixture.retire(&session).await;
+            let next_session = case.fixture.register().await;
+            assert_ne!(session, next_session);
+            fs::write(case.protocol.output.join("native-mode"), "normal").unwrap();
+            let next = case.route(&next_session);
+            case.add(next, ExternalToolDeltaPhase::Applied).await;
+            assert_eq!(case.native_pids().len(), 2);
+            assert_eq!(
+                case.protocol.pids().len(),
+                1,
+                "a spawned initial child requires the real next-round owner"
+            );
+            assert_eq!(
+                case.probe.requests.lock().unwrap()[1].owner.session_id,
+                next_session
+            );
+            let closed = case.close(next).await;
+            case.assert_settled(closed);
+        })
+    })
+    .await;
 }
 
 #[tokio::test]
 async fn native_live_initial_guard_blocks_replacement_until_its_actual_close() {
-    run("ready", "normal", false, |case| Box::pin(async move {
-        let session = case.fixture.register().await;
-        let first = case.route(&session);
-        case.add(first, ExternalToolDeltaPhase::Applied).await;
-        let first_pid = case.native_pids()[0];
-        case.fixture.retire(&session).await;
-        let next_session = case.fixture.register().await;
-        assert_ne!(session, next_session);
-        let blocked = case.route(&next_session);
-        case.add(blocked, ExternalToolDeltaPhase::Failed).await;
-        case.close(blocked).await;
-        assert_eq!(case.native_pids(), vec![first_pid]);
-        assert!(!case.protocol.output.join(format!("{first_pid}.native-ended")).exists(),
-            "the old router remains live after registration replacement");
-        assert!(case.protocol.pids().is_empty());
+    run("ready", "normal", false, |case| {
+        Box::pin(async move {
+            let session = case.fixture.register().await;
+            let first = case.route(&session);
+            case.add(first, ExternalToolDeltaPhase::Applied).await;
+            let first_pid = case.native_pids()[0];
+            case.fixture.retire(&session).await;
+            let next_session = case.fixture.register().await;
+            assert_ne!(session, next_session);
+            let blocked = case.route(&next_session);
+            case.add(blocked, ExternalToolDeltaPhase::Failed).await;
+            case.close(blocked).await;
+            assert_eq!(case.native_pids(), vec![first_pid]);
+            assert!(
+                !case
+                    .protocol
+                    .output
+                    .join(format!("{first_pid}.native-ended"))
+                    .exists(),
+                "the old router remains live after registration replacement"
+            );
+            assert!(case.protocol.pids().is_empty());
 
-        let closed = case.close(first).await;
-        case.assert_settled(closed);
-        assert!(case.protocol.output.join(format!("{first_pid}.native-ended")).exists());
-        let next = case.route(&next_session);
-        case.add(next, ExternalToolDeltaPhase::Applied).await;
-        assert_eq!(case.native_pids().len(), 2);
-        assert_eq!(case.protocol.pids().len(), 1);
-        let closed = case.close(next).await;
-        case.assert_settled(closed);
-    })).await;
+            let closed = case.close(first).await;
+            case.assert_settled(closed);
+            assert!(
+                case.protocol
+                    .output
+                    .join(format!("{first_pid}.native-ended"))
+                    .exists()
+            );
+            let next = case.route(&next_session);
+            case.add(next, ExternalToolDeltaPhase::Applied).await;
+            assert_eq!(case.native_pids().len(), 2);
+            assert_eq!(case.protocol.pids().len(), 1);
+            let closed = case.close(next).await;
+            case.assert_settled(closed);
+        })
+    })
+    .await;
 }
-
 
 async fn initial_cancel_with_changed_resources(spawned: bool) {
     let native = if spawned { "initialize_hold" } else { "normal" };

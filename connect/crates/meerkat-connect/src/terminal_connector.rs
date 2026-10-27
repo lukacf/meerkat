@@ -22,9 +22,7 @@ use meerkat::governed_realm::stock::{
         stock_agent_principal,
     },
 };
-use meerkat_auth_core::auth_oauth::{
-    LoopbackWaitEnd, bind_loopback_callback_with_redirect,
-};
+use meerkat_auth_core::auth_oauth::{LoopbackWaitEnd, bind_loopback_callback_with_redirect};
 use meerkat_core::{
     AgentToolDispatcher, ApprovalActionKind, ApprovalDecision, ApprovalOwnerRef,
     ApprovalPrincipalId, ApprovalProposedAction, ApprovalRecord, ApprovalRequest,
@@ -46,15 +44,15 @@ use std::{
 use tokio::sync::{mpsc, oneshot, watch};
 
 mod access;
-mod installed;
-mod profiles;
-mod login;
-mod oauth_management;
-mod plain;
-mod secrets;
 #[cfg(test)]
 #[path = "terminal_connector/exit_tests.rs"]
 mod exit_tests;
+mod installed;
+mod login;
+mod oauth_management;
+mod plain;
+mod profiles;
+mod secrets;
 
 pub use secrets::management::{ServiceCredentialCommand, run_service_credential_command};
 
@@ -69,7 +67,19 @@ pub(crate) const ACCESS_INVENTORY_TOOL: &str = "toolkit_service_access_inventory
 pub(crate) const INSTALLED_LIST_TOOL: &str = "toolkit_installed_service_candidates";
 pub(crate) const INSTALLED_SELECT_TOOL: &str = "toolkit_select_installed_service";
 pub(crate) const ACCESS_MANAGE_TOOL: &str = "toolkit_manage_service_access";
-pub(crate) const TOOLS: &[&str] = &[TOOL, PLAIN_TOOL, SECRET_TOOL, SECRET_STATUS_TOOL, SECRET_MANAGE_TOOL, OAUTH_STATUS_TOOL, OAUTH_MANAGE_TOOL, ACCESS_INVENTORY_TOOL, ACCESS_MANAGE_TOOL, INSTALLED_LIST_TOOL, INSTALLED_SELECT_TOOL];
+pub(crate) const TOOLS: &[&str] = &[
+    TOOL,
+    PLAIN_TOOL,
+    SECRET_TOOL,
+    SECRET_STATUS_TOOL,
+    SECRET_MANAGE_TOOL,
+    OAUTH_STATUS_TOOL,
+    OAUTH_MANAGE_TOOL,
+    ACCESS_INVENTORY_TOOL,
+    ACCESS_MANAGE_TOOL,
+    INSTALLED_LIST_TOOL,
+    INSTALLED_SELECT_TOOL,
+];
 const WINDOW: Duration = Duration::from_secs(120);
 
 #[derive(Deserialize)]
@@ -110,21 +120,34 @@ impl ReviewedConnector {
     async fn finalize_outcome_after_close(self) -> FinalizedInstallation {
         let interrupt = std::future::pending::<io::Result<()>>();
         tokio::pin!(interrupt);
-        self.finalize_outcome_with_interrupt(interrupt.as_mut()).await
+        self.finalize_outcome_with_interrupt(interrupt.as_mut())
+            .await
     }
 
-    async fn finalize_outcome_with_interrupt<I: Future<Output = io::Result<()>>>(self,
-        mut interrupt: Pin<&mut I>) -> FinalizedInstallation {
-        let target = FinalizationTarget::new(&self.storage, &self.config, &self.request,
-            &self.installed.job_id, &self.installed.session);
+    async fn finalize_outcome_with_interrupt<I: Future<Output = io::Result<()>>>(
+        self,
+        mut interrupt: Pin<&mut I>,
+    ) -> FinalizedInstallation {
+        let target = FinalizationTarget::new(
+            &self.storage,
+            &self.config,
+            &self.request,
+            &self.installed.job_id,
+            &self.installed.session,
+        );
         let mut stopped = None;
-        let outcome = self.finalize_native_after_close(interrupt.as_mut(), &mut stopped).await
+        let outcome = self
+            .finalize_native_after_close(interrupt.as_mut(), &mut stopped)
+            .await
             .unwrap_or_else(FinalizationOutcome::BeforeAdministrationRefused);
         FinalizedInstallation::new_with_stop(target, outcome, stopped)
     }
 
-    async fn finalize_native_after_close<I: Future<Output = io::Result<()>>>(self,
-        interrupt: Pin<&mut I>, stopped: &mut Option<secrets::Stop>) -> Result<FinalizationOutcome, ConnectError> {
+    async fn finalize_native_after_close<I: Future<Output = io::Result<()>>>(
+        self,
+        interrupt: Pin<&mut I>,
+        stopped: &mut Option<secrets::Stop>,
+    ) -> Result<FinalizationOutcome, ConnectError> {
         if self.decision.status != ApprovalStatus::Approved
             || self.installed.server_name != self.config.name
         {
@@ -147,20 +170,24 @@ impl ReviewedConnector {
         // Reuse the setup factory's exact credential persistence. Native code
         // takes administrative custody before constructing its auth service;
         // no setup runtime or prebuilt auth service is reopened here.
-        Ok(settle_connector_effect(interrupt, stopped, || finalize_reviewed_connector(
-            &self.storage,
-            &principals,
-            &self.factory,
-            &review,
-        )).await)
+        Ok(settle_connector_effect(interrupt, stopped, || {
+            finalize_reviewed_connector(&self.storage, &principals, &self.factory, &review)
+        })
+        .await)
     }
 }
 
 /// Core owns the entire connector finalizer once entered. Only gate its entry;
 /// cancellation does not split or abandon that native composite operation.
-async fn settle_connector_effect<I, F>(interrupt: Pin<&mut I>, stopped: &mut Option<secrets::Stop>,
-    effect: impl FnOnce() -> F) -> FinalizationOutcome
-where I: Future<Output = io::Result<()>>, F: Future<Output = ReviewedConnectorFinalization> {
+async fn settle_connector_effect<I, F>(
+    interrupt: Pin<&mut I>,
+    stopped: &mut Option<secrets::Stop>,
+    effect: impl FnOnce() -> F,
+) -> FinalizationOutcome
+where
+    I: Future<Output = io::Result<()>>,
+    F: Future<Output = ReviewedConnectorFinalization>,
+{
     match secrets::joined_effect(interrupt, stopped, effect).await {
         Some(outcome) => FinalizationOutcome::Connector(outcome),
         None => FinalizationOutcome::BeforeAdministrationStopped,
@@ -239,36 +266,49 @@ fn finalization_message(
     finalization_message_ref(server, realm, agent, &outcome)
 }
 
-fn finalization_message_ref(server: &str, realm: &str, agent: &str,
+fn finalization_message_ref(
+    server: &str,
+    realm: &str,
+    agent: &str,
     outcome: &ReviewedConnectorFinalization,
 ) -> Result<String, ConnectError> {
     match outcome {
         ReviewedConnectorFinalization::Refused(_) => Err(unavailable(
-            "Native finalization was refused. No server configuration or grant was written by finalization."
+            "Native finalization was refused. No server configuration or grant was written by finalization.",
         )),
         ReviewedConnectorFinalization::PersistUncertain { .. } => Err(unavailable(
-            "The server configuration write has an uncertain outcome. No grant was issued. Do not repeat this finalization automatically."
+            "The server configuration write has an uncertain outcome. No grant was issued. Do not repeat this finalization automatically.",
         )),
-        ReviewedConnectorFinalization::Persisted { generation, grant } =>
-            persisted_grant_message_ref(server, realm, agent, *generation, grant.as_ref()),
+        ReviewedConnectorFinalization::Persisted { generation, grant } => {
+            persisted_grant_message_ref(server, realm, agent, *generation, grant.as_ref())
+        }
     }
 }
 
 fn persisted_grant_message(
-    server: &str, realm: &str, agent: &str, generation: u64,
+    server: &str,
+    realm: &str,
+    agent: &str,
+    generation: u64,
     grant: Result<meerkat::governed_realm::stock::issuance::StockGrantOutcome, StockGrantError>,
 ) -> Result<String, ConnectError> {
     persisted_grant_message_ref(server, realm, agent, generation, grant.as_ref())
 }
 
-fn persisted_grant_message_ref(server: &str, realm: &str, agent: &str, generation: u64,
+fn persisted_grant_message_ref(
+    server: &str,
+    realm: &str,
+    agent: &str,
+    generation: u64,
     grant: Result<&meerkat::governed_realm::stock::issuance::StockGrantOutcome, &StockGrantError>,
 ) -> Result<String, ConnectError> {
     let saved = format!("Saved {server} in realm {realm} at configuration generation {generation}");
     configured_grant_message_ref(&saved, agent, grant)
 }
 
-fn configured_grant_message_ref(saved: &str, agent: &str,
+fn configured_grant_message_ref(
+    saved: &str,
+    agent: &str,
     grant: Result<&meerkat::governed_realm::stock::issuance::StockGrantOutcome, &StockGrantError>,
 ) -> Result<String, ConnectError> {
     match grant {
@@ -276,7 +316,11 @@ fn configured_grant_message_ref(saved: &str, agent: &str,
             let mut message = format!(
                 "{saved}; native access is selected for agent {agent}. Open a fresh session in this realm to use the reviewed operations."
             );
-            if outcome.cleanup.iter().any(|attempt| attempt.outcome != RevocationOutcome::Revoked) {
+            if outcome
+                .cleanup
+                .iter()
+                .any(|attempt| attempt.outcome != RevocationOutcome::Revoked)
+            {
                 message.push_str(" Previous grant cleanup is incomplete; bounded native references and outcomes were retained.");
             }
             Ok(message)
@@ -293,10 +337,7 @@ fn configured_grant_message_ref(saved: &str, agent: &str,
             "{saved}; grant {} was issued but not selected. The previous selection is unchanged. Do not repeat this finalization automatically.",
             issued.grant_id.as_str()
         ))),
-        Err(StockGrantError::SelectionUncertain {
-            issued,
-            ..
-        }) => Err(unavailable(&format!(
+        Err(StockGrantError::SelectionUncertain { issued, .. }) => Err(unavailable(&format!(
             "{saved}; grant {} was issued and selected, but selection durability is uncertain. A restart may recover either selection. Do not repeat this finalization automatically.",
             issued.grant_id.as_str()
         ))),
@@ -322,24 +363,42 @@ impl ReviewedInstallation {
             Self::Secret(reviewed) => {
                 let interrupt = std::future::pending::<io::Result<()>>();
                 tokio::pin!(interrupt);
-                reviewed.finalize_outcome_after_close(interrupt.as_mut()).await
-            },
+                reviewed
+                    .finalize_outcome_after_close(interrupt.as_mut())
+                    .await
+            }
         }
     }
     /// Use the calling conversation's retained listener after setup has closed.
     /// The caller must retain this future until settlement. A secret installer
     /// joins each entered effect before stopping, without repolling a consumed
     /// listener. The returned result retains cancellation and native outcomes.
-    pub async fn finalize_outcome_unless_cancelled<I: Future<Output = io::Result<()>>>(self,
-        mut interrupt: Pin<&mut I>) -> Result<Option<FinalizedInstallation>, ConnectError> {
+    pub async fn finalize_outcome_unless_cancelled<I: Future<Output = io::Result<()>>>(
+        self,
+        mut interrupt: Pin<&mut I>,
+    ) -> Result<Option<FinalizedInstallation>, ConnectError> {
         if let Some(signal) = interrupt.as_mut().now_or_never() {
-            signal.map_err(|error| ConnectError::native("Listen for finalization cancellation", error))?;
+            signal.map_err(|error| {
+                ConnectError::native("Listen for finalization cancellation", error)
+            })?;
             return Ok(None);
         }
         Ok(Some(match self {
-            Self::Secret(reviewed) => reviewed.finalize_outcome_after_close(interrupt.as_mut()).await,
-            Self::Plain(reviewed) => reviewed.finalize_outcome_with_interrupt(interrupt.as_mut()).await,
-            Self::Account(reviewed) => reviewed.finalize_outcome_with_interrupt(interrupt.as_mut()).await,
+            Self::Secret(reviewed) => {
+                reviewed
+                    .finalize_outcome_after_close(interrupt.as_mut())
+                    .await
+            }
+            Self::Plain(reviewed) => {
+                reviewed
+                    .finalize_outcome_with_interrupt(interrupt.as_mut())
+                    .await
+            }
+            Self::Account(reviewed) => {
+                reviewed
+                    .finalize_outcome_with_interrupt(interrupt.as_mut())
+                    .await
+            }
         }))
     }
     pub async fn finalize_after_close<W: Write>(self, output: &mut W) -> Result<(), ConnectError> {
@@ -354,28 +413,42 @@ pub enum ReviewedAction {
     Access(access::ReviewedAccess),
 }
 impl From<ReviewedInstallation> for ReviewedAction {
-    fn from(value: ReviewedInstallation) -> Self { Self::Installation(value) }
+    fn from(value: ReviewedInstallation) -> Self {
+        Self::Installation(value)
+    }
 }
 impl ReviewedAction {
-    pub async fn finalize_outcome_unless_cancelled<I: Future<Output = io::Result<()>>>(self,
-        mut interrupt: Pin<&mut I>) -> Result<Option<FinalizedAction>, ConnectError> {
+    pub async fn finalize_outcome_unless_cancelled<I: Future<Output = io::Result<()>>>(
+        self,
+        mut interrupt: Pin<&mut I>,
+    ) -> Result<Option<FinalizedAction>, ConnectError> {
         let (outcome, continuation) = match self {
             Self::Installation(reviewed) => {
-                let Some(mut result) = reviewed.finalize_outcome_unless_cancelled(interrupt.as_mut()).await? else { return Ok(None); };
+                let Some(mut result) = reviewed
+                    .finalize_outcome_unless_cancelled(interrupt.as_mut())
+                    .await?
+                else {
+                    return Ok(None);
+                };
                 let notice = result.take_continuation_notice();
                 (ActionOutcome::Installation(Arc::new(result)), notice)
-            },
+            }
             Self::Access(reviewed) => {
                 if let Some(signal) = interrupt.as_mut().now_or_never() {
-                    signal.map_err(|error| ConnectError::native("Listen before access administration", error))?;
+                    signal.map_err(|error| {
+                        ConnectError::native("Listen before access administration", error)
+                    })?;
                     return Ok(None);
                 }
                 let mut result = reviewed.finalize(interrupt.as_mut()).await;
                 let notice = result.take_continuation_notice();
                 (ActionOutcome::Access(result), notice)
-            },
+            }
         };
-        Ok(Some(FinalizedAction {outcome, continuation}))
+        Ok(Some(FinalizedAction {
+            outcome,
+            continuation,
+        }))
     }
 }
 
@@ -393,13 +466,19 @@ impl FinalizedAction {
     /// Finish only the CLI invocation. Historical results grant no retry or
     /// current-state authority, and a later success cannot settle an earlier
     /// uncertain effect.
-    pub fn finish_invocation(completed: &[Self], result: Result<(), ConnectError>) -> Result<(), ConnectError> {
+    pub fn finish_invocation(
+        completed: &[Self],
+        result: Result<(), ConnectError>,
+    ) -> Result<(), ConnectError> {
         // A failure already reports a nonzero exit. Preserve that primary
         // error; a finalization result is not a cleanup failure.
         result?;
-        if !completed.iter().any(Self::has_unconfirmed_effect) { return Ok(()); }
+        if !completed.iter().any(Self::has_unconfirmed_effect) {
+            return Ok(());
+        }
         Err(unavailable(
-            "A finalized setup action has an unresolved or uncertain outcome. Review the displayed result and any retained setup artifacts. Later successful actions do not settle it; do not repeat it automatically."))
+            "A finalized setup action has an unresolved or uncertain outcome. Review the displayed result and any retained setup artifacts. Later successful actions do not settle it; do not repeat it automatically.",
+        ))
     }
     fn has_unconfirmed_effect(&self) -> bool {
         match &self.outcome {
@@ -407,18 +486,32 @@ impl FinalizedAction {
             ActionOutcome::Access(value) => value.has_unconfirmed_effect(),
         }
     }
-    pub fn take_continuation_notice(&mut self) -> Option<FinalizationNotice> { self.continuation.take() }
+    pub fn take_continuation_notice(&mut self) -> Option<FinalizationNotice> {
+        self.continuation.take()
+    }
     pub fn installation(&self) -> Option<Arc<FinalizedInstallation>> {
-        match &self.outcome { ActionOutcome::Installation(value) => Some(value.clone()), ActionOutcome::Access(_) => None }
+        match &self.outcome {
+            ActionOutcome::Installation(value) => Some(value.clone()),
+            ActionOutcome::Access(_) => None,
+        }
     }
     pub fn stopped_during_finalization(&self) -> bool {
-        match &self.outcome { ActionOutcome::Installation(value) => value.stopped_during_finalization(), ActionOutcome::Access(value) => value.stopped() }
+        match &self.outcome {
+            ActionOutcome::Installation(value) => value.stopped_during_finalization(),
+            ActionOutcome::Access(value) => value.stopped(),
+        }
     }
     pub fn display_for_continuation<W: Write>(&self, output: &mut W) -> Result<(), ConnectError> {
-        match &self.outcome { ActionOutcome::Installation(value) => value.display_for_continuation(output), ActionOutcome::Access(value) => value.display(output) }
+        match &self.outcome {
+            ActionOutcome::Installation(value) => value.display_for_continuation(output),
+            ActionOutcome::Access(value) => value.display(output),
+        }
     }
     pub fn retain(&self, directory: &std::path::Path, ordinal: usize) -> Result<(), ConnectError> {
-        match &self.outcome { ActionOutcome::Installation(value) => value.retain(directory, ordinal), ActionOutcome::Access(value) => value.retain(directory, ordinal) }
+        match &self.outcome {
+            ActionOutcome::Installation(value) => value.retain(directory, ordinal),
+            ActionOutcome::Access(value) => value.retain(directory, ordinal),
+        }
     }
 }
 
@@ -442,12 +535,20 @@ pub struct FinalizationNotice {
     input: meerkat_runtime::Input,
 }
 impl FinalizationNotice {
-    pub(crate) fn belongs_to(&self, realm: &meerkat_core::RealmLocator, session: &SessionId) -> bool {
+    pub(crate) fn belongs_to(
+        &self,
+        realm: &meerkat_core::RealmLocator,
+        session: &SessionId,
+    ) -> bool {
         &self.realm == realm && &self.session == session
     }
     #[cfg(test)]
-    pub(crate) fn input_for_test(&self) -> &meerkat_runtime::Input { &self.input }
-    pub(crate) fn into_input(self) -> meerkat_runtime::Input { self.input }
+    pub(crate) fn input_for_test(&self) -> &meerkat_runtime::Input {
+        &self.input
+    }
+    pub(crate) fn into_input(self) -> meerkat_runtime::Input {
+        self.input
+    }
 }
 
 #[derive(Debug)]
@@ -459,10 +560,20 @@ struct FinalizationTarget {
     session: SessionId,
 }
 impl FinalizationTarget {
-    fn new(storage: &ResolvedStorage, server: &McpServerConfig, request: &StockGrantRequest,
-        job_id: &str, session: &SessionId) -> Self {
-        Self { realm: storage.locator.clone(), server: server.name.clone(),
-            agent: request.agent.clone(), job_id: job_id.to_owned(), session: session.clone() }
+    fn new(
+        storage: &ResolvedStorage,
+        server: &McpServerConfig,
+        request: &StockGrantRequest,
+        job_id: &str,
+        session: &SessionId,
+    ) -> Self {
+        Self {
+            realm: storage.locator.clone(),
+            server: server.name.clone(),
+            agent: request.agent.clone(),
+            job_id: job_id.to_owned(),
+            session: session.clone(),
+        }
     }
 }
 
@@ -474,34 +585,63 @@ enum FinalizationOutcome {
     BeforeAdministrationStopped,
     Connector(ReviewedConnectorFinalization),
     PublicPersistenceError(meerkat_core::mcp_config::McpRealmPersistError),
-    PublicPersisted { generation: u64,
-        grant: Result<meerkat::governed_realm::stock::issuance::StockGrantOutcome, StockGrantError> },
-    PublicReused { generation: u64,
-        grant: Result<meerkat::governed_realm::stock::issuance::StockGrantOutcome, StockGrantError> },
-    PublicStoppedBeforeGrant { generation: u64, reused: bool },
+    PublicPersisted {
+        generation: u64,
+        grant: Result<meerkat::governed_realm::stock::issuance::StockGrantOutcome, StockGrantError>,
+    },
+    PublicReused {
+        generation: u64,
+        grant: Result<meerkat::governed_realm::stock::issuance::StockGrantOutcome, StockGrantError>,
+    },
+    PublicStoppedBeforeGrant {
+        generation: u64,
+        reused: bool,
+    },
     Secret(secrets::Outcome),
 }
 
-fn uncertain_grant(result: Result<&meerkat::governed_realm::stock::issuance::StockGrantOutcome, &StockGrantError>) -> bool {
-    matches!(result, Err(StockGrantError::IssuanceUncertain { .. } | StockGrantError::NotSelected { .. }
-        | StockGrantError::SelectionUncertain { .. } | StockGrantError::CommandUncertain))
+fn uncertain_grant(
+    result: Result<&meerkat::governed_realm::stock::issuance::StockGrantOutcome, &StockGrantError>,
+) -> bool {
+    matches!(
+        result,
+        Err(StockGrantError::IssuanceUncertain { .. }
+            | StockGrantError::NotSelected { .. }
+            | StockGrantError::SelectionUncertain { .. }
+            | StockGrantError::CommandUncertain)
+    )
 }
 
-fn unconfirmed_grant_effect(result: Result<&meerkat::governed_realm::stock::issuance::StockGrantOutcome, &StockGrantError>) -> bool {
+fn unconfirmed_grant_effect(
+    result: Result<&meerkat::governed_realm::stock::issuance::StockGrantOutcome, &StockGrantError>,
+) -> bool {
     match result {
-        Ok(outcome) => outcome.cleanup.iter().any(|attempt| attempt.outcome == RevocationOutcome::Uncertain),
+        Ok(outcome) => outcome
+            .cleanup
+            .iter()
+            .any(|attempt| attempt.outcome == RevocationOutcome::Uncertain),
         Err(_) => uncertain_grant(result),
     }
 }
 
-fn public_persistence_may_have_changed(error: &meerkat_core::mcp_config::McpRealmPersistError) -> bool {
-    use meerkat_core::{mcp_config::McpRealmPersistError as Persist, config_runtime::ConfigRuntimeError as Config};
+fn public_persistence_may_have_changed(
+    error: &meerkat_core::mcp_config::McpRealmPersistError,
+) -> bool {
+    use meerkat_core::{
+        config_runtime::ConfigRuntimeError as Config, mcp_config::McpRealmPersistError as Persist,
+    };
     // Legacy add uses Config errors even after document replacement, so keep
     // that conservative split. The entered API distinguishes a refused entry
     // from an unknown write outcome; neither exposes its diagnostic payload.
-    !matches!(error, Persist::ServerExists(_) | Persist::ServerNotFound(_)
-        | Persist::EnvReference(_) | Persist::Access(_) | Persist::NotAdmitted(_)
-        | Persist::Config(Config::GenerationConflict { .. }))
+    !matches!(
+        error,
+        Persist::ServerExists(_)
+            | Persist::ServerNotFound(_)
+            | Persist::EnvReference(_)
+            | Persist::Access(_)
+            | Persist::NotAdmitted(_)
+            | Persist::Config(Config::GenerationConflict { .. })
+    )
 }
 
 fn grant_refusal_tag(error: &meerkat::governed_realm::stock::StockGovernanceError) -> &'static str {
@@ -532,7 +672,9 @@ fn grant_refusal_tag(error: &meerkat::governed_realm::stock::StockGovernanceErro
 }
 
 fn public_persistence_details(error: &meerkat_core::mcp_config::McpRealmPersistError) -> Value {
-    use meerkat_core::{mcp_config::McpRealmPersistError as Persist, config_runtime::ConfigRuntimeError as Config};
+    use meerkat_core::{
+        config_runtime::ConfigRuntimeError as Config, mcp_config::McpRealmPersistError as Persist,
+    };
     // Only variant tags and generation numbers. Error text may contain a
     // credential-bearing configuration line or a local path.
     match error {
@@ -558,11 +700,21 @@ impl FinalizedInstallation {
         Self::new_with_stop(target, outcome, None)
     }
 
-    fn new_with_stop(target: FinalizationTarget, outcome: FinalizationOutcome,
-        stopped: Option<secrets::Stop>) -> Self {
-        let mut observed = Self { target, outcome, continuation: None, stopped };
+    fn new_with_stop(
+        target: FinalizationTarget,
+        outcome: FinalizationOutcome,
+        stopped: Option<secrets::Stop>,
+    ) -> Self {
+        let mut observed = Self {
+            target,
+            outcome,
+            continuation: None,
+            stopped,
+        };
         observed.continuation = Some(FinalizationNotice {
-            realm: observed.target.realm.clone(), session: observed.target.session.clone(), input: observed.make_input(),
+            realm: observed.target.realm.clone(),
+            session: observed.target.session.clone(),
+            input: observed.make_input(),
         });
         observed
     }
@@ -583,19 +735,32 @@ impl FinalizedInstallation {
     fn has_unconfirmed_effect(&self) -> bool {
         match &self.outcome {
             FinalizationOutcome::BeforeAdministrationRefused(_)
-                | FinalizationOutcome::BeforeAdministrationStopped
-                | FinalizationOutcome::Connector(ReviewedConnectorFinalization::Refused(_)) => false,
-            FinalizationOutcome::Connector(ReviewedConnectorFinalization::PersistUncertain { .. }) => true,
-            FinalizationOutcome::Connector(ReviewedConnectorFinalization::Persisted { grant, .. })
-                | FinalizationOutcome::PublicPersisted { grant, .. }
-                | FinalizationOutcome::PublicReused { grant, .. } => unconfirmed_grant_effect(grant.as_ref()),
-            FinalizationOutcome::PublicPersistenceError(error) => public_persistence_may_have_changed(error),
+            | FinalizationOutcome::BeforeAdministrationStopped
+            | FinalizationOutcome::Connector(ReviewedConnectorFinalization::Refused(_)) => false,
+            FinalizationOutcome::Connector(ReviewedConnectorFinalization::PersistUncertain {
+                ..
+            }) => true,
+            FinalizationOutcome::Connector(ReviewedConnectorFinalization::Persisted {
+                grant,
+                ..
+            })
+            | FinalizationOutcome::PublicPersisted { grant, .. }
+            | FinalizationOutcome::PublicReused { grant, .. } => {
+                unconfirmed_grant_effect(grant.as_ref())
+            }
+            FinalizationOutcome::PublicPersistenceError(error) => {
+                public_persistence_may_have_changed(error)
+            }
             FinalizationOutcome::PublicStoppedBeforeGrant { .. } => false,
             FinalizationOutcome::Secret(outcome) => outcome.has_unconfirmed_effect(),
         }
     }
 
-    pub(crate) fn belongs_to(&self, realm: &meerkat_core::RealmLocator, session: &SessionId) -> bool {
+    pub(crate) fn belongs_to(
+        &self,
+        realm: &meerkat_core::RealmLocator,
+        session: &SessionId,
+    ) -> bool {
         &self.target.realm == realm && &self.target.session == session
     }
 
@@ -603,27 +768,42 @@ impl FinalizedInstallation {
         // Native supplies the fresh durable header; the actual input variant
         // and origin identify a process event, never literal human text.
         let mut header = meerkat_runtime::PromptInput::new(String::new(), None).header;
-        header.source = meerkat_runtime::InputOrigin::External { source_name: "meerkat-connect-finalization".into() };
+        header.source = meerkat_runtime::InputOrigin::External {
+            source_name: "meerkat-connect-finalization".into(),
+        };
         meerkat_runtime::Input::ExternalEvent(meerkat_runtime::ExternalEventInput {
-            header, event_type: "connect_finalization_observation".into(),
+            header,
+            event_type: "connect_finalization_observation".into(),
             // Native's SystemNotice projection reads body. Keep exactly one
             // bounded result body; arbitrary structured fields are not text.
-            payload: json!({"body":self.notice().to_string()}), blocks: None,
-            handling_mode: meerkat_runtime::HandlingMode::default(), render_metadata: None, objective_id: None,
+            payload: json!({"body":self.notice().to_string()}),
+            blocks: None,
+            handling_mode: meerkat_runtime::HandlingMode::default(),
+            render_metadata: None,
+            objective_id: None,
         })
     }
 
     fn blocks_reentry(&self, realm: &meerkat_core::RealmLocator, server: &str) -> bool {
-        if &self.target.realm != realm || self.target.server != server { return false; }
+        if &self.target.realm != realm || self.target.server != server {
+            return false;
+        }
         match &self.outcome {
             FinalizationOutcome::BeforeAdministrationRefused(_) => false,
             FinalizationOutcome::BeforeAdministrationStopped => false,
             FinalizationOutcome::Connector(ReviewedConnectorFinalization::Refused(_)) => false,
-            FinalizationOutcome::Connector(ReviewedConnectorFinalization::PersistUncertain { .. }) => true,
-            FinalizationOutcome::Connector(ReviewedConnectorFinalization::Persisted { grant, .. })
-                | FinalizationOutcome::PublicPersisted { grant, .. }
-                | FinalizationOutcome::PublicReused { grant, .. } => uncertain_grant(grant.as_ref()),
-            FinalizationOutcome::PublicPersistenceError(error) => public_persistence_may_have_changed(error),
+            FinalizationOutcome::Connector(ReviewedConnectorFinalization::PersistUncertain {
+                ..
+            }) => true,
+            FinalizationOutcome::Connector(ReviewedConnectorFinalization::Persisted {
+                grant,
+                ..
+            })
+            | FinalizationOutcome::PublicPersisted { grant, .. }
+            | FinalizationOutcome::PublicReused { grant, .. } => uncertain_grant(grant.as_ref()),
+            FinalizationOutcome::PublicPersistenceError(error) => {
+                public_persistence_may_have_changed(error)
+            }
             FinalizationOutcome::PublicStoppedBeforeGrant { .. } => false,
             FinalizationOutcome::Secret(outcome) => outcome.blocks_reentry(),
         }
@@ -633,25 +813,54 @@ impl FinalizedInstallation {
         let target = &self.target;
         match &self.outcome {
             FinalizationOutcome::BeforeAdministrationRefused(_) => Err(unavailable(
-                "Finalization stopped before native administration. No service configuration or grant was written by this finalizer.")),
+                "Finalization stopped before native administration. No service configuration or grant was written by this finalizer.",
+            )),
             FinalizationOutcome::BeforeAdministrationStopped => Err(unavailable(
-                "Setup stopped before native administration. No configuration or grant operation was started.")),
+                "Setup stopped before native administration. No configuration or grant operation was started.",
+            )),
             FinalizationOutcome::Connector(outcome) => finalization_message_ref(
-                &target.server, target.realm.realm.as_str(), &target.agent, outcome),
+                &target.server,
+                target.realm.realm.as_str(),
+                &target.agent,
+                outcome,
+            ),
             FinalizationOutcome::PublicPersistenceError(error) => Err(unavailable(&format!(
                 "The public-service configuration write did not complete ({}). No grant was requested. {}",
-                public_persistence_details(error), if public_persistence_may_have_changed(error) { "The write may be partial. Do not repeat this target automatically." }
-                else { "The native writer refused before changing the configuration." }))),
-            FinalizationOutcome::PublicPersisted { generation, grant } => persisted_grant_message_ref(
-                &target.server, target.realm.realm.as_str(), &target.agent, *generation, grant.as_ref()),
-            FinalizationOutcome::PublicReused { generation, grant } => configured_grant_message_ref(
-                &format!("The exact reviewed public-service configuration for {} in realm {} at generation {} was already saved and was reused. This is a new access request; any prior uncertain grant outcome remains unresolved",
-                    target.server, target.realm.realm.as_str(), generation), &target.agent, grant.as_ref()),
-            FinalizationOutcome::PublicStoppedBeforeGrant { reused, .. } => Err(unavailable(if *reused {
-                "Public-service setup stopped before requesting new access. The existing configuration was not changed; no new grant was requested."
-            } else {
-                "Public-service setup stopped after the configuration was saved. No new grant was requested. The saved configuration was not rolled back."
-            })),
+                public_persistence_details(error),
+                if public_persistence_may_have_changed(error) {
+                    "The write may be partial. Do not repeat this target automatically."
+                } else {
+                    "The native writer refused before changing the configuration."
+                }
+            ))),
+            FinalizationOutcome::PublicPersisted { generation, grant } => {
+                persisted_grant_message_ref(
+                    &target.server,
+                    target.realm.realm.as_str(),
+                    &target.agent,
+                    *generation,
+                    grant.as_ref(),
+                )
+            }
+            FinalizationOutcome::PublicReused { generation, grant } => {
+                configured_grant_message_ref(
+                    &format!(
+                        "The exact reviewed public-service configuration for {} in realm {} at generation {} was already saved and was reused. This is a new access request; any prior uncertain grant outcome remains unresolved",
+                        target.server,
+                        target.realm.realm.as_str(),
+                        generation
+                    ),
+                    &target.agent,
+                    grant.as_ref(),
+                )
+            }
+            FinalizationOutcome::PublicStoppedBeforeGrant { reused, .. } => {
+                Err(unavailable(if *reused {
+                    "Public-service setup stopped before requesting new access. The existing configuration was not changed; no new grant was requested."
+                } else {
+                    "Public-service setup stopped after the configuration was saved. No new grant was requested. The saved configuration was not rolled back."
+                }))
+            }
             FinalizationOutcome::Secret(outcome) => outcome.message(target),
         }
     }
@@ -659,22 +868,31 @@ impl FinalizedInstallation {
     /// Legacy terminal behavior, with the typed result still held by the caller.
     pub fn display<W: Write>(&self, output: &mut W) -> Result<(), ConnectError> {
         let message = self.message()?;
-        writeln!(output, "{message}").map_err(|error| ConnectError::native("Display native finalization result", error))
+        writeln!(output, "{message}")
+            .map_err(|error| ConnectError::native("Display native finalization result", error))
     }
 
     /// Continuing setup also displays refusal/partial outcomes and lets the
     /// agent address independent work. Failure to print does not consume facts.
     pub fn display_for_continuation<W: Write>(&self, output: &mut W) -> Result<(), ConnectError> {
         let message = self.message().unwrap_or_else(|error| error.to_string());
-        writeln!(output, "{message}").map_err(|error| ConnectError::native("Display native finalization result", error))?;
+        writeln!(output, "{message}")
+            .map_err(|error| ConnectError::native("Display native finalization result", error))?;
         if let Some(stop) = &self.stopped {
             let message = match stop {
-                secrets::Stop::Cancelled => "Cancellation was observed. Any entered operation was joined; no later operation was started.",
-                secrets::Stop::ListenerFailed(_) => "Cancellation monitoring failed. Any entered operation was joined; no later operation was started.",
+                secrets::Stop::Cancelled => {
+                    "Cancellation was observed. Any entered operation was joined; no later operation was started."
+                }
+                secrets::Stop::ListenerFailed(_) => {
+                    "Cancellation monitoring failed. Any entered operation was joined; no later operation was started."
+                }
             };
-            writeln!(output, "{message}").map_err(|error| ConnectError::native("Display finalization stop", error))?;
+            writeln!(output, "{message}")
+                .map_err(|error| ConnectError::native("Display finalization stop", error))?;
             if matches!(stop, secrets::Stop::ListenerFailed(_)) {
-                return Err(unavailable("Cancellation monitoring failed during installation finalization. Review the displayed result and any retained setup artifacts."));
+                return Err(unavailable(
+                    "Cancellation monitoring failed during installation finalization. Review the displayed result and any retained setup artifacts.",
+                ));
             }
         }
         Ok(())
@@ -691,7 +909,11 @@ impl FinalizedInstallation {
         let observed = serde_json::to_vec_pretty(&self.private_observation())
             .map_err(|_| unavailable("The finalization observation could not be encoded. The typed result remains held; no retry was started."))?;
         let result = (|| -> io::Result<()> {
-            let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)?;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path)?;
             file.write_all(&observed)?;
             file.sync_all()
         })();
@@ -700,28 +922,43 @@ impl FinalizedInstallation {
     }
 
     fn private_observation(&self) -> Value {
-        let reference = |value: &meerkat_authorization_contracts::work_association::GrantLineageRef| json!({
-            "grant_id":value.grant_id, "issued_revision":value.issued_revision,
-            "authority_generation":value.authority_generation,
-        });
-        let references = |result: Result<&meerkat::governed_realm::stock::issuance::StockGrantOutcome, &StockGrantError>| {
+        let reference =
+            |value: &meerkat_authorization_contracts::work_association::GrantLineageRef| {
+                json!({
+                    "grant_id":value.grant_id, "issued_revision":value.issued_revision,
+                    "authority_generation":value.authority_generation,
+                })
+            };
+        let references = |result: Result<
+            &meerkat::governed_realm::stock::issuance::StockGrantOutcome,
+            &StockGrantError,
+        >| {
             match result {
                 Ok(outcome) => json!({"issued":reference(&outcome.issued),
                     "superseded":outcome.superseded.as_ref().map(&reference),
                     "cleanup":outcome.cleanup.iter().map(|attempt| json!({"agent":attempt.agent,
                         "grant_id":attempt.grant.grant_id,"outcome":format!("{:?}",attempt.outcome)})).collect::<Vec<_>>()}),
                 Err(StockGrantError::IssuanceUncertain { id }) => json!({"possibly_issued_id":id}),
-                Err(StockGrantError::NotSelected { issued, .. }) => json!({"issued":reference(issued)}),
-                Err(StockGrantError::SelectionUncertain { issued, previous, .. }) => json!({"issued":reference(issued),
+                Err(StockGrantError::NotSelected { issued, .. }) => {
+                    json!({"issued":reference(issued)})
+                }
+                Err(StockGrantError::SelectionUncertain {
+                    issued, previous, ..
+                }) => json!({"issued":reference(issued),
                     "previous":previous.as_ref().map(&reference)}),
                 Err(StockGrantError::Refused(_) | StockGrantError::CommandUncertain) => Value::Null,
             }
         };
         let native_references = match &self.outcome {
-            FinalizationOutcome::Connector(ReviewedConnectorFinalization::Persisted { grant, .. })
-                | FinalizationOutcome::PublicPersisted { grant, .. }
-                | FinalizationOutcome::PublicReused { grant, .. } => references(grant.as_ref()),
-            FinalizationOutcome::Secret(outcome) => outcome.grant().map_or(Value::Null, |result| references(result.as_ref())),
+            FinalizationOutcome::Connector(ReviewedConnectorFinalization::Persisted {
+                grant,
+                ..
+            })
+            | FinalizationOutcome::PublicPersisted { grant, .. }
+            | FinalizationOutcome::PublicReused { grant, .. } => references(grant.as_ref()),
+            FinalizationOutcome::Secret(outcome) => outcome
+                .grant()
+                .map_or(Value::Null, |result| references(result.as_ref())),
             _ => Value::Null,
         };
         json!({"scope":"invocation_finalization_observation_only", "observation":self.notice(),
@@ -730,14 +967,27 @@ impl FinalizedInstallation {
     }
 
     pub(crate) fn notice(&self) -> Value {
-        let grant = |result: Result<&meerkat::governed_realm::stock::issuance::StockGrantOutcome, &StockGrantError>| {
+        let grant = |result: Result<
+            &meerkat::governed_realm::stock::issuance::StockGrantOutcome,
+            &StockGrantError,
+        >| {
             match result {
-                Ok(outcome) => json!({"state":"selected", "prior_cleanup_complete":outcome.cleanup.iter()
-                    .all(|attempt| attempt.outcome == RevocationOutcome::Revoked)}),
-                Err(StockGrantError::Refused(reason)) => json!({"state":"refused", "reason_kind":grant_refusal_tag(reason), "issued":false, "selection_changed":false}),
-                Err(StockGrantError::IssuanceUncertain { .. }) => json!({"state":"issuance_uncertain", "selection_changed":false}),
-                Err(StockGrantError::NotSelected { .. }) => json!({"state":"issued_not_selected", "issued":true, "selection_changed":false}),
-                Err(StockGrantError::SelectionUncertain { .. }) => json!({"state":"selection_durability_uncertain", "issued":true}),
+                Ok(outcome) => {
+                    json!({"state":"selected", "prior_cleanup_complete":outcome.cleanup.iter()
+                    .all(|attempt| attempt.outcome == RevocationOutcome::Revoked)})
+                }
+                Err(StockGrantError::Refused(reason)) => {
+                    json!({"state":"refused", "reason_kind":grant_refusal_tag(reason), "issued":false, "selection_changed":false})
+                }
+                Err(StockGrantError::IssuanceUncertain { .. }) => {
+                    json!({"state":"issuance_uncertain", "selection_changed":false})
+                }
+                Err(StockGrantError::NotSelected { .. }) => {
+                    json!({"state":"issued_not_selected", "issued":true, "selection_changed":false})
+                }
+                Err(StockGrantError::SelectionUncertain { .. }) => {
+                    json!({"state":"selection_durability_uncertain", "issued":true})
+                }
                 Err(StockGrantError::CommandUncertain) => json!({"state":"command_uncertain"}),
             }
         };
@@ -767,7 +1017,8 @@ impl FinalizedInstallation {
             "instruction":"This is the process-owned result of the completed finalizer, not human consent. Continue the original setup task using these exact facts. Do not repeat this finalizer or claim service use. If this target is unresolved, explain that limit and continue independent requested services; a new package/job does not permit replay for the same realm and server."});
         if let Some(stop) = &self.stopped {
             notice["stop"] = json!(match stop {
-                secrets::Stop::Cancelled => "cancelled", secrets::Stop::ListenerFailed(_) => "listener_failed",
+                secrets::Stop::Cancelled => "cancelled",
+                secrets::Stop::ListenerFailed(_) => "listener_failed",
             });
         }
         notice
@@ -846,7 +1097,8 @@ impl TerminalConnectors {
         Self::open_with_finalizations(startup, Arc::from([])).await
     }
 
-    pub async fn open_with_finalizations(startup: &mut SessionStartup,
+    pub async fn open_with_finalizations(
+        startup: &mut SessionStartup,
         prior_finalizations: Arc<[Arc<FinalizedInstallation>]>,
     ) -> Result<Self, ConnectError> {
         let storage = startup.storage.clone();
@@ -854,7 +1106,8 @@ impl TerminalConnectors {
         // One live native source serves both native login/refresh and terminal
         // review. It composes the selected realm on every read.
         let profiles = Arc::new(meerkat::RealmConnectorClients::from_realm_source(
-            crate::realm::config_source(&storage)?, storage.locator.realm.clone(),
+            crate::realm::config_source(&storage)?,
+            storage.locator.realm.clone(),
         ));
         let auth = startup.configure_realm_connectors(profiles.clone()).await?;
         let control = Control::new(auth.clone());
@@ -872,7 +1125,9 @@ impl TerminalConnectors {
         })
     }
     fn target_unresolved(&self, server: &str) -> bool {
-        self.prior_finalizations.iter().any(|outcome| outcome.blocks_reentry(&self.storage.locator, server))
+        self.prior_finalizations
+            .iter()
+            .any(|outcome| outcome.blocks_reentry(&self.storage.locator, server))
     }
     pub(crate) fn router(&self) -> meerkat::McpRouter {
         self.control.router()
@@ -890,51 +1145,84 @@ impl TerminalConnectors {
     pub(crate) fn dispatcher_factory(&self) -> crate::service_preparation::TerminalToolFactory {
         let storage = self.storage.clone();
         let requests = self.send.clone();
-        Arc::new(move |installs| Arc::new(RequestTool {
-            installs, storage: storage.clone(), requests: requests.clone(),
-        }))
+        Arc::new(move |installs| {
+            Arc::new(RequestTool {
+                installs,
+                storage: storage.clone(),
+                requests: requests.clone(),
+            })
+        })
     }
     pub async fn next(&mut self) -> Option<ConnectorRequest> {
         self.requests.recv().await
     }
-    pub fn has_reviewed(&self) -> bool { self.reviewed.is_some() }
+    pub fn has_reviewed(&self) -> bool {
+        self.reviewed.is_some()
+    }
     /// Existing installation-only callers never discard a pending access action.
     pub fn take_reviewed(&mut self) -> Option<ReviewedInstallation> {
         match self.reviewed.take() {
             Some(ReviewedAction::Installation(value)) => Some(value),
-            other => { self.reviewed = other; None },
+            other => {
+                self.reviewed = other;
+                None
+            }
         }
     }
-    pub fn take_reviewed_action(&mut self) -> Option<ReviewedAction> { self.reviewed.take() }
+    pub fn take_reviewed_action(&mut self) -> Option<ReviewedAction> {
+        self.reviewed.take()
+    }
     pub fn retire(&mut self) -> Result<(), ConnectError> {
         self.control.retire().map_err(unavailable)
     }
 
     pub async fn present<F: Future<Output = io::Result<()>> + Send, W: Write>(
-        &mut self, request: ConnectorRequest, approvals: &LocalApprovals,
-        presenter: &mut ApprovalPresenter, input: &mut TerminalInput,
-        output: &mut W, interrupt: F,
+        &mut self,
+        request: ConnectorRequest,
+        approvals: &LocalApprovals,
+        presenter: &mut ApprovalPresenter,
+        input: &mut TerminalInput,
+        output: &mut W,
+        interrupt: F,
     ) -> Result<bool, ConnectError> {
         match request {
-            ConnectorRequest::Installed(request) => installed::present(self, request, approvals, interrupt).await,
-            ConnectorRequest::Account(request) => self.present_account(
-                request, approvals, presenter, input, output, interrupt,
-            ).await,
-            ConnectorRequest::Plain(request) => plain::present(
-                self, request, approvals, presenter, input, output, interrupt,
-            ).await,
-            ConnectorRequest::Secret(request) => secrets::present(
-                self, request, approvals, presenter, input, output, interrupt,
-            ).await,
-            ConnectorRequest::CredentialManagement(request) => secrets::management::present(
-                self, request, approvals, presenter, input, output, interrupt,
-            ).await,
-            ConnectorRequest::AccountManagement(request) => oauth_management::present(
-                self, request, approvals, presenter, input, output, interrupt,
-            ).await,
-            ConnectorRequest::AccessManagement(request) => access::present(
-                self, request, approvals, presenter, input, output, interrupt,
-            ).await,
+            ConnectorRequest::Installed(request) => {
+                installed::present(self, request, approvals, interrupt).await
+            }
+            ConnectorRequest::Account(request) => {
+                self.present_account(request, approvals, presenter, input, output, interrupt)
+                    .await
+            }
+            ConnectorRequest::Plain(request) => {
+                plain::present(
+                    self, request, approvals, presenter, input, output, interrupt,
+                )
+                .await
+            }
+            ConnectorRequest::Secret(request) => {
+                secrets::present(
+                    self, request, approvals, presenter, input, output, interrupt,
+                )
+                .await
+            }
+            ConnectorRequest::CredentialManagement(request) => {
+                secrets::management::present(
+                    self, request, approvals, presenter, input, output, interrupt,
+                )
+                .await
+            }
+            ConnectorRequest::AccountManagement(request) => {
+                oauth_management::present(
+                    self, request, approvals, presenter, input, output, interrupt,
+                )
+                .await
+            }
+            ConnectorRequest::AccessManagement(request) => {
+                access::present(
+                    self, request, approvals, presenter, input, output, interrupt,
+                )
+                .await
+            }
         }
     }
 
@@ -963,22 +1251,41 @@ impl TerminalConnectors {
             return selection_refused(reason, request.response, output);
         }
         if let Err(reason) = request_documents(plain::recheck_retained(
-            &request.installed, &request.document, None,
-        )).await {
+            &request.installed,
+            &request.document,
+            None,
+        ))
+        .await
+        {
             return selection_refused(reason, request.response, output);
         }
         if let Err(reason) = request.selection.check_current() {
             return selection_refused(reason, request.response, output);
         }
-        if request.response.is_closed() { return Ok(true); }
+        if request.response.is_closed() {
+            return Ok(true);
+        }
         tokio::pin!(interrupt);
         let prepared = profiles::prepare(
-            &self.storage, &self.factory, &self.profiles, &mut request.target,
-            &request.installed.session, approvals, presenter, input, output,
-            &mut request.response, || request.selection.check_current(), interrupt.as_mut(),
-        ).await;
+            &self.storage,
+            &self.factory,
+            &self.profiles,
+            &mut request.target,
+            &request.installed.session,
+            approvals,
+            presenter,
+            input,
+            output,
+            &mut request.response,
+            || request.selection.check_current(),
+            interrupt.as_mut(),
+        )
+        .await;
         let client_profile = match profiles::presentation(prepared, request.response, output)? {
-            profiles::Presentation::Current(profile, response) => { request.response = response; profile }
+            profiles::Presentation::Current(profile, response) => {
+                request.response = response;
+                profile
+            }
             profiles::Presentation::Finished(keep_turn) => return Ok(keep_turn),
         };
         if let Err(reason) = request.selection.check_target(&request.target) {
@@ -997,10 +1304,11 @@ impl TerminalConnectors {
                 Ok(installation) => installation,
                 Err(reason) => return selection_refused(reason, request.response, output),
             };
-            let account = match crate::connector_install::authorized_account(&request.target, &status) {
-                Ok(account) => account.clone(),
-                Err(reason) => return selection_refused(reason, request.response, output),
-            };
+            let account =
+                match crate::connector_install::authorized_account(&request.target, &status) {
+                    Ok(account) => account.clone(),
+                    Err(reason) => return selection_refused(reason, request.response, output),
+                };
             let config = match reviewed_installation_configuration(&installation) {
                 Ok(config) => config,
                 Err(reason) => return selection_refused(reason, request.response, output),
@@ -1053,7 +1361,8 @@ impl TerminalConnectors {
             &mut request.response,
             interrupt.as_mut(),
         )
-        .await? {
+        .await?
+        {
             ReviewOutcome::Decided(decision) => decision,
             ReviewOutcome::CallerGone => return Ok(true),
             ReviewOutcome::Stopped => return Ok(false),
@@ -1067,28 +1376,47 @@ impl TerminalConnectors {
         if request.response.is_closed() {
             return Ok(true);
         }
-        if let Err(error) = profiles::recheck(&self.profiles, &request.target, client_profile.as_ref()).await {
+        if let Err(error) =
+            profiles::recheck(&self.profiles, &request.target, client_profile.as_ref()).await
+        {
             return error.respond(request.response, output);
         }
         if let Err(reason) = request.selection.check_current() {
             return selection_refused(reason, request.response, output);
         }
-        if request.response.is_closed() { return Ok(true) }
-        let login = login::run(&mut self.control, request.target.clone(),
+        if request.response.is_closed() {
+            return Ok(true);
+        }
+        let login = login::run(
+            &mut self.control,
+            request.target.clone(),
             crate::connector_auth::LoginSelection::Installed(Arc::new(request.selection)),
-            &mut request.response, input, output, interrupt.as_mut()).await?;
+            &mut request.response,
+            input,
+            output,
+            interrupt.as_mut(),
+        )
+        .await?;
         if let Some(reply) = login.stop_reply() {
             writeln!(output, "{}", login.stop_message())
                 .map_err(|e| ConnectError::native("Display sign-in settlement", e))?;
             let _ = request.response.send(reply);
-            return Ok(matches!(login, login::End::Stopped { reason:login::Stop::Cancelled | login::Stop::CallerGone, .. }));
+            return Ok(matches!(
+                login,
+                login::End::Stopped {
+                    reason: login::Stop::Cancelled | login::Stop::CallerGone,
+                    ..
+                }
+            ));
         }
         let completed = match login {
             login::End::Completed(completed) => completed,
             login::End::Refused(code) => {
-                let _ = request.response.send(json!({"state":"unavailable", "reason":code, "grant_issued":false}));
+                let _ = request
+                    .response
+                    .send(json!({"state":"unavailable", "reason":code, "grant_issued":false}));
                 return Ok(true);
-            },
+            }
             login::End::Stopped { .. } => unreachable!("stopped ceremony was settled above"),
         };
         let config = match reviewed_configuration(&completed) {
@@ -1134,15 +1462,27 @@ impl TerminalConnectors {
             return Ok(true);
         }
         if let Err(reason) = request_documents(plain::recheck_retained(
-            &request.installed, &request.document, None,
-        )).await {
+            &request.installed,
+            &request.document,
+            None,
+        ))
+        .await
+        {
             return selection_refused(reason, request.response, output);
         }
         if let Err(reason) = check_selected() {
             return selection_refused(reason, request.response, output);
         }
-        if request.response.is_closed() { return Ok(true); }
-        if let Err(error) = profiles::recheck(&self.profiles, &request.target, request.client_profile.as_ref()).await {
+        if request.response.is_closed() {
+            return Ok(true);
+        }
+        if let Err(error) = profiles::recheck(
+            &self.profiles,
+            &request.target,
+            request.client_profile.as_ref(),
+        )
+        .await
+        {
             return error.respond(request.response, output);
         }
         if let Err(reason) = check_selected() {
@@ -1177,7 +1517,8 @@ impl TerminalConnectors {
             &mut request.response,
             interrupt.as_mut(),
         )
-        .await? {
+        .await?
+        {
             ReviewOutcome::Decided(decision) => decision,
             ReviewOutcome::CallerGone => return Ok(true),
             ReviewOutcome::Stopped => return Ok(false),
@@ -1197,8 +1538,12 @@ impl TerminalConnectors {
         // A decision cannot renew changed source documents. Refuse before
         // passive account work, then retain the later fence across its awaits.
         if let Err(reason) = request_documents(plain::recheck_retained(
-            &request.installed, &request.document, None,
-        )).await {
+            &request.installed,
+            &request.document,
+            None,
+        ))
+        .await
+        {
             return selection_refused(reason, request.response, output);
         }
         let current = self
@@ -1212,15 +1557,25 @@ impl TerminalConnectors {
         if let Err(reason) = check_reviewed_account(&request.target, &request.account, &current) {
             return selection_refused(reason, request.response, output);
         }
-        if let Err(error) = profiles::recheck(&self.profiles, &request.target, request.client_profile.as_ref()).await {
+        if let Err(error) = profiles::recheck(
+            &self.profiles,
+            &request.target,
+            request.client_profile.as_ref(),
+        )
+        .await
+        {
             return error.respond(request.response, output);
         }
         if let Err(reason) = check_selected() {
             return selection_refused(reason, request.response, output);
         }
         if let Err(reason) = request_documents(plain::recheck_retained(
-            &request.installed, &request.document, None,
-        )).await {
+            &request.installed,
+            &request.document,
+            None,
+        ))
+        .await
+        {
             return selection_refused(reason, request.response, output);
         }
         if let Err(reason) = check_selected() {
@@ -1229,19 +1584,22 @@ impl TerminalConnectors {
         if request.response.is_closed() {
             return Ok(true);
         }
-        self.reviewed = Some(ReviewedInstallation::Account(ReviewedConnector {
-            storage: self.storage.clone(),
-            factory: self.factory.clone(),
-            installed: request.installed,
-            document: request.document,
-            target: request.target,
-            account: request.account,
-            config,
-            expected_generation,
-            client_profile_binding: profiles::binding(request.client_profile.as_ref()),
-            request: request.grant,
-            decision,
-        }).into());
+        self.reviewed = Some(
+            ReviewedInstallation::Account(ReviewedConnector {
+                storage: self.storage.clone(),
+                factory: self.factory.clone(),
+                installed: request.installed,
+                document: request.document,
+                target: request.target,
+                account: request.account,
+                config,
+                expected_generation,
+                client_profile_binding: profiles::binding(request.client_profile.as_ref()),
+                request: request.grant,
+                decision,
+            })
+            .into(),
+        );
         let _ = request.response.send(json!({"state":"pending", "reason":"reviewed_finalization_waiting_for_setup_close",
             "login_completed":request.login_completed, "access_reviewed":true, "grant_issued":false,
             "instruction":"The exact review is retained. Finish this turn so native finalization can run after the setup session closes. The host will report its actual outcome before the conversation continues. Do not invoke the integration or claim the service is ready before the terminal reports the native finalization result."}));
@@ -1260,7 +1618,9 @@ async fn request_documents(
 /// Only the static refusal codes from the selected installation/account joins
 /// use this path. I/O, provider and native cleanup failures remain errors.
 fn selection_refused(
-    reason: &'static str, response: oneshot::Sender<Value>, output: &mut impl Write,
+    reason: &'static str,
+    response: oneshot::Sender<Value>,
+    output: &mut impl Write,
 ) -> Result<bool, ConnectError> {
     let message = "The selected integration or account no longer matches this request. No access was granted by this request; check its current selection before trying again.";
     writeln!(output, "{message}")
@@ -1373,7 +1733,8 @@ async fn review<W: Write>(
 #[async_trait]
 impl AgentToolDispatcher for RequestTool {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
-        let mut definitions = vec![Arc::new(ToolDef::new(TOOL,
+        let mut definitions = vec![Arc::new(ToolDef::new(
+            TOOL,
             "Ask the protected terminal to reuse an already signed-in account or sign in for an exact reconciled installed job, then review native account access. Supply the selected publisher's explicit OAuth descriptor and per-raw-operation requirements. No commands, config, credential values or native grants are accepted. Agent and lifetime are proposals shown to the human; expires_in_ms must be explicit (null means until revoked). A named native client profile may be selected by ID. The protected terminal guides missing-profile setup; never request profile settings or secrets in chat. The result never means the service is ready. Authorization URLs and callback values stay outside the model.",
             json!({"type":"object","additionalProperties":false,"required":["job_id","connector","operations","agent","expires_in_ms"],
                 "properties":{"job_id":{"type":"string"},"connector":{
@@ -1391,7 +1752,8 @@ impl AgentToolDispatcher for RequestTool {
                             "properties":{"required_scopes":{"type":"array","items":{"type":"string"},"uniqueItems":true},
                                 "destination_origin":{"type":"string","description":"Explicit scheme://host[:port] from the selected integration's documented API."}}}},
                     "agent":{"type":"string"},
-                    "expires_in_ms":{"type":["integer","null"],"minimum":1}}})))];
+                    "expires_in_ms":{"type":["integer","null"],"minimum":1}}}),
+        ))];
         definitions.push(plain::tool());
         definitions.push(secrets::tool());
         definitions.extend(secrets::management::tools());
@@ -1407,7 +1769,14 @@ impl AgentToolDispatcher for RequestTool {
         }
     }
     fn tool_mutation_class(&self, name: &str) -> ToolMutationClass {
-        if matches!(name, SECRET_STATUS_TOOL | OAUTH_STATUS_TOOL | ACCESS_INVENTORY_TOOL | INSTALLED_LIST_TOOL | INSTALLED_SELECT_TOOL) {
+        if matches!(
+            name,
+            SECRET_STATUS_TOOL
+                | OAUTH_STATUS_TOOL
+                | ACCESS_INVENTORY_TOOL
+                | INSTALLED_LIST_TOOL
+                | INSTALLED_SELECT_TOOL
+        ) {
             ToolMutationClass::ReadOnly
         } else if TOOLS.contains(&name) {
             ToolMutationClass::Mutating
@@ -1493,10 +1862,14 @@ impl AgentToolDispatcher for RequestTool {
 /// Run this after joining completion and before returning for a stopped caller.
 /// A reported cleanup failure is terminal and must not trigger another cancel.
 pub(crate) fn settle_terminal_completion(
-    control: &mut Control, reply: Result<Reply, &'static str>, cleanup_failed: bool,
+    control: &mut Control,
+    reply: Result<Reply, &'static str>,
+    cleanup_failed: bool,
 ) -> Result<Result<Arc<crate::connector_auth::CompletedLogin>, &'static str>, ConnectError> {
     if cleanup_failed {
-        return Err(unavailable("Native connector cancellation did not confirm cleanup"));
+        return Err(unavailable(
+            "Native connector cancellation did not confirm cleanup",
+        ));
     }
     match reply {
         Ok(Reply::Completed(completed)) => Ok(Ok(completed)),
@@ -1507,7 +1880,9 @@ pub(crate) fn settle_terminal_completion(
             control.retire().map_err(unavailable)?;
             match other {
                 Err(code) => Ok(Err(code)),
-                Ok(_) => Err(unavailable("Native connector completion did not return a completed login")),
+                Ok(_) => Err(unavailable(
+                    "Native connector completion did not return a completed login",
+                )),
             }
         }
     }
@@ -1548,7 +1923,10 @@ fn proposal(mut raw: Value) -> Result<Proposal, ToolError> {
     // The terminal tool accepts null as the same profile choice as omission.
     // Keep the shared private-pipe decoder's stricter optional-field contract.
     if let Some(connector) = raw.get_mut("connector").and_then(Value::as_object_mut) {
-        if connector.get("client_auth_profile").is_some_and(Value::is_null) {
+        if connector
+            .get("client_auth_profile")
+            .is_some_and(Value::is_null)
+        {
             connector.remove("client_auth_profile");
         }
     }
@@ -1581,41 +1959,66 @@ mod tests {
 
     #[tokio::test]
     async fn post_close_account_finalizer_rechecks_retained_documents_before_native_effects() {
-        tokio::time::timeout(Duration::from_secs(30), Box::pin(retained_document_finalization_scenario()))
-            .await.expect("the document boundary and passive native account check must settle");
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            Box::pin(retained_document_finalization_scenario()),
+        )
+        .await
+        .expect("the document boundary and passive native account check must settle");
     }
 
     async fn retained_document_finalization_scenario() {
         use meerkat::governed_realm::stock::govern_stock_realm;
-        use meerkat_auth_core::auth_store::{FileLockCoordinator, FileTokenStore, ProviderAuthPersistence};
-        use meerkat_core::{ApprovalService, ConfigDelta, ConfigStore, FileConfigStore};
+        use meerkat_auth_core::auth_store::{
+            FileLockCoordinator, FileTokenStore, ProviderAuthPersistence,
+        };
         use meerkat_core::connection::{CredentialAccountId, CredentialAccountRef};
         use meerkat_core::mcp_config::McpConnectorBinding;
+        use meerkat_core::{ApprovalService, ConfigDelta, ConfigStore, FileConfigStore};
         use sha2::{Digest, Sha256};
 
         // This enters the actual post-close consumer and real native realm
         // owners. The retained package/review is a fixture; no setup helper,
         // installed package, sign-in or live service use is claimed.
-        for changed in [None, Some("ready/installed.json"), Some("configuration/selected.json"),
-            Some("ready/mcp.json"), Some("missing-receipt")] {
+        for changed in [
+            None,
+            Some("ready/installed.json"),
+            Some("configuration/selected.json"),
+            Some("ready/mcp.json"),
+            Some("missing-receipt"),
+        ] {
             let directory = tempfile::tempdir().unwrap();
             let storage = finalizer_storage(directory.path(), "work");
-            let config_path = crate::realm::config_source(&storage).unwrap()
+            let config_path = crate::realm::config_source(&storage)
+                .unwrap()
                 .config_doc_path(&storage.locator.realm);
             let state_path = config_path.with_file_name("config_state.json");
-            let config_store = FileConfigStore::new(config_path.clone(), meerkat_models::canonical());
+            let config_store =
+                FileConfigStore::new(config_path.clone(), meerkat_models::canonical());
             config_store.patch(ConfigDelta(json!({"max_tokens":1234,"tools":{"shell_enabled":false,
                 "mcp_servers":[McpServerConfig::stdio("unrelated", "/bin/true", vec![], Default::default())]}})))
                 .await.unwrap();
             let (_, bundle) = meerkat::storage_provider::open_realm_persistence_with_layout(
-                storage.layout.clone(), storage.locator.realm.as_str(), None,
+                storage.layout.clone(),
+                storage.locator.realm.as_str(),
+                None,
                 Some(meerkat_store::RealmOrigin::Explicit),
-            ).await.unwrap();
+            )
+            .await
+            .unwrap();
             drop(bundle);
             let principals = StockPrincipals::for_local_operator(&storage.locator.realm).unwrap();
-            govern_stock_realm(&storage.locator.state_root, storage.locator.realm.as_str(), &principals)
-                .await.unwrap();
-            let paths = meerkat_store::realm_paths_in(&storage.locator.state_root, storage.locator.realm.as_str());
+            govern_stock_realm(
+                &storage.locator.state_root,
+                storage.locator.realm.as_str(),
+                &principals,
+            )
+            .await
+            .unwrap();
+            let paths = meerkat_store::realm_paths_in(
+                &storage.locator.state_root,
+                storage.locator.realm.as_str(),
+            );
             let owner_path = meerkat_store::grant_owner_store_path(&paths.root);
             let before_owner = std::fs::read(&owner_path).unwrap();
             let before_config = std::fs::read(&config_path).unwrap();
@@ -1628,9 +2031,17 @@ mod tests {
             let receipt = br#"{"scope":"inert retained fixture"}"#;
             let configuration = br#"{"profile":"slack","operations":["auth_test"],"config":{"token_env":"UNRESOLVED_REFERENCE"}}"#;
             let command = root.join("runtime/bin/python").to_str().unwrap().to_owned();
-            let args = vec!["-I".to_owned(), "-m".to_owned(),
-                "meerkat_toolkit_services.adapters.services_mcp".to_owned(), "serve".to_owned(),
-                "--config".to_owned(), root.join("configuration/selected.json").to_str().unwrap().to_owned()];
+            let args = vec![
+                "-I".to_owned(),
+                "-m".to_owned(),
+                "meerkat_toolkit_services.adapters.services_mcp".to_owned(),
+                "serve".to_owned(),
+                "--config".to_owned(),
+                root.join("configuration/selected.json")
+                    .to_str()
+                    .unwrap()
+                    .to_owned(),
+            ];
             let document = Arc::new(json!({"mcpServers":{"mail":{"command":command,"args":args}}}));
             let document_bytes = serde_json::to_vec(document.as_ref()).unwrap();
             std::fs::write(root.join("ready/installed.json"), receipt).unwrap();
@@ -1638,53 +2049,112 @@ mod tests {
             std::fs::write(root.join("ready/mcp.json"), &document_bytes).unwrap();
             let session = SessionId::new();
             let installed = InstalledSelection {
-                realm: storage.locator.clone(), session:session.clone(), job_id:"1".repeat(32), validation_id:"2".repeat(32),
-                family:"services".into(), profile:"slack".into(), server_name:"mail".into(),
-                mcp_path:root.join("ready/mcp.json"), receipt_path:root.join("ready/installed.json"),
-                receipt_sha256:Some(format!("{:x}",Sha256::digest(receipt))),
-                configuration_sha256:Some(format!("{:x}",Sha256::digest(configuration))),
-                mcp_document_sha256:format!("{:x}",Sha256::digest(&document_bytes)),
-                recovery_request_sha256:Some("3".repeat(64)),
+                realm: storage.locator.clone(),
+                session: session.clone(),
+                job_id: "1".repeat(32),
+                validation_id: "2".repeat(32),
+                family: "services".into(),
+                profile: "slack".into(),
+                server_name: "mail".into(),
+                mcp_path: root.join("ready/mcp.json"),
+                receipt_path: root.join("ready/installed.json"),
+                receipt_sha256: Some(format!("{:x}", Sha256::digest(receipt))),
+                configuration_sha256: Some(format!("{:x}", Sha256::digest(configuration))),
+                mcp_document_sha256: format!("{:x}", Sha256::digest(&document_bytes)),
+                recovery_request_sha256: Some("3".repeat(64)),
             };
-            plain::recheck_retained(&installed, &document, None).await.unwrap();
+            plain::recheck_retained(&installed, &document, None)
+                .await
+                .unwrap();
             let target = meerkat::ConnectorOAuthTarget {
-                slot: CredentialAccountRef { realm:storage.locator.realm.clone(),
-                    account:CredentialAccountId::parse("mail").unwrap() },
-                issuer:"https://issuer.invalid".into(), strategy_id:"oidc-userinfo-v1".into(),
-                client:"public-client".into(), resource:"https://api.invalid".into(),
-                scopes:["read".into()].into(),
-                account:meerkat_auth_core::connector_oauth::AccountSelection::Discover,
-                client_auth_profile:None,
+                slot: CredentialAccountRef {
+                    realm: storage.locator.realm.clone(),
+                    account: CredentialAccountId::parse("mail").unwrap(),
+                },
+                issuer: "https://issuer.invalid".into(),
+                strategy_id: "oidc-userinfo-v1".into(),
+                client: "public-client".into(),
+                resource: "https://api.invalid".into(),
+                scopes: ["read".into()].into(),
+                account: meerkat_auth_core::connector_oauth::AccountSelection::Discover,
+                client_auth_profile: None,
             };
-            let account = meerkat::ConnectorVerifiedAccount { issuer:target.issuer.clone(),
-                strategy_id:target.strategy_id.clone(), subject:"historical-fixture-account".into() };
+            let account = meerkat::ConnectorVerifiedAccount {
+                issuer: target.issuer.clone(),
+                strategy_id: target.strategy_id.clone(),
+                subject: "historical-fixture-account".into(),
+            };
             let mut native_args = args;
             native_args[3] = "serve-native".into();
-            let mut config = McpServerConfig::stdio("mail", command, native_args, Default::default());
+            let mut config =
+                McpServerConfig::stdio("mail", command, native_args, Default::default());
             config.access = Some(meerkat_core::McpServerAccess::allowing(["slack_auth_test"]));
             config.connector = Some(McpConnectorBinding {
-                realm_id:storage.locator.realm.as_str().into(), slot_id:"mail".into(),
-                issuer:target.issuer.clone(), client:target.client.clone(), resource:target.resource.clone(),
-                strategy_id:target.strategy_id.clone(), account:account.subject.clone(),
-                operations:[("slack_auth_test".into(), McpConnectorOperation {
-                    required_scopes:["read".into()].into(), destination_origin:target.resource.clone(), read_only:true,
-                })].into(),
+                realm_id: storage.locator.realm.as_str().into(),
+                slot_id: "mail".into(),
+                issuer: target.issuer.clone(),
+                client: target.client.clone(),
+                resource: target.resource.clone(),
+                strategy_id: target.strategy_id.clone(),
+                account: account.subject.clone(),
+                operations: [(
+                    "slack_auth_test".into(),
+                    McpConnectorOperation {
+                        required_scopes: ["read".into()].into(),
+                        destination_origin: target.resource.clone(),
+                        read_only: true,
+                    },
+                )]
+                .into(),
             });
-            let grant = StockGrantRequest { agent:"rkat-agent".into(), expires_in_ms:None,
-                target:StockGrantTarget::Mcp { server:"mail".into(),
-                    operations:McpOperations::Exact(["slack_auth_test".into()].into()) } };
+            let grant = StockGrantRequest {
+                agent: "rkat-agent".into(),
+                expires_in_ms: None,
+                target: StockGrantTarget::Mcp {
+                    server: "mail".into(),
+                    operations: McpOperations::Exact(["slack_auth_test".into()].into()),
+                },
+            };
             let approvals = ApprovalService::new();
-            let pending = approvals.request(review_request(&session, "Fixture account-access review",
-                json!({"scope":"post-close document boundary only"})).unwrap()).unwrap();
-            let decision = approvals.decide(&pending.approval_id, ApprovalDecision::Approve,
-                ApprovalPrincipalId::new("fixture-operator").unwrap(), None, None).unwrap();
-            let factory = meerkat::AgentFactory::new(paths.root.clone()).with_provider_auth_persistence(
-                ProviderAuthPersistence::new(Arc::new(FileTokenStore::new(directory.path().join("credentials"))),
-                    Arc::new(FileLockCoordinator::new(directory.path().join("credential-locks")))),
-            );
-            let reviewed = ReviewedConnector { storage:storage.clone(), factory, installed, document,
-                target, account, config, expected_generation:0, client_profile_binding:None,
-                request:grant, decision };
+            let pending = approvals
+                .request(
+                    review_request(
+                        &session,
+                        "Fixture account-access review",
+                        json!({"scope":"post-close document boundary only"}),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            let decision = approvals
+                .decide(
+                    &pending.approval_id,
+                    ApprovalDecision::Approve,
+                    ApprovalPrincipalId::new("fixture-operator").unwrap(),
+                    None,
+                    None,
+                )
+                .unwrap();
+            let factory = meerkat::AgentFactory::new(paths.root.clone())
+                .with_provider_auth_persistence(ProviderAuthPersistence::new(
+                    Arc::new(FileTokenStore::new(directory.path().join("credentials"))),
+                    Arc::new(FileLockCoordinator::new(
+                        directory.path().join("credential-locks"),
+                    )),
+                ));
+            let reviewed = ReviewedConnector {
+                storage: storage.clone(),
+                factory,
+                installed,
+                document,
+                target,
+                account,
+                config,
+                expected_generation: 0,
+                client_profile_binding: None,
+                request: grant,
+                decision,
+            };
             if let Some(path) = changed {
                 if path == "missing-receipt" {
                     std::fs::remove_file(root.join("ready/installed.json")).unwrap();
@@ -1696,23 +2166,50 @@ mod tests {
             let finalized = reviewed.finalize_outcome_after_close().await;
             assert!(finalized.belongs_to(&storage.locator, &session));
             let facts = finalized.notice();
-            assert_eq!(facts["facts"]["persistence"], if changed.is_some() { "not_entered" } else { "refused" });
+            assert_eq!(
+                facts["facts"]["persistence"],
+                if changed.is_some() {
+                    "not_entered"
+                } else {
+                    "refused"
+                }
+            );
             assert_eq!(facts["facts"]["grant"]["state"], "not_requested");
             let error = finalized.display(&mut output).unwrap_err().to_string();
             let artifacts = directory.path().join("observations");
             std::fs::create_dir(&artifacts).unwrap();
             finalized.retain(&artifacts, 1).unwrap();
-            let retained: Value = serde_json::from_slice(&std::fs::read(artifacts.join("standalone-finalization-1.txt")).unwrap()).unwrap();
-            assert_eq!(retained["observation"], facts, "display failure did not replace the actual native outcome");
+            let retained: Value = serde_json::from_slice(
+                &std::fs::read(artifacts.join("standalone-finalization-1.txt")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                retained["observation"], facts,
+                "display failure did not replace the actual native outcome"
+            );
             if changed.is_some() {
-                let FinalizationOutcome::BeforeAdministrationRefused(reason) = &finalized.outcome else {
+                let FinalizationOutcome::BeforeAdministrationRefused(reason) = &finalized.outcome
+                else {
                     panic!("changed documents reached native administration");
                 };
                 let detail = reason.to_string();
-                assert!(detail.contains("retained integration document") || detail.contains("Retained integration documents"), "{detail}");
-                assert!(detail.contains("Service finalization did not start"), "{detail}");
-                assert!(error.contains("Finalization stopped before native administration"), "{error}");
-                assert!(!error.contains("Native finalization was refused"), "{error}");
+                assert!(
+                    detail.contains("retained integration document")
+                        || detail.contains("Retained integration documents"),
+                    "{detail}"
+                );
+                assert!(
+                    detail.contains("Service finalization did not start"),
+                    "{detail}"
+                );
+                assert!(
+                    error.contains("Finalization stopped before native administration"),
+                    "{error}"
+                );
+                assert!(
+                    !error.contains("Native finalization was refused"),
+                    "{error}"
+                );
             } else {
                 // Matching documents reach the existing native finalizer. Its
                 // real empty credential store refuses the historical account;
@@ -1725,9 +2222,19 @@ mod tests {
             assert!(output.is_empty());
             assert_eq!(std::fs::read(&config_path).unwrap(), before_config);
             assert_eq!(std::fs::read(&owner_path).unwrap(), before_owner);
-            assert!(!state_path.exists(), "no service configuration generation was published");
-            assert_eq!(meerkat_store::read_realm_posture_in(&storage.locator.state_root,
-                storage.locator.realm.as_str()).await.unwrap(), meerkat_store::RealmPosture::Governed);
+            assert!(
+                !state_path.exists(),
+                "no service configuration generation was published"
+            );
+            assert_eq!(
+                meerkat_store::read_realm_posture_in(
+                    &storage.locator.state_root,
+                    storage.locator.realm.as_str()
+                )
+                .await
+                .unwrap(),
+                meerkat_store::RealmPosture::Governed
+            );
         }
     }
 
@@ -1738,29 +2245,52 @@ mod tests {
         let storage = finalizer_storage(root.path(), "work");
         let session = SessionId::new();
         let mut outcome = FinalizedInstallation::new(
-            FinalizationTarget { realm:storage.locator.clone(), server:"mail".into(),
-                agent:"rkat-agent".into(), job_id:"original-job".into(), session:session.clone() },
+            FinalizationTarget {
+                realm: storage.locator.clone(),
+                server: "mail".into(),
+                agent: "rkat-agent".into(),
+                job_id: "original-job".into(),
+                session: session.clone(),
+            },
             FinalizationOutcome::Connector(ReviewedConnectorFinalization::PersistUncertain {
-                reason:"PRIVATE_NATIVE_DIAGNOSTIC_MUST_NOT_BECOME_MODEL_INPUT".into() }),
+                reason: "PRIVATE_NATIVE_DIAGNOSTIC_MUST_NOT_BECOME_MODEL_INPUT".into(),
+            }),
         );
         let notice = outcome.take_continuation_notice().unwrap();
-        assert!(outcome.take_continuation_notice().is_none(), "the retained native fact cannot mint another occurrence");
+        assert!(
+            outcome.take_continuation_notice().is_none(),
+            "the retained native fact cannot mint another occurrence"
+        );
         assert!(notice.belongs_to(&storage.locator, &session));
         assert!(!notice.belongs_to(&storage.locator, &SessionId::new()));
         let input = notice.into_input();
-        let meerkat_runtime::Input::ExternalEvent(event) = &input else { panic!("process result is not human input") };
+        let meerkat_runtime::Input::ExternalEvent(event) = &input else {
+            panic!("process result is not human input")
+        };
         assert_eq!(event.event_type, "connect_finalization_observation");
-        assert!(matches!(&event.header.source, meerkat_runtime::InputOrigin::External { source_name }
-            if source_name == "meerkat-connect-finalization"));
-        assert!(event.blocks.is_none(), "the finalizer supplies no additional model content");
+        assert!(
+            matches!(&event.header.source, meerkat_runtime::InputOrigin::External { source_name }
+            if source_name == "meerkat-connect-finalization")
+        );
+        assert!(
+            event.blocks.is_none(),
+            "the finalizer supplies no additional model content"
+        );
         assert_eq!(event.payload.as_object().unwrap().len(), 1);
         assert_eq!(event.payload["body"], outcome.notice().to_string());
-        assert!(event.header.authority_association.is_none(), "only actual native binding may supply authority");
+        assert!(
+            event.header.authority_association.is_none(),
+            "only actual native binding may supply authority"
+        );
         let content = meerkat_runtime::input::runtime_input_run_started_content(&input).unwrap();
         // Native owns the complete rendering, which may repeat a fact in its
         // summary and structured event block. Check the public facts and
         // privacy here; the resumed-context control counts whole projections.
-        assert!(content.text_content().contains(&outcome.notice().to_string()));
+        assert!(
+            content
+                .text_content()
+                .contains(&outcome.notice().to_string())
+        );
         assert!(!content.text_content().contains("PRIVATE_NATIVE_DIAGNOSTIC"));
         assert!(outcome.belongs_to(&storage.locator, &session));
         assert!(!outcome.belongs_to(&storage.locator, &SessionId::new()));
@@ -1768,82 +2298,196 @@ mod tests {
         assert!(!outcome.belongs_to(&other.locator, &session));
         outcome.retain(root.path(), 1).unwrap();
         let artifact = root.path().join("standalone-finalization-1.txt");
-        assert_eq!(std::fs::metadata(&artifact).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(&artifact).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         let retained = std::fs::read_to_string(&artifact).unwrap();
         assert!(!retained.contains("PRIVATE_NATIVE_DIAGNOSTIC"));
         let error = outcome.retain(root.path(), 1).unwrap_err().to_string();
         assert!(!error.contains("PRIVATE_NATIVE_DIAGNOSTIC"));
         assert!(error.contains("No retry was started"));
-        assert_eq!(std::fs::read_to_string(artifact).unwrap(), retained, "existing observation is never overwritten");
-        assert!(matches!(&outcome.outcome, FinalizationOutcome::Connector(ReviewedConnectorFinalization::PersistUncertain { reason })
-            if reason == "PRIVATE_NATIVE_DIAGNOSTIC_MUST_NOT_BECOME_MODEL_INPUT"), "actual typed result survives observation errors");
+        assert_eq!(
+            std::fs::read_to_string(artifact).unwrap(),
+            retained,
+            "existing observation is never overwritten"
+        );
+        assert!(
+            matches!(&outcome.outcome, FinalizationOutcome::Connector(ReviewedConnectorFinalization::PersistUncertain { reason })
+            if reason == "PRIVATE_NATIVE_DIAGNOSTIC_MUST_NOT_BECOME_MODEL_INPUT"),
+            "actual typed result survives observation errors"
+        );
     }
 
     #[test]
     fn typed_partial_results_preserve_native_references_without_authorizing_reentry() {
-        use meerkat::governed_realm::stock::{StockGovernanceError,
-            issuance::{CleanupAttempt, StockGrantOutcome}};
+        use meerkat::governed_realm::stock::{
+            StockGovernanceError,
+            issuance::{CleanupAttempt, StockGrantOutcome},
+        };
         let root = tempfile::tempdir().unwrap();
         let storage = finalizer_storage(root.path(), "work");
         let principal = stock_agent_principal(&storage.locator.realm, "fixture").unwrap();
         // Exact native reference shapes are observation fixtures only. Neither
         // native issuance nor authority reconstruction is exercised here.
-        let reference = |id: &str| serde_json::from_value(json!({
+        let reference = |id: &str| {
+            serde_json::from_value(json!({
             "root_authority":&principal,"authority_namespace":"fixture-authority",
             "authority_generation":1,"authority_incarnation":"6f75f457-4232-4e12-8426-508d49ece197",
-            "grant_id":id,"issued_revision":1})).unwrap();
+            "grant_id":id,"issued_revision":1}))
+            .unwrap()
+        };
         let private_reason = "PRIVATE_SELECTION_DIAGNOSTIC";
         let cases = [
-            (Ok(StockGrantOutcome { issued:reference("current"), superseded:Some(reference("previous")),
-                cleanup:vec![CleanupAttempt { agent:"fixture".into(), grant:reference("older"),
-                    outcome:RevocationOutcome::Uncertain }] }), "selected", false),
-            (Err(StockGrantError::Refused(StockGovernanceError::GrantsUnavailable)), "refused", false),
-            (Err(StockGrantError::Refused(StockGovernanceError::Io(io::Error::other(private_reason)))), "refused", false),
-            (Err(StockGrantError::Refused(StockGovernanceError::RequesterUnsupported(private_reason.into()))), "refused", false),
-            (Err(StockGrantError::Refused(StockGovernanceError::CallerNotAdmitted(
-                meerkat_core::OperationAuthorizationError::Unavailable))), "refused", false),
-            (Err(StockGrantError::Refused(StockGovernanceError::Review(private_reason.into()))), "refused", false),
-            (Err(StockGrantError::IssuanceUncertain { id:serde_json::from_value(json!("possibly-issued")).unwrap() }),
-                "issuance_uncertain", true),
-            (Err(StockGrantError::NotSelected { issued:reference("current"), reason:private_reason.into() }),
-                "issued_not_selected", true),
-            (Err(StockGrantError::SelectionUncertain { issued:reference("current"), previous:Some(reference("previous")),
-                reason:private_reason.into() }), "selection_durability_uncertain", true),
-            (Err(StockGrantError::CommandUncertain), "command_uncertain", true),
+            (
+                Ok(StockGrantOutcome {
+                    issued: reference("current"),
+                    superseded: Some(reference("previous")),
+                    cleanup: vec![CleanupAttempt {
+                        agent: "fixture".into(),
+                        grant: reference("older"),
+                        outcome: RevocationOutcome::Uncertain,
+                    }],
+                }),
+                "selected",
+                false,
+            ),
+            (
+                Err(StockGrantError::Refused(
+                    StockGovernanceError::GrantsUnavailable,
+                )),
+                "refused",
+                false,
+            ),
+            (
+                Err(StockGrantError::Refused(StockGovernanceError::Io(
+                    io::Error::other(private_reason),
+                ))),
+                "refused",
+                false,
+            ),
+            (
+                Err(StockGrantError::Refused(
+                    StockGovernanceError::RequesterUnsupported(private_reason.into()),
+                )),
+                "refused",
+                false,
+            ),
+            (
+                Err(StockGrantError::Refused(
+                    StockGovernanceError::CallerNotAdmitted(
+                        meerkat_core::OperationAuthorizationError::Unavailable,
+                    ),
+                )),
+                "refused",
+                false,
+            ),
+            (
+                Err(StockGrantError::Refused(StockGovernanceError::Review(
+                    private_reason.into(),
+                ))),
+                "refused",
+                false,
+            ),
+            (
+                Err(StockGrantError::IssuanceUncertain {
+                    id: serde_json::from_value(json!("possibly-issued")).unwrap(),
+                }),
+                "issuance_uncertain",
+                true,
+            ),
+            (
+                Err(StockGrantError::NotSelected {
+                    issued: reference("current"),
+                    reason: private_reason.into(),
+                }),
+                "issued_not_selected",
+                true,
+            ),
+            (
+                Err(StockGrantError::SelectionUncertain {
+                    issued: reference("current"),
+                    previous: Some(reference("previous")),
+                    reason: private_reason.into(),
+                }),
+                "selection_durability_uncertain",
+                true,
+            ),
+            (
+                Err(StockGrantError::CommandUncertain),
+                "command_uncertain",
+                true,
+            ),
         ];
         for (index, (grant, state, blocked)) in cases.into_iter().enumerate() {
-            let observed = FinalizedInstallation::new(FinalizationTarget { realm:storage.locator.clone(),
-                server:"mail".into(),agent:"fixture".into(),job_id:"reviewed-job".into(),session:SessionId::new() },
-                FinalizationOutcome::Connector(ReviewedConnectorFinalization::Persisted { generation:18, grant }));
+            let observed = FinalizedInstallation::new(
+                FinalizationTarget {
+                    realm: storage.locator.clone(),
+                    server: "mail".into(),
+                    agent: "fixture".into(),
+                    job_id: "reviewed-job".into(),
+                    session: SessionId::new(),
+                },
+                FinalizationOutcome::Connector(ReviewedConnectorFinalization::Persisted {
+                    generation: 18,
+                    grant,
+                }),
+            );
             observed.retain(root.path(), index + 1).unwrap();
-            let saved: Value = serde_json::from_slice(&std::fs::read(root.path()
-                .join(format!("standalone-finalization-{}.txt",index + 1))).unwrap()).unwrap();
+            let saved: Value = serde_json::from_slice(
+                &std::fs::read(
+                    root.path()
+                        .join(format!("standalone-finalization-{}.txt", index + 1)),
+                )
+                .unwrap(),
+            )
+            .unwrap();
             assert_eq!(saved["scope"], "invocation_finalization_observation_only");
             assert_eq!(saved["observation"]["facts"]["persistence"], "saved");
             assert_eq!(saved["observation"]["facts"]["generation"], 18);
             assert_eq!(saved["observation"]["facts"]["grant"]["state"], state);
             assert_eq!(saved["observation"]["automatic_reentry_blocked"], blocked);
-            assert_eq!(observed.blocks_reentry(&storage.locator,"mail"), blocked);
-            assert!(!observed.blocks_reentry(&storage.locator,"other-service"));
+            assert_eq!(observed.blocks_reentry(&storage.locator, "mail"), blocked);
+            assert!(!observed.blocks_reentry(&storage.locator, "other-service"));
             assert!(!saved.to_string().contains(private_reason));
             assert!(!observed.notice().to_string().contains(private_reason));
             let mut terminal = Vec::new();
             observed.display_for_continuation(&mut terminal).unwrap();
-            assert!(!String::from_utf8(terminal).unwrap().contains(private_reason));
-            for excluded in ["root_authority", "authority_namespace", "authority_incarnation", "fixture-authority"] {
+            assert!(
+                !String::from_utf8(terminal)
+                    .unwrap()
+                    .contains(private_reason)
+            );
+            for excluded in [
+                "root_authority",
+                "authority_namespace",
+                "authority_incarnation",
+                "fixture-authority",
+            ] {
                 assert!(!saved.to_string().contains(excluded));
             }
             let references = &saved["native_grant_references"];
             match state {
                 "selected" => {
-                    assert_eq!(references["issued"], json!({"grant_id":"current","issued_revision":1,"authority_generation":1}));
-                    assert_eq!(references["superseded"], json!({"grant_id":"previous","issued_revision":1,"authority_generation":1}));
+                    assert_eq!(
+                        references["issued"],
+                        json!({"grant_id":"current","issued_revision":1,"authority_generation":1})
+                    );
+                    assert_eq!(
+                        references["superseded"],
+                        json!({"grant_id":"previous","issued_revision":1,"authority_generation":1})
+                    );
                     assert_eq!(references["cleanup"][0]["grant_id"], "older");
                     assert_eq!(references["cleanup"][0]["agent"], "fixture");
                     assert_eq!(references["cleanup"][0]["outcome"], "Uncertain");
-                    assert_eq!(saved["observation"]["facts"]["grant"]["prior_cleanup_complete"], false);
+                    assert_eq!(
+                        saved["observation"]["facts"]["grant"]["prior_cleanup_complete"],
+                        false
+                    );
                 }
-                "issuance_uncertain" => assert_eq!(references["possibly_issued_id"], "possibly-issued"),
+                "issuance_uncertain" => {
+                    assert_eq!(references["possibly_issued_id"], "possibly-issued")
+                }
                 "issued_not_selected" => assert_eq!(references["issued"]["grant_id"], "current"),
                 "selection_durability_uncertain" => {
                     assert_eq!(references["issued"]["grant_id"], "current");
@@ -1852,12 +2496,22 @@ mod tests {
                 "refused" => {
                     assert!(references.is_null());
                     let expected = match index {
-                        1 => "GrantsUnavailable", 2 => "Io", 3 => "RequesterUnsupported",
-                        4 => "CallerNotAdmitted", 5 => "Review", _ => unreachable!(),
+                        1 => "GrantsUnavailable",
+                        2 => "Io",
+                        3 => "RequesterUnsupported",
+                        4 => "CallerNotAdmitted",
+                        5 => "Review",
+                        _ => unreachable!(),
                     };
-                    assert_eq!(saved["observation"]["facts"]["grant"]["reason_kind"], expected);
+                    assert_eq!(
+                        saved["observation"]["facts"]["grant"]["reason_kind"],
+                        expected
+                    );
                     assert_eq!(saved["observation"]["facts"]["grant"]["issued"], false);
-                    assert_eq!(saved["observation"]["facts"]["grant"]["selection_changed"], false);
+                    assert_eq!(
+                        saved["observation"]["facts"]["grant"]["selection_changed"],
+                        false
+                    );
                 }
                 "command_uncertain" => assert!(references.is_null()),
                 _ => unreachable!(),
@@ -1867,28 +2521,86 @@ mod tests {
 
     #[test]
     fn plain_native_failures_preserve_uncertainty_and_generation_facts_without_error_text() {
-        use meerkat_core::{mcp_config::McpRealmPersistError as Persist, config_runtime::ConfigRuntimeError as Config};
+        use meerkat_core::{
+            config_runtime::ConfigRuntimeError as Config,
+            mcp_config::McpRealmPersistError as Persist,
+        };
         let root = tempfile::tempdir().unwrap();
         let storage = finalizer_storage(root.path(), "work");
         let private = "PRIVATE_CONFIGURATION_OR_PATH";
         // Typed native error inputs, not a simulated successful write. The
         // separate native writer control covers real sidecar failure ordering.
         let cases = [
-            (Persist::ServerExists(private.into()), "refused", "ServerExists", false),
-            (Persist::Config(Config::GenerationConflict { expected:7,current:9 }), "refused", "GenerationConflict", false),
-            (Persist::Config(Config::LockTimeout), "uncertain", "LockTimeout", true),
-            (Persist::Config(Config::Io(io::Error::other(private))), "uncertain", "Io", true),
-            (Persist::Config(Config::Json(serde_json::from_str::<Value>("not-json").unwrap_err())), "uncertain", "Json", true),
-            (Persist::NotAdmitted(meerkat_core::AdministrationEntryRefusal::Unavailable(private.into())),
-                "refused", "NotAdmitted", false),
-            (Persist::OutcomeUnknown(Config::Io(io::Error::other(private))), "uncertain", "OutcomeUnknown", true),
-            (Persist::OutcomeUnknown(Config::GenerationConflict { expected:7,current:9 }),
-                "uncertain", "OutcomeUnknown", true),
+            (
+                Persist::ServerExists(private.into()),
+                "refused",
+                "ServerExists",
+                false,
+            ),
+            (
+                Persist::Config(Config::GenerationConflict {
+                    expected: 7,
+                    current: 9,
+                }),
+                "refused",
+                "GenerationConflict",
+                false,
+            ),
+            (
+                Persist::Config(Config::LockTimeout),
+                "uncertain",
+                "LockTimeout",
+                true,
+            ),
+            (
+                Persist::Config(Config::Io(io::Error::other(private))),
+                "uncertain",
+                "Io",
+                true,
+            ),
+            (
+                Persist::Config(Config::Json(
+                    serde_json::from_str::<Value>("not-json").unwrap_err(),
+                )),
+                "uncertain",
+                "Json",
+                true,
+            ),
+            (
+                Persist::NotAdmitted(meerkat_core::AdministrationEntryRefusal::Unavailable(
+                    private.into(),
+                )),
+                "refused",
+                "NotAdmitted",
+                false,
+            ),
+            (
+                Persist::OutcomeUnknown(Config::Io(io::Error::other(private))),
+                "uncertain",
+                "OutcomeUnknown",
+                true,
+            ),
+            (
+                Persist::OutcomeUnknown(Config::GenerationConflict {
+                    expected: 7,
+                    current: 9,
+                }),
+                "uncertain",
+                "OutcomeUnknown",
+                true,
+            ),
         ];
-        for (index,(error,persistence,kind,blocked)) in cases.into_iter().enumerate() {
-            let observed = FinalizedInstallation::new(FinalizationTarget { realm:storage.locator.clone(),
-                server:"reviewed-service".into(),agent:"reader".into(),job_id:"prior-job".into(),session:SessionId::new() },
-                FinalizationOutcome::PublicPersistenceError(error));
+        for (index, (error, persistence, kind, blocked)) in cases.into_iter().enumerate() {
+            let observed = FinalizedInstallation::new(
+                FinalizationTarget {
+                    realm: storage.locator.clone(),
+                    server: "reviewed-service".into(),
+                    agent: "reader".into(),
+                    job_id: "prior-job".into(),
+                    session: SessionId::new(),
+                },
+                FinalizationOutcome::PublicPersistenceError(error),
+            );
             let notice = observed.notice();
             assert_eq!(notice["facts"]["persistence"], persistence);
             assert_eq!(notice["facts"]["grant"]["state"], "not_requested");
@@ -1896,32 +2608,52 @@ mod tests {
             let detail = &notice["facts"]["error"];
             if matches!(kind, "ServerExists" | "NotAdmitted" | "OutcomeUnknown") {
                 assert_eq!(detail["kind"], kind);
+            } else {
+                assert_eq!(detail["kind"], "Config");
+                assert_eq!(detail["config"]["kind"], kind);
             }
-            else { assert_eq!(detail["kind"], "Config"); assert_eq!(detail["config"]["kind"], kind); }
             if kind == "GenerationConflict" {
-                assert_eq!(detail["config"], json!({"kind":"GenerationConflict","expected":7,"current":9}));
+                assert_eq!(
+                    detail["config"],
+                    json!({"kind":"GenerationConflict","expected":7,"current":9})
+                );
             }
-            observed.retain(root.path(), index+1).unwrap();
-            let artifact = std::fs::read_to_string(root.path().join(format!("standalone-finalization-{}.txt",index+1))).unwrap();
-            let mut output=Vec::new(); observed.display_for_continuation(&mut output).unwrap();
+            observed.retain(root.path(), index + 1).unwrap();
+            let artifact = std::fs::read_to_string(
+                root.path()
+                    .join(format!("standalone-finalization-{}.txt", index + 1)),
+            )
+            .unwrap();
+            let mut output = Vec::new();
+            observed.display_for_continuation(&mut output).unwrap();
             assert!(!artifact.contains(private));
             let output = String::from_utf8(output).unwrap();
             assert!(!output.contains(private));
             if kind == "NotAdmitted" {
                 assert!(output.contains("refused before changing the configuration"));
             } else if kind == "OutcomeUnknown" {
-                assert!(output.contains("The write may be partial. Do not repeat this target automatically."));
+                assert!(output.contains(
+                    "The write may be partial. Do not repeat this target automatically."
+                ));
             }
-            assert!(!observed.blocks_reentry(&storage.locator,"different-service"));
-            assert!(matches!(&observed.outcome,FinalizationOutcome::PublicPersistenceError(_)),
-                "Plain errors remain separate from the native connector disposition");
+            assert!(!observed.blocks_reentry(&storage.locator, "different-service"));
+            assert!(
+                matches!(
+                    &observed.outcome,
+                    FinalizationOutcome::PublicPersistenceError(_)
+                ),
+                "Plain errors remain separate from the native connector disposition"
+            );
         }
         let observed=FinalizedInstallation::new(FinalizationTarget { realm:storage.locator.clone(),
             server:"reviewed-service".into(),agent:"reader".into(),job_id:"prior-job".into(),session:SessionId::new() },
             FinalizationOutcome::Connector(ReviewedConnectorFinalization::Refused(
                 meerkat::governed_realm::stock::finalize::ReviewedConnectorRefusal::ConfigConflict { expected:11,current:13 })));
-        assert_eq!(observed.notice()["facts"]["error"], json!({"kind":"GenerationConflict","expected":11,"current":13}));
-        assert!(!observed.blocks_reentry(&storage.locator,"reviewed-service"));
+        assert_eq!(
+            observed.notice()["facts"]["error"],
+            json!({"kind":"GenerationConflict","expected":11,"current":13})
+        );
+        assert!(!observed.blocks_reentry(&storage.locator, "reviewed-service"));
     }
 
     #[test]
@@ -2013,7 +2745,8 @@ mod tests {
             },
         };
         let review =
-            native_finalization_review(&storage, &target, &account, &config, &request, 17, None).unwrap();
+            native_finalization_review(&storage, &target, &account, &config, &request, 17, None)
+                .unwrap();
         assert_eq!(review.agent, request.agent);
         assert_eq!(review.slot, target.slot);
         assert_eq!(review.account, account);
@@ -2055,8 +2788,10 @@ mod tests {
                 ..request.clone()
             };
             assert!(
-                native_finalization_review(&storage, &target, &account, &config, &changed, 17, None)
-                    .is_err()
+                native_finalization_review(
+                    &storage, &target, &account, &config, &changed, 17, None
+                )
+                .is_err()
             );
         }
         for field in [
@@ -2075,8 +2810,10 @@ mod tests {
                 _ => unreachable!(),
             }
             assert!(
-                native_finalization_review(&storage, &target, &account, &changed, &request, 17, None)
-                    .is_err()
+                native_finalization_review(
+                    &storage, &target, &account, &changed, &request, 17, None
+                )
+                .is_err()
             );
         }
         let timed = StockGrantRequest {
@@ -2084,11 +2821,13 @@ mod tests {
             ..request.clone()
         };
         let timed_review =
-            native_finalization_review(&storage, &target, &account, &config, &timed, 17, None).unwrap();
+            native_finalization_review(&storage, &target, &account, &config, &timed, 17, None)
+                .unwrap();
         assert_eq!(timed_review.expires_in_ms, Some(60_000));
         let foreign = finalizer_storage(directory.path(), "other");
         assert!(
-            native_finalization_review(&foreign, &target, &account, &config, &request, 17, None).is_err()
+            native_finalization_review(&foreign, &target, &account, &config, &request, 17, None)
+                .is_err()
         );
         let global = finalizer_storage(directory.path(), "global");
         let mut global_target = target.clone();
@@ -2096,18 +2835,52 @@ mod tests {
         let mut global_config = config.clone();
         global_config.connector.as_mut().unwrap().realm_id = "global".into();
         let global_review = native_finalization_review(
-            &global, &global_target, &account, &global_config, &timed, 17, None,
-        ).unwrap();
+            &global,
+            &global_target,
+            &account,
+            &global_config,
+            &timed,
+            17,
+            None,
+        )
+        .unwrap();
         assert_eq!(global_review.slot.realm, global.locator.realm);
         assert_eq!(global_review.server, global_config);
         assert_eq!(global_review.expires_in_ms, Some(60_000));
         let named = meerkat::ConnectorOAuthTarget {
-            client_auth_profile: Some("native-profile".into()), ..target.clone()
+            client_auth_profile: Some("native-profile".into()),
+            ..target.clone()
         };
-        assert!(native_finalization_review(&storage, &named, &account, &config, &timed, 17, None).is_err());
-        assert!(native_finalization_review(&storage, &target, &account, &config, &timed, 17, Some("native-profile@binding")).is_err());
-        let named_review = native_finalization_review(&storage, &named, &account, &config, &timed, 17, Some("native-profile@binding")).unwrap();
-        assert_eq!(named_review.client_profile_binding.as_deref(), Some("native-profile@binding"));
+        assert!(
+            native_finalization_review(&storage, &named, &account, &config, &timed, 17, None)
+                .is_err()
+        );
+        assert!(
+            native_finalization_review(
+                &storage,
+                &target,
+                &account,
+                &config,
+                &timed,
+                17,
+                Some("native-profile@binding")
+            )
+            .is_err()
+        );
+        let named_review = native_finalization_review(
+            &storage,
+            &named,
+            &account,
+            &config,
+            &timed,
+            17,
+            Some("native-profile@binding"),
+        )
+        .unwrap();
+        assert_eq!(
+            named_review.client_profile_binding.as_deref(),
+            Some("native-profile@binding")
+        );
     }
 
     #[test]
@@ -2225,7 +2998,8 @@ mod tests {
                 .permissions(std::fs::Permissions::from_mode(0o700))
                 .tempdir()
                 .unwrap();
-            let (approvals, mut presenter) = LocalApprovals::create_paired_host(root.path()).unwrap();
+            let (approvals, mut presenter) =
+                LocalApprovals::create_paired_host(root.path()).unwrap();
             let session = SessionId::new();
             approvals.bind_session(&session).unwrap();
             let (mut response, receive) = oneshot::channel::<Value>();
@@ -2255,7 +3029,10 @@ mod tests {
                     assert!(reviewing.as_mut().now_or_never().is_none());
                 }
                 drop(receive);
-                assert!(matches!(reviewing.await.unwrap(), ReviewOutcome::CallerGone));
+                assert!(matches!(
+                    reviewing.await.unwrap(),
+                    ReviewOutcome::CallerGone
+                ));
             }
             input.check_cleanup().unwrap();
             let service = meerkat_core::ApprovalService::with_store(Arc::new(
@@ -2277,35 +3054,63 @@ mod tests {
             let (approvals, mut presenter) = LocalApprovals::create(root.path()).unwrap();
             let session = SessionId::new();
             approvals.bind_session(&session).unwrap();
-            let mut request = review_request(&session, "Review exact credential removal",
-                json!({"phase":"service_credential_management","service":"cards","slots":["KEY"]})).unwrap();
+            let mut request = review_request(
+                &session,
+                "Review exact credential removal",
+                json!({"phase":"service_credential_management","service":"cards","slots":["KEY"]}),
+            )
+            .unwrap();
             request.expires_at = Some((SystemTime::now() + Duration::from_millis(500)).into());
             let (mut caller, _receive) = oneshot::channel();
             let (lines, receive_lines) = mpsc::channel(1);
             let mut input = TerminalInput::scripted(receive_lines);
             let mut output = Vec::new();
-            let interrupt = std::future::pending::<io::Result<()>>(); tokio::pin!(interrupt);
-            let result = review(&approvals, &mut presenter, &mut input, &mut output,
-                request, &mut caller, interrupt.as_mut()).await;
-            assert!(matches!(result, Err(ConnectError::InvalidInput(ref message))
-                if message == "The access review expired without a returned decision"));
-            assert_eq!(String::from_utf8(output).unwrap().matches("Type 'approve ").count(), 1);
+            let interrupt = std::future::pending::<io::Result<()>>();
+            tokio::pin!(interrupt);
+            let result = review(
+                &approvals,
+                &mut presenter,
+                &mut input,
+                &mut output,
+                request,
+                &mut caller,
+                interrupt.as_mut(),
+            )
+            .await;
+            assert!(
+                matches!(result, Err(ConnectError::InvalidInput(ref message))
+                if message == "The access review expired without a returned decision")
+            );
+            assert_eq!(
+                String::from_utf8(output)
+                    .unwrap()
+                    .matches("Type 'approve ")
+                    .count(),
+                1
+            );
             input.check_cleanup().unwrap();
             lines.send(Ok("input after expiry".into())).await.unwrap();
             assert_eq!(input.recv().await.unwrap().unwrap(), "input after expiry");
             approvals.check_session(&session).unwrap();
             assert!(!approvals.has_uncertain_dispatch());
-        }).await.expect("displayed credential review must retain its actual deadline");
+        })
+        .await
+        .expect("displayed credential review must retain its actual deadline");
     }
 
     #[tokio::test]
     async fn registered_interrupt_stops_review_before_entry_or_ready_approval() {
-        use std::{os::unix::fs::PermissionsExt, sync::atomic::{AtomicUsize, Ordering}};
+        use std::{
+            os::unix::fs::PermissionsExt,
+            sync::atomic::{AtomicUsize, Ordering},
+        };
         for after_presentation in [false, true] {
             let root = tempfile::Builder::new()
                 .permissions(std::fs::Permissions::from_mode(0o700))
-                .tempdir().unwrap();
-            let (approvals, mut presenter) = LocalApprovals::create_paired_host(root.path()).unwrap();
+                .tempdir()
+                .unwrap();
+            let (approvals, mut presenter) =
+                LocalApprovals::create_paired_host(root.path()).unwrap();
             let session = SessionId::new();
             approvals.bind_session(&session).unwrap();
             let (mut response, _receive) = oneshot::channel::<Value>();
@@ -2313,8 +3118,11 @@ mod tests {
             let mut input = TerminalInput::scripted(input_receive);
             let mut output = Vec::new();
             let request = review_request(
-                &session, "Review exact connector", json!({"account":"exact-account"}),
-            ).unwrap();
+                &session,
+                "Review exact connector",
+                json!({"account":"exact-account"}),
+            )
+            .unwrap();
             let (cancel, cancelled) = oneshot::channel();
             let completed = Arc::new(AtomicUsize::new(0));
             let observed = completed.clone();
@@ -2328,15 +3136,21 @@ mod tests {
             let mut ready_approval = None;
             {
                 let reviewing = review(
-                    &approvals, &mut presenter, &mut input, &mut output,
-                    request, &mut response, interrupt.as_mut(),
+                    &approvals,
+                    &mut presenter,
+                    &mut input,
+                    &mut output,
+                    request,
+                    &mut response,
+                    interrupt.as_mut(),
                 );
                 tokio::pin!(reviewing);
                 if after_presentation {
                     assert!(reviewing.as_mut().now_or_never().is_none());
                     let service = meerkat_core::ApprovalService::with_store(Arc::new(
                         meerkat_store::FileApprovalStore::open(approvals.store_path()).unwrap(),
-                    )).unwrap();
+                    ))
+                    .unwrap();
                     let records = service.list(Default::default()).unwrap();
                     assert_eq!(records.len(), 1);
                     let line = format!("approve {}", records[0].approval_id);
@@ -2355,7 +3169,8 @@ mod tests {
             input.check_cleanup().unwrap();
             let service = meerkat_core::ApprovalService::with_store(Arc::new(
                 meerkat_store::FileApprovalStore::open(approvals.store_path()).unwrap(),
-            )).unwrap();
+            ))
+            .unwrap();
             let records = service.list(Default::default()).unwrap();
             assert_eq!(records.len(), usize::from(after_presentation));
             assert!(records.iter().all(|record| record.decision.is_none()));
@@ -2368,7 +3183,8 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let root = tempfile::Builder::new()
             .permissions(std::fs::Permissions::from_mode(0o700))
-            .tempdir().unwrap();
+            .tempdir()
+            .unwrap();
         let (approvals, mut presenter) = LocalApprovals::create_paired_host(root.path()).unwrap();
         let session = SessionId::new();
         approvals.bind_session(&session).unwrap();
@@ -2377,8 +3193,11 @@ mod tests {
         let mut input = TerminalInput::scripted(input_receive);
         let mut output = Vec::new();
         let request = review_request(
-            &session, "Review exact connector", json!({"account":"exact-account"}),
-        ).unwrap();
+            &session,
+            "Review exact connector",
+            json!({"account":"exact-account"}),
+        )
+        .unwrap();
         let (_cancel, cancelled) = oneshot::channel::<()>();
         let interrupt = async move {
             cancelled.await.unwrap();
@@ -2388,17 +3207,25 @@ mod tests {
         assert!(interrupt.as_mut().now_or_never().is_none());
         {
             let reviewing = review(
-                &approvals, &mut presenter, &mut input, &mut output,
-                request, &mut response, interrupt.as_mut(),
+                &approvals,
+                &mut presenter,
+                &mut input,
+                &mut output,
+                request,
+                &mut response,
+                interrupt.as_mut(),
             );
             tokio::pin!(reviewing);
             assert!(reviewing.as_mut().now_or_never().is_none());
             let service = meerkat_core::ApprovalService::with_store(Arc::new(
                 meerkat_store::FileApprovalStore::open(approvals.store_path()).unwrap(),
-            )).unwrap();
+            ))
+            .unwrap();
             let records = service.list(Default::default()).unwrap();
             assert_eq!(records.len(), 1);
-            input_send.try_send(Ok(format!("approve {}", records[0].approval_id))).unwrap();
+            input_send
+                .try_send(Ok(format!("approve {}", records[0].approval_id)))
+                .unwrap();
             let ReviewOutcome::Decided(decision) = reviewing.await.unwrap() else {
                 panic!("the exact ordinary approval must be observed");
             };
@@ -2425,7 +3252,11 @@ mod tests {
         assert!(proposal(zero).is_err());
         for (label, profile, expected) in [
             ("omitted", None, None),
-            ("named", Some(json!("existing-profile")), Some("existing-profile")),
+            (
+                "named",
+                Some(json!("existing-profile")),
+                Some("existing-profile"),
+            ),
             ("null", Some(Value::Null), None),
         ] {
             let mut selected = exact.clone();
@@ -2434,16 +3265,27 @@ mod tests {
             }
             let parsed = proposal(selected)
                 .unwrap_or_else(|_| panic!("{label} profile selection must parse"));
-            let target = parsed.connector.into_native(meerkat_core::RealmId::parse("work").unwrap())
-                .unwrap_or_else(|_| panic!("{label} profile selection must retain its native target"));
-            assert_eq!(target.client_auth_profile.as_deref(), expected, "{label} profile selection");
+            let target = parsed
+                .connector
+                .into_native(meerkat_core::RealmId::parse("work").unwrap())
+                .unwrap_or_else(|_| {
+                    panic!("{label} profile selection must retain its native target")
+                });
+            assert_eq!(
+                target.client_auth_profile.as_deref(),
+                expected,
+                "{label} profile selection"
+            );
         }
         let mut private_wire = exact["connector"].clone();
         private_wire["client_auth_profile"] = Value::Null;
-        assert!(serde_json::from_value::<crate::stdio::wire::ConnectorTarget>(private_wire).is_err(),
-            "terminal null normalization must not relax the private-pipe contract");
+        assert!(
+            serde_json::from_value::<crate::stdio::wire::ConnectorTarget>(private_wire).is_err(),
+            "terminal null normalization must not relax the private-pipe contract"
+        );
         let mut private_profile = exact.clone();
-        private_profile["connector"]["client_auth_profile"] = json!({"id":"mail","client_secret":"private"});
+        private_profile["connector"]["client_auth_profile"] =
+            json!({"id":"mail","client_secret":"private"});
         assert!(proposal(private_profile).is_err());
         for key in [
             "client_secret",

@@ -4,8 +4,8 @@
 use crate::{
     ConnectError, ConnectSession, RealmOptions, SessionOptions, SessionStartup,
     approval::{ApprovalPresenter, LocalApprovals},
-    service_preparation::LazySetup,
     provider_setup::SignInDisposition,
+    service_preparation::LazySetup,
 };
 use futures_util::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use meerkat_core::{AgentEvent, ApprovalDecision, ApprovalPrincipalId};
@@ -23,14 +23,16 @@ use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch},
 };
+#[path = "service_stdio.rs"]
+mod services;
 #[path = "stdio_io.rs"]
 mod transport;
 #[path = "stdio_wire.rs"]
 pub(crate) mod wire;
-#[path = "service_stdio.rs"]
-mod services;
 use wire::*;
-pub(crate) use wire::{Answer as PromptAnswer, Choice as RecoveryChoice, PairingMethod, ProviderAction};
+pub(crate) use wire::{
+    Answer as PromptAnswer, Choice as RecoveryChoice, PairingMethod, ProviderAction,
+};
 
 fn ended() -> ConnectError {
     ConnectError::InvalidInput("The protected private-pipe interaction ended".into())
@@ -42,16 +44,17 @@ pub(crate) struct Exchange {
 }
 
 impl Exchange {
-    pub(crate) fn take_owner_close(&mut self)
-        -> Option<oneshot::Receiver<(SignInDisposition, oneshot::Sender<()>)>> {
+    pub(crate) fn take_owner_close(
+        &mut self,
+    ) -> Option<oneshot::Receiver<(SignInDisposition, oneshot::Sender<()>)>> {
         self.owner_close.take()
     }
 
     /// The Console transport removes this same informational prompt before
     /// acknowledging closure. No native decision or account result is created.
-    pub(crate) async fn closed_by_owner(&mut self)
-        -> Result<(SignInDisposition, oneshot::Sender<()>), oneshot::error::RecvError>
-    {
+    pub(crate) async fn closed_by_owner(
+        &mut self,
+    ) -> Result<(SignInDisposition, oneshot::Sender<()>), oneshot::error::RecvError> {
         match self.owner_close.as_mut() {
             Some(close) => close.await,
             None => std::future::pending().await,
@@ -77,18 +80,23 @@ impl ProviderNotice {
             }
         }
     }
-    pub(crate) fn cancel_requested(&self) -> bool { self.cancel_requested }
+    pub(crate) fn cancel_requested(&self) -> bool {
+        self.cancel_requested
+    }
     pub(crate) async fn finish(self, disposition: SignInDisposition) -> Result<(), ConnectError> {
         self.finish_with_cancellation(disposition).await.map(|_| ())
     }
     /// Report the explicit request only after this prompt has been removed.
     /// A late click can win prompt custody after native completion has joined;
     /// it still stops this request before its separate access review begins.
-    pub(crate) async fn finish_with_cancellation(mut self, disposition: SignInDisposition)
-        -> Result<bool, ConnectError>
-    {
+    pub(crate) async fn finish_with_cancellation(
+        mut self,
+        disposition: SignInDisposition,
+    ) -> Result<bool, ConnectError> {
         let (ack, joined) = oneshot::channel();
-        self.owner_close.send((disposition, ack)).map_err(|_| ended())?;
+        self.owner_close
+            .send((disposition, ack))
+            .map_err(|_| ended())?;
         // Keep the response receiver alive until this exact closure is joined.
         let result = tokio::select! {biased;_=self.bridge.closed()=>Err(ended()),r=joined=>r.map_err(|_|ended())};
         self.cancel_requested |= matches!(self.response.try_recv(), Ok(Ok(PromptAnswer::Cancel)));
@@ -128,14 +136,27 @@ impl PromptBridge {
         tokio::select! {biased;_=self.closed()=>return Err(ended()),r=self.prompts.send(Exchange{prompt,response:send,owner_close:None})=>r.map_err(|_|ended())?}
         tokio::select! {biased;_=self.closed()=>Err(ended()),r=receive=>r.map_err(|_|ended())?.map_err(|_|ended())}
     }
-    pub(crate) async fn provider_notice(&self, prompt: Value) -> Result<ProviderNotice, ConnectError> {
-        if self.retired() || !matches!(prompt["kind"].as_str(), Some("provider_browser" | "provider_device")) {
+    pub(crate) async fn provider_notice(
+        &self,
+        prompt: Value,
+    ) -> Result<ProviderNotice, ConnectError> {
+        if self.retired()
+            || !matches!(
+                prompt["kind"].as_str(),
+                Some("provider_browser" | "provider_device")
+            )
+        {
             return Err(ended());
         }
         let (send, response) = oneshot::channel();
         let (owner_close, close) = oneshot::channel();
         tokio::select! {biased;_=self.closed()=>return Err(ended()),r=self.prompts.send(Exchange{prompt,response:send,owner_close:Some(close)})=>r.map_err(|_|ended())?}
-        Ok(ProviderNotice { cancel_requested: false, response, owner_close, bridge: self.clone() })
+        Ok(ProviderNotice {
+            cancel_requested: false,
+            response,
+            owner_close,
+            bridge: self.clone(),
+        })
     }
 }
 struct Opened {
@@ -176,13 +197,18 @@ fn capabilities(
     prompt_kinds.push("approval");
     if services {
         prompt_kinds.extend([
-            "provider_target", "provider_action", "provider_api_key",
-            "provider_browser", "provider_device",
+            "provider_target",
+            "provider_action",
+            "provider_api_key",
+            "provider_browser",
+            "provider_device",
         ]);
     }
     if paired_host && forge_enabled {
         prompt_kinds.extend([
-            "paired_host_target", "paired_host_pairing_method", "paired_host_pairing_code",
+            "paired_host_target",
+            "paired_host_pairing_method",
+            "paired_host_pairing_code",
         ]);
     }
     if paired_host {
@@ -205,11 +231,17 @@ async fn open(mut binding: Initialize, bridge: PromptBridge) -> Result<Opened, &
     // filesystem setup or any private prompt. The actual driver validated the
     // same closed trusted initialization before scheduling this future.
     let application_forge = if binding.adapter == Adapter::ForgeApplication {
-        if !binding.valid() { return Err("invalid_binding"); }
+        if !binding.valid() {
+            return Err("invalid_binding");
+        }
         let selected = binding.forge.take().ok_or("invalid_binding")?;
-        Some(LazySetup::private_forge_application(selected.host, selected.private_fields)
-            .map_err(|_| "invalid_binding")?)
-    } else { None };
+        Some(
+            LazySetup::private_forge_application(selected.host, selected.private_fields)
+                .map_err(|_| "invalid_binding")?,
+        )
+    } else {
+        None
+    };
     // The selected .51 MCP close does not establish active setup-worker
     // settlement. Refuse this new composition before credentials, artifacts or
     // native startup until the actual owner path and qualification are present.
@@ -223,7 +255,10 @@ async fn open(mut binding: Initialize, bridge: PromptBridge) -> Result<Opened, &
         return Err("unavailable");
     }
     let include_paired_host = binding.paired_host.is_some();
-    let include_forge = matches!(binding.adapter, Adapter::ForgeReading | Adapter::ForgeApplication);
+    let include_forge = matches!(
+        binding.adapter,
+        Adapter::ForgeReading | Adapter::ForgeApplication
+    );
     let auth_binding = binding
         .auth_binding
         .map(|v| {
@@ -250,22 +285,33 @@ async fn open(mut binding: Initialize, bridge: PromptBridge) -> Result<Opened, &
     };
     let model = if binding.adapter.is_services() {
         crate::provider_setup::private::present(&mut startup, model, bridge)
-            .await.map_err(|_| "native_auth_required")?.ok_or("binding_retired")?
+            .await
+            .map_err(|_| "native_auth_required")?
+            .ok_or("binding_retired")?
     } else {
-    if !crate::provider_setup::ready_for_open(&mut startup, &model)
-        .await
-        .map_err(|_| "native_auth_required")?
-    {
-        return Err("native_auth_required");
-    }
-    model
+        if !crate::provider_setup::ready_for_open(&mut startup, &model)
+            .await
+            .map_err(|_| "native_auth_required")?
+        {
+            return Err("native_auth_required");
+        }
+        model
     };
     let connector = if binding.adapter.is_services() {
-        let profiles = binding.connector_auth.take().map(ConnectorProfiles::into_native)
+        let profiles = binding
+            .connector_auth
+            .take()
+            .map(ConnectorProfiles::into_native)
             .unwrap_or_default();
-        Some(crate::connector_auth::Control::new(startup.configure_connectors(profiles)
-            .await.map_err(|_| "connector_unavailable")?))
-    } else { None };
+        Some(crate::connector_auth::Control::new(
+            startup
+                .configure_connectors(profiles)
+                .await
+                .map_err(|_| "connector_unavailable")?,
+        ))
+    } else {
+        None
+    };
     let artifacts =
         crate::resources::reserve_setup_artifacts(&storage).map_err(|_| "unavailable")?;
     let actor =
@@ -285,16 +331,26 @@ async fn open(mut binding: Initialize, bridge: PromptBridge) -> Result<Opened, &
     } else if let Some(lazy) = application_forge {
         (lazy, None, None)
     } else if binding.adapter == Adapter::PairedHost {
-        let credential = binding.paired_host.as_mut()
-            .and_then(|paired_host| paired_host.credential.take()).ok_or("invalid_binding")?;
+        let credential = binding
+            .paired_host
+            .as_mut()
+            .and_then(|paired_host| paired_host.credential.take())
+            .ok_or("invalid_binding")?;
         let client = crate::paired_host::PairedHostClient::for_presenter(
-            &binding.application.origin, &credential.value,
-        ).map_err(|_| "invalid_binding")?;
+            &binding.application.origin,
+            &credential.value,
+        )
+        .map_err(|_| "invalid_binding")?;
         drop(credential);
         let paired_host = crate::paired_host_tool::PairedHostFrontend::private_preparation(client);
-        let presenter = paired_host.take_secret_entry_presenter()
+        let presenter = paired_host
+            .take_secret_entry_presenter()
             .map_err(|_| "unsupported_presenter")?;
-        (LazySetup::paired_host_preparation(paired_host), None, Some(presenter))
+        (
+            LazySetup::paired_host_preparation(paired_host),
+            None,
+            Some(presenter),
+        )
     } else if include_paired_host {
         let (paired_host, presenter) =
             crate::paired_host_tool::PairedHostFrontend::deferred_with_research();
@@ -333,7 +389,10 @@ async fn open(mut binding: Initialize, bridge: PromptBridge) -> Result<Opened, &
     // still retained. Never downgrade a service bootstrap to frontend-only
     // capabilities or construct a second tool-name table for the response.
     let capabilities = capabilities(
-        binding.protocol_version, binding.adapter, include_paired_host, &tools,
+        binding.protocol_version,
+        binding.adapter,
+        include_paired_host,
+        &tools,
         service_presenter.as_ref().map(|(presenter, _)| presenter),
     )?;
     let session = startup
@@ -373,12 +432,21 @@ enum Work {
     Sent(String, TurnCompletion, Option<Result<bool, ()>>),
     Presenter(bool),
     Service(Result<(), ConnectError>),
-    Connector(String, crate::connector_auth::Control,
-        Result<crate::connector_auth::Reply, &'static str>, Option<Result<(), &'static str>>, bool),
+    Connector(
+        String,
+        crate::connector_auth::Control,
+        Result<crate::connector_auth::Reply, &'static str>,
+        Option<Result<(), &'static str>>,
+        bool,
+    ),
     Closed(Result<(), ConnectError>),
 }
 enum ConnectorCommand {
-    Start(meerkat::ConnectorOAuthTarget, String, crate::connector_install::InstallationLogin),
+    Start(
+        meerkat::ConnectorOAuthTarget,
+        String,
+        crate::connector_install::InstallationLogin,
+    ),
     Complete(String, String, Option<String>),
     Cancel,
 }
@@ -458,7 +526,12 @@ enum PromptClosure {
     Response,
 }
 async fn pending_prompt_closed(pending: &mut Option<PendingPrompt>) -> PromptClosure {
-    let Some(PendingPrompt { owner_close, response, .. }) = pending.as_mut() else {
+    let Some(PendingPrompt {
+        owner_close,
+        response,
+        ..
+    }) = pending.as_mut()
+    else {
         return std::future::pending().await;
     };
     // Borrow the retained prompt once. Cancelling this wait leaves both
@@ -559,12 +632,21 @@ impl Driver {
         }
     }
     fn event_target(&self) -> Option<Value> {
-        self.scope.as_ref().map(|scope| json!({"scope":scope})).or_else(|| {
-            self.initialize_id.as_ref().map(|id| json!({"initialize_request_id":id}))
-        })
+        self.scope
+            .as_ref()
+            .map(|scope| json!({"scope":scope}))
+            .or_else(|| {
+                self.initialize_id
+                    .as_ref()
+                    .map(|id| json!({"initialize_request_id":id}))
+            })
     }
     fn event(&mut self, mut value: Value) {
-        if self.binding.as_ref().is_some_and(|b| b.protocol_version == 3) {
+        if self
+            .binding
+            .as_ref()
+            .is_some_and(|b| b.protocol_version == 3)
+        {
             if let Some(target) = self.event_target() {
                 value["target"] = target;
                 self.output(json!({"jsonrpc":"2.0","method":"connect/event","params":value}));
@@ -593,7 +675,9 @@ impl Driver {
         }
         self.secret_presenter.take();
         if let Some(control) = &mut self.connector {
-            if control.retire().is_err() { self.failed = true; }
+            if control.retire().is_err() {
+                self.failed = true;
+            }
         }
         self.private_notices.clear();
         if self
@@ -609,8 +693,15 @@ impl Driver {
         if let Some(prompt) = self.pending.take() {
             drop(prompt.response);
             let disposition = if reason == "expired"
-                && self.binding.as_ref().is_some_and(|binding| binding.protocol_version == 3)
-            { "expired" } else { "retired" };
+                && self
+                    .binding
+                    .as_ref()
+                    .is_some_and(|binding| binding.protocol_version == 3)
+            {
+                "expired"
+            } else {
+                "retired"
+            };
             self.event(
                 json!({"kind":"prompt_closed","prompt_id":prompt.id,"disposition":disposition}),
             );
@@ -631,19 +722,30 @@ impl Driver {
     }
     fn connector_binding(&self, scope: &str) -> Result<(), &'static str> {
         self.valid_scope(scope)?;
-        if !self.binding.as_ref().is_some_and(|b| b.protocol_version == 3 && b.adapter.is_services()) {
+        if !self
+            .binding
+            .as_ref()
+            .is_some_and(|b| b.protocol_version == 3 && b.adapter.is_services())
+        {
             return Err("unavailable");
         }
         Ok(())
     }
     fn connector_scope(&self, scope: &str) -> Result<(), &'static str> {
         self.connector_binding(scope)?;
-        if self.connector_busy { return Err("busy"); }
-        if self.connector.is_none() { return Err("unavailable"); }
+        if self.connector_busy {
+            return Err("busy");
+        }
+        if self.connector.is_none() {
+            return Err("unavailable");
+        }
         Ok(())
     }
     fn connector_work(&mut self, id: String, command: ConnectorCommand) {
-        let Some(mut control) = self.connector.take() else { self.bad(&id, "unavailable"); return; };
+        let Some(mut control) = self.connector.take() else {
+            self.bad(&id, "unavailable");
+            return;
+        };
         self.connector_busy = true;
         let (signal, cancel) = oneshot::channel();
         if matches!(&command, ConnectorCommand::Complete(..)) {
@@ -653,20 +755,34 @@ impl Driver {
         // this existing worker count and cannot overtake entered native work.
         self.workers += 1;
         let mut retired = self.stop.subscribe();
-        self.tasks.push(async move {
-            let stopped = *retired.borrow();
-            let (result, cancellation, cancellation_failed) = if stopped { (Err("binding_retired"), None, false) } else {
-                match command {
-                    ConnectorCommand::Start(target, redirect, selection) => (control.start(target, redirect, selection).await, None, false),
-                    ConnectorCommand::Complete(state, code, handle) => control.complete(state, code, handle, &mut retired, cancel).await,
-                    ConnectorCommand::Cancel => (control.cancel(), None, false),
-                }
-            };
-            // Discovery can yield a new attempt after logout. Join start, then
-            // retire that exact attempt. Do not retry a failed native cancel.
-            let cleanup_failed = cancellation_failed || *retired.borrow() && control.retire().is_err();
-            Work::Connector(id, control, result, cancellation, cleanup_failed)
-        }.boxed());
+        self.tasks.push(
+            async move {
+                let stopped = *retired.borrow();
+                let (result, cancellation, cancellation_failed) = if stopped {
+                    (Err("binding_retired"), None, false)
+                } else {
+                    match command {
+                        ConnectorCommand::Start(target, redirect, selection) => (
+                            control.start(target, redirect, selection).await,
+                            None,
+                            false,
+                        ),
+                        ConnectorCommand::Complete(state, code, handle) => {
+                            control
+                                .complete(state, code, handle, &mut retired, cancel)
+                                .await
+                        }
+                        ConnectorCommand::Cancel => (control.cancel(), None, false),
+                    }
+                };
+                // Discovery can yield a new attempt after logout. Join start, then
+                // retire that exact attempt. Do not retry a failed native cancel.
+                let cleanup_failed =
+                    cancellation_failed || *retired.borrow() && control.retire().is_err();
+                Work::Connector(id, control, result, cancellation, cleanup_failed)
+            }
+            .boxed(),
+        );
     }
     fn target(&self, target: &Target) -> bool {
         match target {
@@ -741,22 +857,35 @@ impl Driver {
                 }
                 self.binding = Some(retained_binding);
                 self.opening = true;
-                if self.binding.as_ref().is_some_and(|b| b.protocol_version == 3) {
+                if self
+                    .binding
+                    .as_ref()
+                    .is_some_and(|b| b.protocol_version == 3)
+                {
                     self.state_event();
                 }
                 let retired = self.stop.subscribe();
                 let bridge = self.bridge.clone();
                 self.tasks.push(
-                    async move { Work::Opened(before_entry(retired, open(binding, bridge)).await) }.boxed(),
+                    async move { Work::Opened(before_entry(retired, open(binding, bridge)).await) }
+                        .boxed(),
                 );
             }
             "connect/connector/login/start" => {
-                let Some(params) = self.params::<ConnectorStart>(&id, request.params) else { return; };
-                if let Err(code) = self.connector_scope(&params.scope) { self.bad(&id, code); return; }
+                let Some(params) = self.params::<ConnectorStart>(&id, request.params) else {
+                    return;
+                };
+                if let Err(code) = self.connector_scope(&params.scope) {
+                    self.bad(&id, code);
+                    return;
+                }
                 let realm = self.connector.as_ref().unwrap().realm().clone();
                 let target = match params.connector.into_native(realm) {
                     Ok(target) => target,
-                    Err(code) => { self.bad(&id, code); return; }
+                    Err(code) => {
+                        self.bad(&id, code);
+                        return;
+                    }
                 };
                 let selected_host = (|| {
                     let binding = self.binding.as_ref().ok_or("invalid_binding")?;
@@ -764,34 +893,50 @@ impl Driver {
                         context_root: binding.realm.context_root.clone().into(),
                         state_root: Some(binding.realm.state_root.clone().into()),
                         user_config_root: Some(binding.realm.user_config_root.clone().into()),
-                    }.resolve(&binding.realm.realm_id).map_err(|_| "invalid_binding")?;
-                    let owner = self.lazy.as_ref().and_then(|lazy| lazy.installs())
+                    }
+                    .resolve(&binding.realm.realm_id)
+                    .map_err(|_| "invalid_binding")?;
+                    let owner = self
+                        .lazy
+                        .as_ref()
+                        .and_then(|lazy| lazy.installs())
                         .ok_or("installation_unconfirmed")?;
                     let session = self.session.as_ref().ok_or("unavailable")?.id().clone();
                     Ok::<_, &'static str>((owner, storage.locator, session))
                 })();
                 let (owner, realm, session) = match selected_host {
                     Ok(selected) => selected,
-                    Err(code) => { self.bad(&id, code); return; }
+                    Err(code) => {
+                        self.bad(&id, code);
+                        return;
+                    }
                 };
                 let selected = match owner.connector_selection(&realm, &session, &params.job_id) {
                     Ok(selected) => selected,
-                    Err(crate::service_install::ConnectorSelectionError::MetadataRequired { family, profile }) => {
+                    Err(crate::service_install::ConnectorSelectionError::MetadataRequired {
+                        family,
+                        profile,
+                    }) => {
                         let mut reply = failed(&id, "installation_metadata_required");
                         reply["error"]["data"]["next_action"] = json!({
                             "tool":"setup_help", "arguments":{"family":family,"profile":profile},
                             "then":{"method":"connect/connector/login/start","job_id":params.job_id},
                             "instruction":"Ask the setup agent to call setup_help for this selected profile, then retry ConnectorStart for this same job with explicit operation requirements."
                         });
-                        self.output(reply); return;
+                        self.output(reply);
+                        return;
                     }
                     Err(crate::service_install::ConnectorSelectionError::Unconfirmed) => {
-                        self.bad(&id, "installation_unconfirmed"); return;
+                        self.bad(&id, "installation_unconfirmed");
+                        return;
                     }
                 };
                 let family = selected.installed.family.clone();
                 let profile = selected.installed.profile.clone();
-                let selection = match crate::connector_install::InstallationLogin::prepare(selected, params.operations) {
+                let selection = match crate::connector_install::InstallationLogin::prepare(
+                    selected,
+                    params.operations,
+                ) {
                     Ok(selection) => selection,
                     Err("unsupported_native_entry") => {
                         let mut reply = failed(&id, "unsupported_native_entry");
@@ -799,28 +944,58 @@ impl Driver {
                             "family":family, "profile":profile, "job_id":params.job_id,
                             "instruction":"Ask the setup agent to select and install a compatible integration whose verified package declares native connector support, then reconcile that new job and retry ConnectorStart with its job_id. The existing ordinary installation remains unchanged."
                         });
-                        self.output(reply); return;
+                        self.output(reply);
+                        return;
                     }
-                    Err(code) => { self.bad(&id, code); return; }
+                    Err(code) => {
+                        self.bad(&id, code);
+                        return;
+                    }
                 };
-                self.connector_work(id, ConnectorCommand::Start(target, params.redirect_uri, selection));
+                self.connector_work(
+                    id,
+                    ConnectorCommand::Start(target, params.redirect_uri, selection),
+                );
             }
             "connect/connector/login/complete" => {
-                let Some(params) = self.params::<ConnectorComplete>(&id, request.params) else { return; };
-                if let Err(code) = self.connector_scope(&params.scope) { self.bad(&id, code); return; }
-                self.connector_work(id, ConnectorCommand::Complete(params.state, params.code, params.host_attempt_handle));
+                let Some(params) = self.params::<ConnectorComplete>(&id, request.params) else {
+                    return;
+                };
+                if let Err(code) = self.connector_scope(&params.scope) {
+                    self.bad(&id, code);
+                    return;
+                }
+                self.connector_work(
+                    id,
+                    ConnectorCommand::Complete(
+                        params.state,
+                        params.code,
+                        params.host_attempt_handle,
+                    ),
+                );
             }
             "connect/connector/login/cancel" => {
-                let Some(params) = self.params::<ConnectorCancel>(&id, request.params) else { return; };
-                if let Err(code) = self.connector_binding(&params.scope) { self.bad(&id, code); return; }
+                let Some(params) = self.params::<ConnectorCancel>(&id, request.params) else {
+                    return;
+                };
+                if let Err(code) = self.connector_binding(&params.scope) {
+                    self.bad(&id, code);
+                    return;
+                }
                 if self.connector_busy {
-                    let Some(cancel) = self.connector_cancel.take() else { self.bad(&id, "busy"); return; };
+                    let Some(cancel) = self.connector_cancel.take() else {
+                        self.bad(&id, "busy");
+                        return;
+                    };
                     self.connector_cancel_id = Some(id);
                     // A closed receiver means completion already resolved. Its
                     // retained Control handles cancellation when Work is read.
                     let _ = cancel.send(());
                 } else {
-                    if self.connector.is_none() { self.bad(&id, "unavailable"); return; }
+                    if self.connector.is_none() {
+                        self.bad(&id, "unavailable");
+                        return;
+                    }
                     self.connector_work(id, ConnectorCommand::Cancel);
                 }
             }
@@ -1047,7 +1222,12 @@ impl Driver {
         }
     }
     fn cancel_current(&mut self) {
-        if self.opening && self.binding.as_ref().is_some_and(|b| b.protocol_version == 3) {
+        if self.opening
+            && self
+                .binding
+                .as_ref()
+                .is_some_and(|b| b.protocol_version == 3)
+        {
             self.fence("retired");
             return;
         }
@@ -1108,11 +1288,27 @@ impl Driver {
             self.fence("expired");
         }
         let initializing = self.opening
-            && self.binding.as_ref().is_some_and(|b| b.protocol_version == 3);
-        let provider_prompt = matches!(exchange.prompt["kind"].as_str(), Some(
-            "provider_target" | "provider_action" | "provider_api_key" | "provider_browser" | "provider_device"
-        ));
-        if provider_prompt && (!initializing || self.binding.as_ref().is_none_or(|b| !b.adapter.is_services())) {
+            && self
+                .binding
+                .as_ref()
+                .is_some_and(|b| b.protocol_version == 3);
+        let provider_prompt = matches!(
+            exchange.prompt["kind"].as_str(),
+            Some(
+                "provider_target"
+                    | "provider_action"
+                    | "provider_api_key"
+                    | "provider_browser"
+                    | "provider_device"
+            )
+        );
+        if provider_prompt
+            && (!initializing
+                || self
+                    .binding
+                    .as_ref()
+                    .is_none_or(|b| !b.adapter.is_services()))
+        {
             self.cancel_current();
             return;
         }
@@ -1123,7 +1319,11 @@ impl Driver {
         }
         self.prompt_counter += 1;
         let id = format!("p:{}", self.prompt_counter);
-        let params = if self.binding.as_ref().is_some_and(|b| b.protocol_version == 3) {
+        let params = if self
+            .binding
+            .as_ref()
+            .is_some_and(|b| b.protocol_version == 3)
+        {
             json!({"target":self.event_target(),"prompt":exchange.prompt})
         } else {
             json!({"scope":self.scope,"prompt":exchange.prompt})
@@ -1140,15 +1340,22 @@ impl Driver {
         });
     }
 
-    fn owner_closed(&mut self, closed: Result<(SignInDisposition, oneshot::Sender<()>), oneshot::error::RecvError>) {
+    fn owner_closed(
+        &mut self,
+        closed: Result<(SignInDisposition, oneshot::Sender<()>), oneshot::error::RecvError>,
+    ) {
         if let Some(prompt) = self.pending.take() {
             let disposition = match closed.as_ref().map(|(disposition, _)| disposition) {
                 Ok(SignInDisposition::Completed) => "owner_completed",
                 Ok(SignInDisposition::Expired) => "expired",
                 Ok(SignInDisposition::Refused) | Err(_) => "refused",
             };
-            self.event(json!({"kind":"prompt_closed","prompt_id":prompt.id,"disposition":disposition}));
-            if let Ok((_, ack)) = closed { let _ = ack.send(()); }
+            self.event(
+                json!({"kind":"prompt_closed","prompt_id":prompt.id,"disposition":disposition}),
+            );
+            if let Ok((_, ack)) = closed {
+                let _ = ack.send(());
+            }
         }
     }
 
@@ -1187,8 +1394,14 @@ impl Driver {
                 let id = self.initialize_id.clone().unwrap();
                 match result_open {
                     Ok(opened) => {
-                        if !self.retired || self.binding.as_ref().is_none_or(|b| b.protocol_version != 3) {
-                            self.scope = Some(format!("connect:{}", meerkat_core::SessionId::new()));
+                        if !self.retired
+                            || self
+                                .binding
+                                .as_ref()
+                                .is_none_or(|b| b.protocol_version != 3)
+                        {
+                            self.scope =
+                                Some(format!("connect:{}", meerkat_core::SessionId::new()));
                         }
                         self.connector = opened.connector;
                         self.session = Some(opened.session);
@@ -1237,17 +1450,30 @@ impl Driver {
                             if let Some((presenter, storage)) = opened.service_presenter {
                                 self.workers += 1;
                                 let bridge = self.bridge.clone();
-                                self.tasks.push(async move {
-                                    Work::Service(services::run(presenter, storage, bridge).await)
-                                }.boxed());
+                                self.tasks.push(
+                                    async move {
+                                        Work::Service(
+                                            services::run(presenter, storage, bridge).await,
+                                        )
+                                    }
+                                    .boxed(),
+                                );
                             }
                             self.output(result(&id,json!({"protocol_version":binding.protocol_version,"scope":self.scope,"session_id":self.session.as_ref().unwrap().id().to_string(),"capabilities":opened.capabilities,"state":self.state()})));
                         }
                     }
                     Err(code) => {
                         self.failed |= code != "binding_retired";
-                        if self.binding.as_ref().is_some_and(|b| b.protocol_version == 3) {
-                            let code = if self.retired { "binding_retired" } else { code };
+                        if self
+                            .binding
+                            .as_ref()
+                            .is_some_and(|b| b.protocol_version == 3)
+                        {
+                            let code = if self.retired {
+                                "binding_retired"
+                            } else {
+                                code
+                            };
                             self.fence("failed");
                             self.bad(&id, code);
                         } else {
@@ -1298,7 +1524,10 @@ impl Driver {
                 // A known attempt result is retained even when the exact input is
                 // requeued or finalization failed. It cannot attest joined work.
                 if !observed.settled
-                    || self.lazy.as_ref().is_some_and(|lazy| lazy.owner().requires_shutdown())
+                    || self
+                        .lazy
+                        .as_ref()
+                        .is_some_and(|lazy| lazy.owner().requires_shutdown())
                 {
                     self.failed = true;
                     self.fence("failed");
@@ -1338,10 +1567,15 @@ impl Driver {
                 let cancel_reply = self.connector_cancel_id.take().map(|cancel_id| {
                     // If the completion won before the signal was observed,
                     // cancel through the same owner now that its join is held.
-                    (cancel_id, cancellation.unwrap_or_else(|| control.cancel().map(|_| ())))
+                    (
+                        cancel_id,
+                        cancellation.unwrap_or_else(|| control.cancel().map(|_| ())),
+                    )
                 });
-                let cleanup_failed = cleanup_failed || cancel_reply.as_ref().is_some_and(|(_, reply)|
-                    matches!(reply, Err("connector_unavailable")));
+                let cleanup_failed = cleanup_failed
+                    || cancel_reply
+                        .as_ref()
+                        .is_some_and(|(_, reply)| matches!(reply, Err("connector_unavailable")));
                 // Retirement may have won after the future returned but before
                 // this driver observed it. Do not publish a late start secret.
                 let cleanup_failed = cleanup_failed || self.retired && control.retire().is_err();
@@ -1366,7 +1600,10 @@ impl Driver {
                 }
                 if let Some((cancel_id, reply)) = cancel_reply {
                     match reply {
-                        Ok(()) => self.output(result(&cancel_id, json!({"scope":self.scope,"cancelled":true}))),
+                        Ok(()) => self.output(result(
+                            &cancel_id,
+                            json!({"scope":self.scope,"cancelled":true}),
+                        )),
                         Err(code) => self.bad(&cancel_id, code),
                     }
                 }
@@ -1432,9 +1669,13 @@ async fn approvals(presenter: ApprovalPresenter, bridge: PromptBridge) -> Work {
     Work::Presenter(present_approvals(presenter, bridge).await)
 }
 
-pub(crate) async fn present_approvals(mut presenter: ApprovalPresenter, bridge: PromptBridge) -> bool {
+pub(crate) async fn present_approvals(
+    mut presenter: ApprovalPresenter,
+    bridge: PromptBridge,
+) -> bool {
     loop {
-        let prompt = tokio::select! {biased;_=bridge.closed()=>return false,prompt=presenter.next()=>prompt};
+        let prompt =
+            tokio::select! {biased;_=bridge.closed()=>return false,prompt=presenter.next()=>prompt};
         let Some(mut prompt) = prompt else {
             return !bridge.retired();
         };

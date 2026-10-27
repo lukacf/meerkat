@@ -3,7 +3,10 @@
 //! continuation reservation and delivery remain the existing production path.
 use super::*;
 use crate::original_ingress::custody_attempt::{CustodyAttempt, CustodyDecision};
-use meerkat_runtime::{LogicalRuntimeId, input_state::{InputLifecycleState, verify_exact_replay}};
+use meerkat_runtime::{
+    LogicalRuntimeId,
+    input_state::{InputLifecycleState, verify_exact_replay},
+};
 use std::sync::{OnceLock, atomic::AtomicUsize};
 use toolkit_store::*;
 
@@ -19,53 +22,82 @@ struct CensusStore {
 }
 impl CensusStore {
     fn new(inner: Arc<dyn ToolkitStore>, scope: StoreScope) -> Self {
-        Self { inner, scope, armed: AtomicBool::new(false),
-            entered: tokio::sync::Notify::new(), release: tokio::sync::Semaphore::new(0),
-            started: AtomicUsize::new(0), completed: AtomicUsize::new(0),
-            cancelled: AtomicUsize::new(0) }
+        Self {
+            inner,
+            scope,
+            armed: AtomicBool::new(false),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Semaphore::new(0),
+            started: AtomicUsize::new(0),
+            completed: AtomicUsize::new(0),
+            cancelled: AtomicUsize::new(0),
+        }
     }
     fn arm(&self) {
         assert!(!self.armed.swap(true, Ordering::SeqCst));
     }
 }
-struct EnteredRead<'a> { store: &'a CensusStore, complete: bool }
+struct EnteredRead<'a> {
+    store: &'a CensusStore,
+    complete: bool,
+}
 impl Drop for EnteredRead<'_> {
     fn drop(&mut self) {
-        if !self.complete { self.store.cancelled.fetch_add(1, Ordering::SeqCst); }
+        if !self.complete {
+            self.store.cancelled.fetch_add(1, Ordering::SeqCst);
+        }
     }
 }
 #[async_trait::async_trait]
 impl ToolkitStore for CensusStore {
-    fn capabilities(&self) -> StoreCapabilities { self.inner.capabilities() }
-    async fn now_ms(&self) -> StoreResult<i64> { self.inner.now_ms().await }
+    fn capabilities(&self) -> StoreCapabilities {
+        self.inner.capabilities()
+    }
+    async fn now_ms(&self) -> StoreResult<i64> {
+        self.inner.now_ms().await
+    }
     async fn admit(&self, request: AdmissionRequest) -> StoreResult<AdmissionOutcome> {
         self.inner.admit(request).await
     }
     async fn get(&self, key: &StoreKey) -> StoreResult<Option<StoredRecord>> {
         self.inner.get(key).await
     }
-    async fn list_records(&self, scope: &StoreScope, after: Option<&str>, limit: u32)
-        -> StoreResult<Vec<StoredRecord>>
-    {
+    async fn list_records(
+        &self,
+        scope: &StoreScope,
+        after: Option<&str>,
+        limit: u32,
+    ) -> StoreResult<Vec<StoredRecord>> {
         if scope == &self.scope && self.armed.swap(false, Ordering::SeqCst) {
             assert!(after.is_none());
             assert_eq!(limit, 32, "observe the first bounded canonical census read");
             self.started.fetch_add(1, Ordering::SeqCst);
-            let mut entered = EnteredRead { store: self, complete: false };
+            let mut entered = EnteredRead {
+                store: self,
+                complete: false,
+            };
             self.entered.notify_one();
             self.release.acquire().await.unwrap().forget();
             let result = self.inner.list_records(scope, after, limit).await;
             self.completed.fetch_add(1, Ordering::SeqCst);
             entered.complete = true;
             result
-        } else { self.inner.list_records(scope, after, limit).await }
+        } else {
+            self.inner.list_records(scope, after, limit).await
+        }
     }
     async fn compare_and_swap(&self, transition: Transition) -> StoreResult<StoredRecord> {
         self.inner.compare_and_swap(transition).await
     }
-    async fn claim_record(&self, key: &StoreKey, revision: u64, worker: &str, ttl: u64)
-        -> StoreResult<RecordLease>
-    { self.inner.claim_record(key, revision, worker, ttl).await }
+    async fn claim_record(
+        &self,
+        key: &StoreKey,
+        revision: u64,
+        worker: &str,
+        ttl: u64,
+    ) -> StoreResult<RecordLease> {
+        self.inner.claim_record(key, revision, worker, ttl).await
+    }
     async fn renew_record_claim(&self, lease: &RecordLease, ttl: u64) -> StoreResult<RecordLease> {
         self.inner.renew_record_claim(lease, ttl).await
     }
@@ -75,29 +107,57 @@ impl ToolkitStore for CensusStore {
     async fn release_record_claim(&self, lease: &RecordLease) -> StoreResult<()> {
         self.inner.release_record_claim(lease).await
     }
-    async fn read_events(&self, key: &StoreKey, after: u64, limit: u32) -> StoreResult<Vec<StoredEvent>> {
+    async fn read_events(
+        &self,
+        key: &StoreKey,
+        after: u64,
+        limit: u32,
+    ) -> StoreResult<Vec<StoredEvent>> {
         self.inner.read_events(key, after, limit).await
     }
     async fn get_effect(&self, key: &EffectKey) -> StoreResult<Option<StoredEffect>> {
         self.inner.get_effect(key).await
     }
-    async fn list_effects(&self, key: &StoreKey, after: Option<&str>, limit: u32)
-        -> StoreResult<Vec<StoredEffect>>
-    { self.inner.list_effects(key, after, limit).await }
-    async fn claim_effect(&self, key: &EffectKey, revision: u64, worker: &str, ttl: u64)
-        -> StoreResult<EffectClaimOutcome>
-    { self.inner.claim_effect(key, revision, worker, ttl).await }
-    async fn acknowledge_effect(&self, lease: &EffectLease, outcome: EffectOutcome)
-        -> StoreResult<StoredEffect>
-    { self.inner.acknowledge_effect(lease, outcome).await }
-    async fn claim_reconciliation(&self, key: &EffectKey, worker: &str, ttl: u64)
-        -> StoreResult<StoredEffect>
-    { self.inner.claim_reconciliation(key, worker, ttl).await }
-    async fn reconcile_effect(&self, lease: &EffectLease, resolution: Reconciliation)
-        -> StoreResult<StoredEffect>
-    { self.inner.reconcile_effect(lease, resolution).await }
+    async fn list_effects(
+        &self,
+        key: &StoreKey,
+        after: Option<&str>,
+        limit: u32,
+    ) -> StoreResult<Vec<StoredEffect>> {
+        self.inner.list_effects(key, after, limit).await
+    }
+    async fn claim_effect(
+        &self,
+        key: &EffectKey,
+        revision: u64,
+        worker: &str,
+        ttl: u64,
+    ) -> StoreResult<EffectClaimOutcome> {
+        self.inner.claim_effect(key, revision, worker, ttl).await
+    }
+    async fn acknowledge_effect(
+        &self,
+        lease: &EffectLease,
+        outcome: EffectOutcome,
+    ) -> StoreResult<StoredEffect> {
+        self.inner.acknowledge_effect(lease, outcome).await
+    }
+    async fn claim_reconciliation(
+        &self,
+        key: &EffectKey,
+        worker: &str,
+        ttl: u64,
+    ) -> StoreResult<StoredEffect> {
+        self.inner.claim_reconciliation(key, worker, ttl).await
+    }
+    async fn reconcile_effect(
+        &self,
+        lease: &EffectLease,
+        resolution: Reconciliation,
+    ) -> StoreResult<StoredEffect> {
+        self.inner.reconcile_effect(lease, resolution).await
+    }
 }
-
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn terminal_census_wakes_existing_completion_after_native_source_restore() {
@@ -290,26 +350,38 @@ async fn terminal_census_wakes_existing_completion_after_native_source_restore()
         assert!(matches!(service.continuation_status(&owner, &key).await.unwrap(),
             ContinuationStatus::Applied { receipt: observed, .. } if observed == receipt));
     }))).catch_unwind().await;
-    if let Some(gate) = selected_gate.get() { gate.release.add_permits(1); }
+    if let Some(gate) = selected_gate.get() {
+        gate.release.add_permits(1);
+    }
     let mut cleanup = if let Some(fixture) = active.as_ref() {
         fixture.source.stop_custody_recovery();
-        let (native, source) = tokio::join!(native_close.join(), fixture.source.join_custody_recovery());
+        let (native, source) =
+            tokio::join!(native_close.join(), fixture.source.join_custody_recovery());
         native.and(source.map_err(|error| error.to_string()))
-    } else { Ok(()) };
+    } else {
+        Ok(())
+    };
     if let Some(gate) = selected_gate.get()
         && gate.cancelled.load(Ordering::SeqCst) != 0
-    { cleanup = cleanup.and(Err("the entered census read was cancelled".into())); }
+    {
+        cleanup = cleanup.and(Err("the entered census read was cancelled".into()));
+    }
     drop(continuation);
     drop(active);
     drop(runtime_store);
     match checked {
         Err(payload) => {
-            if let Err(error) = cleanup { eprintln!("census wake cleanup also failed: {error}"); }
+            if let Err(error) = cleanup {
+                eprintln!("census wake cleanup also failed: {error}");
+            }
             std::panic::resume_unwind(payload);
-        },
+        }
         Ok(result) => {
             assert!(cleanup.is_ok(), "{cleanup:?}");
-            assert!(result.is_ok(), "actual terminal census wake observation timed out");
-        },
+            assert!(
+                result.is_ok(),
+                "actual terminal census wake observation timed out"
+            );
+        }
     }
 }

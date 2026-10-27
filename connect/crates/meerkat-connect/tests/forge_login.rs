@@ -8,13 +8,16 @@ use axum::{
     http::{HeaderMap, Method, StatusCode, Uri},
     response::IntoResponse,
 };
+use futures_util::FutureExt;
 use meerkat_connect::{
     ConnectError, ConnectSession,
-    forge::{FORGE_INSPECT, FORGE_REAUTHENTICATE, FORGE_SELECT_HOST, ForgeFrontend, ForgePrompt, present_forge_selection},
+    forge::{
+        FORGE_INSPECT, FORGE_REAUTHENTICATE, FORGE_SELECT_HOST, ForgeFrontend, ForgePrompt,
+        present_forge_selection,
+    },
     terminal::TerminalInput,
 };
 use meerkat_core::{AgentToolDispatcher, ToolError, ToolMutationClass, types::ToolCallView};
-use futures_util::FutureExt;
 use nix::{
     fcntl::{FcntlArg, fcntl},
     pty::openpty,
@@ -150,7 +153,13 @@ async fn private_present(
     .unwrap()
     .0;
     pty.restored();
-    for value in [password, NONCE, SESSION, "private refused body canary", "private response canary"] {
+    for value in [
+        password,
+        NONCE,
+        SESSION,
+        "private refused body canary",
+        "private response canary",
+    ] {
         assert!(!out.text().contains(value));
     }
     result
@@ -286,7 +295,18 @@ async fn handler(
             "wrong" => Some(StatusCode::UNAUTHORIZED),
             "wrong-forbidden" => Some(StatusCode::FORBIDDEN),
             "wrong-rate-limited" => Some(StatusCode::TOO_MANY_REQUESTS),
-            "reauth-wrong" if host.calls.lock().unwrap().iter().filter(|call| call.as_str() == "POST /login").count() == 2 => Some(StatusCode::UNAUTHORIZED),
+            "reauth-wrong"
+                if host
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|call| call.as_str() == "POST /login")
+                    .count()
+                    == 2 =>
+            {
+                Some(StatusCode::UNAUTHORIZED)
+            }
             _ => None,
         };
         if let Some(status) = refusal {
@@ -332,18 +352,34 @@ async fn handler(
     );
     if uri.path() == "/console/forge/frontends/descriptor" {
         let (status, text) = match host.scenario {
-            "descriptor-missing" => (StatusCode::NOT_FOUND,
-                r#"{"detail":"private response canary"}"#),
-            "descriptor-malformed" => (StatusCode::OK,
-                r#"{"protocol":1,"host":{},"private_fields":[],"private":"private response canary"}"#),
+            "descriptor-missing" => (
+                StatusCode::NOT_FOUND,
+                r#"{"detail":"private response canary"}"#,
+            ),
+            "descriptor-malformed" => (
+                StatusCode::OK,
+                r#"{"protocol":1,"host":{},"private_fields":[],"private":"private response canary"}"#,
+            ),
             other => panic!("unexpected descriptor fixture: {other}"),
         };
-        return (status, [("content-type", "application/json"), ("cache-control", "no-store")], text)
+        return (
+            status,
+            [
+                ("content-type", "application/json"),
+                ("cache-control", "no-store"),
+            ],
+            text,
+        )
             .into_response();
     }
     assert_eq!(uri.path(), "/console/forge/frontends");
-    let support_reads = host.calls.lock().unwrap().iter()
-        .filter(|call| call.as_str() == "GET /console/forge/frontends").count();
+    let support_reads = host
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|call| call.as_str() == "GET /console/forge/frontends")
+        .count();
     let (status, text) = match host.scenario {
         "bad-support" => (501, r#"{"detail":"private response canary","host":{}}"#.to_owned()),
         "duplicate" => (501, r#"{"detail":"ignored","detail":"This application has not declared frontend management support."}"#.to_owned()),
@@ -486,17 +522,28 @@ struct DirectSelection {
 }
 impl DirectSelection {
     fn ready(&self) -> bool {
-        !self.timed_out && matches!(&self.result, Ok(Ok(_)))
+        !self.timed_out
+            && matches!(&self.result, Ok(Ok(_)))
             && matches!(&self.presented, Ok(Ok(true)))
-            && self.entered.is_ok() && self.restored.is_ok()
+            && self.entered.is_ok()
+            && self.restored.is_ok()
     }
     fn finish(self) -> (DirectToolResult, Result<bool, ConnectError>, String) {
         let result = self.result.unwrap_or_else(|panic| resume_unwind(panic));
         let presented = self.presented.unwrap_or_else(|panic| resume_unwind(panic));
         self.entered.unwrap_or_else(|panic| resume_unwind(panic));
         self.restored.unwrap_or_else(|panic| resume_unwind(panic));
-        assert!(!self.timed_out, "direct Forge selection exceeded its observation bound; original work was joined");
-        for private in [PASSWORD, NONCE, SESSION, "private refused body canary", "private response canary"] {
+        assert!(
+            !self.timed_out,
+            "direct Forge selection exceeded its observation bound; original work was joined"
+        );
+        for private in [
+            PASSWORD,
+            NONCE,
+            SESSION,
+            "private refused body canary",
+            "private response canary",
+        ] {
             assert!(!self.output.contains(private));
         }
         (result, presented, self.output)
@@ -504,8 +551,11 @@ impl DirectSelection {
 }
 
 async fn observe_selection(
-    front: &ForgeFrontend, presenter: &mut meerkat_connect::forge::ForgePresenter,
-    origin: &str, id: &str, reauth: bool,
+    front: &ForgeFrontend,
+    presenter: &mut meerkat_connect::forge::ForgePresenter,
+    origin: &str,
+    id: &str,
+    reauth: bool,
 ) -> DirectSelection {
     let mut pty = Pty::new();
     let mut output = Output::default();
@@ -515,13 +565,25 @@ async fn observe_selection(
     let request_finished = Notify::new();
     let requesting = async {
         let result = AssertUnwindSafe(front.dispatch(ToolCallView {
-            id, name:if reauth { FORGE_REAUTHENTICATE } else { FORGE_SELECT_HOST }, args:&arguments,
-        })).catch_unwind().await;
+            id,
+            name: if reauth {
+                FORGE_REAUTHENTICATE
+            } else {
+                FORGE_SELECT_HOST
+            },
+            args: &arguments,
+        }))
+        .catch_unwind()
+        .await;
         request_finished.notify_one();
         result
     };
     let presenting = AssertUnwindSafe(async {
-        let interrupted = async { stopped.await.map_err(|_| io::Error::other("fixture stop source ended")) };
+        let interrupted = async {
+            stopped
+                .await
+                .map_err(|_| io::Error::other("fixture stop source ended"))
+        };
         tokio::pin!(interrupted);
         let prompt = tokio::select! { biased;
             _ = interrupted.as_mut() => {
@@ -538,20 +600,30 @@ async fn observe_selection(
             prompt = presenter.next() => prompt,
         };
         match prompt {
-            Some(prompt) => present_forge_selection(prompt, &mut pty.input, &mut output, interrupted.as_mut()).await,
+            Some(prompt) => {
+                present_forge_selection(prompt, &mut pty.input, &mut output, interrupted.as_mut())
+                    .await
+            }
             None => Err(ConnectError::InvalidInput("fixture presenter ended".into())),
         }
-    }).catch_unwind();
+    })
+    .catch_unwind();
     let entering = AssertUnwindSafe(async {
         if reauth {
             shown(&observed, "Forge Console password (hidden)").await;
             assert!(!observed.text().contains("Forge Console origin"));
-            assert!(!tcgetattr(&pty.observer).unwrap().local_flags.contains(LocalFlags::ECHO));
+            assert!(
+                !tcgetattr(&pty.observer)
+                    .unwrap()
+                    .local_flags
+                    .contains(LocalFlags::ECHO)
+            );
             send(&pty.master, &format!("{PASSWORD}\n"));
         } else {
             enter(&pty.master, &pty.observer, &observed, origin, PASSWORD).await;
         }
-    }).catch_unwind();
+    })
+    .catch_unwind();
     let mut original = Box::pin(async { tokio::join!(requesting, presenting, entering) });
     let (timed_out, (result, presented, entered)) = match timeout(BOUND, original.as_mut()).await {
         Ok(result) => (false, result),
@@ -563,8 +635,14 @@ async fn observe_selection(
         }
     };
     drop(original);
-    DirectSelection { timed_out, result, presented, entered,
-        restored:catch_unwind(AssertUnwindSafe(|| pty.restored())), output:output.text() }
+    DirectSelection {
+        timed_out,
+        result,
+        presented,
+        entered,
+        restored: catch_unwind(AssertUnwindSafe(|| pty.restored())),
+        output: output.text(),
+    }
 }
 
 struct DirectRead {
@@ -577,18 +655,28 @@ impl DirectRead {
     }
     fn finish(self) -> DirectToolResult {
         let result = self.result.unwrap_or_else(|panic| resume_unwind(panic));
-        assert!(!self.timed_out, "direct Forge read/refusal exceeded its observation bound; original waiter was joined");
+        assert!(
+            !self.timed_out,
+            "direct Forge read/refusal exceeded its observation bound; original waiter was joined"
+        );
         result
     }
 }
 async fn observe_read_or_refusal(
-    front: &ForgeFrontend, presenter: &mut meerkat_connect::forge::ForgePresenter,
-    id: &str, name: &str,
+    front: &ForgeFrontend,
+    presenter: &mut meerkat_connect::forge::ForgePresenter,
+    id: &str,
+    name: &str,
 ) -> DirectRead {
     let arguments = raw("{}");
-    let mut original = Box::pin(AssertUnwindSafe(front.dispatch(ToolCallView {
-        id, name, args:&arguments,
-    })).catch_unwind());
+    let mut original = Box::pin(
+        AssertUnwindSafe(front.dispatch(ToolCallView {
+            id,
+            name,
+            args: &arguments,
+        }))
+        .catch_unwind(),
+    );
     let (timed_out, result) = match timeout(BOUND, original.as_mut()).await {
         Ok(result) => (false, result),
         Err(_) => {
@@ -616,7 +704,10 @@ async fn finish_direct_server(mut server: Server) -> Vec<String> {
     // Even a failed observation must not detach the server task.
     stopped.unwrap();
     finished.unwrap();
-    assert!(!timed_out, "direct Forge server exceeded its observation bound; same task was joined");
+    assert!(
+        !timed_out,
+        "direct Forge server exceeded its observation bound; same task was joined"
+    );
     server.host.calls.lock().unwrap().clone()
 }
 
@@ -631,15 +722,23 @@ async fn local_selection_refusal(scenario: &'static str, expected: &str) {
         let selection = observe_selection(&front, &mut presenter, &origin, "first", false).await;
         // Refusal spends only this Forge selection. It must not reopen a
         // login prompt or retry the POST.
-        let retry = observe_read_or_refusal(&front, &mut presenter, "retry", FORGE_SELECT_HOST).await;
+        let retry =
+            observe_read_or_refusal(&front, &mut presenter, "retry", FORGE_SELECT_HOST).await;
         (selection, retry)
-    }).catch_unwind().await;
-    let calls = AssertUnwindSafe(finish_direct_server(server)).catch_unwind().await;
+    })
+    .catch_unwind()
+    .await;
+    let calls = AssertUnwindSafe(finish_direct_server(server))
+        .catch_unwind()
+        .await;
     let (selection, retry) = observed.unwrap_or_else(|panic| resume_unwind(panic));
     let (result, presented, _) = selection.finish();
     let retry = retry.finish();
     let calls = calls.unwrap_or_else(|panic| resume_unwind(panic));
-    assert!(matches!(presented, Ok(true)), "ordinary refusal must keep setup available: {presented:?}");
+    assert!(
+        matches!(presented, Ok(true)),
+        "ordinary refusal must keep setup available: {presented:?}"
+    );
     let error = match result {
         Err(ToolError::ExecutionFailed { message }) => message,
         other => panic!("the original tool must receive a safe execution refusal: {other:?}"),
@@ -648,14 +747,19 @@ async fn local_selection_refusal(scenario: &'static str, expected: &str) {
     for private in [PASSWORD, NONCE, SESSION, origin.as_str(), "canary"] {
         assert!(!error.contains(private));
     }
-    assert!(matches!(retry, Err(ToolError::AccessDenied { .. })),
-        "a refused selection must not restore authority or request another sign-in");
+    assert!(
+        matches!(retry, Err(ToolError::AccessDenied { .. })),
+        "a refused selection must not restore authority or request another sign-in"
+    );
     let expected_calls = if scenario == "expired" {
         vec!["GET /login", "POST /login", "GET /console/forge/frontends"]
     } else {
         vec!["GET /login", "POST /login"]
     };
-    assert_eq!(calls, expected_calls, "exactly one login POST and no Forge prepare/submit");
+    assert_eq!(
+        calls, expected_calls,
+        "exactly one login POST and no Forge prepare/submit"
+    );
 }
 
 #[tokio::test]
@@ -681,39 +785,78 @@ async fn forge_reauthentication_login_refusal_keeps_same_origin_and_presenter_su
         // is propagated only after terminal work and the server are joined.
         let expired = if initial.ready() {
             Some(observe_read_or_refusal(&front, &mut presenter, "expired", FORGE_INSPECT).await)
-        } else { None };
+        } else {
+            None
+        };
         let reauth = if expired.as_ref().is_some_and(DirectRead::execution_refused) {
             Some(observe_selection(&front, &mut presenter, &origin, "reauth", true).await)
-        } else { None };
+        } else {
+            None
+        };
         let retry = if reauth.is_some() {
-            Some(observe_read_or_refusal(&front, &mut presenter, "reauth-retry", FORGE_REAUTHENTICATE).await)
-        } else { None };
+            Some(
+                observe_read_or_refusal(
+                    &front,
+                    &mut presenter,
+                    "reauth-retry",
+                    FORGE_REAUTHENTICATE,
+                )
+                .await,
+            )
+        } else {
+            None
+        };
         (initial, expired, reauth, retry)
-    }).catch_unwind().await;
-    let calls = AssertUnwindSafe(finish_direct_server(server)).catch_unwind().await;
+    })
+    .catch_unwind()
+    .await;
+    let calls = AssertUnwindSafe(finish_direct_server(server))
+        .catch_unwind()
+        .await;
     let (initial, expired, reauth, retry) = observed.unwrap_or_else(|panic| resume_unwind(panic));
     let (selected, initial_presented, _) = initial.finish();
     assert!(selected.is_ok() && matches!(initial_presented, Ok(true)));
-    let expired = expired.expect("successful initial selection reaches expiry readback").finish();
+    let expired = expired
+        .expect("successful initial selection reaches expiry readback")
+        .finish();
     assert!(matches!(expired, Err(ToolError::ExecutionFailed { .. })));
-    let (result, presented, output) = reauth.expect("observed expiry reaches explicit reauthentication").finish();
-    let retry = retry.expect("settled reauthentication reaches the exact refusal check").finish();
+    let (result, presented, output) = reauth
+        .expect("observed expiry reaches explicit reauthentication")
+        .finish();
+    let retry = retry
+        .expect("settled reauthentication reaches the exact refusal check")
+        .finish();
     let calls = calls.unwrap_or_else(|panic| resume_unwind(panic));
-    assert!(matches!(presented, Ok(true)), "refused reauthentication is operation-local: {presented:?}");
+    assert!(
+        matches!(presented, Ok(true)),
+        "refused reauthentication is operation-local: {presented:?}"
+    );
     let error = match result {
         Err(ToolError::ExecutionFailed { message }) => message,
         other => panic!("original reauthentication waiter must receive refusal: {other:?}"),
     };
     assert!(error.contains("Forge Console sign-in was refused"));
-    assert!(matches!(retry, Err(_)), "spent reauthentication must not start another prompt");
+    assert!(
+        matches!(retry, Err(_)),
+        "spent reauthentication must not start another prompt"
+    );
     for private in [PASSWORD, NONCE, SESSION, origin.as_str(), "canary"] {
         assert!(!error.contains(private));
         assert!(!output.contains(private));
     }
     assert!(!output.contains("Forge Console origin"));
-    assert_eq!(calls, ["GET /login", "POST /login", "GET /console/forge/frontends",
-        "GET /console/forge/frontends", "GET /login", "POST /login"],
-        "one initial login and one explicitly requested same-host reauthentication, with no retry or Forge effect");
+    assert_eq!(
+        calls,
+        [
+            "GET /login",
+            "POST /login",
+            "GET /console/forge/frontends",
+            "GET /console/forge/frontends",
+            "GET /login",
+            "POST /login"
+        ],
+        "one initial login and one explicitly requested same-host reauthentication, with no retry or Forge effect"
+    );
 }
 
 #[tokio::test]

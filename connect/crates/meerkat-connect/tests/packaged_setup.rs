@@ -255,7 +255,8 @@ fn setup_catalog_ready(search: &Value, denied: &[&str]) -> Result<bool> {
         let row = matches[0];
         if denied.contains(name) {
             require(
-                row["visibility_status"] == "blocked_by_filter" && row["currently_callable"] == false,
+                row["visibility_status"] == "blocked_by_filter"
+                    && row["currently_callable"] == false,
                 &format!("catalog did not retain the expected policy denial for {name}"),
             )?;
             continue;
@@ -289,8 +290,11 @@ fn setup_load_accepted(load: &Value, denied: &[&str]) -> Result {
     )?;
     let accepted = observed_names(&load["accepted_names"])?;
     let noops = observed_names(&load["noop_names"])?;
-    let expected = SETUP_TOOLS.iter().copied()
-        .filter(|name| !denied.contains(name)).collect::<BTreeSet<_>>();
+    let expected = SETUP_TOOLS
+        .iter()
+        .copied()
+        .filter(|name| !denied.contains(name))
+        .collect::<BTreeSet<_>>();
     require(
         accepted.is_disjoint(&noops)
             && accepted.union(&noops).copied().collect::<BTreeSet<_>>() == expected,
@@ -315,8 +319,12 @@ fn setup_load_accepted(load: &Value, denied: &[&str]) -> Result {
         let row = matches[0];
         if denied.contains(name) {
             require(
-                row["accepted"] == false && row["rejected_reason"] == "not_filterable"
-                    && !row.get("accepted_noop").and_then(Value::as_bool).unwrap_or(false),
+                row["accepted"] == false
+                    && row["rejected_reason"] == "not_filterable"
+                    && !row
+                        .get("accepted_noop")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
                 &format!("native load did not preserve the exact policy refusal for {name}"),
             )?;
             continue;
@@ -367,7 +375,10 @@ async fn await_setup_catalog(session: &ConnectSession, probe: &Probe, denied: &[
 fn selected_pending_catalog_is_not_ready_even_when_exact() {
     let observed = json!({"catalog_exact":true,"total_matches":0,"results":[],
         "pending_sources":["toolkit-setup"],"empty_result_status":"pending_source"});
-    assert!(!setup_catalog_ready(&observed, COMPOSITION_DENIED).expect("explicit selected pending source"));
+    assert!(
+        !setup_catalog_ready(&observed, COMPOSITION_DENIED)
+            .expect("explicit selected pending source")
+    );
     let mut unknown = observed.clone();
     unknown["pending_sources"] = json!(["unselected-server"]);
     assert!(setup_catalog_ready(&unknown, COMPOSITION_DENIED).is_err());
@@ -405,8 +416,10 @@ fn ready_catalog_requires_each_observed_name_including_denial_controls() {
     for status in ["deferred", "loaded", "temporarily_unavailable", "unknown"] {
         let mut observed = ready_catalog(COMPOSITION_DENIED);
         observed["results"][1]["visibility_status"] = json!(status);
-        assert!(setup_catalog_ready(&observed, COMPOSITION_DENIED).is_err(),
-            "{status} must not replace the exact caller denial");
+        assert!(
+            setup_catalog_ready(&observed, COMPOSITION_DENIED).is_err(),
+            "{status} must not replace the exact caller denial"
+        );
     }
     let mut callable_denial = ready_catalog(COMPOSITION_DENIED);
     callable_denial["results"][1]["currently_callable"] = json!(true);
@@ -433,8 +446,13 @@ fn load_acceptance_requires_native_resolutions_not_transport_success() {
         "resolutions":SETUP_TOOLS.iter().map(|name| json!({"name":name,"accepted":false,
             "rejected_reason":"unknown_key"})).collect::<Vec<_>>()});
     assert!(setup_load_accepted(&observed, COMPOSITION_DENIED).is_err());
-    observed["accepted_names"] = json!(SETUP_TOOLS.iter().copied()
-        .filter(|name| *name != SETUP_TOOLS[0] && !COMPOSITION_DENIED.contains(name)).collect::<Vec<_>>());
+    observed["accepted_names"] = json!(
+        SETUP_TOOLS
+            .iter()
+            .copied()
+            .filter(|name| *name != SETUP_TOOLS[0] && !COMPOSITION_DENIED.contains(name))
+            .collect::<Vec<_>>()
+    );
     observed["noop_names"] = json!([SETUP_TOOLS[0]]);
     observed["resolutions"] = json!(
         SETUP_TOOLS
@@ -452,8 +470,10 @@ fn load_acceptance_requires_native_resolutions_not_transport_success() {
     for reason in ["unknown_key", "temporarily_unavailable"] {
         let mut wrong_denial = accepted.clone();
         wrong_denial["resolutions"][1]["rejected_reason"] = json!(reason);
-        assert!(setup_load_accepted(&wrong_denial, COMPOSITION_DENIED).is_err(),
-            "{reason} does not prove policy denial");
+        assert!(
+            setup_load_accepted(&wrong_denial, COMPOSITION_DENIED).is_err(),
+            "{reason} does not prove policy denial"
+        );
     }
     let mut accepted_denial = accepted.clone();
     accepted_denial["resolutions"][1]["accepted"] = json!(true);
@@ -462,7 +482,10 @@ fn load_acceptance_requires_native_resolutions_not_transport_success() {
     noop_denial["resolutions"][1]["accepted_noop"] = json!(true);
     assert!(setup_load_accepted(&noop_denial, COMPOSITION_DENIED).is_err());
     let mut widened = accepted;
-    widened["accepted_names"].as_array_mut().unwrap().push(json!("setup_catalog_entry"));
+    widened["accepted_names"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("setup_catalog_entry"));
     assert!(setup_load_accepted(&widened, COMPOSITION_DENIED).is_err());
     observed["resolutions"][2]["rejected_reason"] = json!("temporarily_unavailable");
     assert!(
@@ -521,7 +544,9 @@ async fn exercise(session: &ConnectSession, probe: &Probe) -> Result {
     // Ask the offered native catalog loader about all observed names. Its
     // exact refusals prove the caller and preparation ceilings without making
     // the model emit an unoffered protected tool call.
-    probe.record(json!({"kind":"native_catalog_policy_denials_verified","names":COMPOSITION_DENIED}));
+    probe.record(
+        json!({"kind":"native_catalog_policy_denials_verified","names":COMPOSITION_DENIED}),
+    );
     let catalog = value(call(session, probe, "setup_catalog", json!({})).await?)?;
     let entries = catalog["entries"]
         .as_array()

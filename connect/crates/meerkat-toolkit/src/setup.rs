@@ -15,13 +15,13 @@ mod continuation_executor;
 mod continuation_recovery;
 pub use continuation_recovery::ContinuationRecoveryPage;
 mod service_continuation;
+use service_continuation::ApprovedServiceReady;
 pub use service_continuation::{
     ApprovedServiceAttachmentClass, ApprovedServiceAttachmentExit,
     ApprovedServiceAttachmentFailure, ApprovedServiceAttachmentObservation,
     ApprovedServiceAttachmentPhase, ApprovedServiceInput, ApprovedServiceSelection,
     ApprovedServiceSourceOwner,
 };
-use service_continuation::ApprovedServiceReady;
 mod helper_result;
 pub use helper_result::{
     SETUP_REPORT, SETUP_RESULTS_BUNDLE, SetupHelperFailure, SetupHelperResultAccess,
@@ -215,8 +215,11 @@ impl SetupSnapshot {
 
     pub fn condition(&self) -> toolkit_store::RecordCondition {
         toolkit_store::RecordCondition {
-            key: self.stored.key.clone(), revision: self.stored.revision,
-            content_digest: self.stored.content_digest.clone(), claim: None, dispatch_claim: None,
+            key: self.stored.key.clone(),
+            revision: self.stored.revision,
+            content_digest: self.stored.content_digest.clone(),
+            claim: None,
+            dispatch_claim: None,
         }
     }
 
@@ -462,7 +465,9 @@ impl<'a> SetupStore<'a> {
         access: SetupAccess<'_>,
     ) -> Result<SetupSnapshot, SetupError> {
         self.check_snapshot(snapshot, &access, true)?;
-        if snapshot.record.approved_service.is_some() { return Err(SetupError::Rejected); }
+        if snapshot.record.approved_service.is_some() {
+            return Err(SetupError::Rejected);
+        }
         selection.validate(
             &snapshot.request,
             access.evidence,
@@ -673,10 +678,20 @@ impl<'a> SetupStore<'a> {
         operation: &Id,
         expected: &crate::request::NativeOriginalTask,
     ) -> Result<SetupSnapshot, SetupError> {
-        let stored = self.store.get(&self.scope.key(operation)).await?
+        let stored = self
+            .store
+            .get(&self.scope.key(operation))
+            .await?
             .ok_or(StoreError::NotFound)?;
         let snapshot = self.recover(stored)?;
-        if snapshot.request().host().continuation.native_original.as_ref() != Some(expected) {
+        if snapshot
+            .request()
+            .host()
+            .continuation
+            .native_original
+            .as_ref()
+            != Some(expected)
+        {
             return Err(SetupError::Denied);
         }
         Ok(snapshot)
@@ -697,7 +712,9 @@ impl<'a> SetupStore<'a> {
         };
         let snapshot = self.recover(stored)?;
         match snapshot.state().lifecycle_phase {
-            AcquisitionPhase::Absent | AcquisitionPhase::Investigating | AcquisitionPhase::Preparing => Ok(None),
+            AcquisitionPhase::Absent
+            | AcquisitionPhase::Investigating
+            | AcquisitionPhase::Preparing => Ok(None),
             _ => continuation_obligation(&snapshot.record, &snapshot.request).map(Some),
         }
     }
@@ -746,8 +763,12 @@ impl<'a> SetupStore<'a> {
         }
         // Authenticate with the fresh read above, but use the same first
         // observation for both generated state and the stored receipt body.
-        let canonical = snapshot.record.continuation_receipt.clone()
-            .or_else(|| expected.cloned()).unwrap_or(evidence);
+        let canonical = snapshot
+            .record
+            .continuation_receipt
+            .clone()
+            .or_else(|| expected.cloned())
+            .unwrap_or(evidence);
         let state = snapshot.state();
         let (mut record, effects) = apply(
             &snapshot,
@@ -894,9 +915,13 @@ fn apply(
     snapshot: &SetupSnapshot,
     input: AcquisitionInput,
 ) -> Result<(AcquisitionRecord, Vec<AcquisitionEffect>), SetupError> {
-    if snapshot.record.approved_service.is_some() && matches!(&input,
-        AcquisitionInput::RecordSelection { .. } | AcquisitionInput::ReportFailure { .. }
-        | AcquisitionInput::ReportUnavailable { .. })
+    if snapshot.record.approved_service.is_some()
+        && matches!(
+            &input,
+            AcquisitionInput::RecordSelection { .. }
+                | AcquisitionInput::ReportFailure { .. }
+                | AcquisitionInput::ReportUnavailable { .. }
+        )
     {
         // The exact B reservation wins against helper/generic result writers
         // through the same acquisition CAS. Cancellation and expiry retain
@@ -936,7 +961,8 @@ fn validate_record(
         || state.authority_digest != request.authority_digest()?.as_str()
         || state.continuation_id != continuation_digest(request)?.as_str()
         || state.deadline != request.host().limits.deadline_ms
-        || state.selection_generation != record.selections.len() as u64 + u64::from(record.approved_service.is_some())
+        || state.selection_generation
+            != record.selections.len() as u64 + u64::from(record.approved_service.is_some())
     {
         return Err(SetupError::InvalidRecord);
     }
@@ -971,11 +997,14 @@ fn validate_record(
         return Err(SetupError::InvalidRecord);
     }
     if let Some(selected) = &record.approved_service {
-        if !record.selections.is_empty() || selected.source.realm != request.constraints().tenant.as_str()
+        if !record.selections.is_empty()
+            || selected.source.realm != request.constraints().tenant.as_str()
             || selected.original_work == *request.original_work()
             || state.selection_digest != digest(selected)?.as_str()
             || state.decision_ref != state.selection_digest
-        { return Err(SetupError::InvalidRecord); }
+        {
+            return Err(SetupError::InvalidRecord);
+        }
     }
     if record.service_attachment_observation.is_some()
         && record.service_attachment_failure.is_none()
@@ -983,18 +1012,24 @@ fn validate_record(
         return Err(SetupError::InvalidRecord);
     }
     if record.service_attachment_failure.is_some()
-        && (record.approved_service.is_none() || record.service_ready.is_some()
+        && (record.approved_service.is_none()
+            || record.service_ready.is_some()
             || state.lifecycle_phase != AcquisitionPhase::Unavailable)
-    { return Err(SetupError::InvalidRecord); }
+    {
+        return Err(SetupError::InvalidRecord);
+    }
     if let Some(ready) = &record.service_ready {
-        if record.approved_service.is_none() || record.ready.is_some()
+        if record.approved_service.is_none()
+            || record.ready.is_some()
             || state.lifecycle_phase != AcquisitionPhase::Ready
             || ready.selection_digest.as_str() != state.selection_digest
             || ready.selection_generation != state.selection_generation
             || ready.observed_at_ms != state.readiness_observed_at
             || digest(ready)?.as_str() != state.readiness_digest
             || state.readiness_ref != state.readiness_digest
-        { return Err(SetupError::InvalidRecord); }
+        {
+            return Err(SetupError::InvalidRecord);
+        }
     }
     match &record.ready {
         Some(ready)
@@ -1020,7 +1055,11 @@ fn validate_record(
                 return Err(SetupError::InvalidRecord);
             }
         }
-        None if state.lifecycle_phase != AcquisitionPhase::Ready || record.service_ready.is_some() => (),
+        None if state.lifecycle_phase != AcquisitionPhase::Ready
+            || record.service_ready.is_some() =>
+        {
+            ()
+        }
         _ => return Err(SetupError::InvalidRecord),
     }
     match &record.detail {

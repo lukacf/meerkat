@@ -1,35 +1,57 @@
 //! An actual native binder queues behind the same source owner's entered
 //! recovery CAS. No worker gate hides this live overlap.
 use super::*;
-use toolkit_store::*;
-use std::sync::{OnceLock, atomic::AtomicBool};
 use crate::original_ingress::custody_attempt::CustodyDecision;
 use crate::private_originals::custody_recovery::HandoffPhase;
+use std::sync::{OnceLock, atomic::AtomicBool};
+use toolkit_store::*;
 
 struct HeldRecoveryWrite {
-    inner: Arc<dyn ToolkitStore>, hold: AtomicBool,
-    entered: tokio::sync::Notify, release: tokio::sync::Semaphore,
-    entered_count: AtomicUsize, returned_count: AtomicUsize,
+    inner: Arc<dyn ToolkitStore>,
+    hold: AtomicBool,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Semaphore,
+    entered_count: AtomicUsize,
+    returned_count: AtomicUsize,
 }
 impl HeldRecoveryWrite {
     fn new(inner: Arc<dyn ToolkitStore>) -> Self {
-        Self { inner, hold: AtomicBool::new(true), entered: tokio::sync::Notify::new(),
-            release: tokio::sync::Semaphore::new(0), entered_count: AtomicUsize::new(0),
-            returned_count: AtomicUsize::new(0) }
+        Self {
+            inner,
+            hold: AtomicBool::new(true),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Semaphore::new(0),
+            entered_count: AtomicUsize::new(0),
+            returned_count: AtomicUsize::new(0),
+        }
     }
 }
 #[async_trait::async_trait]
 impl ToolkitStore for HeldRecoveryWrite {
-    fn capabilities(&self) -> StoreCapabilities { self.inner.capabilities() }
-    async fn now_ms(&self) -> StoreResult<i64> { self.inner.now_ms().await }
-    async fn admit(&self, request: AdmissionRequest) -> StoreResult<AdmissionOutcome> { self.inner.admit(request).await }
-    async fn get(&self, key: &StoreKey) -> StoreResult<Option<StoredRecord>> { self.inner.get(key).await }
-    async fn list_records(&self, scope: &StoreScope, after: Option<&str>, limit: u32) -> StoreResult<Vec<StoredRecord>> {
+    fn capabilities(&self) -> StoreCapabilities {
+        self.inner.capabilities()
+    }
+    async fn now_ms(&self) -> StoreResult<i64> {
+        self.inner.now_ms().await
+    }
+    async fn admit(&self, request: AdmissionRequest) -> StoreResult<AdmissionOutcome> {
+        self.inner.admit(request).await
+    }
+    async fn get(&self, key: &StoreKey) -> StoreResult<Option<StoredRecord>> {
+        self.inner.get(key).await
+    }
+    async fn list_records(
+        &self,
+        scope: &StoreScope,
+        after: Option<&str>,
+        limit: u32,
+    ) -> StoreResult<Vec<StoredRecord>> {
         self.inner.list_records(scope, after, limit).await
     }
     async fn compare_and_swap(&self, transition: Transition) -> StoreResult<StoredRecord> {
         if transition.data.body["custody_attempt"]["decision"] == "promoted"
-            && self.hold.swap(false, Ordering::SeqCst) {
+            && self.hold.swap(false, Ordering::SeqCst)
+        {
             self.entered_count.fetch_add(1, Ordering::SeqCst);
             self.entered.notify_one();
             self.release.acquire().await.unwrap().forget();
@@ -118,35 +140,62 @@ async fn second_original(fixture: &Fixture) -> PrivateOriginalSubmit {
     let authentication = event.original_authentication.clone();
     let reference = fixture.source.retain_event(event).await.unwrap();
     let current = fixture.association.candidate();
-    let mut candidate = claims(label, &current.controller_grant_lineage[0]).candidate().clone();
+    let mut candidate = claims(label, &current.controller_grant_lineage[0])
+        .candidate()
+        .clone();
     candidate.authority_basis = current.authority_basis.clone();
     candidate.target = current.target.clone();
     candidate.controller_grant_lineage = current.controller_grant_lineage.clone();
     candidate.controller_model = current.controller_model.clone();
     candidate.controller_ceiling = current.controller_ceiling.clone();
     let association = InputAuthorityAssociation::new(candidate).unwrap();
-    let original = fixture.owner.bind_controller_only_async(
-        association.clone(), source_custody(&association), &principal("user"), &principal("frontend"),
-        |final_association| {
-            let source = fixture.source.clone(); let reference = reference.clone();
-            async move { source.persist_binding(&reference, &final_association).await }
-        },
-    ).await.unwrap();
-    fixture.source.hold_binding(reference.clone(), original).await.unwrap();
-    PrivateOriginalSubmit { original: reference, content: PROMPT.into(), transport_authentication: authentication }
+    let original = fixture
+        .owner
+        .bind_controller_only_async(
+            association.clone(),
+            source_custody(&association),
+            &principal("user"),
+            &principal("frontend"),
+            |final_association| {
+                let source = fixture.source.clone();
+                let reference = reference.clone();
+                async move { source.persist_binding(&reference, &final_association).await }
+            },
+        )
+        .await
+        .unwrap();
+    fixture
+        .source
+        .hold_binding(reference.clone(), original)
+        .await
+        .unwrap();
+    PrivateOriginalSubmit {
+        original: reference,
+        content: PROMPT.into(),
+        transport_authentication: authentication,
+    }
 }
 
 #[derive(Clone, Copy)]
-enum WaitingCaller { Live, Lost, SourceClosed }
+enum WaitingCaller {
+    Live,
+    Lost,
+    SourceClosed,
+}
 
 async fn exercise(mode: WaitingCaller) {
     let capture = Arc::new(OnceLock::<Arc<HeldRecoveryWrite>>::new());
     let selected = capture.clone();
-    let fixture = Fixture::with_source_store(DeliveryMode::Normal, false,
+    let fixture = Fixture::with_source_store(
+        DeliveryMode::Normal,
+        false,
         Some(Box::new(move |inner, _fault| {
             let store = Arc::new(HeldRecoveryWrite::new(inner));
-            assert!(selected.set(store.clone()).is_ok()); store
-        }))).await;
+            assert!(selected.set(store.clone()).is_ok());
+            store
+        })),
+    )
+    .await;
     let store = capture.get().unwrap().clone();
     let mut native_shutdown = Box::pin(fixture.shutdown());
     let mut native_cleanup = None;
@@ -274,21 +323,37 @@ async fn exercise(mode: WaitingCaller) {
     fixture.source.stop_custody_recovery();
     store.release.add_permits(1);
     drop(caller.take());
-    let native = match native_cleanup { Some(result) => result, None => native_shutdown.as_mut().await };
+    let native = match native_cleanup {
+        Some(result) => result,
+        None => native_shutdown.as_mut().await,
+    };
     let source = fixture.source.join_custody_recovery().await;
     match checked {
-        Ok(Ok(())) => assert!(native.is_ok() && source.is_ok(), "cleanup: native={native:?}; source={source:?}"),
-        Ok(Err(_)) => panic!("writer contention control timed out; native={native:?}; source={source:?}"),
+        Ok(Ok(())) => assert!(
+            native.is_ok() && source.is_ok(),
+            "cleanup: native={native:?}; source={source:?}"
+        ),
+        Ok(Err(_)) => {
+            panic!("writer contention control timed out; native={native:?}; source={source:?}")
+        }
         Err(payload) => {
-            if native.is_err() || source.is_err() { eprintln!("cleanup: native={native:?}; source={source:?}"); }
+            if native.is_err() || source.is_err() {
+                eprintln!("cleanup: native={native:?}; source={source:?}");
+            }
             std::panic::resume_unwind(payload);
         }
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn actual_binder_waits_for_recovery_write_then_admits() { exercise(WaitingCaller::Live).await; }
+async fn actual_binder_waits_for_recovery_write_then_admits() {
+    exercise(WaitingCaller::Live).await;
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cancelled_caller_keeps_actual_binder_wait_owned_until_admission() { exercise(WaitingCaller::Lost).await; }
+async fn cancelled_caller_keeps_actual_binder_wait_owned_until_admission() {
+    exercise(WaitingCaller::Lost).await;
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn source_close_during_writer_wait_refuses_new_candidate_after_release() { exercise(WaitingCaller::SourceClosed).await; }
+async fn source_close_during_writer_wait_refuses_new_candidate_after_release() {
+    exercise(WaitingCaller::SourceClosed).await;
+}

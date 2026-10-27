@@ -2,21 +2,36 @@
 use super::*;
 use crate::installed_host::{InstalledToolkitHost, NativeOwnerStartup};
 use meerkat_core::{ToolCallView, ToolDispatchContext, ToolError};
-use meerkat_toolkit::host_lifetime::{NativeHostLifetime, control::{HostCloseReason, PrivateHostLifetimeControl}};
+use meerkat_toolkit::host_lifetime::{
+    NativeHostLifetime,
+    control::{HostCloseReason, PrivateHostLifetimeControl},
+};
 use serde_json::value::RawValue;
 
-async fn installed() -> (tempfile::TempDir, Arc<NativeHostLifetime>, InstalledToolkitHost) {
+async fn installed() -> (
+    tempfile::TempDir,
+    Arc<NativeHostLifetime>,
+    InstalledToolkitHost,
+) {
     let (directory, mut selection) = crate::installed_host::tests::fixture();
     crate::installed_host::tests::provision_fixture(&mut selection);
-    let (owner, installed) = InstalledToolkitHost::open(selection, NativeOwnerStartup::Restore).await.unwrap();
+    let (owner, installed) = InstalledToolkitHost::open(selection, NativeOwnerStartup::Restore)
+        .await
+        .unwrap();
     let owner = Arc::new(owner);
     installed.originals.bind_host_lifetime(&owner).unwrap();
     (directory, owner, installed)
 }
 
-fn acquisition(installed: &InstalledToolkitHost, directory: &std::path::Path,
-    tools: InstalledAcquisitionTools) -> Arc<InstalledAcquisition> {
-    use meerkat_core::{service::WorkGraphNamespaceGrant, storage_durability::{DurabilityDeclaration, DurabilityResolution}};
+fn acquisition(
+    installed: &InstalledToolkitHost,
+    directory: &std::path::Path,
+    tools: InstalledAcquisitionTools,
+) -> Arc<InstalledAcquisition> {
+    use meerkat_core::{
+        service::WorkGraphNamespaceGrant,
+        storage_durability::{DurabilityDeclaration, DurabilityResolution},
+    };
     use meerkat_toolkit::{authority::Ceiling, setup::WorkAdmissionStepOptions};
     use meerkat_workgraph::{SqliteWorkGraphStore, WorkGraphService};
     let id = |value: &str| Id::new(value).unwrap();
@@ -24,10 +39,18 @@ fn acquisition(installed: &InstalledToolkitHost, directory: &std::path::Path,
     let service = WorkGraphService::with_namespace_grant(
         Arc::new(SqliteWorkGraphStore::open(&directory.join("workgraph.sqlite")).unwrap()),
         WorkGraphNamespaceGrant::new(native.realm.as_str(), "setup").unwrap(),
-    ).unwrap();
-    let backend = SetupWorkBackend::new(service, "fixture".into(), id("generation"), &[
-        DurabilityDeclaration::durable("workgraph", DurabilityResolution::Persistent),
-    ]).unwrap();
+    )
+    .unwrap();
+    let backend = SetupWorkBackend::new(
+        service,
+        "fixture".into(),
+        id("generation"),
+        &[DurabilityDeclaration::durable(
+            "workgraph",
+            DurabilityResolution::Persistent,
+        )],
+    )
+    .unwrap();
     let parent = native.routes[0].application_parent.clone().unwrap();
     let helper = InstalledSetupSelection {
         catalog_capability: None,
@@ -35,44 +58,94 @@ fn acquisition(installed: &InstalledToolkitHost, directory: &std::path::Path,
         member: native.members[0].member.clone(),
         ingress_actor: native.grant_administrator.clone(),
         logical_executor: native.members[0].logical_owner.clone(),
-        represented_subject: None, controller_parent: parent.clone(),
+        represented_subject: None,
+        controller_parent: parent.clone(),
         operation_basis: WorkAuthorityBasis::GrantLineage { lineage: parent },
     };
-    let continuation = installed.native_continuation([id("private")].into()).unwrap();
-    Arc::new(InstalledAcquisition::from_defaults_with_tools(
-        installed.store.clone(), installed.source_scope.clone(), installed.originals.clone(), native,
-        InstalledSetupDefaults {
-            helper, proposal_ceiling: Ceiling { actions: Default::default(), services: Default::default(),
-                frontends: Default::default(), output_audiences: [id("private")].into() },
-            continuation, work_backend: backend, references: None,
-            limits: InstalledSetupLimits::default(),
-            work_step: WorkAdmissionStepOptions { worker: id("worker"), lease_ms: 100,
-                owner_timeout_ms: 25, settlement_budget_ms: 25 },
-        }, tools,
-    ).unwrap())
+    let continuation = installed
+        .native_continuation([id("private")].into())
+        .unwrap();
+    Arc::new(
+        InstalledAcquisition::from_defaults_with_tools(
+            installed.store.clone(),
+            installed.source_scope.clone(),
+            installed.originals.clone(),
+            native,
+            InstalledSetupDefaults {
+                helper,
+                proposal_ceiling: Ceiling {
+                    actions: Default::default(),
+                    services: Default::default(),
+                    frontends: Default::default(),
+                    output_audiences: [id("private")].into(),
+                },
+                continuation,
+                work_backend: backend,
+                references: None,
+                limits: InstalledSetupLimits::default(),
+                work_step: WorkAdmissionStepOptions {
+                    worker: id("worker"),
+                    lease_ms: 100,
+                    owner_timeout_ms: 25,
+                    settlement_budget_ms: 25,
+                },
+            },
+            tools,
+        )
+        .unwrap(),
+    )
 }
 
 #[tokio::test]
 async fn unbound_dispatchers_refuse_before_context_admission_and_have_no_dependencies() {
     let tools = InstalledAcquisitionTools::new(Duration::from_secs(10)).unwrap();
     let cloned = tools.clone();
-    assert!(Arc::ptr_eq(&tools.acquisition_tool(), &cloned.acquisition_tool()));
+    assert!(Arc::ptr_eq(
+        &tools.acquisition_tool(),
+        &cloned.acquisition_tool()
+    ));
     assert!(Arc::ptr_eq(&tools.result_tool(), &cloned.result_tool()));
-    assert_eq!(tools.acquisition_tool().tools()[0].identity(), crate::definition().identity());
-    assert_eq!(tools.result_tool().tools()[0].identity(), results::setup_report_definition().identity());
+    assert_eq!(
+        tools.acquisition_tool().tools()[0].identity(),
+        crate::definition().identity()
+    );
+    assert_eq!(
+        tools.result_tool().tools()[0].identity(),
+        results::setup_report_definition().identity()
+    );
     assert!(tools.0.binding.owner.get().is_none());
-    assert!(matches!(&tools.0.acquisition.admission, crate::FindAndInstallAdmission::Installed(_)));
+    assert!(matches!(
+        &tools.0.acquisition.admission,
+        crate::FindAndInstallAdmission::Installed(_)
+    ));
     let args = RawValue::from_string("{}".into()).unwrap();
     let context = ToolDispatchContext::default();
     // Actual production dispatch must observe the missing owner before it
     // interprets context, arguments or any canonical acquisition row.
-    let result = tools.0.acquisition.dispatch_with_context(
-        ToolCallView { id: "unbound", name: crate::FIND_AND_INSTALL, args: &args }, &context,
-    ).await;
+    let result = tools
+        .0
+        .acquisition
+        .dispatch_with_context(
+            ToolCallView {
+                id: "unbound",
+                name: crate::FIND_AND_INSTALL,
+                args: &args,
+            },
+            &context,
+        )
+        .await;
     assert!(matches!(result, Err(ToolError::Unavailable { .. })));
-    let result = tools.result_tool().dispatch_with_context(ToolCallView {
-        id: "unbound-result", name: meerkat_toolkit::setup::SETUP_REPORT, args: &args,
-    }, &context).await;
+    let result = tools
+        .result_tool()
+        .dispatch_with_context(
+            ToolCallView {
+                id: "unbound-result",
+                name: meerkat_toolkit::setup::SETUP_REPORT,
+                args: &args,
+            },
+            &context,
+        )
+        .await;
     assert!(matches!(result, Err(ToolError::Unavailable { .. })));
     // Neither leaf even retains a source/store until this actual binding exists.
     assert!(tools.0.acquisition.admission_owner().is_err());
@@ -91,7 +164,10 @@ async fn same_leaves_bind_once_to_the_creating_owner_and_expire_with_it() {
     assert!(Arc::ptr_eq(&tools.result_tool(), &owner.result_tool()));
     let held = tools.0.acquisition.admission_owner().unwrap();
     assert!(Arc::ptr_eq(held.acquisition.as_ref().unwrap(), &owner));
-    assert!(Arc::ptr_eq(held.dependencies.conditional_store.as_ref().unwrap(), &installed.store));
+    assert!(Arc::ptr_eq(
+        held.dependencies.conditional_store.as_ref().unwrap(),
+        &installed.store
+    ));
     assert!(tools.bind(&owner).is_err());
     assert!(tools.require_unbound(Duration::from_secs(10)).is_err());
     drop(held);
@@ -108,10 +184,20 @@ async fn closed_final_owner_refuses_and_timeout_cannot_change_after_enrollment()
     let owner = acquisition(&installed, directory.path(), tools.clone());
     owner.bind_tool_driver().unwrap();
     assert!(tools.0.acquisition.admission_owner().is_ok());
-    lifetime.begin_close_activation(HostCloseReason::Shutdown).unwrap();
+    lifetime
+        .begin_close_activation(HostCloseReason::Shutdown)
+        .unwrap();
     assert!(tools.0.acquisition.admission_owner().is_err());
-    assert!(tools.0.binding.owner.get().and_then(Weak::upgrade).is_some(),
-        "the refusal is actual close, not a dropped owner");
+    assert!(
+        tools
+            .0
+            .binding
+            .owner
+            .get()
+            .and_then(Weak::upgrade)
+            .is_some(),
+        "the refusal is actual close, not a dropped owner"
+    );
 }
 
 #[tokio::test]
@@ -120,29 +206,57 @@ async fn configured_owner_without_native_identity_refuses_both_production_leaves
     let tools = InstalledAcquisitionTools::new(Duration::from_secs(10)).unwrap();
     let owner = acquisition(&installed, directory.path(), tools.clone());
     owner.bind_tool_driver().unwrap();
-    assert!(tools.0.binding.owner().is_some(), "the installed source is alive");
-    assert!(tools.0.binding.execution_owner().is_none(), "configuration is not native binding");
+    assert!(
+        tools.0.binding.owner().is_some(),
+        "the installed source is alive"
+    );
+    assert!(
+        tools.0.binding.execution_owner().is_none(),
+        "configuration is not native binding"
+    );
     let args = RawValue::from_string("{}".into()).unwrap();
-    for (tool, name) in [(tools.acquisition_tool(), crate::FIND_AND_INSTALL),
-        (tools.result_tool(), meerkat_toolkit::setup::SETUP_REPORT)] {
-        assert!(matches!(tool.dispatch_with_context(ToolCallView {
-            id: "unbound-native", name, args: &args,
-        }, &ToolDispatchContext::default()).await, Err(ToolError::Unavailable { .. })));
+    for (tool, name) in [
+        (tools.acquisition_tool(), crate::FIND_AND_INSTALL),
+        (tools.result_tool(), meerkat_toolkit::setup::SETUP_REPORT),
+    ] {
+        assert!(matches!(
+            tool.dispatch_with_context(
+                ToolCallView {
+                    id: "unbound-native",
+                    name,
+                    args: &args,
+                },
+                &ToolDispatchContext::default()
+            )
+            .await,
+            Err(ToolError::Unavailable { .. })
+        ));
     }
-    let scope = toolkit_store::StoreScope { realm: owner.host.tenant.to_string(),
-        owner: format!("toolkit/acquisition/{}", owner.host.deployment) };
-    assert!(owner.store.list_records(&scope, None, 10).await.unwrap().is_empty());
+    let scope = toolkit_store::StoreScope {
+        realm: owner.host.tenant.to_string(),
+        owner: format!("toolkit/acquisition/{}", owner.host.deployment),
+    };
+    assert!(
+        owner
+            .store
+            .list_records(&scope, None, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
 async fn production_leaves_reach_actual_bound_owner_but_not_missing_native_continuation() {
     use crate::private_originals::ContinuationFixture;
     use futures::FutureExt;
-    use std::panic::AssertUnwindSafe;
-    use meerkat_core::{service::WorkGraphNamespaceGrant,
-        storage_durability::{DurabilityDeclaration, DurabilityResolution}};
-    use meerkat_workgraph::{SqliteWorkGraphStore, WorkGraphService};
+    use meerkat_core::{
+        service::WorkGraphNamespaceGrant,
+        storage_durability::{DurabilityDeclaration, DurabilityResolution},
+    };
     use meerkat_toolkit::{authority::Ceiling, setup::WorkAdmissionStepOptions};
+    use meerkat_workgraph::{SqliteWorkGraphStore, WorkGraphService};
+    use std::panic::AssertUnwindSafe;
 
     let fixture = ContinuationFixture::for_continuation().await;
     let result = AssertUnwindSafe(Box::pin(async {
@@ -276,9 +390,10 @@ async fn production_leaves_reach_actual_bound_owner_but_not_missing_native_conti
     })).catch_unwind().await;
     let cleanup = fixture.shutdown().await;
     assert!(cleanup.is_ok(), "{cleanup:?}");
-    if let Err(panic) = result { std::panic::resume_unwind(panic); }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
 }
-
 
 #[tokio::test]
 async fn retained_owner_lookup_survives_setup_writer_without_authorizing_entry() {

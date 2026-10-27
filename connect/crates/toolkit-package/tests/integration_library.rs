@@ -143,7 +143,10 @@ fn remote_declaration(selected: &ActivationManifest) -> RemoteExportDeclaration 
     let mut value = serde_json::to_value(selected).unwrap();
     value.as_object_mut().unwrap().remove("configuration");
     value.as_object_mut().unwrap().remove("policy");
-    value["components"][0]["source"].as_object_mut().unwrap().remove("configuration_revision");
+    value["components"][0]["source"]
+        .as_object_mut()
+        .unwrap()
+        .remove("configuration_revision");
     value["selection_kind"] = serde_json::json!(REMOTE_EXPORT_DECLARATION);
     serde_json::from_value(value).unwrap()
 }
@@ -461,7 +464,11 @@ fn portable_export_refuses_known_host_requirements_whether_omitted_or_declared()
         if declare {
             selected.host_services.push(requirement.clone());
         }
-        assert!(bundle.export_portable_declaration(bundle.digest(), remote_declaration(&selected)).is_err());
+        assert!(
+            bundle
+                .export_portable_declaration(bundle.digest(), remote_declaration(&selected))
+                .is_err()
+        );
         assert!(
             matches!(
                 bundle.export_portable(bundle.digest(), selected),
@@ -521,7 +528,11 @@ fn portable_export_preserves_lifecycle_contract_and_state_refusals() {
                 }),
             _ => unreachable!(),
         }
-        assert!(bundle.export_portable_declaration(bundle.digest(), remote_declaration(&selected)).is_err());
+        assert!(
+            bundle
+                .export_portable_declaration(bundle.digest(), remote_declaration(&selected))
+                .is_err()
+        );
         assert!(
             matches!(
                 bundle.export_portable(bundle.digest(), selected),
@@ -560,7 +571,7 @@ fn portable_export_requires_exact_nonempty_declared_server_names() {
     }
     let mut extra = selected.clone();
     extra.portable_mcp_entries.push(PortableMcpEntry {
-            environment_secret_slots: None,
+        environment_secret_slots: None,
         operation_tools: None,
         name: id("unselected-alias"),
         component: id("remote"),
@@ -647,9 +658,14 @@ fn portable_export_does_not_turn_guidance_into_an_executable_choice() {
     selected.package = guidance.package().identity.clone();
     selected.package_content_digest = guidance.package().content_digest().unwrap();
     selected.strategy = guidance.recipes().recipes[0].strategy.clone();
-    assert!(matches!(guidance.export_portable_declaration(guidance.digest(), remote_declaration(&selected)),
-        Err(LibraryPortableExportError::Selection(LibrarySelectionError::GuidanceOnly))));
-    selected.components.clear(); selected.exports.clear();
+    assert!(matches!(
+        guidance.export_portable_declaration(guidance.digest(), remote_declaration(&selected)),
+        Err(LibraryPortableExportError::Selection(
+            LibrarySelectionError::GuidanceOnly
+        ))
+    ));
+    selected.components.clear();
+    selected.exports.clear();
     assert!(matches!(
         guidance.export_portable(guidance.digest(), selected),
         Err(LibraryPortableExportError::Selection(
@@ -1456,21 +1472,36 @@ fn calendar_changed_current_prerequisites_cannot_replace_either_retained_version
 fn remote_declaration_preserves_portability_without_host_snapshots_or_legacy_digest_changes() {
     let bundle = IntegrationBundle::parse(PLUGIN, Some(MCP), RECIPES).unwrap();
     let mut selected = selection(&bundle);
-    selected.portable_mcp_entries[0].operation_tools = Some([(id("fixture-read"), "provider.read".into())].into());
+    selected.portable_mcp_entries[0].operation_tools =
+        Some([(id("fixture-read"), "provider.read".into())].into());
     let legacy_digest = ContentDigest::of_bytes(&canonical_json(&selected).unwrap());
     let declaration = remote_declaration(&selected);
     let raw = serde_json::to_value(&declaration).unwrap();
     assert!(raw.get("configuration").is_none());
     assert!(raw.get("policy").is_none());
-    assert!(raw["components"][0]["source"].get("configuration_revision").is_none());
+    assert!(
+        raw["components"][0]["source"]
+            .get("configuration_revision")
+            .is_none()
+    );
     assert!(serde_json::from_value::<ActivationManifest>(raw.clone()).is_err());
     let pin = ContentDigest::of_bytes(&canonical_json(&declaration).unwrap());
-    let (legacy, legacy_service) = bundle.export_portable_with_selection(bundle.digest(), selected.clone()).unwrap();
-    let (portable, service) = bundle.export_portable_declaration(bundle.digest(), declaration).unwrap();
-    assert_eq!(portable, legacy, "independent output bytes must not depend on host snapshots");
+    let (legacy, legacy_service) = bundle
+        .export_portable_with_selection(bundle.digest(), selected.clone())
+        .unwrap();
+    let (portable, service) = bundle
+        .export_portable_declaration(bundle.digest(), declaration)
+        .unwrap();
+    assert_eq!(
+        portable, legacy,
+        "independent output bytes must not depend on host snapshots"
+    );
     let legacy_service = serde_json::to_value(legacy_service.unwrap()).unwrap();
     let service = serde_json::to_value(service.unwrap()).unwrap();
-    assert_eq!(legacy_service["manifest_digest"], serde_json::json!(legacy_digest));
+    assert_eq!(
+        legacy_service["manifest_digest"],
+        serde_json::json!(legacy_digest)
+    );
     assert!(legacy_service.get("selection_kind").is_none());
     assert!(legacy_service.get("declaration_digest").is_none());
     assert_eq!(service["selection_kind"], REMOTE_EXPORT_DECLARATION);
@@ -1479,19 +1510,35 @@ fn remote_declaration_preserves_portability_without_host_snapshots_or_legacy_dig
     assert_ne!(pin, legacy_digest);
     let validated = selected.validate(bundle.package()).unwrap();
     assert_eq!(validated.digest(), &legacy_digest);
-    assert!(!validated.check_host(&HostCapabilities { contracts:BTreeMap::new(), services:BTreeMap::new(),
-        runtimes:BTreeSet::new(), placements:BTreeSet::new() }).is_compatible());
+    assert!(
+        !validated
+            .check_host(&HostCapabilities {
+                contracts: BTreeMap::new(),
+                services: BTreeMap::new(),
+                runtimes: BTreeSet::new(),
+                placements: BTreeSet::new()
+            })
+            .is_compatible()
+    );
     for field in ["configuration", "policy", "source-revision", "unknown-kind"] {
         let mut changed = raw.clone();
         match field {
             "configuration" | "policy" => changed[field] = serde_json::json!({}),
-            "source-revision" => changed["components"][0]["source"]["configuration_revision"] = serde_json::json!("1"),
+            "source-revision" => {
+                changed["components"][0]["source"]["configuration_revision"] =
+                    serde_json::json!("1")
+            }
             "unknown-kind" => changed["selection_kind"] = serde_json::json!("activation"),
             _ => unreachable!(),
         }
         match serde_json::from_value::<RemoteExportDeclaration>(changed) {
-            Err(_) => {},
-            Ok(value) => assert!(bundle.export_portable_declaration(bundle.digest(), value).is_err(), "{field}"),
+            Err(_) => {}
+            Ok(value) => assert!(
+                bundle
+                    .export_portable_declaration(bundle.digest(), value)
+                    .is_err(),
+                "{field}"
+            ),
         }
     }
 }
@@ -1500,28 +1547,66 @@ fn remote_declaration_preserves_portability_without_host_snapshots_or_legacy_dig
 fn remote_declaration_refuses_changed_recipe_and_missing_schema_declarations() {
     let bundle = IntegrationBundle::parse(PLUGIN, Some(MCP), RECIPES).unwrap();
     let mut selected = selection(&bundle);
-    selected.portable_mcp_entries[0].operation_tools = Some([(id("fixture-read"), "provider.read".into())].into());
+    selected.portable_mcp_entries[0].operation_tools =
+        Some([(id("fixture-read"), "provider.read".into())].into());
     let original = serde_json::to_value(remote_declaration(&selected)).unwrap();
-    for mode in ["endpoint", "publisher", "auth", "write", "empty-map", "missing-contract", "missing-schema"] {
+    for mode in [
+        "endpoint",
+        "publisher",
+        "auth",
+        "write",
+        "empty-map",
+        "missing-contract",
+        "missing-schema",
+    ] {
         let mut value = original.clone();
         match mode {
-            "endpoint" => value["components"][0]["source"]["endpoint"] = serde_json::json!("https://different.invalid/mcp"),
-            "publisher" => value["components"][0]["source"]["publisher"] = serde_json::json!("different"),
+            "endpoint" => {
+                value["components"][0]["source"]["endpoint"] =
+                    serde_json::json!("https://different.invalid/mcp")
+            }
+            "publisher" => {
+                value["components"][0]["source"]["publisher"] = serde_json::json!("different")
+            }
             "auth" => value["exports"][0]["authentication"] = serde_json::json!({"kind":"none"}),
-            "write" => value["exports"][0]["operations"][0]["declared_effect"] = serde_json::json!("write"),
-            "empty-map" => value["portable_mcp_entries"][0]["operation_tools"] = serde_json::json!({}),
-            "missing-contract" => { value["components"][0]["source"].as_object_mut().unwrap().remove("observed_contract"); },
-            "missing-schema" => { value["exports"][0]["operations"][0].as_object_mut().unwrap().remove("schema_digest"); },
+            "write" => {
+                value["exports"][0]["operations"][0]["declared_effect"] = serde_json::json!("write")
+            }
+            "empty-map" => {
+                value["portable_mcp_entries"][0]["operation_tools"] = serde_json::json!({})
+            }
+            "missing-contract" => {
+                value["components"][0]["source"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("observed_contract");
+            }
+            "missing-schema" => {
+                value["exports"][0]["operations"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("schema_digest");
+            }
             _ => unreachable!(),
         }
         match serde_json::from_value::<RemoteExportDeclaration>(value) {
-            Err(_) => {},
-            Ok(value) => assert!(bundle.export_portable_declaration(bundle.digest(), value).is_err(), "{mode}"),
+            Err(_) => {}
+            Ok(value) => assert!(
+                bundle
+                    .export_portable_declaration(bundle.digest(), value)
+                    .is_err(),
+                "{mode}"
+            ),
         }
     }
     // Malformed selected fields must not displace pre-existing stale/guidance errors.
-    let mut invalid = selected.clone(); invalid.components.clear(); invalid.exports.clear();
-    assert!(matches!(bundle.export_portable(&digest("stale"), invalid.clone()),
-        Err(LibraryPortableExportError::Selection(LibrarySelectionError::StaleBundle))));
-
+    let mut invalid = selected.clone();
+    invalid.components.clear();
+    invalid.exports.clear();
+    assert!(matches!(
+        bundle.export_portable(&digest("stale"), invalid.clone()),
+        Err(LibraryPortableExportError::Selection(
+            LibrarySelectionError::StaleBundle
+        ))
+    ));
 }

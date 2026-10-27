@@ -1,8 +1,8 @@
 //! Actual native issuance and retained source controls. No MCP process or input
 //! is admitted here. The protected parent-review control lives with OperatorSetup.
-use meerkat_authorization_contracts::constraints::DomainRestriction;
 use super::*;
 use crate::original_ingress::tests::{claims, initialized, private_event, source};
+use meerkat_authorization_contracts::constraints::DomainRestriction;
 use meerkat_authorization_contracts::work_association::WorkAuthorityBasis;
 use meerkat_core::mcp_config::McpConnectorOperation;
 use std::os::unix::fs::PermissionsExt;
@@ -94,7 +94,11 @@ async fn selected_adapter_for_decision(
     decision: &PrivateServiceMcpAccessDecision,
 ) -> Arc<PrivateOriginals> {
     let mut adapter = crate::original_ingress::tests::private_originals(owner.clone(), path).await;
-    let route = &mut Arc::get_mut(&mut adapter).unwrap().routes.get_mut().unwrap()[0];
+    let route = &mut Arc::get_mut(&mut adapter)
+        .unwrap()
+        .routes
+        .get_mut()
+        .unwrap()[0];
     let operator = route.grant_caller.clone();
     route.grant_caller = app();
     let mut bounds = selected
@@ -148,38 +152,93 @@ async fn application_policy_pending_record_keeps_exact_provenance_without_reissu
     let route = adapter.routes.get().unwrap()[0].clone();
     let mut decision = decision();
     let evidence = ApplicationServiceEvidence {
-        owner: route.grant_caller.clone(), deployment: Id::new(adapter.scope.owner.clone()).unwrap(),
+        owner: route.grant_caller.clone(),
+        deployment: Id::new(adapter.scope.owner.clone()).unwrap(),
         source_policy_sha256: "a".repeat(64),
-        original: PrivateOriginalRef { route: route.id.clone(), original: EvidenceId::new("original-a").unwrap(), event_sha256: "b".repeat(64) },
-        acquisition: StoreKey { realm: adapter.scope.realm.clone(), owner: adapter.scope.owner.clone(), id: "task".into() },
+        original: PrivateOriginalRef {
+            route: route.id.clone(),
+            original: EvidenceId::new("original-a").unwrap(),
+            event_sha256: "b".repeat(64),
+        },
+        acquisition: StoreKey {
+            realm: adapter.scope.realm.clone(),
+            owner: adapter.scope.owner.clone(),
+            id: "task".into(),
+        },
         instruction_sha256: "c".repeat(64),
         service_parent: None,
-        tool_policy: None, installation_readback: None,
-        provenance: serde_json::json!({"policy_decision":"actual-test-producer-decision"}).as_object().unwrap().clone(),
+        tool_policy: None,
+        installation_readback: None,
+        provenance: serde_json::json!({"policy_decision":"actual-test-producer-decision"})
+            .as_object()
+            .unwrap()
+            .clone(),
     };
     decision.evidence.sha256 = digest(&canonical_json(&evidence).unwrap());
-    let reference = PrivateServiceGrantRef { route: decision.route.clone(), decision: decision.decision.clone(),
-        decision_sha256: decision_digest(&AccessDecision::Mcp(decision.clone()), Some(&selected.0)).unwrap() };
+    let reference = PrivateServiceGrantRef {
+        route: decision.route.clone(),
+        decision: decision.decision.clone(),
+        decision_sha256: decision_digest(&AccessDecision::Mcp(decision.clone()), Some(&selected.0))
+            .unwrap(),
+    };
     let key = adapter.access_key(&reference).unwrap();
-    let record = AccessRecord { decision: AccessDecision::Mcp(decision.clone()), caller: route.grant_caller,
-        parent: route.application_parent.clone().unwrap(), issuance: IssuanceObservation::PendingNativeIssuance,
-        mcp: Some(selected.0.clone()), application_policy: Some(evidence.clone()) };
+    let record = AccessRecord {
+        decision: AccessDecision::Mcp(decision.clone()),
+        caller: route.grant_caller,
+        parent: route.application_parent.clone().unwrap(),
+        issuance: IssuanceObservation::PendingNativeIssuance,
+        mcp: Some(selected.0.clone()),
+        application_policy: Some(evidence.clone()),
+    };
     let data = encode_access(&record).unwrap();
     assert_eq!(data.version, 4);
-    adapter.store.admit(AdmissionRequest { key: key.clone(), admission_key: key.id.clone(), data,
-        events: vec![], effects: vec![] }).await.unwrap();
+    adapter
+        .store
+        .admit(AdmissionRequest {
+            key: key.clone(),
+            admission_key: key.id.clone(),
+            data,
+            events: vec![],
+            effects: vec![],
+        })
+        .await
+        .unwrap();
     let before = std::fs::read(&path).unwrap();
     let (_host_dir, host) = crate::installed_host::operator_setup::test_service_lifetime();
-    let replay = adapter.apply_service_access(AccessDecision::Mcp(decision.clone()), Some(selected.0.clone()),
-        route.application_parent.clone(), Some(Arc::downgrade(&host)), Some(evidence.clone()),
-        Arc::new(|| panic!("a saved uncertain attempt must not enter native again"))).await.unwrap();
-    assert_eq!(replay.state, PrivateServiceGrantState::PendingReconciliation);
+    let replay = adapter
+        .apply_service_access(
+            AccessDecision::Mcp(decision.clone()),
+            Some(selected.0.clone()),
+            route.application_parent.clone(),
+            Some(Arc::downgrade(&host)),
+            Some(evidence.clone()),
+            Arc::new(|| panic!("a saved uncertain attempt must not enter native again")),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        replay.state,
+        PrivateServiceGrantState::PendingReconciliation
+    );
     assert_eq!(std::fs::read(&path).unwrap(), before);
     let mut other = evidence;
-    other.provenance.insert("policy_decision".into(), serde_json::json!("different-decision"));
-    assert!(matches!(adapter.apply_service_access(AccessDecision::Mcp(decision), Some(selected.0),
-        route.application_parent, Some(Arc::downgrade(&host)), Some(other), Arc::new(|| Ok(()))).await,
-        Err(PrivateOriginalError::Conflict)));
+    other.provenance.insert(
+        "policy_decision".into(),
+        serde_json::json!("different-decision"),
+    );
+    assert!(matches!(
+        adapter
+            .apply_service_access(
+                AccessDecision::Mcp(decision),
+                Some(selected.0),
+                route.application_parent,
+                Some(Arc::downgrade(&host)),
+                Some(other),
+                Arc::new(|| Ok(()))
+            )
+            .await,
+        Err(PrivateOriginalError::Conflict)
+    ));
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
@@ -193,8 +252,12 @@ async fn late_current_failure(error: PrivateOriginalError) {
     let selected = selection(&config());
     let adapter = selected_adapter(initialized(&path), &store_path, &selected).await;
     let decision = decision();
-    let reference = PrivateServiceGrantRef { route: decision.route.clone(), decision: decision.decision.clone(),
-        decision_sha256: decision_digest(&AccessDecision::Mcp(decision.clone()), Some(&selected.0)).unwrap() };
+    let reference = PrivateServiceGrantRef {
+        route: decision.route.clone(),
+        decision: decision.decision.clone(),
+        decision_sha256: decision_digest(&AccessDecision::Mcp(decision.clone()), Some(&selected.0))
+            .unwrap(),
+    };
     let key = adapter.access_key(&reference).unwrap();
     assert!(adapter.store.get(&key).await.unwrap().is_none());
     let before = std::fs::read(&path).unwrap();
@@ -217,19 +280,37 @@ async fn late_current_failure(error: PrivateOriginalError) {
         })).await;
     assert!(matches!(refused, Err(actual) if actual == error));
     assert_eq!(checked.load(std::sync::atomic::Ordering::SeqCst), 1);
-    assert_eq!(std::fs::read(&path).unwrap(), before, "late failure issues no native child");
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "late failure issues no native child"
+    );
     let stored = adapter.store.get(&key).await.unwrap().unwrap();
     let record = adapter.decode_access(&stored, &reference).unwrap();
     assert!(match error {
-        PrivateOriginalError::Denied => matches!(record.issuance, IssuanceObservation::NativeRefused),
+        PrivateOriginalError::Denied =>
+            matches!(record.issuance, IssuanceObservation::NativeRefused),
         _ => matches!(record.issuance, IssuanceObservation::PendingNativeIssuance),
     });
-    let replay = adapter.apply_service_access(AccessDecision::Mcp(decision), Some(selected.0),
-        adapter.routes.get().unwrap()[0].application_parent.clone(), Some(Arc::downgrade(&host)), None,
-        Arc::new(|| panic!("a saved attempt never reruns policy or native issuance"))).await.unwrap();
-    assert_eq!(replay.state, if error == PrivateOriginalError::Denied {
-        PrivateServiceGrantState::GrantUnavailable
-    } else { PrivateServiceGrantState::PendingReconciliation });
+    let replay = adapter
+        .apply_service_access(
+            AccessDecision::Mcp(decision),
+            Some(selected.0),
+            adapter.routes.get().unwrap()[0].application_parent.clone(),
+            Some(Arc::downgrade(&host)),
+            None,
+            Arc::new(|| panic!("a saved attempt never reruns policy or native issuance")),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        replay.state,
+        if error == PrivateOriginalError::Denied {
+            PrivateServiceGrantState::GrantUnavailable
+        } else {
+            PrivateServiceGrantState::PendingReconciliation
+        }
+    );
     assert_eq!(adapter.store.get(&key).await.unwrap().unwrap(), stored);
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
@@ -246,23 +327,32 @@ async fn late_policy_denial_is_definite_and_never_reissues() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dropped_caller_closes_entered_worker_but_retains_its_custody_until_settlement() {
-    use std::sync::{Condvar, atomic::{AtomicBool, Ordering}};
+    use std::sync::{
+        Condvar,
+        atomic::{AtomicBool, Ordering},
+    };
     // The marker stands for owned invocation/policy custody. The actual
     // production callback owns native ReviewedEntry custody and reservation.
     // This control enters the real issuance worker and aborts its awaiting
     // caller at that boundary; it does not simulate an issued-grant rollback.
     struct Custody(Arc<AtomicBool>, Arc<tokio::sync::Notify>);
     impl Drop for Custody {
-        fn drop(&mut self) { self.0.store(true, Ordering::SeqCst); self.1.notify_one(); }
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+            self.1.notify_one();
+        }
     }
     struct Close(Arc<AtomicBool>);
     impl Drop for Close {
-        fn drop(&mut self) { self.0.store(false, Ordering::SeqCst); }
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::SeqCst);
+        }
     }
     let dir = directory();
     let path = dir.path().join("grants");
     let selected = selection(&config());
-    let adapter = selected_adapter(initialized(&path), &dir.path().join("originals"), &selected).await;
+    let adapter =
+        selected_adapter(initialized(&path), &dir.path().join("originals"), &selected).await;
     let before = std::fs::read(&path).unwrap();
     let (_host_dir, host) = crate::installed_host::operator_setup::test_service_lifetime();
     let entered = Arc::new(tokio::sync::Notify::new());
@@ -278,18 +368,34 @@ async fn dropped_caller_closes_entered_worker_but_retains_its_custody_until_sett
     let custody = Custody(dropped.clone(), settled.clone());
     let worker = tokio::spawn(async move {
         let _close = Close(worker_open.clone());
-        worker_adapter.apply_service_access(AccessDecision::Mcp(decision()), Some(worker_selected.0),
-            worker_adapter.routes.get().unwrap()[0].application_parent.clone(), Some(Arc::downgrade(&host)), None,
-            Arc::new(move || {
-                let _custody = &custody;
-                worker_entered.notify_one();
-                let (lock, wake) = &*worker_release;
-                let mut released = lock.lock().unwrap();
-                while !*released { released = wake.wait(released).unwrap(); }
-                if worker_open.load(Ordering::SeqCst) { Ok(()) } else { Err(PrivateOriginalError::Denied) }
-            })).await
+        worker_adapter
+            .apply_service_access(
+                AccessDecision::Mcp(decision()),
+                Some(worker_selected.0),
+                worker_adapter.routes.get().unwrap()[0]
+                    .application_parent
+                    .clone(),
+                Some(Arc::downgrade(&host)),
+                None,
+                Arc::new(move || {
+                    let _custody = &custody;
+                    worker_entered.notify_one();
+                    let (lock, wake) = &*worker_release;
+                    let mut released = lock.lock().unwrap();
+                    while !*released {
+                        released = wake.wait(released).unwrap();
+                    }
+                    if worker_open.load(Ordering::SeqCst) {
+                        Ok(())
+                    } else {
+                        Err(PrivateOriginalError::Denied)
+                    }
+                }),
+            )
+            .await
     });
-    let entered_result = tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified()).await;
+    let entered_result =
+        tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified()).await;
     worker.abort();
     let cancelled = matches!(worker.await, Err(error) if error.is_cancelled());
     let closed = !open.load(Ordering::SeqCst);
@@ -298,7 +404,8 @@ async fn dropped_caller_closes_entered_worker_but_retains_its_custody_until_sett
     // including an entry timeout, so failure cannot strand a blocking worker.
     *release.0.lock().unwrap() = true;
     release.1.notify_one();
-    let settlement = tokio::time::timeout(std::time::Duration::from_secs(10), settled.notified()).await;
+    let settlement =
+        tokio::time::timeout(std::time::Duration::from_secs(10), settled.notified()).await;
     assert!(entered_result.is_ok());
     assert!(cancelled);
     assert!(closed);
@@ -307,7 +414,10 @@ async fn dropped_caller_closes_entered_worker_but_retains_its_custody_until_sett
     assert!(dropped.load(Ordering::SeqCst));
     assert_eq!(std::fs::read(&path).unwrap(), before);
     let replay = apply(&adapter, decision(), selected).await.unwrap();
-    assert_eq!(replay.state, PrivateServiceGrantState::PendingReconciliation);
+    assert_eq!(
+        replay.state,
+        PrivateServiceGrantState::PendingReconciliation
+    );
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 async fn bind(
@@ -492,7 +602,11 @@ async fn whole_set_replays_without_reissue_and_matches_only_its_access_bound_sou
     assert!(
         owner
             .grants()
-            .resolve_lineage(&lineage, &adapter.routes.get().unwrap()[0].logical_executor, None)
+            .resolve_lineage(
+                &lineage,
+                &adapter.routes.get().unwrap()[0].logical_executor,
+                None
+            )
             .is_err()
     );
     assert_eq!(
@@ -627,7 +741,11 @@ async fn narrowed_intermediate_parent_cannot_restore_removed_connector_approval(
         &dir.path().join("originals"),
     )
     .await;
-    let route = &mut Arc::get_mut(&mut adapter).unwrap().routes.get_mut().unwrap()[0];
+    let route = &mut Arc::get_mut(&mut adapter)
+        .unwrap()
+        .routes
+        .get_mut()
+        .unwrap()[0];
     let operator = route.grant_caller.clone();
     route.grant_caller = app();
     let mut bounds = selected

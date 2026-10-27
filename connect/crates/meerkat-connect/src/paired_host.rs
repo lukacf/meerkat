@@ -2300,7 +2300,9 @@ impl FrontendProblem {
             }
             "voice_map_invalid" => "The voice map does not fit the selected roles.",
             "roles_incompatible" => "The role owner refuses this role configuration.",
-            "not_a_paired_host_extension" => "The source declares no PairedHost extension entry point.",
+            "not_a_paired_host_extension" => {
+                "The source declares no PairedHost extension entry point."
+            }
             "metadata_invalid" => {
                 "The source's package metadata is not static, valid PairedHost extension metadata."
             }
@@ -2412,7 +2414,8 @@ impl PairedHostClient {
         human_selected_origin: &str,
         presenter_credential: Option<HeaderValue>,
     ) -> Result<Self, PairedHostError> {
-        let origin = Url::parse(human_selected_origin).map_err(|_| PairedHostError::InvalidOrigin)?;
+        let origin =
+            Url::parse(human_selected_origin).map_err(|_| PairedHostError::InvalidOrigin)?;
         // Url normalizes dot segments and backslashes. Refuse an input path
         // before that normalization can turn a non-origin input into '/'.
         let authority = human_selected_origin
@@ -2438,8 +2441,8 @@ impl PairedHostClient {
             return Err(PairedHostError::InvalidOrigin);
         }
         let serialized_origin = origin.origin().ascii_serialization();
-        let origin_header =
-            HeaderValue::from_str(&serialized_origin).map_err(|_| PairedHostError::InvalidOrigin)?;
+        let origin_header = HeaderValue::from_str(&serialized_origin)
+            .map_err(|_| PairedHostError::InvalidOrigin)?;
         let cookies = Arc::new(OriginCookies {
             origin: serialized_origin,
             jar: Jar::default(),
@@ -2482,11 +2485,14 @@ impl PairedHostClient {
         let Some(credential) = &self.presenter_credential else {
             return Ok(request);
         };
-        if !matches!(operation,
-            PairedHostOperation::FrontendInventory | PairedHostOperation::FrontendSourceTags
-                | PairedHostOperation::FrontendSourceInspect | PairedHostOperation::PrepareCandidate
-                | PairedHostOperation::FrontendChangeStatus)
-        {
+        if !matches!(
+            operation,
+            PairedHostOperation::FrontendInventory
+                | PairedHostOperation::FrontendSourceTags
+                | PairedHostOperation::FrontendSourceInspect
+                | PairedHostOperation::PrepareCandidate
+                | PairedHostOperation::FrontendChangeStatus
+        ) {
             return Err(PairedHostError::PresenterOperationUnavailable);
         }
         Ok(request.header("x-paired-host-presenter-credential", credential.clone()))
@@ -2676,7 +2682,8 @@ impl PairedHostClient {
         if operation == PairedHostOperation::FrontendSourceInspect {
             request = request.timeout(SOURCE_INSPECT_TIMEOUT);
         }
-        let response = self.authorize(operation, request)?
+        let response = self
+            .authorize(operation, request)?
             .send()
             .await
             .map_err(|error| transport_error(operation, &error))?;
@@ -2715,7 +2722,8 @@ impl PairedHostClient {
             .header(ORIGIN, self.origin_header.clone())
             .header(ACCEPT, "application/json")
             .header(CACHE_CONTROL, "no-store");
-        let response = self.authorize(operation, request)?
+        let response = self
+            .authorize(operation, request)?
             .send()
             .await
             .map_err(|error| transport_error(operation, &error))?;
@@ -3097,7 +3105,8 @@ impl PairedHostClient {
             .header(ORIGIN, self.origin_header.clone())
             .header(ACCEPT, "application/json")
             .header(CACHE_CONTROL, "no-store");
-        let response = self.authorize(operation, request)?
+        let response = self
+            .authorize(operation, request)?
             .send()
             .await
             .map_err(|error| transport_error(operation, &error))?;
@@ -3289,7 +3298,8 @@ impl PairedHostClient {
         } else {
             self.http.get(url)
         };
-        let response = self.authorize(operation, request)?
+        let response = self
+            .authorize(operation, request)?
             .header(ACCEPT, "application/json")
             .header(CACHE_CONTROL, "no-store")
             .send()
@@ -3413,7 +3423,8 @@ impl PairedHostClient {
             .header(CONTENT_TYPE, "application/json")
             .header(ACCEPT, "application/json")
             .body(bytes);
-        let response = self.authorize(operation, request)?
+        let response = self
+            .authorize(operation, request)?
             .send()
             .await
             .map_err(|error| transport_error(operation, &error))?;
@@ -3469,41 +3480,75 @@ mod presenter_transport_tests {
                 }
                 requests.push(String::from_utf8(request).unwrap());
                 let body = r#"{"error":"forbidden","code":"console_owner_required"}"#;
-                let reply = format!("HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nSet-Cookie: hc_console_device=unselected; Path=/; HttpOnly\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                let reply = format!(
+                    "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nSet-Cookie: hc_console_device=unselected; Path=/; HttpOnly\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
                 socket.write_all(reply.as_bytes()).await.unwrap();
                 socket.shutdown().await.unwrap();
             }
             requests
         });
-        assert_eq!(client.request_pairing("no enrollment").await.unwrap_err(),
-            PairedHostError::PresenterOperationUnavailable);
-        assert_eq!(client.confirm_pairing(PairingCode::new("123456".into()).unwrap()).await.unwrap_err(),
-            PairedHostError::PresenterOperationUnavailable);
+        assert_eq!(
+            client.request_pairing("no enrollment").await.unwrap_err(),
+            PairedHostError::PresenterOperationUnavailable
+        );
+        assert_eq!(
+            client
+                .confirm_pairing(PairingCode::new("123456".into()).unwrap())
+                .await
+                .unwrap_err(),
+            PairedHostError::PresenterOperationUnavailable
+        );
         for _ in 0..2 {
-            assert!(matches!(client.frontend_inventory().await,
-                Err(PairedHostError::Refused { operation: PairedHostOperation::FrontendInventory,
-                    reason: PairedHostRefusal::ConsoleOwnerRequired })));
+            assert!(matches!(
+                client.frontend_inventory().await,
+                Err(PairedHostError::Refused {
+                    operation: PairedHostOperation::FrontendInventory,
+                    reason: PairedHostRefusal::ConsoleOwnerRequired
+                })
+            ));
         }
-        let requests = tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap();
+        let requests = tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
         for request in requests {
             assert!(request.starts_with("GET /console/extensions/frontend/inventory HTTP/1.1\r\n"));
             let request = request.to_ascii_lowercase();
-            assert!(request.contains("\r\nx-paired-host-presenter-credential: private-test-only\r\n"));
+            assert!(
+                request.contains("\r\nx-paired-host-presenter-credential: private-test-only\r\n")
+            );
             assert!(request.contains(&format!("\r\norigin: {origin}\r\n")));
             assert!(!request.contains("\r\ncookie:") && !request.contains("\r\nauthorization:"));
         }
-        for operation in [PairedHostOperation::FrontendInventory, PairedHostOperation::FrontendSourceTags,
-            PairedHostOperation::FrontendSourceInspect, PairedHostOperation::PrepareCandidate,
-            PairedHostOperation::FrontendChangeStatus] {
-            let request = client.authorize(operation, client.http.get(&origin)).unwrap().build().unwrap();
+        for operation in [
+            PairedHostOperation::FrontendInventory,
+            PairedHostOperation::FrontendSourceTags,
+            PairedHostOperation::FrontendSourceInspect,
+            PairedHostOperation::PrepareCandidate,
+            PairedHostOperation::FrontendChangeStatus,
+        ] {
+            let request = client
+                .authorize(operation, client.http.get(&origin))
+                .unwrap()
+                .build()
+                .unwrap();
             assert!(request.headers()["x-paired-host-presenter-credential"].is_sensitive());
         }
-        for operation in [PairedHostOperation::RequestPairing, PairedHostOperation::ConfirmPairing,
-            PairedHostOperation::ConfirmTerminalPairing, PairedHostOperation::SubmitFrontendChange,
-            PairedHostOperation::CreateExtensionSecretIntent, PairedHostOperation::ExtensionSecretIntentStatus,
-            PairedHostOperation::CancelExtensionSecretIntent] {
-            assert!(matches!(client.authorize(operation, client.http.post(&origin)),
-                Err(PairedHostError::PresenterOperationUnavailable)));
+        for operation in [
+            PairedHostOperation::RequestPairing,
+            PairedHostOperation::ConfirmPairing,
+            PairedHostOperation::ConfirmTerminalPairing,
+            PairedHostOperation::SubmitFrontendChange,
+            PairedHostOperation::CreateExtensionSecretIntent,
+            PairedHostOperation::ExtensionSecretIntentStatus,
+            PairedHostOperation::CancelExtensionSecretIntent,
+        ] {
+            assert!(matches!(
+                client.authorize(operation, client.http.post(&origin)),
+                Err(PairedHostError::PresenterOperationUnavailable)
+            ));
         }
         assert!(client.take_confirmed_device().is_none());
         assert!(!format!("{client:?}").contains("private-test-only"));
@@ -3514,7 +3559,10 @@ mod presenter_transport_tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let destination = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
-        let redirect = format!("http://{}/private-destination", destination.local_addr().unwrap());
+        let redirect = format!(
+            "http://{}/private-destination",
+            destination.local_addr().unwrap()
+        );
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut request = Vec::new();
@@ -3522,26 +3570,51 @@ mod presenter_transport_tests {
                 assert!(request.len() < 8192);
                 request.push(socket.read_u8().await.unwrap());
             }
-            assert!(String::from_utf8_lossy(&request).to_ascii_lowercase()
-                .contains("\r\ncontent-length: 2\r\n"));
+            assert!(
+                String::from_utf8_lossy(&request)
+                    .to_ascii_lowercase()
+                    .contains("\r\ncontent-length: 2\r\n")
+            );
             let mut body = [0; 2];
             socket.read_exact(&mut body).await.unwrap();
             assert_eq!(&body, b"{}");
-            let reply = format!("HTTP/1.1 307 Temporary Redirect\r\nLocation: {redirect}\r\nSet-Cookie: hc_console_device=unselected; Path=/; HttpOnly\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            let reply = format!(
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: {redirect}\r\nSet-Cookie: hc_console_device=unselected; Path=/; HttpOnly\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
             socket.write_all(reply.as_bytes()).await.unwrap();
             socket.shutdown().await.unwrap();
             String::from_utf8(request).unwrap()
         });
         let client = PairedHostClient::for_presenter(&origin, "private-test-only").unwrap();
-        let error = client.post(PairedHostOperation::PrepareCandidate, &serde_json::json!({}))
-            .await.unwrap_err();
-        assert_eq!(error, PairedHostError::Unconfirmed {
-            operation: PairedHostOperation::PrepareCandidate, reason: UnconfirmedReason::Redirect,
-        });
-        let request = tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap();
+        let error = client
+            .post(
+                PairedHostOperation::PrepareCandidate,
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error,
+            PairedHostError::Unconfirmed {
+                operation: PairedHostOperation::PrepareCandidate,
+                reason: UnconfirmedReason::Redirect,
+            }
+        );
+        let request = tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(request.starts_with("POST /console/extensions/frontend/prepare HTTP/1.1\r\n"));
-        assert!(request.to_ascii_lowercase().contains("\r\nx-paired-host-presenter-credential: private-test-only\r\n"));
-        assert!(tokio::time::timeout(Duration::from_millis(80), destination.accept()).await.is_err());
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("\r\nx-paired-host-presenter-credential: private-test-only\r\n")
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), destination.accept())
+                .await
+                .is_err()
+        );
         assert!(!error.to_string().contains("private-test-only"));
         assert!(!error.to_string().contains("private-destination"));
     }
@@ -3857,7 +3930,8 @@ fn checked_response(
         404 if operation != PairedHostOperation::FrontendChangeStatus
             && !matches!(
                 operation,
-                PairedHostOperation::FrontendSourceTags | PairedHostOperation::FrontendSourceInspect
+                PairedHostOperation::FrontendSourceTags
+                    | PairedHostOperation::FrontendSourceInspect
             )
             && !secret_intent_operation(operation) =>
         {
@@ -3919,7 +3993,9 @@ fn change_rejection(
         (PairedHostOperation::SubmitFrontendChange, 413, Kind::InvalidRequest) => {
             Some("body_too_large")
         }
-        (PairedHostOperation::SubmitFrontendChange, 400, Kind::DiffMismatch) => Some("diff_mismatch"),
+        (PairedHostOperation::SubmitFrontendChange, 400, Kind::DiffMismatch) => {
+            Some("diff_mismatch")
+        }
         (PairedHostOperation::SubmitFrontendChange, 400, Kind::SummaryMismatch) => {
             Some("summary_mismatch")
         }
@@ -3958,7 +4034,10 @@ fn change_rejection(
     })
 }
 
-fn prepare_rejection(status: u16, bytes: &[u8]) -> Result<FrontendRequestRejection, PairedHostError> {
+fn prepare_rejection(
+    status: u16,
+    bytes: &[u8],
+) -> Result<FrontendRequestRejection, PairedHostError> {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Rejection {

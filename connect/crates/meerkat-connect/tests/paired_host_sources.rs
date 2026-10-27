@@ -1313,8 +1313,10 @@ async fn role_admitted_inspect_prepare_exact_submit_and_later_status_do_not_repl
         let binding = PairedHostFrontend::new(PairedHostClient::new(&fixture.origin).unwrap());
         let mut private = binding.take_secret_entry_presenter().unwrap();
         let directory = tempfile::tempdir().unwrap();
-        let (approvals, mut decisions) = LocalApprovals::create_paired_host(directory.path()).unwrap();
-        let mut options = paired_host_frontend_session(SessionOptions::default(), &binding).unwrap();
+        let (approvals, mut decisions) =
+            LocalApprovals::create_paired_host(directory.path()).unwrap();
+        let mut options =
+            paired_host_frontend_session(SessionOptions::default(), &binding).unwrap();
         approvals
             .attach_paired_host_direct(&mut options, &binding)
             .unwrap();
@@ -1602,10 +1604,13 @@ async fn role_prepare_keeps_exact_owner_pins_and_fixed_errors() {
 
 #[tokio::test]
 async fn role_tool_arguments_refuse_duplicate_decoded_keys_before_transport() {
-    use meerkat_connect::paired_host_tool::{PAIRED_HOST_FRONTEND_PREPARE, PairedHostPreparationTools};
+    use meerkat_connect::paired_host_tool::{
+        PAIRED_HOST_FRONTEND_PREPARE, PairedHostPreparationTools,
+    };
     use meerkat_core::types::ToolCallView;
     let tools =
-        PairedHostPreparationTools::new(PairedHostClient::new("http://127.0.0.1:9").unwrap()).unwrap();
+        PairedHostPreparationTools::new(PairedHostClient::new("http://127.0.0.1:9").unwrap())
+            .unwrap();
     let raw = json!({"new_extension":role_proposal(1)}).to_string();
     for duplicate in [
         r#""voice_map":{"identity":"first","identity":"second"}"#,

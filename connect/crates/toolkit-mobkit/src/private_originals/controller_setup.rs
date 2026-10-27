@@ -27,7 +27,8 @@ impl LocalControllerSetup {
     }
 
     pub(crate) fn matches_grant_owner(&self, owner: &Arc<ToolkitOriginalOwner>) -> bool {
-        self.source_owner().is_some_and(|source| Arc::ptr_eq(&source.owner, owner))
+        self.source_owner()
+            .is_some_and(|source| Arc::ptr_eq(&source.owner, owner))
     }
 
     pub fn original(&self) -> &PrivateOriginalRef {
@@ -55,7 +56,12 @@ impl LocalControllerSetup {
         session_id: SessionId,
         controller: ControllerModelClient,
     ) -> Self {
-        Self { source_owner: Arc::downgrade(owner), original, session_id, controller }
+        Self {
+            source_owner: Arc::downgrade(owner),
+            original,
+            session_id,
+            controller,
+        }
     }
 }
 
@@ -103,7 +109,9 @@ impl PrivateOriginals {
         // ticket is interpreted as an admission observation.
         if !matches!(
             result,
-            Err(IdentityRuntimeError::GovernedInput(GovernedInputError::Bind(_)))
+            Err(IdentityRuntimeError::GovernedInput(
+                GovernedInputError::Bind(_)
+            ))
         ) {
             return Err(PrivateOriginalError::Unavailable);
         }

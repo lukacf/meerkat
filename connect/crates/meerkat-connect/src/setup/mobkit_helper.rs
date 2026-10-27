@@ -133,7 +133,10 @@ impl PreparedSetupConnection {
             .map_err(|error| ConnectError::native("validate composed setup helper", error))?;
         let mut server = self.into_server();
         let mut operations = PREPARATION_TOOLS.to_vec();
-        if matches!(tools, SetupHelperTools::InertAcquisition | SetupHelperTools::CheckedInstallation) {
+        if matches!(
+            tools,
+            SetupHelperTools::InertAcquisition | SetupHelperTools::CheckedInstallation
+        ) {
             operations.extend_from_slice(ACQUISITION_TOOLS);
         }
         if tools == SetupHelperTools::CheckedInstallation {
@@ -157,30 +160,37 @@ impl PreparedSetupHelper {
     /// existing setup MCP server. No stock builtin or nested model is enabled.
     /// This finite ceiling is not authority: native target lineage and the
     /// compiled application policy still admit each call independently.
-    pub fn with_public_research_from_policy(
-        self,
-        policy: &CompiledApplicationToolPolicy,
-    ) -> Self {
+    pub fn with_public_research_from_policy(self, policy: &CompiledApplicationToolPolicy) -> Self {
         let member_identity = self.member.member.clone();
-        self.with_public_research_operations(|name| policy.members.iter().any(|member| {
-            member.member_identity == member_identity
-                && member.grants.iter().any(|grant| {
-                    grant.tool_name == name && grant.action == CompiledMemberToolAction::Invoke
-                })
-        }))
+        self.with_public_research_operations(|name| {
+            policy.members.iter().any(|member| {
+                member.member_identity == member_identity
+                    && member.grants.iter().any(|grant| {
+                        grant.tool_name == name && grant.action == CompiledMemberToolAction::Invoke
+                    })
+            })
+        })
     }
 
     /// Reconstruct only the two optional ceiling entries from the already
     /// retained application configuration. Callers still compare the complete
     /// member, server and definition. This does not establish policy authority.
     pub(crate) fn with_retained_public_research(self, server: &McpServerConfig) -> Self {
-        self.with_public_research_operations(|name| server.access.as_ref()
-            .is_some_and(|access| access.allowed_operations.contains(name)))
+        self.with_public_research_operations(|name| {
+            server
+                .access
+                .as_ref()
+                .is_some_and(|access| access.allowed_operations.contains(name))
+        })
     }
 
     fn with_public_research_operations(mut self, permits: impl Fn(&str) -> bool) -> Self {
         if self.public_research_ceiling {
-            let access = self.server.access.as_mut().expect("prepared helper MCP ceiling");
+            let access = self
+                .server
+                .access
+                .as_mut()
+                .expect("prepared helper MCP ceiling");
             for name in ["setup_search_github", "setup_read_github"] {
                 access.allowed_operations.remove(name);
                 if permits(name) {

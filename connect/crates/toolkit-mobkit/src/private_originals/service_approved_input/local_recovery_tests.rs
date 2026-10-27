@@ -41,7 +41,9 @@ async fn installed_local_recovery_requires_opt_in_and_exact_owner_then_revokes_o
         let id = first_id(&page);
         drop(pipe);
         (page, id, journal(&other))
-    })).catch_unwind().await;
+    }))
+    .catch_unwind()
+    .await;
     let cleanup = other.shutdown().await;
     assert!(cleanup.is_ok(), "foreign fixture join: {cleanup:?}");
     let (foreign_page, foreign_id, foreign_journal) = match foreign_page {
@@ -77,14 +79,19 @@ async fn installed_local_recovery_requires_opt_in_and_exact_owner_then_revokes_o
         let id = first_id(&page);
         assert!(!page.has_next());
         assert!(matches!(
-            view.page(Some((&foreign_page, LocalRecoveryPageRead::Refresh))).await,
+            view.page(Some((&foreign_page, LocalRecoveryPageRead::Refresh)))
+                .await,
             Err(meerkat_toolkit::host_lifetime::control::HostLifetimeError::WrongOwner)
         ));
         assert!(matches!(
             view.revoke(&foreign_page, &foreign_id).await,
             Err(meerkat_toolkit::host_lifetime::control::HostLifetimeError::WrongOwner)
         ));
-        assert_eq!(journal(&other), foreign_journal, "foreign grants are unchanged");
+        assert_eq!(
+            journal(&other),
+            foreign_journal,
+            "foreign grants are unchanged"
+        );
         assert!(view.revoke(&page, "unretained-row").await.is_err());
         assert_eq!(
             journal(&fixture),

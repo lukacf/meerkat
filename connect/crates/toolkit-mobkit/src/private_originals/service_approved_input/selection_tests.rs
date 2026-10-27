@@ -14,7 +14,8 @@ const LEGACY_WIRE: &str = concat!(
     r#","before_ms":1800000000000}"#,
 );
 
-const LEGACY_CANONICAL_SHA256: &str = "da3f109daccfc0e9b550bd055be9f2393defebd73cffd7431e355dea757d9d81";
+const LEGACY_CANONICAL_SHA256: &str =
+    "da3f109daccfc0e9b550bd055be9f2393defebd73cffd7431e355dea757d9d81";
 
 fn legacy() -> ApprovedTaskMember {
     serde_json::from_str(LEGACY_WIRE).expect("frozen legacy wire must decode")
@@ -23,7 +24,8 @@ fn legacy() -> ApprovedTaskMember {
 fn batch(count: usize) -> ApprovedTaskLink {
     let old = legacy();
     ApprovedTaskLink::Batch(ApprovedTaskBatch {
-        kind: BatchVersion::PublicServicesV1, setup: None,
+        kind: BatchVersion::PublicServicesV1,
+        setup: None,
         header: old.header,
         set_sha256: "e".repeat(64),
         members: (0..count)
@@ -92,7 +94,13 @@ fn singleton_preserves_frozen_legacy_bytes_and_canonical_digest() {
 #[test]
 fn singleton_rejects_missing_null_unknown_and_duplicate_legacy_fields() {
     let original: Value = serde_json::from_str(LEGACY_WIRE).unwrap();
-    for key in ["parent", "acquisition", "original_task", "grant", "before_ms"] {
+    for key in [
+        "parent",
+        "acquisition",
+        "original_task",
+        "grant",
+        "before_ms",
+    ] {
         let mut missing = original.clone();
         missing.as_object_mut().unwrap().remove(key);
         assert_refused(&format!("missing {key}"), missing);
@@ -118,7 +126,10 @@ fn batch_roundtrips_two_and_eight_members_with_exact_attachment_projection() {
         let decoded: ApprovedTaskLink = serde_json::from_slice(&wire).unwrap();
         assert!(decoded == expected);
         assert_eq!(serde_json::to_vec(&decoded).unwrap(), wire);
-        assert_eq!(canonical_json(&decoded).unwrap(), canonical_json(&expected).unwrap());
+        assert_eq!(
+            canonical_json(&decoded).unwrap(),
+            canonical_json(&expected).unwrap()
+        );
         assert!(decoded.singleton_grant().is_err());
         let ApprovedTaskLink::Batch(selected) = &decoded else {
             panic!("versioned set decoded as legacy singleton");
@@ -132,7 +143,12 @@ fn batch_roundtrips_two_and_eight_members_with_exact_attachment_projection() {
         for (member, projected) in selected.members.iter().zip(attachments) {
             assert!(projected.header == selected.header);
             assert!(projected.grant == member.grant);
-            assert!(decoded.attachment_grant(member.connection.as_str()).unwrap() == &member.grant);
+            assert!(
+                decoded
+                    .attachment_grant(member.connection.as_str())
+                    .unwrap()
+                    == &member.grant
+            );
             assert!(decoded.attachment_member(&member.grant).unwrap() == projected);
         }
     }
@@ -143,8 +159,14 @@ fn batch_requires_exact_version_and_complete_strict_wire_fields() {
     let original = batch_value(2);
     let wire = serde_json::to_string(&original).unwrap();
     for key in [
-        "kind", "parent", "acquisition", "original_task", "before_ms",
-        "set_sha256", "members", "catalog",
+        "kind",
+        "parent",
+        "acquisition",
+        "original_task",
+        "before_ms",
+        "set_sha256",
+        "members",
+        "catalog",
     ] {
         let mut missing = original.clone();
         missing.as_object_mut().unwrap().remove(key);
@@ -154,7 +176,12 @@ fn batch_requires_exact_version_and_complete_strict_wire_fields() {
         assert_refused(&format!("batch null {key}"), null);
         assert_duplicate_refused("batch", &wire, key);
     }
-    for kind in [json!("public_services_v2"), json!("Single"), json!(0), json!({})] {
+    for kind in [
+        json!("public_services_v2"),
+        json!("Single"),
+        json!(0),
+        json!({}),
+    ] {
         let mut malformed = original.clone();
         malformed["kind"] = kind;
         assert_refused("unknown or malformed batch discriminator", malformed);
@@ -187,7 +214,8 @@ fn batch_rejects_invalid_cardinality_order_digest_and_routes() {
     unsorted["members"].as_array_mut().unwrap().reverse();
     assert_refused("unsorted targets", unsorted);
     let mut repeated_target = batch_value(2);
-    repeated_target["members"][1]["connection"] = repeated_target["members"][0]["connection"].clone();
+    repeated_target["members"][1]["connection"] =
+        repeated_target["members"][0]["connection"].clone();
     assert_refused("repeated target with distinct grants", repeated_target);
     for digest in ["e".repeat(63), "g".repeat(64), "e".repeat(65)] {
         let mut invalid = batch_value(2);

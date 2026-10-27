@@ -15,15 +15,15 @@ use meerkat_llm_core::{
     LlmClient, LlmError, LlmRequest, LlmStream, PlainModelRoute, PreparedLlmRequest,
 };
 use meerkat_mob::{
-    AgentIdentity as MemberIdentity, MobDefinition, MobId, MobRuntimeMode,
-    MobStorage, Profile, ProfileBinding, ProfileName, SpawnMemberSpec, ToolConfig,
+    AgentIdentity as MemberIdentity, MobDefinition, MobId, MobRuntimeMode, MobStorage, Profile,
+    ProfileBinding, ProfileName, SpawnMemberSpec, ToolConfig,
 };
 use meerkat_mobkit::identity_first::{
     AgentAddressability, AgentIdentity, AgentRuntimeId, CheckpointVersion, ContinuityGeneration,
-    ContinuityRecord, DurabilityPolicy, DurableAgentSpec, IdentityLifecycleState,
-    IdentityFirstRuntimeContext, IdentityRuntime, IdentityRuntimeConfig, LeaseAcquireResult,
-    LeaseProvider, LocalContinuityStore, LocalLeaseProvider, MobSessionBridge, MutableRosterProvider,
-    PublicIdentityRuntime,
+    ContinuityRecord, DurabilityPolicy, DurableAgentSpec, IdentityFirstRuntimeContext,
+    IdentityLifecycleState, IdentityRuntime, IdentityRuntimeConfig, LeaseAcquireResult,
+    LeaseProvider, LocalContinuityStore, LocalLeaseProvider, MobSessionBridge,
+    MutableRosterProvider, PublicIdentityRuntime,
 };
 use meerkat_mobkit::{
     DiscoverySpec, MetaConfig, MobBootstrapSpec, MobTerminalShutdownOutcome, UnifiedRuntime,
@@ -65,14 +65,22 @@ fn selection() -> ControllerModelSelection {
 fn fixture_controller_decorator() -> meerkat_core::AgentLlmClientDecorator {
     Arc::new(|client| {
         let expected = selection();
-        assert!(client.controller_model_selection().as_ref() == Some(&expected),
-            "factory client must preserve the fixture controller selection");
-        let pin = client.clone().pin_controller()
+        assert!(
+            client.controller_model_selection().as_ref() == Some(&expected),
+            "factory client must preserve the fixture controller selection"
+        );
+        let pin = client
+            .clone()
+            .pin_controller()
             .expect("actual factory client must supply its native controller pin");
-        assert!(pin.selection() == &expected,
-            "factory pin must preserve the selected fixture controller");
-        assert!(pin.client().controller_model_selection().as_ref() == Some(&expected),
-            "pinned factory client must preserve the selected fixture controller");
+        assert!(
+            pin.selection() == &expected,
+            "factory pin must preserve the selected fixture controller"
+        );
+        assert!(
+            pin.client().controller_model_selection().as_ref() == Some(&expected),
+            "pinned factory client must preserve the selected fixture controller"
+        );
         client
     })
 }
@@ -195,14 +203,19 @@ struct Fixture {
 
 impl Fixture {
     async fn new(with_controller_source: bool) -> Self {
-        let directory = Arc::new(tempfile::Builder::new()
-            .permissions(std::fs::Permissions::from_mode(0o700))
-            .tempdir()
-            .unwrap());
+        let directory = Arc::new(
+            tempfile::Builder::new()
+                .permissions(std::fs::Permissions::from_mode(0o700))
+                .tempdir()
+                .unwrap(),
+        );
         let mut opened = None;
         let built = std::panic::AssertUnwindSafe(tokio::time::timeout(
-            WAIT, Self::build(directory.clone(), with_controller_source, &mut opened),
-        )).catch_unwind().await;
+            WAIT,
+            Self::build(directory.clone(), with_controller_source, &mut opened),
+        ))
+        .catch_unwind()
+        .await;
         match built {
             Ok(Ok(fixture)) => fixture,
             failed => {
@@ -211,7 +224,10 @@ impl Fixture {
                     None => Ok(()),
                 };
                 // The directory remains alive through native teardown.
-                assert!(cleanup.is_ok(), "controller fixture cleanup failed: {cleanup:?}");
+                assert!(
+                    cleanup.is_ok(),
+                    "controller fixture cleanup failed: {cleanup:?}"
+                );
                 match failed {
                     Err(payload) => std::panic::resume_unwind(payload),
                     _ => panic!("controller fixture construction timed out"),
@@ -238,17 +254,25 @@ impl Fixture {
         let definition = definition();
         let namespace = definition.id.to_string();
         let spec = MobBootstrapSpec::new(definition, MobStorage::in_memory(), service.clone())
-            .with_session_runtime_adapter(machine.clone()).unwrap()
+            .with_session_runtime_adapter(machine.clone())
+            .unwrap()
             .with_declared_ephemeral_mob_storage();
-        *opened = Some(UnifiedRuntime::bootstrap(
-            spec,
-            MetaConfig {
-                modules: Vec::new(),
-                discovery: DiscoverySpec { namespace, modules: Vec::new() },
-                pre_spawn: Vec::new(),
-            },
-            WAIT,
-        ).await.unwrap());
+        *opened = Some(
+            UnifiedRuntime::bootstrap(
+                spec,
+                MetaConfig {
+                    modules: Vec::new(),
+                    discovery: DiscoverySpec {
+                        namespace,
+                        modules: Vec::new(),
+                    },
+                    pre_spawn: Vec::new(),
+                },
+                WAIT,
+            )
+            .await
+            .unwrap(),
+        );
         let native = opened.as_mut().unwrap();
         let handle = native.mob_handle();
         let member = MemberIdentity::from(MEMBER);
@@ -269,9 +293,10 @@ impl Fixture {
             .pin_controller_client_for_actor(&actor)
             .await
             .unwrap_or_else(|error| {
-                if let meerkat_core::service::SessionError::Agent(
-                    AgentError::OperationRefused { refusal }
-                ) = &error {
+                if let meerkat_core::service::SessionError::Agent(AgentError::OperationRefused {
+                    refusal,
+                }) = &error
+                {
                     panic!("actual actor controller pin refused: {:?}", refusal.kind());
                 }
                 panic!("actual actor controller pin failed: {error:?}");
@@ -283,17 +308,20 @@ impl Fixture {
         }
         let lease_provider = Arc::new(LocalLeaseProvider::new());
         let runtime_instance = "toolkit-controller-preparation";
-        let runtime = Arc::new(IdentityRuntime::new(IdentityRuntimeConfig {
-            continuity_store: Arc::new(LocalContinuityStore::in_memory().unwrap()),
-            lease_provider: lease_provider.clone(),
-            runtime_instance_id: runtime_instance.into(),
-            has_runtime_store: true,
-            durability_policy: DurabilityPolicy::SyncWriteThrough,
-            bridge: Some(Arc::new(bridge)),
-            default_timeout: None,
-        }).with_runtime_services(
-            meerkat_mobkit::identity_first::AgentRuntimeServices::new(handle.clone()),
-        ));
+        let runtime = Arc::new(
+            IdentityRuntime::new(IdentityRuntimeConfig {
+                continuity_store: Arc::new(LocalContinuityStore::in_memory().unwrap()),
+                lease_provider: lease_provider.clone(),
+                runtime_instance_id: runtime_instance.into(),
+                has_runtime_store: true,
+                durability_policy: DurabilityPolicy::SyncWriteThrough,
+                bridge: Some(Arc::new(bridge)),
+                default_timeout: None,
+            })
+            .with_runtime_services(
+                meerkat_mobkit::identity_first::AgentRuntimeServices::new(handle.clone()),
+            ),
+        );
         let identity = AgentIdentity::parse(MEMBER).unwrap();
         let member_spec = DurableAgentSpec {
             identity: identity.clone(),
@@ -314,12 +342,20 @@ impl Fixture {
         let status = runtime.status(&identity).await.unwrap();
         assert_eq!(status.state, IdentityLifecycleState::Active);
         assert_eq!(status.session_id, Some(session.clone()));
-        assert!(status.agent_runtime_id.is_some(), "spawned Core member has a runtime identity");
-        assert_eq!(runtime.core_session_owner(&session).await.unwrap(), Some(identity.clone()));
+        assert!(
+            status.agent_runtime_id.is_some(),
+            "spawned Core member has a runtime identity"
+        );
+        assert_eq!(
+            runtime.core_session_owner(&session).await.unwrap(),
+            Some(identity.clone())
+        );
         native.attach_identity_first_context(Arc::new(IdentityFirstRuntimeContext::new(
             runtime,
             Arc::new(MutableRosterProvider::new(vec![member_spec])),
-            None, None, Some(handle.definition().clone()),
+            None,
+            None,
+            Some(handle.definition().clone()),
         )));
         let runtime = native.identity_runtime().unwrap();
         let domain = owner.ingress_domain().clone();
@@ -391,7 +427,9 @@ impl Fixture {
         if report.cleanup_completed() && terminal_clean {
             Ok(())
         } else {
-            Err(format!("native controller fixture cleanup incomplete: {report:?}"))
+            Err(format!(
+                "native controller fixture cleanup incomplete: {report:?}"
+            ))
         }
     }
 
@@ -443,12 +481,18 @@ async fn actual_controller_preparation_releases_native_lease_without_admitting_i
         // observer. Compare its actual selection and complete lowered route,
         // not the allocation identity of two independent native pin calls.
         assert!(prepared.controller().selection() == fixture.pin.selection());
-        let prepared_facts = prepared.controller().plain_facts()
+        let prepared_facts = prepared
+            .controller()
+            .plain_facts()
             .expect("prepared native pin must retain its selected client and route facts");
-        let actor_facts = fixture.pin.plain_facts()
+        let actor_facts = fixture
+            .pin
+            .plain_facts()
             .expect("fixture actor pin must retain its selected client and route facts");
-        assert!(prepared_facts.route_key() == actor_facts.route_key(),
-            "prepared controller must preserve the actor pin's complete native route");
+        assert!(
+            prepared_facts.route_key() == actor_facts.route_key(),
+            "prepared controller must preserve the actor pin's complete native route"
+        );
         assert!(Arc::ptr_eq(
             &prepared.source_owner().unwrap(),
             &fixture.source

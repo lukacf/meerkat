@@ -74,18 +74,20 @@ pub fn reserve_setup_artifacts(
 #[cfg(all(unix, feature = "console"))]
 pub(crate) mod installation_readback;
 #[cfg(unix)]
-mod readback_process;
-#[cfg(unix)]
 mod local_round;
 #[cfg(unix)]
-pub use local_round::{LocalRoundGuard, LocalRoundOwner, OwnedLocalRoundGuard};
+mod readback_process;
 #[cfg(all(unix, feature = "console"))]
 pub use local_round::LocalRoundAttempts;
+#[cfg(unix)]
+pub use local_round::{LocalRoundGuard, LocalRoundOwner, OwnedLocalRoundGuard};
 
 #[cfg(not(unix))]
 impl InstalledResources {
     pub(crate) async fn readback(
-        self, _storage: &meerkat_core::ResolvedStorage, _request: &serde_json::Value,
+        self,
+        _storage: &meerkat_core::ResolvedStorage,
+        _request: &serde_json::Value,
     ) -> Result<serde_json::Value, ConnectError> {
         Err(invalid())
     }
@@ -239,12 +241,14 @@ mod tests {
         manifest["npm_acquisition"] = group.clone();
         let pin = fixture.pin(manifest.clone());
         assert!(fixture.verify(&pin).is_ok());
-        for malformed in [Value::Null, json!({"node": group["node"]}),
+        for malformed in [
+            Value::Null,
+            json!({"node": group["node"]}),
             json!({"node": group["node"], "npm_cli": group["npm_cli"],
                 "npm_archive": group["npm_archive"], "fallback": true}),
             json!({"node": "runtime/node/bin/node", "npm_cli": group["npm_cli"],
-                "npm_archive": group["npm_archive"]})]
-        {
+                "npm_archive": group["npm_archive"]}),
+        ] {
             let mut bad = manifest.clone();
             bad["npm_acquisition"] = malformed;
             assert!(fixture.verify(&fixture.pin(bad)).is_err());
@@ -793,8 +797,10 @@ impl InstalledResources {
             .arg(&self.prepare)
             .arg("--destination")
             .arg(directory.join("prepared"))
-            .arg("--realm-state-root").arg(&storage.locator.state_root)
-            .arg("--realm").arg(storage.locator.realm.as_str())
+            .arg("--realm-state-root")
+            .arg(&storage.locator.state_root)
+            .arg("--realm")
+            .arg(storage.locator.realm.as_str())
             .current_dir(&self.root)
             .env_clear()
             .env("PATH", "/usr/bin:/bin")

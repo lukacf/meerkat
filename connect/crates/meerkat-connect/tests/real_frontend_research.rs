@@ -4,8 +4,8 @@
 use futures_util::{FutureExt, StreamExt};
 use meerkat_connect::{
     ConnectSession, RealmOptions, SessionOptions, approval::LocalApprovals,
-    paired_host::PairedHostClient, paired_host_tool::PairedHostFrontend, research::FRONTEND_RESEARCH,
-    setup::paired_host_frontend_session,
+    paired_host::PairedHostClient, paired_host_tool::PairedHostFrontend,
+    research::FRONTEND_RESEARCH, setup::paired_host_frontend_session,
 };
 use meerkat_core::{
     AgentEvent, BudgetLimits, Config, EventEnvelope, Provider, ops::ToolAccessPolicy,
@@ -62,7 +62,9 @@ fn completion_diagnostics(outcome: &Result<CompletionOutcome, CompletionWaitErro
                 CompletionWaitError::BoundaryRolledBack { .. } => "boundary_rolled_back",
                 CompletionWaitError::DurableOutcomeUnknown { .. } => "durable_outcome_unknown",
                 CompletionWaitError::RequeuedAcrossStop { .. } => "requeued_across_stop",
-                CompletionWaitError::ConsumedWithInterruptedRun { .. } => "consumed_with_interrupted_run",
+                CompletionWaitError::ConsumedWithInterruptedRun { .. } => {
+                    "consumed_with_interrupted_run"
+                }
                 // The error is non-exhaustive.
                 _ => "other",
             };
@@ -136,8 +138,10 @@ impl Trace {
                 used,
                 limit,
                 percent,
-            } => self.record(json!({"kind":"native_budget_warning","budget_type":budget_type,
-                "used":used,"limit":limit,"percent":percent})),
+            } => self.record(
+                json!({"kind":"native_budget_warning","budget_type":budget_type,
+                "used":used,"limit":limit,"percent":percent}),
+            ),
             AgentEvent::RunCompleted {
                 terminal_cause_kind,
                 ..

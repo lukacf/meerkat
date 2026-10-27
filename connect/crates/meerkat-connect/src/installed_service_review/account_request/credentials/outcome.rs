@@ -43,11 +43,20 @@ pub(super) struct PersistenceOutcome {
 }
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum CredentialState { Reviewed, Denied, Incomplete }
+pub(super) enum CredentialState {
+    Reviewed,
+    Denied,
+    Incomplete,
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum PublicationState { NotEntered, Retained, NotRetained, OutcomeUnknown }
+pub(super) enum PublicationState {
+    NotEntered,
+    Retained,
+    NotRetained,
+    OutcomeUnknown,
+}
 
 /// No value, native error text, request body or credential-store reference is
 /// projected. An installed definition is distinct from all credentials stored,
@@ -63,7 +72,10 @@ pub(super) struct CredentialReply {
     pub(super) task_publication: PublicationState,
 }
 impl CredentialReply {
-    pub(super) fn pending(observed: &CredentialOwnerObservation, slots: impl Iterator<Item = String>) -> Self {
+    pub(super) fn pending(
+        observed: &CredentialOwnerObservation,
+        slots: impl Iterator<Item = String>,
+    ) -> Self {
         Self {
             state: CredentialState::Incomplete,
             access_reviewed: false,
@@ -71,8 +83,16 @@ impl CredentialReply {
                 defining_realm: observed.defining_realm.clone(),
                 server_name: observed.configuration.name.clone(),
                 reviewed_configuration_generation: observed.configuration_generation,
-                install: InstallOutcome { state: WriteState::NotEntered, generation: None },
-                secrets: slots.map(|slot| SecretOutcome { slot, state: WriteState::NotEntered }).collect(),
+                install: InstallOutcome {
+                    state: WriteState::NotEntered,
+                    generation: None,
+                },
+                secrets: slots
+                    .map(|slot| SecretOutcome {
+                        slot,
+                        state: WriteState::NotEntered,
+                    })
+                    .collect(),
             },
             grant_issued: false,
             fresh_instruction_retained: false,

@@ -142,9 +142,12 @@ impl Package {
                     self.entered.notify_one();
                     self.release.notified().await;
                 }
-                self.readback_reply.lock().unwrap().clone()
+                self.readback_reply
+                    .lock()
+                    .unwrap()
+                    .clone()
                     .unwrap_or_else(|| json!({"scope":"consumer_setup_state"}))
-            },
+            }
             "setup_check" | "setup_selected_check" => {
                 self.checks.fetch_add(1, Ordering::SeqCst);
                 if let Some(content) = self.check_blocks.lock().unwrap().clone() {
@@ -172,10 +175,19 @@ impl Package {
                 }
                 let job = if self.behavior == 7
                     && self.reply.lock().unwrap()["validation_id"] == "9".repeat(32)
-                { "4".repeat(32) } else { "3".repeat(32) };
+                {
+                    "4".repeat(32)
+                } else {
+                    "3".repeat(32)
+                };
                 json!({"job":{"id":job, "kind":"install", "family":if self.selected {"selected-python"} else {"services"}, "status":"running"}})
             }
-            "setup_help" => self.readback_reply.lock().unwrap().clone().unwrap_or_else(|| json!({})),
+            "setup_help" => self
+                .readback_reply
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| json!({})),
             "setup_job" | "setup_reconcile" => {
                 if self.lose_readback.swap(false, Ordering::SeqCst) {
                     return Err(ToolError::execution_failed("fixture lost readback reply"));
@@ -194,7 +206,9 @@ impl Package {
             && self.readback_is_error.load(Ordering::SeqCst);
         let result = if self.structured_reply.load(Ordering::SeqCst) {
             ToolResult::with_blocks(
-                call.id.into(), vec![meerkat_core::ContentBlock::structured(&value).unwrap()], is_error,
+                call.id.into(),
+                vec![meerkat_core::ContentBlock::structured(&value).unwrap()],
+                is_error,
             )
         } else {
             ToolResult::new(call.id.into(), value.to_string(), is_error)
@@ -295,15 +309,24 @@ impl Fixture {
         })
     }
 
-    fn build(selected: bool, behavior: u8, realm_id: &str,
-        approvals: impl FnOnce(&std::path::Path, &RealmLocator) -> (LocalApprovals, Option<ApprovalPresenter>),
+    fn build(
+        selected: bool,
+        behavior: u8,
+        realm_id: &str,
+        approvals: impl FnOnce(
+            &std::path::Path,
+            &RealmLocator,
+        ) -> (LocalApprovals, Option<ApprovalPresenter>),
     ) -> Self {
         let root = tempfile::tempdir().unwrap();
         let realm = crate::RealmOptions {
             context_root: root.path().to_owned(),
             state_root: Some(root.path().join("native-state")),
             user_config_root: Some(root.path().join("user-config")),
-        }.resolve(realm_id).unwrap().locator;
+        }
+        .resolve(realm_id)
+        .unwrap()
+        .locator;
         let (approvals, presenter) = approvals(root.path(), &realm);
         let session = SessionId::new();
         approvals.bind_session(&session).unwrap();
@@ -363,14 +386,18 @@ impl Fixture {
         let mut fixture = Self::new(selected, behavior, DECISION_LIFETIME);
         fixture.owner = CheckedInstalls::fixture_with_review(
             fixture.package.clone(),
-            Arc::new(LocalApprovals { shared: fixture.approvals.shared.clone(), service_tasks: None }),
+            Arc::new(LocalApprovals {
+                shared: fixture.approvals.shared.clone(),
+                service_tasks: None,
+            }),
         );
         fixture.owner.bind_realm(&fixture.realm).unwrap();
         fixture.gate = Arc::new(ExecutionPolicyGatedDispatcher::new(
             fixture.owner.clone(),
             ToolExecutionPolicy::resolve(ToolAccessPolicy::AllowList(
                 NAMES.iter().copied().collect(),
-            )).unwrap(),
+            ))
+            .unwrap(),
         ));
         fixture
     }
@@ -448,10 +475,13 @@ impl Fixture {
         )
     }
     async fn prompt(&mut self) -> ApprovalPrompt {
-        tokio::time::timeout(Duration::from_secs(2), self.presenter.as_mut().unwrap().next())
-            .await
-            .unwrap()
-            .unwrap()
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            self.presenter.as_mut().unwrap().next(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
     }
     fn count(&self) -> usize {
         self.package.installs.load(Ordering::SeqCst)
@@ -716,24 +746,39 @@ async fn checked_install_owner_busy_reply_preserves_history_until_exact_readback
     for selected in [false, true] {
         for structured in [false, true] {
             let mut f = Fixture::new(selected, 0, DECISION_LIFETIME);
-            f.package.structured_reply.store(structured, Ordering::SeqCst);
+            f.package
+                .structured_reply
+                .store(structured, Ordering::SeqCst);
             f.check().await;
             let run = f.install();
             f.prompt().await.decide(ApprovalDecision::Approve).unwrap();
             run.await.unwrap().unwrap();
             *f.package.readback_reply.lock().unwrap() = Some(job_readback(selected));
-            f.start("completed", "setup_job", json!({"job_id":"3".repeat(32)}), false)
-                .await.unwrap().unwrap();
-            let historical = f.owner.installed_selection(&f.realm, &f.session, &"3".repeat(32))
-                .unwrap().installed;
+            f.start(
+                "completed",
+                "setup_job",
+                json!({"job_id":"3".repeat(32)}),
+                false,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let historical = f
+                .owner
+                .installed_selection(&f.realm, &f.session, &"3".repeat(32))
+                .unwrap()
+                .installed;
             assert!(historical.is_some());
 
             let busy = json!({"error":"operation_in_progress"});
             *f.package.readback_reply.lock().unwrap() = Some(busy.clone());
             f.package.readback_is_error.store(true, Ordering::SeqCst);
             for tool in ["setup_job", "setup_reconcile"] {
-                let result = f.start("busy", tool, json!({"job_id":"3".repeat(32)}), true)
-                    .await.unwrap().unwrap();
+                let result = f
+                    .start("busy", tool, json!({"job_id":"3".repeat(32)}), true)
+                    .await
+                    .unwrap()
+                    .unwrap();
                 assert!(result.result.is_error);
                 assert_eq!(result.result.tool_use_id, "busy");
                 assert!(result.async_ops.is_empty() && result.session_effects.is_empty());
@@ -746,7 +791,9 @@ async fn checked_install_owner_busy_reply_preserves_history_until_exact_readback
                     }
                     _ => panic!("the owner's error response must be returned unchanged"),
                 }
-                let observed = f.owner.installed_selection(&f.realm, &f.session, &"3".repeat(32))
+                let observed = f
+                    .owner
+                    .installed_selection(&f.realm, &f.session, &"3".repeat(32))
                     .unwrap();
                 assert!(!observed.matched);
                 assert_eq!(observed.installed, historical);
@@ -756,13 +803,25 @@ async fn checked_install_owner_busy_reply_preserves_history_until_exact_readback
 
             f.package.readback_is_error.store(false, Ordering::SeqCst);
             *f.package.readback_reply.lock().unwrap() = Some(reconciled(selected, 1));
-            f.start("matched", "setup_reconcile", json!({"job_id":"3".repeat(32)}), false)
-                .await.unwrap().unwrap();
-            let observed = f.owner.installed_selection(&f.realm, &f.session, &"3".repeat(32))
+            f.start(
+                "matched",
+                "setup_reconcile",
+                json!({"job_id":"3".repeat(32)}),
+                false,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let observed = f
+                .owner
+                .installed_selection(&f.realm, &f.session, &"3".repeat(32))
                 .unwrap();
             assert!(observed.matched);
             assert_eq!(observed.reconciliation_revision, Some(1));
-            assert_eq!(observed.installed.unwrap().receipt_sha256.as_deref(), Some("6".repeat(64).as_str()));
+            assert_eq!(
+                observed.installed.unwrap().receipt_sha256.as_deref(),
+                Some("6".repeat(64).as_str())
+            );
             assert_eq!(f.count(), 1);
         }
     }
@@ -1644,7 +1703,6 @@ async fn checked_install_poison_after_observation_preserves_native_result_and_cu
     }
 }
 
-
 // These controls run only a synthetic package. Default native contexts in the
 // positive tests do not qualify governed helper authority or provider effects.
 #[tokio::test]
@@ -1654,7 +1712,9 @@ async fn owner_local_review_covers_both_dispatch_forms_without_research_gate() {
             let mut f = Fixture::local(selected, 0);
             f.check().await;
             f.start("research", "research_fixture", json!({}), resolved)
-                .await.unwrap().unwrap();
+                .await
+                .unwrap()
+                .unwrap();
             assert!(f.presenter.as_mut().unwrap().prompts.try_recv().is_err());
             let run = f.start("install", f.install_name(), install(selected), resolved);
             let mut prompt = f.prompt().await;
@@ -1667,9 +1727,21 @@ async fn owner_local_review_covers_both_dispatch_forms_without_research_gate() {
             let result = run.await.unwrap().unwrap();
             assert!(result.settlement_failures().is_empty());
             assert_eq!(f.count(), 1);
-            assert_eq!(f.approvals.shared.service.get(&id).unwrap().status, ApprovalStatus::Approved);
-            assert_eq!(f.approvals.shared.state().unwrap().attempt.as_ref().unwrap().custody,
-                Custody::Settled(LiveBridgeEffectOutcome::Committed));
+            assert_eq!(
+                f.approvals.shared.service.get(&id).unwrap().status,
+                ApprovalStatus::Approved
+            );
+            assert_eq!(
+                f.approvals
+                    .shared
+                    .state()
+                    .unwrap()
+                    .attempt
+                    .as_ref()
+                    .unwrap()
+                    .custody,
+                Custody::Settled(LiveBridgeEffectOutcome::Committed)
+            );
             assert_eq!(f.package.calls.lock().unwrap().last().unwrap().3, resolved);
             assert!(f.install().await.unwrap().is_err());
             assert!(f.presenter.as_mut().unwrap().prompts.try_recv().is_err());
@@ -1711,9 +1783,21 @@ async fn owner_local_review_preserves_raw_entry_result_across_capture_failure() 
         f.prompt().await.decide(ApprovalDecision::Approve).unwrap();
         assert!(run.await.unwrap().is_err());
         assert_eq!(f.count(), 1);
-        assert_eq!(f.approvals.shared.state().unwrap().attempt.as_ref().unwrap().custody,
-            if behavior == 1 { Custody::SpentUncertain }
-            else { Custody::Settled(LiveBridgeEffectOutcome::Committed) });
+        assert_eq!(
+            f.approvals
+                .shared
+                .state()
+                .unwrap()
+                .attempt
+                .as_ref()
+                .unwrap()
+                .custody,
+            if behavior == 1 {
+                Custody::SpentUncertain
+            } else {
+                Custody::Settled(LiveBridgeEffectOutcome::Committed)
+            }
+        );
         assert!(f.install().await.unwrap().is_err());
         assert!(f.presenter.as_mut().unwrap().prompts.try_recv().is_err());
     }
@@ -1746,30 +1830,59 @@ async fn owner_local_settlement_matches_call_and_session_and_retains_failure_met
     let raw = serde_json::value::to_raw_value(&install(false)).unwrap();
     let current = ToolDispatchContext::default().with_runtime_identity(f.session.clone(), None);
     let foreign = ToolDispatchContext::default().with_runtime_identity(SessionId::new(), None);
-    let exact = ToolCallView { id: "install", name: f.install_name(), args: &raw };
-    let wrong = ToolCallView { id: "different-call", name: f.install_name(), args: &raw };
+    let exact = ToolCallView {
+        id: "install",
+        name: f.install_name(),
+        args: &raw,
+    };
+    let wrong = ToolCallView {
+        id: "different-call",
+        name: f.install_name(),
+        args: &raw,
+    };
     for (call, context) in [(wrong, &current), (exact, &foreign)] {
-        let result = f.approvals.settle_service_result(&f.owner, call, context,
-            LiveBridgeEffectOutcome::Committed,
-            Ok(ToolResult::new(call.id.into(), "actual inner result".into(), false).into()),
-        ).unwrap();
+        let result = f
+            .approvals
+            .settle_service_result(
+                &f.owner,
+                call,
+                context,
+                LiveBridgeEffectOutcome::Committed,
+                Ok(ToolResult::new(call.id.into(), "actual inner result".into(), false).into()),
+            )
+            .unwrap();
         assert_eq!(result.result.text_content(), "actual inner result");
         assert_eq!(result.settlement_failures().len(), 1);
-        assert_eq!(result.settlement_failures()[0].physical_outcome,
-            LiveBridgeEffectOutcome::Committed);
+        assert_eq!(
+            result.settlement_failures()[0].physical_outcome,
+            LiveBridgeEffectOutcome::Committed
+        );
         assert!(f.approvals.has_uncertain_dispatch());
     }
     f.package.release.notify_one();
     run.await.unwrap().unwrap();
-    assert_eq!(f.approvals.shared.state().unwrap().attempt.as_ref().unwrap().custody,
-        Custody::Settled(LiveBridgeEffectOutcome::Committed));
+    assert_eq!(
+        f.approvals
+            .shared
+            .state()
+            .unwrap()
+            .attempt
+            .as_ref()
+            .unwrap()
+            .custody,
+        Custody::Settled(LiveBridgeEffectOutcome::Committed)
+    );
 }
 
 struct RefusePreparedOperation;
 impl meerkat_core::authorization::WorkAuthorization for RefusePreparedOperation {
-    fn prepare(&self, _: &meerkat_core::authorization::PreparedAuthorizationBinding)
-        -> Result<Arc<dyn meerkat_core::authorization::PreparedOperationAuthorization>,
-            meerkat_core::authorization::OperationAuthorizationError> {
+    fn prepare(
+        &self,
+        _: &meerkat_core::authorization::PreparedAuthorizationBinding,
+    ) -> Result<
+        Arc<dyn meerkat_core::authorization::PreparedOperationAuthorization>,
+        meerkat_core::authorization::OperationAuthorizationError,
+    > {
         Err(meerkat_core::authorization::OperationAuthorizationError::Unavailable)
     }
 }
@@ -1784,21 +1897,39 @@ async fn owner_local_checks_actual_native_context_after_approval_before_entry() 
         // Deliberately malformed native work context: a public work host with
         // no native prepared check. The actual current-call API must refuse it.
         // This fixture never manufactures an admitted authorization payload.
-        let context = ToolDispatchContext::default().with_runtime_identity(session, None)
-            .with_work_authorization(Some(meerkat_core::authorization::WorkAuthorizationContext::new(
-                Arc::new(RefusePreparedOperation),
-                meerkat_core::exact_operation::OperationExecutionScope::Domain,
-            )));
+        let context = ToolDispatchContext::default()
+            .with_runtime_identity(session, None)
+            .with_work_authorization(Some(
+                meerkat_core::authorization::WorkAuthorizationContext::new(
+                    Arc::new(RefusePreparedOperation),
+                    meerkat_core::exact_operation::OperationExecutionScope::Domain,
+                ),
+            ));
         let raw = serde_json::value::to_raw_value(&install(false)).unwrap();
-        let call = ToolCallView { id: "install", name: "setup_install", args: &raw };
+        let call = ToolCallView {
+            id: "install",
+            name: "setup_install",
+            args: &raw,
+        };
         owner.dispatch_with_context(call, &context).await
     });
     f.prompt().await.decide(ApprovalDecision::Approve).unwrap();
-    assert!(matches!(run.await.unwrap().unwrap_err().primary_error(),
-        ToolError::AuthorizationRefused { .. }));
+    assert!(matches!(
+        run.await.unwrap().unwrap_err().primary_error(),
+        ToolError::AuthorizationRefused { .. }
+    ));
     assert_eq!(f.count(), 0);
-    assert_eq!(f.approvals.shared.state().unwrap().attempt.as_ref().unwrap().custody,
-        Custody::Settled(LiveBridgeEffectOutcome::Failed));
+    assert_eq!(
+        f.approvals
+            .shared
+            .state()
+            .unwrap()
+            .attempt
+            .as_ref()
+            .unwrap()
+            .custody,
+        Custody::Settled(LiveBridgeEffectOutcome::Failed)
+    );
 }
 
 #[tokio::test]
@@ -1811,22 +1942,72 @@ async fn checked_install_keeps_exact_package_recovery_reference_and_refuses_rebi
     let mut exact = job_readback(false);
     exact["job"]["recovery_request"] = json!({"id":"3".repeat(32),"sha256":"9".repeat(64)});
     *f.package.readback_reply.lock().unwrap() = Some(exact.clone());
-    f.start("job", "setup_job", json!({"job_id":"3".repeat(32)}), true).await.unwrap().unwrap();
-    assert_eq!(f.owner.installed_selection(&f.realm, &f.session, &"3".repeat(32)).unwrap()
-        .installed.unwrap().recovery_request_sha256, Some("9".repeat(64)));
+    f.start("job", "setup_job", json!({"job_id":"3".repeat(32)}), true)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        f.owner
+            .installed_selection(&f.realm, &f.session, &"3".repeat(32))
+            .unwrap()
+            .installed
+            .unwrap()
+            .recovery_request_sha256,
+        Some("9".repeat(64))
+    );
     for change in ["id", "sha256", "missing"] {
         let mut changed = exact.clone();
-        if change == "missing" { changed["job"].as_object_mut().unwrap().remove("recovery_request"); }
-        else { changed["job"]["recovery_request"][change] = if change == "id" { "4".repeat(32) } else { "8".repeat(64) }.into(); }
+        if change == "missing" {
+            changed["job"]
+                .as_object_mut()
+                .unwrap()
+                .remove("recovery_request");
+        } else {
+            changed["job"]["recovery_request"][change] = if change == "id" {
+                "4".repeat(32)
+            } else {
+                "8".repeat(64)
+            }
+            .into();
+        }
         *f.package.readback_reply.lock().unwrap() = Some(changed);
-        assert!(f.start("changed", "setup_job", json!({"job_id":"3".repeat(32)}), true).await.unwrap().is_err());
-        let held = f.owner.installed_selection(&f.realm, &f.session, &"3".repeat(32)).unwrap();
+        assert!(
+            f.start(
+                "changed",
+                "setup_job",
+                json!({"job_id":"3".repeat(32)}),
+                true
+            )
+            .await
+            .unwrap()
+            .is_err()
+        );
+        let held = f
+            .owner
+            .installed_selection(&f.realm, &f.session, &"3".repeat(32))
+            .unwrap();
         assert!(!held.matched);
-        assert_eq!(held.installed.unwrap().recovery_request_sha256, Some("9".repeat(64)));
+        assert_eq!(
+            held.installed.unwrap().recovery_request_sha256,
+            Some("9".repeat(64))
+        );
     }
     *f.package.readback_reply.lock().unwrap() = Some(exact);
-    f.start("recover", "setup_job", json!({"job_id":"3".repeat(32)}), true).await.unwrap().unwrap();
-    assert!(f.owner.installed_selection(&f.realm, &f.session, &"3".repeat(32)).unwrap().matched);
+    f.start(
+        "recover",
+        "setup_job",
+        json!({"job_id":"3".repeat(32)}),
+        true,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        f.owner
+            .installed_selection(&f.realm, &f.session, &"3".repeat(32))
+            .unwrap()
+            .matched
+    );
     assert_eq!(f.count(), 1, "readback never installs again");
 }
 
@@ -1853,8 +2034,10 @@ async fn checked_install_single_structured_reply_retains_proposal_and_exact_rece
         let outcome = run.await.unwrap().unwrap();
         assert_eq!(outcome.result.tool_use_id, "install");
         assert!(!outcome.result.is_error);
-        assert!(matches!(outcome.result.content.as_slice(),
-            [meerkat_core::ContentBlock::Structured { .. }]));
+        assert!(matches!(
+            outcome.result.content.as_slice(),
+            [meerkat_core::ContentBlock::Structured { .. }]
+        ));
         assert!(outcome.async_ops.is_empty() && outcome.session_effects.is_empty());
         assert_eq!(f.count(), 1);
         assert!(!f.approvals.has_uncertain_dispatch());
@@ -1863,30 +2046,47 @@ async fn checked_install_single_structured_reply_retains_proposal_and_exact_rece
 
         *f.package.readback_reply.lock().unwrap() = Some(job_readback(selected));
         f.start("job", "setup_job", json!({"job_id":"3".repeat(32)}), true)
-            .await.unwrap().unwrap();
-        let capture = f.owner.installed_selection(
-            &f.realm, &f.session, &"3".repeat(32),
-        ).unwrap();
+            .await
+            .unwrap()
+            .unwrap();
+        let capture = f
+            .owner
+            .installed_selection(&f.realm, &f.session, &"3".repeat(32))
+            .unwrap();
         assert!(capture.matched);
         let installed = capture.installed.unwrap();
         assert_eq!(installed.realm, f.realm);
         assert_eq!(installed.session, f.session);
-        assert_eq!(installed.validation_id,
-            if selected { "b".repeat(32) } else { "a".repeat(32) });
+        assert_eq!(
+            installed.validation_id,
+            if selected {
+                "b".repeat(32)
+            } else {
+                "a".repeat(32)
+            }
+        );
         assert!(!format!("{installed:?}").contains("do-not-retain-this-value"));
         assert!(!format!("{installed:?}").contains("FIXTURE_SECRET"));
-        assert!(f.owner.installed_selection(
-            &f.realm, &SessionId::new(), &"3".repeat(32),
-        ).is_err());
+        assert!(
+            f.owner
+                .installed_selection(&f.realm, &SessionId::new(), &"3".repeat(32),)
+                .is_err()
+        );
         f.package.epoch.store(8, Ordering::SeqCst);
-        assert!(!f.owner.installed_selection(
-            &f.realm, &f.session, &"3".repeat(32),
-        ).unwrap().matched);
+        assert!(
+            !f.owner
+                .installed_selection(&f.realm, &f.session, &"3".repeat(32),)
+                .unwrap()
+                .matched
+        );
         assert_eq!(f.count(), 1);
         let calls = f.package.calls.lock().unwrap();
         assert_eq!(calls.len(), 3);
-        assert!(calls.iter().all(|(_, _, session, resolved)|
-            session == &f.session && *resolved));
+        assert!(
+            calls
+                .iter()
+                .all(|(_, _, session, resolved)| session == &f.session && *resolved)
+        );
     }
 }
 
@@ -1903,16 +2103,30 @@ async fn checked_install_refused_structured_reply_leaves_no_approvable_proposal(
         wrong_scope["scope"] = "different_scope".into();
         for blocks in [
             vec![structured(&valid), structured(&valid)],
-            vec![ContentBlock::Text { text: valid.clone() }, structured(&valid)],
-            vec![structured(&valid), ContentBlock::Text { text: valid.clone() }],
+            vec![
+                ContentBlock::Text {
+                    text: valid.clone(),
+                },
+                structured(&valid),
+            ],
+            vec![
+                structured(&valid),
+                ContentBlock::Text {
+                    text: valid.clone(),
+                },
+            ],
             vec![structured(&duplicated)],
             vec![structured("[]")],
             vec![structured(&wrong_scope.to_string())],
         ] {
             let mut f = Fixture::new(selected, 0, DECISION_LIFETIME);
             *f.package.check_blocks.lock().unwrap() = Some(blocks);
-            assert!(f.start("check", f.check_name(), selection(selected), true)
-                .await.unwrap().is_err());
+            assert!(
+                f.start("check", f.check_name(), selection(selected), true)
+                    .await
+                    .unwrap()
+                    .is_err()
+            );
             assert_eq!(f.package.checks.load(Ordering::SeqCst), 1);
             assert_eq!(f.package.calls.lock().unwrap().len(), 1);
             assert_eq!(f.count(), 0);
@@ -1920,9 +2134,18 @@ async fn checked_install_refused_structured_reply_leaves_no_approvable_proposal(
             // An invalid check cannot mint the actual owner-held action that
             // would be needed to arm an install. Do not submit another call.
             let args = serde_json::value::to_raw_value(&install(selected)).unwrap();
-            assert!(f.owner.retain_action(ToolCallView {
-                id: "install", name: f.install_name(), args: &args,
-            }, &f.session).is_err());
+            assert!(
+                f.owner
+                    .retain_action(
+                        ToolCallView {
+                            id: "install",
+                            name: f.install_name(),
+                            args: &args,
+                        },
+                        &f.session
+                    )
+                    .is_err()
+            );
             assert!(!f.approvals.has_uncertain_dispatch());
         }
     }
@@ -1930,760 +2153,1367 @@ async fn checked_install_refused_structured_reply_leaves_no_approvable_proposal(
 
 #[cfg(all(unix, feature = "console"))]
 mod application_policy_tests {
-use super::*;
+    use super::*;
 
-// Actual installed file/phase owner and native ApprovalService, with the same
-// synthetic package used above. This does not qualify a governed native helper,
-// account, live installation, application policy deployment or service grant.
-struct PolicyOwnerFixture {
-    lock: Arc<tokio::sync::RwLock<()>>,
-    owner: meerkat_core::PrincipalRef,
-    calls: AtomicUsize,
-    released: Arc<AtomicUsize>,
-    mode: u8,
-    exact_effect: String,
-    change_epoch: Mutex<Option<Arc<Package>>>,
-}
-struct PolicyReservationFixture {
-    _reservation: tokio::sync::OwnedRwLockReadGuard<()>,
-    owner: meerkat_core::PrincipalRef,
-    evidence: serde_json::Map<String, Value>,
-    released: Arc<AtomicUsize>,
-    stale: bool,
-}
-impl Drop for PolicyReservationFixture {
-    fn drop(&mut self) { self.released.fetch_add(1, Ordering::SeqCst); }
-}
-impl installation_policy::InstallationPolicyReservation for PolicyReservationFixture {
-    fn owner(&self) -> &meerkat_core::PrincipalRef { &self.owner }
-    fn provenance(&self) -> &serde_json::Map<String, Value> { &self.evidence }
-    fn check_current(&self) -> Result<(), meerkat_toolkit::host_lifetime::control::HostLifetimeError> {
-        if self.stale { Err(meerkat_toolkit::host_lifetime::control::HostLifetimeError::Denied) } else { Ok(()) }
+    // Actual installed file/phase owner and native ApprovalService, with the same
+    // synthetic package used above. This does not qualify a governed native helper,
+    // account, live installation, application policy deployment or service grant.
+    struct PolicyOwnerFixture {
+        lock: Arc<tokio::sync::RwLock<()>>,
+        owner: meerkat_core::PrincipalRef,
+        calls: AtomicUsize,
+        released: Arc<AtomicUsize>,
+        mode: u8,
+        exact_effect: String,
+        change_epoch: Mutex<Option<Arc<Package>>>,
     }
-}
-impl installation_policy::ApplicationInstallationPolicy for PolicyOwnerFixture {
-    fn reserve(&self, request: &installation_policy::InstallationPolicyRequest<'_>)
-        -> Result<installation_policy::InstallationPolicyDecision, meerkat_toolkit::host_lifetime::control::HostLifetimeError>
-    {
-        use installation_policy::InstallationPolicyDecision;
-        use meerkat_toolkit::host_lifetime::control::HostLifetimeError;
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        if request.proposal["owner_proposal"]["effect_sha256"] != self.exact_effect
-            || request.call.name != "setup_selected_install"
-            || request.context.origin_session_id().is_none()
-        { return Err(HostLifetimeError::Denied); }
-        match self.mode {
-            1 => return Ok(InstallationPolicyDecision::RequiresHuman),
-            2 => return Err(HostLifetimeError::Denied),
-            3 => return Err(HostLifetimeError::Unavailable),
-            _ => {},
+    struct PolicyReservationFixture {
+        _reservation: tokio::sync::OwnedRwLockReadGuard<()>,
+        owner: meerkat_core::PrincipalRef,
+        evidence: serde_json::Map<String, Value>,
+        released: Arc<AtomicUsize>,
+        stale: bool,
+    }
+    impl Drop for PolicyReservationFixture {
+        fn drop(&mut self) {
+            self.released.fetch_add(1, Ordering::SeqCst);
         }
-        let reservation = self.lock.clone().try_read_owned().map_err(|_| HostLifetimeError::Unavailable)?;
-        if let Some(package) = self.change_epoch.lock().unwrap().take() {
-            package.epoch.fetch_add(1, Ordering::SeqCst);
+    }
+    impl installation_policy::InstallationPolicyReservation for PolicyReservationFixture {
+        fn owner(&self) -> &meerkat_core::PrincipalRef {
+            &self.owner
         }
-        let owner = if self.mode == 4 {
-            meerkat_core::PrincipalRef::in_domain(meerkat_core::PrincipalKind::ServiceAccount,
-                "other-policy", meerkat_core::TrustDomainId::new("fixture").unwrap()).unwrap()
-        } else { self.owner.clone() };
-        Ok(InstallationPolicyDecision::Permit(Box::new(PolicyReservationFixture {
-            _reservation: reservation, owner,
-            evidence: serde_json::Map::from_iter([("rule".into(), json!("exact-fixture-effect"))]),
-            released: self.released.clone(), stale: self.mode == 5,
-        })))
+        fn provenance(&self) -> &serde_json::Map<String, Value> {
+            &self.evidence
+        }
+        fn check_current(
+            &self,
+        ) -> Result<(), meerkat_toolkit::host_lifetime::control::HostLifetimeError> {
+            if self.stale {
+                Err(meerkat_toolkit::host_lifetime::control::HostLifetimeError::Denied)
+            } else {
+                Ok(())
+            }
+        }
     }
-}
-
-fn policy_lifetime(root: &Path, realm: &meerkat_core::RealmId)
-    -> (Arc<meerkat_toolkit::host_lifetime::NativeHostLifetime>, PathBuf)
-{
-    policy_lifetime_with_selection(root, realm, None, false)
-}
-
-fn policy_lifetime_with_selection(root: &Path, realm: &meerkat_core::RealmId,
-    selected: Option<crate::application_acquisition::selected_policy::StandingPolicySelection>,
-    administration: bool)
-    -> (Arc<meerkat_toolkit::host_lifetime::NativeHostLifetime>, PathBuf)
-{
-    use meerkat_toolkit::host_lifetime::{NativeHostLifetime, control::{HostBootstrapSelection, SelectedHostArtifact}, policy::*};
-    use sha2::{Digest, Sha256};
-    let hash = |bytes: &[u8]| format!("{:x}", Sha256::digest(bytes));
-    let deployment = root.canonicalize().unwrap().join("application");
-    let bundle = deployment.join("shared/policy/bundle.1");
-    std::fs::create_dir_all(&bundle).unwrap();
-    std::fs::create_dir_all(deployment.join("shared/activations")).unwrap();
-    std::fs::create_dir_all(deployment.join("shared/control")).unwrap();
-    let write = |path: PathBuf, bytes: &[u8]| {
-        std::fs::write(&path, bytes).unwrap();
-        SelectedHostArtifact { path, sha256: hash(bytes) }
-    };
-    let source = write(bundle.join("policy.json"), br#"{"schema":1}"#);
-    let principal = |name| meerkat_core::PrincipalRef::in_domain(
-        meerkat_core::PrincipalKind::ServiceAccount, name,
-        meerkat_core::TrustDomainId::new("fixture").unwrap()).unwrap();
-    let application = principal("application");
-    let tool = write(bundle.join("tools.json"), b"[]");
-    let reference = CompiledArtifactReference { name: "tools.json".into(), sha256: tool.sha256.clone() };
-    let setup = selected.map(|selected| {
-        let artifact = write(bundle.join("native-setup.json"), &toolkit_package::canonical_json(&selected).unwrap());
-        CompiledArtifactReference { name: "native-setup.json".into(), sha256: artifact.sha256 }
-    });
-    let mut policy = CompiledLocalPolicy { schema: 7, deployment: toolkit_package::Id::new("fixture").unwrap(),
-        source_policy_sha256: source.sha256.clone(), components: vec![], channels: vec![],
-        native_host: Some(CompiledNativeHost { realm: realm.clone(), grant_administrator: application.clone(),
-            remote_operator: None, service_parent_administration: None, setup: setup.clone(),
-            ingress_domain: meerkat_authorization_contracts::constraints::ResourceDomain {
-                authority: application.clone(), namespace: "fixture".into(),
-            }, application_tool_policy: reference.clone(), routes: vec![], members: vec![CompiledNativeMember {
-                member: meerkat_core::MobMemberBinding { mob_id: "unattended-fixture".into(),
-                    role: "setup".into(), member: "helper".into() }, logical_owner: principal("helper"),
-                context_generation: 1, audience: meerkat_authorization_contracts::constraints::AudienceRef::Principal {
-                    principal: application,
-                }, initial_surface: reference, setup_capability: None,
-            }],
-        }),
-    };
-    if administration {
-        // Only a selected-owner fixture: this actual stock principal value is
-        // not an opened grant owner or proof of administrative authentication.
-        let native = policy.native_host.as_mut().unwrap();
-        native.remote_operator = Some(meerkat::governed_realm::stock::StockPrincipals::for_local_operator(realm).unwrap().operator);
-        let route = toolkit_package::Id::new("policy-service-route").unwrap();
-        let application = native.grant_administrator.clone();
-        let domain = native.ingress_domain.clone();
-        native.routes.push(CompiledNativeSourceRoute {
-            id: route.clone(), origin: CompiledNativeSourceOrigin::LocalConsole {
-                member: native.members[0].member.clone(), requester: application.clone(), ingress_actor: application.clone(),
-            }, application_parent: None, controller_parent: None,
-            logical_executor: application.clone(), represented_subject: None, source_authority: application,
-            authentication_domain: domain.clone(), event_domain: domain,
-        });
-        native.service_parent_administration = Some(ServiceParentAdministration::ApplicationPolicyTasks {
-            routes: [route].into_iter().collect(),
-        });
+    impl installation_policy::ApplicationInstallationPolicy for PolicyOwnerFixture {
+        fn reserve(
+            &self,
+            request: &installation_policy::InstallationPolicyRequest<'_>,
+        ) -> Result<
+            installation_policy::InstallationPolicyDecision,
+            meerkat_toolkit::host_lifetime::control::HostLifetimeError,
+        > {
+            use installation_policy::InstallationPolicyDecision;
+            use meerkat_toolkit::host_lifetime::control::HostLifetimeError;
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if request.proposal["owner_proposal"]["effect_sha256"] != self.exact_effect
+                || request.call.name != "setup_selected_install"
+                || request.context.origin_session_id().is_none()
+            {
+                return Err(HostLifetimeError::Denied);
+            }
+            match self.mode {
+                1 => return Ok(InstallationPolicyDecision::RequiresHuman),
+                2 => return Err(HostLifetimeError::Denied),
+                3 => return Err(HostLifetimeError::Unavailable),
+                _ => {}
+            }
+            let reservation = self
+                .lock
+                .clone()
+                .try_read_owned()
+                .map_err(|_| HostLifetimeError::Unavailable)?;
+            if let Some(package) = self.change_epoch.lock().unwrap().take() {
+                package.epoch.fetch_add(1, Ordering::SeqCst);
+            }
+            let owner = if self.mode == 4 {
+                meerkat_core::PrincipalRef::in_domain(
+                    meerkat_core::PrincipalKind::ServiceAccount,
+                    "other-policy",
+                    meerkat_core::TrustDomainId::new("fixture").unwrap(),
+                )
+                .unwrap()
+            } else {
+                self.owner.clone()
+            };
+            Ok(InstallationPolicyDecision::Permit(Box::new(
+                PolicyReservationFixture {
+                    _reservation: reservation,
+                    owner,
+                    evidence: serde_json::Map::from_iter([(
+                        "rule".into(),
+                        json!("exact-fixture-effect"),
+                    )]),
+                    released: self.released.clone(),
+                    stale: self.mode == 5,
+                },
+            )))
+        }
     }
-    let local = write(bundle.join("toolkit-local-policy.json"), &policy.canonical_bytes().unwrap());
-    let mut artifacts = vec![json!({"path":"policy.json","sha256":source.sha256}),
-        json!({"path":"toolkit-local-policy.json","sha256":local.sha256}),
-        json!({"path":"tools.json","sha256":tool.sha256})];
-    if let Some(setup) = setup { artifacts.push(json!({"path":setup.name,"sha256":setup.sha256})); }
-    let manifest = write(bundle.join("manifest.json"), &toolkit_package::canonical_json(&json!({"artifacts":artifacts})).unwrap());
-    let activation = write(deployment.join("shared/activations/1.json"), &toolkit_package::canonical_json(&json!({
-        "activation_id":"1","policy_bundle":{"path":"shared/policy/bundle.1",
-            "policy_digest":format!("hc-policy-v1:sha256:{}",manifest.sha256)}
-    })).unwrap());
-    std::os::unix::fs::symlink("shared/activations/1.json", deployment.join("current")).unwrap();
-    let mut lifetime = NativeHostLifetime::bootstrap(HostBootstrapSelection {
-        deployment_root: deployment, activation, policy_manifest: manifest, local_policy: local,
-    }).unwrap();
-    lifetime.bind_native_authorization_publication(meerkat_authorization::publication::LocalAuthorizationPublication::new()).unwrap();
-    (Arc::new(lifetime), source.path)
-}
 
-fn policy_fixture(behavior: u8, mode: u8) -> (Fixture, Arc<PolicyOwnerFixture>, PathBuf) {
-    let mut retained = None;
-    let realm = meerkat_core::mob_realm_id("unattended-fixture").unwrap();
-    let mut fixture = Fixture::build(true, behavior, realm.as_str(), |root, realm| {
-        let (lifetime, source) = policy_lifetime(root, &realm.realm);
-        let provider = Arc::new(PolicyOwnerFixture { lock: Arc::new(tokio::sync::RwLock::new(())),
-            owner: lifetime.selected_policy().native_host.as_ref().unwrap().grant_administrator.clone(),
-            calls: AtomicUsize::new(0), released: Arc::new(AtomicUsize::new(0)), mode,
-            exact_effect: "d".repeat(64), change_epoch: Mutex::new(None) });
-        let policy = installation_policy::InstalledInstallationPolicy::new(lifetime, provider.clone()).unwrap();
-        retained = Some((provider, source));
-        (LocalApprovals::create_for_installation_policy(root, policy).unwrap(), None)
-    });
-    fixture.owner = CheckedInstalls::fixture_with_review(fixture.package.clone(),
-        Arc::new(LocalApprovals { shared: fixture.approvals.shared.clone(), service_tasks: None }));
-    fixture.owner.bind_realm(&fixture.realm).unwrap();
-    fixture.gate = Arc::new(ExecutionPolicyGatedDispatcher::new(fixture.owner.clone(),
-        ToolExecutionPolicy::resolve(ToolAccessPolicy::AllowList(NAMES.iter().copied().collect())).unwrap()));
-    let (provider, source) = retained.unwrap();
-    (fixture, provider, source)
-}
+    fn policy_lifetime(
+        root: &Path,
+        realm: &meerkat_core::RealmId,
+    ) -> (
+        Arc<meerkat_toolkit::host_lifetime::NativeHostLifetime>,
+        PathBuf,
+    ) {
+        policy_lifetime_with_selection(root, realm, None, false)
+    }
 
-#[tokio::test]
-async fn application_policy_installs_exact_action_without_a_presenter_and_records_real_owner() {
-    let (f, policy, _) = policy_fixture(0, 0);
-    f.check().await;
-    let result = f.install().await.unwrap().unwrap();
-    assert!(!result.result.is_error);
-    assert!(f.presenter.is_none());
-    assert!(f.approvals.shared.prompts.is_closed());
-    assert_eq!(f.count(), 1);
-    let records = f.approvals.shared.service.list(Default::default()).unwrap();
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].status, ApprovalStatus::Approved);
-    assert_eq!(records[0].decision.as_ref().unwrap().actor,
-        ApprovalPrincipalId::new(serde_json::to_string(&policy.owner).unwrap()).unwrap());
-    assert_eq!(records[0].request_provenance.as_ref().unwrap()["application"], json!(policy.owner));
-    assert_eq!(records[0].request_provenance.as_ref().unwrap()["decision"], json!({"rule":"exact-fixture-effect"}));
-    assert_eq!(records[0].proposed_action.body.as_ref().unwrap()["owner_proposal"]["effect_sha256"], "d".repeat(64));
-    assert!(policy.lock.try_write().is_ok());
-    assert_eq!(policy.released.load(Ordering::SeqCst), 1);
-    assert!(f.install().await.unwrap().is_err());
-    assert_eq!(f.count(), 1);
-}
+    fn policy_lifetime_with_selection(
+        root: &Path,
+        realm: &meerkat_core::RealmId,
+        selected: Option<crate::application_acquisition::selected_policy::StandingPolicySelection>,
+        administration: bool,
+    ) -> (
+        Arc<meerkat_toolkit::host_lifetime::NativeHostLifetime>,
+        PathBuf,
+    ) {
+        use meerkat_toolkit::host_lifetime::{
+            NativeHostLifetime,
+            control::{HostBootstrapSelection, SelectedHostArtifact},
+            policy::*,
+        };
+        use sha2::{Digest, Sha256};
+        let hash = |bytes: &[u8]| format!("{:x}", Sha256::digest(bytes));
+        let deployment = root.canonicalize().unwrap().join("application");
+        let bundle = deployment.join("shared/policy/bundle.1");
+        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::create_dir_all(deployment.join("shared/activations")).unwrap();
+        std::fs::create_dir_all(deployment.join("shared/control")).unwrap();
+        let write = |path: PathBuf, bytes: &[u8]| {
+            std::fs::write(&path, bytes).unwrap();
+            SelectedHostArtifact {
+                path,
+                sha256: hash(bytes),
+            }
+        };
+        let source = write(bundle.join("policy.json"), br#"{"schema":1}"#);
+        let principal = |name| {
+            meerkat_core::PrincipalRef::in_domain(
+                meerkat_core::PrincipalKind::ServiceAccount,
+                name,
+                meerkat_core::TrustDomainId::new("fixture").unwrap(),
+            )
+            .unwrap()
+        };
+        let application = principal("application");
+        let tool = write(bundle.join("tools.json"), b"[]");
+        let reference = CompiledArtifactReference {
+            name: "tools.json".into(),
+            sha256: tool.sha256.clone(),
+        };
+        let setup = selected.map(|selected| {
+            let artifact = write(
+                bundle.join("native-setup.json"),
+                &toolkit_package::canonical_json(&selected).unwrap(),
+            );
+            CompiledArtifactReference {
+                name: "native-setup.json".into(),
+                sha256: artifact.sha256,
+            }
+        });
+        let mut policy = CompiledLocalPolicy {
+            schema: 7,
+            deployment: toolkit_package::Id::new("fixture").unwrap(),
+            source_policy_sha256: source.sha256.clone(),
+            components: vec![],
+            channels: vec![],
+            native_host: Some(CompiledNativeHost {
+                realm: realm.clone(),
+                grant_administrator: application.clone(),
+                remote_operator: None,
+                service_parent_administration: None,
+                setup: setup.clone(),
+                ingress_domain: meerkat_authorization_contracts::constraints::ResourceDomain {
+                    authority: application.clone(),
+                    namespace: "fixture".into(),
+                },
+                application_tool_policy: reference.clone(),
+                routes: vec![],
+                members: vec![CompiledNativeMember {
+                    member: meerkat_core::MobMemberBinding {
+                        mob_id: "unattended-fixture".into(),
+                        role: "setup".into(),
+                        member: "helper".into(),
+                    },
+                    logical_owner: principal("helper"),
+                    context_generation: 1,
+                    audience:
+                        meerkat_authorization_contracts::constraints::AudienceRef::Principal {
+                            principal: application,
+                        },
+                    initial_surface: reference,
+                    setup_capability: None,
+                }],
+            }),
+        };
+        if administration {
+            // Only a selected-owner fixture: this actual stock principal value is
+            // not an opened grant owner or proof of administrative authentication.
+            let native = policy.native_host.as_mut().unwrap();
+            native.remote_operator = Some(
+                meerkat::governed_realm::stock::StockPrincipals::for_local_operator(realm)
+                    .unwrap()
+                    .operator,
+            );
+            let route = toolkit_package::Id::new("policy-service-route").unwrap();
+            let application = native.grant_administrator.clone();
+            let domain = native.ingress_domain.clone();
+            native.routes.push(CompiledNativeSourceRoute {
+                id: route.clone(),
+                origin: CompiledNativeSourceOrigin::LocalConsole {
+                    member: native.members[0].member.clone(),
+                    requester: application.clone(),
+                    ingress_actor: application.clone(),
+                },
+                application_parent: None,
+                controller_parent: None,
+                logical_executor: application.clone(),
+                represented_subject: None,
+                source_authority: application,
+                authentication_domain: domain.clone(),
+                event_domain: domain,
+            });
+            native.service_parent_administration =
+                Some(ServiceParentAdministration::ApplicationPolicyTasks {
+                    routes: [route].into_iter().collect(),
+                });
+        }
+        let local = write(
+            bundle.join("toolkit-local-policy.json"),
+            &policy.canonical_bytes().unwrap(),
+        );
+        let mut artifacts = vec![
+            json!({"path":"policy.json","sha256":source.sha256}),
+            json!({"path":"toolkit-local-policy.json","sha256":local.sha256}),
+            json!({"path":"tools.json","sha256":tool.sha256}),
+        ];
+        if let Some(setup) = setup {
+            artifacts.push(json!({"path":setup.name,"sha256":setup.sha256}));
+        }
+        let manifest = write(
+            bundle.join("manifest.json"),
+            &toolkit_package::canonical_json(&json!({"artifacts":artifacts})).unwrap(),
+        );
+        let activation = write(
+            deployment.join("shared/activations/1.json"),
+            &toolkit_package::canonical_json(&json!({
+                "activation_id":"1","policy_bundle":{"path":"shared/policy/bundle.1",
+                    "policy_digest":format!("hc-policy-v1:sha256:{}",manifest.sha256)}
+            }))
+            .unwrap(),
+        );
+        std::os::unix::fs::symlink("shared/activations/1.json", deployment.join("current"))
+            .unwrap();
+        let mut lifetime = NativeHostLifetime::bootstrap(HostBootstrapSelection {
+            deployment_root: deployment,
+            activation,
+            policy_manifest: manifest,
+            local_policy: local,
+        })
+        .unwrap();
+        lifetime
+            .bind_native_authorization_publication(
+                meerkat_authorization::publication::LocalAuthorizationPublication::new(),
+            )
+            .unwrap();
+        (Arc::new(lifetime), source.path)
+    }
 
-#[tokio::test]
-async fn application_policy_human_step_and_refusals_create_no_approval_or_install_arm() {
-    for mode in 1..=5 {
-        let (f, policy, _) = policy_fixture(0, mode);
+    fn policy_fixture(behavior: u8, mode: u8) -> (Fixture, Arc<PolicyOwnerFixture>, PathBuf) {
+        let mut retained = None;
+        let realm = meerkat_core::mob_realm_id("unattended-fixture").unwrap();
+        let mut fixture = Fixture::build(true, behavior, realm.as_str(), |root, realm| {
+            let (lifetime, source) = policy_lifetime(root, &realm.realm);
+            let provider = Arc::new(PolicyOwnerFixture {
+                lock: Arc::new(tokio::sync::RwLock::new(())),
+                owner: lifetime
+                    .selected_policy()
+                    .native_host
+                    .as_ref()
+                    .unwrap()
+                    .grant_administrator
+                    .clone(),
+                calls: AtomicUsize::new(0),
+                released: Arc::new(AtomicUsize::new(0)),
+                mode,
+                exact_effect: "d".repeat(64),
+                change_epoch: Mutex::new(None),
+            });
+            let policy =
+                installation_policy::InstalledInstallationPolicy::new(lifetime, provider.clone())
+                    .unwrap();
+            retained = Some((provider, source));
+            (
+                LocalApprovals::create_for_installation_policy(root, policy).unwrap(),
+                None,
+            )
+        });
+        fixture.owner = CheckedInstalls::fixture_with_review(
+            fixture.package.clone(),
+            Arc::new(LocalApprovals {
+                shared: fixture.approvals.shared.clone(),
+                service_tasks: None,
+            }),
+        );
+        fixture.owner.bind_realm(&fixture.realm).unwrap();
+        fixture.gate = Arc::new(ExecutionPolicyGatedDispatcher::new(
+            fixture.owner.clone(),
+            ToolExecutionPolicy::resolve(ToolAccessPolicy::AllowList(
+                NAMES.iter().copied().collect(),
+            ))
+            .unwrap(),
+        ));
+        let (provider, source) = retained.unwrap();
+        (fixture, provider, source)
+    }
+
+    #[tokio::test]
+    async fn application_policy_installs_exact_action_without_a_presenter_and_records_real_owner() {
+        let (f, policy, _) = policy_fixture(0, 0);
         f.check().await;
-        let result = f.install().await.unwrap();
-        if mode == 1 {
-            let result = result.unwrap();
-            assert!(!result.result.is_error);
-            assert_eq!(serde_json::from_str::<Value>(&result.result.text_content()).unwrap(),
-                json!({"state":"requires_action","action":"human_installation_review","installed":false}));
-        } else {
-            let error = result.unwrap_err();
-            if mode == 3 {
-                assert_eq!(std::mem::discriminant(&error), std::mem::discriminant(&ToolError::unavailable(
-                    f.install_name(), meerkat_core::ToolUnavailableReason::TemporarilyUnavailable)));
-            } else { assert!(matches!(error, ToolError::AccessDenied { .. })); }
+        let result = f.install().await.unwrap().unwrap();
+        assert!(!result.result.is_error);
+        assert!(f.presenter.is_none());
+        assert!(f.approvals.shared.prompts.is_closed());
+        assert_eq!(f.count(), 1);
+        let records = f.approvals.shared.service.list(Default::default()).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].status, ApprovalStatus::Approved);
+        assert_eq!(
+            records[0].decision.as_ref().unwrap().actor,
+            ApprovalPrincipalId::new(serde_json::to_string(&policy.owner).unwrap()).unwrap()
+        );
+        assert_eq!(
+            records[0].request_provenance.as_ref().unwrap()["application"],
+            json!(policy.owner)
+        );
+        assert_eq!(
+            records[0].request_provenance.as_ref().unwrap()["decision"],
+            json!({"rule":"exact-fixture-effect"})
+        );
+        assert_eq!(
+            records[0].proposed_action.body.as_ref().unwrap()["owner_proposal"]["effect_sha256"],
+            "d".repeat(64)
+        );
+        assert!(policy.lock.try_write().is_ok());
+        assert_eq!(policy.released.load(Ordering::SeqCst), 1);
+        assert!(f.install().await.unwrap().is_err());
+        assert_eq!(f.count(), 1);
+    }
+
+    #[tokio::test]
+    async fn application_policy_human_step_and_refusals_create_no_approval_or_install_arm() {
+        for mode in 1..=5 {
+            let (f, policy, _) = policy_fixture(0, mode);
+            f.check().await;
+            let result = f.install().await.unwrap();
+            if mode == 1 {
+                let result = result.unwrap();
+                assert!(!result.result.is_error);
+                assert_eq!(
+                    serde_json::from_str::<Value>(&result.result.text_content()).unwrap(),
+                    json!({"state":"requires_action","action":"human_installation_review","installed":false})
+                );
+            } else {
+                let error = result.unwrap_err();
+                if mode == 3 {
+                    assert_eq!(
+                        std::mem::discriminant(&error),
+                        std::mem::discriminant(&ToolError::unavailable(
+                            f.install_name(),
+                            meerkat_core::ToolUnavailableReason::TemporarilyUnavailable
+                        ))
+                    );
+                } else {
+                    assert!(matches!(error, ToolError::AccessDenied { .. }));
+                }
+            }
+            assert!(
+                f.approvals
+                    .shared
+                    .service
+                    .list(Default::default())
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(f.approvals.shared.state().unwrap().attempt.is_none());
+            assert_eq!(f.count(), 0);
+            assert!(policy.lock.try_write().is_ok());
+            assert!(f.presenter.is_none());
         }
-        assert!(f.approvals.shared.service.list(Default::default()).unwrap().is_empty());
-        assert!(f.approvals.shared.state().unwrap().attempt.is_none());
+    }
+
+    #[tokio::test]
+    async fn application_policy_rechecks_selected_artifact_and_exact_arm_after_reservation() {
+        let (f, policy, source) = policy_fixture(0, 0);
+        f.check().await;
+        std::fs::write(source, b"changed selected application policy").unwrap();
+        assert!(f.install().await.unwrap().is_err());
+        assert_eq!(policy.calls.load(Ordering::SeqCst), 0);
+        assert!(
+            f.approvals
+                .shared
+                .service
+                .list(Default::default())
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(f.count(), 0);
+
+        let (f, policy, _) = policy_fixture(0, 0);
+        f.check().await;
+        *policy.change_epoch.lock().unwrap() = Some(f.package.clone());
+        assert!(f.install().await.unwrap().is_err());
+        let records = f.approvals.shared.service.list(Default::default()).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].status, ApprovalStatus::Approved);
         assert_eq!(f.count(), 0);
         assert!(policy.lock.try_write().is_ok());
-        assert!(f.presenter.is_none());
+        assert_eq!(policy.released.load(Ordering::SeqCst), 1);
     }
-}
 
-#[tokio::test]
-async fn application_policy_rechecks_selected_artifact_and_exact_arm_after_reservation() {
-    let (f, policy, source) = policy_fixture(0, 0);
-    f.check().await;
-    std::fs::write(source, b"changed selected application policy").unwrap();
-    assert!(f.install().await.unwrap().is_err());
-    assert_eq!(policy.calls.load(Ordering::SeqCst), 0);
-    assert!(f.approvals.shared.service.list(Default::default()).unwrap().is_empty());
-    assert_eq!(f.count(), 0);
+    #[tokio::test]
+    async fn application_policy_drop_releases_reservation_but_keeps_uncertain_replay_exclusion() {
+        let (f, policy, _) = policy_fixture(2, 0);
+        f.check().await;
+        let entered = f.package.entered.notified();
+        let run = f.install();
+        tokio::pin!(entered);
+        let observed = tokio::time::timeout(Duration::from_secs(2), entered.as_mut()).await;
+        let held = policy.lock.try_write().is_err();
+        run.abort();
+        let cancelled = run.await;
+        assert!(observed.is_ok());
+        assert!(held);
+        assert!(cancelled.unwrap_err().is_cancelled());
+        assert!(policy.lock.try_write().is_ok());
+        assert_eq!(policy.released.load(Ordering::SeqCst), 1);
+        assert!(f.approvals.has_uncertain_dispatch());
+        assert!(f.install().await.unwrap().is_err());
+        assert_eq!(f.count(), 1);
+    }
 
-    let (f, policy, _) = policy_fixture(0, 0);
-    f.check().await;
-    *policy.change_epoch.lock().unwrap() = Some(f.package.clone());
-    assert!(f.install().await.unwrap().is_err());
-    let records = f.approvals.shared.service.list(Default::default()).unwrap();
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].status, ApprovalStatus::Approved);
-    assert_eq!(f.count(), 0);
-    assert!(policy.lock.try_write().is_ok());
-    assert_eq!(policy.released.load(Ordering::SeqCst), 1);
-}
+    #[tokio::test]
+    async fn application_policy_lost_reply_releases_reservation_without_rearming() {
+        let (f, policy, _) = policy_fixture(1, 0);
+        f.check().await;
+        assert!(f.install().await.unwrap().is_err());
+        assert!(policy.lock.try_write().is_ok());
+        assert_eq!(policy.released.load(Ordering::SeqCst), 1);
+        assert!(f.approvals.has_uncertain_dispatch());
+        assert!(f.install().await.unwrap().is_err());
+        assert_eq!(f.count(), 1);
+    }
 
-#[tokio::test]
-async fn application_policy_drop_releases_reservation_but_keeps_uncertain_replay_exclusion() {
-    let (f, policy, _) = policy_fixture(2, 0);
-    f.check().await;
-    let entered = f.package.entered.notified();
-    let run = f.install();
-    tokio::pin!(entered);
-    let observed = tokio::time::timeout(Duration::from_secs(2), entered.as_mut()).await;
-    let held = policy.lock.try_write().is_err();
-    run.abort();
-    let cancelled = run.await;
-    assert!(observed.is_ok());
-    assert!(held);
-    assert!(cancelled.unwrap_err().is_cancelled());
-    assert!(policy.lock.try_write().is_ok());
-    assert_eq!(policy.released.load(Ordering::SeqCst), 1);
-    assert!(f.approvals.has_uncertain_dispatch());
-    assert!(f.install().await.unwrap().is_err());
-    assert_eq!(f.count(), 1);
-}
-
-#[tokio::test]
-async fn application_policy_lost_reply_releases_reservation_without_rearming() {
-    let (f, policy, _) = policy_fixture(1, 0);
-    f.check().await;
-    assert!(f.install().await.unwrap().is_err());
-    assert!(policy.lock.try_write().is_ok());
-    assert_eq!(policy.released.load(Ordering::SeqCst), 1);
-    assert!(f.approvals.has_uncertain_dispatch());
-    assert!(f.install().await.unwrap().is_err());
-    assert_eq!(f.count(), 1);
-}
-
-#[tokio::test]
-async fn application_policy_closed_lifetime_refuses_before_dispatch_and_releases_policy() {
-    use meerkat_toolkit::host_lifetime::control::{HostCloseReason, PrivateHostLifetimeControl};
-    let (f, policy, _) = policy_fixture(0, 0);
-    f.check().await;
-    let args = serde_json::value::to_raw_value(&install(true)).unwrap();
-    let call = ToolCallView { id: "install", name: f.install_name(), args: &args };
-    let context = ToolDispatchContext::default().with_runtime_identity(f.session.clone(), None);
-    assert!(matches!(f.approvals.await_service_dispatch(&f.owner, call, &context, None).await.unwrap(),
-        SoftwareReviewOutcome::Approved));
-    let guard = f.approvals.service_dispatch_guard(call, &context).unwrap();
-    let lifetime = f.approvals.shared.installation_policy.as_ref().unwrap().resolve().unwrap().unwrap().lifetime().clone();
-    let closing = lifetime.begin_close_activation(HostCloseReason::OperatorDisable).unwrap();
-    let refused = f.approvals.check_service_entry(call, &context);
-    let result = f.approvals.settle_service_result(&f.owner, call, &context,
-        LiveBridgeEffectOutcome::Failed, Err(ToolError::access_denied(call.name)));
-    drop(guard);
-    let closed = lifetime.join_close(&closing.handle).await;
-    assert!(closed.is_ok());
-    assert!(refused.is_err());
-    assert!(result.is_err());
-    assert_eq!(f.count(), 0);
-    assert!(policy.lock.try_write().is_ok());
-    assert_eq!(policy.released.load(Ordering::SeqCst), 1);
-    assert!(!f.approvals.has_uncertain_dispatch());
-}
-
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn application_policy_record_and_entry_do_not_invert_phase_and_approval_state() {
-    use std::sync::mpsc;
-    for entry_check in [false, true] {
+    #[tokio::test]
+    async fn application_policy_closed_lifetime_refuses_before_dispatch_and_releases_policy() {
+        use meerkat_toolkit::host_lifetime::control::{
+            HostCloseReason, PrivateHostLifetimeControl,
+        };
         let (f, policy, _) = policy_fixture(0, 0);
         f.check().await;
         let args = serde_json::value::to_raw_value(&install(true)).unwrap();
-        let call = ToolCallView { id: "install", name: f.install_name(), args: &args };
-        let context = ToolDispatchContext::default().with_runtime_identity(f.session.clone(), None);
-        let installed_policy = f.approvals.shared.installation_policy.as_ref().unwrap().resolve().unwrap().unwrap();
-        let lifetime = installed_policy.lifetime().clone();
-        let retained = if entry_check {
-            f.approvals.await_service_dispatch(&f.owner, call, &context, None).await.unwrap();
-            None
-        } else {
-            // Reserve before holding phase so this reaches the real decision
-            // seam, not the earlier reserve-time selection observation.
-            let held = f.owner.retain_action(call, &f.session).unwrap();
-            let mut reviewed = held.review();
-            reviewed["tool"] = call.name.into();
-            reviewed["call_id"] = call.id.into();
-            let entry = installed_policy.reserve(held.realm(), call, &context, &reviewed).unwrap().unwrap();
-            Some((held, reviewed, entry))
+        let call = ToolCallView {
+            id: "install",
+            name: f.install_name(),
+            args: &args,
         };
-        // Keep this wrapper alive through settlement: its Drop retires Shared.
-        let approvals = Arc::new(LocalApprovals { shared: f.approvals.shared.clone(), service_tasks: None });
-        let (phase_ready, phase_observed) = tokio::sync::oneshot::channel();
-        let (phase_release, release) = mpsc::sync_channel(1);
-        let observing = approvals.clone();
-        let phase = tokio::task::spawn_blocking(move || lifetime.with_current_setup(|| {
-            // Nonblocking acquisition only: never wait for State under entry.
-            // Once both are held, an entry-first contender must refuse without
-            // trying State; a State-first contender cannot complete yet.
-            let state = observing.shared.state.try_lock()
-                .map_err(|_| meerkat_toolkit::host_lifetime::control::HostLifetimeError::Unavailable)?;
-            let custody = state.attempt.as_ref().map(|attempt| attempt.custody);
-            let _ = phase_ready.send(custody);
-            let released = release.recv_timeout(Duration::from_secs(5)).is_ok();
-            drop(state);
-            Ok((released, custody))
-        }));
-        let ready = tokio::time::timeout(Duration::from_secs(2), phase_observed).await;
-        let runtime = tokio::runtime::Handle::current();
-        let owner = f.owner.clone();
-        let worker_approvals = approvals.clone();
-        let (attempt_completed, completed) = tokio::sync::oneshot::channel();
-        let operation = tokio::task::spawn_blocking(move || {
-            let call = ToolCallView { id: "install", name: "setup_selected_install", args: &args };
-            let result = match retained {
-                Some((held, reviewed, entry)) => runtime.block_on(worker_approvals.shared.review_dispatch(
-                    call, Some(&context), Some(HeldAction::Service(held)), reviewed, None, Some(entry), |held| match held {
-                        HeldAction::Service(held) => owner.arm_action(held),
-                        _ => Err(ToolError::access_denied(call.name)),
-                    })),
-                None => worker_approvals.check_service_entry(call, &context),
-            };
-            let _ = attempt_completed.send(result);
-        });
-        // Completion must occur while setup holds both entry and State.
-        // A State-first path times out without trapping either worker: release
-        // and join before inspecting any result.
-        let contended = tokio::time::timeout(Duration::from_secs(2), completed).await;
-        let effects_while_held = f.count();
-        let released_while_held = policy.released.load(Ordering::SeqCst);
-        let _ = phase_release.send(());
-        let phase_result = phase.await;
-        let operation_result = operation.await;
-
-        // The refused record did not consume its proposal. After release, the
-        // same real review/entry paths must succeed without changing authority.
-        let args = serde_json::value::to_raw_value(&install(true)).unwrap();
-        let call = ToolCallView { id: "install", name: f.install_name(), args: &args };
         let context = ToolDispatchContext::default().with_runtime_identity(f.session.clone(), None);
-        let uncontended_review = if entry_check { None } else {
-            Some(f.approvals.await_service_dispatch(&f.owner, call, &context, None).await)
-        };
-        let uncontended_entry = f.approvals.check_service_entry(call, &context);
-        let current = f.approvals.check_session(&f.session);
-        let records = f.approvals.shared.service.list(Default::default());
-        // No installation is dispatched. Settle the unused arm with a known
-        // failure, then check that real policy/custody/arm ownership was released.
-        let guard = f.approvals.service_dispatch_guard(call, &context).ok();
-        let had_guard = guard.is_some();
-        let settled = f.approvals.settle_service_result(&f.owner, call, &context,
-            LiveBridgeEffectOutcome::Failed, Err(ToolError::access_denied(call.name)));
+        assert!(matches!(
+            f.approvals
+                .await_service_dispatch(&f.owner, call, &context, None)
+                .await
+                .unwrap(),
+            SoftwareReviewOutcome::Approved
+        ));
+        let guard = f.approvals.service_dispatch_guard(call, &context).unwrap();
+        let lifetime = f
+            .approvals
+            .shared
+            .installation_policy
+            .as_ref()
+            .unwrap()
+            .resolve()
+            .unwrap()
+            .unwrap()
+            .lifetime()
+            .clone();
+        let closing = lifetime
+            .begin_close_activation(HostCloseReason::OperatorDisable)
+            .unwrap();
+        let refused = f.approvals.check_service_entry(call, &context);
+        let result = f.approvals.settle_service_result(
+            &f.owner,
+            call,
+            &context,
+            LiveBridgeEffectOutcome::Failed,
+            Err(ToolError::access_denied(call.name)),
+        );
         drop(guard);
-        let reusable = f.owner.retain_action(call, &f.session).is_ok();
-
-        let expected_custody = if entry_check { Some(Custody::SpentUncertain) } else { None };
-        assert_eq!(ready.unwrap().unwrap(), expected_custody);
-        assert_eq!(phase_result.unwrap().unwrap(), (true, expected_custody));
-        assert!(operation_result.is_ok());
-        assert_eq!(contended.unwrap().unwrap(), Err(ToolError::unavailable(
-            f.install_name(), meerkat_core::ToolUnavailableReason::TemporarilyUnavailable)));
-        assert_eq!(effects_while_held, 0);
-        assert_eq!(released_while_held, if entry_check { 0 } else { 1 });
-        if !entry_check { assert!(matches!(uncontended_review, Some(Ok(SoftwareReviewOutcome::Approved)))); }
-        assert!(uncontended_entry.is_ok());
-        assert!(current.is_ok());
-        let records = records.unwrap();
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].status, ApprovalStatus::Approved);
-        assert!(had_guard);
-        assert_eq!(settled.unwrap_err(), ToolError::access_denied(f.install_name()));
-        assert!(!f.approvals.has_uncertain_dispatch());
-        assert!(reusable);
+        let closed = lifetime.join_close(&closing.handle).await;
+        assert!(closed.is_ok());
+        assert!(refused.is_err());
+        assert!(result.is_err());
         assert_eq!(f.count(), 0);
         assert!(policy.lock.try_write().is_ok());
-        assert_eq!(policy.calls.load(Ordering::SeqCst), if entry_check { 1 } else { 2 });
-        assert_eq!(policy.released.load(Ordering::SeqCst), if entry_check { 1 } else { 2 });
+        assert_eq!(policy.released.load(Ordering::SeqCst), 1);
+        assert!(!f.approvals.has_uncertain_dispatch());
     }
-}
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn application_policy_record_and_entry_do_not_invert_phase_and_approval_state() {
+        use std::sync::mpsc;
+        for entry_check in [false, true] {
+            let (f, policy, _) = policy_fixture(0, 0);
+            f.check().await;
+            let args = serde_json::value::to_raw_value(&install(true)).unwrap();
+            let call = ToolCallView {
+                id: "install",
+                name: f.install_name(),
+                args: &args,
+            };
+            let context =
+                ToolDispatchContext::default().with_runtime_identity(f.session.clone(), None);
+            let installed_policy = f
+                .approvals
+                .shared
+                .installation_policy
+                .as_ref()
+                .unwrap()
+                .resolve()
+                .unwrap()
+                .unwrap();
+            let lifetime = installed_policy.lifetime().clone();
+            let retained = if entry_check {
+                f.approvals
+                    .await_service_dispatch(&f.owner, call, &context, None)
+                    .await
+                    .unwrap();
+                None
+            } else {
+                // Reserve before holding phase so this reaches the real decision
+                // seam, not the earlier reserve-time selection observation.
+                let held = f.owner.retain_action(call, &f.session).unwrap();
+                let mut reviewed = held.review();
+                reviewed["tool"] = call.name.into();
+                reviewed["call_id"] = call.id.into();
+                let entry = installed_policy
+                    .reserve(held.realm(), call, &context, &reviewed)
+                    .unwrap()
+                    .unwrap();
+                Some((held, reviewed, entry))
+            };
+            // Keep this wrapper alive through settlement: its Drop retires Shared.
+            let approvals = Arc::new(LocalApprovals {
+                shared: f.approvals.shared.clone(),
+                service_tasks: None,
+            });
+            let (phase_ready, phase_observed) = tokio::sync::oneshot::channel();
+            let (phase_release, release) = mpsc::sync_channel(1);
+            let observing = approvals.clone();
+            let phase = tokio::task::spawn_blocking(move || {
+                lifetime.with_current_setup(|| {
+                    // Nonblocking acquisition only: never wait for State under entry.
+                    // Once both are held, an entry-first contender must refuse without
+                    // trying State; a State-first contender cannot complete yet.
+                    let state = observing.shared.state.try_lock().map_err(|_| {
+                        meerkat_toolkit::host_lifetime::control::HostLifetimeError::Unavailable
+                    })?;
+                    let custody = state.attempt.as_ref().map(|attempt| attempt.custody);
+                    let _ = phase_ready.send(custody);
+                    let released = release.recv_timeout(Duration::from_secs(5)).is_ok();
+                    drop(state);
+                    Ok((released, custody))
+                })
+            });
+            let ready = tokio::time::timeout(Duration::from_secs(2), phase_observed).await;
+            let runtime = tokio::runtime::Handle::current();
+            let owner = f.owner.clone();
+            let worker_approvals = approvals.clone();
+            let (attempt_completed, completed) = tokio::sync::oneshot::channel();
+            let operation = tokio::task::spawn_blocking(move || {
+                let call = ToolCallView {
+                    id: "install",
+                    name: "setup_selected_install",
+                    args: &args,
+                };
+                let result = match retained {
+                    Some((held, reviewed, entry)) => {
+                        runtime.block_on(worker_approvals.shared.review_dispatch(
+                            call,
+                            Some(&context),
+                            Some(HeldAction::Service(held)),
+                            reviewed,
+                            None,
+                            Some(entry),
+                            |held| match held {
+                                HeldAction::Service(held) => owner.arm_action(held),
+                                _ => Err(ToolError::access_denied(call.name)),
+                            },
+                        ))
+                    }
+                    None => worker_approvals.check_service_entry(call, &context),
+                };
+                let _ = attempt_completed.send(result);
+            });
+            // Completion must occur while setup holds both entry and State.
+            // A State-first path times out without trapping either worker: release
+            // and join before inspecting any result.
+            let contended = tokio::time::timeout(Duration::from_secs(2), completed).await;
+            let effects_while_held = f.count();
+            let released_while_held = policy.released.load(Ordering::SeqCst);
+            let _ = phase_release.send(());
+            let phase_result = phase.await;
+            let operation_result = operation.await;
 
-// This low-level selected-owner fixture pins a small policy document in a real
-// activation. The full acquisition document is exercised separately by the
-// application_setup closure control; the package dispatcher here is synthetic.
-fn selected_fixture(behavior: u8,
-    selection: crate::application_acquisition::selected_policy::StandingPolicySelection,
-    presenter: bool,
-) -> (Fixture, Arc<crate::application_acquisition::selected_policy::SelectedPolicyBinding>,
-    Arc<meerkat_toolkit::host_lifetime::NativeHostLifetime>, PathBuf)
-{
-    selected_fixture_with_administration(behavior, selection, presenter, false)
-}
-fn selected_fixture_with_administration(behavior: u8,
-    selection: crate::application_acquisition::selected_policy::StandingPolicySelection,
-    presenter: bool, administration: bool,
-) -> (Fixture, Arc<crate::application_acquisition::selected_policy::SelectedPolicyBinding>,
-    Arc<meerkat_toolkit::host_lifetime::NativeHostLifetime>, PathBuf)
-{
-    use crate::application_acquisition::selected_policy::SelectedPolicyBinding;
-    let mut retained = None;
-    let realm = meerkat_core::mob_realm_id("unattended-fixture").unwrap();
-    let mut fixture = Fixture::build(true, behavior, realm.as_str(), |root, realm| {
-        let (lifetime, source) = policy_lifetime_with_selection(root, &realm.realm, Some(selection), administration);
-        let native = lifetime.selected_policy().native_host.as_ref().unwrap();
-        let slot = SelectedPolicyBinding::new(selection, native.grant_administrator.clone(),
-            lifetime.selected_policy().deployment.clone(), realm.realm.clone(),
-            native.members.iter().map(|row| row.member.member.clone()).collect());
-        let approvals = LocalApprovals::create_for_selected_policy(root, slot.clone(), presenter.then_some(false)).unwrap();
-        retained = Some((slot, lifetime, source));
-        approvals
-    });
-    fixture.owner = CheckedInstalls::fixture_with_review(fixture.package.clone(),
-        Arc::new(LocalApprovals { shared: fixture.approvals.shared.clone(), service_tasks: None }));
-    fixture.owner.bind_realm(&fixture.realm).unwrap();
-    fixture.gate = Arc::new(ExecutionPolicyGatedDispatcher::new(fixture.owner.clone(),
-        ToolExecutionPolicy::resolve(ToolAccessPolicy::AllowList(NAMES.iter().copied().collect())).unwrap()));
-    let (slot, lifetime, source) = retained.unwrap();
-    (fixture, slot, lifetime, source)
-}
-fn checked_selection() -> crate::application_acquisition::selected_policy::StandingPolicySelection {
-    use crate::application_acquisition::selected_policy::*;
-    StandingPolicySelection { installation: InstallationSelection::CheckedSoftware, access: AccessSelection::ConfiguredParent, tool_policy: None }
-}
-fn bind_selected(slot: &crate::application_acquisition::selected_policy::SelectedPolicyBinding,
-    lifetime: &Arc<meerkat_toolkit::host_lifetime::NativeHostLifetime>,
-    selection: crate::application_acquisition::selected_policy::StandingPolicySelection)
-    -> Result<(), meerkat_toolkit::host_lifetime::control::HostLifetimeError> {
-    let reference = lifetime.selected_policy().native_host.as_ref().unwrap().setup.as_ref().unwrap();
-    slot.bind(lifetime.clone(), selection, reference)
-}
+            // The refused record did not consume its proposal. After release, the
+            // same real review/entry paths must succeed without changing authority.
+            let args = serde_json::value::to_raw_value(&install(true)).unwrap();
+            let call = ToolCallView {
+                id: "install",
+                name: f.install_name(),
+                args: &args,
+            };
+            let context =
+                ToolDispatchContext::default().with_runtime_identity(f.session.clone(), None);
+            let uncontended_review = if entry_check {
+                None
+            } else {
+                Some(
+                    f.approvals
+                        .await_service_dispatch(&f.owner, call, &context, None)
+                        .await,
+                )
+            };
+            let uncontended_entry = f.approvals.check_service_entry(call, &context);
+            let current = f.approvals.check_session(&f.session);
+            let records = f.approvals.shared.service.list(Default::default());
+            // No installation is dispatched. Settle the unused arm with a known
+            // failure, then check that real policy/custody/arm ownership was released.
+            let guard = f.approvals.service_dispatch_guard(call, &context).ok();
+            let had_guard = guard.is_some();
+            let settled = f.approvals.settle_service_result(
+                &f.owner,
+                call,
+                &context,
+                LiveBridgeEffectOutcome::Failed,
+                Err(ToolError::access_denied(call.name)),
+            );
+            drop(guard);
+            let reusable = f.owner.retain_action(call, &f.session).is_ok();
 
-#[tokio::test]
-async fn selected_policy_defers_to_exact_adopted_owner_and_cannot_rebind() {
-    use crate::application_acquisition::selected_policy::InstallationSelection;
-    use meerkat_toolkit::host_lifetime::control::HostLifetimeError;
-    let selection = checked_selection();
-    let (mut f, slot, lifetime, _) = selected_fixture(0, selection, true);
-    f.check().await;
-    let unavailable = f.install().await.unwrap().unwrap_err();
-    assert_eq!(std::mem::discriminant(&unavailable), std::mem::discriminant(&ToolError::unavailable(
-        f.install_name(), meerkat_core::ToolUnavailableReason::TemporarilyUnavailable)));
-    assert!(matches!(slot.service(), Err(HostLifetimeError::Unavailable)));
-    assert!(f.approvals.shared.service.list(Default::default()).unwrap().is_empty());
-    assert!(f.approvals.shared.state().unwrap().attempt.is_none());
-    assert!(f.presenter.as_mut().unwrap().prompts.try_recv().is_err());
-    assert_eq!(f.count(), 0);
-    let mut wrong = selection;
-    wrong.installation = InstallationSelection::HumanReview;
-    assert!(bind_selected(&slot, &lifetime, wrong).is_err());
-    bind_selected(&slot, &lifetime, selection).unwrap();
-    let bound = slot.installation().unwrap().unwrap();
-    assert!(Arc::ptr_eq(bound.lifetime(), &lifetime));
-    assert!(slot.service().unwrap().unwrap().belongs_to(&lifetime));
-    assert!(bind_selected(&slot, &lifetime, selection).is_err());
-    let other = tempfile::tempdir().unwrap();
-    let (other_owner, _) = policy_lifetime_with_selection(other.path(), &f.realm.realm, Some(selection), false);
-    assert!(bind_selected(&slot, &other_owner, selection).is_err());
-    assert!(Arc::ptr_eq(slot.installation().unwrap().unwrap().lifetime(), &lifetime));
-    assert!(f.install().await.unwrap().is_ok());
-    assert_eq!(f.count(), 1);
-    // A real available presenter was not used for pending state or policy permit.
-    assert!(f.presenter.as_mut().unwrap().prompts.try_recv().is_err());
-}
-
-#[tokio::test]
-async fn selected_policy_records_exact_outside_catalog_action_and_real_owner_without_presenter() {
-    let selection = checked_selection();
-    let (f, slot, lifetime, _) = selected_fixture(0, selection, false);
-    bind_selected(&slot, &lifetime, selection).unwrap();
-    f.check().await;
-    let result = f.install().await.unwrap().unwrap();
-    assert!(!result.result.is_error);
-    assert!(f.presenter.is_none());
-    assert!(f.approvals.shared.prompts.is_closed());
-    let records = f.approvals.shared.service.list(Default::default()).unwrap();
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].status, ApprovalStatus::Approved);
-    assert_eq!(records[0].decision.as_ref().unwrap().actor,
-        ApprovalPrincipalId::new(serde_json::to_string(slot.owner()).unwrap()).unwrap());
-    let provenance = records[0].request_provenance.as_ref().unwrap();
-    assert_eq!(provenance["application"], json!(slot.owner()));
-    assert_eq!(provenance["decision"]["kind"], "selected_application_setup_policy");
-    assert_eq!(provenance["decision"]["selection"], json!(selection));
-    assert_eq!(provenance["decision"]["setup"], json!(lifetime.selected_policy().native_host.as_ref().unwrap().setup));
-    assert_eq!(records[0].proposed_action.body.as_ref().unwrap()["owner_proposal"]["effect_sha256"], "d".repeat(64));
-    assert_eq!(f.package.reply.lock().unwrap()["package"]["publisher"], "fixture");
-    assert!(f.install().await.unwrap().is_err());
-    assert_eq!(f.count(), 1);
-}
-
-#[tokio::test]
-async fn selected_human_mode_uses_same_presenter_or_returns_action_without_arming() {
-    use crate::application_acquisition::selected_policy::InstallationSelection;
-    let mut selection = checked_selection();
-    selection.installation = InstallationSelection::HumanReview;
-    let (f, slot, lifetime, _) = selected_fixture(0, selection, false);
-    bind_selected(&slot, &lifetime, selection).unwrap();
-    f.check().await;
-    let action = f.install().await.unwrap().unwrap();
-    assert_eq!(serde_json::from_str::<Value>(&action.result.text_content()).unwrap(),
-        json!({"state":"requires_action","action":"human_installation_review","installed":false}));
-    assert_eq!(f.count(), 0);
-    assert!(f.approvals.shared.service.list(Default::default()).unwrap().is_empty());
-    assert!(f.approvals.shared.state().unwrap().attempt.is_none());
-
-    let (mut f, slot, lifetime, _) = selected_fixture(0, selection, true);
-    bind_selected(&slot, &lifetime, selection).unwrap();
-    f.check().await;
-    let run = f.install();
-    let prompt = tokio::time::timeout(Duration::from_secs(2), f.presenter.as_mut().unwrap().next()).await;
-    let observed = match prompt {
-        Ok(Some(mut prompt)) => {
-            let id = prompt.record.approval_id.clone();
-            let pending = prompt.record.status == ApprovalStatus::Pending;
-            let decision = prompt.decide(ApprovalDecision::Approve);
-            if decision.is_err() { run.abort(); }
-            Some((id, pending, decision))
+            let expected_custody = if entry_check {
+                Some(Custody::SpentUncertain)
+            } else {
+                None
+            };
+            assert_eq!(ready.unwrap().unwrap(), expected_custody);
+            assert_eq!(phase_result.unwrap().unwrap(), (true, expected_custody));
+            assert!(operation_result.is_ok());
+            assert_eq!(
+                contended.unwrap().unwrap(),
+                Err(ToolError::unavailable(
+                    f.install_name(),
+                    meerkat_core::ToolUnavailableReason::TemporarilyUnavailable
+                ))
+            );
+            assert_eq!(effects_while_held, 0);
+            assert_eq!(released_while_held, if entry_check { 0 } else { 1 });
+            if !entry_check {
+                assert!(matches!(
+                    uncontended_review,
+                    Some(Ok(SoftwareReviewOutcome::Approved))
+                ));
+            }
+            assert!(uncontended_entry.is_ok());
+            assert!(current.is_ok());
+            let records = records.unwrap();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].status, ApprovalStatus::Approved);
+            assert!(had_guard);
+            assert_eq!(
+                settled.unwrap_err(),
+                ToolError::access_denied(f.install_name())
+            );
+            assert!(!f.approvals.has_uncertain_dispatch());
+            assert!(reusable);
+            assert_eq!(f.count(), 0);
+            assert!(policy.lock.try_write().is_ok());
+            assert_eq!(
+                policy.calls.load(Ordering::SeqCst),
+                if entry_check { 1 } else { 2 }
+            );
+            assert_eq!(
+                policy.released.load(Ordering::SeqCst),
+                if entry_check { 1 } else { 2 }
+            );
         }
-        _ => { run.abort(); None }
-    };
-    let completed = run.await;
-    let (id, pending, decision) = observed.expect("same presenter receives native review");
-    assert!(pending);
-    decision.unwrap();
-    completed.unwrap().unwrap();
-    let record = f.approvals.shared.service.get(&id).unwrap();
-    assert_eq!(record.decision.as_ref().unwrap().actor, ApprovalPrincipalId::new("connect-local-terminal").unwrap());
-    assert_eq!(f.count(), 1);
-}
-
-
-#[tokio::test]
-async fn task_parent_selection_without_admin_rule_never_arms_or_falls_back() {
-    use crate::application_acquisition::selected_policy::AccessSelection;
-    use meerkat_toolkit::host_lifetime::control::HostLifetimeError;
-    let mut selection = checked_selection();
-    selection.access = AccessSelection::ProvisionTaskParent;
-    let (mut f, slot, lifetime, _) = selected_fixture(0, selection, true);
-    assert!(matches!(slot.service(), Err(HostLifetimeError::Unavailable)));
-    assert!(bind_selected(&slot, &lifetime, selection).is_err());
-    // Do not reinterpret the request as its otherwise available configured or
-    // human branch after the independent administrative selection was refused.
-    for access in [AccessSelection::ConfiguredParent, AccessSelection::HumanReview] {
-        let mut alternate = selection;
-        alternate.access = access;
-        assert!(matches!(bind_selected(&slot, &lifetime, alternate), Err(HostLifetimeError::WrongOwner)));
     }
-    f.check().await;
-    let result = f.install().await.unwrap().unwrap_err();
-    assert_eq!(std::mem::discriminant(&result), std::mem::discriminant(&ToolError::unavailable(
-        f.install_name(), meerkat_core::ToolUnavailableReason::TemporarilyUnavailable)));
-    assert!(matches!(slot.service(), Err(HostLifetimeError::Unavailable)));
-    assert!(f.approvals.shared.service.list(Default::default()).unwrap().is_empty());
-    assert!(f.approvals.shared.state().unwrap().attempt.is_none());
-    assert!(f.presenter.as_mut().unwrap().prompts.try_recv().is_err());
-    assert_eq!(f.count(), 0);
-}
 
-#[tokio::test]
-async fn task_parent_fields_without_actual_producer_never_authorize_or_bind() {
-    use crate::application_acquisition::selected_policy::AccessSelection;
-    use meerkat_toolkit::host_lifetime::control::HostLifetimeError;
-    let mut selection = checked_selection();
-    selection.access = AccessSelection::ProvisionTaskParent;
-    let (mut f, slot, lifetime, _) = selected_fixture_with_administration(0, selection, true, true);
-    assert!(matches!(bind_selected(&slot, &lifetime, selection), Err(HostLifetimeError::Unavailable)));
-    // Even an exact selected administrative label and rule cannot substitute
-    // for the actual protected parent's independently retained auth owner.
-    assert!(matches!(slot.service(), Err(HostLifetimeError::Unavailable)));
-    assert!(matches!(slot.service_parent(), Err(HostLifetimeError::Unavailable)));
-    f.check().await;
-    assert!(f.install().await.unwrap().is_err());
-    assert!(f.approvals.shared.service.list(Default::default()).unwrap().is_empty());
-    assert!(f.approvals.shared.state().unwrap().attempt.is_none());
-    assert!(f.presenter.as_mut().unwrap().prompts.try_recv().is_err());
-    assert_eq!(f.count(), 0);
-}
+    // This low-level selected-owner fixture pins a small policy document in a real
+    // activation. The full acquisition document is exercised separately by the
+    // application_setup closure control; the package dispatcher here is synthetic.
+    fn selected_fixture(
+        behavior: u8,
+        selection: crate::application_acquisition::selected_policy::StandingPolicySelection,
+        presenter: bool,
+    ) -> (
+        Fixture,
+        Arc<crate::application_acquisition::selected_policy::SelectedPolicyBinding>,
+        Arc<meerkat_toolkit::host_lifetime::NativeHostLifetime>,
+        PathBuf,
+    ) {
+        selected_fixture_with_administration(behavior, selection, presenter, false)
+    }
+    fn selected_fixture_with_administration(
+        behavior: u8,
+        selection: crate::application_acquisition::selected_policy::StandingPolicySelection,
+        presenter: bool,
+        administration: bool,
+    ) -> (
+        Fixture,
+        Arc<crate::application_acquisition::selected_policy::SelectedPolicyBinding>,
+        Arc<meerkat_toolkit::host_lifetime::NativeHostLifetime>,
+        PathBuf,
+    ) {
+        use crate::application_acquisition::selected_policy::SelectedPolicyBinding;
+        let mut retained = None;
+        let realm = meerkat_core::mob_realm_id("unattended-fixture").unwrap();
+        let mut fixture = Fixture::build(true, behavior, realm.as_str(), |root, realm| {
+            let (lifetime, source) =
+                policy_lifetime_with_selection(root, &realm.realm, Some(selection), administration);
+            let native = lifetime.selected_policy().native_host.as_ref().unwrap();
+            let slot = SelectedPolicyBinding::new(
+                selection,
+                native.grant_administrator.clone(),
+                lifetime.selected_policy().deployment.clone(),
+                realm.realm.clone(),
+                native
+                    .members
+                    .iter()
+                    .map(|row| row.member.member.clone())
+                    .collect(),
+            );
+            let approvals = LocalApprovals::create_for_selected_policy(
+                root,
+                slot.clone(),
+                presenter.then_some(false),
+            )
+            .unwrap();
+            retained = Some((slot, lifetime, source));
+            approvals
+        });
+        fixture.owner = CheckedInstalls::fixture_with_review(
+            fixture.package.clone(),
+            Arc::new(LocalApprovals {
+                shared: fixture.approvals.shared.clone(),
+                service_tasks: None,
+            }),
+        );
+        fixture.owner.bind_realm(&fixture.realm).unwrap();
+        fixture.gate = Arc::new(ExecutionPolicyGatedDispatcher::new(
+            fixture.owner.clone(),
+            ToolExecutionPolicy::resolve(ToolAccessPolicy::AllowList(
+                NAMES.iter().copied().collect(),
+            ))
+            .unwrap(),
+        ));
+        let (slot, lifetime, source) = retained.unwrap();
+        (fixture, slot, lifetime, source)
+    }
+    fn checked_selection()
+    -> crate::application_acquisition::selected_policy::StandingPolicySelection {
+        use crate::application_acquisition::selected_policy::*;
+        StandingPolicySelection {
+            installation: InstallationSelection::CheckedSoftware,
+            access: AccessSelection::ConfiguredParent,
+            tool_policy: None,
+        }
+    }
+    fn bind_selected(
+        slot: &crate::application_acquisition::selected_policy::SelectedPolicyBinding,
+        lifetime: &Arc<meerkat_toolkit::host_lifetime::NativeHostLifetime>,
+        selection: crate::application_acquisition::selected_policy::StandingPolicySelection,
+    ) -> Result<(), meerkat_toolkit::host_lifetime::control::HostLifetimeError> {
+        let reference = lifetime
+            .selected_policy()
+            .native_host
+            .as_ref()
+            .unwrap()
+            .setup
+            .as_ref()
+            .unwrap();
+        slot.bind(lifetime.clone(), selection, reference)
+    }
 
-#[tokio::test]
-async fn selected_policy_drift_and_entered_cancellation_never_fall_back_or_rearm() {
-    let selection = checked_selection();
-    let (mut f, slot, lifetime, source) = selected_fixture(0, selection, true);
-    bind_selected(&slot, &lifetime, selection).unwrap();
-    f.check().await;
-    std::fs::write(source, b"changed selected source").unwrap();
-    assert!(f.install().await.unwrap().is_err());
-    assert!(f.presenter.as_mut().unwrap().prompts.try_recv().is_err());
-    assert!(f.approvals.shared.service.list(Default::default()).unwrap().is_empty());
-    assert_eq!(f.count(), 0);
+    #[tokio::test]
+    async fn selected_policy_defers_to_exact_adopted_owner_and_cannot_rebind() {
+        use crate::application_acquisition::selected_policy::InstallationSelection;
+        use meerkat_toolkit::host_lifetime::control::HostLifetimeError;
+        let selection = checked_selection();
+        let (mut f, slot, lifetime, _) = selected_fixture(0, selection, true);
+        f.check().await;
+        let unavailable = f.install().await.unwrap().unwrap_err();
+        assert_eq!(
+            std::mem::discriminant(&unavailable),
+            std::mem::discriminant(&ToolError::unavailable(
+                f.install_name(),
+                meerkat_core::ToolUnavailableReason::TemporarilyUnavailable
+            ))
+        );
+        assert!(matches!(
+            slot.service(),
+            Err(HostLifetimeError::Unavailable)
+        ));
+        assert!(
+            f.approvals
+                .shared
+                .service
+                .list(Default::default())
+                .unwrap()
+                .is_empty()
+        );
+        assert!(f.approvals.shared.state().unwrap().attempt.is_none());
+        assert!(f.presenter.as_mut().unwrap().prompts.try_recv().is_err());
+        assert_eq!(f.count(), 0);
+        let mut wrong = selection;
+        wrong.installation = InstallationSelection::HumanReview;
+        assert!(bind_selected(&slot, &lifetime, wrong).is_err());
+        bind_selected(&slot, &lifetime, selection).unwrap();
+        let bound = slot.installation().unwrap().unwrap();
+        assert!(Arc::ptr_eq(bound.lifetime(), &lifetime));
+        assert!(slot.service().unwrap().unwrap().belongs_to(&lifetime));
+        assert!(bind_selected(&slot, &lifetime, selection).is_err());
+        let other = tempfile::tempdir().unwrap();
+        let (other_owner, _) =
+            policy_lifetime_with_selection(other.path(), &f.realm.realm, Some(selection), false);
+        assert!(bind_selected(&slot, &other_owner, selection).is_err());
+        assert!(Arc::ptr_eq(
+            slot.installation().unwrap().unwrap().lifetime(),
+            &lifetime
+        ));
+        assert!(f.install().await.unwrap().is_ok());
+        assert_eq!(f.count(), 1);
+        // A real available presenter was not used for pending state or policy permit.
+        assert!(f.presenter.as_mut().unwrap().prompts.try_recv().is_err());
+    }
 
-    let (mut f, slot, lifetime, _) = selected_fixture(2, selection, true);
-    bind_selected(&slot, &lifetime, selection).unwrap();
-    f.check().await;
-    let entered = f.package.entered.notified();
-    let run = f.install();
-    tokio::pin!(entered);
-    let observed = tokio::time::timeout(Duration::from_secs(2), entered.as_mut()).await;
-    run.abort();
-    let cancelled = run.await;
-    assert!(observed.is_ok());
-    assert!(cancelled.unwrap_err().is_cancelled());
-    assert!(f.approvals.has_uncertain_dispatch());
-    assert!(f.install().await.unwrap().is_err());
-    assert!(f.presenter.as_mut().unwrap().prompts.try_recv().is_err());
-    assert!(f.approvals.shared.state().unwrap().attempt.as_ref().unwrap().policy_entry.is_none());
-    assert_eq!(f.count(), 1);
-}
+    #[tokio::test]
+    async fn selected_policy_records_exact_outside_catalog_action_and_real_owner_without_presenter()
+    {
+        let selection = checked_selection();
+        let (f, slot, lifetime, _) = selected_fixture(0, selection, false);
+        bind_selected(&slot, &lifetime, selection).unwrap();
+        f.check().await;
+        let result = f.install().await.unwrap().unwrap();
+        assert!(!result.result.is_error);
+        assert!(f.presenter.is_none());
+        assert!(f.approvals.shared.prompts.is_closed());
+        let records = f.approvals.shared.service.list(Default::default()).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].status, ApprovalStatus::Approved);
+        assert_eq!(
+            records[0].decision.as_ref().unwrap().actor,
+            ApprovalPrincipalId::new(serde_json::to_string(slot.owner()).unwrap()).unwrap()
+        );
+        let provenance = records[0].request_provenance.as_ref().unwrap();
+        assert_eq!(provenance["application"], json!(slot.owner()));
+        assert_eq!(
+            provenance["decision"]["kind"],
+            "selected_application_setup_policy"
+        );
+        assert_eq!(provenance["decision"]["selection"], json!(selection));
+        assert_eq!(
+            provenance["decision"]["setup"],
+            json!(
+                lifetime
+                    .selected_policy()
+                    .native_host
+                    .as_ref()
+                    .unwrap()
+                    .setup
+            )
+        );
+        assert_eq!(
+            records[0].proposed_action.body.as_ref().unwrap()["owner_proposal"]["effect_sha256"],
+            "d".repeat(64)
+        );
+        assert_eq!(
+            f.package.reply.lock().unwrap()["package"]["publisher"],
+            "fixture"
+        );
+        assert!(f.install().await.unwrap().is_err());
+        assert_eq!(f.count(), 1);
+    }
 
-#[tokio::test]
-async fn selected_human_recovery_keeps_exact_participant_and_whole_member_policy_scope() {
-    use crate::application_acquisition::selected_policy::{AccessSelection, MemberToolPolicySelection, SelectedPolicyBinding};
-    use toolkit_mobkit::private_originals::{ActiveMemberToolPolicyDecision, ApplicationToolPolicyRecoveryRequest,
-        ApplicationToolPolicyRecoveryDecision, ServiceToolPolicyProposal, ServiceToolPolicySelection,
-        ServiceToolInvocation, ServiceToolPolicyVersion, MemberPolicyLifetime};
-    use meerkat_core::{CompiledApplicationToolPolicy, CompiledMemberToolGrants, CompiledMemberToolGrant,
-        CompiledMemberToolAction, CompiledToolConsequence, CompiledPolicySourceProvenance,
-        PolicyId, PolicyProviderId, PolicyRevision, PolicyDigest};
-    use meerkat_core::approval::{ApprovalRequest, ApprovalPrincipalId, ApprovalOwnerRef,
-        ApprovalResourceRef, ApprovalResourceKind, ApprovalResourceId, ApprovalProposedAction,
-        ApprovalActionKind, ApprovalRisk};
-    let mut selection = checked_selection();
-    selection.access = AccessSelection::HumanReview;
-    selection.tool_policy = Some(MemberToolPolicySelection::UntilSuperseded);
-    let (fixture, binding, lifetime, _source) = selected_fixture(0, selection, true);
-    let participant = binding.participant();
-    assert!(Arc::ptr_eq(&participant, &binding.participant()));
-    let native = lifetime.selected_policy().native_host.as_ref().unwrap();
-    let member = native.members[0].member.member.clone();
-    let compiled = CompiledApplicationToolPolicy::new(PolicyProviderId::new("fixture-policy-owner").unwrap(),
-        PolicyId::new("fixture-policy").unwrap(), PolicyRevision(2),
-        CompiledPolicySourceProvenance { source_id: "fixture".into(), source_digest: PolicyDigest::from_canonical_bytes(b"fixture") },
-        native.members.iter().map(|row| CompiledMemberToolGrants { member_identity: row.member.member.clone(), grants: vec![
-            CompiledMemberToolGrant { tool_name: "exact_tool".into(), action: CompiledMemberToolAction::Invoke,
-                consequence: CompiledToolConsequence::R0 }] }).collect()).unwrap();
-    let canonical = compiled.canonical_json().unwrap();
-    let proposal = ServiceToolPolicyProposal { provider_id: compiled.provider_id.clone(), policy_id: compiled.policy_id.clone(), member,
-        selection: ServiceToolPolicySelection { tools: vec![ServiceToolInvocation { name: "exact_tool".into(), consequence: CompiledToolConsequence::R0 }], catalog: None },
-        catalog_session: None, prior: ServiceToolPolicyVersion { revision: PolicyRevision(1), digest: PolicyDigest::from_canonical_bytes(b"prior") },
-        candidate: ServiceToolPolicyVersion { revision: compiled.revision, digest: PolicyDigest::from_canonical_bytes(&canonical) },
-        candidate_canonical_json: String::from_utf8(canonical.clone()).unwrap(), lifetime: MemberPolicyLifetime::UntilSuperseded };
-    // This directly exercises the selected participant, not canonical-slot
-    // authentication. Production supplies the real active decision and record.
-    let decision = ActiveMemberToolPolicyDecision { approval_id: "fixture-observation".into(), owner: native.grant_administrator.clone(),
-        realm: native.realm.as_str().into(), deployment: lifetime.selected_policy().deployment.to_string(),
-        original: toolkit_mobkit::private_originals::PrivateOriginalRef {
-            route: toolkit_package::Id::new("fixture-route").unwrap(),
-            original: meerkat_authorization_contracts::evidence::EvidenceId::new("fixture-original").unwrap(),
-            event_sha256: "a".repeat(64) },
-        acquisition: serde_json::from_value(json!({ "realm": native.realm.as_str(),
-            "owner": "fixture-owner", "id": "fixture-acquisition" })).unwrap(),
-        proposal, human_review: None };
-    assert!(matches!(participant.reserve_tool_policy_recovery(&ApplicationToolPolicyRecoveryRequest { decision: &decision, canonical_json: &canonical }).unwrap(),
-        ApplicationToolPolicyRecoveryDecision::Permit(_)));
-    let mut wrong = decision.clone(); wrong.realm = "another-realm".into();
-    assert!(participant.reserve_tool_policy_recovery(&ApplicationToolPolicyRecoveryRequest { decision: &wrong, canonical_json: &canonical }).is_err());
-    wrong = decision.clone(); wrong.proposal.member = "unselected-member".into();
-    assert!(participant.reserve_tool_policy_recovery(&ApplicationToolPolicyRecoveryRequest { decision: &wrong, canonical_json: &canonical }).is_err());
-    let mut changed = canonical.clone(); changed.push(b' ');
-    assert!(participant.reserve_tool_policy_recovery(&ApplicationToolPolicyRecoveryRequest { decision: &decision, canonical_json: &changed }).is_err());
-    bind_selected(&binding, &lifetime, selection).unwrap();
-    assert!(binding.service().unwrap().is_none(), "recovery never enables automatic HumanReview access");
-    assert!(Arc::ptr_eq(&participant, &binding.participant()), "final binding retains the exact recovery participant");
-    let mut legacy = selection; legacy.tool_policy = None;
-    let (_fixture, legacy_binding, _lifetime, _source) = selected_fixture(0, legacy, true);
-    assert!(matches!(legacy_binding.participant().reserve_tool_policy_recovery(&ApplicationToolPolicyRecoveryRequest {
-        decision: &decision, canonical_json: &canonical }).unwrap(), ApplicationToolPolicyRecoveryDecision::RequiresHuman));
+    #[tokio::test]
+    async fn selected_human_mode_uses_same_presenter_or_returns_action_without_arming() {
+        use crate::application_acquisition::selected_policy::InstallationSelection;
+        let mut selection = checked_selection();
+        selection.installation = InstallationSelection::HumanReview;
+        let (f, slot, lifetime, _) = selected_fixture(0, selection, false);
+        bind_selected(&slot, &lifetime, selection).unwrap();
+        f.check().await;
+        let action = f.install().await.unwrap().unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&action.result.text_content()).unwrap(),
+            json!({"state":"requires_action","action":"human_installation_review","installed":false})
+        );
+        assert_eq!(f.count(), 0);
+        assert!(
+            f.approvals
+                .shared
+                .service
+                .list(Default::default())
+                .unwrap()
+                .is_empty()
+        );
+        assert!(f.approvals.shared.state().unwrap().attempt.is_none());
 
-    // Exercise the real existing approval presenter and exact record body, not
-    // native Human authentication or canonical-store acceptance. The default
-    // participant has no standing selection or installed service policy.
-    let default_participant = || SelectedPolicyBinding::human_review_participant(
-        native.grant_administrator.clone(), lifetime.selected_policy().deployment.clone(), native.realm.clone(),
-        native.members.iter().map(|row| row.member.member.clone()).collect());
-    assert!(matches!(default_participant().reserve_tool_policy_recovery(&ApplicationToolPolicyRecoveryRequest {
-        decision: &decision, canonical_json: &canonical }).unwrap(), ApplicationToolPolicyRecoveryDecision::RequiresHuman));
-    let request = ApprovalRequest {
-        requester: ApprovalPrincipalId::new("fixture-presenter").unwrap(),
-        owner: ApprovalOwnerRef::Session { session_id: fixture.session.clone() },
-        resource: ApprovalResourceRef { kind: ApprovalResourceKind::Runtime,
-            id: ApprovalResourceId::new("fixture-member-policy") },
-        proposed_action: ApprovalProposedAction { kind: ApprovalActionKind::Other,
-            summary: "Approve the complete member policy until superseded".into(),
-            body: Some(json!({"access_request":{"member_tool_policy":{"proposal":&decision.proposal}}})) },
-        risk: ApprovalRisk::High, request_body: None,
-        allowed_decisions: [ApprovalDecision::Approve, ApprovalDecision::Deny].into_iter().collect(),
-        expires_at: Some((std::time::SystemTime::now() + Duration::from_secs(30)).into()),
-        metadata: Default::default(), request_provenance: None,
-    };
-    let approval_root = tempfile::tempdir().unwrap();
-    let (approvals, mut presenter) = LocalApprovals::create(approval_root.path()).unwrap();
-    approvals.bind_session(&fixture.session).unwrap();
-    let (record, answer) = tokio::time::timeout(Duration::from_secs(2), async {
-        tokio::join!(approvals.review_access(request), async {
-            let mut prompt = presenter.next().await.ok_or(ConnectError::ReviewCancelled)?;
-            prompt.decide(ApprovalDecision::Approve)
+        let (mut f, slot, lifetime, _) = selected_fixture(0, selection, true);
+        bind_selected(&slot, &lifetime, selection).unwrap();
+        f.check().await;
+        let run = f.install();
+        let prompt =
+            tokio::time::timeout(Duration::from_secs(2), f.presenter.as_mut().unwrap().next())
+                .await;
+        let observed = match prompt {
+            Ok(Some(mut prompt)) => {
+                let id = prompt.record.approval_id.clone();
+                let pending = prompt.record.status == ApprovalStatus::Pending;
+                let decision = prompt.decide(ApprovalDecision::Approve);
+                if decision.is_err() {
+                    run.abort();
+                }
+                Some((id, pending, decision))
+            }
+            _ => {
+                run.abort();
+                None
+            }
+        };
+        let completed = run.await;
+        let (id, pending, decision) = observed.expect("same presenter receives native review");
+        assert!(pending);
+        decision.unwrap();
+        completed.unwrap().unwrap();
+        let record = f.approvals.shared.service.get(&id).unwrap();
+        assert_eq!(
+            record.decision.as_ref().unwrap().actor,
+            ApprovalPrincipalId::new("connect-local-terminal").unwrap()
+        );
+        assert_eq!(f.count(), 1);
+    }
+
+    #[tokio::test]
+    async fn task_parent_selection_without_admin_rule_never_arms_or_falls_back() {
+        use crate::application_acquisition::selected_policy::AccessSelection;
+        use meerkat_toolkit::host_lifetime::control::HostLifetimeError;
+        let mut selection = checked_selection();
+        selection.access = AccessSelection::ProvisionTaskParent;
+        let (mut f, slot, lifetime, _) = selected_fixture(0, selection, true);
+        assert!(matches!(
+            slot.service(),
+            Err(HostLifetimeError::Unavailable)
+        ));
+        assert!(bind_selected(&slot, &lifetime, selection).is_err());
+        // Do not reinterpret the request as its otherwise available configured or
+        // human branch after the independent administrative selection was refused.
+        for access in [
+            AccessSelection::ConfiguredParent,
+            AccessSelection::HumanReview,
+        ] {
+            let mut alternate = selection;
+            alternate.access = access;
+            assert!(matches!(
+                bind_selected(&slot, &lifetime, alternate),
+                Err(HostLifetimeError::WrongOwner)
+            ));
+        }
+        f.check().await;
+        let result = f.install().await.unwrap().unwrap_err();
+        assert_eq!(
+            std::mem::discriminant(&result),
+            std::mem::discriminant(&ToolError::unavailable(
+                f.install_name(),
+                meerkat_core::ToolUnavailableReason::TemporarilyUnavailable
+            ))
+        );
+        assert!(matches!(
+            slot.service(),
+            Err(HostLifetimeError::Unavailable)
+        ));
+        assert!(
+            f.approvals
+                .shared
+                .service
+                .list(Default::default())
+                .unwrap()
+                .is_empty()
+        );
+        assert!(f.approvals.shared.state().unwrap().attempt.is_none());
+        assert!(f.presenter.as_mut().unwrap().prompts.try_recv().is_err());
+        assert_eq!(f.count(), 0);
+    }
+
+    #[tokio::test]
+    async fn task_parent_fields_without_actual_producer_never_authorize_or_bind() {
+        use crate::application_acquisition::selected_policy::AccessSelection;
+        use meerkat_toolkit::host_lifetime::control::HostLifetimeError;
+        let mut selection = checked_selection();
+        selection.access = AccessSelection::ProvisionTaskParent;
+        let (mut f, slot, lifetime, _) =
+            selected_fixture_with_administration(0, selection, true, true);
+        assert!(matches!(
+            bind_selected(&slot, &lifetime, selection),
+            Err(HostLifetimeError::Unavailable)
+        ));
+        // Even an exact selected administrative label and rule cannot substitute
+        // for the actual protected parent's independently retained auth owner.
+        assert!(matches!(
+            slot.service(),
+            Err(HostLifetimeError::Unavailable)
+        ));
+        assert!(matches!(
+            slot.service_parent(),
+            Err(HostLifetimeError::Unavailable)
+        ));
+        f.check().await;
+        assert!(f.install().await.unwrap().is_err());
+        assert!(
+            f.approvals
+                .shared
+                .service
+                .list(Default::default())
+                .unwrap()
+                .is_empty()
+        );
+        assert!(f.approvals.shared.state().unwrap().attempt.is_none());
+        assert!(f.presenter.as_mut().unwrap().prompts.try_recv().is_err());
+        assert_eq!(f.count(), 0);
+    }
+
+    #[tokio::test]
+    async fn selected_policy_drift_and_entered_cancellation_never_fall_back_or_rearm() {
+        let selection = checked_selection();
+        let (mut f, slot, lifetime, source) = selected_fixture(0, selection, true);
+        bind_selected(&slot, &lifetime, selection).unwrap();
+        f.check().await;
+        std::fs::write(source, b"changed selected source").unwrap();
+        assert!(f.install().await.unwrap().is_err());
+        assert!(f.presenter.as_mut().unwrap().prompts.try_recv().is_err());
+        assert!(
+            f.approvals
+                .shared
+                .service
+                .list(Default::default())
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(f.count(), 0);
+
+        let (mut f, slot, lifetime, _) = selected_fixture(2, selection, true);
+        bind_selected(&slot, &lifetime, selection).unwrap();
+        f.check().await;
+        let entered = f.package.entered.notified();
+        let run = f.install();
+        tokio::pin!(entered);
+        let observed = tokio::time::timeout(Duration::from_secs(2), entered.as_mut()).await;
+        run.abort();
+        let cancelled = run.await;
+        assert!(observed.is_ok());
+        assert!(cancelled.unwrap_err().is_cancelled());
+        assert!(f.approvals.has_uncertain_dispatch());
+        assert!(f.install().await.unwrap().is_err());
+        assert!(f.presenter.as_mut().unwrap().prompts.try_recv().is_err());
+        assert!(
+            f.approvals
+                .shared
+                .state()
+                .unwrap()
+                .attempt
+                .as_ref()
+                .unwrap()
+                .policy_entry
+                .is_none()
+        );
+        assert_eq!(f.count(), 1);
+    }
+
+    #[tokio::test]
+    async fn selected_human_recovery_keeps_exact_participant_and_whole_member_policy_scope() {
+        use crate::application_acquisition::selected_policy::{
+            AccessSelection, MemberToolPolicySelection, SelectedPolicyBinding,
+        };
+        use meerkat_core::approval::{
+            ApprovalActionKind, ApprovalOwnerRef, ApprovalPrincipalId, ApprovalProposedAction,
+            ApprovalRequest, ApprovalResourceId, ApprovalResourceKind, ApprovalResourceRef,
+            ApprovalRisk,
+        };
+        use meerkat_core::{
+            CompiledApplicationToolPolicy, CompiledMemberToolAction, CompiledMemberToolGrant,
+            CompiledMemberToolGrants, CompiledPolicySourceProvenance, CompiledToolConsequence,
+            PolicyDigest, PolicyId, PolicyProviderId, PolicyRevision,
+        };
+        use toolkit_mobkit::private_originals::{
+            ActiveMemberToolPolicyDecision, ApplicationToolPolicyRecoveryDecision,
+            ApplicationToolPolicyRecoveryRequest, MemberPolicyLifetime, ServiceToolInvocation,
+            ServiceToolPolicyProposal, ServiceToolPolicySelection, ServiceToolPolicyVersion,
+        };
+        let mut selection = checked_selection();
+        selection.access = AccessSelection::HumanReview;
+        selection.tool_policy = Some(MemberToolPolicySelection::UntilSuperseded);
+        let (fixture, binding, lifetime, _source) = selected_fixture(0, selection, true);
+        let participant = binding.participant();
+        assert!(Arc::ptr_eq(&participant, &binding.participant()));
+        let native = lifetime.selected_policy().native_host.as_ref().unwrap();
+        let member = native.members[0].member.member.clone();
+        let compiled = CompiledApplicationToolPolicy::new(
+            PolicyProviderId::new("fixture-policy-owner").unwrap(),
+            PolicyId::new("fixture-policy").unwrap(),
+            PolicyRevision(2),
+            CompiledPolicySourceProvenance {
+                source_id: "fixture".into(),
+                source_digest: PolicyDigest::from_canonical_bytes(b"fixture"),
+            },
+            native
+                .members
+                .iter()
+                .map(|row| CompiledMemberToolGrants {
+                    member_identity: row.member.member.clone(),
+                    grants: vec![CompiledMemberToolGrant {
+                        tool_name: "exact_tool".into(),
+                        action: CompiledMemberToolAction::Invoke,
+                        consequence: CompiledToolConsequence::R0,
+                    }],
+                })
+                .collect(),
+        )
+        .unwrap();
+        let canonical = compiled.canonical_json().unwrap();
+        let proposal = ServiceToolPolicyProposal {
+            provider_id: compiled.provider_id.clone(),
+            policy_id: compiled.policy_id.clone(),
+            member,
+            selection: ServiceToolPolicySelection {
+                tools: vec![ServiceToolInvocation {
+                    name: "exact_tool".into(),
+                    consequence: CompiledToolConsequence::R0,
+                }],
+                catalog: None,
+            },
+            catalog_session: None,
+            prior: ServiceToolPolicyVersion {
+                revision: PolicyRevision(1),
+                digest: PolicyDigest::from_canonical_bytes(b"prior"),
+            },
+            candidate: ServiceToolPolicyVersion {
+                revision: compiled.revision,
+                digest: PolicyDigest::from_canonical_bytes(&canonical),
+            },
+            candidate_canonical_json: String::from_utf8(canonical.clone()).unwrap(),
+            lifetime: MemberPolicyLifetime::UntilSuperseded,
+        };
+        // This directly exercises the selected participant, not canonical-slot
+        // authentication. Production supplies the real active decision and record.
+        let decision = ActiveMemberToolPolicyDecision {
+            approval_id: "fixture-observation".into(),
+            owner: native.grant_administrator.clone(),
+            realm: native.realm.as_str().into(),
+            deployment: lifetime.selected_policy().deployment.to_string(),
+            original: toolkit_mobkit::private_originals::PrivateOriginalRef {
+                route: toolkit_package::Id::new("fixture-route").unwrap(),
+                original: meerkat_authorization_contracts::evidence::EvidenceId::new(
+                    "fixture-original",
+                )
+                .unwrap(),
+                event_sha256: "a".repeat(64),
+            },
+            acquisition: serde_json::from_value(json!({ "realm": native.realm.as_str(),
+            "owner": "fixture-owner", "id": "fixture-acquisition" }))
+            .unwrap(),
+            proposal,
+            human_review: None,
+        };
+        assert!(matches!(
+            participant
+                .reserve_tool_policy_recovery(&ApplicationToolPolicyRecoveryRequest {
+                    decision: &decision,
+                    canonical_json: &canonical
+                })
+                .unwrap(),
+            ApplicationToolPolicyRecoveryDecision::Permit(_)
+        ));
+        let mut wrong = decision.clone();
+        wrong.realm = "another-realm".into();
+        assert!(
+            participant
+                .reserve_tool_policy_recovery(&ApplicationToolPolicyRecoveryRequest {
+                    decision: &wrong,
+                    canonical_json: &canonical
+                })
+                .is_err()
+        );
+        wrong = decision.clone();
+        wrong.proposal.member = "unselected-member".into();
+        assert!(
+            participant
+                .reserve_tool_policy_recovery(&ApplicationToolPolicyRecoveryRequest {
+                    decision: &wrong,
+                    canonical_json: &canonical
+                })
+                .is_err()
+        );
+        let mut changed = canonical.clone();
+        changed.push(b' ');
+        assert!(
+            participant
+                .reserve_tool_policy_recovery(&ApplicationToolPolicyRecoveryRequest {
+                    decision: &decision,
+                    canonical_json: &changed
+                })
+                .is_err()
+        );
+        bind_selected(&binding, &lifetime, selection).unwrap();
+        assert!(
+            binding.service().unwrap().is_none(),
+            "recovery never enables automatic HumanReview access"
+        );
+        assert!(
+            Arc::ptr_eq(&participant, &binding.participant()),
+            "final binding retains the exact recovery participant"
+        );
+        let mut legacy = selection;
+        legacy.tool_policy = None;
+        let (_fixture, legacy_binding, _lifetime, _source) = selected_fixture(0, legacy, true);
+        assert!(matches!(
+            legacy_binding
+                .participant()
+                .reserve_tool_policy_recovery(&ApplicationToolPolicyRecoveryRequest {
+                    decision: &decision,
+                    canonical_json: &canonical
+                })
+                .unwrap(),
+            ApplicationToolPolicyRecoveryDecision::RequiresHuman
+        ));
+
+        // Exercise the real existing approval presenter and exact record body, not
+        // native Human authentication or canonical-store acceptance. The default
+        // participant has no standing selection or installed service policy.
+        let default_participant = || {
+            SelectedPolicyBinding::human_review_participant(
+                native.grant_administrator.clone(),
+                lifetime.selected_policy().deployment.clone(),
+                native.realm.clone(),
+                native
+                    .members
+                    .iter()
+                    .map(|row| row.member.member.clone())
+                    .collect(),
+            )
+        };
+        assert!(matches!(
+            default_participant()
+                .reserve_tool_policy_recovery(&ApplicationToolPolicyRecoveryRequest {
+                    decision: &decision,
+                    canonical_json: &canonical
+                })
+                .unwrap(),
+            ApplicationToolPolicyRecoveryDecision::RequiresHuman
+        ));
+        let request = ApprovalRequest {
+            requester: ApprovalPrincipalId::new("fixture-presenter").unwrap(),
+            owner: ApprovalOwnerRef::Session {
+                session_id: fixture.session.clone(),
+            },
+            resource: ApprovalResourceRef {
+                kind: ApprovalResourceKind::Runtime,
+                id: ApprovalResourceId::new("fixture-member-policy"),
+            },
+            proposed_action: ApprovalProposedAction {
+                kind: ApprovalActionKind::Other,
+                summary: "Approve the complete member policy until superseded".into(),
+                body: Some(
+                    json!({"access_request":{"member_tool_policy":{"proposal":&decision.proposal}}}),
+                ),
+            },
+            risk: ApprovalRisk::High,
+            request_body: None,
+            allowed_decisions: [ApprovalDecision::Approve, ApprovalDecision::Deny]
+                .into_iter()
+                .collect(),
+            expires_at: Some((std::time::SystemTime::now() + Duration::from_secs(30)).into()),
+            metadata: Default::default(),
+            request_provenance: None,
+        };
+        let approval_root = tempfile::tempdir().unwrap();
+        let (approvals, mut presenter) = LocalApprovals::create(approval_root.path()).unwrap();
+        approvals.bind_session(&fixture.session).unwrap();
+        let (record, answer) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(approvals.review_access(request), async {
+                let mut prompt = presenter
+                    .next()
+                    .await
+                    .ok_or(ConnectError::ReviewCancelled)?;
+                prompt.decide(ApprovalDecision::Approve)
+            })
         })
-    }).await.unwrap();
-    answer.unwrap();
-    let mut human = decision.clone();
-    human.approval_id = human.proposal.sha256().unwrap();
-    human.human_review = Some(record.unwrap());
-    // A fresh same-scope participant is how ordinary Restore rechecks the
-    // canonical record. This does not execute native Restore or a store replay.
-    for participant in [default_participant(), default_participant(), legacy_binding.participant()] {
-        assert!(matches!(participant.reserve_tool_policy_recovery(&ApplicationToolPolicyRecoveryRequest {
-            decision: &human, canonical_json: &canonical }).unwrap(), ApplicationToolPolicyRecoveryDecision::Permit(_)));
-        let mut service_only = human.clone();
-        service_only.human_review.as_mut().unwrap().proposed_action.body = Some(json!({"access_request":{"service_instruction":{}}}));
-        assert!(matches!(participant.reserve_tool_policy_recovery(&ApplicationToolPolicyRecoveryRequest {
-            decision: &service_only, canonical_json: &canonical }).unwrap(), ApplicationToolPolicyRecoveryDecision::RequiresHuman));
-        let mut changed = human.clone();
-        changed.human_review.as_mut().unwrap().proposed_action.body = Some(json!({"access_request":{"member_tool_policy":{"proposal":{}}}}));
-        assert!(matches!(participant.reserve_tool_policy_recovery(&ApplicationToolPolicyRecoveryRequest {
-            decision: &changed, canonical_json: &canonical }).unwrap(), ApplicationToolPolicyRecoveryDecision::RequiresHuman));
+        .await
+        .unwrap();
+        answer.unwrap();
+        let mut human = decision.clone();
+        human.approval_id = human.proposal.sha256().unwrap();
+        human.human_review = Some(record.unwrap());
+        // A fresh same-scope participant is how ordinary Restore rechecks the
+        // canonical record. This does not execute native Restore or a store replay.
+        for participant in [
+            default_participant(),
+            default_participant(),
+            legacy_binding.participant(),
+        ] {
+            assert!(matches!(
+                participant
+                    .reserve_tool_policy_recovery(&ApplicationToolPolicyRecoveryRequest {
+                        decision: &human,
+                        canonical_json: &canonical
+                    })
+                    .unwrap(),
+                ApplicationToolPolicyRecoveryDecision::Permit(_)
+            ));
+            let mut service_only = human.clone();
+            service_only
+                .human_review
+                .as_mut()
+                .unwrap()
+                .proposed_action
+                .body = Some(json!({"access_request":{"service_instruction":{}}}));
+            assert!(matches!(
+                participant
+                    .reserve_tool_policy_recovery(&ApplicationToolPolicyRecoveryRequest {
+                        decision: &service_only,
+                        canonical_json: &canonical
+                    })
+                    .unwrap(),
+                ApplicationToolPolicyRecoveryDecision::RequiresHuman
+            ));
+            let mut changed = human.clone();
+            changed.human_review.as_mut().unwrap().proposed_action.body =
+                Some(json!({"access_request":{"member_tool_policy":{"proposal":{}}}}));
+            assert!(matches!(
+                participant
+                    .reserve_tool_policy_recovery(&ApplicationToolPolicyRecoveryRequest {
+                        decision: &changed,
+                        canonical_json: &canonical
+                    })
+                    .unwrap(),
+                ApplicationToolPolicyRecoveryDecision::RequiresHuman
+            ));
+        }
     }
-}
-
 }
 
 #[path = "service_install_tests/review_observation.rs"]

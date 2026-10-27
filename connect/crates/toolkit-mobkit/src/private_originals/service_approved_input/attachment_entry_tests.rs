@@ -88,7 +88,12 @@ async fn mutate(
                 .unwrap()
                 .unwrap();
             let record = source.decode_record(&stored, b).unwrap();
-            let grant = &record.approved_task.as_ref().unwrap().singleton_grant().unwrap();
+            let grant = &record
+                .approved_task
+                .as_ref()
+                .unwrap()
+                .singleton_grant()
+                .unwrap();
             let route = source.route(&b.route).unwrap();
             let original = OriginalWorkRef {
                 authority: route.source_authority.clone(),
@@ -141,7 +146,12 @@ async fn exercise(mutation: Option<Mutation>) {
         let b_record = fixture.source.decode_record(&b_stored, &b).unwrap();
         let access_key = crate::private_originals::service_grants::tests::fixture_access_key(
             &fixture.source,
-            &b_record.approved_task.as_ref().unwrap().singleton_grant().unwrap(),
+            &b_record
+                .approved_task
+                .as_ref()
+                .unwrap()
+                .singleton_grant()
+                .unwrap(),
         )
         .unwrap();
         let access_before = fixture.store.get(&access_key).await.unwrap().unwrap();

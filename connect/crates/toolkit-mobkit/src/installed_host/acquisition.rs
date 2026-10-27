@@ -6,23 +6,28 @@
 
 mod coordinator;
 mod enrollment;
-pub use enrollment::InstalledAcquisitionTools;
 pub(crate) use enrollment::AcquisitionToolBinding;
+pub use enrollment::InstalledAcquisitionTools;
 mod task_approval;
 pub use task_approval::InstalledServiceTaskSource;
-mod results;
 pub(crate) mod recovery;
+mod results;
 pub use results::setup_report_definition;
 mod bootstrap;
-pub use bootstrap::{AcquisitionBootstrapStatus, AcquisitionDisabledReason, InstalledSetupBootstrap};
 pub(crate) use bootstrap::AcquisitionBootstrap;
+pub use bootstrap::{
+    AcquisitionBootstrapStatus, AcquisitionDisabledReason, InstalledSetupBootstrap,
+};
 mod admission;
 pub(crate) use admission::installed_invocation_correlation;
 mod continuation;
+pub use admission::{
+    InstalledOriginalInvocation, InstalledOriginalTaskOwner, InstalledSetupDefaults,
+    InstalledSetupLimits, InstalledSetupPreparer,
+};
 pub use continuation::InstalledNativeContinuation;
 #[cfg(test)]
 pub(crate) use continuation::owner_tests::{ContextProbe, ProbeProvider};
-pub use admission::{InstalledOriginalInvocation, InstalledOriginalTaskOwner, InstalledSetupDefaults, InstalledSetupLimits, InstalledSetupPreparer};
 pub(crate) use coordinator::SetupWorkerObservation;
 
 use crate::{
@@ -186,7 +191,15 @@ impl InstalledAcquisition {
         additional_helpers: Vec<InstalledSetupSelection>,
     ) -> Result<Self, HostLifetimeError> {
         let tools = InstalledAcquisitionTools::new(owners.admission_timeout)?;
-        Self::with_tools(store, source_scope, originals, native, owners, tools, additional_helpers)
+        Self::with_tools(
+            store,
+            source_scope,
+            originals,
+            native,
+            owners,
+            tools,
+            additional_helpers,
+        )
     }
 
     pub(super) fn with_tools(
@@ -199,7 +212,9 @@ impl InstalledAcquisition {
         additional_helpers: Vec<InstalledSetupSelection>,
     ) -> Result<Self, HostLifetimeError> {
         tools.require_unbound(owners.admission_timeout)?;
-        store.capabilities().require_durable_contract()
+        store
+            .capabilities()
+            .require_durable_contract()
             .map_err(|_| HostLifetimeError::InvalidSelection)?;
         // Conditional publication can participate only in this physical
         // realm. A tenant alias must be resolved by the application compiler.
@@ -243,17 +258,28 @@ impl InstalledAcquisition {
     }
 
     pub(crate) fn helper_selections(&self) -> Vec<InstalledSetupSelection> {
-        self.helpers.all().map(|(helper, _)| helper.clone()).collect()
+        self.helpers
+            .all()
+            .map(|(helper, _)| helper.clone())
+            .collect()
     }
 
-    fn selected_helper(&self, request: &meerkat_toolkit::request::ValidatedSetupRequest)
-        -> Result<crate::original_ingress::helper_originals::HelperAdmissionSelection, SetupError>
+    fn selected_helper(
+        &self,
+        request: &meerkat_toolkit::request::ValidatedSetupRequest,
+    ) -> Result<crate::original_ingress::helper_originals::HelperAdmissionSelection, SetupError>
     {
-        let (helper, member) = self.helpers.get(request.host().setup_helper.as_ref())
+        let (helper, member) = self
+            .helpers
+            .get(request.host().setup_helper.as_ref())
             .map_err(|_| SetupError::Denied)?;
-        Ok(crate::original_ingress::helper_originals::HelperAdmissionSelection {
-            helper: helper.clone(), member: member.clone(), grant_caller: self.grant_caller.clone(),
-        })
+        Ok(
+            crate::original_ingress::helper_originals::HelperAdmissionSelection {
+                helper: helper.clone(),
+                member: member.clone(),
+                grant_caller: self.grant_caller.clone(),
+            },
+        )
     }
 
     pub(super) fn bind_tool_driver(self: &Arc<Self>) -> Result<(), HostLifetimeError> {
@@ -262,8 +288,10 @@ impl InstalledAcquisition {
 
     pub(crate) fn tool_admission(&self) -> crate::AdmissionDependencies {
         crate::AdmissionDependencies {
-            store: self.store.clone(), conditional_store: Some(self.store.clone()),
-            scope: self.scope.clone(), host: self.host.clone(),
+            store: self.store.clone(),
+            conditional_store: Some(self.store.clone()),
+            scope: self.scope.clone(),
+            host: self.host.clone(),
             references: self.references.clone(),
         }
     }
@@ -362,21 +390,38 @@ pub(crate) struct AdmissionRecheckPause {
 }
 #[cfg(test)]
 impl AdmissionRecheckPause {
-    pub(crate) async fn entered(&self) { self.entered.notified().await; }
-    pub(crate) fn release(&self) { self.release.add_permits(1); }
+    pub(crate) async fn entered(&self) {
+        self.entered.notified().await;
+    }
+    pub(crate) fn release(&self) {
+        self.release.add_permits(1);
+    }
     pub(crate) async fn outcome(&self) -> Result<(), ToolAdmissionError> {
         self.finished.notified().await;
-        self.result.lock().unwrap().take().expect("actual admission returned")
+        self.result
+            .lock()
+            .unwrap()
+            .take()
+            .expect("actual admission returned")
     }
 }
 #[cfg(test)]
 impl InstalledAcquisition {
     pub(crate) fn hold_admission_recheck_for_test(&self) -> Arc<AdmissionRecheckPause> {
         let pause = Arc::new(AdmissionRecheckPause {
-            entered: tokio::sync::Notify::new(), release: tokio::sync::Semaphore::new(0),
-            finished: tokio::sync::Notify::new(), result: std::sync::Mutex::new(None),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Semaphore::new(0),
+            finished: tokio::sync::Notify::new(),
+            result: std::sync::Mutex::new(None),
         });
-        assert!(self.host.recheck_pause.lock().unwrap().replace(pause.clone()).is_none());
+        assert!(
+            self.host
+                .recheck_pause
+                .lock()
+                .unwrap()
+                .replace(pause.clone())
+                .is_none()
+        );
         pause
     }
 }
@@ -440,9 +485,14 @@ impl CanonicalSetupHost {
             .await
             .map_err(source_admission_error)?;
         if !Arc::ptr_eq(&current.original, &original.original)
-            || !self.originals.same_acquisition_source(
-                &original.reference, &original.source_record, &current.source_record,
-            ).map_err(source_admission_error)?
+            || !self
+                .originals
+                .same_acquisition_source(
+                    &original.reference,
+                    &original.source_record,
+                    &current.source_record,
+                )
+                .map_err(source_admission_error)?
             || current.contributors.len() != original.contributors.len()
             || current
                 .contributors

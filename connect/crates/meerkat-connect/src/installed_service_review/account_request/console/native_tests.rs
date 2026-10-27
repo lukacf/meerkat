@@ -2,7 +2,8 @@
 //! and blocked token exchange. It is not a verified Console viewer or B test.
 use super::*;
 use crate::installed_service_review::{
-    InstalledServiceReview, account_request::console::{complete_joined, fixture_join_on_close},
+    InstalledServiceReview,
+    account_request::console::{complete_joined, fixture_join_on_close},
 };
 
 #[tokio::test]
@@ -141,46 +142,72 @@ fn console_ready_close_does_not_start_the_native_account_ceremony() {
                 .build()
                 .expect("ready-close Tokio runtime")
                 .block_on(async {
-                tokio::time::timeout(Duration::from_secs(10), async {
-                    let root = tempfile::tempdir().unwrap();
-                    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-                    let origin = format!("http://{}", listener.local_addr().unwrap());
-                    let (startup, auth, _unused_control) = connector_fixture(root.path(), &origin).await;
-                    let realm = startup.storage.locator.clone();
-                    let session = connector_native_session(startup).await;
-                    let installed =
-                        connector_installed_fixture(realm.clone(), session.id().clone(), false, true).await;
-                    let (approvals, _presenter) = LocalApprovals::create_browser(
-                        root.path(),
-                        ApprovalPrincipalId::new("fixture-console-presenter").unwrap(),
-                        std::time::SystemTime::now() + Duration::from_secs(120),
-                    ).unwrap();
-                    approvals.bind_session(session.id()).unwrap();
-                    let mut review = InstalledServiceReview::fixture_checked(
-                        realm, session.id().clone(), installed.owner.clone(), auth.clone(), Arc::new(approvals),
-                    ).unwrap();
-                    let params: ConnectorStart =
-                        serde_json::from_value(connector_start("fixture-scope", &origin)).unwrap();
-                    let target = params.connector.into_native(auth.realm.clone()).unwrap();
-                    let (bridge, _prompts, _retire) = PromptBridge::channel();
-                    let closed = std::future::ready(());
-                    tokio::pin!(closed);
-                    let (result, stopped) = fixture_join_on_close(
-                        review.start_account(
-                            &"3".repeat(32), target, serde_json::from_value(connector_operations()).unwrap(),
-                            params.redirect_uri,
-                        ),
-                        &bridge, closed.as_mut(),
-                    ).await;
-                    assert!(stopped);
-                    assert!(result.is_none(), "ready close must not poll native start");
-                    assert!(!review.fixture_account_started());
-                    assert!(listener.accept().now_or_never().is_none(),
-                        "ready close must not begin native authorization-server discovery");
-                    review.retire().unwrap();
-                    drop(review);
-                    Arc::try_unwrap(session).ok().unwrap().close().await.unwrap();
-                }).await.expect("ready close started or failed to release native account work");
+                    tokio::time::timeout(Duration::from_secs(10), async {
+                        let root = tempfile::tempdir().unwrap();
+                        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                        let origin = format!("http://{}", listener.local_addr().unwrap());
+                        let (startup, auth, _unused_control) =
+                            connector_fixture(root.path(), &origin).await;
+                        let realm = startup.storage.locator.clone();
+                        let session = connector_native_session(startup).await;
+                        let installed = connector_installed_fixture(
+                            realm.clone(),
+                            session.id().clone(),
+                            false,
+                            true,
+                        )
+                        .await;
+                        let (approvals, _presenter) = LocalApprovals::create_browser(
+                            root.path(),
+                            ApprovalPrincipalId::new("fixture-console-presenter").unwrap(),
+                            std::time::SystemTime::now() + Duration::from_secs(120),
+                        )
+                        .unwrap();
+                        approvals.bind_session(session.id()).unwrap();
+                        let mut review = InstalledServiceReview::fixture_checked(
+                            realm,
+                            session.id().clone(),
+                            installed.owner.clone(),
+                            auth.clone(),
+                            Arc::new(approvals),
+                        )
+                        .unwrap();
+                        let params: ConnectorStart =
+                            serde_json::from_value(connector_start("fixture-scope", &origin))
+                                .unwrap();
+                        let target = params.connector.into_native(auth.realm.clone()).unwrap();
+                        let (bridge, _prompts, _retire) = PromptBridge::channel();
+                        let closed = std::future::ready(());
+                        tokio::pin!(closed);
+                        let (result, stopped) = fixture_join_on_close(
+                            review.start_account(
+                                &"3".repeat(32),
+                                target,
+                                serde_json::from_value(connector_operations()).unwrap(),
+                                params.redirect_uri,
+                            ),
+                            &bridge,
+                            closed.as_mut(),
+                        )
+                        .await;
+                        assert!(stopped);
+                        assert!(result.is_none(), "ready close must not poll native start");
+                        assert!(!review.fixture_account_started());
+                        assert!(
+                            listener.accept().now_or_never().is_none(),
+                            "ready close must not begin native authorization-server discovery"
+                        );
+                        review.retire().unwrap();
+                        drop(review);
+                        Arc::try_unwrap(session)
+                            .ok()
+                            .unwrap()
+                            .close()
+                            .await
+                            .unwrap();
+                    })
+                    .await
+                    .expect("ready close started or failed to release native account work");
                 });
         })
         .expect("ready-close fixture thread");
@@ -189,9 +216,12 @@ fn console_ready_close_does_not_start_the_native_account_ceremony() {
     }
 }
 
-
 #[derive(Clone, Copy)]
-enum SignInCancelPoint { BeforeCompletion, EnteredCompletion, AfterCompletion }
+enum SignInCancelPoint {
+    BeforeCompletion,
+    EnteredCompletion,
+    AfterCompletion,
+}
 
 #[tokio::test]
 async fn provider_sign_in_cancel_before_completion_entry_retires_only_the_started_attempt() {
@@ -230,36 +260,66 @@ async fn provider_sign_in_cancel_fixture(point: SignInCancelPoint) {
             };
             let (mut socket, _) = incoming.unwrap();
             let (header, _body) = connector_http(&mut socket).await;
-            server_calls.lock().unwrap().push(header.lines().next().unwrap_or_default().to_owned());
+            server_calls
+                .lock()
+                .unwrap()
+                .push(header.lines().next().unwrap_or_default().to_owned());
             let response = if header.starts_with("POST /token ") {
-                if let Some(entered) = entered.take() { let _ = entered.send(()); }
-                if let Some(release) = wait_release.take() { let _ = release.await; }
+                if let Some(entered) = entered.take() {
+                    let _ = entered.send(());
+                }
+                if let Some(release) = wait_release.take() {
+                    let _ = release.await;
+                }
                 json!({"access_token":"private-token-canary","token_type":"Bearer",
                     "expires_in":3600,"scope":"openid"})
             } else if header.starts_with("GET /userinfo ") {
                 json!({"sub":"verified-subject"})
-            } else { connector_metadata(&origin_server) };
+            } else {
+                connector_metadata(&origin_server)
+            };
             connector_http_reply(&mut socket, response).await;
         }
     });
     let (startup, auth, _unused_control) = connector_fixture(root.path(), &origin).await;
     let realm = startup.storage.locator.clone();
     let session = connector_native_session(startup).await;
-    let installed = connector_installed_fixture(realm.clone(), session.id().clone(), false, true).await;
-    let (approvals, _presenter) = LocalApprovals::create_browser(root.path(),
+    let installed =
+        connector_installed_fixture(realm.clone(), session.id().clone(), false, true).await;
+    let (approvals, _presenter) = LocalApprovals::create_browser(
+        root.path(),
         ApprovalPrincipalId::new("fixture-console-presenter").unwrap(),
-        std::time::SystemTime::now() + Duration::from_secs(120)).unwrap();
+        std::time::SystemTime::now() + Duration::from_secs(120),
+    )
+    .unwrap();
     approvals.bind_session(session.id()).unwrap();
-    let mut review = InstalledServiceReview::fixture_checked(realm, session.id().clone(),
-        installed.owner.clone(), auth.clone(), Arc::new(approvals)).unwrap();
-    let params: ConnectorStart = serde_json::from_value(connector_start("fixture-scope", &origin)).unwrap();
+    let mut review = InstalledServiceReview::fixture_checked(
+        realm,
+        session.id().clone(),
+        installed.owner.clone(),
+        auth.clone(),
+        Arc::new(approvals),
+    )
+    .unwrap();
+    let params: ConnectorStart =
+        serde_json::from_value(connector_start("fixture-scope", &origin)).unwrap();
     let target = params.connector.into_native(auth.realm.clone()).unwrap();
     let slot = target.slot.clone();
-    let started = review.start_account(&"3".repeat(32), target,
-        serde_json::from_value(connector_operations()).unwrap(), params.redirect_uri).await.unwrap();
+    let started = review
+        .start_account(
+            &"3".repeat(32),
+            target,
+            serde_json::from_value(connector_operations()).unwrap(),
+            params.redirect_uri,
+        )
+        .await
+        .unwrap();
     let (bridge, mut prompts, _retire) = PromptBridge::channel();
-    let mut notice = bridge.provider_notice(json!({"kind":"provider_browser",
-        "authorization_url":started.authorize_url})).await.unwrap();
+    let mut notice = bridge
+        .provider_notice(json!({"kind":"provider_browser",
+        "authorization_url":started.authorize_url}))
+        .await
+        .unwrap();
     let mut exchange = Some(prompts.recv().await.unwrap());
     let owner_close = exchange.as_mut().unwrap().take_owner_close().unwrap();
     let mut callback = None;
@@ -272,19 +332,27 @@ async fn provider_sign_in_cancel_fixture(point: SignInCancelPoint) {
     let mut stayed_pending = None;
     let mut release = Some(release);
     let joined = {
-        let completing = complete_joined(&mut review, started.state, "private-code-canary".into(),
-            started.host_attempt_handle, notice.cancelled());
+        let completing = complete_joined(
+            &mut review,
+            started.state,
+            "private-code-canary".into(),
+            started.host_attempt_handle,
+            notice.cancelled(),
+        );
         tokio::pin!(completing);
         let mut early = None;
         if matches!(point, SignInCancelPoint::EnteredCompletion) {
             // Only the observer borrows the completion. A timeout cannot drop
             // it, and all diagnostics are checked after release and full join.
-            entered_observed = Some(tokio::time::timeout(Duration::from_secs(10), async {
-                tokio::select! { biased;
-                    entered = &mut wait_entered => entered.is_ok(),
-                    result = completing.as_mut() => { early = Some(result); false },
-                }
-            }).await);
+            entered_observed = Some(
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    tokio::select! { biased;
+                        entered = &mut wait_entered => entered.is_ok(),
+                        result = completing.as_mut() => { early = Some(result); false },
+                    }
+                })
+                .await,
+            );
             cancellation = Some(crate::installed_service_review::account_request::console::cancel_retained_sign_in_authorized(
                 31, &mut exchange, &mut callback, br#"{"review_id":31}"#, || Ok(())));
             if early.is_none() {
@@ -295,13 +363,19 @@ async fn provider_sign_in_cancel_fixture(point: SignInCancelPoint) {
         }
         // Release the exact issuer gate regardless of observation outcome.
         let _ = release.take().unwrap().send(());
-        match early { Some(result) => result, None => completing.await }
+        match early {
+            Some(result) => result,
+            None => completing.await,
+        }
     };
     if matches!(point, SignInCancelPoint::AfterCompletion) {
         cancellation = Some(crate::installed_service_review::account_request::console::cancel_retained_sign_in_authorized(
             31, &mut exchange, &mut callback, br#"{"review_id":31}"#, || Ok(())));
     }
-    let login_completed = joined.as_ref().ok().and_then(|(completion,_)| completion.as_ref())
+    let login_completed = joined
+        .as_ref()
+        .ok()
+        .and_then(|(completion, _)| completion.as_ref())
         .is_some_and(|completion| completion.result.is_ok());
     // Fixture teardown reaches the same Control retirement: Started is
     // cancelled and Completed is kept. This also retires fixture approvals;
@@ -310,13 +384,23 @@ async fn provider_sign_in_cancel_fixture(point: SignInCancelPoint) {
     let native_status = auth.facade.connector_status(&slot).await;
     let finish = notice.finish_with_cancellation(if login_completed {
         SignInDisposition::Completed
-    } else { SignInDisposition::Refused });
+    } else {
+        SignInDisposition::Refused
+    });
     tokio::pin!(finish);
     let early_finish = finish.as_mut().now_or_never();
     let closing = owner_close.await;
-    let disposition = closing.as_ref().ok().map(|(value,_)| matches!(value, SignInDisposition::Completed));
-    if let Ok((_,ack)) = closing { let _ = ack.send(()); }
-    let finished = match early_finish { Some(result) => result, None => finish.await };
+    let disposition = closing
+        .as_ref()
+        .ok()
+        .map(|(value, _)| matches!(value, SignInDisposition::Completed));
+    if let Ok((_, ack)) = closing {
+        let _ = ack.send(());
+    }
+    let finished = match early_finish {
+        Some(result) => result,
+        None => finish.await,
+    };
     let _ = stop_issuer.send(());
     let issuer_joined = server.await;
     let requests = calls.lock().unwrap().clone();
@@ -332,8 +416,15 @@ async fn provider_sign_in_cancel_fixture(point: SignInCancelPoint) {
     match point {
         SignInCancelPoint::BeforeCompletion => {
             assert!(stopped && completion.is_none());
-            assert!(!requests.iter().any(|request| request.starts_with("POST /token ")));
-            assert_eq!(native_status.unwrap().phase, meerkat::ConnectorAuthPhase::AuthorizationRequired);
+            assert!(
+                !requests
+                    .iter()
+                    .any(|request| request.starts_with("POST /token "))
+            );
+            assert_eq!(
+                native_status.unwrap().phase,
+                meerkat::ConnectorAuthPhase::AuthorizationRequired
+            );
             assert_eq!(disposition, Some(false));
         }
         SignInCancelPoint::EnteredCompletion => {
@@ -343,14 +434,20 @@ async fn provider_sign_in_cancel_fixture(point: SignInCancelPoint) {
             let completed = completion.unwrap();
             assert!(completed.result.is_err() && !completed.cleanup_unconfirmed);
             assert!(matches!(completed.cancellation, Some(Ok(()))));
-            assert_eq!(native_status.unwrap().phase, meerkat::ConnectorAuthPhase::AuthorizationRequired);
+            assert_eq!(
+                native_status.unwrap().phase,
+                meerkat::ConnectorAuthPhase::AuthorizationRequired
+            );
             assert_eq!(disposition, Some(false));
         }
         SignInCancelPoint::AfterCompletion => {
             assert!(!stopped);
             let completed = completion.unwrap();
             assert!(completed.result.is_ok() && !completed.cleanup_unconfirmed);
-            assert_eq!(native_status.unwrap().phase, meerkat::ConnectorAuthPhase::Authorized);
+            assert_eq!(
+                native_status.unwrap().phase,
+                meerkat::ConnectorAuthPhase::Authorized
+            );
             assert_eq!(disposition, Some(true));
         }
     }

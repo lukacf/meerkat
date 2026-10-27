@@ -1,8 +1,8 @@
 //! The production private caller runs through real native admission and source
 //! custody. Faults wrap the real bridge before lookup or after fresh acceptance.
 
-use meerkat_authorization_contracts::constraints::DomainRestriction;
 use super::*;
+use meerkat_authorization_contracts::constraints::DomainRestriction;
 
 // Test-only result context. Production admission types do not
 // implement Debug; retain their existing serialized variant in failed checks.
@@ -13,13 +13,13 @@ fn submission_context<E: std::fmt::Debug>(result: &Result<PrivateOriginalSubmiss
     }
 }
 
-use meerkat_core::lifecycle::InputId;
 use crate::original_ingress::tests::{
     claims, initialized, principal, private_event, source as source_custody,
 };
 use futures::FutureExt;
 use meerkat::{AgentFactory, Config, EphemeralSessionService, FactoryAgentBuilder};
 use meerkat_authorization_contracts::constraints::AudienceRef;
+use meerkat_core::lifecycle::InputId;
 use meerkat_core::{
     AgentError, AgentSessionStore, ControllerModelSelection, Message, Provider, Session,
     SessionLlmIdentity, StopReason,
@@ -29,15 +29,15 @@ use meerkat_llm_core::{
     PreparedLlmRequest,
 };
 use meerkat_mob::{
-    AgentIdentity as MemberIdentity, MobDefinition, MobId, MobRuntimeMode,
-    MobStorage, Profile, ProfileBinding, ProfileName, SpawnMemberSpec, ToolConfig,
+    AgentIdentity as MemberIdentity, MobDefinition, MobId, MobRuntimeMode, MobStorage, Profile,
+    ProfileBinding, ProfileName, SpawnMemberSpec, ToolConfig,
 };
 use meerkat_mobkit::identity_first::{
     AgentAddressability, AgentIdentity, AgentRuntimeId, CheckpointVersion, ContinuityGeneration,
-    ContinuityRecord, DurabilityPolicy, DurableAgentSpec, FencingToken, IdentityLifecycleState,
-    IdentityFirstRuntimeContext, IdentityRuntime, IdentityRuntimeConfig, LeaseAcquireResult,
-    LeaseProvider, LocalContinuityStore, LocalLeaseProvider, MobSessionBridge, MutableRosterProvider,
-    PublicIdentityRuntime, TurnOutcome, TurnOutput, TurnTicket,
+    ContinuityRecord, DurabilityPolicy, DurableAgentSpec, FencingToken,
+    IdentityFirstRuntimeContext, IdentityLifecycleState, IdentityRuntime, IdentityRuntimeConfig,
+    LeaseAcquireResult, LeaseProvider, LocalContinuityStore, LocalLeaseProvider, MobSessionBridge,
+    MutableRosterProvider, PublicIdentityRuntime, TurnOutcome, TurnOutput, TurnTicket,
 };
 use meerkat_mobkit::{
     DiscoverySpec, MetaConfig, MobBootstrapSpec, MobTerminalShutdownOutcome, UnifiedRuntime,
@@ -71,18 +71,18 @@ use meerkat_runtime::{
     meerkat_machine::{AuthenticatedOriginalSource, ScopedInvocation, ScopedMandateOwner},
 };
 
-#[path = "governed_submit_test_bridge.rs"]
-mod observed;
-#[path = "custody_recovery_tests.rs"]
-mod custody_recovery_tests;
-#[path = "custody_recovery_writer_tests.rs"]
-mod custody_recovery_writer_tests;
 #[path = "custody_recovery_budget_tests.rs"]
 mod custody_recovery_budget_tests;
 #[path = "custody_recovery_stopped_traversal_tests.rs"]
 mod custody_recovery_stopped_traversal_tests;
+#[path = "custody_recovery_tests.rs"]
+mod custody_recovery_tests;
+#[path = "custody_recovery_writer_tests.rs"]
+mod custody_recovery_writer_tests;
 #[path = "first_input_tests.rs"]
 pub(in crate::private_originals) mod first_input_tests;
+#[path = "governed_submit_test_bridge.rs"]
+mod observed;
 
 #[derive(Clone, Copy)]
 pub(in crate::private_originals) enum DeliveryMode {
@@ -106,9 +106,14 @@ pub(in crate::private_originals) enum DeliveryMode {
 
 impl DeliveryMode {
     fn helper_reprepare(self) -> bool {
-        matches!(self, Self::HelperPolicyChangesOnce | Self::HelperPolicyChangesAlways
-            | Self::HelperPolicyChangesThenUnresolved | Self::HelperPolicyChangesThenRetirement
-            | Self::HelperPolicyChangesThenDeadline)
+        matches!(
+            self,
+            Self::HelperPolicyChangesOnce
+                | Self::HelperPolicyChangesAlways
+                | Self::HelperPolicyChangesThenUnresolved
+                | Self::HelperPolicyChangesThenRetirement
+                | Self::HelperPolicyChangesThenDeadline
+        )
     }
 }
 
@@ -342,14 +347,22 @@ fn selection() -> ControllerModelSelection {
 fn fixture_controller_decorator() -> meerkat_core::AgentLlmClientDecorator {
     Arc::new(|client| {
         let expected = selection();
-        assert!(client.controller_model_selection().as_ref() == Some(&expected),
-            "factory client must preserve the fixture controller selection");
-        let pin = client.clone().pin_controller()
+        assert!(
+            client.controller_model_selection().as_ref() == Some(&expected),
+            "factory client must preserve the fixture controller selection"
+        );
+        let pin = client
+            .clone()
+            .pin_controller()
             .expect("actual factory client must supply its native controller pin");
-        assert!(pin.selection() == &expected,
-            "factory pin must preserve the selected fixture controller");
-        assert!(pin.client().controller_model_selection().as_ref() == Some(&expected),
-            "pinned factory client must preserve the selected fixture controller");
+        assert!(
+            pin.selection() == &expected,
+            "factory pin must preserve the selected fixture controller"
+        );
+        assert!(
+            pin.client().controller_model_selection().as_ref() == Some(&expected),
+            "pinned factory client must preserve the selected fixture controller"
+        );
         client
     })
 }
@@ -368,11 +381,17 @@ struct PreparedResponsePause {
 /// settle before normal fixture shutdown. Default transport stays unchanged.
 pub(crate) struct PreparedResponseHold(Arc<PreparedResponsePause>);
 impl PreparedResponseHold {
-    pub(crate) async fn entered(&self) { self.0.entered.notified().await; }
-    pub(crate) fn release(&self) { self.0.release.notify_one(); }
+    pub(crate) async fn entered(&self) {
+        self.0.entered.notified().await;
+    }
+    pub(crate) fn release(&self) {
+        self.0.release.notify_one();
+    }
 }
 impl Drop for PreparedResponseHold {
-    fn drop(&mut self) { self.release(); }
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 impl ScriptedProvider {
     fn hold_next_response(&self) -> PreparedResponseHold {
@@ -420,27 +439,33 @@ impl LlmClient for ScriptedProvider {
         // bounded reprepare/controller recovery; the fixture never retries.
         let prepared = match authorization.prepare(model_facts()) {
             Ok(prepared) => prepared,
-            Err(error) => return Box::pin(futures::stream::iter([
-                Err(LlmError::from_operation_authorization(error)),
-            ])),
+            Err(error) => {
+                return Box::pin(futures::stream::iter([Err(
+                    LlmError::from_operation_authorization(error),
+                )]));
+            }
         };
         let current = match prepared.current() {
             Ok(current) => current,
-            Err(error) => return Box::pin(futures::stream::iter([
-                Err(LlmError::from_operation_authorization(error)),
-            ])),
+            Err(error) => {
+                return Box::pin(futures::stream::iter([Err(
+                    LlmError::from_operation_authorization(error),
+                )]));
+            }
         };
-        if let Err(error) = current.observe_entry(meerkat_core::OperationEntryBoundary::ModelRequest) {
-            return Box::pin(futures::stream::iter([
-                Err(LlmError::from_operation_observation(error)),
-            ]));
-        }
-        if let Err(error) = current
-            .observe_outcome(OperationObservedOutcome::HttpResponse { status: 200 })
+        if let Err(error) =
+            current.observe_entry(meerkat_core::OperationEntryBoundary::ModelRequest)
         {
-            return Box::pin(futures::stream::iter([
-                Err(LlmError::from_operation_observation(error)),
-            ]));
+            return Box::pin(futures::stream::iter([Err(
+                LlmError::from_operation_observation(error),
+            )]));
+        }
+        if let Err(error) =
+            current.observe_outcome(OperationObservedOutcome::HttpResponse { status: 200 })
+        {
+            return Box::pin(futures::stream::iter([Err(
+                LlmError::from_operation_observation(error),
+            )]));
         }
         self.0.fetch_add(1, Ordering::SeqCst);
         let response = futures::stream::iter([
@@ -455,13 +480,13 @@ impl LlmClient for ScriptedProvider {
         let pause = self.1.lock().unwrap().take();
         match pause {
             None => Box::pin(response),
-            Some(pause) => Box::pin(futures::StreamExt::flatten(
-                futures::stream::once(async move {
+            Some(pause) => Box::pin(futures::StreamExt::flatten(futures::stream::once(
+                async move {
                     pause.entered.notify_one();
                     pause.release.notified().await;
                     response
-                }),
-            )),
+                },
+            ))),
         }
     }
 
@@ -534,7 +559,10 @@ async fn bootstrap_fixture(spec: MobBootstrapSpec, namespace: String) -> Unified
         spec,
         MetaConfig {
             modules: Vec::new(),
-            discovery: DiscoverySpec { namespace, modules: Vec::new() },
+            discovery: DiscoverySpec {
+                namespace,
+                modules: Vec::new(),
+            },
             pre_spawn: Vec::new(),
         },
         WAIT,
@@ -576,14 +604,22 @@ struct Fixture {
     submission: PrivateOriginalSubmit,
 }
 
-type RecoverySourceStore = Box<dyn FnOnce(Arc<dyn toolkit_store::ToolkitStore>, Arc<DeliveryFault>)
-    -> Arc<dyn toolkit_store::ToolkitStore> + Send>;
+type RecoverySourceStore = Box<
+    dyn FnOnce(
+            Arc<dyn toolkit_store::ToolkitStore>,
+            Arc<DeliveryFault>,
+        ) -> Arc<dyn toolkit_store::ToolkitStore>
+        + Send,
+>;
 impl Fixture {
     async fn new(mode: DeliveryMode, wrong_destination: bool) -> Self {
         Self::with_source_store(mode, wrong_destination, None).await
     }
-    async fn with_source_store(mode: DeliveryMode, wrong_destination: bool,
-        source_store: Option<RecoverySourceStore>) -> Self {
+    async fn with_source_store(
+        mode: DeliveryMode,
+        wrong_destination: bool,
+        source_store: Option<RecoverySourceStore>,
+    ) -> Self {
         let directory = Arc::new(
             tempfile::Builder::new()
                 .permissions(std::fs::Permissions::from_mode(0o700))
@@ -596,7 +632,13 @@ impl Fixture {
         let mut opened = None;
         let constructed = std::panic::AssertUnwindSafe(tokio::time::timeout(
             WAIT,
-            Self::build(directory.clone(), mode, wrong_destination, &mut opened, source_store),
+            Self::build(
+                directory.clone(),
+                mode,
+                wrong_destination,
+                &mut opened,
+                source_store,
+            ),
         ))
         .catch_unwind()
         .await;
@@ -668,7 +710,8 @@ impl Fixture {
         let definition = definition();
         let namespace = definition.id.to_string();
         let spec = MobBootstrapSpec::new(definition, MobStorage::in_memory(), service.clone())
-            .with_session_runtime_adapter(machine.clone()).unwrap()
+            .with_session_runtime_adapter(machine.clone())
+            .unwrap()
             .with_declared_ephemeral_mob_storage();
         *opened = Some(bootstrap_fixture(spec, namespace).await);
         let native = opened.as_mut().unwrap();
@@ -691,9 +734,10 @@ impl Fixture {
             .pin_controller_client_for_actor(&actor)
             .await
             .unwrap_or_else(|error| {
-                if let meerkat_core::service::SessionError::Agent(
-                    AgentError::OperationRefused { refusal }
-                ) = &error {
+                if let meerkat_core::service::SessionError::Agent(AgentError::OperationRefused {
+                    refusal,
+                }) = &error
+                {
                     panic!("actual actor controller pin refused: {:?}", refusal.kind());
                 }
                 panic!("actual actor controller pin failed: {error:?}");
@@ -713,17 +757,20 @@ impl Fixture {
         };
         let lease_provider = Arc::new(LocalLeaseProvider::new());
         let runtime_instance = "toolkit-controller-preparation";
-        let runtime = Arc::new(IdentityRuntime::new(IdentityRuntimeConfig {
-            continuity_store: Arc::new(LocalContinuityStore::in_memory().unwrap()),
-            lease_provider: lease_provider.clone(),
-            runtime_instance_id: runtime_instance.into(),
-            has_runtime_store: true,
-            durability_policy: DurabilityPolicy::SyncWriteThrough,
-            bridge: Some(Arc::new(bridge)),
-            default_timeout: None,
-        }).with_runtime_services(
-            meerkat_mobkit::identity_first::AgentRuntimeServices::new(handle.clone()),
-        ));
+        let runtime = Arc::new(
+            IdentityRuntime::new(IdentityRuntimeConfig {
+                continuity_store: Arc::new(LocalContinuityStore::in_memory().unwrap()),
+                lease_provider: lease_provider.clone(),
+                runtime_instance_id: runtime_instance.into(),
+                has_runtime_store: true,
+                durability_policy: DurabilityPolicy::SyncWriteThrough,
+                bridge: Some(Arc::new(bridge)),
+                default_timeout: None,
+            })
+            .with_runtime_services(
+                meerkat_mobkit::identity_first::AgentRuntimeServices::new(handle.clone()),
+            ),
+        );
         let identity = AgentIdentity::parse(MEMBER).unwrap();
         let member_spec = DurableAgentSpec {
             identity: identity.clone(),
@@ -744,8 +791,14 @@ impl Fixture {
         let status = runtime.status(&identity).await.unwrap();
         assert_eq!(status.state, IdentityLifecycleState::Active);
         assert_eq!(status.session_id, Some(session.clone()));
-        assert!(status.agent_runtime_id.is_some(), "spawned Core member has a runtime identity");
-        assert_eq!(runtime.core_session_owner(&session).await.unwrap(), Some(identity.clone()));
+        assert!(
+            status.agent_runtime_id.is_some(),
+            "spawned Core member has a runtime identity"
+        );
+        assert_eq!(
+            runtime.core_session_owner(&session).await.unwrap(),
+            Some(identity.clone())
+        );
         native.attach_identity_first_context(Arc::new(IdentityFirstRuntimeContext::new(
             runtime,
             Arc::new(MutableRosterProvider::new(vec![member_spec])),
@@ -756,7 +809,8 @@ impl Fixture {
         let runtime = native.identity_runtime().unwrap();
         let domain = owner.ingress_domain().clone();
         let raw_source: Arc<dyn toolkit_store::ToolkitStore> = Arc::new(
-            toolkit_store::SqliteStore::open(directory.path().join("originals.sqlite3")).unwrap());
+            toolkit_store::SqliteStore::open(directory.path().join("originals.sqlite3")).unwrap(),
+        );
         let selected_source = match source_store {
             Some(select) => select(raw_source, fault.clone()),
             None => raw_source,
@@ -1020,7 +1074,10 @@ async fn actual_private_caller_promotes_fresh_acceptance_and_native_ticket_compl
         ..
     }) = result
     else {
-        panic!("actual native fresh admission and source promotion required: {}", submission_context(&result))
+        panic!(
+            "actual native fresh admission and source promotion required: {}",
+            submission_context(&result)
+        )
     };
     assert_eq!(session_id, fixture.session.to_string());
     assert_eq!(completion, Some(Ok(())));
@@ -1059,7 +1116,10 @@ async fn actual_private_retry_uses_native_replay_without_a_second_input_or_contr
         ..
     }) = first
     else {
-        panic!("first native admission required: {}", submission_context(&first))
+        panic!(
+            "first native admission required: {}",
+            submission_context(&first)
+        )
     };
     assert_eq!(completion, Some(Ok(())));
     assert_eq!(first_contributor, Ok(true));
@@ -1070,7 +1130,10 @@ async fn actual_private_retry_uses_native_replay_without_a_second_input_or_contr
         ..
     }) = result
     else {
-        panic!("native canonical replay must withdraw the retry guard: {}", submission_context(&result))
+        panic!(
+            "native canonical replay must withdraw the retry guard: {}",
+            submission_context(&result)
+        )
     };
     assert_eq!(input_id, first_input);
     assert_eq!(contributor, Ok(true));
@@ -1098,20 +1161,28 @@ async fn actual_native_destination_refusal_withdraws_private_source_candidate() 
     let cleanup = fixture.shutdown().await;
 
     assert!(cleanup.is_ok(), "native cleanup failed: {cleanup:?}");
-    assert!(matches!(
-        first,
-        Ok(PrivateOriginalSubmission::NativeOutcomeUnavailable)
-    ), "{}", submission_context(&first));
+    assert!(
+        matches!(
+            first,
+            Ok(PrivateOriginalSubmission::NativeOutcomeUnavailable)
+        ),
+        "{}",
+        submission_context(&first)
+    );
     assert_eq!(contributor, Ok(false));
     assert_eq!(unresolved, Ok(0));
     assert_eq!(accepted, 0);
     assert_eq!(first_inputs, Ok((0, 0)));
     assert_eq!(requests, 0);
     assert_eq!(first_refused, 1);
-    assert!(matches!(
-        retry,
-        Ok(PrivateOriginalSubmission::NativeOutcomeUnavailable)
-    ), "{}", submission_context(&retry));
+    assert!(
+        matches!(
+            retry,
+            Ok(PrivateOriginalSubmission::NativeOutcomeUnavailable)
+        ),
+        "{}",
+        submission_context(&retry)
+    );
     assert_eq!(final_refused, 2);
     assert_eq!(final_inputs, Ok((0, 0)));
 }
@@ -1136,16 +1207,23 @@ async fn actual_post_admission_publication_failure_preserves_admission_and_nativ
         source_settlement: PrivateSourceSettlement::PostAdmissionPublicationFailed,
     }) = result
     else {
-        panic!("publication failure cannot relabel native acceptance as refusal: {}", submission_context(&result))
+        panic!(
+            "publication failure cannot relabel native acceptance as refusal: {}",
+            submission_context(&result)
+        )
     };
     assert_eq!(session_id, fixture.session.to_string());
     assert!(TurnTicket::parse(&ticket).is_ok());
     assert_eq!(accepted, 1);
     assert_eq!(contributor, Ok(false));
     assert_eq!(unresolved, Ok(1));
-    assert!(matches!(retry, Ok(PrivateOriginalSubmission::Admitted {
-        source_settlement: PrivateSourceSettlement::PostAdmissionPublicationFailed, ..
-    })));
+    assert!(matches!(
+        retry,
+        Ok(PrivateOriginalSubmission::Admitted {
+            source_settlement: PrivateSourceSettlement::PostAdmissionPublicationFailed,
+            ..
+        })
+    ));
     assert_eq!(inputs, Ok((1, 1)));
     // admit() makes the guard non-pending before publication. Poison clears
     // only its unpromoted Candidate projection; Drop does not withdraw it.
@@ -1169,18 +1247,24 @@ async fn actual_lost_native_acceptance_answer_reconciles_exact_input_without_res
     let cleanup = fixture.shutdown().await;
 
     assert!(cleanup.is_ok(), "native cleanup failed: {cleanup:?}");
-    assert!(matches!(
-        result,
-        Ok(PrivateOriginalSubmission::AdmissionUnresolved)
-    ), "{}", submission_context(&result));
+    assert!(
+        matches!(result, Ok(PrivateOriginalSubmission::AdmissionUnresolved)),
+        "{}",
+        submission_context(&result)
+    );
     assert_eq!(accepted, 1);
     assert_eq!(inputs, Ok((1, 1)));
     assert_eq!(contributor, Ok(false));
     assert_eq!(unresolved, Ok(1));
-    assert!(matches!(retry, Ok(PrivateOriginalSubmission::Admitted {
-        deduplicated: false, turn_ticket: None,
-        source_settlement: PrivateSourceSettlement::FreshAcceptancePromoted, ..
-    })));
+    assert!(matches!(
+        retry,
+        Ok(PrivateOriginalSubmission::Admitted {
+            deduplicated: false,
+            turn_ticket: None,
+            source_settlement: PrivateSourceSettlement::FreshAcceptancePromoted,
+            ..
+        })
+    ));
     assert_eq!(after_inputs, Ok((1, 1)));
     assert_eq!(after_contributor, Ok(true));
     assert_eq!(after_unresolved, Ok(0));
@@ -1251,7 +1335,9 @@ async fn private_caller_receiver_loss_cannot_withdraw_a_native_accepted_original
     assert!(
         entered.is_ok(),
         "real native fresh acceptance was not reached; wait: {entered:?}; accepted: {accepted_before_release}; caller: {:?}",
-        joined.as_ref().map(|join| join.as_ref().map(|timed| timed.as_ref().map(submission_context)))
+        joined.as_ref().map(|join| join
+            .as_ref()
+            .map(|timed| timed.as_ref().map(submission_context)))
     );
     assert!(matches!(joined, Ok(Err(ref error)) if error.is_cancelled()));
     assert_eq!(accepted_before_release, 1);
@@ -1272,7 +1358,6 @@ async fn private_caller_receiver_loss_cannot_withdraw_a_native_accepted_original
     assert_eq!(requests, 1);
 }
 
-
 /// Corrupt only the host's expected observation after a real native admission.
 /// The actual machine row, receipt and admission count are never fabricated.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1281,9 +1366,23 @@ async fn lost_answer_wrong_content_authority_session_or_input_keeps_candidate() 
     let fixture = Fixture::new(DeliveryMode::LoseAcceptedAnswer, false).await;
     let result = AssertUnwindSafe(async {
         let submitted = fixture.submit().await;
-        assert!(matches!(submitted, Ok(PrivateOriginalSubmission::AdmissionUnresolved)), "{}", submission_context(&submitted));
-        let held = fixture.source.retained.lock().unwrap().iter()
-            .find(|held| held.reference == fixture.submission.original).cloned().unwrap();
+        assert!(
+            matches!(
+                submitted,
+                Ok(PrivateOriginalSubmission::AdmissionUnresolved)
+            ),
+            "{}",
+            submission_context(&submitted)
+        );
+        let held = fixture
+            .source
+            .retained
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|held| held.reference == fixture.submission.original)
+            .cloned()
+            .unwrap();
         for fault in 0..4 {
             let pending = held.unresolved.lock().unwrap().pop().unwrap();
             let mut pending = match Arc::try_unwrap(pending) {
@@ -1293,10 +1392,16 @@ async fn lost_answer_wrong_content_authority_session_or_input_keeps_candidate() 
             let original_input = pending.input.clone();
             let original_session = pending.session.clone();
             match fault {
-                0 => { let Input::Prompt(prompt) = &mut pending.input else { panic!("prompt") };
-                    prompt.content = PromptInput::new("different instruction", None).content; },
+                0 => {
+                    let Input::Prompt(prompt) = &mut pending.input else {
+                        panic!("prompt")
+                    };
+                    prompt.content = PromptInput::new("different instruction", None).content;
+                }
                 1 => {
-                    let Input::Prompt(prompt) = &pending.input else { panic!("prompt") };
+                    let Input::Prompt(prompt) = &pending.input else {
+                        panic!("prompt")
+                    };
                     assert!(prompt.header.authority_association.is_some());
                     pending.input = Input::Prompt(PromptInput {
                         header: meerkat_runtime::InputHeader {
@@ -1306,10 +1411,12 @@ async fn lost_answer_wrong_content_authority_session_or_input_keeps_candidate() 
                         ..prompt.clone()
                     });
                     assert_eq!(pending.input.id(), original_input.id());
-                },
+                }
                 2 => pending.session = SessionId::new(),
                 _ => {
-                    let Input::Prompt(prompt) = &pending.input else { panic!("prompt") };
+                    let Input::Prompt(prompt) = &pending.input else {
+                        panic!("prompt")
+                    };
                     pending.input = Input::Prompt(PromptInput {
                         header: meerkat_runtime::InputHeader {
                             id: InputId::new(),
@@ -1318,35 +1425,58 @@ async fn lost_answer_wrong_content_authority_session_or_input_keeps_candidate() 
                         ..prompt.clone()
                     });
                     assert_ne!(pending.input.id(), original_input.id());
-                    assert_eq!(pending.input.header().authority_association,
-                        original_input.header().authority_association);
-                },
+                    assert_eq!(
+                        pending.input.header().authority_association,
+                        original_input.header().authority_association
+                    );
+                }
             }
             held.unresolved.lock().unwrap().push(Arc::new(pending));
-            let observed = fixture.source.reconcile_original_submission(&fixture.submission.original).await;
-            assert!(matches!(observed,
-                Err(PrivateOriginalError::Conflict) |
-                Ok(Some(PrivateOriginalSubmission::AdmissionUnresolved))));
+            let observed = fixture
+                .source
+                .reconcile_original_submission(&fixture.submission.original)
+                .await;
+            assert!(matches!(
+                observed,
+                Err(PrivateOriginalError::Conflict)
+                    | Ok(Some(PrivateOriginalSubmission::AdmissionUnresolved))
+            ));
             assert_eq!(fixture.observe_contributor().await, Ok(false));
             assert_eq!(fixture.native_inputs().await, Ok((1, 1)));
             assert_eq!(fixture.unresolved_count().await, Ok(1));
             let pending = held.unresolved.lock().unwrap().pop().unwrap();
-            let mut pending = match Arc::try_unwrap(pending) { Ok(value) => value, Err(_) => panic!("custody retained by observation") };
-            pending.input = original_input; pending.session = original_session;
+            let mut pending = match Arc::try_unwrap(pending) {
+                Ok(value) => value,
+                Err(_) => panic!("custody retained by observation"),
+            };
+            pending.input = original_input;
+            pending.session = original_session;
             held.unresolved.lock().unwrap().push(Arc::new(pending));
         }
         // Dropping an unpolled reader leaves the same keeper untouched. The
         // existing HoldAccepted control covers receiver loss during delivery.
-        drop(fixture.source.reconcile_original_submission(&fixture.submission.original));
+        drop(
+            fixture
+                .source
+                .reconcile_original_submission(&fixture.submission.original),
+        );
         assert_eq!(fixture.unresolved_count().await, Ok(1));
-        assert!(matches!(fixture.submit().await, Ok(PrivateOriginalSubmission::Admitted {
-            source_settlement: PrivateSourceSettlement::FreshAcceptancePromoted, ..
-        })));
+        assert!(matches!(
+            fixture.submit().await,
+            Ok(PrivateOriginalSubmission::Admitted {
+                source_settlement: PrivateSourceSettlement::FreshAcceptancePromoted,
+                ..
+            })
+        ));
         assert_eq!(fixture.native_inputs().await, Ok((1, 1)));
-    }).catch_unwind().await;
+    })
+    .catch_unwind()
+    .await;
     let cleanup = fixture.shutdown().await;
     assert!(cleanup.is_ok(), "{cleanup:?}");
-    if let Err(panic) = result { std::panic::resume_unwind(panic); }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1356,19 +1486,34 @@ async fn closed_native_owner_does_not_withdraw_unresolved_candidate() {
     let inputs = fixture.native_inputs().await;
     let source = fixture.source.clone();
     let reference = fixture.submission.original.clone();
-    let held = source.retained.lock().unwrap().iter()
-        .find(|held| held.reference == reference).cloned().unwrap();
+    let held = source
+        .retained
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|held| held.reference == reference)
+        .cloned()
+        .unwrap();
     let cleanup = fixture.shutdown().await;
     drop(fixture);
     let observed = source.reconcile_original_submission(&reference).await;
     assert!(cleanup.is_ok(), "{cleanup:?}");
-    assert!(matches!(submitted, Ok(PrivateOriginalSubmission::AdmissionUnresolved)), "{}", submission_context(&submitted));
+    assert!(
+        matches!(
+            submitted,
+            Ok(PrivateOriginalSubmission::AdmissionUnresolved)
+        ),
+        "{}",
+        submission_context(&submitted)
+    );
     assert_eq!(inputs, Ok((1, 1)));
     assert!(matches!(observed, Err(PrivateOriginalError::Unavailable)));
     assert_eq!(held.unresolved.lock().unwrap().len(), 1);
-    assert!(matches!(&*held.unresolved.lock().unwrap()[0].pending.lock().unwrap(), SourcePublication::Pending(_)));
+    assert!(matches!(
+        &*held.unresolved.lock().unwrap()[0].pending.lock().unwrap(),
+        SourcePublication::Pending(_)
+    ));
 }
-
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_exact_observers_share_the_same_source_publication_result() {
@@ -1376,36 +1521,70 @@ async fn concurrent_exact_observers_share_the_same_source_publication_result() {
     let fixture = Fixture::new(DeliveryMode::LoseAcceptedAnswer, false).await;
     let result = AssertUnwindSafe(async {
         let submitted = fixture.submit().await;
-        assert!(matches!(submitted, Ok(PrivateOriginalSubmission::AdmissionUnresolved)), "{}", submission_context(&submitted));
-        let held = fixture.source.retained.lock().unwrap().iter()
-            .find(|held| held.reference == fixture.submission.original).cloned().unwrap();
+        assert!(
+            matches!(
+                submitted,
+                Ok(PrivateOriginalSubmission::AdmissionUnresolved)
+            ),
+            "{}",
+            submission_context(&submitted)
+        );
+        let held = fixture
+            .source
+            .retained
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|held| held.reference == fixture.submission.original)
+            .cloned()
+            .unwrap();
         let pending = held.unresolved.lock().unwrap()[0].clone();
-        let stored = fixture.machine.input_state(&pending.session, pending.input.id()).await.unwrap().unwrap();
+        let stored = fixture
+            .machine
+            .input_state(&pending.session, pending.input.id())
+            .await
+            .unwrap()
+            .unwrap();
         verify_exact_replay(&stored.state, &pending.input).unwrap();
         // Both observers already hold the same guard and exact native evidence.
         // Exercise its serialized consumption directly to force the overlap;
         // neither observer submits another input or invents native acceptance.
         let start = Arc::new(tokio::sync::Barrier::new(3));
         let spawn = || {
-            let pending = pending.clone(); let start = start.clone();
-            tokio::spawn(async move { start.wait().await; pending.admit() })
+            let pending = pending.clone();
+            let start = start.clone();
+            tokio::spawn(async move {
+                start.wait().await;
+                pending.admit()
+            })
         };
-        let first = spawn(); let second = spawn();
+        let first = spawn();
+        let second = spawn();
         start.wait().await;
         let (first, second) = tokio::join!(first, second);
         assert_eq!(first.unwrap(), Ok(()));
         assert_eq!(second.unwrap(), Ok(()));
-        assert!(matches!(fixture.source.reconcile_original_submission(&fixture.submission.original).await,
+        assert!(matches!(
+            fixture
+                .source
+                .reconcile_original_submission(&fixture.submission.original)
+                .await,
             Ok(Some(PrivateOriginalSubmission::Admitted {
-                source_settlement: PrivateSourceSettlement::FreshAcceptancePromoted, ..
-            }))));
+                source_settlement: PrivateSourceSettlement::FreshAcceptancePromoted,
+                ..
+            }))
+        ));
         assert_eq!(fixture.observe_contributor().await, Ok(true));
         assert_eq!(fixture.native_inputs().await, Ok((1, 1)));
         assert_eq!(fixture.unresolved_count().await, Ok(0));
-    }).catch_unwind().await;
+    })
+    .catch_unwind()
+    .await;
     let cleanup = fixture.shutdown().await;
     assert!(cleanup.is_ok(), "{cleanup:?}");
-    if let Err(panic) = result { std::panic::resume_unwind(panic); }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 #[tokio::test]
@@ -1413,16 +1592,22 @@ async fn fixture_controller_adapter_preserves_pin_and_prepares_without_model_req
     let provider = Arc::new(ScriptedProvider::default());
     let direct: Arc<dyn LlmClient> = provider.clone();
     let probe: Arc<dyn LlmClient> = Arc::new(
-        crate::installed_host::acquisition::ProbeProvider::new(provider.clone())
+        crate::installed_host::acquisition::ProbeProvider::new(provider.clone()),
     );
     for raw in [direct, probe] {
         let adapter: Arc<dyn meerkat_core::AgentLlmClient> = Arc::new(
             meerkat_llm_core::LlmClientAdapter::try_for_provider_identity(
-                raw, MODEL.to_owned(), Provider::Anthropic
-            ).unwrap()
+                raw,
+                MODEL.to_owned(),
+                Provider::Anthropic,
+            )
+            .unwrap(),
         );
         let observed = fixture_controller_decorator()(adapter.clone());
-        assert!(Arc::ptr_eq(&adapter, &observed), "the diagnostic preserves the actual client");
+        assert!(
+            Arc::ptr_eq(&adapter, &observed),
+            "the diagnostic preserves the actual client"
+        );
         let pin = observed.pin_controller().unwrap();
         pin.client().prepare_controller_credential().await.unwrap();
         assert_eq!(provider.0.load(Ordering::SeqCst), 0);
@@ -1434,33 +1619,54 @@ async fn controller_only_owner_refuses_operation_basis_before_persistence() {
     let directory = tempfile::tempdir().unwrap();
     let owner = initialized(&directory.path().join("grants"));
     let grants = owner.grants();
-    let controller = grants.issue_root(
-        &principal("admin"), id("controller"), principal("agent"), None,
-        ceiling("infer"),
-    ).unwrap();
-    let operation = grants.issue_root(
-        &principal("admin"), id("operation"), principal("admin"), None,
-        ceiling("read"),
-    ).unwrap();
-    let mut candidate = claims("wrong-controller-only-basis", &operation).candidate().clone();
+    let controller = grants
+        .issue_root(
+            &principal("admin"),
+            id("controller"),
+            principal("agent"),
+            None,
+            ceiling("infer"),
+        )
+        .unwrap();
+    let operation = grants
+        .issue_root(
+            &principal("admin"),
+            id("operation"),
+            principal("admin"),
+            None,
+            ceiling("read"),
+        )
+        .unwrap();
+    let mut candidate = claims("wrong-controller-only-basis", &operation)
+        .candidate()
+        .clone();
     candidate.controller_grant_lineage = vec![controller];
     candidate.controller_model = Some(selection());
     candidate.controller_ceiling = ceiling("infer");
     let association = InputAuthorityAssociation::new(candidate).unwrap();
     let persistence_calls = AtomicUsize::new(0);
-    let result = owner.bind_controller_only_async(
-        association.clone(), source_custody(&association),
-        &principal("user"), &principal("frontend"),
-        |_| async {
-            persistence_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(None)
-        },
-    ).await;
+    let result = owner
+        .bind_controller_only_async(
+            association.clone(),
+            source_custody(&association),
+            &principal("user"),
+            &principal("frontend"),
+            |_| async {
+                persistence_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(None)
+            },
+        )
+        .await;
     assert_eq!(persistence_calls.load(Ordering::SeqCst), 0);
     let error = match result {
         Err(error) => error,
         Ok(_) => panic!("controller-only binding accepted an operation grant basis"),
     };
-    assert!(matches!(error, crate::original_ingress::OriginalWriterError::UnsupportedMandate),
-        "{error:?}");
+    assert!(
+        matches!(
+            error,
+            crate::original_ingress::OriginalWriterError::UnsupportedMandate
+        ),
+        "{error:?}"
+    );
 }

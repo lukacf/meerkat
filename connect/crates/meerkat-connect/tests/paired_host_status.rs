@@ -301,7 +301,8 @@ async fn fresh_native_sessions_read_prior_requests_without_recovering_submission
         // Each connection is freshly paired; no retained candidate, approval,
         // request map or previous ConnectSession is carried into the next one.
         let binding = host.paired().await;
-        let (approvals, mut presenter) = LocalApprovals::create_paired_host(directory.path()).unwrap();
+        let (approvals, mut presenter) =
+            LocalApprovals::create_paired_host(directory.path()).unwrap();
         let mut initial = SessionOptions::default();
         if index == 1 {
             initial.build.tool_access_policy = Some(ToolAccessPolicy::ReadOnly);

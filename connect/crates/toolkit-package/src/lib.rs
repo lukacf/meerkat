@@ -11,9 +11,9 @@ mod discovery;
 mod gitops;
 mod library;
 mod local_install;
-mod local_software;
 #[cfg(feature = "local-recipes")]
 mod local_recipes;
+mod local_software;
 mod manifest;
 mod mcpb;
 mod mcpb_install;
@@ -30,9 +30,9 @@ pub use compose::*;
 pub use discovery::*;
 pub use gitops::*;
 pub use library::*;
-pub use local_software::*;
 #[cfg(feature = "local-recipes")]
 pub use local_recipes::*;
+pub use local_software::*;
 pub use manifest::*;
 pub use mcpb::*;
 pub use mcpb_install::*;

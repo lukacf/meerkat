@@ -300,7 +300,10 @@ async fn operator_recovery_restores_file_owner_and_cleans_unpublished_intent_wit
         assert!(issued(changes).is_empty());
         assert_eq!(
             revoked(changes),
-            vec![parent.grant_id.as_str().to_owned(), child.grant_id.as_str().to_owned()]
+            vec![
+                parent.grant_id.as_str().to_owned(),
+                child.grant_id.as_str().to_owned()
+            ]
         );
         assert_eq!(
             fixture

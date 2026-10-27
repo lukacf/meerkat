@@ -8,16 +8,18 @@ use meerkat_core::{
     ReviewedEntryTicket, ToolCallView, ToolCatalogCapabilities, ToolDef, ToolDispatchContext,
     ToolError, ToolMutationClass, ToolResult, ops::ToolDispatchOutcome,
 };
-use meerkat_toolkit::setup::{SETUP_ACCOUNT_REQUEST, SETUP_ACCOUNTS_BUNDLE, SETUP_PUBLIC_SERVICE_REQUEST};
+use meerkat_toolkit::setup::{
+    SETUP_ACCOUNT_REQUEST, SETUP_ACCOUNTS_BUNDLE, SETUP_PUBLIC_SERVICE_REQUEST,
+};
 use serde::Deserialize;
-use toolkit_mobkit::private_originals::ServiceToolPolicySelection;
 use tokio::sync::{mpsc, oneshot};
+use toolkit_mobkit::private_originals::ServiceToolPolicySelection;
 
+mod application;
+pub(crate) mod console;
+pub(crate) mod credentials;
 mod present;
 pub(crate) mod public;
-pub(crate) mod credentials;
-pub(crate) mod console;
-mod application;
 pub(crate) use application::compose_application_policy_requests;
 #[cfg(all(unix, feature = "console"))]
 pub(crate) use application::compose_selected_policy_requests;
@@ -176,10 +178,16 @@ pub(crate) struct InstalledAccountRequests {
 
 impl InstalledAccountRequest {
     /// The actual borrowed helper request owns this response channel.
-    pub(crate) async fn closed(&mut self) { self.response.closed().await; }
+    pub(crate) async fn closed(&mut self) {
+        self.response.closed().await;
+    }
 
-    pub(crate) fn console_task(&self) -> Option<&toolkit_mobkit::private_originals::InstalledServiceTask> {
-        self.task.as_ref().filter(|task| task.console_login().is_some())
+    pub(crate) fn console_task(
+        &self,
+    ) -> Option<&toolkit_mobkit::private_originals::InstalledServiceTask> {
+        self.task
+            .as_ref()
+            .filter(|task| task.console_login().is_some())
     }
 }
 
@@ -187,20 +195,23 @@ impl InstalledAccountRequests {
     pub(crate) fn new(review: InstalledServiceReview) -> (Arc<dyn AgentToolDispatcher>, Self) {
         Self::with_tasks(review, None)
     }
-    pub(crate) fn with_tasks(review: InstalledServiceReview,
+    pub(crate) fn with_tasks(
+        review: InstalledServiceReview,
         tasks: Option<toolkit_mobkit::installed_host::acquisition::InstalledServiceTaskSource>,
     ) -> (Arc<dyn AgentToolDispatcher>, Self) {
         Self::with_policy(review, tasks, None)
     }
     #[cfg(all(unix, feature = "console"))]
-    pub(crate) fn with_selected_policy(review: InstalledServiceReview,
+    pub(crate) fn with_selected_policy(
+        review: InstalledServiceReview,
         tasks: Option<toolkit_mobkit::installed_host::acquisition::InstalledServiceTaskSource>,
         selected: Arc<crate::application_acquisition::selected_policy::SelectedPolicyBinding>,
     ) -> (Arc<dyn AgentToolDispatcher>, Self) {
         let application = application::ApplicationRequestOwner::selected(&review, selected);
         Self::with_policy(review, tasks, Some(application))
     }
-    fn with_policy(review: InstalledServiceReview,
+    fn with_policy(
+        review: InstalledServiceReview,
         tasks: Option<toolkit_mobkit::installed_host::acquisition::InstalledServiceTaskSource>,
         application: Option<Arc<application::ApplicationRequestOwner>>,
     ) -> (Arc<dyn AgentToolDispatcher>, Self) {
@@ -255,7 +266,9 @@ pub(crate) enum InstalledRequest {
     Credentials(credentials::InstalledCredentialRequest),
 }
 impl InstalledRequest {
-    pub(crate) fn console_task(&self) -> Option<&toolkit_mobkit::private_originals::InstalledServiceTask> {
+    pub(crate) fn console_task(
+        &self,
+    ) -> Option<&toolkit_mobkit::private_originals::InstalledServiceTask> {
         match self {
             Self::Account(request) => request.console_task(),
             Self::Public(request) => request.console_task(),
@@ -291,12 +304,19 @@ pub(super) struct ReviewControl {
     created: tokio::sync::watch::Receiver<Option<ApprovalId>>,
 }
 impl ReviewControl {
-    fn retire(&self) { self.cancelled.send_replace(true); }
+    fn retire(&self) {
+        self.cancelled.send_replace(true);
+    }
     async fn approval(&self) -> Result<ApprovalId, ConnectError> {
         let mut created = self.created.clone();
         loop {
-            if let Some(id) = created.borrow_and_update().clone() { return Ok(id); }
-            created.changed().await.map_err(|_| ConnectError::ReviewCancelled)?;
+            if let Some(id) = created.borrow_and_update().clone() {
+                return Ok(id);
+            }
+            created
+                .changed()
+                .await
+                .map_err(|_| ConnectError::ReviewCancelled)?;
         }
     }
 }
@@ -310,7 +330,16 @@ impl ReviewCancellation {
     fn channel() -> (ReviewControl, Self) {
         let (cancelled, receive) = tokio::sync::watch::channel(false);
         let (created, approval) = tokio::sync::watch::channel(None);
-        (ReviewControl { cancelled, created: approval }, Self { cancelled: receive, created })
+        (
+            ReviewControl {
+                cancelled,
+                created: approval,
+            },
+            Self {
+                cancelled: receive,
+                created,
+            },
+        )
     }
     pub(super) fn approval_created(&self, id: &ApprovalId) {
         self.created.send_replace(Some(id.clone()));
@@ -318,12 +347,16 @@ impl ReviewCancellation {
     pub(super) fn check(&self) -> Result<(), ConnectError> {
         if *self.cancelled.borrow() || self.cancelled.has_changed().is_err() {
             Err(ConnectError::ReviewCancelled)
-        } else { Ok(()) }
+        } else {
+            Ok(())
+        }
     }
     pub(super) async fn cancelled(&self) {
         let mut receive = self.cancelled.clone();
         while !*receive.borrow_and_update() {
-            if receive.changed().await.is_err() { break; }
+            if receive.changed().await.is_err() {
+                break;
+            }
         }
     }
 }
@@ -354,18 +387,29 @@ fn consumer_agent_schema() -> Value {
 
 // The caller invokes this only after preparing the captured task and checking
 // the borrowed call again. A mismatch discloses no unrelated member or grant.
-fn require_captured_consumer(name: &str, proposed: &str,
-    task: &toolkit_mobkit::private_originals::InstalledServiceTask) -> Result<(), ToolError> {
-    let captured = task.consumer_member().ok_or_else(|| ToolError::unavailable(name,
-        meerkat_core::ToolUnavailableReason::TemporarilyUnavailable))?;
+fn require_captured_consumer(
+    name: &str,
+    proposed: &str,
+    task: &toolkit_mobkit::private_originals::InstalledServiceTask,
+) -> Result<(), ToolError> {
+    let captured = task.consumer_member().ok_or_else(|| {
+        ToolError::unavailable(
+            name,
+            meerkat_core::ToolUnavailableReason::TemporarilyUnavailable,
+        )
+    })?;
     validate_captured_consumer(name, proposed, captured)
 }
 
 fn validate_captured_consumer(name: &str, proposed: &str, captured: &str) -> Result<(), ToolError> {
     if proposed != captured {
         let exact = serde_json::to_string(captured).map_err(|_| unavailable())?;
-        return Err(ToolError::InvalidArguments { name: name.into(), reason: format!(
-            "agent must be the captured waiting-task member {exact}, not a display name or role label. Correct only agent and resubmit the same job, raw operations and requested lifetime. This request has not entered access review.") });
+        return Err(ToolError::InvalidArguments {
+            name: name.into(),
+            reason: format!(
+                "agent must be the captured waiting-task member {exact}, not a display name or role label. Correct only agent and resubmit the same job, raw operations and requested lifetime. This request has not entered access review."
+            ),
+        });
     }
     Ok(())
 }
@@ -437,29 +481,56 @@ impl RequestTool {
         };
         // Revalidate this actual call after every preparation outcome, before
         // exposing a refusal or sending a proposal to the private presenter.
-        if let Some(refreshed) = current.check_tool_authorization(call, plan)? { current = refreshed; }
+        if let Some(refreshed) = current.check_tool_authorization(call, plan)? {
+            current = refreshed;
+        }
         let task = task.map_err(|error| match error {
             toolkit_mobkit::private_originals::PrivateOriginalError::Unavailable => unavailable(),
             toolkit_mobkit::private_originals::PrivateOriginalError::Conflict
-            | toolkit_mobkit::private_originals::PrivateOriginalError::Denied => ToolError::access_denied(call.name),
+            | toolkit_mobkit::private_originals::PrivateOriginalError::Denied => {
+                ToolError::access_denied(call.name)
+            }
         })?;
-        if let Some(task) = &task { require_captured_consumer(call.name, &proposal.agent, task)?; }
-        if task.is_none() && proposal.tool_policy.is_some() { return Err(ToolError::access_denied(call.name)); }
+        if let Some(task) = &task {
+            require_captured_consumer(call.name, &proposal.agent, task)?;
+        }
+        if task.is_none() && proposal.tool_policy.is_some() {
+            return Err(ToolError::access_denied(call.name));
+        }
         let selection = InstalledAccountSelection {
-            agent: proposal.agent, expires_in_ms: proposal.expires_in_ms,
-            operations, tool_policy: proposal.tool_policy,
+            agent: proposal.agent,
+            expires_in_ms: proposal.expires_in_ms,
+            operations,
+            tool_policy: proposal.tool_policy,
         };
         if let Some(application) = &self.application {
-            if let Some(result) = application::connector(self, application.clone(), call, &current, plan,
-                task.as_ref().ok_or_else(|| ToolError::access_denied(call.name))?, login, &target,
-                &software, &selection).await? { return Ok(result); }
-            if let Some(refreshed) = current.check_tool_authorization(call, plan)? { current = refreshed; }
+            if let Some(result) = application::connector(
+                self,
+                application.clone(),
+                call,
+                &current,
+                plan,
+                task.as_ref()
+                    .ok_or_else(|| ToolError::access_denied(call.name))?,
+                login,
+                &target,
+                &software,
+                &selection,
+            )
+            .await?
+            {
+                return Ok(result);
+            }
+            if let Some(refreshed) = current.check_tool_authorization(call, plan)? {
+                current = refreshed;
+            }
         }
         let entry = current.reviewed_entry_ticket(call, plan)?;
         let (checks, mut requests) = mpsc::channel::<oneshot::Sender<bool>>(1);
         let (response, receive) = oneshot::channel();
         self.requests
-            .as_ref().ok_or_else(unavailable)?
+            .as_ref()
+            .ok_or_else(unavailable)?
             .try_send(InstalledAccountRequest {
                 job_id: proposal.job_id,
                 target,
@@ -501,8 +572,11 @@ impl RequestTool {
 #[async_trait]
 impl AgentToolDispatcher for RequestTool {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
-        vec![Arc::new(installed_account_request_definition()),
-            Arc::new(public::installed_public_service_request_definition())].into()
+        vec![
+            Arc::new(installed_account_request_definition()),
+            Arc::new(public::installed_public_service_request_definition()),
+        ]
+        .into()
     }
     fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
         ToolCatalogCapabilities {
@@ -510,7 +584,10 @@ impl AgentToolDispatcher for RequestTool {
             may_require_catalog_control_plane: false,
         }
     }
-    fn review_entry_support(&self, name: &str) -> meerkat_core::approval::review::ReviewEntrySupport {
+    fn review_entry_support(
+        &self,
+        name: &str,
+    ) -> meerkat_core::approval::review::ReviewEntrySupport {
         use meerkat_core::approval::review::ReviewEntrySupport;
         if matches!(name, SETUP_ACCOUNT_REQUEST | SETUP_PUBLIC_SERVICE_REQUEST) {
             ReviewEntrySupport::ConsumesAtEntry
@@ -636,19 +713,32 @@ fn oauth_proposal_schema() -> Value {
 /// successor: native task catalog scope and ordinary exposed-tool invocation.
 /// This validates a proposal only; the existing owner still constructs and
 /// reviews the whole successor and issues any native grant.
-fn require_console_tool_policy(name: &str, config: &meerkat_core::McpServerConfig,
-    operations: &std::collections::BTreeSet<String>, selection: Option<&ServiceToolPolicySelection>,
+fn require_console_tool_policy(
+    name: &str,
+    config: &meerkat_core::McpServerConfig,
+    operations: &std::collections::BTreeSet<String>,
+    selection: Option<&ServiceToolPolicySelection>,
 ) -> Result<(), ToolError> {
-    let required = operations.iter().map(|raw|
-        config.tool_names.get(raw).unwrap_or(raw).as_str()).collect::<std::collections::BTreeSet<_>>();
-    let covered = selection.into_iter().flat_map(|policy| policy.tools.iter())
-        .map(|tool| tool.name.as_str()).collect::<std::collections::BTreeSet<_>>();
+    let required = operations
+        .iter()
+        .map(|raw| config.tool_names.get(raw).unwrap_or(raw).as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let covered = selection
+        .into_iter()
+        .flat_map(|policy| policy.tools.iter())
+        .map(|tool| tool.name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
     let missing = required.difference(&covered).copied().collect::<Vec<_>>();
-    if selection.is_some_and(|policy| policy.catalog.is_some()) && missing.is_empty() { return Ok(()); }
+    if selection.is_some_and(|policy| policy.catalog.is_some()) && missing.is_empty() {
+        return Ok(());
+    }
     let names = serde_json::to_string(&required).map_err(|_| unavailable())?;
-    Err(ToolError::InvalidArguments { name: name.into(), reason: format!(
-        "This captured-original Console setup requires explicit tool_policy: select a catalog consequence (r0-r3, not null) and tools with consequences covering these exact exposed names: {names}. Raw operations and exposed tool names are separate; do not use declaration IDs. Keep the same checked job, consumer and requested lifetime. Existing member policy cannot supply the new task's catalog grant. The same protected review covers the whole resulting member policy until superseded and catalog metadata for the Original conversation, not only this integration. This request has not entered access review."
-    ) })
+    Err(ToolError::InvalidArguments {
+        name: name.into(),
+        reason: format!(
+            "This captured-original Console setup requires explicit tool_policy: select a catalog consequence (r0-r3, not null) and tools with consequences covering these exact exposed names: {names}. Raw operations and exposed tool names are separate; do not use declaration IDs. Keep the same checked job, consumer and requested lifetime. Existing member policy cannot supply the new task's catalog grant. The same protected review covers the whole resulting member policy until superseded and catalog metadata for the Original conversation, not only this integration. This request has not entered access review."
+        ),
+    })
 }
 
 /// Optional proposal only. The canonical owner supplies the member, complete

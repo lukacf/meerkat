@@ -3,8 +3,10 @@
 //! generation rename. No native grant, controller, adapter or model is mocked.
 
 use super::*;
-use meerkat_core::{Config, ConfigDelta, ConfigError, ConfigRuntime, ConfigRuntimeError,
-    ConfigStore, ConfigWarning, FileConfigStore};
+use meerkat_core::{
+    Config, ConfigDelta, ConfigError, ConfigRuntime, ConfigRuntimeError, ConfigStore,
+    ConfigWarning, FileConfigStore,
+};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct ObstructGenerationAfterPatch {
@@ -15,11 +17,18 @@ struct ObstructGenerationAfterPatch {
 
 #[async_trait::async_trait]
 impl ConfigStore for ObstructGenerationAfterPatch {
-    async fn get(&self) -> Result<Config, ConfigError> { self.file.get().await }
+    async fn get(&self) -> Result<Config, ConfigError> {
+        self.file.get().await
+    }
 
-    async fn set(&self, config: Config) -> Result<(), ConfigError> { self.file.set(config).await }
+    async fn set(&self, config: Config) -> Result<(), ConfigError> {
+        self.file.set(config).await
+    }
 
-    async fn patch_preview(&self, delta: &ConfigDelta) -> Result<(Config, Vec<ConfigWarning>), ConfigError> {
+    async fn patch_preview(
+        &self,
+        delta: &ConfigDelta,
+    ) -> Result<(Config, Vec<ConfigWarning>), ConfigError> {
         self.file.patch_preview(delta).await
     }
 
@@ -50,8 +59,12 @@ impl Write for ApproveRenderedReview {
         if self.decisions == 0 {
             let text = std::str::from_utf8(&self.bytes).expect("rendered terminal text");
             if let Some((_, decision)) = text.split_once("Type 'approve ") {
-                let (id, _) = decision.split_once('\'').expect("actual displayed approval ID");
-                self.input.try_send(Ok(format!("approve {id}"))).expect("one exact protected decision");
+                let (id, _) = decision
+                    .split_once('\'')
+                    .expect("actual displayed approval ID");
+                self.input
+                    .try_send(Ok(format!("approve {id}")))
+                    .expect("one exact protected decision");
                 self.decisions += 1;
             }
         }
@@ -61,9 +74,12 @@ impl Write for ApproveRenderedReview {
 
 #[tokio::test]
 async fn partial_config_publication_returns_before_reviewed_grant_with_real_owner_unchanged() {
-    tokio::time::timeout(std::time::Duration::from_secs(30), partial_config_publication_scenario())
-        .await
-        .expect("the complete protected-review and partial-publication scenario must settle");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        partial_config_publication_scenario(),
+    )
+    .await
+    .expect("the complete protected-review and partial-publication scenario must settle");
 }
 
 async fn partial_config_publication_scenario() {
@@ -74,72 +90,139 @@ async fn partial_config_publication_scenario() {
         context_root: directory.path().to_owned(),
         state_root: Some(directory.path().join("state")),
         user_config_root: Some(directory.path().join("home")),
-    }.resolve("work").unwrap();
+    }
+    .resolve("work")
+    .unwrap();
     let source = crate::realm::config_source(&storage).unwrap();
     let config_path = source.config_doc_path(&storage.locator.realm);
     let state_path = config_path.with_file_name("config_state.json");
     let global_path = storage.layout.user_rkat_root().unwrap().join("config.toml");
-    let server = |name: &str, arg: &str| McpServerConfig::stdio(name, "/bin/true", vec![arg.into()], Default::default());
+    let server = |name: &str, arg: &str| {
+        McpServerConfig::stdio(name, "/bin/true", vec![arg.into()], Default::default())
+    };
     let old_helper = server(crate::setup::SERVER_NAME, "prior-helper");
     let unrelated = server("unrelated", "keep-this-entry");
     let parent = FileConfigStore::new(global_path.clone(), meerkat_models::canonical());
-    parent.patch(ConfigDelta(serde_json::json!({"max_tokens": 9999,
-        "tools":{"mcp_servers":[server("inherited", "parent-only")]}}))).await.unwrap();
+    parent
+        .patch(ConfigDelta(serde_json::json!({"max_tokens": 9999,
+        "tools":{"mcp_servers":[server("inherited", "parent-only")]}})))
+        .await
+        .unwrap();
     let file = FileConfigStore::new(config_path.clone(), meerkat_models::canonical());
     file.patch(ConfigDelta(serde_json::json!({"max_tokens":1234,
-        "tools":{"shell_enabled":false,"mcp_servers":[old_helper,unrelated.clone()]}}))).await.unwrap();
+        "tools":{"shell_enabled":false,"mcp_servers":[old_helper,unrelated.clone()]}})))
+        .await
+        .unwrap();
     let before_config = std::fs::read(&config_path).unwrap();
     let before_parent = std::fs::read(&global_path).unwrap();
-    assert!(!state_path.exists(), "the reviewed generation is the actual initial zero");
+    assert!(
+        !state_path.exists(),
+        "the reviewed generation is the actual initial zero"
+    );
 
     // Establish a real durable owner, then drop the opener before the
     // consumer under test restores that same already-governed realm.
     let (_, bundle) = meerkat::storage_provider::open_realm_persistence_with_layout(
-        storage.layout.clone(), storage.locator.realm.as_str(), None,
+        storage.layout.clone(),
+        storage.locator.realm.as_str(),
+        None,
         Some(meerkat_store::RealmOrigin::Explicit),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     drop(bundle);
     let principals = StockPrincipals::for_local_operator(&storage.locator.realm).unwrap();
-    govern_stock_realm(&storage.locator.state_root, storage.locator.realm.as_str(), &principals).await.unwrap();
-    let paths = meerkat_store::realm_paths_in(&storage.locator.state_root, storage.locator.realm.as_str());
+    govern_stock_realm(
+        &storage.locator.state_root,
+        storage.locator.realm.as_str(),
+        &principals,
+    )
+    .await
+    .unwrap();
+    let paths =
+        meerkat_store::realm_paths_in(&storage.locator.state_root, storage.locator.realm.as_str());
     let owner_path = meerkat_store::grant_owner_store_path(&paths.root);
     let before_owner = std::fs::read(&owner_path).unwrap();
-    assert!(!before_owner.is_empty(), "the oracle is a real native grant owner");
-    assert!(!state_path.exists(), "governance did not publish a config generation");
+    assert!(
+        !before_owner.is_empty(),
+        "the oracle is a real native grant owner"
+    );
+    assert!(
+        !state_path.exists(),
+        "governance did not publish a config generation"
+    );
 
-    let store = Arc::new(ObstructGenerationAfterPatch { file, state_path: state_path.clone(), patched: AtomicUsize::new(0) });
+    let store = Arc::new(ObstructGenerationAfterPatch {
+        file,
+        state_path: state_path.clone(),
+        patched: AtomicUsize::new(0),
+    });
     let runtime = ConfigRuntime::new(store.clone(), state_path.clone());
     let artifacts = directory.path().join("artifacts");
     std::fs::create_dir(&artifacts).unwrap();
     let raw = br#"{"mcpServers":{"toolkit-setup":{"command":"/usr/bin/env","args":["-i","/bin/true","reviewed-helper"]}}}"#;
     let connection = crate::setup::PreparedSetupConnection::from_preparer_output(raw).unwrap();
-    let mut expected_helper = crate::setup::PreparedSetupConnection::from_preparer_output(raw).unwrap().into_server();
+    let mut expected_helper = crate::setup::PreparedSetupConnection::from_preparer_output(raw)
+        .unwrap()
+        .into_server();
     expected_helper.access = Some(meerkat_core::McpServerAccess::allowing(
-        crate::setup::PREPARATION_TOOLS.iter().chain(crate::setup::ACQUISITION_TOOLS.iter()).map(|name| (*name).to_owned()),
+        crate::setup::PREPARATION_TOOLS
+            .iter()
+            .chain(crate::setup::ACQUISITION_TOOLS.iter())
+            .map(|name| (*name).to_owned()),
     ));
-    let prepared = crate::resources::PreparedResources { connection, artifact_directory: artifacts.clone() };
+    let prepared = crate::resources::PreparedResources {
+        connection,
+        artifact_directory: artifacts.clone(),
+    };
     let session = Session::new();
     let (approvals, mut presenter) = LocalApprovals::create_paired_host(&artifacts).unwrap();
     approvals.bind_session(session.id()).unwrap();
     let (tx, rx) = tokio::sync::mpsc::channel(1);
     let mut input = TerminalInput::scripted(rx);
-    let mut output = ApproveRenderedReview { bytes: Vec::new(), input: tx, decisions: 0 };
+    let mut output = ApproveRenderedReview {
+        bytes: Vec::new(),
+        input: tx,
+        decisions: 0,
+    };
     let interrupt = std::future::pending::<io::Result<()>>();
     tokio::pin!(interrupt);
-    let result = SessionStartup::prepare_standalone_with_config(storage.clone(), session, prepared, runtime,
-        &approvals, &mut presenter, &mut input, &mut output, interrupt.as_mut()).await;
+    let result = SessionStartup::prepare_standalone_with_config(
+        storage.clone(),
+        session,
+        prepared,
+        runtime,
+        &approvals,
+        &mut presenter,
+        &mut input,
+        &mut output,
+        interrupt.as_mut(),
+    )
+    .await;
     approvals.retire();
     let error = match result {
         Err(error) => error,
         Ok(startup) => {
-            if let Some(mut startup) = startup { startup.abort_standalone(&mut output).await.unwrap(); }
+            if let Some(mut startup) = startup {
+                startup.abort_standalone(&mut output).await.unwrap();
+            }
             panic!("a failed native generation publication must return its failure");
         }
     };
-    let ConnectError::Native { operation, source } = error else { panic!("the native write failure is primary"); };
-    assert_eq!(operation, "Save reviewed setup configuration; outcome may be partial");
-    assert!(matches!(source.downcast_ref::<ConfigRuntimeError>(), Some(ConfigRuntimeError::Io(_))),
-        "the error must be native generation publication, not delegated store refusal");
+    let ConnectError::Native { operation, source } = error else {
+        panic!("the native write failure is primary");
+    };
+    assert_eq!(
+        operation,
+        "Save reviewed setup configuration; outcome may be partial"
+    );
+    assert!(
+        matches!(
+            source.downcast_ref::<ConfigRuntimeError>(),
+            Some(ConfigRuntimeError::Io(_))
+        ),
+        "the error must be native generation publication, not delegated store refusal"
+    );
     assert_eq!(store.patched.load(Ordering::SeqCst), 1);
     assert!(state_path.is_dir());
     assert_ne!(std::fs::read(&config_path).unwrap(), before_config);
@@ -147,24 +230,42 @@ async fn partial_config_publication_scenario() {
     assert_eq!(after.max_tokens, Some(1234));
     assert!(!after.tools.shell_enabled);
     assert_eq!(after.tools.mcp_servers, vec![expected_helper, unrelated]);
-    assert_eq!(std::fs::read(&global_path).unwrap(), before_parent, "parent configuration is untouched");
-    assert_eq!(std::fs::read(&owner_path).unwrap(), before_owner, "no grant was appended or owner recreated");
-    assert_eq!(meerkat_store::read_realm_posture_in(&storage.locator.state_root, storage.locator.realm.as_str()).await.unwrap(), meerkat_store::RealmPosture::Governed);
+    assert_eq!(
+        std::fs::read(&global_path).unwrap(),
+        before_parent,
+        "parent configuration is untouched"
+    );
+    assert_eq!(
+        std::fs::read(&owner_path).unwrap(),
+        before_owner,
+        "no grant was appended or owner recreated"
+    );
+    assert_eq!(
+        meerkat_store::read_realm_posture_in(
+            &storage.locator.state_root,
+            storage.locator.realm.as_str()
+        )
+        .await
+        .unwrap(),
+        meerkat_store::RealmPosture::Governed
+    );
     assert_eq!(output.decisions, 1);
     let output = String::from_utf8(output.bytes).unwrap();
     assert!(output.contains("Decision recorded. Waiting for the native outcome."));
     assert!(output.contains("Saving the setup connection failed and may be partial. No setup grant or retry was started."));
-    let retained = std::fs::read_to_string(artifacts.join("standalone-setup-configuration.txt")).unwrap();
+    let retained =
+        std::fs::read_to_string(artifacts.join("standalone-setup-configuration.txt")).unwrap();
     assert!(retained.contains("Native configuration write failed and may be partial"));
     assert!(artifacts.join("standalone-realm-governance.txt").is_file());
-    assert!(!artifacts.join("standalone-mcp-grant-request.txt").exists(),
-        "the mandatory request record immediately before native issuance was not reached");
+    assert!(
+        !artifacts.join("standalone-mcp-grant-request.txt").exists(),
+        "the mandatory request record immediately before native issuance was not reached"
+    );
     assert!(!artifacts.join("standalone-mcp-grant-outcome.txt").exists());
     // Stage entry follows a successfully observed reviewed grant in production.
     // The exact early return and unchanged owner above do not constitute a
     // separately instrumented stage-entry counter or a successful startup.
 }
-
 
 #[tokio::test]
 async fn ordinary_continuation_reopens_exact_history_and_current_config_without_reissuing() {

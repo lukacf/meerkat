@@ -26,7 +26,8 @@ impl PrivateOriginals {
         context: &ToolDispatchContext,
         expected: &InstalledSetupSelection,
     ) -> Result<SetupResultSource, PrivateOriginalError> {
-        self.setup_result_source_from(context, std::slice::from_ref(expected)).await
+        self.setup_result_source_from(context, std::slice::from_ref(expected))
+            .await
     }
 
     pub(crate) async fn setup_result_source_from(
@@ -101,7 +102,11 @@ impl PrivateOriginals {
         let facts = self
             .helper_policy_source(association)?
             .ok_or(PrivateOriginalError::Unavailable)?;
-        if expected.iter().filter(|helper| **helper == facts.selection.helper).count() != 1
+        if expected
+            .iter()
+            .filter(|helper| **helper == facts.selection.helper)
+            .count()
+            != 1
             || association.candidate().target.context.as_str() != session.to_string()
             || association.candidate().target.logical_runtime.as_str() != retained.runtime_id()
         {
@@ -151,11 +156,18 @@ impl PrivateOriginals {
             if record.operation_cancelled {
                 return Err(PrivateOriginalError::Denied);
             }
-            self.extend_result_ancestor_sources(&record, &mut ancestor_sources).await?;
-            contributor_sources.push((contributor.clone(), RecordCondition {
-                key: row.key, revision: row.revision, content_digest: row.content_digest,
-                claim: None, dispatch_claim: None,
-            }));
+            self.extend_result_ancestor_sources(&record, &mut ancestor_sources)
+                .await?;
+            contributor_sources.push((
+                contributor.clone(),
+                RecordCondition {
+                    key: row.key,
+                    revision: row.revision,
+                    content_digest: row.content_digest,
+                    claim: None,
+                    dispatch_claim: None,
+                },
+            ));
             originals.push(original);
         }
         for original in &originals {
@@ -274,8 +286,12 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::original_ingress::tests::{claims, initialized, principal, private_originals, source};
-    use meerkat_authorization_contracts::{constraints::ExecutionRestrictions, evidence::EvidenceId};
+    use crate::original_ingress::tests::{
+        claims, initialized, principal, private_originals, source,
+    };
+    use meerkat_authorization_contracts::{
+        constraints::ExecutionRestrictions, evidence::EvidenceId,
+    };
     use std::os::unix::fs::PermissionsExt;
 
     #[tokio::test]
@@ -283,30 +299,54 @@ mod tests {
         // Source-currentness control only. This fixture does not claim a real
         // helper dispatch, matched result, native admission or operation grant.
         let directory = tempfile::Builder::new()
-            .permissions(std::fs::Permissions::from_mode(0o700)).tempdir().unwrap();
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
         let owner = initialized(&directory.path().join("grants"));
-        let adapter = private_originals(owner.clone(), &directory.path().join("source.sqlite3")).await;
-        let base = owner.grants().issue_root(
-            &principal("admin"), EvidenceId::new("result-source-base").unwrap(),
-            principal("admin"), None, ExecutionRestrictions::unrestricted(),
-        ).unwrap();
+        let adapter =
+            private_originals(owner.clone(), &directory.path().join("source.sqlite3")).await;
+        let base = owner
+            .grants()
+            .issue_root(
+                &principal("admin"),
+                EvidenceId::new("result-source-base").unwrap(),
+                principal("admin"),
+                None,
+                ExecutionRestrictions::unrestricted(),
+            )
+            .unwrap();
         let association = claims("result-source", &base);
-        let original = owner.enroll_new_authenticated(
-            association.clone(), source(&association), &principal("user"),
-            &principal("frontend"), &principal("admin"),
-            EvidenceId::new("result-source-child").unwrap(),
-            ExecutionRestrictions::unrestricted(), |_| Ok(None),
-        ).unwrap();
+        let original = owner
+            .enroll_new_authenticated(
+                association.clone(),
+                source(&association),
+                &principal("user"),
+                &principal("frontend"),
+                &principal("admin"),
+                EvidenceId::new("result-source-child").unwrap(),
+                ExecutionRestrictions::unrestricted(),
+                |_| Ok(None),
+            )
+            .unwrap();
         let association = original.association();
         adapter.require_result_source(association, true).unwrap();
-        assert!(matches!(adapter.require_result_source(association, false),
-            Err(PrivateOriginalError::Unavailable)));
+        assert!(matches!(
+            adapter.require_result_source(association, false),
+            Err(PrivateOriginalError::Unavailable)
+        ));
         let c = association.candidate();
-        assert!(owner.admitted_original_basis(&c.ingress_namespace, &c.original_work).unwrap().is_none());
+        assert!(
+            owner
+                .admitted_original_basis(&c.ingress_namespace, &c.original_work)
+                .unwrap()
+                .is_none()
+        );
         let mut foreign = c.clone();
         foreign.ingress_namespace.realm = meerkat_core::RealmId::parse("foreign-realm").unwrap();
         let foreign = InputAuthorityAssociation::new(foreign).unwrap();
-        assert!(matches!(adapter.require_result_source(&foreign, true),
-            Err(PrivateOriginalError::Unavailable)));
+        assert!(matches!(
+            adapter.require_result_source(&foreign, true),
+            Err(PrivateOriginalError::Unavailable)
+        ));
     }
 }

@@ -468,7 +468,10 @@ async fn ready_configured_provider_needs_no_prompt_or_realm_materialization() {
     assert_eq!(resolved.provider, meerkat_core::Provider::OpenAI);
     assert_eq!(request.model.as_deref(), Some(resolved.model.as_str()));
     assert_eq!(request.provider, Some(resolved.provider));
-    assert!(request.auth_binding.is_none(), "a ready native candidate is not an explicit binding selection");
+    assert!(
+        request.auth_binding.is_none(),
+        "a ready native candidate is not an explicit binding selection"
+    );
     // Exercise the actual public-presenter return that main retains for the
     // same setup conversation after finalization refreshes configuration.
     let mut refreshed = effective.clone();
@@ -2155,7 +2158,12 @@ async fn configured_managed_api_key_uses_explicit_owner_and_same_native_session(
     );
 }
 
-async fn first_target_key_entry(master: &OwnedFd, observer: &OwnedFd, output: &Output, name: &[u8]) {
+async fn first_target_key_entry(
+    master: &OwnedFd,
+    observer: &OwnedFd,
+    output: &Output,
+    name: &[u8],
+) {
     shown(output, "Connection name [").await;
     waiting_for_input(observer).await;
     write(master, name).unwrap();
@@ -2168,61 +2176,130 @@ async fn first_target_key_entry(master: &OwnedFd, observer: &OwnedFd, output: &O
     write(master, b"enter-key\n").unwrap();
     shown(output, KEY_PROMPT).await;
     waiting_for_input(observer).await;
-    assert!(!tcgetattr(observer).unwrap().local_flags.contains(nix::sys::termios::LocalFlags::ECHO));
+    assert!(
+        !tcgetattr(observer)
+            .unwrap()
+            .local_flags
+            .contains(nix::sys::termios::LocalFlags::ECHO)
+    );
 }
 
 #[tokio::test]
 async fn empty_realm_without_environment_creates_first_target_and_uses_original_startup() {
-    if !isolated("empty_realm_without_environment_creates_first_target_and_uses_original_startup").await { return; }
+    if !isolated("empty_realm_without_environment_creates_first_target_and_uses_original_startup")
+        .await
+    {
+        return;
+    }
     let root = PathBuf::from(std::env::var_os(ROOT).unwrap());
     let selected = storage(&root, "work");
     let path = root.join("state/work/config.toml");
     assert!(!path.exists());
-    assert!(!selected.layout.user_rkat_root().unwrap().join("config.toml").exists());
-    for key in ["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY", "RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY",
-        "RKAT_GEMINI_API_KEY", "GEMINI_API_KEY", "RKAT_GOOGLE_API_KEY", "GOOGLE_API_KEY"] {
+    assert!(
+        !selected
+            .layout
+            .user_rkat_root()
+            .unwrap()
+            .join("config.toml")
+            .exists()
+    );
+    for key in [
+        "RKAT_OPENAI_API_KEY",
+        "OPENAI_API_KEY",
+        "RKAT_ANTHROPIC_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "RKAT_GEMINI_API_KEY",
+        "GEMINI_API_KEY",
+        "RKAT_GOOGLE_API_KEY",
+        "GOOGLE_API_KEY",
+    ] {
         assert!(std::env::var_os(key).is_none());
     }
-    let original_config = meerkat_connect::realm::read_config(&selected).await.unwrap();
-    let original_model = meerkat::resolve_create_session_model(&original_config, Default::default()).unwrap();
+    let original_config = meerkat_connect::realm::read_config(&selected)
+        .await
+        .unwrap();
+    let original_model =
+        meerkat::resolve_create_session_model(&original_config, Default::default()).unwrap();
     let mut startup = SessionStartup::open(selected.clone()).await.unwrap();
     let mut pty = Pty::new();
     let mut output = Output::default();
     let observed = output.clone();
     let human = async {
         first_target_key_entry(&pty.master, &pty.observer, &observed, b"\n").await;
-        assert!(path.is_file(), "configuration must settle before secret collection");
+        assert!(
+            path.is_file(),
+            "configuration must settle before secret collection"
+        );
         write(&pty.master, format!("{MANAGED_KEY}\n").as_bytes()).unwrap();
     };
     let (result, ()) = timeout(BOUND, async {
-        tokio::join!(present_provider_setup(&mut startup, None, false, &mut pty.input,
-            &mut output, std::future::pending()), human)
-    }).await.expect("the actual no-env public first-target path must reach terminal input");
+        tokio::join!(
+            present_provider_setup(
+                &mut startup,
+                None,
+                false,
+                &mut pty.input,
+                &mut output,
+                std::future::pending()
+            ),
+            human
+        )
+    })
+    .await
+    .expect("the actual no-env public first-target path must reach terminal input");
     let request = result.unwrap().unwrap();
-    assert_eq!(request.model.as_deref(), Some(original_model.model.as_str()),
-        "the returned continuation selection retains the same native effective model");
+    assert_eq!(
+        request.model.as_deref(),
+        Some(original_model.model.as_str()),
+        "the returned continuation selection retains the same native effective model"
+    );
     assert_eq!(request.provider, Some(original_model.provider));
     let binding = request.auth_binding.as_ref().unwrap();
     assert_eq!(binding.realm.as_str(), "work");
-    assert_eq!(binding.binding.as_str(), format!("{}_api_key", original_model.provider.as_str()));
-    let config = meerkat_connect::realm::read_config(&selected).await.unwrap();
+    assert_eq!(
+        binding.binding.as_str(),
+        format!("{}_api_key", original_model.provider.as_str())
+    );
+    let config = meerkat_connect::realm::read_config(&selected)
+        .await
+        .unwrap();
     let target = meerkat_core::resolve_explicit_auth_binding_target(&config, binding).unwrap();
     let ordinary_request = meerkat::CreateSessionModelResolutionRequest::default();
-    assert!(ordinary_request.auth_binding.is_none(), "ordinary selection must not supply the returned override");
+    assert!(
+        ordinary_request.auth_binding.is_none(),
+        "ordinary selection must not supply the returned override"
+    );
     let ordinary = meerkat::resolve_create_session_model(&config, ordinary_request).unwrap();
     assert_eq!(ordinary.model, original_model.model);
     assert_eq!(ordinary.provider, original_model.provider);
-    let candidates = meerkat_core::resolve_auth_binding_candidates_for_provider(&config,
-        ordinary.provider, ordinary.auth_binding.as_ref(), Some(&selected.locator.realm), true).unwrap();
+    let candidates = meerkat_core::resolve_auth_binding_candidates_for_provider(
+        &config,
+        ordinary.provider,
+        ordinary.auth_binding.as_ref(),
+        Some(&selected.locator.realm),
+        true,
+    )
+    .unwrap();
     assert_eq!(candidates.first(), Some(&target));
     use meerkat_auth_core::auth_store::{TokenKey, TokenStoreBackend};
     let backend = TokenStoreBackend::default_auto().unwrap();
-    let TokenStoreBackend::File { root: store_root } = &backend else { panic!("isolated native file store required"); };
+    let TokenStoreBackend::File { root: store_root } = &backend else {
+        panic!("isolated native file store required");
+    };
     assert!(store_root.starts_with(&root));
     let store = backend.open().unwrap();
     let key = TokenKey::from_credential_identity(&target.credential_identity);
     assert_eq!(store.list().await.unwrap(), vec![key.clone()]);
-    assert_eq!(store.load(&key).await.unwrap().unwrap().primary_secret.as_deref(), Some(MANAGED_KEY));
+    assert_eq!(
+        store
+            .load(&key)
+            .await
+            .unwrap()
+            .unwrap()
+            .primary_secret
+            .as_deref(),
+        Some(MANAGED_KEY)
+    );
     assert!(!output.text().contains(MANAGED_KEY));
     pty.restored();
     // Consume this original startup into the existing native controller path.
@@ -2230,15 +2307,25 @@ async fn empty_realm_without_environment_creates_first_target_and_uses_original_
     let (frontend, _host) = PairedHostFrontend::deferred();
     let (lazy, _service) = LazySetup::new(frontend);
     let (approvals, _decisions) = LocalApprovals::create_paired_host(&root).unwrap();
-    let mut options = lazy.session_options(SessionOptions { model: request, ..Default::default() }).unwrap();
+    let mut options = lazy
+        .session_options(SessionOptions {
+            model: request,
+            ..Default::default()
+        })
+        .unwrap();
     approvals.attach_lazy_setup(&mut options, &lazy).unwrap();
-    let session = timeout(BOUND, Box::pin(startup.open_lazy_setup(options, &lazy))).await.unwrap().unwrap();
+    let session = timeout(BOUND, Box::pin(startup.open_lazy_setup(options, &lazy)))
+        .await
+        .unwrap()
+        .unwrap();
     timeout(BOUND, session.close()).await.unwrap().unwrap();
 }
 
 #[tokio::test]
 async fn first_target_quit_before_creation_keeps_document_and_credentials_absent() {
-    if !isolated("first_target_quit_before_creation_keeps_document_and_credentials_absent").await { return; }
+    if !isolated("first_target_quit_before_creation_keeps_document_and_credentials_absent").await {
+        return;
+    }
     let root = PathBuf::from(std::env::var_os(ROOT).unwrap());
     let selected = storage(&root, "work");
     let mut startup = SessionStartup::open(selected).await.unwrap();
@@ -2254,13 +2341,27 @@ async fn first_target_quit_before_creation_keeps_document_and_credentials_absent
         write(&pty.master, b"/quit\n").unwrap();
     };
     let (result, ()) = timeout(BOUND, async {
-        tokio::join!(present_provider_setup(&mut startup, None, false, &mut pty.input,
-            &mut output, std::future::pending()), human)
-    }).await.unwrap();
+        tokio::join!(
+            present_provider_setup(
+                &mut startup,
+                None,
+                false,
+                &mut pty.input,
+                &mut output,
+                std::future::pending()
+            ),
+            human
+        )
+    })
+    .await
+    .unwrap();
     assert!(result.unwrap().is_none());
     assert!(!root.join("state/work/config.toml").exists());
     assert!(!root.join("state/work/config_state.json").exists());
-    let store = meerkat_auth_core::auth_store::TokenStoreBackend::default_auto().unwrap().open().unwrap();
+    let store = meerkat_auth_core::auth_store::TokenStoreBackend::default_auto()
+        .unwrap()
+        .open()
+        .unwrap();
     assert!(store.list().await.unwrap().is_empty());
     assert!(!observed.text().contains(KEY_PROMPT));
     pty.restored();
@@ -2268,7 +2369,9 @@ async fn first_target_quit_before_creation_keeps_document_and_credentials_absent
 
 #[tokio::test]
 async fn first_target_document_change_during_hidden_input_refuses_native_save() {
-    if !isolated("first_target_document_change_during_hidden_input_refuses_native_save").await { return; }
+    if !isolated("first_target_document_change_during_hidden_input_refuses_native_save").await {
+        return;
+    }
     let root = PathBuf::from(std::env::var_os(ROOT).unwrap());
     let selected = storage(&root, "work");
     let mut startup = SessionStartup::open(selected.clone()).await.unwrap();
@@ -2278,82 +2381,173 @@ async fn first_target_document_change_during_hidden_input_refuses_native_save() 
     let human = async {
         first_target_key_entry(&pty.master, &pty.observer, &observed, b"first_key\n").await;
         use meerkat_core::ConfigStore;
-        meerkat_core::FileConfigStore::new(root.join("state/work/config.toml"), meerkat_models::canonical())
-            .patch(meerkat_core::ConfigDelta(serde_json::json!({"realm":{"work":{"auth":{"first_key":{
+        meerkat_core::FileConfigStore::new(
+            root.join("state/work/config.toml"),
+            meerkat_models::canonical(),
+        )
+        .patch(meerkat_core::ConfigDelta(
+            serde_json::json!({"realm":{"work":{"auth":{"first_key":{
                 "source":{"kind":"env","env":"CONNECT_PROVIDER_ABSENT_KEY"}
-            }}}}}))).await.unwrap();
+            }}}}}),
+        ))
+        .await
+        .unwrap();
         write(&pty.master, format!("{MANAGED_KEY}\n").as_bytes()).unwrap();
     };
     let (result, ()) = timeout(BOUND, async {
-        tokio::join!(present_provider_setup(&mut startup, None, false, &mut pty.input,
-            &mut output, std::future::pending()), human)
-    }).await.unwrap();
-    assert!(result.is_err(), "the old retained Config must not authorize a write after input");
-    let store = meerkat_auth_core::auth_store::TokenStoreBackend::default_auto().unwrap().open().unwrap();
+        tokio::join!(
+            present_provider_setup(
+                &mut startup,
+                None,
+                false,
+                &mut pty.input,
+                &mut output,
+                std::future::pending()
+            ),
+            human
+        )
+    })
+    .await
+    .unwrap();
+    assert!(
+        result.is_err(),
+        "the old retained Config must not authorize a write after input"
+    );
+    let store = meerkat_auth_core::auth_store::TokenStoreBackend::default_auto()
+        .unwrap()
+        .open()
+        .unwrap();
     assert!(store.list().await.unwrap().is_empty());
-    assert!(!observed.text().contains("API key stored by the native credential owner."));
+    assert!(
+        !observed
+            .text()
+            .contains("API key stored by the native credential owner.")
+    );
     assert!(!observed.text().contains(MANAGED_KEY));
-    let config = meerkat_connect::realm::read_config(&selected).await.unwrap();
-    let reference = meerkat_core::AuthBindingRef { realm: selected.locator.realm,
-        binding: meerkat_core::BindingId::parse("first_key").unwrap(), profile: None,
-        origin: meerkat_core::BindingOrigin::Configured };
+    let config = meerkat_connect::realm::read_config(&selected)
+        .await
+        .unwrap();
+    let reference = meerkat_core::AuthBindingRef {
+        realm: selected.locator.realm,
+        binding: meerkat_core::BindingId::parse("first_key").unwrap(),
+        profile: None,
+        origin: meerkat_core::BindingOrigin::Configured,
+    };
     let target = meerkat_core::resolve_explicit_auth_binding_target(&config, &reference).unwrap();
-    assert!(matches!(target.auth_profile.source, meerkat_core::CredentialSourceSpec::Env { .. }));
+    assert!(matches!(
+        target.auth_profile.source,
+        meerkat_core::CredentialSourceSpec::Env { .. }
+    ));
     pty.restored();
 }
 
 #[tokio::test]
 async fn first_target_explicit_model_reviews_durable_realm_default_and_preserves_parent() {
-    if !isolated("first_target_explicit_model_reviews_durable_realm_default_and_preserves_parent").await { return; }
+    if !isolated("first_target_explicit_model_reviews_durable_realm_default_and_preserves_parent")
+        .await
+    {
+        return;
+    }
     let root = PathBuf::from(std::env::var_os(ROOT).unwrap());
     let selected = storage(&root, "work");
-    let parent_path = selected.layout.user_rkat_root().unwrap().join("config.toml");
+    let parent_path = selected
+        .layout
+        .user_rkat_root()
+        .unwrap()
+        .join("config.toml");
     std::fs::create_dir_all(parent_path.parent().unwrap()).unwrap();
     // Native implicit global inheritance requires its realm declaration.
     let parent = b"[agent]\nmodel = \"claude-opus-5-5\"\n[realm.global]\n";
     std::fs::write(&parent_path, parent).unwrap();
-    let initial = meerkat_connect::realm::read_config(&selected).await.unwrap();
-    let initial_model = meerkat::resolve_create_session_model(&initial, Default::default()).unwrap();
+    let initial = meerkat_connect::realm::read_config(&selected)
+        .await
+        .unwrap();
+    let initial_model =
+        meerkat::resolve_create_session_model(&initial, Default::default()).unwrap();
     assert_eq!(initial_model.model, "claude-opus-5-5");
     let mut startup = SessionStartup::open(selected.clone()).await.unwrap();
     let mut pty = Pty::new();
     let mut output = Output::default();
     let observed = output.clone();
-    let human = async {
-        shown(&observed, "Connection name [").await;
-        waiting_for_input(&pty.observer).await;
-        write(&pty.master, b"first_key\n").unwrap();
-        shown(&observed, "Type 'create'").await;
-        waiting_for_input(&pty.observer).await;
-        assert!(observed.text().contains("Change this realm's default model from 'claude-opus-5-5' to 'gpt-6-astra'"));
-        assert!(observed.text().contains("Parent and global documents are unchanged."));
-        assert!(!root.join("state/work/config.toml").exists());
-        write(&pty.master, b"create\n").unwrap();
-        shown(&observed, "Type 'enter-key'").await;
-        waiting_for_input(&pty.observer).await;
-        write(&pty.master, b"enter-key\n").unwrap();
-        shown(&observed, KEY_PROMPT).await;
-        waiting_for_input(&pty.observer).await;
-        assert!(!tcgetattr(&pty.observer).unwrap().local_flags.contains(nix::sys::termios::LocalFlags::ECHO));
-        write(&pty.master, format!("{MANAGED_KEY}\n").as_bytes()).unwrap();
-    };
+    let human =
+        async {
+            shown(&observed, "Connection name [").await;
+            waiting_for_input(&pty.observer).await;
+            write(&pty.master, b"first_key\n").unwrap();
+            shown(&observed, "Type 'create'").await;
+            waiting_for_input(&pty.observer).await;
+            assert!(observed.text().contains(
+                "Change this realm's default model from 'claude-opus-5-5' to 'gpt-6-astra'"
+            ));
+            assert!(
+                observed
+                    .text()
+                    .contains("Parent and global documents are unchanged.")
+            );
+            assert!(!root.join("state/work/config.toml").exists());
+            write(&pty.master, b"create\n").unwrap();
+            shown(&observed, "Type 'enter-key'").await;
+            waiting_for_input(&pty.observer).await;
+            write(&pty.master, b"enter-key\n").unwrap();
+            shown(&observed, KEY_PROMPT).await;
+            waiting_for_input(&pty.observer).await;
+            assert!(
+                !tcgetattr(&pty.observer)
+                    .unwrap()
+                    .local_flags
+                    .contains(nix::sys::termios::LocalFlags::ECHO)
+            );
+            write(&pty.master, format!("{MANAGED_KEY}\n").as_bytes()).unwrap();
+        };
     let (result, ()) = timeout(BOUND, async {
-        tokio::join!(present_provider_setup(&mut startup, Some("gpt-6-astra".into()), false,
-            &mut pty.input, &mut output, std::future::pending()), human)
-    }).await.expect("explicit-model first target must finish the protected reviewed path");
+        tokio::join!(
+            present_provider_setup(
+                &mut startup,
+                Some("gpt-6-astra".into()),
+                false,
+                &mut pty.input,
+                &mut output,
+                std::future::pending()
+            ),
+            human
+        )
+    })
+    .await
+    .expect("explicit-model first target must finish the protected reviewed path");
     let request = result.unwrap().unwrap();
     assert_eq!(request.model.as_deref(), Some("gpt-6-astra"));
-    let fresh = meerkat_connect::realm::read_config(&selected).await.unwrap();
+    let fresh = meerkat_connect::realm::read_config(&selected)
+        .await
+        .unwrap();
     let ordinary = meerkat::resolve_create_session_model(&fresh, Default::default()).unwrap();
-    assert_eq!(ordinary.model, "gpt-6-astra", "no model, provider or binding override supplies this fresh choice");
+    assert_eq!(
+        ordinary.model, "gpt-6-astra",
+        "no model, provider or binding override supplies this fresh choice"
+    );
     assert_eq!(ordinary.provider, meerkat_core::Provider::OpenAI);
-    let candidates = meerkat_core::resolve_auth_binding_candidates_for_provider(&fresh,
-        ordinary.provider, ordinary.auth_binding.as_ref(), Some(&selected.locator.realm), true).unwrap();
-    let target = meerkat_core::resolve_explicit_auth_binding_target(&fresh, request.auth_binding.as_ref().unwrap()).unwrap();
+    let candidates = meerkat_core::resolve_auth_binding_candidates_for_provider(
+        &fresh,
+        ordinary.provider,
+        ordinary.auth_binding.as_ref(),
+        Some(&selected.locator.realm),
+        true,
+    )
+    .unwrap();
+    let target = meerkat_core::resolve_explicit_auth_binding_target(
+        &fresh,
+        request.auth_binding.as_ref().unwrap(),
+    )
+    .unwrap();
     assert_eq!(candidates.first(), Some(&target));
     assert_eq!(std::fs::read(&parent_path).unwrap(), parent);
     use meerkat_core::ConfigStore;
-    let own = meerkat_core::FileConfigStore::new(root.join("state/work/config.toml"), meerkat_models::canonical()).get().await.unwrap();
+    let own = meerkat_core::FileConfigStore::new(
+        root.join("state/work/config.toml"),
+        meerkat_models::canonical(),
+    )
+    .get()
+    .await
+    .unwrap();
     assert_eq!(own.agent.model, "gpt-6-astra");
     assert!(!observed.text().contains(MANAGED_KEY));
     pty.restored();

@@ -1,23 +1,28 @@
 //! The production caller enters native from an empty keeper. Only model IO
 //! and installed-package readback use mechanical fixtures. The stdio MCP
 //! process, native Apply, accepted receipt and operation observation are real.
-use super::super::super::admission_tests::{approve_b_configuration, approve_b_configuration_with_tool_policy};
+use super::super::super::admission_tests::{
+    approve_b_configuration, approve_b_configuration_with_tool_policy,
+};
 use super::*;
 use futures::StreamExt;
 use meerkat_authorization_contracts::work_association::InputAuthorityAssociation;
 use meerkat_core::{
-    ApprovalDecision, ApprovalRecord, ApprovalStatus, ControllerModelSelection, Message,
-    Provider, StopReason, ToolIdentity, ToolResult, lifecycle::InputId, types::ToolSourceKind,
+    ApprovalDecision, ApprovalRecord, ApprovalStatus, ControllerModelSelection, Message, Provider,
+    StopReason, ToolIdentity, ToolResult, lifecycle::InputId, types::ToolSourceKind,
 };
 use meerkat_llm_core::{
     LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest, LlmStream, PlainModelRoute,
     PreparedLlmRequest,
 };
 use meerkat_runtime::completion::CompletionOutcome;
-use meerkat_runtime::terminal_status::{InputTerminalReceiptRead, InteractionSelector};
 use meerkat_runtime::input_state::{InputLifecycleState, InputTerminalOutcome, StoredInputState};
+use meerkat_runtime::terminal_status::{InputTerminalReceiptRead, InteractionSelector};
 use meerkat_runtime::{LogicalRuntimeId, RuntimeStore, SessionServiceRuntimeExt};
-use std::{path::{Path, PathBuf}, sync::atomic::AtomicBool};
+use std::{
+    path::{Path, PathBuf},
+    sync::atomic::AtomicBool,
+};
 
 type PersistentFixture =
     ContinuationFixture<meerkat::PersistentSessionService<meerkat::FactoryAgentBuilder>>;
@@ -96,7 +101,9 @@ exit 3"#
                 if deferred {
                     // Real schema volume selects native deferred catalog mode.
                     serde_json::json!({"type":"object","description":"A harmless read whose exact schema is intentionally large enough for native deferred discovery. The native catalog must load this tool before it can be offered to the Original model."}).to_string()
-                } else { serde_json::json!({"type":"object"}).to_string() },
+                } else {
+                    serde_json::json!({"type":"object"}).to_string()
+                },
             ],
             Default::default(),
         );
@@ -118,7 +125,10 @@ exit 3"#
     }
     fn calls_at(path: &Path) -> Vec<serde_json::Value> {
         match std::fs::read_to_string(path) {
-            Ok(text) => text.lines().map(|line| serde_json::from_str(line).unwrap()).collect(),
+            Ok(text) => text
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect(),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => vec![],
             Err(error) => panic!("fixture invocation observation failed: {error}"),
         }
@@ -147,7 +157,10 @@ const PUBLIC_CATALOG_CALL: &str = "actual-public-attachment-catalog";
 const MAX_PUBLIC_READ_CHOICES: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PublicReadFailure { ReprepareRequired, AuthorizationUnavailable }
+enum PublicReadFailure {
+    ReprepareRequired,
+    AuthorizationUnavailable,
+}
 
 struct PublicReadChoice {
     call_id: String,
@@ -174,12 +187,27 @@ struct PublicReadScript {
 }
 impl PublicReadScript {
     fn provider(self: &Arc<Self>, inner: Arc<dyn LlmClient>) -> Arc<dyn LlmClient> {
-        Arc::new(PublicReadProvider { inner, script: self.clone() })
+        Arc::new(PublicReadProvider {
+            inner,
+            script: self.clone(),
+        })
     }
     fn arm(&self, instruction: String, endpoint_calls: PathBuf) {
         assert!(!instruction.is_empty());
-        assert!(self.expected_instruction.lock().unwrap().replace(instruction).is_none());
-        assert!(self.endpoint_calls.lock().unwrap().replace(endpoint_calls).is_none());
+        assert!(
+            self.expected_instruction
+                .lock()
+                .unwrap()
+                .replace(instruction)
+                .is_none()
+        );
+        assert!(
+            self.endpoint_calls
+                .lock()
+                .unwrap()
+                .replace(endpoint_calls)
+                .is_none()
+        );
         assert!(!self.armed.swap(true, Ordering::SeqCst));
     }
     fn endpoint_call_count(&self) -> usize {
@@ -190,19 +218,29 @@ impl PublicReadScript {
     }
 }
 
-
 fn public_failure(result: &ToolResult) -> PublicReadFailure {
-    [PublicReadFailure::ReprepareRequired, PublicReadFailure::AuthorizationUnavailable]
-        .into_iter().find(|kind| {
-            let error = match kind {
-                PublicReadFailure::ReprepareRequired => meerkat_core::ToolError::AuthorizationRefused {
-                    refusal: meerkat_core::OperationRefused::new(meerkat_core::OperationRefusalKind::ReprepareRequired),
-                },
-                PublicReadFailure::AuthorizationUnavailable => meerkat_core::ToolError::OperationAuthorizationUnavailable,
-            };
-            let expected = meerkat_core::ops::terminal_tool_outcome_for_error(result.tool_use_id.clone(), error).result;
-            serde_json::to_value(result).unwrap() == serde_json::to_value(expected).unwrap()
-        }).expect("only exact native operation refusal or unavailable feedback permits a fresh choice")
+    [
+        PublicReadFailure::ReprepareRequired,
+        PublicReadFailure::AuthorizationUnavailable,
+    ]
+    .into_iter()
+    .find(|kind| {
+        let error = match kind {
+            PublicReadFailure::ReprepareRequired => meerkat_core::ToolError::AuthorizationRefused {
+                refusal: meerkat_core::OperationRefused::new(
+                    meerkat_core::OperationRefusalKind::ReprepareRequired,
+                ),
+            },
+            PublicReadFailure::AuthorizationUnavailable => {
+                meerkat_core::ToolError::OperationAuthorizationUnavailable
+            }
+        };
+        let expected =
+            meerkat_core::ops::terminal_tool_outcome_for_error(result.tool_use_id.clone(), error)
+                .result;
+        serde_json::to_value(result).unwrap() == serde_json::to_value(expected).unwrap()
+    })
+    .expect("only exact native operation refusal or unavailable feedback permits a fresh choice")
 }
 
 struct PublicReadProvider {
@@ -215,7 +253,8 @@ impl LlmClient for PublicReadProvider {
         self.inner.prepare_controller_credential().await
     }
     fn plain_model_route(
-        &self, model: &str,
+        &self,
+        model: &str,
     ) -> Result<PlainModelRoute, meerkat_core::ControllerFactsUnavailable> {
         self.inner.plain_model_route(model)
     }
@@ -353,8 +392,12 @@ impl LlmClient for PublicReadProvider {
         })))
     }
 
-    fn provider(&self) -> Provider { self.inner.provider() }
-    async fn health_check(&self) -> Result<(), LlmError> { self.inner.health_check().await }
+    fn provider(&self) -> Provider {
+        self.inner.provider()
+    }
+    async fn health_check(&self) -> Result<(), LlmError> {
+        self.inner.health_check().await
+    }
 }
 
 /// This replaces only the installed-package subprocess. Its answer must match
@@ -398,8 +441,12 @@ impl ServiceInstallationReadback for ExactPackageReadback {
         let barrier = self.barrier.lock().unwrap().clone();
         if let Some(barrier) = barrier {
             barrier.entered.notify_one();
-            barrier.release.acquire().await
-                .map_err(|_| PrivateOriginalError::Unavailable)?.forget();
+            barrier
+                .release
+                .acquire()
+                .await
+                .map_err(|_| PrivateOriginalError::Unavailable)?
+                .forget();
         }
         Ok(self.config.clone())
     }
@@ -453,7 +500,9 @@ async fn approved_native(
         // The exact read ceiling remains in the reviewed MCP configuration.
         config.connector = None;
         config.access = Some(meerkat_core::McpServerAccess::allowing(["read".to_owned()]));
-        config.tool_names.insert("read".into(), "attachment_public_read".into());
+        config
+            .tool_names
+            .insert("read".into(), "attachment_public_read".into());
         assert!(meerkat::ConnectorMcpInstallation::from_config(&config).is_none());
     }
     let b = if public {
@@ -462,7 +511,10 @@ async fn approved_native(
         // catalog controls and the mapped invocation. Native task catalog
         // authority is separate from the durable ordinary member policy.
         approve_b_configuration_with_tool_policy(
-            fixture, snapshot, [Id::new("read").unwrap()].into(), config.clone(),
+            fixture,
+            snapshot,
+            [Id::new("read").unwrap()].into(),
+            config.clone(),
             ServiceToolPolicySelection {
                 tools: vec![crate::installed_host::tool_policy::ServiceToolInvocation {
                     name: config.tool_names.get("read").unwrap().clone(),
@@ -470,11 +522,16 @@ async fn approved_native(
                 }],
                 catalog: Some(meerkat_core::CompiledToolConsequence::R0),
             },
-        ).await
+        )
+        .await
     } else {
         approve_b_configuration(
-            fixture, snapshot, [Id::new("read").unwrap()].into(), Some(config.clone()),
-        ).await
+            fixture,
+            snapshot,
+            [Id::new("read").unwrap()].into(),
+            Some(config.clone()),
+        )
+        .await
     };
     let stored = fixture
         .store
@@ -483,8 +540,11 @@ async fn approved_native(
         .unwrap()
         .unwrap();
     let record = fixture.source.decode_record(&stored, &b).unwrap();
-    assert_eq!(record.event.content_sha256, digest(instruction.as_bytes()),
-        "the retained B source must bind the selected acquisition instruction");
+    assert_eq!(
+        record.event.content_sha256,
+        digest(instruction.as_bytes()),
+        "the retained B source must bind the selected acquisition instruction"
+    );
     let task = record.approved_task.unwrap();
     let readback = Arc::new(ExactPackageReadback {
         evidence: record.event.original_authentication,
@@ -521,23 +581,32 @@ async fn installation_publication_case(change_owner: bool) {
         PersistentFixture::for_live_attachment_with_model_and_human_policy(|inner| inner).await;
     let endpoint = Endpoint::new();
     let outcome = AssertUnwindSafe(Box::pin(tokio::time::timeout(WAIT * 4, async {
-        fixture.source.bind_controller_pin_source(fixture.service.clone()).unwrap();
-        let (b, stored, task, readback, _, _) =
-            approved_native(&fixture, &endpoint, true).await;
-        let unrelated = fixture.store.admit(toolkit_store::AdmissionRequest {
-            key: toolkit_store::StoreKey {
-                realm: fixture.scope.realm.clone(),
-                owner: "test/attachment-publication".into(),
-                id: "unrelated".into(),
-            },
-            admission_key: "unrelated".into(),
-            data: toolkit_store::RecordData {
-                schema: "attachment-publication-control".into(),
-                version: 1,
-                body: serde_json::json!({"value": 0}),
-            },
-            events: vec![], effects: vec![],
-        }).await.unwrap().record().clone();
+        fixture
+            .source
+            .bind_controller_pin_source(fixture.service.clone())
+            .unwrap();
+        let (b, stored, task, readback, _, _) = approved_native(&fixture, &endpoint, true).await;
+        let unrelated = fixture
+            .store
+            .admit(toolkit_store::AdmissionRequest {
+                key: toolkit_store::StoreKey {
+                    realm: fixture.scope.realm.clone(),
+                    owner: "test/attachment-publication".into(),
+                    id: "unrelated".into(),
+                },
+                admission_key: "unrelated".into(),
+                data: toolkit_store::RecordData {
+                    schema: "attachment-publication-control".into(),
+                    version: 1,
+                    body: serde_json::json!({"value": 0}),
+                },
+                events: vec![],
+                effects: vec![],
+            })
+            .await
+            .unwrap()
+            .record()
+            .clone();
         let barrier = Arc::new(ReadbackBarrier {
             entered: tokio::sync::Notify::new(),
             release: tokio::sync::Semaphore::new(0),
@@ -546,7 +615,9 @@ async fn installation_publication_case(change_owner: bool) {
         let model_requests = fixture.model_requests();
         let grant = task.attachments()[0].clone();
         let prepare = fixture.source.prepare_service_mcp_installation_member(
-            &fixture.store, &b, &grant.grant,
+            &fixture.store,
+            &b,
+            &grant.grant,
         );
         tokio::pin!(prepare);
         tokio::select! {
@@ -556,17 +627,27 @@ async fn installation_publication_case(change_owner: bool) {
         if change_owner {
             let mut changed = unrelated.data.clone();
             changed.body["value"] = serde_json::json!(1);
-            fixture.store.compare_and_swap(toolkit_store::Transition {
-                key: unrelated.key, expected_revision: unrelated.revision,
-                expected_digest: Some(unrelated.content_digest), claim: None,
-                data: changed, events: vec![], effects: vec![],
-            }).await.unwrap();
+            fixture
+                .store
+                .compare_and_swap(toolkit_store::Transition {
+                    key: unrelated.key,
+                    expected_revision: unrelated.revision,
+                    expected_digest: Some(unrelated.content_digest),
+                    claim: None,
+                    data: changed,
+                    events: vec![],
+                    effects: vec![],
+                })
+                .await
+                .unwrap();
         }
         barrier.release.add_permits(1);
         let prepared = prepare.await;
         if change_owner {
-            assert!(matches!(prepared, Err(PrivateOriginalError::Unavailable)),
-                "the old captured publication must fail before native entry");
+            assert!(
+                matches!(prepared, Err(PrivateOriginalError::Unavailable)),
+                "the old captured publication must fail before native entry"
+            );
         } else {
             assert!(prepared.is_ok(), "unchanged canonical owners must prepare");
         }
@@ -575,17 +656,32 @@ async fn installation_publication_case(change_owner: bool) {
         if change_owner {
             // A separate preparation may capture current facts. The refused
             // preparation above never refreshes its retained stamp.
-            assert!(fixture.source.prepare_service_mcp_installation_member(
-                &fixture.store, &b, &grant.grant,
-            ).await.is_ok());
+            assert!(
+                fixture
+                    .source
+                    .prepare_service_mcp_installation_member(&fixture.store, &b, &grant.grant,)
+                    .await
+                    .is_ok()
+            );
             assert_eq!(readback.calls.load(Ordering::SeqCst), 2);
         }
-        assert_eq!(fixture.store.get(&stored.key).await.unwrap().unwrap(), stored);
-        assert!(fixture.source.held_service_attachment(&b, &grant).unwrap().is_none());
+        assert_eq!(
+            fixture.store.get(&stored.key).await.unwrap().unwrap(),
+            stored
+        );
+        assert!(
+            fixture
+                .source
+                .held_service_attachment(&b, &grant)
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(fixture.model_requests(), model_requests);
         assert_eq!(endpoint.starts(), 0);
         assert!(endpoint.calls().is_empty());
-    }))).catch_unwind().await;
+    })))
+    .catch_unwind()
+    .await;
     endpoint.release();
     fixture.source.join_service_attachments().await;
     let cleanup = fixture.shutdown().await;
@@ -656,11 +752,18 @@ async fn assert_native_inputs(
 /// A controller choice is accepted by this test only with the actual B audit.
 /// Historical observations grant nothing; every fresh call still uses native
 /// preparation, currentness, entry and outcome checks in the real dispatcher.
-fn assert_public_tool_audit(row: &StoredInputState, session: &meerkat_core::SessionId, script: &PublicReadScript) -> u32 {
-    use meerkat_authorization_contracts::audit::{AuditObservation, AuditTarget, AuditModelUse,
-        StoredAuthorizationAuditObservation};
-    use meerkat_core::{OperationEntryBoundary, OperationRefusalKind, authorization::OperationObservedOutcome,
-        exact_operation::OperationExecutionScope, ops::ToolDispatchTerminalErrorKind};
+fn assert_public_tool_audit(
+    row: &StoredInputState,
+    session: &meerkat_core::SessionId,
+    script: &PublicReadScript,
+) -> u32 {
+    use meerkat_authorization_contracts::audit::{
+        AuditModelUse, AuditObservation, AuditTarget, StoredAuthorizationAuditObservation,
+    };
+    use meerkat_core::{
+        OperationEntryBoundary, OperationRefusalKind, authorization::OperationObservedOutcome,
+        exact_operation::OperationExecutionScope, ops::ToolDispatchTerminalErrorKind,
+    };
 
     // Root, policy wrapper and MCP leaf can observe the same operation. Check
     // their ordered typed observations, not a count of adapter layers. Core's
@@ -671,55 +774,93 @@ fn assert_public_tool_audit(row: &StoredInputState, session: &meerkat_core::Sess
         target: &AuditTarget,
         failure: Option<PublicReadFailure>,
     ) -> (usize, usize) {
-        let steps = records.iter().enumerate().filter(|(_, record)|
-            &record.observation.operation_id == operation).collect::<Vec<_>>();
+        let steps = records
+            .iter()
+            .enumerate()
+            .filter(|(_, record)| &record.observation.operation_id == operation)
+            .collect::<Vec<_>>();
         assert!(!steps.is_empty());
-        let (mut prepared, mut entered, mut saw_refusal, mut returned) = (false, false, false, false);
+        let (mut prepared, mut entered, mut saw_refusal, mut returned) =
+            (false, false, false, false);
         for (_, record) in &steps {
-            assert_eq!(record.observation.run_id, steps[0].1.observation.run_id,
-                "one operation cannot migrate between runs");
+            assert_eq!(
+                record.observation.run_id, steps[0].1.observation.run_id,
+                "one operation cannot migrate between runs"
+            );
             match &record.observation.observation {
                 AuditObservation::Prepared { target: actual, .. } => {
                     assert!(!prepared && !entered && !saw_refusal && !returned);
-                    assert!(actual.as_ref() == target, "one operation must retain its exact target");
+                    assert!(
+                        actual.as_ref() == target,
+                        "one operation must retain its exact target"
+                    );
                     prepared = true;
                 }
                 AuditObservation::Entry { boundary } => {
-                    assert!(matches!(boundary, Some(OperationEntryBoundary::ToolDispatch
-                        | OperationEntryBoundary::ToolExecutionPolicy | OperationEntryBoundary::ToolEffect)),
-                        "tool entries must identify their actual dispatch, policy or effect boundary");
-                    assert!(prepared && !saw_refusal && !returned,
-                        "adapter entry must precede refusal or returned outcome");
+                    assert!(
+                        matches!(
+                            boundary,
+                            Some(
+                                OperationEntryBoundary::ToolDispatch
+                                    | OperationEntryBoundary::ToolExecutionPolicy
+                                    | OperationEntryBoundary::ToolEffect
+                            )
+                        ),
+                        "tool entries must identify their actual dispatch, policy or effect boundary"
+                    );
+                    assert!(
+                        prepared && !saw_refusal && !returned,
+                        "adapter entry must precede refusal or returned outcome"
+                    );
                     entered = true;
                 }
-                AuditObservation::Refused { target: actual, reason, .. } => {
+                AuditObservation::Refused {
+                    target: actual,
+                    reason,
+                    ..
+                } => {
                     assert_eq!(failure, Some(PublicReadFailure::ReprepareRequired));
                     assert!(!returned);
-                    assert!(actual.as_ref() == target, "refusal must bind the exact operation target");
+                    assert!(
+                        actual.as_ref() == target,
+                        "refusal must bind the exact operation target"
+                    );
                     assert_eq!(*reason, OperationRefusalKind::ReprepareRequired);
                     saw_refusal = true;
                 }
                 AuditObservation::AuthorizationUnavailable { target: actual } => {
                     assert_eq!(failure, Some(PublicReadFailure::AuthorizationUnavailable));
                     assert!(!returned);
-                    assert!(actual.as_ref() == target, "unavailability must bind the exact operation target");
+                    assert!(
+                        actual.as_ref() == target,
+                        "unavailability must bind the exact operation target"
+                    );
                     saw_refusal = true;
                 }
                 AuditObservation::Outcome { outcome } => {
                     if let Some(failure) = failure {
                         assert!(saw_refusal);
                         let expected = match failure {
-                            PublicReadFailure::ReprepareRequired => ToolDispatchTerminalErrorKind::AuthorizationRefused,
-                            PublicReadFailure::AuthorizationUnavailable => ToolDispatchTerminalErrorKind::OperationAuthorizationUnavailable,
+                            PublicReadFailure::ReprepareRequired => {
+                                ToolDispatchTerminalErrorKind::AuthorizationRefused
+                            }
+                            PublicReadFailure::AuthorizationUnavailable => {
+                                ToolDispatchTerminalErrorKind::OperationAuthorizationUnavailable
+                            }
                         };
-                        assert!(matches!(outcome, OperationObservedOutcome::ToolDispatchError { error }
-                            if *error == expected), "every failed adapter outcome must retain its exact authorization error");
+                        assert!(
+                            matches!(outcome, OperationObservedOutcome::ToolDispatchError { error }
+                            if *error == expected),
+                            "every failed adapter outcome must retain its exact authorization error"
+                        );
                     } else {
                         assert!(entered && !saw_refusal);
-                        assert!(matches!(outcome, OperationObservedOutcome::ToolDispatchReturned {
+                        assert!(
+                            matches!(outcome, OperationObservedOutcome::ToolDispatchReturned {
                             asynchronous_operations, result_is_error: false, terminal_error: None,
                         } if asynchronous_operations.is_empty()),
-                            "every successful adapter outcome must retain the synchronous read result");
+                            "every successful adapter outcome must retain the synchronous read result"
+                        );
                     }
                     returned = true;
                 }
@@ -744,144 +885,299 @@ fn assert_public_tool_audit(row: &StoredInputState, session: &meerkat_core::Sess
     assert!(!records.is_empty());
     // This is separate actual endpoint evidence, not an interpretation of
     // native stage observations. The endpoint records tools/call before reply.
-    assert_eq!(script.endpoint_call_count(), 1, "completed B has exactly one physical endpoint read");
+    assert_eq!(
+        script.endpoint_call_count(),
+        1,
+        "completed B has exactly one physical endpoint read"
+    );
     for record in &records {
-        assert!(record.observation.run_id.is_some(), "every B observation must retain its actual run");
+        assert!(
+            record.observation.run_id.is_some(),
+            "every B observation must retain its actual run"
+        );
         assert_eq!(record.contributors.len(), 1);
         assert_eq!(record.contributors[0].input_id, row.state.input_id);
-        assert!(matches!(&record.observation.execution_scope, OperationExecutionScope::RuntimeInput {
+        assert!(
+            matches!(&record.observation.execution_scope, OperationExecutionScope::RuntimeInput {
             owner_session_id, canonical_input_id, submitted_input_id, ..
         } if owner_session_id == session && canonical_input_id == &row.state.input_id
-            && submitted_input_id == &row.state.input_id));
+            && submitted_input_id == &row.state.input_id)
+        );
     }
     let mut tools: Vec<(&meerkat_core::OperationId, &AuditTarget)> = Vec::new();
     for record in &records {
         let target = match &record.observation.observation {
-            AuditObservation::Prepared { target, .. } | AuditObservation::Refused { target, .. }
-                | AuditObservation::AuthorizationUnavailable { target } => target,
+            AuditObservation::Prepared { target, .. }
+            | AuditObservation::Refused { target, .. }
+            | AuditObservation::AuthorizationUnavailable { target } => target,
             _ => continue,
         };
-        if matches!(target.as_ref(), AuditTarget::Tool { .. }) && !tools.iter().any(
-            |(operation, _)| *operation == &record.observation.operation_id) {
+        if matches!(target.as_ref(), AuditTarget::Tool { .. })
+            && !tools
+                .iter()
+                .any(|(operation, _)| *operation == &record.observation.operation_id)
+        {
             tools.push((&record.observation.operation_id, target.as_ref()));
         }
     }
     let catalog_choices = script.catalog_choices.lock().unwrap();
     assert!(!catalog_choices.is_empty() && catalog_choices.len() <= MAX_PUBLIC_READ_CHOICES);
-    let catalog_tools = tools.iter().filter(|(_, target)| matches!(target,
-        AuditTarget::Tool { tool_name, .. } if tool_name == "tool_catalog_load")).copied().collect::<Vec<_>>();
+    let catalog_tools = tools
+        .iter()
+        .filter(|(_, target)| {
+            matches!(target,
+        AuditTarget::Tool { tool_name, .. } if tool_name == "tool_catalog_load")
+        })
+        .copied()
+        .collect::<Vec<_>>();
     assert_eq!(catalog_tools.len(), catalog_choices.len());
     let mut catalog_final_run_calls = 0;
     let mut catalog_end = 0;
-    for (index, ((operation, target), choice)) in catalog_tools.iter().zip(catalog_choices.iter()).enumerate() {
-        let AuditTarget::Tool { call_id, arguments_digest, owners, .. } = target else { unreachable!() };
+    for (index, ((operation, target), choice)) in
+        catalog_tools.iter().zip(catalog_choices.iter()).enumerate()
+    {
+        let AuditTarget::Tool {
+            call_id,
+            arguments_digest,
+            owners,
+            ..
+        } = target
+        else {
+            unreachable!()
+        };
         assert_eq!(call_id, &choice.call_id);
         assert_eq!(choice.endpoint_calls_before, 0);
-        if let AuditTarget::Tool { arguments_digest: first, owners: first_owners, .. } = catalog_tools[0].1 {
+        if let AuditTarget::Tool {
+            arguments_digest: first,
+            owners: first_owners,
+            ..
+        } = catalog_tools[0].1
+        {
             assert!(arguments_digest == first && owners == first_owners);
         }
-        let failure = if index + 1 == catalog_choices.len() { None } else {
-            let mut failures = records.iter().filter(|record| &record.observation.operation_id == *operation)
+        let failure = if index + 1 == catalog_choices.len() {
+            None
+        } else {
+            let mut failures = records
+                .iter()
+                .filter(|record| &record.observation.operation_id == *operation)
                 .filter_map(|record| match &record.observation.observation {
-                    AuditObservation::Refused { reason: OperationRefusalKind::ReprepareRequired, .. } => Some(PublicReadFailure::ReprepareRequired),
-                    AuditObservation::AuthorizationUnavailable { .. } => Some(PublicReadFailure::AuthorizationUnavailable),
+                    AuditObservation::Refused {
+                        reason: OperationRefusalKind::ReprepareRequired,
+                        ..
+                    } => Some(PublicReadFailure::ReprepareRequired),
+                    AuditObservation::AuthorizationUnavailable { .. } => {
+                        Some(PublicReadFailure::AuthorizationUnavailable)
+                    }
                     _ => None,
                 });
-            let first = failures.next().expect("an earlier catalog choice needs an exact typed native failure");
+            let first = failures
+                .next()
+                .expect("an earlier catalog choice needs an exact typed native failure");
             assert!(failures.all(|kind| kind == first));
-            if let Some(feedback) = catalog_choices[index + 1].prior_feedback { assert_eq!(feedback, first); }
+            if let Some(feedback) = catalog_choices[index + 1].prior_feedback {
+                assert_eq!(feedback, first);
+            }
             Some(first)
         };
         let (start, end) = operation_span(&records, operation, target, failure);
         let operation_run = records[start].observation.run_id.as_ref().unwrap();
-        let controller = records.iter().enumerate().filter(|(_, record)| record.observation.operation_id == choice.controller)
+        let controller = records
+            .iter()
+            .enumerate()
+            .filter(|(_, record)| record.observation.operation_id == choice.controller)
             .collect::<Vec<_>>();
         assert_eq!(controller.len(), 3);
-        assert!(controller.iter().all(|(i, record)| *i < start && *i >= catalog_end
+        assert!(controller.iter().all(|(i, record)| *i < start
+            && *i >= catalog_end
             && record.observation.run_id.as_ref() == Some(operation_run)));
-        assert!(matches!(&controller[0].1.observation.observation, AuditObservation::Prepared { target, .. }
-            if matches!(target.as_ref(), AuditTarget::Model(model) if model.usage == AuditModelUse::ControllerInference)));
-        assert!(matches!(&controller[1].1.observation.observation, AuditObservation::Entry {
-            boundary: Some(OperationEntryBoundary::ModelRequest)
-        }));
-        assert!(matches!(&controller[2].1.observation.observation, AuditObservation::Outcome {
-            outcome: OperationObservedOutcome::HttpResponse { status: 200 }
-        }));
-        if operation_run == run { catalog_final_run_calls += 1; }
+        assert!(
+            matches!(&controller[0].1.observation.observation, AuditObservation::Prepared { target, .. }
+            if matches!(target.as_ref(), AuditTarget::Model(model) if model.usage == AuditModelUse::ControllerInference))
+        );
+        assert!(matches!(
+            &controller[1].1.observation.observation,
+            AuditObservation::Entry {
+                boundary: Some(OperationEntryBoundary::ModelRequest)
+            }
+        ));
+        assert!(matches!(
+            &controller[2].1.observation.observation,
+            AuditObservation::Outcome {
+                outcome: OperationObservedOutcome::HttpResponse { status: 200 }
+            }
+        ));
+        if operation_run == run {
+            catalog_final_run_calls += 1;
+        }
         catalog_end = end;
     }
-    assert_eq!(script.catalog_feedback.lock().unwrap().as_ref().unwrap().tool_use_id,
-        catalog_choices.last().unwrap().call_id);
+    assert_eq!(
+        script
+            .catalog_feedback
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .tool_use_id,
+        catalog_choices.last().unwrap().call_id
+    );
     tools.retain(|(_, target)| !matches!(target, AuditTarget::Tool { tool_name, .. } if tool_name == "tool_catalog_load"));
     let choices = script.choices.lock().unwrap();
     assert!(!choices.is_empty() && choices.len() <= MAX_PUBLIC_READ_CHOICES);
-    assert_eq!(tools.len(), choices.len(), "every actual scripted choice has one exact native tool operation");
+    assert_eq!(
+        tools.len(),
+        choices.len(),
+        "every actual scripted choice has one exact native tool operation"
+    );
     let expected_identity = script.offered.lock().unwrap();
     let mut previous: Option<(usize, &meerkat_core::RunId, PublicReadFailure)> = None;
     let mut final_run_calls = catalog_final_run_calls;
     for (index, ((operation, target), choice)) in tools.iter().zip(choices.iter()).enumerate() {
-        let AuditTarget::Tool { call_id, tool_name, arguments_digest, owners } = target else { unreachable!() };
+        let AuditTarget::Tool {
+            call_id,
+            tool_name,
+            arguments_digest,
+            owners,
+        } = target
+        else {
+            unreachable!()
+        };
         assert_eq!(call_id, &choice.call_id);
         assert_eq!(tool_name, expected_identity.as_ref().unwrap().name.as_str());
         assert_eq!(choice.endpoint_calls_before, 0);
-        if let AuditTarget::Tool { arguments_digest: first_arguments, owners: first_owners, .. } = tools[0].1 {
-            assert!(arguments_digest == first_arguments && owners == first_owners,
-                "every choice must retain the same exact arguments and selected owners");
+        if let AuditTarget::Tool {
+            arguments_digest: first_arguments,
+            owners: first_owners,
+            ..
+        } = tools[0].1
+        {
+            assert!(
+                arguments_digest == first_arguments && owners == first_owners,
+                "every choice must retain the same exact arguments and selected owners"
+            );
         }
-        let operation_records = records.iter().filter(|record|
-            &record.observation.operation_id == *operation).collect::<Vec<_>>();
+        let operation_records = records
+            .iter()
+            .filter(|record| &record.observation.operation_id == *operation)
+            .collect::<Vec<_>>();
         let operation_run = operation_records[0].observation.run_id.as_ref().unwrap();
-        let failure = if index + 1 == choices.len() { None } else {
-            let mut failures = operation_records.iter().filter_map(|record| match &record.observation.observation {
-                AuditObservation::Refused { reason: OperationRefusalKind::ReprepareRequired, .. } => Some(PublicReadFailure::ReprepareRequired),
-                AuditObservation::AuthorizationUnavailable { .. } => Some(PublicReadFailure::AuthorizationUnavailable),
-                _ => None,
+        let failure = if index + 1 == choices.len() {
+            None
+        } else {
+            let mut failures = operation_records.iter().filter_map(|record| {
+                match &record.observation.observation {
+                    AuditObservation::Refused {
+                        reason: OperationRefusalKind::ReprepareRequired,
+                        ..
+                    } => Some(PublicReadFailure::ReprepareRequired),
+                    AuditObservation::AuthorizationUnavailable { .. } => {
+                        Some(PublicReadFailure::AuthorizationUnavailable)
+                    }
+                    _ => None,
+                }
             });
-            let first = failures.next().expect("an earlier choice needs an exact typed native failure");
+            let first = failures
+                .next()
+                .expect("an earlier choice needs an exact typed native failure");
             assert!(failures.all(|kind| kind == first));
             Some(first)
         };
         let (tool_start, tool_end) = operation_span(&records, operation, target, failure);
-        assert!(tool_start > catalog_end, "mapped invocation follows actual catalog admission");
-        let controller = records.iter().enumerate().filter(|(_, record)|
-            record.observation.operation_id == choice.controller).collect::<Vec<_>>();
-        assert_eq!(controller.len(), 3, "the actual fixture controller observes prepare, entry and HTTP return");
+        assert!(
+            tool_start > catalog_end,
+            "mapped invocation follows actual catalog admission"
+        );
+        let controller = records
+            .iter()
+            .enumerate()
+            .filter(|(_, record)| record.observation.operation_id == choice.controller)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            controller.len(),
+            3,
+            "the actual fixture controller observes prepare, entry and HTTP return"
+        );
         assert!(controller.iter().all(|(i, record)| *i < tool_start
             && record.observation.run_id.as_ref() == Some(operation_run)));
-        assert!(matches!(&controller[0].1.observation.observation, AuditObservation::Prepared { target, .. }
+        assert!(
+            matches!(&controller[0].1.observation.observation, AuditObservation::Prepared { target, .. }
             if matches!(target.as_ref(), AuditTarget::Model(model)
-                if model.usage == AuditModelUse::ControllerInference && model.hosted_capabilities.is_empty())));
-        assert!(matches!(&controller[1].1.observation.observation, AuditObservation::Entry {
-            boundary: Some(OperationEntryBoundary::ModelRequest)
-        }));
-        assert!(matches!(&controller[2].1.observation.observation, AuditObservation::Outcome {
-            outcome: OperationObservedOutcome::HttpResponse { status: 200 }
-        }));
+                if model.usage == AuditModelUse::ControllerInference && model.hosted_capabilities.is_empty()))
+        );
+        assert!(matches!(
+            &controller[1].1.observation.observation,
+            AuditObservation::Entry {
+                boundary: Some(OperationEntryBoundary::ModelRequest)
+            }
+        ));
+        assert!(matches!(
+            &controller[2].1.observation.observation,
+            AuditObservation::Outcome {
+                outcome: OperationObservedOutcome::HttpResponse { status: 200 }
+            }
+        ));
         if let Some((prior_end, prior_run, prior_failure)) = previous {
             assert!(controller.iter().all(|(i, _)| *i > prior_end));
-            if let Some(feedback) = choice.prior_feedback { assert_eq!(feedback, prior_failure); }
-            else { assert_ne!(operation_run, prior_run, "missing feedback requires a native same-B run restart"); }
-        } else { assert!(choice.prior_feedback.is_none()); }
-        if operation_run == run { final_run_calls += 1; }
-        if let Some(failure) = failure { previous = Some((tool_end, operation_run, failure)); }
-        else {
-            assert_eq!(operation_run, run, "the one successful read must belong to final B's run");
-            assert_eq!(script.feedback.lock().unwrap().as_ref().unwrap().tool_use_id, choice.call_id);
+            if let Some(feedback) = choice.prior_feedback {
+                assert_eq!(feedback, prior_failure);
+            } else {
+                assert_ne!(
+                    operation_run, prior_run,
+                    "missing feedback requires a native same-B run restart"
+                );
+            }
+        } else {
+            assert!(choice.prior_feedback.is_none());
+        }
+        if operation_run == run {
+            final_run_calls += 1;
+        }
+        if let Some(failure) = failure {
+            previous = Some((tool_end, operation_run, failure));
+        } else {
+            assert_eq!(
+                operation_run, run,
+                "the one successful read must belong to final B's run"
+            );
+            assert_eq!(
+                script
+                    .feedback
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .tool_use_id,
+                choice.call_id
+            );
             let answer_id = script.answer_controller.lock().unwrap().clone().unwrap();
             assert!(choices.iter().all(|choice| choice.controller != answer_id));
-            let answer = records.iter().enumerate().filter(|(_, record)|
-                record.observation.operation_id == answer_id).collect::<Vec<_>>();
+            let answer = records
+                .iter()
+                .enumerate()
+                .filter(|(_, record)| record.observation.operation_id == answer_id)
+                .collect::<Vec<_>>();
             assert_eq!(answer.len(), 3);
-            assert!(answer.iter().all(|(i, record)| *i > tool_end && record.observation.run_id.as_ref() == Some(run)));
-            assert!(matches!(&answer[0].1.observation.observation, AuditObservation::Prepared { target, .. }
+            assert!(answer.iter().all(
+                |(i, record)| *i > tool_end && record.observation.run_id.as_ref() == Some(run)
+            ));
+            assert!(
+                matches!(&answer[0].1.observation.observation, AuditObservation::Prepared { target, .. }
                 if matches!(target.as_ref(), AuditTarget::Model(model)
-                    if model.usage == AuditModelUse::ControllerInference && model.hosted_capabilities.is_empty())));
-            assert!(matches!(&answer[1].1.observation.observation, AuditObservation::Entry {
-            boundary: Some(OperationEntryBoundary::ModelRequest)
-        }));
-            assert!(matches!(&answer[2].1.observation.observation, AuditObservation::Outcome {
-                outcome: OperationObservedOutcome::HttpResponse { status: 200 }
-            }));
+                    if model.usage == AuditModelUse::ControllerInference && model.hosted_capabilities.is_empty()))
+            );
+            assert!(matches!(
+                &answer[1].1.observation.observation,
+                AuditObservation::Entry {
+                    boundary: Some(OperationEntryBoundary::ModelRequest)
+                }
+            ));
+            assert!(matches!(
+                &answer[2].1.observation.observation,
+                AuditObservation::Outcome {
+                    outcome: OperationObservedOutcome::HttpResponse { status: 200 }
+                }
+            ));
         }
     }
     final_run_calls
@@ -975,13 +1271,19 @@ async fn actual_attachment_case(cancel: bool, public: bool) {
     let (fixture, runtime_store) = match &script {
         Some(script) => {
             let script = script.clone();
-            PersistentFixture::for_live_attachment_with_model_and_human_policy(move |inner| script.provider(inner)).await
+            PersistentFixture::for_live_attachment_with_model_and_human_policy(move |inner| {
+                script.provider(inner)
+            })
+            .await
         }
         None => PersistentFixture::for_live_attachment().await,
     };
     if public {
         // Exercise cold source custody with the same actual native service.
-        fixture.source.bind_controller_pin_source(fixture.service.clone()).unwrap();
+        fixture
+            .source
+            .bind_controller_pin_source(fixture.service.clone())
+            .unwrap();
     }
     let endpoint = Endpoint::new();
     let outcome = AssertUnwindSafe(Box::pin(tokio::time::timeout(WAIT * 4, async {
@@ -1294,87 +1596,139 @@ async fn actual_attachment_case(cancel: bool, public: bool) {
         };
         // A provider assertion may poison its test-only lock. Preserve the
         // original failure and still retain these safe mechanical observations.
-        let choices = script.as_ref().unwrap().choices.lock().unwrap_or_else(|error| error.into_inner());
-        let choice_observations = choices.iter().map(|choice| serde_json::json!({
-            "call_id": choice.call_id, "controller_operation_id": choice.controller,
-            "endpoint_calls_before": choice.endpoint_calls_before,
-            "prior_feedback": choice.prior_feedback.map(|kind| match kind {
-                PublicReadFailure::ReprepareRequired => "operation_refused",
-                PublicReadFailure::AuthorizationUnavailable => "authorization_unavailable",
-            }),
-        })).collect::<Vec<_>>();
+        let choices = script
+            .as_ref()
+            .unwrap()
+            .choices
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let choice_observations = choices
+            .iter()
+            .map(|choice| {
+                serde_json::json!({
+                    "call_id": choice.call_id, "controller_operation_id": choice.controller,
+                    "endpoint_calls_before": choice.endpoint_calls_before,
+                    "prior_feedback": choice.prior_feedback.map(|kind| match kind {
+                        PublicReadFailure::ReprepareRequired => "operation_refused",
+                        PublicReadFailure::AuthorizationUnavailable => "authorization_unavailable",
+                    }),
+                })
+            })
+            .collect::<Vec<_>>();
         drop(choices);
-        eprintln!("{}", serde_json::json!({
-            "event": "attachment_control_endpoint_observation",
-            "endpoint_call_count": endpoint_call_count,
-            "choices": choice_observations,
-        }));
-        let observed = tokio::time::timeout(WAIT,
-            runtime_store.load_input_states_strict(&LogicalRuntimeId::for_session(&fixture.session))).await;
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "event": "attachment_control_endpoint_observation",
+                "endpoint_call_count": endpoint_call_count,
+                "choices": choice_observations,
+            })
+        );
+        let observed = tokio::time::timeout(
+            WAIT,
+            runtime_store
+                .load_input_states_strict(&LogicalRuntimeId::for_session(&fixture.session)),
+        )
+        .await;
         match observed {
-            Ok(Ok(rows)) => for row in rows {
-                let Ok(encoded) = serde_json::to_value(&row) else { continue; };
-                let Some(audit) = encoded.get("authorization_audit") else { continue; };
-                let Ok(records) = serde_json::from_value::<Vec<
+            Ok(Ok(rows)) => {
+                for row in rows {
+                    let Ok(encoded) = serde_json::to_value(&row) else {
+                        continue;
+                    };
+                    let Some(audit) = encoded.get("authorization_audit") else {
+                        continue;
+                    };
+                    let Ok(records) = serde_json::from_value::<Vec<
                     meerkat_authorization_contracts::audit::StoredAuthorizationAuditObservation
                 >>(audit.clone()) else { continue; };
-                for (index, record) in records.iter().enumerate() {
-                    use meerkat_authorization_contracts::audit::{AuditObservation, AuditTarget};
-                    let observation = &record.observation;
-                    let (kind, target, reason, publication, observed_at) = match &observation.observation {
-                        AuditObservation::Prepared { target, policy } =>
-                            ("prepared", Some(target.as_ref()), None, Some(policy.publication_sequence), Some(policy.observed_at_ms)),
-                        AuditObservation::Refused { target, reason, .. } =>
-                            ("refused", Some(target.as_ref()), Some(*reason), None, None),
-                        AuditObservation::AuthorizationUnavailable { target } =>
-                            ("authorization_unavailable", Some(target.as_ref()), None, None, None),
-                        AuditObservation::Entry { .. } => ("entry", None, None, None, None),
-                        AuditObservation::Outcome { .. } => ("outcome", None, None, None, None),
-                        AuditObservation::ReviewAttemptStarted { .. } => ("review_attempt_started", None, None, None, None),
-                        AuditObservation::MandatoryHookWithheld { .. } => ("mandatory_hook_withheld", None, None, None, None),
-                        _ => ("unknown", None, None, None, None),
-                    };
-                    // Do not print prompts, tool arguments/digests, credentials,
-                    // accounts, endpoints, grant lineages or output payloads.
-                    let target = match target {
-                        Some(AuditTarget::Model(model)) => serde_json::json!({
-                            "kind": "model", "usage": model.usage,
-                            "hosted_capability_count": model.hosted_capabilities.len(),
-                        }),
-                        Some(AuditTarget::Tool { call_id, tool_name, .. }) =>
-                            serde_json::json!({"kind": "tool", "call_id": call_id, "tool_name": tool_name}),
-                        Some(_) => serde_json::json!({"kind": "other"}),
-                        None => serde_json::Value::Null,
-                    };
-                    let returned = match &observation.observation {
-                        AuditObservation::Outcome { outcome } => {
-                            use meerkat_core::authorization::OperationObservedOutcome;
-                            match outcome {
-                                OperationObservedOutcome::ToolDispatchReturned {
-                                    asynchronous_operations, result_is_error, terminal_error,
-                                } => serde_json::json!({
-                                    "kind": "tool_dispatch_returned",
-                                    "asynchronous_operation_count": asynchronous_operations.len(),
-                                    "result_is_error": result_is_error, "terminal_error": terminal_error,
-                                }),
-                                OperationObservedOutcome::ToolDispatchError { error } =>
-                                    serde_json::json!({"kind": "tool_dispatch_error", "error": error}),
-                                OperationObservedOutcome::HttpResponse { status } =>
-                                    serde_json::json!({"kind": "http_response", "status": status}),
-                                _ => serde_json::json!({"kind": "other"}),
+                    for (index, record) in records.iter().enumerate() {
+                        use meerkat_authorization_contracts::audit::{
+                            AuditObservation, AuditTarget,
+                        };
+                        let observation = &record.observation;
+                        let (kind, target, reason, publication, observed_at) = match &observation
+                            .observation
+                        {
+                            AuditObservation::Prepared { target, policy } => (
+                                "prepared",
+                                Some(target.as_ref()),
+                                None,
+                                Some(policy.publication_sequence),
+                                Some(policy.observed_at_ms),
+                            ),
+                            AuditObservation::Refused { target, reason, .. } => {
+                                ("refused", Some(target.as_ref()), Some(*reason), None, None)
                             }
-                        }
-                        _ => serde_json::Value::Null,
-                    };
-                    eprintln!("{}", serde_json::json!({
-                        "event": "attachment_control_native_authorization_audit",
-                        "input_id": row.state.input_id, "index": index,
-                        "operation_id": observation.operation_id, "run_id": observation.run_id,
-                        "kind": kind, "target": target, "reason": reason, "outcome": returned,
-                        "publication_sequence": publication, "observed_at_ms": observed_at,
-                    }));
+                            AuditObservation::AuthorizationUnavailable { target } => (
+                                "authorization_unavailable",
+                                Some(target.as_ref()),
+                                None,
+                                None,
+                                None,
+                            ),
+                            AuditObservation::Entry { .. } => ("entry", None, None, None, None),
+                            AuditObservation::Outcome { .. } => ("outcome", None, None, None, None),
+                            AuditObservation::ReviewAttemptStarted { .. } => {
+                                ("review_attempt_started", None, None, None, None)
+                            }
+                            AuditObservation::MandatoryHookWithheld { .. } => {
+                                ("mandatory_hook_withheld", None, None, None, None)
+                            }
+                            _ => ("unknown", None, None, None, None),
+                        };
+                        // Do not print prompts, tool arguments/digests, credentials,
+                        // accounts, endpoints, grant lineages or output payloads.
+                        let target = match target {
+                            Some(AuditTarget::Model(model)) => serde_json::json!({
+                                "kind": "model", "usage": model.usage,
+                                "hosted_capability_count": model.hosted_capabilities.len(),
+                            }),
+                            Some(AuditTarget::Tool {
+                                call_id, tool_name, ..
+                            }) => {
+                                serde_json::json!({"kind": "tool", "call_id": call_id, "tool_name": tool_name})
+                            }
+                            Some(_) => serde_json::json!({"kind": "other"}),
+                            None => serde_json::Value::Null,
+                        };
+                        let returned = match &observation.observation {
+                            AuditObservation::Outcome { outcome } => {
+                                use meerkat_core::authorization::OperationObservedOutcome;
+                                match outcome {
+                                    OperationObservedOutcome::ToolDispatchReturned {
+                                        asynchronous_operations,
+                                        result_is_error,
+                                        terminal_error,
+                                    } => serde_json::json!({
+                                        "kind": "tool_dispatch_returned",
+                                        "asynchronous_operation_count": asynchronous_operations.len(),
+                                        "result_is_error": result_is_error, "terminal_error": terminal_error,
+                                    }),
+                                    OperationObservedOutcome::ToolDispatchError { error } => {
+                                        serde_json::json!({"kind": "tool_dispatch_error", "error": error})
+                                    }
+                                    OperationObservedOutcome::HttpResponse { status } => {
+                                        serde_json::json!({"kind": "http_response", "status": status})
+                                    }
+                                    _ => serde_json::json!({"kind": "other"}),
+                                }
+                            }
+                            _ => serde_json::Value::Null,
+                        };
+                        eprintln!(
+                            "{}",
+                            serde_json::json!({
+                                "event": "attachment_control_native_authorization_audit",
+                                "input_id": row.state.input_id, "index": index,
+                                "operation_id": observation.operation_id, "run_id": observation.run_id,
+                                "kind": kind, "target": target, "reason": reason, "outcome": returned,
+                                "publication_sequence": publication, "observed_at_ms": observed_at,
+                            })
+                        );
+                    }
                 }
-            },
+            }
             _ => eprintln!("attachment control native audit observation unavailable"),
         }
     }
@@ -1402,7 +1756,8 @@ async fn actual_pending_attachment_cannot_admit_b_after_parent_cancellation() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn actual_public_attachment_loads_catalog_calls_mapped_read_and_completes_exact_b_once_with_cancellation() {
+async fn actual_public_attachment_loads_catalog_calls_mapped_read_and_completes_exact_b_once_with_cancellation()
+ {
     // Real captured A with find_and_install only, reviewed complete successor,
     // native catalog scope, Apply, catalog load, mapped invocation and exact B
     // completion. Controlled MCP/model IO is not live provider acceptance.

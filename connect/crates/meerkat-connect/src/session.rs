@@ -15,9 +15,11 @@ use meerkat_core::{
 };
 use meerkat_runtime::{
     AcceptOutcome, Input, MeerkatMachine, PromptInput, RuntimeExecutorAttachmentWitness,
-    RuntimeSessionRegistrationWitness, completion::CompletionHandle,
-    input_admission_custody::{NativeInputAdmissionCompletion, NativeInputAdmissionCustody,
-        NativeInputAdmissionSettlement},
+    RuntimeSessionRegistrationWitness,
+    completion::CompletionHandle,
+    input_admission_custody::{
+        NativeInputAdmissionCompletion, NativeInputAdmissionCustody, NativeInputAdmissionSettlement,
+    },
 };
 
 use crate::{ConnectError, realm::read_config};
@@ -57,7 +59,14 @@ impl SessionStartup {
 
     async fn with_config(storage: ResolvedStorage, config: Config) -> Result<Self, ConnectError> {
         let factory = Self::realm_factory(&storage);
-        Ok(Self { storage, config, factory, persistence: None, connector_auth: None, standalone: None })
+        Ok(Self {
+            storage,
+            config,
+            factory,
+            persistence: None,
+            connector_auth: None,
+            standalone: None,
+        })
     }
 
     /// Select the existing native credential backend without composing a model,
@@ -80,26 +89,30 @@ impl SessionStartup {
         factory
     }
 
-    pub(crate) async fn persistence(&mut self) -> Result<&meerkat::PersistenceBundle, ConnectError> {
+    pub(crate) async fn persistence(
+        &mut self,
+    ) -> Result<&meerkat::PersistenceBundle, ConnectError> {
         if self.standalone.is_some() {
             return Err(ConnectError::InvalidInput(
                 "The governed setup stage must supply its own native authority".into(),
             ));
         }
         if self.persistence.is_none() {
-        let (_, persistence) = meerkat::storage_provider::open_realm_persistence_with_layout(
-            self.storage.layout.clone(),
-            self.storage.locator.realm.as_str(),
-            None,
-            Some(meerkat_store::RealmOrigin::Explicit),
-        )
-        .await
-        .map_err(|e| ConnectError::native("open selected realm persistence", e))?;
+            let (_, persistence) = meerkat::storage_provider::open_realm_persistence_with_layout(
+                self.storage.layout.clone(),
+                self.storage.locator.realm.as_str(),
+                None,
+                Some(meerkat_store::RealmOrigin::Explicit),
+            )
+            .await
+            .map_err(|e| ConnectError::native("open selected realm persistence", e))?;
             self.persistence = Some(persistence);
         }
-        self.persistence.as_ref().ok_or_else(|| ConnectError::InvalidInput(
-            "Native startup did not retain its persistence bundle".into(),
-        ))
+        self.persistence.as_ref().ok_or_else(|| {
+            ConnectError::InvalidInput(
+                "Native startup did not retain its persistence bundle".into(),
+            )
+        })
     }
 
     /// Use the native owner already selected for this startup. A standalone
@@ -110,17 +123,28 @@ impl SessionStartup {
         &mut self,
     ) -> Result<meerkat_runtime::ProviderAuthRuntimeAuthority, ConnectError> {
         if let Some(staged) = self.standalone.as_ref() {
-            return staged.stage.provider_auth_runtime_authority()
-                .map_err(|error| ConnectError::native("Read staged setup authentication authority", error));
+            return staged
+                .stage
+                .provider_auth_runtime_authority()
+                .map_err(|error| {
+                    ConnectError::native("Read staged setup authentication authority", error)
+                });
         }
-        Ok(self.persistence().await?.runtime_adapter().provider_auth_runtime_authority())
+        Ok(self
+            .persistence()
+            .await?
+            .runtime_adapter()
+            .provider_auth_runtime_authority())
     }
 
     pub(crate) async fn configure_connectors(
-        &mut self, profiles: Vec<meerkat::ConnectorClientAuthProfile>,
+        &mut self,
+        profiles: Vec<meerkat::ConnectorClientAuthProfile>,
     ) -> Result<Arc<crate::connector_auth::ConnectorAuth>, ConnectError> {
         if self.connector_auth.is_some() {
-            return Err(ConnectError::InvalidInput("Connector authority is already configured".into()));
+            return Err(ConnectError::InvalidInput(
+                "Connector authority is already configured".into(),
+            ));
         }
         let runtime = self.provider_auth_runtime_authority().await?;
         let facade = meerkat::HostAuthService::from_factory(&self.factory, runtime)
@@ -130,24 +154,29 @@ impl SessionStartup {
         // once into the live provider; it reads each call's staged native
         // configuration without a Toolkit installation snapshot or registry.
         let auth = crate::connector_auth::ConnectorAuth::from_facade(
-            facade, self.storage.locator.realm.clone(),
+            facade,
+            self.storage.locator.realm.clone(),
         )?;
         self.connector_auth = Some(auth.clone());
         Ok(auth)
     }
 
     pub(crate) async fn configure_realm_connectors(
-        &mut self, profiles: Arc<meerkat::RealmConnectorClients>,
+        &mut self,
+        profiles: Arc<meerkat::RealmConnectorClients>,
     ) -> Result<Arc<crate::connector_auth::ConnectorAuth>, ConnectError> {
         if self.connector_auth.is_some() {
-            return Err(ConnectError::InvalidInput("Connector authority is already configured".into()));
+            return Err(ConnectError::InvalidInput(
+                "Connector authority is already configured".into(),
+            ));
         }
         let runtime = self.provider_auth_runtime_authority().await?;
         let facade = meerkat::HostAuthService::from_factory(&self.factory, runtime)
             .map_err(|error| ConnectError::provider_setup("Open connector authority", error))?
             .with_connector_client_source(profiles);
         let auth = crate::connector_auth::ConnectorAuth::from_facade(
-            facade, self.storage.locator.realm.clone(),
+            facade,
+            self.storage.locator.realm.clone(),
         )?;
         self.connector_auth = Some(auth.clone());
         Ok(auth)
@@ -164,16 +193,22 @@ impl SessionStartup {
         let result = async {
             validate_lazy_options(&options, lazy)?;
             if let Some(installs) = lazy.installs() {
-                installs.bind_realm(&self.storage.locator)
+                installs
+                    .bind_realm(&self.storage.locator)
                     .map_err(|e| ConnectError::native("bind selected installation realm", e))?;
             }
             let mut session = Box::pin(ConnectSession::open_composed(
-                self.storage.clone(), self.config.clone(), options,
-                lazy.paired_host().research(), Some(self),
-            )).await?;
+                self.storage.clone(),
+                self.config.clone(),
+                options,
+                lazy.paired_host().research(),
+                Some(self),
+            ))
+            .await?;
             session.service_preparation = Some(lazy.owner());
             Ok(session)
-        }.await;
+        }
+        .await;
         if result.is_err() {
             lazy.owner().shutdown().await;
         }
@@ -186,7 +221,11 @@ fn validate_lazy_options(
     lazy: &crate::service_preparation::LazySetup,
 ) -> Result<(), ConnectError> {
     if !crate::setup::is_direct_paired_host_composition(options)
-        || !options.build.external_tools.as_ref().is_some_and(|tools| lazy.matches(tools))
+        || !options
+            .build
+            .external_tools
+            .as_ref()
+            .is_some_and(|tools| lazy.matches(tools))
         || options.build.tool_dispatch_admission.is_none()
     {
         return Err(ConnectError::InvalidInput(
@@ -259,10 +298,12 @@ impl ConnectSession {
     ) -> Result<Self, ConnectError> {
         validate_lazy_options(&options, lazy)?;
         if let Some(installs) = lazy.installs() {
-            installs.bind_realm(&storage.locator)
+            installs
+                .bind_realm(&storage.locator)
                 .map_err(|e| ConnectError::native("bind selected installation realm", e))?;
         }
-        let mut session = Self::open_inner(storage, config, options, lazy.paired_host().research()).await?;
+        let mut session =
+            Self::open_inner(storage, config, options, lazy.paired_host().research()).await?;
         session.service_preparation = Some(lazy.owner());
         Ok(session)
     }
@@ -315,7 +356,8 @@ impl ConnectSession {
             || options.build.tool_dispatch_admission.is_none()
         {
             return Err(ConnectError::InvalidInput(
-                "PairedHost research requires its exact local composition and dispatch admission".into(),
+                "PairedHost research requires its exact local composition and dispatch admission"
+                    .into(),
             ));
         }
         Self::open_inner(storage, config, options, paired_host.research()).await
@@ -329,7 +371,10 @@ impl ConnectSession {
     ) -> Result<Self, ConnectError> {
         // The shared native construction retains sizeable factory/config state.
         // Keep it out of every embedding caller's inline async stack frame.
-        Box::pin(Self::open_composed(storage, config, options, research, None)).await
+        Box::pin(Self::open_composed(
+            storage, config, options, research, None,
+        ))
+        .await
     }
 
     async fn open_composed(
@@ -388,10 +433,17 @@ impl ConnectSession {
             None => SessionStartup::with_config(storage.clone(), config.clone()).await?,
         };
         startup.persistence().await?;
-        let SessionStartup { factory, persistence, connector_auth, .. } = startup;
-        let persistence = persistence.ok_or_else(|| ConnectError::InvalidInput(
-            "Native startup did not retain its persistence bundle".into(),
-        ))?;
+        let SessionStartup {
+            factory,
+            persistence,
+            connector_auth,
+            ..
+        } = startup;
+        let persistence = persistence.ok_or_else(|| {
+            ConnectError::InvalidInput(
+                "Native startup did not retain its persistence bundle".into(),
+            )
+        })?;
         let (service, machine) =
             build_persistent_service_with_runtime_adapter(factory, config, 1, persistence)
                 .map_err(|error| ConnectError::native("Build persistent setup service", error))?;
@@ -475,9 +527,16 @@ impl ConnectSession {
         };
         let attachment = match attachment_rx.await {
             Ok(attachment) => attachment,
-            Err(_) => return Err(close_missing_attachment(
-                service, machine, registration, research, connector_auth,
-            ).await),
+            Err(_) => {
+                return Err(close_missing_attachment(
+                    service,
+                    machine,
+                    registration,
+                    research,
+                    connector_auth,
+                )
+                .await);
+            }
         };
         let session = Self {
             service,
@@ -515,32 +574,49 @@ impl ConnectSession {
     // These helpers do not construct authorization or replace the native input.
     #[cfg(test)]
     pub(crate) async fn fixture_open_governed(
-        startup: SessionStartup, options: SessionOptions,
+        startup: SessionStartup,
+        options: SessionOptions,
     ) -> Result<Self, ConnectError> {
-        Box::pin(Self::open_composed(startup.storage.clone(), startup.config.clone(),
-            options, None, Some(startup))).await
+        Box::pin(Self::open_composed(
+            startup.storage.clone(),
+            startup.config.clone(),
+            options,
+            None,
+            Some(startup),
+        ))
+        .await
     }
 
     #[cfg(test)]
-    pub(crate) async fn fixture_controller(&self)
-        -> Result<meerkat_core::ControllerModelClient, ConnectError>
-    {
-        let lease = self.service.acquire_live_session_actor_turn_boundary_lease(&self.session_id)
-            .await.map_err(|error| ConnectError::native("pin fixture actor", error))?;
-        self.service.pin_controller_client_for_actor(&lease).await
+    pub(crate) async fn fixture_controller(
+        &self,
+    ) -> Result<meerkat_core::ControllerModelClient, ConnectError> {
+        let lease = self
+            .service
+            .acquire_live_session_actor_turn_boundary_lease(&self.session_id)
+            .await
+            .map_err(|error| ConnectError::native("pin fixture actor", error))?;
+        self.service
+            .pin_controller_client_for_actor(&lease)
+            .await
             .map_err(|error| ConnectError::native("pin fixture controller", error))
     }
 
     #[cfg(test)]
-    pub(crate) async fn fixture_submit_bound(&self, input: Input)
-        -> Result<(AcceptOutcome, CompletionHandle), ConnectError>
-    {
-        let (admission, completion) = self.machine
-            .accept_input_with_completion_for_attachment(&self.attachment, input).await
+    pub(crate) async fn fixture_submit_bound(
+        &self,
+        input: Input,
+    ) -> Result<(AcceptOutcome, CompletionHandle), ConnectError> {
+        let (admission, completion) = self
+            .machine
+            .accept_input_with_completion_for_attachment(&self.attachment, input)
+            .await
             .map_err(|error| ConnectError::native("submit bound fixture input", error))?;
         match completion {
             Some(completion) => Ok((admission, completion)),
-            None => Err(ConnectError::MissingCompletion { admission: Box::new(admission) }),
+            None => Err(ConnectError::MissingCompletion {
+                admission: Box::new(admission),
+            }),
         }
     }
 
@@ -548,25 +624,52 @@ impl ConnectSession {
         &self.session_id
     }
 
-    pub(crate) async fn public_history(&self, offset: Option<usize>) -> Result<serde_json::Value, ConnectError> {
+    pub(crate) async fn public_history(
+        &self,
+        offset: Option<usize>,
+    ) -> Result<serde_json::Value, ConnectError> {
         use meerkat_core::service::{SessionHistoryQuery, SessionServiceHistoryExt};
-        let mut page = self.service.read_history(&self.session_id, SessionHistoryQuery {
-            offset: offset.unwrap_or(0), limit: Some(50),
-        }).await.map_err(|e| ConnectError::native("read setup history", e))?;
+        let mut page = self
+            .service
+            .read_history(
+                &self.session_id,
+                SessionHistoryQuery {
+                    offset: offset.unwrap_or(0),
+                    limit: Some(50),
+                },
+            )
+            .await
+            .map_err(|e| ConnectError::native("read setup history", e))?;
         if offset.is_none() && page.message_count > 50 {
-            page = self.service.read_history(&self.session_id, SessionHistoryQuery {
-                offset: page.message_count - 50, limit: Some(50),
-            }).await.map_err(|e| ConnectError::native("read setup history", e))?;
+            page = self
+                .service
+                .read_history(
+                    &self.session_id,
+                    SessionHistoryQuery {
+                        offset: page.message_count - 50,
+                        limit: Some(50),
+                    },
+                )
+                .await
+                .map_err(|e| ConnectError::native("read setup history", e))?;
         }
-        let messages: Vec<_> = page.messages.iter().filter_map(|message| {
-            let (role, text) = match message {
-                meerkat_core::Message::User(user) => ("user", user.text_content()),
-                meerkat_core::Message::BlockAssistant(assistant) => ("assistant", assistant.text_blocks().collect::<String>()),
-                _ => return None,
-            };
-            Some(serde_json::json!({"role":role,"text":text}))
-        }).collect();
-        Ok(serde_json::json!({"messages":messages,"offset":page.offset,"total":page.message_count,"hasMore":page.has_more}))
+        let messages: Vec<_> = page
+            .messages
+            .iter()
+            .filter_map(|message| {
+                let (role, text) = match message {
+                    meerkat_core::Message::User(user) => ("user", user.text_content()),
+                    meerkat_core::Message::BlockAssistant(assistant) => {
+                        ("assistant", assistant.text_blocks().collect::<String>())
+                    }
+                    _ => return None,
+                };
+                Some(serde_json::json!({"role":role,"text":text}))
+            })
+            .collect();
+        Ok(
+            serde_json::json!({"messages":messages,"offset":page.offset,"total":page.message_count,"hasMore":page.has_more}),
+        )
     }
 
     pub async fn events(&self) -> Result<EventStream, ConnectError> {
@@ -581,7 +684,8 @@ impl ConnectSession {
         &self,
         message: String,
     ) -> Result<(AcceptOutcome, CompletionHandle), ConnectError> {
-        self.submit_input(Input::Prompt(PromptInput::new(message, None))).await
+        self.submit_input(Input::Prompt(PromptInput::new(message, None)))
+            .await
     }
 
     /// Bind this invocation's actual administrative result once as a system
@@ -591,7 +695,8 @@ impl ConnectSession {
     /// Unconfirmed admission retains the bound input in this process; a later
     /// submission cannot bind while that owner remains unresolved.
     pub async fn submit_finalization(
-        &self, notice: crate::terminal_connector::FinalizationNotice,
+        &self,
+        notice: crate::terminal_connector::FinalizationNotice,
     ) -> Result<(AcceptOutcome, CompletionHandle), ConnectError> {
         if self.stock.is_none() || !notice.belongs_to(&self.realm, &self.session_id) {
             return Err(ConnectError::InvalidInput("Finalization notices require this exact resumed realm, session and current governed owner".into()));
@@ -599,43 +704,87 @@ impl ConnectSession {
         self.submit_input(notice.into_input()).await
     }
 
-    async fn submit_input(&self, input: Input) -> Result<(AcceptOutcome, CompletionHandle), ConnectError> {
+    async fn submit_input(
+        &self,
+        input: Input,
+    ) -> Result<(AcceptOutcome, CompletionHandle), ConnectError> {
         if let Some(stock) = &self.stock {
             // This async-mutex guard reserves the one submission before any
             // actor lookup or bind await. An occupied slot is never rebound.
             let mut reserved = self.stock_submission.reserve()?;
-            let witness = self.service.live_session_actor_witness(&self.session_id).await
-                .ok_or_else(|| ConnectError::InvalidInput("The governed setup actor is unavailable".into()))?;
-            let lease = self.service.acquire_live_session_actor_turn_boundary_lease_exact(&witness)
-                .await.map_err(|e| ConnectError::native("Pin governed setup actor", e))?
-                .ok_or_else(|| ConnectError::InvalidInput("The governed setup actor changed".into()))?;
-            let controller = self.service.pin_controller_client_for_actor(&lease).await
+            let witness = self
+                .service
+                .live_session_actor_witness(&self.session_id)
+                .await
+                .ok_or_else(|| {
+                    ConnectError::InvalidInput("The governed setup actor is unavailable".into())
+                })?;
+            let lease = self
+                .service
+                .acquire_live_session_actor_turn_boundary_lease_exact(&witness)
+                .await
+                .map_err(|e| ConnectError::native("Pin governed setup actor", e))?
+                .ok_or_else(|| {
+                    ConnectError::InvalidInput("The governed setup actor changed".into())
+                })?;
+            let controller = self
+                .service
+                .pin_controller_client_for_actor(&lease)
+                .await
                 .map_err(|e| ConnectError::native("Pin governed setup controller", e))?;
             // Both stock contracts retain this actual pin. Release the actor
             // boundary before native binding/admission, preserving input kind.
             drop(lease);
             let bound = match input {
-                Input::Prompt(prompt) => stock.bind_prompt(&self.machine, &self.session_id,
-                    Input::Prompt(prompt), controller).await,
-                Input::ExternalEvent(event) => stock.bind_host_outcome(&self.machine, &self.session_id,
-                    event, controller).await,
-                _ => return Err(ConnectError::InvalidInput(
-                    "Governed setup accepts human prompts or typed host outcomes".into())),
+                Input::Prompt(prompt) => {
+                    stock
+                        .bind_prompt(
+                            &self.machine,
+                            &self.session_id,
+                            Input::Prompt(prompt),
+                            controller,
+                        )
+                        .await
+                }
+                Input::ExternalEvent(event) => {
+                    stock
+                        .bind_host_outcome(&self.machine, &self.session_id, event, controller)
+                        .await
+                }
+                _ => {
+                    return Err(ConnectError::InvalidInput(
+                        "Governed setup accepts human prompts or typed host outcomes".into(),
+                    ));
+                }
             };
-            let (input, pending) = bound
-                .map_err(|e| ConnectError::native("Bind governed setup original", e))?;
+            let (input, pending) =
+                bound.map_err(|e| ConnectError::native("Bind governed setup original", e))?;
             let observation = Arc::new(OnceLock::new());
-            *reserved = Some(BoundStockSubmission { input, pending: Some(pending),
-                observation: observation.clone(), _receipt: None });
+            *reserved = Some(BoundStockSubmission {
+                input,
+                pending: Some(pending),
+                observation: observation.clone(),
+                _receipt: None,
+            });
             // Keep the exact occurrence outside the native wait. The callback
             // records only native's classification and never enters publication.
-            let submitted = reserved.as_ref().expect("the bound submission was retained").input.clone();
-            let result = self.machine
+            let submitted = reserved
+                .as_ref()
+                .expect("the bound submission was retained")
+                .input
+                .clone();
+            let result = self
+                .machine
                 .accept_input_with_completion_for_attachment_and_replay_policy_with_custody(
-                    &self.attachment, submitted, meerkat_runtime::accept::InputReplayPolicy::KeyOnly,
+                    &self.attachment,
+                    submitted,
+                    meerkat_runtime::accept::InputReplayPolicy::KeyOnly,
                     Box::new(StockAdmissionObservation(observation.clone())),
-                ).await;
-            let settlement = reserved.as_ref().and_then(|bound| bound.observation.get().copied());
+                )
+                .await;
+            let settlement = reserved
+                .as_ref()
+                .and_then(|bound| bound.observation.get().copied());
             match result {
                 Err(error) => {
                     let primary = ConnectError::native("Submit governed setup message", error);
@@ -649,29 +798,51 @@ impl ConnectSession {
                         match reserved.as_mut().expect("retained submission").promote() {
                             Ok(()) => primary,
                             Err(promotion) => ConnectError::Cleanup {
-                                primary: Box::new(primary), cleanup: Box::new(promotion),
+                                primary: Box::new(primary),
+                                cleanup: Box::new(promotion),
                             },
                         }
-                    } else { primary };
+                    } else {
+                        primary
+                    };
                     return Err(self.stock_submission.retain_error(error));
                 }
                 Ok((admission, completion)) => {
                     let exact_accepted = matches!(&admission, AcceptOutcome::Accepted { input_id, .. }
                         if input_id == reserved.as_ref().expect("retained submission").input.id());
-                    if settlement == Some(NativeInputAdmissionSettlement::Admitted) && exact_accepted {
-                        if let Err(primary) = reserved.as_mut().expect("retained submission").promote() {
+                    if settlement == Some(NativeInputAdmissionSettlement::Admitted)
+                        && exact_accepted
+                    {
+                        if let Err(primary) =
+                            reserved.as_mut().expect("retained submission").promote()
+                        {
                             // Consuming promotion failure cannot restore the
                             // original or admit a new bind. Keep its exact input
                             // and receipt even after explicit cancellation joins.
-                            reserved.as_mut().expect("retained submission")._receipt = Some((admission.clone(), None));
+                            reserved.as_mut().expect("retained submission")._receipt =
+                                Some((admission.clone(), None));
                             let cancelled = self.cancel(&admission).await.map(|_| ());
                             let settled = match completion {
-                                Some(completion) => completion.try_wait_with_terminal_outcome().await
-                                    .map(|_| ()).map_err(|error| ConnectError::native("Observe refused setup original settlement", error)),
-                                None => Err(ConnectError::MissingCompletion { admission: Box::new(admission) }),
+                                Some(completion) => completion
+                                    .try_wait_with_terminal_outcome()
+                                    .await
+                                    .map(|_| ())
+                                    .map_err(|error| {
+                                        ConnectError::native(
+                                            "Observe refused setup original settlement",
+                                            error,
+                                        )
+                                    }),
+                                None => Err(ConnectError::MissingCompletion {
+                                    admission: Box::new(admission),
+                                }),
                             };
-                            let error = match standalone::combine(Err(primary), standalone::combine(cancelled, settled)) {
-                                Err(error) => error, Ok(()) => unreachable!(),
+                            let error = match standalone::combine(
+                                Err(primary),
+                                standalone::combine(cancelled, settled),
+                            ) {
+                                Err(error) => error,
+                                Ok(()) => unreachable!(),
                             };
                             return Err(self.stock_submission.retain_error(error));
                         }
@@ -684,24 +855,24 @@ impl ConnectSession {
                         // The unchanged KeyOnly contract cannot authenticate a
                         // duplicate payload. Keep the actual receipt/handle and
                         // block another bind rather than promote by enum tag.
-                        reserved.as_mut().expect("retained submission")._receipt = Some((admission, completion));
+                        reserved.as_mut().expect("retained submission")._receipt =
+                            Some((admission, completion));
                         return Err(self.stock_submission.retain_error(ConnectError::InvalidInput(
                             "Native admission did not confirm this exact bound input; its outcome remains retained".into(),
                         )));
                     }
                     return match completion {
                         Some(completion) => Ok((admission, completion)),
-                        None => Err(ConnectError::MissingCompletion { admission: Box::new(admission) }),
+                        None => Err(ConnectError::MissingCompletion {
+                            admission: Box::new(admission),
+                        }),
                     };
                 }
             }
         }
         let (admission, completion) = self
             .machine
-            .accept_input_with_completion_for_attachment(
-                &self.attachment,
-                input,
-            )
+            .accept_input_with_completion_for_attachment(&self.attachment, input)
             .await
             .map_err(|e| ConnectError::native("submit setup message", e))?;
         match completion {
@@ -741,19 +912,23 @@ impl ConnectSession {
     /// after this method returns its actual outcome.
     pub async fn try_close_for_finalization(self) -> FinalizationClose {
         use meerkat_runtime::RuntimeSessionQuiescentClose;
-        let observation = self.machine
+        let observation = self
+            .machine
             .unregister_session_registration_until_terminal_if_quiescent(&self.registration)
             .await;
         match observation {
             Ok(RuntimeSessionQuiescentClose::Closed) => {
                 // This private transition is available only after native's
                 // owned teardown. The returned owner cannot unregister again.
-                FinalizationClose::Closed(ClosedSetup { session: Arc::new(self) })
+                FinalizationClose::Closed(ClosedSetup {
+                    session: Arc::new(self),
+                })
             }
             Ok(RuntimeSessionQuiescentClose::Busy) => FinalizationClose::Busy(self),
             other => FinalizationClose::Unconfirmed {
                 session: self,
-                observation: other.map_err(|error| ConnectError::native("Observe quiescent setup close", error)),
+                observation: other
+                    .map_err(|error| ConnectError::native("Observe quiescent setup close", error)),
             },
         }
     }
@@ -818,7 +993,10 @@ struct BoundStockSubmission {
 
 impl BoundStockSubmission {
     fn promote(&mut self) -> Result<(), ConnectError> {
-        self.pending.take().expect("one promotion of the retained candidate").admit()
+        self.pending
+            .take()
+            .expect("one promotion of the retained candidate")
+            .admit()
             .map_err(|error| ConnectError::native("Retain accepted setup original", error))
     }
 }
@@ -826,9 +1004,10 @@ impl BoundStockSubmission {
 struct StockAdmissionObservation(Arc<OnceLock<NativeInputAdmissionSettlement>>);
 
 impl NativeInputAdmissionCustody for StockAdmissionObservation {
-    fn settle(self: Box<Self>, settlement: NativeInputAdmissionSettlement)
-        -> Option<NativeInputAdmissionCompletion>
-    {
+    fn settle(
+        self: Box<Self>,
+        settlement: NativeInputAdmissionSettlement,
+    ) -> Option<NativeInputAdmissionCompletion> {
         // Native owns the classification. This callback must stay local and
         // infallible: no pending.admit, publication, I/O, await or restoration.
         let _ = self.0.set(settlement);
@@ -837,22 +1016,29 @@ impl NativeInputAdmissionCustody for StockAdmissionObservation {
 }
 
 impl StockSubmission {
-    fn reserve(self: &Arc<Self>) -> Result<tokio::sync::MutexGuard<'_, Option<BoundStockSubmission>>, ConnectError> {
+    fn reserve(
+        self: &Arc<Self>,
+    ) -> Result<tokio::sync::MutexGuard<'_, Option<BoundStockSubmission>>, ConnectError> {
         let guard = self.candidate.try_lock().map_err(|_| self.retain_error(ConnectError::InvalidInput(
             "Another governed submission is being bound or admitted; no new occurrence was created".into(),
         )))?;
         if guard.is_some() {
             return Err(self.retain_error(ConnectError::InvalidInput(
-                "The prior governed submission remains retained; no new occurrence was created".into(),
+                "The prior governed submission remains retained; no new occurrence was created"
+                    .into(),
             )));
         }
         Ok(guard)
     }
 
     fn retain_error(self: &Arc<Self>, source: ConnectError) -> ConnectError {
-        ConnectError::native("Governed submission ownership", StockSubmissionError {
-            source: Box::new(source), _custody: self.clone(),
-        })
+        ConnectError::native(
+            "Governed submission ownership",
+            StockSubmissionError {
+                source: Box::new(source),
+                _custody: self.clone(),
+            },
+        )
     }
 
     async fn release_after_confirmed_close(&self) {
@@ -870,18 +1056,24 @@ struct StockSubmissionError {
 
 impl std::fmt::Debug for StockSubmissionError {
     fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        output.debug_struct("StockSubmissionError").finish_non_exhaustive()
+        output
+            .debug_struct("StockSubmissionError")
+            .finish_non_exhaustive()
     }
 }
 
 impl std::fmt::Display for StockSubmissionError {
     fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        output.write_str("the original submission owner and error are retained; do not retry automatically")
+        output.write_str(
+            "the original submission owner and error are retained; do not retry automatically",
+        )
     }
 }
 
 impl std::error::Error for StockSubmissionError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { Some(self.source.as_ref()) }
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
 }
 
 /// Custody returned by one automatic administrative close attempt. A native
@@ -907,15 +1099,25 @@ impl ClosedSetup {
     /// Finish only host cleanup. On failure retain this exact cleanup owner;
     /// an explicit retry never repeats native registration teardown.
     pub async fn finish_host_cleanup(self) -> Result<(), (Self, ConnectError)> {
-        if let Some(owner) = &self.session.service_preparation { owner.shutdown().await; }
+        if let Some(owner) = &self.session.service_preparation {
+            owner.shutdown().await;
+        }
         match self.session.service.try_shutdown().await {
             Ok(()) => {
-                self.session.stock_submission.release_after_confirmed_close().await;
+                self.session
+                    .stock_submission
+                    .release_after_confirmed_close()
+                    .await;
                 Ok(())
             }
             Err(error) => {
-                let error = retain_failed_close(self.session.clone(),
-                    ConnectError::native("Close quiescent setup service", HostCleanupError(Box::new(error))));
+                let error = retain_failed_close(
+                    self.session.clone(),
+                    ConnectError::native(
+                        "Close quiescent setup service",
+                        HostCleanupError(Box::new(error)),
+                    ),
+                );
                 Err((self, error))
             }
         }
@@ -926,9 +1128,13 @@ impl ClosedSetup {
 // exact registration, actor service and any unconfirmed bound input. Keeping
 // this error is process-local custody, not a durable recovery or retry handle.
 fn retain_failed_close(session: Arc<ConnectSession>, source: ConnectError) -> ConnectError {
-    ConnectError::native("Setup teardown remains unconfirmed", RetainedSetupCloseError {
-        source: Box::new(source), _session: session,
-    })
+    ConnectError::native(
+        "Setup teardown remains unconfirmed",
+        RetainedSetupCloseError {
+            source: Box::new(source),
+            _session: session,
+        },
+    )
 }
 
 struct RetainedSetupCloseError {
@@ -938,7 +1144,9 @@ struct RetainedSetupCloseError {
 
 impl std::fmt::Debug for RetainedSetupCloseError {
     fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        output.debug_struct("RetainedSetupCloseError").finish_non_exhaustive()
+        output
+            .debug_struct("RetainedSetupCloseError")
+            .finish_non_exhaustive()
     }
 }
 
@@ -949,7 +1157,9 @@ impl std::fmt::Display for RetainedSetupCloseError {
 }
 
 impl std::error::Error for RetainedSetupCloseError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { Some(self.source.as_ref()) }
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
 }
 
 // A missing attachment cannot be converted into a complete ConnectSession.
@@ -957,12 +1167,22 @@ impl std::error::Error for RetainedSetupCloseError {
 // cleanup. No replacement attachment or registration is selected here.
 async fn close_missing_attachment(
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
-    machine: Arc<MeerkatMachine>, registration: RuntimeSessionRegistrationWitness,
+    machine: Arc<MeerkatMachine>,
+    registration: RuntimeSessionRegistrationWitness,
     research: Option<crate::research::ResearchScope>,
     connector_auth: Option<Arc<crate::connector_auth::ConnectorAuth>>,
 ) -> ConnectError {
-    close_failed_construction(ConnectError::MissingAttachment, service, machine,
-        Some(registration), research, connector_auth, None, None).await
+    close_failed_construction(
+        ConnectError::MissingAttachment,
+        service,
+        machine,
+        Some(registration),
+        research,
+        connector_auth,
+        None,
+        None,
+    )
+    .await
 }
 
 // Preserve the original failure and exact partial construction owners. Missing
@@ -970,21 +1190,26 @@ async fn close_missing_attachment(
 async fn close_failed_construction(
     primary: ConnectError,
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
-    machine: Arc<MeerkatMachine>, registration: Option<RuntimeSessionRegistrationWitness>,
+    machine: Arc<MeerkatMachine>,
+    registration: Option<RuntimeSessionRegistrationWitness>,
     research: Option<crate::research::ResearchScope>,
     connector_auth: Option<Arc<crate::connector_auth::ConnectorAuth>>,
     stock: Option<Arc<meerkat::governed_realm::stock::StockGovernance>>,
     setup: Option<Arc<crate::service_preparation::NativeSetup>>,
 ) -> ConnectError {
     let unregister = match &registration {
-        Some(registration) => machine.unregister_session_registration_until_terminal_if_current(registration)
-            .await.map_err(|error| ConnectError::native("close failed setup construction", error)),
+        Some(registration) => machine
+            .unregister_session_registration_until_terminal_if_current(registration)
+            .await
+            .map_err(|error| ConnectError::native("close failed setup construction", error)),
         None => Err(ConnectError::MissingRegistration),
     };
     let observed_unregister = unregister.as_ref().ok().copied();
     // Attempt service cleanup even when exact registration teardown refused.
     // Service shutdown alone cannot upgrade false or an error into a join.
-    let shutdown = service.try_shutdown().await
+    let shutdown = service
+        .try_shutdown()
+        .await
         .map_err(|error| ConnectError::native("close failed setup service", error));
     let unregister = unregister.and_then(|joined| if joined { Ok(()) } else {
         Err(ConnectError::InvalidInput("Setup construction cleanup did not confirm terminal teardown of the selected registration".into()))
@@ -993,11 +1218,20 @@ async fn close_failed_construction(
         Ok(()) => primary,
         Err(source) => ConnectError::Cleanup {
             primary: Box::new(primary),
-            cleanup: Box::new(ConnectError::native("Setup construction cleanup remains unconfirmed",
-                RetainedSetupConstructionError { source: Box::new(source), observed_unregister,
-                    _service: service, _machine: machine, _registration: registration,
-                    _research: research, _connector_auth: connector_auth,
-                    _stock: stock, _setup: setup })),
+            cleanup: Box::new(ConnectError::native(
+                "Setup construction cleanup remains unconfirmed",
+                RetainedSetupConstructionError {
+                    source: Box::new(source),
+                    observed_unregister,
+                    _service: service,
+                    _machine: machine,
+                    _registration: registration,
+                    _research: research,
+                    _connector_auth: connector_auth,
+                    _stock: stock,
+                    _setup: setup,
+                },
+            )),
         },
     }
 }
@@ -1020,8 +1254,10 @@ struct RetainedSetupConstructionError {
 }
 impl std::fmt::Debug for RetainedSetupConstructionError {
     fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        output.debug_struct("RetainedSetupConstructionError")
-            .field("observed_unregister", &self.observed_unregister).finish_non_exhaustive()
+        output
+            .debug_struct("RetainedSetupConstructionError")
+            .field("observed_unregister", &self.observed_unregister)
+            .finish_non_exhaustive()
     }
 }
 impl std::fmt::Display for RetainedSetupConstructionError {
@@ -1030,7 +1266,9 @@ impl std::fmt::Display for RetainedSetupConstructionError {
     }
 }
 impl std::error::Error for RetainedSetupConstructionError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { Some(self.source.as_ref()) }
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
 }
 
 // Keep the actual native error in the source chain without rendering arbitrary
@@ -1045,7 +1283,9 @@ impl std::fmt::Display for HostCleanupError {
 }
 
 impl std::error::Error for HostCleanupError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> { Some(self.0.as_ref()) }
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref())
+    }
 }
 
 #[cfg(test)]
@@ -1054,9 +1294,14 @@ mod quiescent_close_tests {
 
     #[test]
     fn cleanup_error_preserves_typed_source_without_rendering_its_payload() {
-        let error = HostCleanupError(Box::new(std::io::Error::other("private native fixture detail")));
+        let error = HostCleanupError(Box::new(std::io::Error::other(
+            "private native fixture detail",
+        )));
         assert!(!error.to_string().contains("private native fixture detail"));
-        let source = std::error::Error::source(&error).unwrap().downcast_ref::<std::io::Error>().unwrap();
+        let source = std::error::Error::source(&error)
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .unwrap();
         assert_eq!(source.to_string(), "private native fixture detail");
     }
 
@@ -1210,8 +1455,11 @@ mod quiescent_close_tests {
         }
         impl std::error::Error for Primary {}
         let exact_primary = |error: &ConnectError, marker: &Arc<()>| match error {
-            ConnectError::Native { operation, source } if *operation == "fixture construction" =>
-                source.downcast_ref::<Primary>().is_some_and(|source| Arc::ptr_eq(&source.0, marker)),
+            ConnectError::Native { operation, source } if *operation == "fixture construction" => {
+                source
+                    .downcast_ref::<Primary>()
+                    .is_some_and(|source| Arc::ptr_eq(&source.0, marker))
+            }
             _ => false,
         };
         tokio::time::timeout(std::time::Duration::from_secs(30), async {
@@ -1288,32 +1536,59 @@ mod quiescent_close_tests {
                 context_root: temp.path().to_owned(),
                 state_root: Some(temp.path().join("realms")),
                 user_config_root: Some(temp.path().join("home")),
-            }.resolve("absent-registration").unwrap();
-            let session = ConnectSession::open_with_config(storage, Config::default(), SessionOptions {
-                model: CreateSessionModelResolutionRequest { model: Some("gpt-5.4".into()), ..Default::default() },
-                build: SessionBuildOptions {
-                    llm_client_override: Some(meerkat::encode_llm_client_override_for_service(Arc::new(
-                        meerkat_client::TestClient::for_provider(meerkat_core::Provider::OpenAI)
-                    ))),
-                    ..Default::default()
+            }
+            .resolve("absent-registration")
+            .unwrap();
+            let session = ConnectSession::open_with_config(
+                storage,
+                Config::default(),
+                SessionOptions {
+                    model: CreateSessionModelResolutionRequest {
+                        model: Some("gpt-5.4".into()),
+                        ..Default::default()
+                    },
+                    build: SessionBuildOptions {
+                        llm_client_override: Some(meerkat::encode_llm_client_override_for_service(
+                            Arc::new(meerkat_client::TestClient::for_provider(
+                                meerkat_core::Provider::OpenAI,
+                            )),
+                        )),
+                        ..Default::default()
+                    },
                 },
-            }).await.unwrap();
+            )
+            .await
+            .unwrap();
             let machine = session.machine.clone();
             let session_id = session.session_id.clone();
             let epoch = session.registration.epoch_id().clone();
-            let first_close = machine.unregister_session_registration_until_terminal_if_current(&session.registration).await;
+            let first_close = machine
+                .unregister_session_registration_until_terminal_if_current(&session.registration)
+                .await;
             let preserved = match session.try_close_for_finalization().await {
-                FinalizationClose::Unconfirmed { session, observation } => {
-                    let preserved = matches!(observation, Ok(meerkat_runtime::RuntimeSessionQuiescentClose::NotCurrent))
-                        && Arc::ptr_eq(&machine, &session.machine)
-                        && session.session_id == session_id && session.registration.epoch_id() == &epoch;
+                FinalizationClose::Unconfirmed {
+                    session,
+                    observation,
+                } => {
+                    let preserved = matches!(
+                        observation,
+                        Ok(meerkat_runtime::RuntimeSessionQuiescentClose::NotCurrent)
+                    ) && Arc::ptr_eq(&machine, &session.machine)
+                        && session.session_id == session_id
+                        && session.registration.epoch_id() == &epoch;
                     // Even with successful host shutdown, a second ordinary
                     // close cannot upgrade NotCurrent into a joined receipt.
-                    let cleanup = session.close().await.expect_err("absent registration remains unconfirmed");
+                    let cleanup = session
+                        .close()
+                        .await
+                        .expect_err("absent registration remains unconfirmed");
                     let retained = match &cleanup {
-                        ConnectError::Native { source, .. } => source.downcast_ref::<RetainedSetupCloseError>(),
+                        ConnectError::Native { source, .. } => {
+                            source.downcast_ref::<RetainedSetupCloseError>()
+                        }
                         _ => None,
-                    }.expect("failed consuming close retains its complete original owner");
+                    }
+                    .expect("failed consuming close retains its complete original owner");
                     let same_owner = Arc::ptr_eq(&machine, &retained._session.machine)
                         && retained._session.session_id == session_id
                         && retained._session.registration.epoch_id() == &epoch;
@@ -1321,11 +1596,25 @@ mod quiescent_close_tests {
                     // must prove the join. Dropping this error is not proof.
                     preserved && same_owner
                 }
-                FinalizationClose::Busy(session) => { session.close().await.unwrap(); false }
-                FinalizationClose::Closed(closed) => { assert!(closed.finish_host_cleanup().await.is_ok()); false }
+                FinalizationClose::Busy(session) => {
+                    session.close().await.unwrap();
+                    false
+                }
+                FinalizationClose::Closed(closed) => {
+                    assert!(closed.finish_host_cleanup().await.is_ok());
+                    false
+                }
             };
-            assert!(matches!(first_close, Ok(true)), "only the first exact true result proves fixture teardown");
-            assert!(preserved, "NotCurrent must retain the original owner and native observation");
-        }).await.expect("bounded exact-registration control");
+            assert!(
+                matches!(first_close, Ok(true)),
+                "only the first exact true result proves fixture teardown"
+            );
+            assert!(
+                preserved,
+                "NotCurrent must retain the original owner and native observation"
+            );
+        })
+        .await
+        .expect("bounded exact-registration control");
     }
 }

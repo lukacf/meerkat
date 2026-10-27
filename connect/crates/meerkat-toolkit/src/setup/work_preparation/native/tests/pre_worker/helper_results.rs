@@ -27,17 +27,37 @@ async fn published_helper(
         .await
         .unwrap();
     // Explicit source history remains fixture data, not native permission.
-    let original = f.store.admit(AdmissionRequest {
-        key: StoreKey { realm: "tenant".into(), owner: "fixture-original".into(), id: "result-parent".into() },
-        admission_key: "result-parent".into(),
-        data: RecordData { schema: "test.original_source".into(), version: 1,
-            body: serde_json::to_value(f.authority.association()).unwrap() },
-        events: vec![], effects: vec![],
-    }).await.unwrap().record().clone();
-    let contributors = vec![(f.authority.association().clone(), RecordCondition {
-        key: original.key, revision: original.revision, content_digest: original.content_digest,
-        claim: None, dispatch_claim: None,
-    })];
+    let original = f
+        .store
+        .admit(AdmissionRequest {
+            key: StoreKey {
+                realm: "tenant".into(),
+                owner: "fixture-original".into(),
+                id: "result-parent".into(),
+            },
+            admission_key: "result-parent".into(),
+            data: RecordData {
+                schema: "test.original_source".into(),
+                version: 1,
+                body: serde_json::to_value(f.authority.association()).unwrap(),
+            },
+            events: vec![],
+            effects: vec![],
+        })
+        .await
+        .unwrap()
+        .record()
+        .clone();
+    let contributors = vec![(
+        f.authority.association().clone(),
+        RecordCondition {
+            key: original.key,
+            revision: original.revision,
+            content_digest: original.content_digest,
+            claim: None,
+            dispatch_claim: None,
+        },
+    )];
     (preparation, child, source, contributors)
 }
 fn helper_context<'a>(
@@ -87,7 +107,11 @@ async fn canonical_helper_result_survives_lost_reply_and_binds_explanation_befor
     let authorization = native_fixture::current(child.association());
     let context = helper_context(&child, &authorization, f.now);
     let before = f.store.get(f.snapshot.key()).await.unwrap().unwrap();
-    let initial_page = f.bridge(&f.store).continuation_recovery_page(None, 32).await.unwrap();
+    let initial_page = f
+        .bridge(&f.store)
+        .continuation_recovery_page(None, 32)
+        .await
+        .unwrap();
     assert!(initial_page.operations.is_empty());
     assert!(!initial_page.had_unavailable_records);
     assert!(before.data.body.get("helper_detail").is_none());
@@ -102,7 +126,12 @@ async fn canonical_helper_result_survives_lost_reply_and_binds_explanation_befor
                 .resolve_helper_failure(
                     &operation,
                     SetupHelperFailure::Failed { detail },
-                    access(&source, preparation.input_reference(), &context, &contributor_sources),
+                    access(
+                        &source,
+                        preparation.input_reference(),
+                        &context,
+                        &contributor_sources
+                    ),
                     &f.backend,
                     "invalid-detail"
                 )
@@ -115,7 +144,12 @@ async fn canonical_helper_result_survives_lost_reply_and_binds_explanation_befor
         .resolve_helper_failure(
             &operation,
             report(),
-            access(&source, preparation.input_reference(), &context, &contributor_sources),
+            access(
+                &source,
+                preparation.input_reference(),
+                &context,
+                &contributor_sources,
+            ),
             &f.backend,
             "result-fixture",
         )
@@ -131,14 +165,28 @@ async fn canonical_helper_result_survives_lost_reply_and_binds_explanation_befor
     let page = bridge.continuation_recovery_page(None, 1).await.unwrap();
     assert_eq!(page.operations, vec![operation.clone()]);
     assert!(!page.had_unavailable_records);
-    assert_eq!(page.next_after_id.as_deref(), Some(f.snapshot.key().id.as_str()));
-    let next = bridge.continuation_recovery_page(page.next_after_id.as_deref(), 1).await.unwrap();
+    assert_eq!(
+        page.next_after_id.as_deref(),
+        Some(f.snapshot.key().id.as_str())
+    );
+    let next = bridge
+        .continuation_recovery_page(page.next_after_id.as_deref(), 1)
+        .await
+        .unwrap();
     assert!(next.operations.is_empty());
     assert!(next.next_after_id.is_none());
     for limit in [0, 65] {
-        assert!(bridge.continuation_recovery_page(None, limit).await.is_err());
+        assert!(
+            bridge
+                .continuation_recovery_page(None, limit)
+                .await
+                .is_err()
+        );
     }
-    for scope in [SetupScope::new(id("foreign"), id("deployment")), SetupScope::new(id("tenant"), id("foreign"))] {
+    for scope in [
+        SetupScope::new(id("foreign"), id("deployment")),
+        SetupScope::new(id("tenant"), id("foreign")),
+    ] {
         let other = SetupStore::new_conditional(&reopened, scope).unwrap();
         let page = other.continuation_recovery_page(None, 32).await.unwrap();
         assert!(page.operations.is_empty());
@@ -186,7 +234,12 @@ async fn canonical_helper_result_survives_lost_reply_and_binds_explanation_befor
         .resolve_helper_failure(
             &operation,
             report(),
-            access(&source, preparation.input_reference(), &context, &contributor_sources),
+            access(
+                &source,
+                preparation.input_reference(),
+                &context,
+                &contributor_sources,
+            ),
             &f.backend,
             "replay-fixture",
         )
@@ -209,7 +262,12 @@ async fn canonical_helper_result_survives_lost_reply_and_binds_explanation_befor
                 SetupHelperFailure::Failed {
                     detail: "Different result under the same acquisition.".into()
                 },
-                access(&source, preparation.input_reference(), &context, &contributor_sources),
+                access(
+                    &source,
+                    preparation.input_reference(),
+                    &context,
+                    &contributor_sources
+                ),
                 &f.backend,
                 "conflicting-fixture"
             )
@@ -273,7 +331,12 @@ async fn helper_result_refuses_substituted_source_effect_parent_and_current_cont
             .resolve_helper_failure(
                 &operation,
                 report(),
-                access(&source, preparation.input_reference(), &wrong_context, &contributor_sources),
+                access(
+                    &source,
+                    preparation.input_reference(),
+                    &wrong_context,
+                    &contributor_sources
+                ),
                 &f.backend,
                 "parent-context"
             )
@@ -288,7 +351,12 @@ async fn helper_result_refuses_substituted_source_effect_parent_and_current_cont
             .resolve_helper_failure(
                 &operation,
                 report(),
-                access(&source, preparation.input_reference(), &stale, &contributor_sources),
+                access(
+                    &source,
+                    preparation.input_reference(),
+                    &stale,
+                    &contributor_sources
+                ),
                 &f.backend,
                 "stale-policy"
             )
@@ -315,7 +383,6 @@ fn helper_report_shape_cannot_assert_ready_or_smuggle_authority() {
     }
 }
 
-
 #[tokio::test]
 async fn helper_result_uses_current_owner_condition_without_rewriting_publication() {
     let f = Fixture::new().await;
@@ -326,16 +393,36 @@ async fn helper_result_uses_current_owner_condition_without_rewriting_publicatio
     let before = f.store.get(&source.source.key).await.unwrap().unwrap();
     // This Toolkit-layer fixture has opaque source data. The installed source
     // owner's real typed-input checks are covered by the native helper test.
-    let advanced = f.store.compare_and_swap(toolkit_store::Transition {
-        key: before.key.clone(), expected_revision: before.revision,
-        expected_digest: Some(before.content_digest.clone()), data: before.data,
-        claim: None, events: vec![], effects: vec![],
-    }).await.unwrap();
+    let advanced = f
+        .store
+        .compare_and_swap(toolkit_store::Transition {
+            key: before.key.clone(),
+            expected_revision: before.revision,
+            expected_digest: Some(before.content_digest.clone()),
+            data: before.data,
+            claim: None,
+            events: vec![],
+            effects: vec![],
+        })
+        .await
+        .unwrap();
     let mut current = source.clone();
     current.source.revision = advanced.revision;
     current.source.content_digest = advanced.content_digest.clone();
-    let (_, published) = f.bridge(&f.store).helper_result_snapshot(&operation,
-        &access(&current, preparation.input_reference(), &context, &contributor_sources), &f.backend).await.unwrap();
+    let (_, published) = f
+        .bridge(&f.store)
+        .helper_result_snapshot(
+            &operation,
+            &access(
+                &current,
+                preparation.input_reference(),
+                &context,
+                &contributor_sources,
+            ),
+            &f.backend,
+        )
+        .await
+        .unwrap();
     assert_eq!(published.helper_source().unwrap().source, source.source);
     for kind in ["stale", "regressed", "ahead", "digest", "claim", "dispatch"] {
         let mut changed = current.clone();
@@ -347,18 +434,49 @@ async fn helper_result_uses_current_owner_condition_without_rewriting_publicatio
                 changed.source.revision = source.source.revision;
                 changed.source.content_digest = "changed-content".into();
             }
-            "claim" => changed.source.claim = Some(toolkit_store::RecordLease {
-                store_id: "foreign".into(), key: changed.source.key.clone(),
-                worker: "foreign".into(), fence: 1, expires_at_ms: 1,
-            }),
+            "claim" => {
+                changed.source.claim = Some(toolkit_store::RecordLease {
+                    store_id: "foreign".into(),
+                    key: changed.source.key.clone(),
+                    worker: "foreign".into(),
+                    fence: 1,
+                    expires_at_ms: 1,
+                })
+            }
             "dispatch" => changed.source.dispatch_claim = Some(f.lease.clone()),
             _ => unreachable!(),
         }
-        assert!(f.bridge(&f.store).helper_result_snapshot(&operation,
-            &access(&changed, preparation.input_reference(), &context, &contributor_sources), &f.backend).await.is_err(), "{kind}");
+        assert!(
+            f.bridge(&f.store)
+                .helper_result_snapshot(
+                    &operation,
+                    &access(
+                        &changed,
+                        preparation.input_reference(),
+                        &context,
+                        &contributor_sources
+                    ),
+                    &f.backend
+                )
+                .await
+                .is_err(),
+            "{kind}"
+        );
     }
-    let (_, again) = f.bridge(&f.store).helper_result_snapshot(&operation,
-        &access(&current, preparation.input_reference(), &context, &contributor_sources), &f.backend).await.unwrap();
+    let (_, again) = f
+        .bridge(&f.store)
+        .helper_result_snapshot(
+            &operation,
+            &access(
+                &current,
+                preparation.input_reference(),
+                &context,
+                &contributor_sources,
+            ),
+            &f.backend,
+        )
+        .await
+        .unwrap();
     assert_eq!(again.helper_source().unwrap().source, source.source);
 }
 
@@ -379,21 +497,33 @@ impl ResultBoundaryStore<'_> {
         }
         let mut data = self.source.data.clone();
         data.body["changed_at_result_commit"] = serde_json::Value::Bool(true);
-        self.inner.compare_and_swap(Transition {
-            key: self.source.key.clone(),
-            expected_revision: self.source.revision,
-            expected_digest: Some(self.source.content_digest.clone()),
-            claim: None, data, events: vec![], effects: vec![],
-        }).await.unwrap();
+        self.inner
+            .compare_and_swap(Transition {
+                key: self.source.key.clone(),
+                expected_revision: self.source.revision,
+                expected_digest: Some(self.source.content_digest.clone()),
+                claim: None,
+                data,
+                events: vec![],
+                effects: vec![],
+            })
+            .await
+            .unwrap();
     }
 }
 
 #[async_trait::async_trait]
 impl ConditionalAdmissionStore for ResultBoundaryStore<'_> {
-    async fn admit_conditionally(&self, request: ConditionalAdmission) -> StoreResult<AdmissionOutcome> {
+    async fn admit_conditionally(
+        &self,
+        request: ConditionalAdmission,
+    ) -> StoreResult<AdmissionOutcome> {
         self.inner.admit_conditionally(request).await
     }
-    async fn compare_and_swap_conditionally(&self, request: ConditionalTransition) -> StoreResult<StoredRecord> {
+    async fn compare_and_swap_conditionally(
+        &self,
+        request: ConditionalTransition,
+    ) -> StoreResult<StoredRecord> {
         self.mutate_before_commit(&request.transition.key).await;
         self.inner.compare_and_swap_conditionally(request).await
     }
@@ -404,15 +534,33 @@ async fn helper_result_fences_contributor_and_helper_changes_at_commit() {
     for changed in ["contributor", "helper", "ancestor"] {
         let f = Fixture::new().await;
         let (preparation, child, mut source, mut contributors) = published_helper(&f).await;
-        let ancestor = f.store.admit(AdmissionRequest {
-            key: StoreKey { realm: "tenant".into(), owner: "fixture-ancestor".into(), id: "approved-parent".into() },
-            admission_key: "approved-parent".into(),
-            data: RecordData { schema: "test.ancestor_source".into(), version: 1,
-                body: serde_json::json!({"cancelled": false}) }, events: vec![], effects: vec![],
-        }).await.unwrap().record().clone();
+        let ancestor = f
+            .store
+            .admit(AdmissionRequest {
+                key: StoreKey {
+                    realm: "tenant".into(),
+                    owner: "fixture-ancestor".into(),
+                    id: "approved-parent".into(),
+                },
+                admission_key: "approved-parent".into(),
+                data: RecordData {
+                    schema: "test.ancestor_source".into(),
+                    version: 1,
+                    body: serde_json::json!({"cancelled": false}),
+                },
+                events: vec![],
+                effects: vec![],
+            })
+            .await
+            .unwrap()
+            .record()
+            .clone();
         let mut ancestors = vec![RecordCondition {
-            key: ancestor.key, revision: ancestor.revision, content_digest: ancestor.content_digest,
-            claim: None, dispatch_claim: None,
+            key: ancestor.key,
+            revision: ancestor.revision,
+            content_digest: ancestor.content_digest,
+            claim: None,
+            dispatch_claim: None,
         }];
         let source_key = match changed {
             "contributor" => &contributors[0].1.key,
@@ -429,29 +577,67 @@ async fn helper_result_fences_contributor_and_helper_changes_at_commit() {
         let operation = operation_id(f.snapshot.request()).unwrap();
         let authorization = native_fixture::current(child.association());
         let context = helper_context(&child, &authorization, f.now);
-        let bridge = SetupStore::new_conditional(
-            &raced, SetupScope::new(id("tenant"), id("deployment")),
-        ).unwrap();
+        let bridge =
+            SetupStore::new_conditional(&raced, SetupScope::new(id("tenant"), id("deployment")))
+                .unwrap();
         let before = f.store.get(f.snapshot.key()).await.unwrap().unwrap();
-        let effects = f.store.list_effects(f.snapshot.key(), None, 64).await.unwrap();
-        let mut result_access = access(&source, preparation.input_reference(), &context, &contributors);
+        let effects = f
+            .store
+            .list_effects(f.snapshot.key(), None, 64)
+            .await
+            .unwrap();
+        let mut result_access = access(
+            &source,
+            preparation.input_reference(),
+            &context,
+            &contributors,
+        );
         result_access.ancestor_sources = &ancestors;
-        let result = bridge.resolve_helper_failure(
-            &operation, report(), result_access,
-            &f.backend, "ordinary-result-race",
-        ).await;
+        let result = bridge
+            .resolve_helper_failure(
+                &operation,
+                report(),
+                result_access,
+                &f.backend,
+                "ordinary-result-race",
+            )
+            .await;
         assert!(raced.fired.load(Ordering::SeqCst), "{changed}");
-        assert!(matches!(result, Err(SetupError::Store(StoreError::Conflict))), "{changed}");
-        assert_eq!(f.store.get(f.snapshot.key()).await.unwrap().unwrap(), before, "{changed}");
-        assert_eq!(f.store.list_effects(f.snapshot.key(), None, 64).await.unwrap(), effects, "{changed}");
-        assert!(bridge.committed_continuation(&operation).await.unwrap().is_none(), "{changed}");
+        assert!(
+            matches!(result, Err(SetupError::Store(StoreError::Conflict))),
+            "{changed}"
+        );
+        assert_eq!(
+            f.store.get(f.snapshot.key()).await.unwrap().unwrap(),
+            before,
+            "{changed}"
+        );
+        assert_eq!(
+            f.store
+                .list_effects(f.snapshot.key(), None, 64)
+                .await
+                .unwrap(),
+            effects,
+            "{changed}"
+        );
+        assert!(
+            bridge
+                .committed_continuation(&operation)
+                .await
+                .unwrap()
+                .is_none(),
+            "{changed}"
+        );
 
         // Only source revision changed in this storage fixture. A fresh read
         // retains the same helper publication and exact contributor identity.
         let current = f.store.get(&raced.source.key).await.unwrap().unwrap();
         let condition = RecordCondition {
-            key: current.key, revision: current.revision, content_digest: current.content_digest,
-            claim: None, dispatch_claim: None,
+            key: current.key,
+            revision: current.revision,
+            content_digest: current.content_digest,
+            claim: None,
+            dispatch_claim: None,
         };
         match changed {
             "contributor" => contributors[0].1 = condition,
@@ -459,15 +645,36 @@ async fn helper_result_fences_contributor_and_helper_changes_at_commit() {
             "ancestor" => ancestors[0] = condition,
             _ => unreachable!(),
         }
-        let mut current_access = access(&source, preparation.input_reference(), &context, &contributors);
+        let mut current_access = access(
+            &source,
+            preparation.input_reference(),
+            &context,
+            &contributors,
+        );
         current_access.ancestor_sources = &ancestors;
-        let committed = f.bridge(&f.store).resolve_helper_failure(
-            &operation, report(), current_access,
-            &f.backend, "ordinary-result-after-race",
-        ).await.unwrap();
+        let committed = f
+            .bridge(&f.store)
+            .resolve_helper_failure(
+                &operation,
+                report(),
+                current_access,
+                &f.backend,
+                "ordinary-result-after-race",
+            )
+            .await
+            .unwrap();
         assert_eq!(committed.phase, AcquisitionPhase::Unavailable, "{changed}");
-        let obligation = f.bridge(&f.store).committed_continuation(&operation).await.unwrap().unwrap();
-        assert_eq!(obligation.original_work(), f.authority.original_work(), "{changed}");
+        let obligation = f
+            .bridge(&f.store)
+            .committed_continuation(&operation)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            obligation.original_work(),
+            f.authority.original_work(),
+            "{changed}"
+        );
     }
 }
 

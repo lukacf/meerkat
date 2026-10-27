@@ -39,7 +39,9 @@ pub struct WorkAdmissionStepOptions {
 impl WorkAdmissionStepOptions {
     /// Validate trusted bootstrap bounds through the same work-step owner used
     /// at dispatch. This performs no claim, admission, observation or effect.
-    pub fn validate(&self) -> Result<(), SetupError> { validate_options(self) }
+    pub fn validate(&self) -> Result<(), SetupError> {
+        validate_options(self)
+    }
 }
 
 /// An observation of one handoff, not a work-execution or acquisition state.

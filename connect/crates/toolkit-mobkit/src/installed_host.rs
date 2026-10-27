@@ -13,8 +13,8 @@ mod application_operations_tests;
 #[cfg(test)]
 pub(crate) mod controller_first_input_fixture;
 pub mod operator_setup;
-pub mod prepared_registration;
 pub mod preparation;
+pub mod prepared_registration;
 pub use preparation::{PreparedInstallationOwner, PreparedInstalledHost};
 mod preparation_policy;
 pub use preparation_policy::PreparedApplicationPolicy;
@@ -50,7 +50,6 @@ use meerkat_core::{
 use meerkat_mob::{
     MemberDestinationSelection, MemberRuntimeBuildIdentity, MemberRuntimeRegistrationHook, MobError,
 };
-use tool_policy::{PreparedInstalledToolPolicy, ValidatedInstalledToolPolicy};
 use meerkat_runtime::{
     input_authority::{NativeAdmissionError, NativeIngressContext},
     meerkat_machine::{RetainedInvocationOwner, ScopedInvocation, ScopedMandateOwner},
@@ -67,6 +66,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+use tool_policy::{PreparedInstalledToolPolicy, ValidatedInstalledToolPolicy};
 use toolkit_package::canonical_json;
 use toolkit_store::{SqliteStore, StoreScope};
 
@@ -93,8 +93,16 @@ pub struct InstalledToolkitHost {
 /// Fixed process-source custody for actual native prepare and visibility
 /// observations. Implementations must never treat these as finish or adoption.
 pub trait InstalledSurfaceAssociations: Send + Sync {
-    fn prepared(&self, identity: &MemberRuntimeBuildIdentity, surface: &meerkat_core::PreparedToolSurface) -> Result<(), HostLifetimeError>;
-    fn visible(&self, identity: &MemberRuntimeBuildIdentity, surface: &[meerkat_core::ToolDef]) -> Result<(), HostLifetimeError>;
+    fn prepared(
+        &self,
+        identity: &MemberRuntimeBuildIdentity,
+        surface: &meerkat_core::PreparedToolSurface,
+    ) -> Result<(), HostLifetimeError>;
+    fn visible(
+        &self,
+        identity: &MemberRuntimeBuildIdentity,
+        surface: &[meerkat_core::ToolDef],
+    ) -> Result<(), HostLifetimeError>;
 }
 
 /// Read-only result of the actual executable artifact validators. It carries
@@ -120,7 +128,9 @@ pub fn validate_installed_artifacts(
         }
         Ok(bytes)
     };
-    if let Some(setup) = &native.setup { let _ = checked(setup)?; }
+    if let Some(setup) = &native.setup {
+        let _ = checked(setup)?;
+    }
     let tool_bytes = checked(&native.application_tool_policy)?;
     let tool_policy = ValidatedInstalledToolPolicy::parse(&tool_bytes)?;
     let mut surfaces = Vec::new();
@@ -169,9 +179,11 @@ impl InstalledToolkitHost {
     /// Enroll the existing installed product's read-only package verifier.
     /// Public/private command documents cannot select or replace this owner.
     pub fn with_service_installation_readback(
-        self, owner: Arc<dyn crate::private_originals::ServiceInstallationReadback>,
+        self,
+        owner: Arc<dyn crate::private_originals::ServiceInstallationReadback>,
     ) -> Result<Self, HostLifetimeError> {
-        self.originals.bind_service_installation_readback(owner)
+        self.originals
+            .bind_service_installation_readback(owner)
             .map_err(|_| HostLifetimeError::InvalidSelection)?;
         Ok(self)
     }
@@ -182,7 +194,15 @@ impl InstalledToolkitHost {
         selection: HostBootstrapSelection,
         startup: NativeOwnerStartup,
     ) -> Result<(NativeHostLifetime, Self), HostLifetimeError> {
-        Self::open_selected(selection, startup, None, None, #[cfg(test)] None).await
+        Self::open_selected(
+            selection,
+            startup,
+            None,
+            None,
+            #[cfg(test)]
+            None,
+        )
+        .await
     }
 
     /// Adopt the policy used by this process's completed native preparations.
@@ -195,15 +215,32 @@ impl InstalledToolkitHost {
         startup: NativeOwnerStartup,
         prepared_tool_policy: PreparedInstalledToolPolicy,
     ) -> Result<(NativeHostLifetime, Self), HostLifetimeError> {
-        Self::open_selected(selection, startup, Some(prepared_tool_policy), None, #[cfg(test)] None).await
+        Self::open_selected(
+            selection,
+            startup,
+            Some(prepared_tool_policy),
+            None,
+            #[cfg(test)]
+            None,
+        )
+        .await
     }
 
     pub async fn open_with_application_service_policy(
-        selection: HostBootstrapSelection, startup: NativeOwnerStartup,
+        selection: HostBootstrapSelection,
+        startup: NativeOwnerStartup,
         prepared_tool_policy: Option<PreparedInstalledToolPolicy>,
         participant: Arc<dyn crate::private_originals::ApplicationServicePolicy>,
     ) -> Result<(NativeHostLifetime, Self), HostLifetimeError> {
-        Self::open_selected(selection, startup, prepared_tool_policy, Some(participant), #[cfg(test)] None).await
+        Self::open_selected(
+            selection,
+            startup,
+            prepared_tool_policy,
+            Some(participant),
+            #[cfg(test)]
+            None,
+        )
+        .await
     }
 
     /// Test fixtures select a storage observation wrapper before the first
@@ -249,8 +286,11 @@ impl InstalledToolkitHost {
         // Use the same intact canonical pair contract as stopped preparation.
         // Its native lease is acquired before the published source store opens.
         let (source, store) = operator_setup::open_owner_pair_in(
-            &directory, &native.ingress_domain, native.remote_operator.as_ref(),
-            operator_setup::OperatorOwnerStartup::Restore, true,
+            &directory,
+            &native.ingress_domain,
+            native.remote_operator.as_ref(),
+            operator_setup::OperatorOwnerStartup::Restore,
+            true,
         )?;
         let store = Arc::new(store);
         let routes = native
@@ -298,8 +338,14 @@ impl InstalledToolkitHost {
                 .map_err(|_| HostLifetimeError::InvalidSelection)?,
         );
         originals.select_installed_pair_recovery()?;
-        let service_policy = tool_policy.bind_service_owner(store.clone(), source_scope.clone(),
-            native.grant_administrator.clone(), participant).await?;
+        let service_policy = tool_policy
+            .bind_service_owner(
+                store.clone(),
+                source_scope.clone(),
+                native.grant_administrator.clone(),
+                participant,
+            )
+            .await?;
         originals.bind_service_tool_policy(service_policy)?;
         owner.bind_native_authorization_publication(source.publication())?;
         owner.validate_current_selection()?;
@@ -322,10 +368,14 @@ impl InstalledToolkitHost {
     /// preflight. The original owner, resources, routes, destinations and native
     /// mandate remain intact; this process has one immutable source selection.
     pub fn with_application_update(
-        mut self, prior_policy: &[u8], candidate_policy: &[u8],
+        mut self,
+        prior_policy: &[u8],
+        candidate_policy: &[u8],
         associations: Arc<dyn InstalledSurfaceAssociations>,
     ) -> Result<Self, HostLifetimeError> {
-        if self.update_associations.is_some() { return Err(HostLifetimeError::InvalidSelection); }
+        if self.update_associations.is_some() {
+            return Err(HostLifetimeError::InvalidSelection);
+        }
         self.tool_policy = self.tool_policy.successor(prior_policy, candidate_policy)?;
         self.update_associations = Some(associations);
         Ok(self)
@@ -385,9 +435,16 @@ impl InstalledToolkitHost {
         defaults: acquisition::InstalledSetupDefaults,
         additional_helpers: Vec<acquisition::InstalledSetupSelection>,
     ) -> Result<Self, HostLifetimeError> {
-        if !self.acquisition.is_unconfigured() { return Err(HostLifetimeError::InvalidSelection); }
+        if !self.acquisition.is_unconfigured() {
+            return Err(HostLifetimeError::InvalidSelection);
+        }
         let acquisition = Arc::new(acquisition::InstalledAcquisition::from_defaults(
-            self.store.clone(), self.source_scope.clone(), self.originals.clone(), &self.native, defaults, additional_helpers,
+            self.store.clone(),
+            self.source_scope.clone(),
+            self.originals.clone(),
+            &self.native,
+            defaults,
+            additional_helpers,
         )?);
         acquisition.bind_tool_driver()?;
         self.acquisition = acquisition::AcquisitionBootstrap::selected(acquisition);
@@ -401,9 +458,14 @@ impl InstalledToolkitHost {
         &self,
         audience: std::collections::BTreeSet<toolkit_package::Id>,
     ) -> Result<Arc<acquisition::InstalledNativeContinuation>, HostLifetimeError> {
-        acquisition::InstalledNativeContinuation::new(self.store.clone(), self.source_scope.clone(),
-            self.originals.clone(), toolkit_package::Id::new("toolkit.setup")
-                .map_err(|_| HostLifetimeError::InvalidSelection)?, audience)
+        acquisition::InstalledNativeContinuation::new(
+            self.store.clone(),
+            self.source_scope.clone(),
+            self.originals.clone(),
+            toolkit_package::Id::new("toolkit.setup")
+                .map_err(|_| HostLifetimeError::InvalidSelection)?,
+            audience,
+        )
     }
 
     /// Opt in before the native spec exists. The same application retains the
@@ -425,9 +487,9 @@ impl InstalledToolkitHost {
         defaults: acquisition::InstalledSetupBootstrap,
         additional_helpers: Vec<acquisition::InstalledSetupSelection>,
     ) -> Result<Self, HostLifetimeError> {
-        let tools = acquisition::InstalledAcquisitionTools::new(
-            std::time::Duration::from_millis(defaults.limits.admission_timeout_ms),
-        )?;
+        let tools = acquisition::InstalledAcquisitionTools::new(std::time::Duration::from_millis(
+            defaults.limits.admission_timeout_ms,
+        ))?;
         self.with_enrolled_bootstrap_acquisition_helpers(defaults, tools, additional_helpers)
     }
 
@@ -454,12 +516,16 @@ impl InstalledToolkitHost {
             return Err(HostLifetimeError::InvalidSelection);
         }
         self.acquisition = acquisition::AcquisitionBootstrap::deferred_with_tools(
-            self.store.clone(), self.source_scope.clone(), self.originals.clone(),
-            self.native.clone(), defaults, tools, additional_helpers,
+            self.store.clone(),
+            self.source_scope.clone(),
+            self.originals.clone(),
+            self.native.clone(),
+            defaults,
+            tools,
+            additional_helpers,
         )?;
         Ok(self)
     }
-
 
     pub fn compose(
         mut self,
@@ -488,12 +554,19 @@ impl InstalledToolkitHost {
         {
             return Err(HostLifetimeError::InvalidSelection);
         }
-        registration.adopt(self.final_registration(owner.clone()), &self.tool_policy.registry())?;
+        registration.adopt(
+            self.final_registration(owner.clone()),
+            &self.tool_policy.registry(),
+        )?;
         policy.adopt(self.final_policy(owner.clone()))?;
         Ok(ToolkitGatewayHost::with_prepared_private_originals(
-            owner, closed, self.originals, registration,
-        ).with_installed_tool_policy(self.tool_policy.registry())
-            .with_installed_acquisition(self.acquisition))
+            owner,
+            closed,
+            self.originals,
+            registration,
+        )
+        .with_installed_tool_policy(self.tool_policy.registry())
+        .with_installed_acquisition(self.acquisition))
     }
 
     fn final_registration(
@@ -525,8 +598,12 @@ impl InstalledToolkitHost {
         registration: Arc<dyn MemberRuntimeRegistrationHook>,
         policy: Arc<P>,
     ) -> ToolkitGatewayHost
-    where P: ScopedMandateOwner + AdmittedWorkPolicyOwner + OperationPolicyOwner
-        + RetainedInvocationOwner + 'static,
+    where
+        P: ScopedMandateOwner
+            + AdmittedWorkPolicyOwner
+            + OperationPolicyOwner
+            + RetainedInvocationOwner
+            + 'static,
     {
         ToolkitGatewayHost::with_private_originals(
             owner,
@@ -697,12 +774,19 @@ impl MemberRuntimeRegistrationHook for InstalledMemberRegistration {
         match &self.update_associations {
             Some(associations) => associations.prepared(identity, surface),
             None => tool_policy::validate_installed_surface(surface, &self.surfaces[index]),
-        }.map_err(|_| MobError::WiringError(
-            "prepared tool has no selected installed-artifact association".into(),
-        ))?;
-        self.tool_policy.select(&member.member, surface).map_err(|_| {
-            MobError::WiringError("member has no selected prepared application tool policy".into())
-        })
+        }
+        .map_err(|_| {
+            MobError::WiringError(
+                "prepared tool has no selected installed-artifact association".into(),
+            )
+        })?;
+        self.tool_policy
+            .select(&member.member, surface)
+            .map_err(|_| {
+                MobError::WiringError(
+                    "member has no selected prepared application tool policy".into(),
+                )
+            })
     }
     async fn verify_member_surface(
         &self,
@@ -711,9 +795,11 @@ impl MemberRuntimeRegistrationHook for InstalledMemberRegistration {
     ) -> Result<(), MobError> {
         let (index, _) = self.member(identity)?;
         if let Some(associations) = &self.update_associations {
-            return associations.visible(identity, surface).map_err(|_| MobError::WiringError(
-                "visible tool has no selected update preparation association".into(),
-            ));
+            return associations.visible(identity, surface).map_err(|_| {
+                MobError::WiringError(
+                    "visible tool has no selected update preparation association".into(),
+                )
+            });
         }
         let installed = &self.surfaces[index];
         if surface
@@ -741,19 +827,25 @@ struct InstalledApplicationPolicy {
 fn installed_operation_unavailable(stage: &'static str, error: &OperationAuthorizationError) {
     if matches!(error, OperationAuthorizationError::Unavailable) {
         use std::io::Write as _;
-        let _ = writeln!(std::io::stderr().lock(),
-            "{{\"event\":\"toolkit_installed_operation_unavailable\",\"stage\":\"{stage}\",\"cause\":\"Unavailable\"}}");
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "{{\"event\":\"toolkit_installed_operation_unavailable\",\"stage\":\"{stage}\",\"cause\":\"Unavailable\"}}"
+        );
     }
 }
 
 impl InstalledApplicationPolicy {
     /// Helper effects use their one canonical setup deadline, never a review TTL.
     fn allowance_deadline(
-        &self, association: &InputAuthorityAssociation,
-        purpose: LocalPolicyPurpose, now_ms: u64,
+        &self,
+        association: &InputAuthorityAssociation,
+        purpose: LocalPolicyPurpose,
+        now_ms: u64,
     ) -> Result<u64, OperationAuthorizationError> {
         if purpose == LocalPolicyPurpose::Operation {
-            if let Some(deadline) = self.originals.helper_operation_deadline(association)
+            if let Some(deadline) = self
+                .originals
+                .helper_operation_deadline(association)
                 .map_err(mcp_control_error)?
             {
                 if now_ms >= deadline {
@@ -775,7 +867,9 @@ impl InstalledApplicationPolicy {
         association: &InputAuthorityAssociation,
     ) -> Result<(), OperationAuthorizationError> {
         self.member(association)?;
-        if let Some(helper) = self.originals.helper_policy_source(association)
+        if let Some(helper) = self
+            .originals
+            .helper_policy_source(association)
             .map_err(|_| OperationAuthorizationError::Unavailable)?
         {
             self.validate_source_entry(None)?;
@@ -792,36 +886,66 @@ impl InstalledApplicationPolicy {
         self.validate_source_entry(self.source_component(association)?)
     }
 
-    fn source_component(&self, association: &InputAuthorityAssociation)
-        -> Result<Option<&toolkit_package::Id>, OperationAuthorizationError>
-    {
-        if self.originals.helper_policy_source(association)
-            .map_err(|_| OperationAuthorizationError::Unavailable)?.is_some()
-        { return Ok(None); }
-        let route_id = self.originals.route_for_binding(association)
+    fn source_component(
+        &self,
+        association: &InputAuthorityAssociation,
+    ) -> Result<Option<&toolkit_package::Id>, OperationAuthorizationError> {
+        if self
+            .originals
+            .helper_policy_source(association)
+            .map_err(|_| OperationAuthorizationError::Unavailable)?
+            .is_some()
+        {
+            return Ok(None);
+        }
+        let route_id = self
+            .originals
+            .route_for_binding(association)
             .map_err(|_| OperationAuthorizationError::Unavailable)?;
-        let route = self.native.routes.iter().find(|route| route.id == route_id)
+        let route = self
+            .native
+            .routes
+            .iter()
+            .find(|route| route.id == route_id)
             .ok_or(OperationAuthorizationError::Unavailable)?;
         match &route.origin {
-            meerkat_toolkit::host_lifetime::policy::CompiledNativeSourceOrigin::LocalConsole { .. } => Ok(None),
+            meerkat_toolkit::host_lifetime::policy::CompiledNativeSourceOrigin::LocalConsole {
+                ..
+            } => Ok(None),
             meerkat_toolkit::host_lifetime::policy::CompiledNativeSourceOrigin::ProviderEvent {
-                channel_id, sender_id, target_identity,
-            } => Ok(Some(&self.selected.channels.iter().find(|channel| {
-                &channel.channel_id == channel_id && &channel.sender_id == sender_id
-                    && &channel.target_identity == target_identity
-            }).ok_or(OperationAuthorizationError::Unavailable)?.component)),
+                channel_id,
+                sender_id,
+                target_identity,
+            } => Ok(Some(
+                &self
+                    .selected
+                    .channels
+                    .iter()
+                    .find(|channel| {
+                        &channel.channel_id == channel_id
+                            && &channel.sender_id == sender_id
+                            && &channel.target_identity == target_identity
+                    })
+                    .ok_or(OperationAuthorizationError::Unavailable)?
+                    .component,
+            )),
         }
     }
 
-    fn validate_source_entry(&self, component: Option<&toolkit_package::Id>)
-        -> Result<(), OperationAuthorizationError>
-    {
-        self.lifetime.validate_native_entry(component).map_err(|error| match error {
-            HostLifetimeError::Denied | HostLifetimeError::WrongOwner | HostLifetimeError::InvalidSelection => {
-                OperationRefused::new(OperationRefusalKind::Denied).into()
-            }
-            _ => OperationAuthorizationError::Unavailable,
-        })
+    fn validate_source_entry(
+        &self,
+        component: Option<&toolkit_package::Id>,
+    ) -> Result<(), OperationAuthorizationError> {
+        self.lifetime
+            .validate_native_entry(component)
+            .map_err(|error| match error {
+                HostLifetimeError::Denied
+                | HostLifetimeError::WrongOwner
+                | HostLifetimeError::InvalidSelection => {
+                    OperationRefused::new(OperationRefusalKind::Denied).into()
+                }
+                _ => OperationAuthorizationError::Unavailable,
+            })
     }
 
     fn model_values(
@@ -872,7 +996,9 @@ impl InstalledApplicationPolicy {
         association: &InputAuthorityAssociation,
     ) -> Result<&CompiledNativeMember, OperationAuthorizationError> {
         if let Some(policy) = self.originals.service_tool_policy.get() {
-            policy.check_current().map_err(|_| OperationAuthorizationError::Unavailable)?;
+            policy
+                .check_current()
+                .map_err(|_| OperationAuthorizationError::Unavailable)?;
         }
         let claims = association.candidate();
         if claims.ingress_namespace.realm != self.native.realm
@@ -880,24 +1006,37 @@ impl InstalledApplicationPolicy {
         {
             return Err(OperationRefused::new(OperationRefusalKind::Denied).into());
         }
-        if let Some(source) = self.originals.helper_policy_source(association)
+        if let Some(source) = self
+            .originals
+            .helper_policy_source(association)
             .map_err(|_| OperationAuthorizationError::Unavailable)?
         {
             let selected = source.selection;
-            let member = self.native.members.iter().find(|member| **member == selected.member)
+            let member = self
+                .native
+                .members
+                .iter()
+                .find(|member| **member == selected.member)
                 .ok_or(OperationAuthorizationError::Unavailable)?;
             if selected.grant_caller != self.native.grant_administrator
                 || selected.helper.member != member.member
                 || claims.original_work.authority != self.native.ingress_domain.authority
-            { return Err(OperationRefused::new(OperationRefusalKind::Denied).into()); }
+            {
+                return Err(OperationRefused::new(OperationRefusalKind::Denied).into());
+            }
             // The helper source verifies the exact independently selected basis,
             // including native per-target lineages. This historical mapping
             // grants nothing; native resolves that basis for the real operation.
             return Ok(member);
         }
         if !(matches!(&claims.authority_basis, WorkAuthorityBasis::GrantLineage { lineage } if !lineage.is_empty())
-            || matches!(&claims.authority_basis, WorkAuthorityBasis::TargetedGrantLineages { .. }))
-        { return Err(OperationRefused::new(OperationRefusalKind::Denied).into()); }
+            || matches!(
+                &claims.authority_basis,
+                WorkAuthorityBasis::TargetedGrantLineages { .. }
+            ))
+        {
+            return Err(OperationRefused::new(OperationRefusalKind::Denied).into());
+        }
         // Targeted grants include configured setup and controller-only work.
         // Exact retained source custody is still required below; native checks
         // only the lineage selected by the actual operation at its entry.
@@ -971,12 +1110,15 @@ impl RetainedInvocationOwner for InstalledApplicationPolicy {
         // Native has verified the retained input/contributor ledger. Reuse the
         // same current source, member and host lifetime policy as fresh entry;
         // no fresh transport authentication is invented for a completion.
-        self.current_invocation(association).map_err(|error| match error {
-            OperationAuthorizationError::Refused(refusal) => NativeAdmissionError::Refused(refusal),
-            _ => NativeAdmissionError::Readiness(
-                meerkat_core::authorization::ControllerReadinessFailure::PolicyUnavailable,
-            ),
-        })
+        self.current_invocation(association)
+            .map_err(|error| match error {
+                OperationAuthorizationError::Refused(refusal) => {
+                    NativeAdmissionError::Refused(refusal)
+                }
+                _ => NativeAdmissionError::Readiness(
+                    meerkat_core::authorization::ControllerReadinessFailure::PolicyUnavailable,
+                ),
+            })
     }
 }
 impl AdmittedWorkPolicyOwner for InstalledApplicationPolicy {
@@ -986,7 +1128,9 @@ impl AdmittedWorkPolicyOwner for InstalledApplicationPolicy {
         binding: &PreparedAuthorizationBinding,
         now_ms: u64,
     ) -> Result<WorkOwnerAllowance, OperationAuthorizationError> {
-        let current = self.originals.current_service_mcp_control(control, binding, now_ms, false)
+        let current = self
+            .originals
+            .current_service_mcp_control(control, binding, now_ms, false)
             .map_err(mcp_control_error)?;
         self.member(&current.parent)?;
         self.current_invocation(&current.parent)?;
@@ -1029,7 +1173,9 @@ impl OperationPolicyOwner for InstalledApplicationPolicy {
         binding: &PreparedAuthorizationBinding,
         now_ms: u64,
     ) -> Result<LocalPolicyAllowance, OperationAuthorizationError> {
-        let current = self.originals.current_service_mcp_control(control, binding, now_ms, true)
+        let current = self
+            .originals
+            .current_service_mcp_control(control, binding, now_ms, true)
             .map_err(mcp_control_error)?;
         self.member(&current.parent)?;
         self.current_invocation(&current.parent)?;
@@ -1194,11 +1340,14 @@ impl OperationPolicyOwner for InstalledApplicationPolicy {
                             &claims.logical_executor,
                             &claims.target.audience,
                             &helper.origin,
-                        ).map_err(|_| OperationAuthorizationError::Unavailable)?
+                        )
+                        .map_err(|_| OperationAuthorizationError::Unavailable)?
                     }
                     (
                         Some(meerkat_core::ToolOperationTarget::RegisteredToolBundleOperation {
-                            bundle, operation, account: _,
+                            bundle,
+                            operation,
+                            account: _,
                         }),
                         None,
                     ) if bundle == meerkat_toolkit::setup::SETUP_ACCOUNTS_BUNDLE
@@ -1206,22 +1355,29 @@ impl OperationPolicyOwner for InstalledApplicationPolicy {
                     {
                         // Same canonical helper source, separate native operation.
                         // Neither the request name nor human review grants access.
-                        let Some(helper) = self.originals.helper_policy_source(association)
-                            .map_err(|_| OperationAuthorizationError::Unavailable)? else {
+                        let Some(helper) = self
+                            .originals
+                            .helper_policy_source(association)
+                            .map_err(|_| OperationAuthorizationError::Unavailable)?
+                        else {
                             return Err(OperationRefused::new(OperationRefusalKind::Denied).into());
                         };
-                        let _session = meerkat_core::SessionId::parse(claims.target.context.as_str())
-                            .map_err(|_| OperationAuthorizationError::Unavailable)?;
+                        let _session =
+                            meerkat_core::SessionId::parse(claims.target.context.as_str())
+                                .map_err(|_| OperationAuthorizationError::Unavailable)?;
                         application_operations::setup_account_request_for_origin(
                             &self.native.grant_administrator,
                             &claims.logical_executor,
                             &claims.target.audience,
                             &helper.origin,
-                        ).map_err(|_| OperationAuthorizationError::Unavailable)?
+                        )
+                        .map_err(|_| OperationAuthorizationError::Unavailable)?
                     }
                     (
                         Some(meerkat_core::ToolOperationTarget::RegisteredToolBundleOperation {
-                            bundle, operation, account: _,
+                            bundle,
+                            operation,
+                            account: _,
                         }),
                         None,
                     ) if bundle == meerkat_toolkit::setup::SETUP_ACCOUNTS_BUNDLE
@@ -1229,47 +1385,73 @@ impl OperationPolicyOwner for InstalledApplicationPolicy {
                     {
                         // Same canonical helper source, separate native operation.
                         // Neither the request name nor human review grants access.
-                        let Some(helper) = self.originals.helper_policy_source(association)
-                            .map_err(|_| OperationAuthorizationError::Unavailable)? else {
+                        let Some(helper) = self
+                            .originals
+                            .helper_policy_source(association)
+                            .map_err(|_| OperationAuthorizationError::Unavailable)?
+                        else {
                             return Err(OperationRefused::new(OperationRefusalKind::Denied).into());
                         };
-                        let _session = meerkat_core::SessionId::parse(claims.target.context.as_str())
-                            .map_err(|_| OperationAuthorizationError::Unavailable)?;
+                        let _session =
+                            meerkat_core::SessionId::parse(claims.target.context.as_str())
+                                .map_err(|_| OperationAuthorizationError::Unavailable)?;
                         application_operations::setup_public_service_request_for_origin(
                             &self.native.grant_administrator,
                             &claims.logical_executor,
                             &claims.target.audience,
                             &helper.origin,
-                        ).map_err(|_| OperationAuthorizationError::Unavailable)?
+                        )
+                        .map_err(|_| OperationAuthorizationError::Unavailable)?
                     }
                     (
                         Some(meerkat_core::ToolOperationTarget::McpServerOperation {
-                            server, raw_operation, connector, ..
+                            server,
+                            raw_operation,
+                            connector,
+                            ..
                         }),
                         None,
                     ) => {
-                        if !matches!(connector, meerkat_core::mcp_config::McpConnectorApproval::NoConnector) {
+                        if !matches!(
+                            connector,
+                            meerkat_core::mcp_config::McpConnectorApproval::NoConnector
+                        ) {
                             // This exact source selected the retained access decision.
                             // A current server name or physical generation cannot
                             // invent its Toolkit connection/Revision correspondence.
-                            self.originals.check_service_mcp_operation(
-                                association, server, raw_operation, connector, now_ms,
-                            ).map_err(|error| match error {
-                                crate::private_originals::PrivateOriginalError::Denied
-                                | crate::private_originals::PrivateOriginalError::Conflict =>
-                                    OperationAuthorizationError::from(OperationRefused::new(OperationRefusalKind::Denied)),
-                                _ => OperationAuthorizationError::Unavailable,
-                            })?;
+                            self.originals
+                                .check_service_mcp_operation(
+                                    association,
+                                    server,
+                                    raw_operation,
+                                    connector,
+                                    now_ms,
+                                )
+                                .map_err(|error| match error {
+                                    crate::private_originals::PrivateOriginalError::Denied
+                                    | crate::private_originals::PrivateOriginalError::Conflict => {
+                                        OperationAuthorizationError::from(OperationRefused::new(
+                                            OperationRefusalKind::Denied,
+                                        ))
+                                    }
+                                    _ => OperationAuthorizationError::Unavailable,
+                                })?;
                         }
                         connector_value = Some(application_operations::mcp_connector_operation(
-                            &self.native.grant_administrator, &claims.logical_executor,
-                            &claims.target.audience, server, connector,
+                            &self.native.grant_administrator,
+                            &claims.logical_executor,
+                            &claims.target.audience,
+                            server,
+                            connector,
                         ));
                         application_operations::mcp_operation(
-                            &self.native.grant_administrator, &claims.logical_executor,
-                            &claims.target.audience, server, raw_operation,
+                            &self.native.grant_administrator,
+                            &claims.logical_executor,
+                            &claims.target.audience,
+                            server,
+                            raw_operation,
                         )
-                    },
+                    }
                     // Missing, multiple and future operation kinds do not
                     // inherit catalog exposure or downstream invocation access.
                     _ => return Err(OperationAuthorizationError::Unavailable),
@@ -1287,12 +1469,17 @@ impl OperationPolicyOwner for InstalledApplicationPolicy {
     }
 }
 
-fn mcp_control_error(error: crate::private_originals::PrivateOriginalError) -> OperationAuthorizationError {
+fn mcp_control_error(
+    error: crate::private_originals::PrivateOriginalError,
+) -> OperationAuthorizationError {
     match error {
         crate::private_originals::PrivateOriginalError::Denied
-        | crate::private_originals::PrivateOriginalError::Conflict =>
-            OperationRefused::new(OperationRefusalKind::Denied).into(),
-        crate::private_originals::PrivateOriginalError::Unavailable => OperationAuthorizationError::Unavailable,
+        | crate::private_originals::PrivateOriginalError::Conflict => {
+            OperationRefused::new(OperationRefusalKind::Denied).into()
+        }
+        crate::private_originals::PrivateOriginalError::Unavailable => {
+            OperationAuthorizationError::Unavailable
+        }
     }
 }
 
@@ -1303,12 +1490,12 @@ mod tests {
 
     use super::*;
     use meerkat_authorization_contracts::{constraints::AudienceRef, evidence::EvidenceId};
-    use meerkat_mobkit::member_tool_policy::providers_from_canonical_payloads;
     use meerkat_core::{
-        CompiledApplicationToolPolicy, CompiledMemberToolGrants, CompiledPolicySourceProvenance, PolicyDigest, PolicyId,
-        PolicyProviderId, PolicyRevision,
+        CompiledApplicationToolPolicy, CompiledMemberToolGrants, CompiledPolicySourceProvenance,
+        PolicyDigest, PolicyId, PolicyProviderId, PolicyRevision,
         auth::{PrincipalKind, PrincipalRef, TrustDomainId},
     };
+    use meerkat_mobkit::member_tool_policy::providers_from_canonical_payloads;
     use meerkat_toolkit::host_lifetime::{
         control::SelectedHostArtifact, policy::CompiledLocalPolicy,
     };
@@ -1881,11 +2068,7 @@ mod tests {
         // itself retains the private source adapter. Exercise the real cycle.
         let machine = Arc::new(
             meerkat_runtime::MeerkatMachine::ephemeral()
-                .with_local_grant_authorization(
-                    installed
-                        .originals
-                        .configuration(policy),
-                )
+                .with_local_grant_authorization(installed.originals.configuration(policy))
                 .unwrap(),
         );
         installed.originals.bind_machine(machine.clone()).unwrap();

@@ -9,9 +9,8 @@ use crate::{
 use async_trait::async_trait;
 use meerkat_workgraph::{
     CreateWorkItemRequest, ExternalWorkRef, MemoryWorkGraphStore, SqliteWorkGraphStore,
-    UpdateWorkItemRequest, WorkGraphError, WorkGraphEventFilter,
-    WorkGraphEventKind, WorkGraphService, WorkGraphStore, WorkItemFilter, WorkNamespace,
-    WorkPriority,
+    UpdateWorkItemRequest, WorkGraphError, WorkGraphEventFilter, WorkGraphEventKind,
+    WorkGraphService, WorkGraphStore, WorkItemFilter, WorkNamespace, WorkPriority,
 };
 use std::{
     collections::BTreeSet,
@@ -41,7 +40,8 @@ fn correlation() -> SetupWorkCorrelation {
             revision: Revision::new("revision-1").unwrap(),
             content_digest: ContentDigest::of_bytes(b"original user request and supplied context"),
         },
-        continuation: TaskContinuation { native_original: None,
+        continuation: TaskContinuation {
+            native_original: None,
             owner: id("original-task-owner"),
             task: id("original-task"),
             revision: Revision::new("original-task-revision").unwrap(),
@@ -848,7 +848,6 @@ async fn prepared_workgraph_fence_rechecks_revocation_after_async_preparation() 
     );
 }
 
-
 /// Pause after preliminary screening. Another task changes the independent
 /// observer's actual fixture authority before the private read/disclosure.
 struct PausedScreening {
@@ -875,7 +874,8 @@ impl SetupWorkObservationAuthorizer for PausedScreening {
         disclose: Box<dyn FnOnce() + Send + '_>,
     ) -> Result<(), SetupWorkAdmissionError> {
         self.disclosures.fetch_add(1, Ordering::SeqCst);
-        self.exact.with_current_disclosure(request, admission, disclose)
+        self.exact
+            .with_current_disclosure(request, admission, disclose)
     }
 }
 
@@ -888,13 +888,9 @@ async fn revoked_observation_withholds_identity_absence_conflict_and_store_error
         let work = service(store);
         let original = admission();
         if case != "absence" {
-            admit_setup_work_protocol_fixture(
-                &work,
-                &original,
-                &TestHost::approves(&original),
-            )
-            .await
-            .unwrap();
+            admit_setup_work_protocol_fixture(&work, &original, &TestHost::approves(&original))
+                .await
+                .unwrap();
         }
         let request = if case == "conflict" {
             SetupWorkAdmission::from_host_protocol_fixture(
@@ -910,7 +906,9 @@ async fn revoked_observation_withholds_identity_absence_conflict_and_store_error
             original
         };
         let observer = PausedScreening {
-            exact: ObservationHost { exact: TestHost::approves(&request) },
+            exact: ObservationHost {
+                exact: TestHost::approves(&request),
+            },
             entered: tokio::sync::Notify::new(),
             resume: tokio::sync::Notify::new(),
             disclosures: AtomicUsize::new(0),
@@ -926,7 +924,10 @@ async fn revoked_observation_withholds_identity_absence_conflict_and_store_error
             observer.resume.notify_one();
         };
         let (result, ()) = tokio::join!(observe_setup_work(&work, &request, &observer), revoke);
-        assert!(matches!(result, Err(SetupWorkAdmissionError::Denied)), "{case}");
+        assert!(
+            matches!(result, Err(SetupWorkAdmissionError::Denied)),
+            "{case}"
+        );
         assert_eq!(observer.disclosures.load(Ordering::SeqCst), 1, "{case}");
     }
 }
@@ -960,7 +961,6 @@ async fn observation_owner_cannot_skip_the_guarded_disclosure_callback() {
         Err(SetupWorkAdmissionError::OwnerTaskFailed)
     ));
 }
-
 
 mod held_sqlite_observation {
     use super::*;

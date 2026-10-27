@@ -3,7 +3,9 @@ use super::*;
 use serde_json::Value;
 
 fn readback_unavailable() -> ConnectError {
-    ConnectError::InvalidInput("The selected service readback is unconfirmed; its private artifacts are retained.".into())
+    ConnectError::InvalidInput(
+        "The selected service readback is unconfirmed; its private artifacts are retained.".into(),
+    )
 }
 
 // Fixed labels and elapsed time only. No request, path, native identity or
@@ -21,7 +23,9 @@ pub(super) fn readback_diagnostic(stage: &'static str, outcome: &'static str) {
     let _ = writeln!(std::io::stderr().lock(), "{diagnostic}");
 }
 
-pub(super) async fn locate_readback_resources(stage: &'static str) -> Result<InstalledResources, ConnectError> {
+pub(super) async fn locate_readback_resources(
+    stage: &'static str,
+) -> Result<InstalledResources, ConnectError> {
     observe_readback_resources(stage, InstalledResources::locate).await
 }
 
@@ -33,8 +37,10 @@ async fn observe_readback_resources<T: Send + 'static>(
     // Resource verification inventories and hashes the full installed closure.
     // The existing recovery owner joins this future; do not select away an
     // entered observation or move its post-readback currentness checks earlier.
-    let result = tokio::task::spawn_blocking(observe).await
-        .map_err(|_| readback_unavailable()).and_then(|result| result);
+    let result = tokio::task::spawn_blocking(observe)
+        .await
+        .map_err(|_| readback_unavailable())
+        .and_then(|result| result);
     readback_diagnostic(stage, if result.is_ok() { "ok" } else { "error" });
     result
 }
@@ -42,33 +48,63 @@ async fn observe_readback_resources<T: Send + 'static>(
 impl InstalledResources {
     /// One bounded package-owned verifier call within existing joined recovery.
     /// No helper/runtime is started and no installation or auth is replayed.
-    pub(crate) async fn readback(self, storage: &meerkat_core::ResolvedStorage, request: &Value)
-        -> Result<Value, ConnectError>
-    {
+    pub(crate) async fn readback(
+        self,
+        storage: &meerkat_core::ResolvedStorage,
+        request: &Value,
+    ) -> Result<Value, ConnectError> {
+        use nix::{
+            sys::signal::{Signal, kill},
+            unistd::Pid,
+        };
         use std::{io::Write, os::unix::fs::OpenOptionsExt};
-        use nix::{sys::signal::{kill, Signal}, unistd::Pid};
         readback_diagnostic("process_prepare", "entered");
-        let directory = reserve_setup_artifacts(storage)?.canonicalize().map_err(|_| readback_unavailable())?;
+        let directory = reserve_setup_artifacts(storage)?
+            .canonicalize()
+            .map_err(|_| readback_unavailable())?;
         let request_path = directory.join("readback-request.json");
         let raw = serde_json::to_vec(request).map_err(|_| readback_unavailable())?;
-        if raw.len() > 1024 * 1024 { return Err(readback_unavailable()); }
-        let mut file = fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
-            .open(&request_path).map_err(|_| readback_unavailable())?;
+        if raw.len() > 1024 * 1024 {
+            return Err(readback_unavailable());
+        }
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&request_path)
+            .map_err(|_| readback_unavailable())?;
         file.write_all(&raw).map_err(|_| readback_unavailable())?;
         file.sync_all().map_err(|_| readback_unavailable())?;
         drop(file);
         let stdout_path = directory.join("readback.stdout");
-        let stdout = fs::OpenOptions::new().create_new(true).write(true).mode(0o600)
-            .open(&stdout_path).map_err(|_| readback_unavailable())?;
-        let stderr = fs::OpenOptions::new().create_new(true).write(true).mode(0o600)
-            .open(directory.join("readback.stderr")).map_err(|_| readback_unavailable())?;
+        let stdout = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&stdout_path)
+            .map_err(|_| readback_unavailable())?;
+        let stderr = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(directory.join("readback.stderr"))
+            .map_err(|_| readback_unavailable())?;
         let mut child = tokio::process::Command::new(&self.python)
-            .args(["-I", "-B"]).arg(&self.prepare)
-            .arg("--destination").arg(directory.join("readback"))
-            .arg("--installation-readback").arg(&request_path)
-            .current_dir(&self.root).env_clear().env("PATH", "/usr/bin:/bin")
-            .stdin(Stdio::null()).stdout(Stdio::from(stdout)).stderr(Stdio::from(stderr))
-            .kill_on_drop(true).spawn().map_err(|_| readback_unavailable())?;
+            .args(["-I", "-B"])
+            .arg(&self.prepare)
+            .arg("--destination")
+            .arg(directory.join("readback"))
+            .arg("--installation-readback")
+            .arg(&request_path)
+            .current_dir(&self.root)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr))
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|_| readback_unavailable())?;
         readback_diagnostic("process_prepare", "ok");
         readback_diagnostic("child_wait", "entered");
         let status = tokio::select! {
@@ -88,23 +124,44 @@ impl InstalledResources {
                 return Err(readback_unavailable());
             }
         };
-        readback_diagnostic("child_wait", if status.success() { "ok" } else { "exit_unsuccessful" });
-        if !status.success() || fs::read(&request_path).map_err(|_| readback_unavailable())? != raw {
+        readback_diagnostic(
+            "child_wait",
+            if status.success() {
+                "ok"
+            } else {
+                "exit_unsuccessful"
+            },
+        );
+        if !status.success() || fs::read(&request_path).map_err(|_| readback_unavailable())? != raw
+        {
             return Err(readback_unavailable());
         }
         // Native verification uses the binary's original manifest pin again.
         let current = locate_readback_resources("resources_after").await?;
-        if current.root != self.root || current.prepare != self.prepare || current.python != self.python {
+        if current.root != self.root
+            || current.prepare != self.prepare
+            || current.python != self.python
+        {
             return Err(readback_unavailable());
         }
         let metadata = fs::symlink_metadata(&stdout_path).map_err(|_| readback_unavailable())?;
-        if !metadata.is_file() || metadata.len() > 1024 * 1024 { return Err(readback_unavailable()); }
+        if !metadata.is_file() || metadata.len() > 1024 * 1024 {
+            return Err(readback_unavailable());
+        }
         let mut bytes = Vec::new();
-        fs::File::open(stdout_path).map_err(|_| readback_unavailable())?.take(1024 * 1024 + 1)
-            .read_to_end(&mut bytes).map_err(|_| readback_unavailable())?;
-        if bytes.len() > 1024 * 1024 { return Err(readback_unavailable()); }
+        fs::File::open(stdout_path)
+            .map_err(|_| readback_unavailable())?
+            .take(1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| readback_unavailable())?;
+        if bytes.len() > 1024 * 1024 {
+            return Err(readback_unavailable());
+        }
         let value = serde_json::from_slice(&bytes).map_err(|_| readback_unavailable());
-        readback_diagnostic("retained_output", if value.is_ok() { "ok" } else { "error" });
+        readback_diagnostic(
+            "retained_output",
+            if value.is_ok() { "ok" } else { "error" },
+        );
         value
     }
 }
@@ -112,7 +169,11 @@ impl InstalledResources {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, atomic::{AtomicBool, Ordering}, mpsc};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    };
     use std::time::Duration;
 
     #[tokio::test(flavor = "current_thread")]
@@ -125,7 +186,11 @@ mod tests {
             let _ = entered.send(());
             let released = held.recv_timeout(Duration::from_secs(5)).is_ok();
             worker_finished.store(true, Ordering::SeqCst);
-            if released { Ok(41_u8) } else { Err(ConnectError::ReviewCancelled) }
+            if released {
+                Ok(41_u8)
+            } else {
+                Err(ConnectError::ReviewCancelled)
+            }
         }));
         let entered_result = tokio::time::timeout(Duration::from_secs(2), waiting).await;
         // This timer must run while the synchronous observation is held. An
@@ -146,12 +211,17 @@ mod tests {
     async fn resource_observation_preserves_refusal_and_reports_worker_failure() {
         let refusal = observe_readback_resources("resources_after", || {
             Err::<(), _>(ConnectError::ReviewCancelled)
-        }).await;
+        })
+        .await;
         assert!(matches!(refusal, Err(ConnectError::ReviewCancelled)));
-        let failure = observe_readback_resources("resources_after", || -> Result<(), ConnectError> {
-            panic!("controlled resource observation failure")
-        }).await;
-        assert!(matches!(failure, Err(ConnectError::InvalidInput(ref message))
-            if message == &readback_unavailable().to_string()));
+        let failure =
+            observe_readback_resources("resources_after", || -> Result<(), ConnectError> {
+                panic!("controlled resource observation failure")
+            })
+            .await;
+        assert!(
+            matches!(failure, Err(ConnectError::InvalidInput(ref message))
+            if message == &readback_unavailable().to_string())
+        );
     }
 }

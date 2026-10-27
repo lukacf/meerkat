@@ -210,7 +210,9 @@ enum InitialCancellation {
 }
 
 fn restore(
-    state: &Mutex<State>, key: &McpAttemptKey, mut owner: LocalRoundOwner,
+    state: &Mutex<State>,
+    key: &McpAttemptKey,
+    mut owner: LocalRoundOwner,
     initial_cancel: Option<InitialCancellation>,
 ) -> bool {
     // No external callback executes under this lock. On a poisoned lock keep
@@ -221,8 +223,7 @@ fn restore(
     if !current {
         owner.poisoned = true;
     }
-    if current && !owner.poisoned
-        && matches!(initial_cancel, Some(InitialCancellation::NotSpawned))
+    if current && !owner.poisoned && matches!(initial_cancel, Some(InitialCancellation::NotSpawned))
     {
         // Core never spawned this initial descriptor. Return its unused
         // preparation. A future begin still selects and validates its own
@@ -255,7 +256,8 @@ fn normal_close(process: &McpAttemptProcessEnd) -> bool {
 }
 
 fn initial_cancellation(
-    disposition: &McpAttemptDisposition, key: &McpAttemptKey,
+    disposition: &McpAttemptDisposition,
+    key: &McpAttemptKey,
 ) -> Option<InitialCancellation> {
     if &disposition.key != key
         || !matches!(disposition.open, McpAttemptOpenOutcome::Cancelled { .. })

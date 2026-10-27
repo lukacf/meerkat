@@ -51,8 +51,7 @@ const OAUTH_PROMPT: &str = "Confirm this original setup request reached the sele
 const OAUTH_ANSWER: &str = "The original setup request reached the selected native model target.";
 const SETUP_HELPER_REVIEW: &str =
     "Allow the supplied setup helper to prepare choices in this realm?";
-const SETUP_MODEL_REVIEW: &str =
-    "Allow this setup assistant to use the selected model and tools?";
+const SETUP_MODEL_REVIEW: &str = "Allow this setup assistant to use the selected model and tools?";
 const DEFAULT_REQUEST: &str =
     "Help me set up my Telegram frontend, starting with supplied setup guidance.";
 const SERVICE_REQUEST: &str =
@@ -74,11 +73,13 @@ const STATUS_REQUEST: &str = "Check only that exact request's status. Do not sub
 const STATUS_ANSWER: &str = "PairedHost reports the review request submitted. The lost POST remains uncertain; it was not sent again.";
 const RECIPE_REQUEST: &str = "Show the first supplied integration recipe and its exact service capabilities, then look at the next entry. Investigate only.";
 const RECIPE_ANSWER: &str = "The supplied recipe metadata describes scoped service capabilities. Installation and account readiness remain unverified.";
-const RECIPE_FAILED_REQUEST: &str = "Explain the source requirements for that exact recipe. Investigate only.";
+const RECIPE_FAILED_REQUEST: &str =
+    "Explain the source requirements for that exact recipe. Investigate only.";
 const RECIPE_PROVIDER_FAILURE: &str = "fixture rejected this model request";
 const DOCUMENT_REQUEST: &str = "Read https://127.0.0.1:9/guide?lang=en#install as source evidence, if it is a public document.";
 const DOCUMENT_URL: &str = "https://127.0.0.1:9/guide?lang=en#install";
-const DOCUMENT_ANSWER: &str = "The reader refused the private destination. No source document was fetched.";
+const DOCUMENT_ANSWER: &str =
+    "The reader refused the private destination. No source document was fetched.";
 const RECIPE_FOLLOWUP: &str =
     "Keep this same conversation and remind me what was actually verified.";
 const RECIPE_FOLLOWUP_ANSWER: &str =
@@ -366,7 +367,11 @@ fn role_model_response(request: &Request, phase: usize) -> String {
                 tool_result(&request.body, "role-host"),
                 json!({"state":"selected","changed":true})
             );
-            Some(("role-inventory", "paired_host_frontend_inventory", json!({})))
+            Some((
+                "role-inventory",
+                "paired_host_frontend_inventory",
+                json!({}),
+            ))
         }
         2 => {
             assert_eq!(tool_result(&request.body, "role-inventory"), inventory());
@@ -626,11 +631,18 @@ fn document_refusal_response(request: &Request, phase: usize) -> String {
     assert_eq!(request.headers["authorization"], format!("Bearer {TOKEN}"));
     assert_eq!(request.body["model"], "cli-fixture-remote");
     assert!(request.body.to_string().contains(DOCUMENT_REQUEST));
-    assert!(request.body["tools"].as_array().unwrap().iter()
-        .any(|tool| tool["function"]["name"] == "read_public_document"));
+    assert!(
+        request.body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["function"]["name"] == "read_public_document")
+    );
     let event = match phase {
-        4 => json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"private-document","type":"function",
-            "function":{"name":"read_public_document","arguments":json!({"url":DOCUMENT_URL}).to_string()}}]},"finish_reason":"tool_calls"}]}),
+        4 => {
+            json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"private-document","type":"function",
+            "function":{"name":"read_public_document","arguments":json!({"url":DOCUMENT_URL}).to_string()}}]},"finish_reason":"tool_calls"}]})
+        }
         5 => {
             let result = tool_result(&request.body, "private-document");
             assert_eq!(result["error"], "destination_refused");
@@ -672,7 +684,11 @@ fn deferred_model_response(request: &Request, phase: usize, mode: DeferredMode) 
     if prebound && phase == 0 {
         assert!(names.contains(&"paired_host_frontend_inventory"));
         assert!(!names.contains(&"setup_catalog"));
-        return deferred_call_response("early-inventory", "paired_host_frontend_inventory", json!({}));
+        return deferred_call_response(
+            "early-inventory",
+            "paired_host_frontend_inventory",
+            json!({}),
+        );
     }
     if prebound {
         assert_eq!(tool_result(&request.body, "early-inventory"), inventory());
@@ -1146,15 +1162,19 @@ fn secret_model_response(request: &Request, phase: usize) -> String {
         6 => {
             assert!(serialized.contains(REVIEW_REQUEST));
             Some((
-                "review-again", "paired_host_frontend_status",
+                "review-again",
+                "paired_host_frontend_status",
                 json!({"change_digest":secret_prepared()["change"]["change_digest"],"show_review":true}),
             ))
         }
         7 => {
-            assert_eq!(tool_result(&request.body, "review-again"), json!({
-                "state":"prepared", "change":secret_prepared()["change"],
-                "base_current":false, "review_presentation":"queued",
-            }));
+            assert_eq!(
+                tool_result(&request.body, "review-again"),
+                json!({
+                    "state":"prepared", "change":secret_prepared()["change"],
+                    "base_current":false, "review_presentation":"queued",
+                })
+            );
             None
         }
         _ => panic!("unexpected secret provider request/retry"),
@@ -1266,16 +1286,27 @@ fn recovery_model_response(request: &Request, phase: usize) -> String {
                 "access_denied"
             );
             Some((
-                "uncertain-review", "paired_host_frontend_status",
+                "uncertain-review",
+                "paired_host_frontend_status",
                 json!({"change_digest":change["change_digest"],"show_review":true}),
             ))
         }
         10 => {
-            assert_eq!(tool_result(&request.body, "uncertain-review")["error"], "access_denied");
-            Some(("uncertain-document", "read_public_document", json!({"url":DOCUMENT_URL})))
+            assert_eq!(
+                tool_result(&request.body, "uncertain-review")["error"],
+                "access_denied"
+            );
+            Some((
+                "uncertain-document",
+                "read_public_document",
+                json!({"url":DOCUMENT_URL}),
+            ))
         }
         11 => {
-            assert_eq!(tool_result(&request.body, "uncertain-document")["error"], "access_denied");
+            assert_eq!(
+                tool_result(&request.body, "uncertain-document")["error"],
+                "access_denied"
+            );
             None
         }
         _ => panic!("unexpected provider request or native replay"),
@@ -1335,7 +1366,17 @@ impl Server {
         secret_entry: bool,
         deferred: Option<DeferredMode>,
     ) -> Self {
-        Self::start_case(provider, secret_entry, deferred, false, false, false, false, false).await
+        Self::start_case(
+            provider,
+            secret_entry,
+            deferred,
+            false,
+            false,
+            false,
+            false,
+            false,
+        )
+        .await
     }
 
     async fn start_recovery(provider: bool) -> Self {
@@ -1404,8 +1445,11 @@ impl Server {
                     assert!(messages.iter().any(|message| {
                         message["role"] == "assistant" && message["content"] == RECIPE_ANSWER
                     }));
-                    let latest_input = messages.iter().rev()
-                        .find(|message| message["role"] == "user").unwrap();
+                    let latest_input = messages
+                        .iter()
+                        .rev()
+                        .find(|message| message["role"] == "user")
+                        .unwrap();
                     assert_eq!(latest_input["content"], RECIPE_FAILED_REQUEST);
                     (
                         400,
@@ -1425,7 +1469,8 @@ impl Server {
                             // never another recipe or follow-up phase.
                             recipe_model_response(
                                 &received,
-                                phase - usize::from(recipe_failure && phase > 4)
+                                phase
+                                    - usize::from(recipe_failure && phase > 4)
                                     - 2 * usize::from(document_refusal && phase > 5),
                             )
                         } else if roles {
@@ -1446,7 +1491,11 @@ impl Server {
                     )
                 } else {
                     assert!(!received.headers.contains_key("authorization"));
-                    let change = if roles { role_prepared()["change"].clone() } else { prepared()["change"].clone() };
+                    let change = if roles {
+                        role_prepared()["change"].clone()
+                    } else {
+                        prepared()["change"].clone()
+                    };
                     let (status, headers, value) = match (
                         received.method.as_str(),
                         received.path.as_str(),
@@ -1484,15 +1533,38 @@ impl Server {
                                 inventory()
                             },
                         ),
-                        ("GET", path) if roles && path.starts_with("/console/extensions/frontend/sources/inspect?") => {
-                            let url = reqwest::Url::parse(&format!("http://fixture.invalid{path}")).unwrap();
-                            let query: Vec<_> = url.query_pairs().map(|(key,value)| (key.into_owned(),value.into_owned())).collect();
-                            assert_eq!(query, vec![("repo".into(),ROLE_REPO.into()),("tag".into(),"v0.1.0".into()),("package_path".into(),"extension".into())]);
+                        ("GET", path)
+                            if roles
+                                && path.starts_with(
+                                    "/console/extensions/frontend/sources/inspect?",
+                                ) =>
+                        {
+                            let url = reqwest::Url::parse(&format!("http://fixture.invalid{path}"))
+                                .unwrap();
+                            let query: Vec<_> = url
+                                .query_pairs()
+                                .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                                .collect();
+                            assert_eq!(
+                                query,
+                                vec![
+                                    ("repo".into(), ROLE_REPO.into()),
+                                    ("tag".into(), "v0.1.0".into()),
+                                    ("package_path".into(), "extension".into())
+                                ]
+                            );
                             assert!(received.body.is_null());
                             (200, String::new(), role_inspection())
                         }
                         ("POST", "/console/extensions/frontend/prepare") => {
-                            assert_eq!(received.body, if roles { json!({"new_extension":combined_role_proposal(&role_inspection())}) } else { candidate() });
+                            assert_eq!(
+                                received.body,
+                                if roles {
+                                    json!({"new_extension":combined_role_proposal(&role_inspection())})
+                                } else {
+                                    candidate()
+                                }
+                            );
                             (
                                 200,
                                 String::new(),
@@ -1539,26 +1611,32 @@ impl Server {
                                 received.body,
                                 json!({"change_digest":change["change_digest"],"change":change})
                             );
-                            (
-                                if recovery { 0 } else { 201 },
-                                String::new(),
-                                {
-                                    let mut receipt = json!({"request_id":change["change_digest"],"state":"submitted",
+                            (if recovery { 0 } else { 201 }, String::new(), {
+                                let mut receipt = json!({"request_id":change["change_digest"],"state":"submitted",
                                         "submitted_at":"2026-10-07T00:00:00+00:00","submitted_by":"paired-device","change":change});
-                                    if roles { receipt["attempt"] = json!(2); }
-                                    receipt
-                                },
-                            )
+                                if roles {
+                                    receipt["attempt"] = json!(2);
+                                }
+                                receipt
+                            })
                         }
                         ("GET", path)
-                            if secret_entry && path == format!(
-                                "/console/extensions/frontend/change-requests/{}",
-                                secret_prepared()["change"]["change_digest"].as_str().unwrap()
-                            ) =>
+                            if secret_entry
+                                && path
+                                    == format!(
+                                        "/console/extensions/frontend/change-requests/{}",
+                                        secret_prepared()["change"]["change_digest"]
+                                            .as_str()
+                                            .unwrap()
+                                    ) =>
                         {
                             assert!(received.body.is_null());
-                            (200, String::new(), json!({"state":"prepared",
-                                "change":secret_prepared()["change"], "base_current":false}))
+                            (
+                                200,
+                                String::new(),
+                                json!({"state":"prepared",
+                                "change":secret_prepared()["change"], "base_current":false}),
+                            )
                         }
                         ("GET", path)
                             if path
@@ -1570,7 +1648,9 @@ impl Server {
                             (
                                 200,
                                 String::new(),
-                                if roles { role_built() } else {
+                                if roles {
+                                    role_built()
+                                } else {
                                     json!({"request_id":change["change_digest"],"state":"submitted","submitted_at":"2026-10-07T00:00:00+00:00"})
                                 },
                             )
@@ -2091,10 +2171,15 @@ impl Cli {
         device: Option<&DeviceFixture>,
     ) -> Self {
         let synthetic_prefix = fixture.is_none().then(|| {
-            PathBuf::from(std::env::var_os("CONNECT_LAZY_SERVICES_FIXTURE_PREFIX")
-                .expect("PTY CLI tests require the assembled pin-built synthetic resource prefix"))
+            PathBuf::from(
+                std::env::var_os("CONNECT_LAZY_SERVICES_FIXTURE_PREFIX").expect(
+                    "PTY CLI tests require the assembled pin-built synthetic resource prefix",
+                ),
+            )
         });
-        let fixture = fixture.or(synthetic_prefix.as_deref()).expect("selected resource prefix");
+        let fixture = fixture
+            .or(synthetic_prefix.as_deref())
+            .expect("selected resource prefix");
         let prefix = if supplied {
             fixture.to_owned()
         } else {
@@ -2116,12 +2201,17 @@ impl Cli {
         // A supplied production artifact may be built without test-support.
         // Its delivery owner supplies the exact receipt hash, as for stock rkat.
         // All ordinary fixtures keep the Cargo-built executable as their pin.
-        let expected_cli_sha256 = supplied.then(|| std::env::var_os("CONNECT_SUPPLIED_CLI_SHA256"))
-            .flatten().map(|value| value.into_string().expect("CLI SHA-256 must be UTF-8"))
+        let expected_cli_sha256 = supplied
+            .then(|| std::env::var_os("CONNECT_SUPPLIED_CLI_SHA256"))
+            .flatten()
+            .map(|value| value.into_string().expect("CLI SHA-256 must be UTF-8"))
             .unwrap_or_else(|| file_digest(Path::new(env!("CARGO_BIN_EXE_meerkat-connect"))));
         assert_eq!(expected_cli_sha256.len(), 64);
-        assert!(expected_cli_sha256.bytes().all(|byte|
-            byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+        assert!(
+            expected_cli_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
         assert_eq!(
             file_digest(source),
             expected_cli_sha256,
@@ -2160,7 +2250,10 @@ impl Cli {
                     &mut budget,
                 );
             }
-            assert_eq!(fs::read(prefix.join("libexec/meerkat-connect/resources.json")).unwrap(), manifest);
+            assert_eq!(
+                fs::read(prefix.join("libexec/meerkat-connect/resources.json")).unwrap(),
+                manifest
+            );
         }
         // Public native config, not an injected LlmClient, RKAT_TEST_CLIENT,
         // provider override environment variable, or product test switch.
@@ -2266,11 +2359,21 @@ default_model = "cli-fixture"
             // A second ordinary process reuses the first process's saved setup
             // descriptor. Never erase it as test setup before the old/new review.
             let retained = fs::read(&config_path).unwrap();
-            let mut actual = meerkat_core::Config::from_persisted_toml(
-                std::str::from_utf8(&retained).unwrap()).unwrap().0;
-            actual.tools.mcp_servers.retain(|server| server.name != "toolkit-setup");
-            let expected = meerkat_core::Config::from_persisted_toml(&config).unwrap().0;
-            assert_eq!(serde_json::to_value(actual).unwrap(), serde_json::to_value(expected).unwrap());
+            let mut actual =
+                meerkat_core::Config::from_persisted_toml(std::str::from_utf8(&retained).unwrap())
+                    .unwrap()
+                    .0;
+            actual
+                .tools
+                .mcp_servers
+                .retain(|server| server.name != "toolkit-setup");
+            let expected = meerkat_core::Config::from_persisted_toml(&config)
+                .unwrap()
+                .0;
+            assert_eq!(
+                serde_json::to_value(actual).unwrap(),
+                serde_json::to_value(expected).unwrap()
+            );
         } else {
             fs::write(&config_path, config).unwrap();
         }
@@ -2434,8 +2537,11 @@ default_model = "cli-fixture"
     async fn approve_setup_helper(&mut self) {
         assert!(self.setup_approvals.is_empty());
         self.shown(SETUP_HELPER_REVIEW, 0).await;
-        assert_eq!(fs::read(self.state.join(REALM).join("config.toml")).unwrap(), self.initial_config,
-            "the native config mutation must wait for this exact review");
+        assert_eq!(
+            fs::read(self.state.join(REALM).join("config.toml")).unwrap(),
+            self.initial_config,
+            "the native config mutation must wait for this exact review"
+        );
         self.approve_startup_review(SETUP_HELPER_REVIEW).await;
     }
 
@@ -2451,8 +2557,14 @@ default_model = "cli-fixture"
         self.shown(summary, 0).await;
         let start = self.transcript.rfind(summary).unwrap();
         self.shown("Type 'approve ", start).await;
-        let id = self.transcript[start..].split("Type 'approve ").nth(1).unwrap()
-            .split('\'').next().unwrap().to_owned();
+        let id = self.transcript[start..]
+            .split("Type 'approve ")
+            .nth(1)
+            .unwrap()
+            .split('\'')
+            .next()
+            .unwrap()
+            .to_owned();
         assert!(!id.is_empty() && !self.setup_approvals.contains(&id));
         assert!(!self.transcript.contains("Setup session: "));
         self.send(&format!("approve {id}\n"));
@@ -2461,16 +2573,25 @@ default_model = "cli-fixture"
 
     async fn deny_startup_review(&mut self, summary: &'static str) {
         assert!(self.denied_setup_review.is_none());
-        assert_eq!(self.setup_approvals.len(), match summary {
-            SETUP_HELPER_REVIEW => 0,
-            SETUP_MODEL_REVIEW => 1,
-            _ => panic!("only the two exact startup reviews belong to this fixture"),
-        });
+        assert_eq!(
+            self.setup_approvals.len(),
+            match summary {
+                SETUP_HELPER_REVIEW => 0,
+                SETUP_MODEL_REVIEW => 1,
+                _ => panic!("only the two exact startup reviews belong to this fixture"),
+            }
+        );
         self.shown(summary, 0).await;
         let start = self.transcript.rfind(summary).unwrap();
         self.shown("Type 'approve ", start).await;
-        let id = self.transcript[start..].split("Type 'approve ").nth(1).unwrap()
-            .split('\'').next().unwrap().to_owned();
+        let id = self.transcript[start..]
+            .split("Type 'approve ")
+            .nth(1)
+            .unwrap()
+            .split('\'')
+            .next()
+            .unwrap()
+            .to_owned();
         assert!(!id.is_empty() && !self.setup_approvals.contains(&id));
         assert!(!self.transcript.contains("Setup session: "));
         self.send(&format!("deny {id}\n"));
@@ -2482,68 +2603,145 @@ default_model = "cli-fixture"
     }
 
     fn assert_reviewed_setup_with_installations(
-        &self, before: &[u8], installed: &[meerkat_core::McpServerConfig],
+        &self,
+        before: &[u8],
+        installed: &[meerkat_core::McpServerConfig],
     ) {
         assert_eq!(before, self.initial_config);
-        let mut expected = meerkat_core::Config::from_persisted_toml(
-            std::str::from_utf8(before).unwrap()).unwrap().0;
+        let mut expected =
+            meerkat_core::Config::from_persisted_toml(std::str::from_utf8(before).unwrap())
+                .unwrap()
+                .0;
         let current = fs::read(self.state.join(REALM).join("config.toml")).unwrap();
-        let actual = meerkat_core::Config::from_persisted_toml(
-            std::str::from_utf8(&current).unwrap()).unwrap().0;
-        let new: Vec<_> = preparation_artifacts(&self.state).into_iter()
-            .filter(|path| !self.previous_preparations.contains(path)).collect();
-        assert_eq!(new.len(), 1, "exactly one supplied preparation per CLI process");
+        let actual =
+            meerkat_core::Config::from_persisted_toml(std::str::from_utf8(&current).unwrap())
+                .unwrap()
+                .0;
+        let new: Vec<_> = preparation_artifacts(&self.state)
+            .into_iter()
+            .filter(|path| !self.previous_preparations.contains(path))
+            .collect();
+        assert_eq!(
+            new.len(),
+            1,
+            "exactly one supplied preparation per CLI process"
+        );
         let (_, prepared) = read_bounded_json(&new[0].join("prepare.stdout"), 256 * 1024);
         let stdio: meerkat_core::mcp_config::McpStdioConfig =
             serde_json::from_value(prepared["mcpServers"]["toolkit-setup"].clone()).unwrap();
         let mut server = meerkat_core::McpServerConfig::stdio(
-            "toolkit-setup", stdio.command, stdio.args, stdio.env);
-        let operations = ["setup_state", "setup_jobs", "setup_job", "setup_catalog",
-            "setup_catalog_entry", "setup_catalog_route", "setup_prepare", "setup_retry_prepare",
-            "setup_help", "setup_check", "setup_stop", "setup_reconcile", "setup_recovery_manifest",
-            "setup_guide", "setup_inspect_package", "setup_inspect_schema", "setup_acquire_python", "setup_search_node",
-            "setup_acquire_node", "setup_acquire_node_prebuilt", "setup_inspect_acquired", "setup_recipes", "setup_recipe",
-            "setup_remember_remote", "setup_export_recipe"];
+            "toolkit-setup",
+            stdio.command,
+            stdio.args,
+            stdio.env,
+        );
+        let operations = [
+            "setup_state",
+            "setup_jobs",
+            "setup_job",
+            "setup_catalog",
+            "setup_catalog_entry",
+            "setup_catalog_route",
+            "setup_prepare",
+            "setup_retry_prepare",
+            "setup_help",
+            "setup_check",
+            "setup_stop",
+            "setup_reconcile",
+            "setup_recovery_manifest",
+            "setup_guide",
+            "setup_inspect_package",
+            "setup_inspect_schema",
+            "setup_acquire_python",
+            "setup_search_node",
+            "setup_acquire_node",
+            "setup_acquire_node_prebuilt",
+            "setup_inspect_acquired",
+            "setup_recipes",
+            "setup_recipe",
+            "setup_remember_remote",
+            "setup_export_recipe",
+        ];
         server.access = Some(meerkat_core::McpServerAccess::allowing(operations));
-        let prior: Vec<_> = expected.tools.mcp_servers.iter().enumerate()
-            .filter(|(_, row)| row.name == "toolkit-setup").collect();
+        let prior: Vec<_> = expected
+            .tools
+            .mcp_servers
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.name == "toolkit-setup")
+            .collect();
         assert!(prior.len() <= 1);
         let previous = prior.first().map(|(_, row)| (*row).clone());
         let index = prior.first().map(|(index, _)| *index);
-        let (_, review) = read_bounded_json(&new[0].join("standalone-setup-review.txt"), 256 * 1024);
+        let (_, review) =
+            read_bounded_json(&new[0].join("standalone-setup-review.txt"), 256 * 1024);
         assert_eq!(review["realm"], REALM);
-        assert_eq!(review["previous_setup"], serde_json::to_value(previous).unwrap());
-        assert_eq!(review["supplied_setup"], serde_json::to_value(&server).unwrap());
+        assert_eq!(
+            review["previous_setup"],
+            serde_json::to_value(previous).unwrap()
+        );
+        assert_eq!(
+            review["supplied_setup"],
+            serde_json::to_value(&server).unwrap()
+        );
         let checked = &review["checked_installation"];
         assert_eq!(checked["route"], "meerkat-connect-checked-installs");
         assert_eq!(checked["server"], "toolkit-setup");
-        assert_eq!(checked["operations"], json!([
-            "setup_install", "setup_selected_check", "setup_selected_install",
-        ]), "the initial review must name the exact separately granted route operations");
+        assert_eq!(
+            checked["operations"],
+            json!([
+                "setup_install",
+                "setup_selected_check",
+                "setup_selected_install",
+            ]),
+            "the initial review must name the exact separately granted route operations"
+        );
         let scope = checked["scope"].as_str().unwrap();
         assert!(scope.contains("live checked setup session"));
         assert!(scope.contains("separate human review"));
         assert!(scope.contains("raw MCP access does not include these operations"));
-        assert!(review["lifetime"].as_str().unwrap().contains("Until revoked"));
-        assert!(self.transcript.contains("Checked installation route access was granted and selected"));
+        assert!(
+            review["lifetime"]
+                .as_str()
+                .unwrap()
+                .contains("Until revoked")
+        );
+        assert!(
+            self.transcript
+                .contains("Checked installation route access was granted and selected")
+        );
         match index {
             Some(index) => expected.tools.mcp_servers[index] = server,
             None => expected.tools.mcp_servers.push(server),
         }
         for server in installed {
-            assert!(!expected.tools.mcp_servers.iter().any(|row| row.name == server.name),
-                "an additional reviewed installation must have its own server name");
+            assert!(
+                !expected
+                    .tools
+                    .mcp_servers
+                    .iter()
+                    .any(|row| row.name == server.name),
+                "an additional reviewed installation must have its own server name"
+            );
             expected.tools.mcp_servers.push(server.clone());
         }
-        assert_eq!(serde_json::to_value(actual).unwrap(), serde_json::to_value(expected).unwrap(),
-            "only exact reviewed supplied MCP descriptors may change");
+        assert_eq!(
+            serde_json::to_value(actual).unwrap(),
+            serde_json::to_value(expected).unwrap(),
+            "only exact reviewed supplied MCP descriptors may change"
+        );
         assert!(self.state.join(REALM).join("realm_manifest.json").is_file());
-        assert!(self.transcript.contains("Setup helper access was granted and selected"));
+        assert!(
+            self.transcript
+                .contains("Setup helper access was granted and selected")
+        );
     }
 
     fn reviewed_session(&self) -> meerkat_core::SessionId {
-        let new: Vec<_> = preparation_artifacts(&self.state).into_iter()
-            .filter(|path| !self.previous_preparations.contains(path)).collect();
+        let new: Vec<_> = preparation_artifacts(&self.state)
+            .into_iter()
+            .filter(|path| !self.previous_preparations.contains(path))
+            .collect();
         assert_eq!(new.len(), 1);
         reviewed_setup_session(&new[0], &self.setup_approvals, &self.denied_setup_review)
     }
@@ -2553,7 +2751,8 @@ default_model = "cli-fixture"
     }
 
     async fn finish_with_installations(
-        &mut self, installed: &[meerkat_core::McpServerConfig],
+        &mut self,
+        installed: &[meerkat_core::McpServerConfig],
     ) -> ExitStatus {
         let deadline = Instant::now() + self.observation_bound;
         let status = loop {
@@ -2575,15 +2774,37 @@ default_model = "cli-fixture"
             self.flags
         );
         assert_eq!(self.prefix.join("libexec").exists(), self.packaged);
-        if self.denied_setup_review.as_ref().is_some_and(|(summary, _)| *summary == SETUP_HELPER_REVIEW) {
+        if self
+            .denied_setup_review
+            .as_ref()
+            .is_some_and(|(summary, _)| *summary == SETUP_HELPER_REVIEW)
+        {
             assert!(self.setup_approvals.is_empty());
-            assert_eq!(self.transcript.matches("Preparing the supplied setup helper.").count(), 1);
-            let new: Vec<_> = preparation_artifacts(&self.state).into_iter()
-                .filter(|path| !self.previous_preparations.contains(path)).collect();
-            assert_eq!(new.len(), 1, "the prepared resource and denied decision remain inspectable");
-            assert_eq!(fs::read(self.state.join(REALM).join("config.toml")).unwrap(), self.initial_config);
-            assert_eq!(meerkat_store::read_realm_posture_in(&self.state, REALM).await.unwrap(),
-                meerkat_store::RealmPosture::NotMaterialized);
+            assert_eq!(
+                self.transcript
+                    .matches("Preparing the supplied setup helper.")
+                    .count(),
+                1
+            );
+            let new: Vec<_> = preparation_artifacts(&self.state)
+                .into_iter()
+                .filter(|path| !self.previous_preparations.contains(path))
+                .collect();
+            assert_eq!(
+                new.len(),
+                1,
+                "the prepared resource and denied decision remain inspectable"
+            );
+            assert_eq!(
+                fs::read(self.state.join(REALM).join("config.toml")).unwrap(),
+                self.initial_config
+            );
+            assert_eq!(
+                meerkat_store::read_realm_posture_in(&self.state, REALM)
+                    .await
+                    .unwrap(),
+                meerkat_store::RealmPosture::NotMaterialized
+            );
             assert!(!meerkat_store::grant_owner_store_path(&self.state.join(REALM)).exists());
             assert!(!self.state.join(REALM).join("config_state.json").exists());
             assert!(!new[0].join("standalone-setup-review.txt").exists());
@@ -2593,20 +2814,38 @@ default_model = "cli-fixture"
             assert!(!self.transcript.contains("Setup session: "));
             assert!(!self.transcript.contains("You: "));
         } else if self.setup_approvals.is_empty() {
-            assert!(!self.transcript.contains("Preparing the supplied setup helper."));
-            assert_eq!(preparation_artifacts(&self.state).into_iter().collect::<BTreeSet<_>>(),
-                self.previous_preparations);
+            assert!(
+                !self
+                    .transcript
+                    .contains("Preparing the supplied setup helper.")
+            );
+            assert_eq!(
+                preparation_artifacts(&self.state)
+                    .into_iter()
+                    .collect::<BTreeSet<_>>(),
+                self.previous_preparations
+            );
         } else {
             self.assert_reviewed_setup_with_installations(&self.initial_config, installed);
-            assert_eq!(self.transcript.matches("Preparing the supplied setup helper.").count(), 1);
             assert_eq!(
-                meerkat_store::read_realm_posture_in(&self.state, REALM).await.unwrap(),
+                self.transcript
+                    .matches("Preparing the supplied setup helper.")
+                    .count(),
+                1
+            );
+            assert_eq!(
+                meerkat_store::read_realm_posture_in(&self.state, REALM)
+                    .await
+                    .unwrap(),
                 meerkat_store::RealmPosture::Governed,
                 "the reviewed pre-stage governance remains after CLI exit"
             );
             let selected = self.reviewed_session();
             if let Some(banner) = self.transcript.split("Setup session: ").nth(1) {
-                assert_eq!(banner.split_whitespace().next().unwrap(), selected.to_string());
+                assert_eq!(
+                    banner.split_whitespace().next().unwrap(),
+                    selected.to_string()
+                );
             }
         }
         assert_eq!(
@@ -2699,8 +2938,7 @@ async fn actual_cli_pairs_without_os_store_and_submits_exact_review_after_suppli
     let turn_start = cli.transcript.len();
     cli.send("Read the frontend inventory and prepare, submit and check its review request.\n");
     cli.shown("Type 'approve ", turn_start).await;
-    let approval = cli
-        .transcript[turn_start..]
+    let approval = cli.transcript[turn_start..]
         .split("Type 'approve ")
         .last()
         .unwrap()
@@ -3117,8 +3355,12 @@ async fn actual_cli_secret_intent_approval_hands_entry_only_to_terminal_and_read
 
     let requests = host.requests.lock().unwrap();
     let status_path = format!("{INTENTS}/{INTENT_ID}");
-    let draft_status_path = format!("/console/extensions/frontend/change-requests/{}",
-        secret_prepared()["change"]["change_digest"].as_str().unwrap());
+    let draft_status_path = format!(
+        "/console/extensions/frontend/change-requests/{}",
+        secret_prepared()["change"]["change_digest"]
+            .as_str()
+            .unwrap()
+    );
     assert_eq!(
         requests
             .iter()
@@ -3175,7 +3417,8 @@ async fn actual_cli_secret_intent_approval_hands_entry_only_to_terminal_and_read
                     path.display()
                 );
             }
-            review_request_persisted |= bytes.windows(REVIEW_REQUEST.len())
+            review_request_persisted |= bytes
+                .windows(REVIEW_REQUEST.len())
                 .any(|part| part == REVIEW_REQUEST.as_bytes());
             if path.file_name().and_then(|name| name.to_str()) == Some("native-decisions.json") {
                 approval_records += 1;
@@ -3191,7 +3434,10 @@ async fn actual_cli_secret_intent_approval_hands_entry_only_to_terminal_and_read
         }
     }
     assert_eq!(approval_records, 1);
-    assert!(review_request_persisted, "the explicit redisplay request remains in native history");
+    assert!(
+        review_request_persisted,
+        "the explicit redisplay request remains in native history"
+    );
     assert!(
         native_receipt_observed,
         "the scan must include persisted native intent observations"
@@ -3668,7 +3914,8 @@ async fn startup_cancel_during_refresh(fail_refresh: bool) {
     assert!(!cli.transcript.contains("You: "));
 
     killpg(Pid::from_raw(cli.child.id() as i32), Signal::SIGINT).unwrap();
-    cli.shown("Waiting for native setup startup to settle", 0).await;
+    cli.shown("Waiting for native setup startup to settle", 0)
+        .await;
     assert!(
         cli.child.try_wait().unwrap().is_none(),
         "native refresh remains owned"
@@ -3755,7 +4002,10 @@ async fn startup_cancel_during_refresh(fail_refresh: bool) {
     .await
     .unwrap()
     .unwrap();
-    assert!(sessions.is_empty(), "cancelled preparation must not materialize a session");
+    assert!(
+        sessions.is_empty(),
+        "cancelled preparation must not materialize a session"
+    );
     // Inspect the actual session selected before review, even though its actor
     // never materialized and no post-materialization banner was printed.
     let inputs = timeout(
@@ -3763,8 +4013,14 @@ async fn startup_cancel_during_refresh(fail_refresh: bool) {
         persistence.runtime_store().load_input_states_strict(
             &meerkat_runtime::identifiers::LogicalRuntimeId::for_session(&cli.reviewed_session()),
         ),
-    ).await.unwrap().unwrap();
-    assert!(inputs.is_empty(), "no initial input may be admitted after cancellation");
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        inputs.is_empty(),
+        "no initial input may be admitted after cancellation"
+    );
 }
 
 #[tokio::test]
@@ -4210,13 +4466,16 @@ async fn recipe_discovery_cli(existing_inventory: bool, failed_turn: bool, docum
     provider.finish().await;
     assert_eq!(
         provider.requests.lock().unwrap().len(),
-        if document_refusal { 7 } else if failed_turn { 6 } else { 5 },
+        if document_refusal {
+            7
+        } else if failed_turn {
+            6
+        } else {
+            5
+        },
     );
     assert_eq!(cli.transcript.matches("Setup session: ").count(), 1);
-    for marker in [
-        "PairedHost origin: ",
-        "Enter the six-digit code",
-    ] {
+    for marker in ["PairedHost origin: ", "Enter the six-digit code"] {
         assert!(!cli.transcript.contains(marker));
     }
     assert_eq!(cli.transcript.matches("Type 'approve ").count(), 2);
@@ -4285,9 +4544,20 @@ async fn recipe_discovery_cli(existing_inventory: bool, failed_turn: bool, docum
             identifiers::LogicalRuntimeId,
             input_state::{InputLifecycleState, InputTerminalOutcome},
         };
-        assert!(history.contains(if failed_turn { RECIPE_FAILED_REQUEST } else { DOCUMENT_REQUEST }));
-        if document_refusal { assert!(history.contains(DOCUMENT_ANSWER)); }
-        assert_eq!(cli.transcript.matches("The native setup turn failed.").count(), usize::from(failed_turn));
+        assert!(history.contains(if failed_turn {
+            RECIPE_FAILED_REQUEST
+        } else {
+            DOCUMENT_REQUEST
+        }));
+        if document_refusal {
+            assert!(history.contains(DOCUMENT_ANSWER));
+        }
+        assert_eq!(
+            cli.transcript
+                .matches("The native setup turn failed.")
+                .count(),
+            usize::from(failed_turn)
+        );
         for request in provider.requests.lock().unwrap().iter() {
             for protected in [CODE, DEVICE, PAIR, TOKEN] {
                 assert!(!request.body.to_string().contains(protected));
@@ -4295,26 +4565,30 @@ async fn recipe_discovery_cli(existing_inventory: bool, failed_turn: bool, docum
         }
         let mut inputs = timeout(
             BOUND,
-            persistence.runtime_store().load_input_states_strict(
-                &LogicalRuntimeId::for_session(&session_id),
-            ),
+            persistence
+                .runtime_store()
+                .load_input_states_strict(&LogicalRuntimeId::for_session(&session_id)),
         )
         .await
         .unwrap()
         .unwrap();
-        assert_eq!(inputs.len(), 3, "one native input per explicit human message");
+        assert_eq!(
+            inputs.len(),
+            3,
+            "one native input per explicit human message"
+        );
         inputs.sort_by_key(|input| input.seed.admission_sequence);
-        let input_ids: BTreeSet<_> = inputs.iter()
-            .map(|input| input.state.input_id.to_string()).collect();
+        let input_ids: BTreeSet<_> = inputs
+            .iter()
+            .map(|input| input.state.input_id.to_string())
+            .collect();
         assert_eq!(input_ids.len(), 3);
         for (index, input) in inputs.iter().enumerate() {
             assert_eq!(input.seed.attempt_count, 1, "no runtime replay");
             assert_eq!(input.state.recovery_count, 0);
             let stored = serde_json::to_value(input).unwrap();
-            let outcome: CompletionOutcome = serde_json::from_value(
-                stored["terminal_completion"]["outcome"].clone(),
-            )
-            .unwrap();
+            let outcome: CompletionOutcome =
+                serde_json::from_value(stored["terminal_completion"]["outcome"].clone()).unwrap();
             if index == 1 && failed_turn {
                 assert!(matches!(
                     input.seed.phase,
@@ -4326,11 +4600,15 @@ async fn recipe_discovery_cli(existing_inventory: bool, failed_turn: bool, docum
                 ));
                 assert!(matches!(
                     outcome,
-                    CompletionOutcome::Abandoned { .. } | CompletionOutcome::AbandonedWithError { .. }
+                    CompletionOutcome::Abandoned { .. }
+                        | CompletionOutcome::AbandonedWithError { .. }
                 ));
             } else {
                 assert_eq!(input.seed.phase, InputLifecycleState::Consumed);
-                assert_eq!(input.seed.terminal_outcome, Some(InputTerminalOutcome::Consumed));
+                assert_eq!(
+                    input.seed.terminal_outcome,
+                    Some(InputTerminalOutcome::Consumed)
+                );
                 assert!(matches!(outcome, CompletionOutcome::Completed(_)));
             }
         }
@@ -4390,7 +4668,8 @@ async fn actual_cli_denied_setup_helper_review_leaves_native_realm_unmaterialize
     let owner = meerkat_store::grant_owner_store_path(&cli.state.join(REALM));
     assert!(!owner.exists());
     assert!(!cli.state.join(REALM).join("realm_manifest.json").exists());
-    cli.shown("Choose a realm number, 'new', or /quit: ", 0).await;
+    cli.shown("Choose a realm number, 'new', or /quit: ", 0)
+        .await;
     cli.send("new\n");
     cli.shown("New realm: ", 0).await;
     cli.send(&format!("{REALM}\n"));
@@ -4400,8 +4679,14 @@ async fn actual_cli_denied_setup_helper_review_leaves_native_realm_unmaterialize
 
     assert!(provider.requests.lock().unwrap().is_empty());
     assert_eq!(existing_realm_files(&cli.state), previous);
-    assert_eq!(fs::read(cli.state.join(REALM).join("config.toml")).unwrap(), config);
-    assert!(!owner.exists(), "first denial cannot create the native grant owner or issue grants");
+    assert_eq!(
+        fs::read(cli.state.join(REALM).join("config.toml")).unwrap(),
+        config
+    );
+    assert!(
+        !owner.exists(),
+        "first denial cannot create the native grant owner or issue grants"
+    );
     assert!(!owner.with_file_name("stock-grants.json").exists());
     assert!(!cli.state.join(REALM).join("realm_manifest.json").exists());
     assert!(!cli.state.join(REALM).join("config_state.json").exists());
@@ -4409,9 +4694,15 @@ async fn actual_cli_denied_setup_helper_review_leaves_native_realm_unmaterialize
     assert!(cli.setup_approvals.is_empty());
     let artifacts = preparation_artifacts(&cli.state);
     assert_eq!(artifacts.len(), 1);
-    assert!(!artifacts[0].join("standalone-mcp-grant-request.txt").exists());
-    assert!(!artifacts[0].join("standalone-stage-abort.txt").exists(),
-        "the refused pre-stage review never acquires a stage");
+    assert!(
+        !artifacts[0]
+            .join("standalone-mcp-grant-request.txt")
+            .exists()
+    );
+    assert!(
+        !artifacts[0].join("standalone-stage-abort.txt").exists(),
+        "the refused pre-stage review never acquires a stage"
+    );
     // finish() reads this exact native Denied record and its selected session
     // owner, while retaining the shared terminal, secret and process checks.
     cli.reviewed_session();
@@ -4425,7 +4716,8 @@ async fn actual_cli_denied_setup_model_review_retains_only_helper_effects_and_no
     let root = root_with_existing_realm().await;
     let previous = existing_realm_files(&root.path().join("state"));
     let mut cli = Cli::spawn_configured_in(root, None, &provider.origin, None, false, None, None);
-    cli.shown("Choose a realm number, 'new', or /quit: ", 0).await;
+    cli.shown("Choose a realm number, 'new', or /quit: ", 0)
+        .await;
     cli.send("new\n");
     cli.shown("New realm: ", 0).await;
     cli.send(&format!("{REALM}\n"));
@@ -4436,19 +4728,33 @@ async fn actual_cli_denied_setup_model_review_retains_only_helper_effects_and_no
     // is already settled. Save the actual native selection and owner bytes.
     let owner = meerkat_store::grant_owner_store_path(&cli.state.join(REALM));
     let selection = owner.with_file_name("stock-grants.json");
-    let retained: Vec<_> = [owner.clone(), selection.clone(),
+    let retained: Vec<_> = [
+        owner.clone(),
+        selection.clone(),
         cli.state.join(REALM).join("realm_manifest.json"),
         cli.state.join(REALM).join("config.toml"),
-        cli.state.join(REALM).join("config_state.json")]
-        .into_iter().map(|path| { let bytes = fs::read(&path).unwrap(); (path, bytes) }).collect();
+        cli.state.join(REALM).join("config_state.json"),
+    ]
+    .into_iter()
+    .map(|path| {
+        let bytes = fs::read(&path).unwrap();
+        (path, bytes)
+    })
+    .collect();
     let grants: StockGrantFile = serde_json::from_slice(&fs::read(&selection).unwrap()).unwrap();
     assert_eq!(grants.agents.len(), 1);
     let refs = grants.agents.get(DEFAULT_STOCK_AGENT).unwrap();
     assert!(refs.targeted);
     assert!(refs.operation.is_none() && refs.controller.is_none() && refs.catalog.is_none());
     assert!(refs.tool_bundles.is_empty() && refs.pending_cleanup.is_empty());
-    assert_eq!(refs.mcp.keys().map(String::as_str).collect::<Vec<_>>(), ["toolkit-setup"]);
-    assert!(refs.prompt_selection().is_none(), "helper access is not a selected controller grant");
+    assert_eq!(
+        refs.mcp.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["toolkit-setup"]
+    );
+    assert!(
+        refs.prompt_selection().is_none(),
+        "helper access is not a selected controller grant"
+    );
 
     cli.deny_startup_review(SETUP_MODEL_REVIEW).await;
     assert!(cli.finish().await.success(), "{}", cli.transcript);
@@ -4456,14 +4762,20 @@ async fn actual_cli_denied_setup_model_review_retains_only_helper_effects_and_no
     assert!(provider.requests.lock().unwrap().is_empty());
     assert_eq!(existing_realm_files(&cli.state), previous);
     for (path, before) in retained {
-        assert_eq!(fs::read(&path).unwrap(), before,
-            "second denial must retain exactly the independently approved helper effects: {}", path.display());
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            before,
+            "second denial must retain exactly the independently approved helper effects: {}",
+            path.display()
+        );
     }
     assert_eq!(cli.setup_approvals.len(), 1);
     assert_eq!(cli.transcript.matches("Type 'approve ").count(), 2);
     assert!(!cli.transcript.contains("Setup session: "));
     assert!(!cli.transcript.contains("You: "));
-    assert!(cli.transcript.contains("No controller or additional setup grant changed the realm in this setup stage."));
+    assert!(cli.transcript.contains(
+        "No controller or additional setup grant changed the realm in this setup stage."
+    ));
     let artifacts = preparation_artifacts(&cli.state);
     assert_eq!(artifacts.len(), 1);
     let abort = fs::read_to_string(artifacts[0].join("standalone-stage-abort.txt")).unwrap();
@@ -4472,16 +4784,33 @@ async fn actual_cli_denied_setup_model_review_retains_only_helper_effects_and_no
     // its actual native classification and matching terminal projection;
     // final release is established by the post-exit governed reopen below.
     if abort.contains("custody: Released") {
-        assert!(cli.transcript.contains("Setup stopped and this realm owner was released."));
+        assert!(
+            cli.transcript
+                .contains("Setup stopped and this realm owner was released.")
+        );
     } else {
         assert!(abort.contains("custody: Retained"));
-        assert!(cli.transcript.contains("a native handle still retains this realm owner"));
-        assert!(cli.transcript.contains("This does not confirm that credential work has finished"));
+        assert!(
+            cli.transcript
+                .contains("a native handle still retains this realm owner")
+        );
+        assert!(
+            cli.transcript
+                .contains("This does not confirm that credential work has finished")
+        );
     }
-    assert_eq!(fs::read_to_string(artifacts[0].join("standalone-stage-unobserved.txt")).unwrap(), "[]");
+    assert_eq!(
+        fs::read_to_string(artifacts[0].join("standalone-stage-unobserved.txt")).unwrap(),
+        "[]"
+    );
     assert!(!artifacts[0].join("standalone-stage-finish.txt").exists());
-    assert!(fs::read_dir(&artifacts[0]).unwrap().all(|entry|
-        !entry.unwrap().file_name().to_string_lossy().starts_with("standalone-stage-grant-")));
+    assert!(fs::read_dir(&artifacts[0]).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("standalone-stage-grant-")
+    }));
 
     // Reopen through the actual governed path only after the child's natural
     // exit and absent process group. The denied record supplies the exact
@@ -4492,19 +4821,53 @@ async fn actual_cli_denied_setup_model_review_retains_only_helper_effects_and_no
         context_root: root.join("outside-checkout"),
         state_root: Some(cli.state.clone()),
         user_config_root: Some(root.join("home")),
-    }.resolve(REALM).unwrap();
-    let (_, persistence) = timeout(BOUND, meerkat::governed_realm::open_stock_realm_persistence_as(
-        &meerkat::DiskStorageProvider, &storage.locator.state_root, REALM, None,
-        Some(meerkat_store::RealmOrigin::Explicit), Some(storage.layout), DEFAULT_STOCK_AGENT,
-    )).await.unwrap().unwrap();
-    let sessions = timeout(BOUND, persistence.session_store().list(meerkat_core::SessionFilter {
-        limit: Some(2), ..Default::default()
-    })).await.unwrap().unwrap();
-    assert!(sessions.is_empty(), "denied controller review cannot materialize a session");
-    let inputs = timeout(BOUND, persistence.runtime_store().load_input_states_strict(
-        &meerkat_runtime::identifiers::LogicalRuntimeId::for_session(&session),
-    )).await.unwrap().unwrap();
-    assert!(inputs.is_empty(), "no input may be admitted for the exact denied session");
+    }
+    .resolve(REALM)
+    .unwrap();
+    let (_, persistence) = timeout(
+        BOUND,
+        meerkat::governed_realm::open_stock_realm_persistence_as(
+            &meerkat::DiskStorageProvider,
+            &storage.locator.state_root,
+            REALM,
+            None,
+            Some(meerkat_store::RealmOrigin::Explicit),
+            Some(storage.layout),
+            DEFAULT_STOCK_AGENT,
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let sessions = timeout(
+        BOUND,
+        persistence
+            .session_store()
+            .list(meerkat_core::SessionFilter {
+                limit: Some(2),
+                ..Default::default()
+            }),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        sessions.is_empty(),
+        "denied controller review cannot materialize a session"
+    );
+    let inputs = timeout(
+        BOUND,
+        persistence.runtime_store().load_input_states_strict(
+            &meerkat_runtime::identifiers::LogicalRuntimeId::for_session(&session),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        inputs.is_empty(),
+        "no input may be admitted for the exact denied session"
+    );
     drop(persistence);
 }
 
@@ -4582,7 +4945,10 @@ async fn actual_cli_combined_roles_preserve_inspection_choice_and_exact_approval
         cli.transcript
             .contains(&format!("{}{review_path}", host.origin))
     );
-    assert_eq!(cli.transcript.matches("PairedHost change review").count(), 1);
+    assert_eq!(
+        cli.transcript.matches("PairedHost change review").count(),
+        1
+    );
     assert_eq!(cli.transcript.matches("Type 'approve ").count(), 3);
     assert_eq!(host.submissions(), 1);
     assert_eq!(preparation_output_count(&cli.state), 1);
@@ -4927,8 +5293,7 @@ async fn deferred_cli(mode: DeferredMode, fixture: Option<&Path>) {
     }
     cli.shown("Type 'approve ", turn_start).await;
     assert_eq!(host.submissions(), 0);
-    let approval = cli
-        .transcript[turn_start..]
+    let approval = cli.transcript[turn_start..]
         .split("Type 'approve ")
         .last()
         .unwrap()
@@ -5117,7 +5482,8 @@ fn preparation_output_count(root: &Path) -> usize {
 }
 
 fn reviewed_setup_session(
-    preparation: &Path, setup_approvals: &[String],
+    preparation: &Path,
+    setup_approvals: &[String],
     denied_setup_review: &Option<(&'static str, String)>,
 ) -> meerkat_core::SessionId {
     use meerkat_core::{ApprovalOwnerRef, ApprovalStore};
@@ -5126,26 +5492,58 @@ fn reviewed_setup_session(
     let mut records = Vec::new();
     for entry in fs::read_dir(preparation).unwrap() {
         let directory = entry.unwrap().path();
-        if !directory.file_name().unwrap().to_string_lossy().starts_with("consent-") { continue; }
-        assert!(fs::symlink_metadata(&directory).unwrap().is_dir(),
-            "a consent owner must be an actual directory");
+        if !directory
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("consent-")
+        {
+            continue;
+        }
+        assert!(
+            fs::symlink_metadata(&directory).unwrap().is_dir(),
+            "a consent owner must be an actual directory"
+        );
         let path = directory.join("native-decisions.json");
-        assert!(fs::symlink_metadata(&path).unwrap().is_file(),
-            "the existing native decision store must be an actual file");
-        records.extend(meerkat_store::FileApprovalStore::open(&path).unwrap().load_all().unwrap());
+        assert!(
+            fs::symlink_metadata(&path).unwrap().is_file(),
+            "the existing native decision store must be an actual file"
+        );
+        records.extend(
+            meerkat_store::FileApprovalStore::open(&path)
+                .unwrap()
+                .load_all()
+                .unwrap(),
+        );
     }
     let mut selected = None;
-    let expected = setup_approvals.iter().enumerate()
-        .map(|(index, id)| (id, meerkat_core::ApprovalStatus::Approved,
-            [SETUP_HELPER_REVIEW, SETUP_MODEL_REVIEW][index]))
-        .chain(denied_setup_review.iter()
-            .map(|(summary, id)| (id, meerkat_core::ApprovalStatus::Denied, *summary)));
+    let expected = setup_approvals
+        .iter()
+        .enumerate()
+        .map(|(index, id)| {
+            (
+                id,
+                meerkat_core::ApprovalStatus::Approved,
+                [SETUP_HELPER_REVIEW, SETUP_MODEL_REVIEW][index],
+            )
+        })
+        .chain(
+            denied_setup_review
+                .iter()
+                .map(|(summary, id)| (id, meerkat_core::ApprovalStatus::Denied, *summary)),
+        );
     if denied_setup_review.is_some() {
-        assert_eq!(records.len(), setup_approvals.len() + 1,
-            "a refused startup cannot silently create another review");
+        assert_eq!(
+            records.len(),
+            setup_approvals.len() + 1,
+            "a refused startup cannot silently create another review"
+        );
     }
     for (id, status, summary) in expected {
-        let matching: Vec<_> = records.iter().filter(|record| record.approval_id.to_string() == *id).collect();
+        let matching: Vec<_> = records
+            .iter()
+            .filter(|record| record.approval_id.to_string() == *id)
+            .collect();
         assert_eq!(matching.len(), 1);
         let record = matching[0];
         assert_eq!(record.status, status);
@@ -5153,7 +5551,9 @@ fn reviewed_setup_session(
         let ApprovalOwnerRef::Session { session_id } = &record.owner else {
             panic!("startup review must belong to the actual selected session")
         };
-        if let Some(previous) = &selected { assert_eq!(previous, session_id); }
+        if let Some(previous) = &selected {
+            assert_eq!(previous, session_id);
+        }
         selected = Some(session_id.clone());
     }
     selected.expect("at least one exact startup decision")
@@ -5161,74 +5561,187 @@ fn reviewed_setup_session(
 
 #[test]
 fn reviewed_setup_session_finds_exact_receipts_across_native_stores() {
-    use meerkat_core::{ApprovalActionKind, ApprovalDecision, ApprovalOwnerRef, ApprovalPrincipalId,
+    use meerkat_core::{
+        ApprovalActionKind, ApprovalDecision, ApprovalOwnerRef, ApprovalPrincipalId,
         ApprovalProposedAction, ApprovalRequest, ApprovalResourceId, ApprovalResourceKind,
-        ApprovalResourceRef, ApprovalRisk, ApprovalService, SessionId};
-    fn decide(path: &Path, session: &SessionId, summary: &str, decision: ApprovalDecision) -> String {
+        ApprovalResourceRef, ApprovalRisk, ApprovalService, SessionId,
+    };
+    fn decide(
+        path: &Path,
+        session: &SessionId,
+        summary: &str,
+        decision: ApprovalDecision,
+    ) -> String {
         let service = ApprovalService::with_store(Arc::new(
-            meerkat_store::FileApprovalStore::open(path).unwrap())).unwrap();
-        let record = service.request(ApprovalRequest {
-            requester: ApprovalPrincipalId::new("fixture-requester").unwrap(),
-            owner: ApprovalOwnerRef::Session { session_id: session.clone() },
-            resource: ApprovalResourceRef { kind: ApprovalResourceKind::Runtime,
-                id: ApprovalResourceId::new("fixture-selected-realm") },
-            proposed_action: ApprovalProposedAction { kind: ApprovalActionKind::Other,
-                summary: summary.into(), body: None },
-            risk: ApprovalRisk::Medium, request_body: None,
-            allowed_decisions: [ApprovalDecision::Approve, ApprovalDecision::Deny].into_iter().collect(),
-            expires_at: None, metadata: Default::default(), request_provenance: None,
-        }).unwrap();
-        service.decide(&record.approval_id, decision,
-            ApprovalPrincipalId::new("fixture-human").unwrap(), None, None).unwrap();
+            meerkat_store::FileApprovalStore::open(path).unwrap(),
+        ))
+        .unwrap();
+        let record = service
+            .request(ApprovalRequest {
+                requester: ApprovalPrincipalId::new("fixture-requester").unwrap(),
+                owner: ApprovalOwnerRef::Session {
+                    session_id: session.clone(),
+                },
+                resource: ApprovalResourceRef {
+                    kind: ApprovalResourceKind::Runtime,
+                    id: ApprovalResourceId::new("fixture-selected-realm"),
+                },
+                proposed_action: ApprovalProposedAction {
+                    kind: ApprovalActionKind::Other,
+                    summary: summary.into(),
+                    body: None,
+                },
+                risk: ApprovalRisk::Medium,
+                request_body: None,
+                allowed_decisions: [ApprovalDecision::Approve, ApprovalDecision::Deny]
+                    .into_iter()
+                    .collect(),
+                expires_at: None,
+                metadata: Default::default(),
+                request_provenance: None,
+            })
+            .unwrap();
+        service
+            .decide(
+                &record.approval_id,
+                decision,
+                ApprovalPrincipalId::new("fixture-human").unwrap(),
+                None,
+                None,
+            )
+            .unwrap();
         record.approval_id.to_string()
     }
     let root = tempfile::tempdir().unwrap();
     let session = meerkat::Session::new().id().clone();
     let first = root.path().join("consent-first/native-decisions.json");
-    let second = root.path().join("consent-continuation/native-decisions.json");
+    let second = root
+        .path()
+        .join("consent-continuation/native-decisions.json");
     let third = root.path().join("consent-empty/native-decisions.json");
-    let approvals = vec![decide(&first, &session, SETUP_HELPER_REVIEW, ApprovalDecision::Approve),
-        decide(&first, &session, SETUP_MODEL_REVIEW, ApprovalDecision::Approve)];
-    decide(&second, &session, "A later software review", ApprovalDecision::Approve);
+    let approvals = vec![
+        decide(
+            &first,
+            &session,
+            SETUP_HELPER_REVIEW,
+            ApprovalDecision::Approve,
+        ),
+        decide(
+            &first,
+            &session,
+            SETUP_MODEL_REVIEW,
+            ApprovalDecision::Approve,
+        ),
+    ];
+    decide(
+        &second,
+        &session,
+        "A later software review",
+        ApprovalDecision::Approve,
+    );
     meerkat_store::FileApprovalStore::open(&third).unwrap();
     let empty = fs::read(&third).unwrap();
-    assert_eq!(reviewed_setup_session(root.path(), &approvals, &None), session);
+    assert_eq!(
+        reviewed_setup_session(root.path(), &approvals, &None),
+        session
+    );
     fs::copy(&first, &third).unwrap();
-    assert!(std::panic::catch_unwind(|| reviewed_setup_session(root.path(), &approvals, &None)).is_err(),
-        "duplicate observed IDs across owners must not select an arbitrary record");
+    assert!(
+        std::panic::catch_unwind(|| reviewed_setup_session(root.path(), &approvals, &None))
+            .is_err(),
+        "duplicate observed IDs across owners must not select an arbitrary record"
+    );
     fs::write(&third, &empty).unwrap();
     let foreign = meerkat::Session::new().id().clone();
-    let foreign_model = decide(&third, &foreign, SETUP_MODEL_REVIEW, ApprovalDecision::Approve);
-    assert!(std::panic::catch_unwind(|| reviewed_setup_session(root.path(),
-        &[approvals[0].clone(), foreign_model.clone()], &None)).is_err(),
-        "exact startup IDs must still name one common native session");
+    let foreign_model = decide(
+        &third,
+        &foreign,
+        SETUP_MODEL_REVIEW,
+        ApprovalDecision::Approve,
+    );
+    assert!(
+        std::panic::catch_unwind(|| reviewed_setup_session(
+            root.path(),
+            &[approvals[0].clone(), foreign_model.clone()],
+            &None
+        ))
+        .is_err(),
+        "exact startup IDs must still name one common native session"
+    );
     fs::write(&third, &empty).unwrap();
-    assert!(std::panic::catch_unwind(|| reviewed_setup_session(root.path(),
-        &[approvals[0].clone(), "missing-startup-id".into()], &None)).is_err());
+    assert!(
+        std::panic::catch_unwind(|| reviewed_setup_session(
+            root.path(),
+            &[approvals[0].clone(), "missing-startup-id".into()],
+            &None
+        ))
+        .is_err()
+    );
     let alias = root.path().join("consent-alias");
     std::os::unix::fs::symlink(first.parent().unwrap(), &alias).unwrap();
-    let refused = std::panic::catch_unwind(|| reviewed_setup_session(root.path(), &approvals, &None));
+    let refused =
+        std::panic::catch_unwind(|| reviewed_setup_session(root.path(), &approvals, &None));
     fs::remove_file(alias).unwrap();
-    assert!(refused.is_err(), "a consent directory alias must not be followed");
+    assert!(
+        refused.is_err(),
+        "a consent directory alias must not be followed"
+    );
     fs::remove_file(&third).unwrap();
-    assert!(std::panic::catch_unwind(|| reviewed_setup_session(root.path(), &approvals, &None)).is_err());
-    assert!(!third.exists(), "receipt observation must not create a missing store");
+    assert!(
+        std::panic::catch_unwind(|| reviewed_setup_session(root.path(), &approvals, &None))
+            .is_err()
+    );
+    assert!(
+        !third.exists(),
+        "receipt observation must not create a missing store"
+    );
     std::os::unix::fs::symlink(&first, &third).unwrap();
-    let refused = std::panic::catch_unwind(|| reviewed_setup_session(root.path(), &approvals, &None));
+    let refused =
+        std::panic::catch_unwind(|| reviewed_setup_session(root.path(), &approvals, &None));
     fs::remove_file(&third).unwrap();
-    assert!(refused.is_err(), "the native decision file must not be a symlink");
+    assert!(
+        refused.is_err(),
+        "the native decision file must not be a symlink"
+    );
 
     let denied_root = tempfile::tempdir().unwrap();
-    let initial = denied_root.path().join("consent-startup/native-decisions.json");
-    let later = denied_root.path().join("consent-later/native-decisions.json");
-    let approved = vec![decide(&initial, &session, SETUP_HELPER_REVIEW, ApprovalDecision::Approve)];
-    let denied = Some((SETUP_MODEL_REVIEW,
-        decide(&initial, &session, SETUP_MODEL_REVIEW, ApprovalDecision::Deny)));
+    let initial = denied_root
+        .path()
+        .join("consent-startup/native-decisions.json");
+    let later = denied_root
+        .path()
+        .join("consent-later/native-decisions.json");
+    let approved = vec![decide(
+        &initial,
+        &session,
+        SETUP_HELPER_REVIEW,
+        ApprovalDecision::Approve,
+    )];
+    let denied = Some((
+        SETUP_MODEL_REVIEW,
+        decide(
+            &initial,
+            &session,
+            SETUP_MODEL_REVIEW,
+            ApprovalDecision::Deny,
+        ),
+    ));
     meerkat_store::FileApprovalStore::open(&later).unwrap();
-    assert_eq!(reviewed_setup_session(denied_root.path(), &approved, &denied), session);
-    decide(&later, &session, "Unexpected review after refusal", ApprovalDecision::Approve);
-    assert!(std::panic::catch_unwind(|| reviewed_setup_session(denied_root.path(), &approved, &denied)).is_err(),
-        "a denied startup must count unexpected reviews across every store");
+    assert_eq!(
+        reviewed_setup_session(denied_root.path(), &approved, &denied),
+        session
+    );
+    decide(
+        &later,
+        &session,
+        "Unexpected review after refusal",
+        ApprovalDecision::Approve,
+    );
+    assert!(
+        std::panic::catch_unwind(|| reviewed_setup_session(denied_root.path(), &approved, &denied))
+            .is_err(),
+        "a denied startup must count unexpected reviews across every store"
+    );
 }
 
 fn preparation_artifacts(root: &Path) -> Vec<PathBuf> {
@@ -5236,19 +5749,28 @@ fn preparation_artifacts(root: &Path) -> Vec<PathBuf> {
     if !parent.exists() {
         return Vec::new();
     }
-    let directories: Vec<_> = fs::read_dir(parent).unwrap()
+    let directories: Vec<_> = fs::read_dir(parent)
+        .unwrap()
         .filter_map(|entry| {
             let path = entry.unwrap().path();
             let metadata = fs::symlink_metadata(&path).unwrap();
             // The realm also owns regular files such as recipes.sqlite and
             // SQLite sidecars. They are not setup invocations.
-            if metadata.is_file() { return None; }
-            assert!(metadata.is_dir(), "setup artifact entries must not be symlinks or special files");
+            if metadata.is_file() {
+                return None;
+            }
+            assert!(
+                metadata.is_dir(),
+                "setup artifact entries must not be symlinks or special files"
+            );
             Some(path)
         })
         .collect();
     assert!(directories.len() <= 16, "bounded setup invocation count");
-    directories.into_iter().filter(|path| path.join("prepare.stdout").is_file()).collect()
+    directories
+        .into_iter()
+        .filter(|path| path.join("prepare.stdout").is_file())
+        .collect()
 }
 
 #[test]
@@ -5271,14 +5793,24 @@ fn preparation_artifacts_allow_realm_files_but_refuse_symlinks_and_excess_direct
         std::os::unix::fs::symlink(target, &alias).unwrap();
         let refused = std::panic::catch_unwind(|| preparation_artifacts(root.path()));
         fs::remove_file(alias).unwrap();
-        assert!(refused.is_err(), "the observer must not follow realm symlinks");
+        assert!(
+            refused.is_err(),
+            "the observer must not follow realm symlinks"
+        );
     }
-    for index in 2..16 { fs::create_dir(parent.join(format!("setup-pending-{index}"))).unwrap(); }
-    assert_eq!(preparation_artifacts(root.path()), vec![prepared],
-        "regular realm files do not consume the setup-directory bound");
+    for index in 2..16 {
+        fs::create_dir(parent.join(format!("setup-pending-{index}"))).unwrap();
+    }
+    assert_eq!(
+        preparation_artifacts(root.path()),
+        vec![prepared],
+        "regular realm files do not consume the setup-directory bound"
+    );
     fs::create_dir(parent.join("setup-seventeenth")).unwrap();
-    assert!(std::panic::catch_unwind(|| preparation_artifacts(root.path())).is_err(),
-        "the setup invocation bound still applies to real directories");
+    assert!(
+        std::panic::catch_unwind(|| preparation_artifacts(root.path())).is_err(),
+        "the setup invocation bound still applies to real directories"
+    );
 }
 
 fn read_bounded_json(path: &Path, limit: u64) -> (Vec<u8>, Value) {
@@ -5594,7 +6126,8 @@ async fn actual_cli_forge_sign_in_reports_unsupported_without_paired_host_or_rep
         1
     );
     assert!(
-        !cli.transcript.contains("PairedHost origin:") && !cli.transcript.contains("Type 'request'")
+        !cli.transcript.contains("PairedHost origin:")
+            && !cli.transcript.contains("Type 'request'")
     );
     assert_eq!(preparation_output_count(&cli.state), 1);
     cli.assert_reviewed_setup(&config);
@@ -6057,9 +6590,19 @@ async fn actual_cli_forge_configuration_recovers_after_process_restart_without_r
             .count(),
         1
     );
-    for path in ["/console/forge/frontends/prepare", "/console/forge/frontends/submit"] {
-        assert_eq!(result["requests"].as_array().unwrap().iter()
-            .filter(|request| request["method"] == "POST" && request["path"] == path).count(), 1);
+    for path in [
+        "/console/forge/frontends/prepare",
+        "/console/forge/frontends/submit",
+    ] {
+        assert_eq!(
+            result["requests"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|request| request["method"] == "POST" && request["path"] == path)
+                .count(),
+            1
+        );
     }
     assert_eq!(result["state"]["revision"], 1);
     assert_eq!(fs::read(&references[0].0).unwrap(), references[0].1);
@@ -6724,8 +7267,10 @@ async fn actual_stdio_forge_configuration_remount_cancel_and_retire() {
     // Native exact cancellation may archive the terminal input before its
     // final lookup, returning false. Preserve that disposition independently
     // from the actual joined completion below.
-    assert!(matches!(cancel_one["result"]["status"].as_str(),
-        Some("cancellation_requested" | "not_current")));
+    assert!(matches!(
+        cancel_one["result"]["status"].as_str(),
+        Some("cancellation_requested" | "not_current")
+    ));
     assert_eq!(cancel_one["result"]["scope"], scope);
     assert_eq!(cancel_one["result"]["send_request_id"], "h:hold");
     assert_eq!(cancel_one["result"], cancel_two["result"]);
@@ -6826,14 +7371,23 @@ async fn actual_stdio_forge_configuration_remount_cancel_and_retire() {
         .await
         .unwrap();
     assert_eq!(inputs.len(), 3);
-    inputs.sort_by_key(|input| input.seed.admission_sequence.expect("native admission sequence"));
+    inputs.sort_by_key(|input| {
+        input
+            .seed
+            .admission_sequence
+            .expect("native admission sequence")
+    });
     let mut native_completions = vec![];
     for (input, send_id) in inputs.iter().zip(["h:first", "h:choice", "h:hold"]) {
         let value = serde_json::to_value(input).unwrap();
         let outcome: CompletionOutcome =
             serde_json::from_value(value["terminal_completion"]["outcome"].clone()).unwrap();
         let outcome = serde_json::to_value(outcome).unwrap();
-        let wire = cli.rows.iter().find(|row| row["id"] == send_id && row.get("method").is_none()).unwrap();
+        let wire = cli
+            .rows
+            .iter()
+            .find(|row| row["id"] == send_id && row.get("method").is_none())
+            .unwrap();
         assert_eq!(outcome["completion_type"], wire["result"]["completion"]);
         native_completions.push(outcome["completion_type"].clone());
         assert!(matches!(
@@ -7276,7 +7830,11 @@ async fn actual_stdio_paired_host_role_secret_and_private_notices() {
         cli.response("h:retire").await["result"]["entered_work"],
         "settled"
     );
-    cli.request("h:close", "connect/close", json!({"target":{"scope":scope}}));
+    cli.request(
+        "h:close",
+        "connect/close",
+        json!({"target":{"scope":scope}}),
+    );
     assert_eq!(
         cli.response("h:close").await["result"]["resources_closed"],
         true

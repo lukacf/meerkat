@@ -131,7 +131,10 @@ impl PreparedServiceRecovery<'_> {
         drop(custody);
         let setup_children = self.setup.map(|setup| match setup.revoke(self.source) {
             Ok(()) => "revoked_or_not_issued",
-            Err(_) => { uncertain = true; "unresolved" },
+            Err(_) => {
+                uncertain = true;
+                "unresolved"
+            }
         });
         Ok(ServiceRecoveryOutcome {
             parent: "revoked",
@@ -174,21 +177,37 @@ impl PrivateOriginals {
         if !row.can_recover || row.published_member || row.parent.is_none() || row.child.is_none() {
             return Err(PrivateOriginalError::Denied);
         }
-        let setup = if matches!(row.child.as_ref().map(|child| &child.owner),
-            Some(ServiceRecoveryChildOwner::ThisApproval(_))) {
+        let setup = if matches!(
+            row.child.as_ref().map(|child| &child.owner),
+            Some(ServiceRecoveryChildOwner::ThisApproval(_))
+        ) {
             if let Some(fresh) = &row.fresh {
                 let record = self.decode_stored(fresh)?;
                 match record.approved_task.as_ref() {
-                    Some(task) if task.setup().is_some() && task.contains(&row.selection.reference) => {
-                        let reference = PrivateOriginalRef { route: record.event.route.clone(),
+                    Some(task)
+                        if task.setup().is_some() && task.contains(&row.selection.reference) =>
+                    {
+                        let reference = PrivateOriginalRef {
+                            route: record.event.route.clone(),
                             original: record.event.original.clone(),
-                            event_sha256: digest(&canonical_json(&record.event).map_err(|_| PrivateOriginalError::Conflict)?) };
-                        Some(self.prepare_service_setup_cleanup(&reference, fresh).await?)
-                    },
+                            event_sha256: digest(
+                                &canonical_json(&record.event)
+                                    .map_err(|_| PrivateOriginalError::Conflict)?,
+                            ),
+                        };
+                        Some(
+                            self.prepare_service_setup_cleanup(&reference, fresh)
+                                .await?,
+                        )
+                    }
                     _ => None,
                 }
-            } else { None }
-        } else { None };
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         // No admission/current-task test: the authenticated operator can clean
         // up a cancelled or cold original without reviving its authority.
         Ok(PreparedServiceRecovery {
@@ -313,10 +332,12 @@ impl PrivateOriginals {
                 return Err(PrivateOriginalError::Conflict);
             }
             let selection = match (&approval.decision, &approval.selection) {
-                (super::service_grants::AccessDecision::Mcp(decision), Some(selection)) =>
-                    self.retained_service_selection(decision, selection, &approval.requested)?,
-                (super::service_grants::AccessDecision::Catalog(decision), None) =>
-                    self.retained_catalog_selection(decision, &approval.requested)?,
+                (super::service_grants::AccessDecision::Mcp(decision), Some(selection)) => {
+                    self.retained_service_selection(decision, selection, &approval.requested)?
+                }
+                (super::service_grants::AccessDecision::Catalog(decision), None) => {
+                    self.retained_catalog_selection(decision, &approval.requested)?
+                }
                 _ => return Err(PrivateOriginalError::Conflict),
             };
             let fresh_key = StoreKey {
@@ -352,13 +373,22 @@ impl PrivateOriginals {
             let published_member = match (&fresh, &parent) {
                 (Some(fresh), Some(parent)) => {
                     let published = self.decode_stored(fresh)?;
-                    let link = published.approved_task.as_ref().ok_or(PrivateOriginalError::Conflict)?;
+                    let link = published
+                        .approved_task
+                        .as_ref()
+                        .ok_or(PrivateOriginalError::Conflict)?;
                     let selected = link.contains(&selection.reference)
-                        && self.service_compensation_child(&selection.reference, parent).await?.is_some();
+                        && self
+                            .service_compensation_child(&selection.reference, parent)
+                            .await?
+                            .is_some();
                     // A cancelled, provably unbound batch can clean its own
                     // selected partial effects. Legacy publication stays protected.
-                    let rejected_batch = matches!(link, super::service_approved_input::ApprovedTaskLink::Batch(_))
-                        && published.operation_cancelled && published.final_association.is_none()
+                    let rejected_batch = matches!(
+                        link,
+                        super::service_approved_input::ApprovedTaskLink::Batch(_)
+                    ) && published.operation_cancelled
+                        && published.final_association.is_none()
                         && published.service_admission.is_none()
                         && published.bound_service_input.is_none();
                     selected && !rejected_batch

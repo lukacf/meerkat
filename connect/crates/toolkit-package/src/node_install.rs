@@ -5,10 +5,12 @@
 //! selection inputs, then verify every selected archive before ordinary npm
 //! realizes the environment. Serialized projection data cannot authorize work.
 
-use crate::local_install::{DeclaredMcpService, local_artifact_selection, software_artifact_selection};
+use crate::local_install::{
+    DeclaredMcpService, local_artifact_selection, software_artifact_selection,
+};
 use crate::{
-    ContentDigest, Entrypoint, Id, IntegrationPackage, PackageIdentity, RuntimeKind,
-    ValidatedManifest, ValidatedLocalSoftware, LocalSoftwareDocumentKind, ValidationError,
+    ContentDigest, Entrypoint, Id, IntegrationPackage, LocalSoftwareDocumentKind, PackageIdentity,
+    RuntimeKind, ValidatedLocalSoftware, ValidatedManifest, ValidationError,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -88,8 +90,13 @@ impl NodeInstallPlan {
         validated: &ValidatedLocalSoftware,
         component_id: &Id,
     ) -> Result<Self, ValidationError> {
-        let local = software_artifact_selection(package, validated, component_id,
-            RuntimeKind::Node, "node_install")?;
+        let local = software_artifact_selection(
+            package,
+            validated,
+            component_id,
+            RuntimeKind::Node,
+            "node_install",
+        )?;
         let selected = validated.declaration();
         node_closure(local.artifacts)?;
         Ok(Self {

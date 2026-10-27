@@ -41,9 +41,15 @@ fn software_fixture(package: &IntegrationPackage) -> Value {
     })
 }
 
-fn software_plan(package: &IntegrationPackage, value: Value) -> Result<NodeInstallPlan, ValidationError> {
-    let declaration: LocalSoftwareDeclaration = serde_json::from_value(value)
-        .map_err(|_| ValidationError { path: "fixture".into(), message: "invalid document".into() })?;
+fn software_plan(
+    package: &IntegrationPackage,
+    value: Value,
+) -> Result<NodeInstallPlan, ValidationError> {
+    let declaration: LocalSoftwareDeclaration =
+        serde_json::from_value(value).map_err(|_| ValidationError {
+            path: "fixture".into(),
+            message: "invalid document".into(),
+        })?;
     NodeInstallPlan::from_declaration(package, &declaration.validate(package)?, &id("node-server"))
 }
 
@@ -157,7 +163,7 @@ fn projection_uses_existing_portable_independence_checks_and_requires_one_entry(
         match mutation {
             "absent" => selection.portable_mcp_entries.clear(),
             "extra" => selection.portable_mcp_entries.push(PortableMcpEntry {
-            environment_secret_slots: None,
+                environment_secret_slots: None,
                 operation_tools: None,
                 name: id("another-name"),
                 component: id("node-server"),
@@ -320,21 +326,36 @@ fn explicit_raw_names_preserve_declaration_origin_and_legacy_projection() {
     let legacy = serde_json::to_value(plan(&package, selection.clone()).unwrap()).unwrap();
     assert!(legacy.get("declared_service").is_none());
     let legacy_manifest = serde_json::to_value(&selection).unwrap();
-    assert!(legacy_manifest["portable_mcp_entries"][0].get("operation_tools").is_none());
-    selection.portable_mcp_entries[0].operation_tools = Some(BTreeMap::from([
-        (id("fixture-read"), "read_items_from_server".to_owned()),
-    ]));
+    assert!(
+        legacy_manifest["portable_mcp_entries"][0]
+            .get("operation_tools")
+            .is_none()
+    );
+    selection.portable_mcp_entries[0].operation_tools = Some(BTreeMap::from([(
+        id("fixture-read"),
+        "read_items_from_server".to_owned(),
+    )]));
     let declared = serde_json::to_value(plan(&package, selection.clone()).unwrap()).unwrap();
-    assert_eq!(declared["declared_service"], json!({"authentication":{"kind":"none"},
-        "operation_tools":{"fixture-read":"read_items_from_server"}}));
+    assert_eq!(
+        declared["declared_service"],
+        json!({"authentication":{"kind":"none"},
+        "operation_tools":{"fixture-read":"read_items_from_server"}})
+    );
     assert_ne!(declared["manifest_digest"], legacy["manifest_digest"]);
-    let Export::ServiceConnector(service) = &mut selection.exports[0] else { panic!("service fixture"); };
+    let Export::ServiceConnector(service) = &mut selection.exports[0] else {
+        panic!("service fixture");
+    };
     service.authentication = AuthenticationRequirement::Binding {
-        owner: id("process-owner"), requirement: id("key"), credential_audience: id("service"),
+        owner: id("process-owner"),
+        requirement: id("key"),
+        credential_audience: id("service"),
     };
     let binding = serde_json::to_value(plan(&package, selection).unwrap()).unwrap();
-    assert_eq!(binding["declared_service"]["authentication"], json!({"kind":"binding",
-        "owner":"process-owner","requirement":"key","credential_audience":"service"}));
+    assert_eq!(
+        binding["declared_service"]["authentication"],
+        json!({"kind":"binding",
+        "owner":"process-owner","requirement":"key","credential_audience":"service"})
+    );
     assert_ne!(binding["manifest_digest"], declared["manifest_digest"]);
 }
 
@@ -345,14 +366,25 @@ fn explicit_raw_mapping_cannot_alias_omit_or_add_declared_operations() {
         let mut names = BTreeMap::from([(id("fixture-read"), "raw_read".to_owned())]);
         match mode {
             "empty" => names.clear(),
-            "extra" => { names.insert(id("unselected"), "raw_extra".into()); },
-            "missing" => { names.remove(&id("fixture-read")); names.insert(id("unselected"), "raw_read".into()); },
-            "raw-control" => { names.insert(id("fixture-read"), "raw\nread".into()); },
+            "extra" => {
+                names.insert(id("unselected"), "raw_extra".into());
+            }
+            "missing" => {
+                names.remove(&id("fixture-read"));
+                names.insert(id("unselected"), "raw_read".into());
+            }
+            "raw-control" => {
+                names.insert(id("fixture-read"), "raw\nread".into());
+            }
             "duplicate" => {
-                let Export::ServiceConnector(service) = &mut selection.exports[0] else { panic!("service fixture"); };
-                let mut extra = service.operations[0].clone(); extra.id = id("second-read");
-                service.operations.push(extra); names.insert(id("second-read"), "raw_read".into());
-            },
+                let Export::ServiceConnector(service) = &mut selection.exports[0] else {
+                    panic!("service fixture");
+                };
+                let mut extra = service.operations[0].clone();
+                extra.id = id("second-read");
+                service.operations.push(extra);
+                names.insert(id("second-read"), "raw_read".into());
+            }
             _ => unreachable!(),
         }
         selection.portable_mcp_entries[0].operation_tools = Some(names);
@@ -435,14 +467,23 @@ mod cli {
         let mut args = fixture.arguments();
         args[2] = "--declaration".into();
         let output = run(&args);
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         assert!(output.stderr.is_empty());
-        assert_eq!(serde_json::from_slice::<Value>(&output.stdout).unwrap(),
-            serde_json::to_value(software_plan(&package, declaration.clone()).unwrap()).unwrap());
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+            serde_json::to_value(software_plan(&package, declaration.clone()).unwrap()).unwrap()
+        );
         assert_eq!(fs::read(&fixture.selection).unwrap(), bytes);
         assert_eq!(refused(run(&fixture.arguments())), "invalid_selection\n");
         let mut both = args.clone();
-        both.extend(["--selection".into(), fixture.selection.display().to_string()]);
+        both.extend([
+            "--selection".into(),
+            fixture.selection.display().to_string(),
+        ]);
         assert_eq!(refused(run(&both)), "invalid_arguments\n");
         let mut changed = declaration;
         changed["package_content_digest"] = json!("0".repeat(64));
@@ -513,28 +554,61 @@ mod cli {
 fn software_node_plan_preserves_exact_closure_and_excludes_full_activation_identity() {
     let (package, _) = fixture();
     let input = software_fixture(&package);
-    let proof = serde_json::from_value::<LocalSoftwareDeclaration>(input.clone()).unwrap()
-        .validate(&package).unwrap();
-    let value = serde_json::to_value(NodeInstallPlan::from_declaration(&package, &proof, &id("node-server")).unwrap()).unwrap();
+    let proof = serde_json::from_value::<LocalSoftwareDeclaration>(input.clone())
+        .unwrap()
+        .validate(&package)
+        .unwrap();
+    let value = serde_json::to_value(
+        NodeInstallPlan::from_declaration(&package, &proof, &id("node-server")).unwrap(),
+    )
+    .unwrap();
     assert_eq!(value["document_kind"], "local_software_declaration");
     assert_eq!(value["declaration_digest"], json!(proof.digest()));
-    assert_eq!(value["closure"], input["components"][0]["source"]["dependencies"]["artifacts"]);
-    assert_eq!(value["entrypoint"], input["components"][0]["source"]["entrypoint"]);
+    assert_eq!(
+        value["closure"],
+        input["components"][0]["source"]["dependencies"]["artifacts"]
+    );
+    assert_eq!(
+        value["entrypoint"],
+        input["components"][0]["source"]["entrypoint"]
+    );
     assert!(value.get("manifest_digest").is_none());
     assert!(value.get("configuration").is_none());
     assert!(value.get("ready").is_none());
     assert!(PythonInstallPlan::from_declaration(&package, &proof, &id("node-server")).is_err());
-    for mutation in ["missing-project", "missing-lock", "alias", "nested", "wrong-runtime"] {
-        let mut changed=input.clone();
+    for mutation in [
+        "missing-project",
+        "missing-lock",
+        "alias",
+        "nested",
+        "wrong-runtime",
+    ] {
+        let mut changed = input.clone();
         match mutation {
-            "missing-project" => { changed["components"][0]["source"]["dependencies"]["artifacts"].as_object_mut().unwrap().remove("package-json"); },
-            "missing-lock" => { changed["components"][0]["source"]["dependencies"]["artifacts"].as_object_mut().unwrap().remove("package-lock"); },
-            "alias" => changed["components"][0]["source"]["dependencies"]["artifacts"]["Package-Lock"]=json!("4".repeat(64)),
-            "nested" => changed["components"][0]["source"]["dependencies"]["artifacts"]["dir/archive"]=json!("4".repeat(64)),
-            "wrong-runtime" => changed["components"][0]["runtime"]=json!("python"),
+            "missing-project" => {
+                changed["components"][0]["source"]["dependencies"]["artifacts"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("package-json");
+            }
+            "missing-lock" => {
+                changed["components"][0]["source"]["dependencies"]["artifacts"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("package-lock");
+            }
+            "alias" => {
+                changed["components"][0]["source"]["dependencies"]["artifacts"]["Package-Lock"] =
+                    json!("4".repeat(64))
+            }
+            "nested" => {
+                changed["components"][0]["source"]["dependencies"]["artifacts"]["dir/archive"] =
+                    json!("4".repeat(64))
+            }
+            "wrong-runtime" => changed["components"][0]["runtime"] = json!("python"),
             _ => unreachable!(),
         }
-        assert!(software_plan(&package,changed).is_err(), "{mutation}");
+        assert!(software_plan(&package, changed).is_err(), "{mutation}");
     }
 }
 
@@ -542,56 +616,104 @@ fn software_node_plan_preserves_exact_closure_and_excludes_full_activation_ident
 fn secret_environment_declarations_bind_both_software_document_forms() {
     let (package, mut selected) = fixture();
     let source: Value = serde_json::from_slice(SELECTION).unwrap();
-    assert_eq!(serde_json::to_value(&selected.portable_mcp_entries).unwrap(), source["portable_mcp_entries"]);
-    selected.portable_mcp_entries[0].operation_tools = Some(BTreeMap::from([(id("fixture-read"), "actual_read".into())]));
-    let Export::ServiceConnector(service) = &mut selected.exports[0] else { panic!("service") };
-    service.authentication = AuthenticationRequirement::Binding { owner:id("process-owner"), requirement:id("api-key"), credential_audience:id("service") };
+    assert_eq!(
+        serde_json::to_value(&selected.portable_mcp_entries).unwrap(),
+        source["portable_mcp_entries"]
+    );
+    selected.portable_mcp_entries[0].operation_tools =
+        Some(BTreeMap::from([(id("fixture-read"), "actual_read".into())]));
+    let Export::ServiceConnector(service) = &mut selected.exports[0] else {
+        panic!("service")
+    };
+    service.authentication = AuthenticationRequirement::Binding {
+        owner: id("process-owner"),
+        requirement: id("api-key"),
+        credential_audience: id("service"),
+    };
     let before = serde_json::to_value(plan(&package, selected.clone()).unwrap()).unwrap();
-    assert!(before["declared_service"].get("environment_secret_slots").is_none());
-    selected.portable_mcp_entries[0].environment_secret_slots = Some(serde_json::from_value(json!(["TOKEN", "API_KEY"])).unwrap());
+    assert!(
+        before["declared_service"]
+            .get("environment_secret_slots")
+            .is_none()
+    );
+    selected.portable_mcp_entries[0].environment_secret_slots =
+        Some(serde_json::from_value(json!(["TOKEN", "API_KEY"])).unwrap());
     let after = serde_json::to_value(plan(&package, selected.clone()).unwrap()).unwrap();
-    assert_eq!(after["declared_service"]["environment_secret_slots"], json!(["API_KEY", "TOKEN"]));
+    assert_eq!(
+        after["declared_service"]["environment_secret_slots"],
+        json!(["API_KEY", "TOKEN"])
+    );
     assert_ne!(before["manifest_digest"], after["manifest_digest"]);
     assert_eq!(before["entrypoint"], after["entrypoint"]);
     let mut software = software_fixture(&package);
     software["exports"][0]["authentication"] = after["declared_service"]["authentication"].clone();
-    let plain_before = serde_json::to_value(software_plan(&package,software.clone()).unwrap()).unwrap();
+    let plain_before =
+        serde_json::to_value(software_plan(&package, software.clone()).unwrap()).unwrap();
     software["portable_mcp_entries"][0]["environment_secret_slots"] = json!(["TOKEN", "API_KEY"]);
-    let plain_after = serde_json::to_value(software_plan(&package,software).unwrap()).unwrap();
-    assert_eq!(plain_after["declared_service"]["environment_secret_slots"], after["declared_service"]["environment_secret_slots"]);
-    assert_ne!(plain_before["declaration_digest"], plain_after["declaration_digest"]);
+    let plain_after = serde_json::to_value(software_plan(&package, software).unwrap()).unwrap();
+    assert_eq!(
+        plain_after["declared_service"]["environment_secret_slots"],
+        after["declared_service"]["environment_secret_slots"]
+    );
+    assert_ne!(
+        plain_before["declaration_digest"],
+        plain_after["declaration_digest"]
+    );
     assert_eq!(plain_before["entrypoint"], plain_after["entrypoint"]);
 }
 
 #[test]
 fn secret_environment_declarations_reject_ambiguity_and_authentication_downgrades() {
     let (package, selected) = fixture();
-    let bad = vec![Value::Null, json!([]), json!(["TOKEN","TOKEN"]), json!(["invalid-name"]),
-        json!(["1TOKEN"]), json!(["TOKEN",7]), json!(["TOKEN\n"]), json!(["x".repeat(129)]),
-        json!((0..257).map(|index| format!("KEY_{index}")).collect::<Vec<_>>())];
+    let bad = vec![
+        Value::Null,
+        json!([]),
+        json!(["TOKEN", "TOKEN"]),
+        json!(["invalid-name"]),
+        json!(["1TOKEN"]),
+        json!(["TOKEN", 7]),
+        json!(["TOKEN\n"]),
+        json!(["x".repeat(129)]),
+        json!(
+            (0..257)
+                .map(|index| format!("KEY_{index}"))
+                .collect::<Vec<_>>()
+        ),
+    ];
     for slots in bad {
         let mut full = serde_json::to_value(&selected).unwrap();
         full["portable_mcp_entries"][0]["environment_secret_slots"] = slots.clone();
         assert!(serde_json::from_value::<ActivationManifest>(full).is_err());
         let mut plain = software_fixture(&package);
         plain["portable_mcp_entries"][0]["environment_secret_slots"] = slots;
-        assert!(software_plan(&package,plain).is_err());
+        assert!(software_plan(&package, plain).is_err());
     }
-    for no_auth in [true,false] {
+    for no_auth in [true, false] {
         let mut full = selected.clone();
-        full.portable_mcp_entries[0].environment_secret_slots = Some(serde_json::from_value(json!(["TOKEN"])).unwrap());
+        full.portable_mcp_entries[0].environment_secret_slots =
+            Some(serde_json::from_value(json!(["TOKEN"])).unwrap());
         let mut plain = software_fixture(&package);
         plain["portable_mcp_entries"][0]["environment_secret_slots"] = json!(["TOKEN"]);
         if no_auth {
-            full.portable_mcp_entries[0].operation_tools = Some(BTreeMap::from([(id("fixture-read"),"actual_read".into())]));
+            full.portable_mcp_entries[0].operation_tools =
+                Some(BTreeMap::from([(id("fixture-read"), "actual_read".into())]));
         } else {
-            let auth = AuthenticationRequirement::Binding {owner:id("process"),requirement:id("key"),credential_audience:id("service")};
-            let Export::ServiceConnector(service) = &mut full.exports[0] else { panic!("service") };
+            let auth = AuthenticationRequirement::Binding {
+                owner: id("process"),
+                requirement: id("key"),
+                credential_audience: id("service"),
+            };
+            let Export::ServiceConnector(service) = &mut full.exports[0] else {
+                panic!("service")
+            };
             service.authentication = auth.clone();
             plain["exports"][0]["authentication"] = serde_json::to_value(auth).unwrap();
-            plain["portable_mcp_entries"][0].as_object_mut().unwrap().remove("operation_tools");
+            plain["portable_mcp_entries"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("operation_tools");
         }
-        assert!(plan(&package,full).is_err());
-        assert!(software_plan(&package,plain).is_err());
+        assert!(plan(&package, full).is_err());
+        assert!(software_plan(&package, plain).is_err());
     }
 }

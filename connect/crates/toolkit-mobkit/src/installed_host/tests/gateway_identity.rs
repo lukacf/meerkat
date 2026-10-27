@@ -13,13 +13,13 @@ use meerkat_mobkit::{
 };
 use meerkat_runtime::service_ext::SessionServiceRuntimeExt;
 use serde::{Deserialize, Serialize};
-use toolkit_store::ToolkitStore;
 use std::{
     io::{BufRead, BufReader, Write},
     process::{Child, Command, Stdio},
     sync::{Mutex, mpsc},
     time::{Duration, Instant},
 };
+use toolkit_store::ToolkitStore;
 
 const CHILD_REPORT: &str = "TOOLKIT_GATEWAY_IDENTITY_NEGATIVE_REPORT";
 const TEST: &str = "installed_host::tests::gateway_identity::native_no_identity_path_refuses_toolkit_ready_before_input_or_publication";
@@ -50,12 +50,20 @@ struct ObservedHost {
 
 #[async_trait::async_trait]
 impl GatewayHostComposition for ObservedHost {
-    async fn prepare_bootstrap(&self, spec: MobBootstrapSpec) -> Result<MobBootstrapSpec, GatewayHostError> {
+    async fn prepare_bootstrap(
+        &self,
+        spec: MobBootstrapSpec,
+    ) -> Result<MobBootstrapSpec, GatewayHostError> {
         let result = self.inner.prepare_bootstrap(spec).await;
         self.trace.lock().unwrap().prepared = result.is_ok();
         result
     }
-    fn native_grant_work_configuration(&self) -> Result<Option<meerkat_runtime::meerkat_machine::NativeGrantWorkConfiguration>, GatewayHostError> {
+    fn native_grant_work_configuration(
+        &self,
+    ) -> Result<
+        Option<meerkat_runtime::meerkat_machine::NativeGrantWorkConfiguration>,
+        GatewayHostError,
+    > {
         self.inner.native_grant_work_configuration()
     }
     async fn bind_runtime(&self, runtime: &mut UnifiedRuntime) -> Result<(), GatewayHostError> {
@@ -66,11 +74,17 @@ impl GatewayHostComposition for ObservedHost {
         self.trace.lock().unwrap().runtime_bound = result.is_ok();
         result
     }
-    async fn bind_identity_runtime(&self, runtime: &mut UnifiedRuntime) -> Result<(), GatewayHostError> {
+    async fn bind_identity_runtime(
+        &self,
+        runtime: &mut UnifiedRuntime,
+    ) -> Result<(), GatewayHostError> {
         self.trace.lock().unwrap().identity_calls += 1;
         self.inner.bind_identity_runtime(runtime).await
     }
-    fn publish_bootstrap_ready(&self, publication: GatewayBootstrapReady<'_>) -> Result<(), GatewayHostError> {
+    fn publish_bootstrap_ready(
+        &self,
+        publication: GatewayBootstrapReady<'_>,
+    ) -> Result<(), GatewayHostError> {
         let identity_present = self.originals.bound_identity_runtime().is_ok();
         let selection_current = self.owner.validate_current_selection().is_ok();
         let result = self.inner.publish_bootstrap_ready(publication);
@@ -89,11 +103,19 @@ impl GatewayHostComposition for ObservedHost {
         self.trace.lock().unwrap().close_joined = result.is_ok();
         result
     }
-    async fn wait_closed(&self) { self.inner.wait_closed().await; }
-    async fn prepared_application(&self, request: Option<&PreparedApplicationRequest>) -> Result<Option<PreparedGatewayApplication>, GatewayHostError> {
+    async fn wait_closed(&self) {
+        self.inner.wait_closed().await;
+    }
+    async fn prepared_application(
+        &self,
+        request: Option<&PreparedApplicationRequest>,
+    ) -> Result<Option<PreparedGatewayApplication>, GatewayHostError> {
         self.inner.prepared_application(request).await
     }
-    fn compose_member_factory(&self, construction: &GatewayFactoryConstruction<'_>) -> Result<Option<GatewayMcpComposition>, GatewayHostError> {
+    fn compose_member_factory(
+        &self,
+        construction: &GatewayFactoryConstruction<'_>,
+    ) -> Result<Option<GatewayMcpComposition>, GatewayHostError> {
         self.inner.compose_member_factory(construction)
     }
 }
@@ -111,9 +133,12 @@ struct Report {
 async fn run_child(report_path: &Path) {
     let (_directory, mut selection) = fixture();
     provision_fixture(&mut selection);
-    let (owner, installed) = InstalledToolkitHost::open(selection.clone(), NativeOwnerStartup::Restore)
-        .await.unwrap();
-    let directory = state_directory(&selection, &installed.native, NativeOwnerStartup::Restore).unwrap();
+    let (owner, installed) =
+        InstalledToolkitHost::open(selection.clone(), NativeOwnerStartup::Restore)
+            .await
+            .unwrap();
+    let directory =
+        state_directory(&selection, &installed.native, NativeOwnerStartup::Restore).unwrap();
     let grant_bytes = fs::read(directory.join("grants.jsonl")).unwrap();
     let originals = installed.originals.clone();
     let store = installed.store.clone();
@@ -121,8 +146,11 @@ async fn run_child(report_path: &Path) {
     let (_signal, closed) = tokio::sync::watch::channel(false);
     let owner = Arc::new(owner);
     let host = Arc::new(ObservedHost {
-        inner: installed.compose(owner.clone(), PrivateHostClosed(closed)), owner,
-        originals: originals.clone(), trace: Mutex::new(Trace::default()), service: Mutex::new(None),
+        inner: installed.compose(owner.clone(), PrivateHostClosed(closed)),
+        owner,
+        originals: originals.clone(),
+        trace: Mutex::new(Trace::default()),
+        service: Mutex::new(None),
     });
     let result = meerkat_mobkit::rpc_gateway::run_persistent_with_host(None, host.clone()).await;
     // The same actual service and machine remain available for observation.
@@ -136,7 +164,12 @@ async fn run_child(report_path: &Path) {
         (Some(sessions), Ok(machine)) => {
             let mut count = Some(0);
             for session in sessions {
-                count = match (count, machine.meerkat_machine_spine_snapshot(&session.session_id).await) {
+                count = match (
+                    count,
+                    machine
+                        .meerkat_machine_spine_snapshot(&session.session_id)
+                        .await,
+                ) {
                     (Some(count), Some(snapshot)) => Some(count + snapshot.ledger.input_count),
                     _ => None,
                 };
@@ -145,11 +178,20 @@ async fn run_child(report_path: &Path) {
         }
         _ => None,
     };
-    let source_rows = store.list_records(&scope, None, 1).await.ok().map(|rows| rows.len());
+    let source_rows = store
+        .list_records(&scope, None, 1)
+        .await
+        .ok()
+        .map(|rows| rows.len());
     let report = Report {
         trace: std::mem::take(&mut *host.trace.lock().unwrap()),
-        returned_host_unavailable: matches!(result, Err(GatewayRunError::Host(GatewayHostError::Unavailable))),
-        sessions: sessions.as_ref().map(Vec::len), inputs, source_rows,
+        returned_host_unavailable: matches!(
+            result,
+            Err(GatewayRunError::Host(GatewayHostError::Unavailable))
+        ),
+        sessions: sessions.as_ref().map(Vec::len),
+        inputs,
+        source_rows,
         grant_bytes_unchanged: fs::read(directory.join("grants.jsonl")).unwrap() == grant_bytes,
     };
     fs::write(report_path, serde_json::to_vec(&report).unwrap()).unwrap();
@@ -161,16 +203,23 @@ struct ChildGuard {
 }
 impl Drop for ChildGuard {
     fn drop(&mut self) {
-        if !matches!(self.process.try_wait(), Ok(Some(_))) { let _ = self.process.kill(); }
+        if !matches!(self.process.try_wait(), Ok(Some(_))) {
+            let _ = self.process.kill();
+        }
         let _ = self.process.wait();
-        if let Some(reader) = self.reader.take() { let _ = reader.join(); }
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
     }
 }
 
 #[test]
 fn native_no_identity_path_refuses_toolkit_ready_before_input_or_publication() {
     if let Some(path) = std::env::var_os(CHILD_REPORT) {
-        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         runtime.block_on(run_child(Path::new(&path)));
         // The native driver has returned after cleanup. Its stdin helper can
         // remain blocked until EOF, as in the native gateway process entry.
@@ -186,19 +235,27 @@ fn native_no_identity_path_refuses_toolkit_ready_before_input_or_publication() {
         // Keep release stack qualification separate from this debug fixture.
         command.env("RUST_MIN_STACK", "8388608");
     }
-    let mut child = ChildGuard { process: command
-        .args(["--exact", TEST, "--nocapture", "--test-threads=1"])
-        .env(CHILD_REPORT, &report_path)
-        .env("OPENAI_API_KEY", "sk-no-request-identity-fixture")
-        .env("XDG_STATE_HOME", directory.path().join("xdg-state"))
-        .current_dir(directory.path())
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(stderr)
-        .spawn().unwrap(), reader: None };
+    let mut child = ChildGuard {
+        process: command
+            .args(["--exact", TEST, "--nocapture", "--test-threads=1"])
+            .env(CHILD_REPORT, &report_path)
+            .env("OPENAI_API_KEY", "sk-no-request-identity-fixture")
+            .env("XDG_STATE_HOME", directory.path().join("xdg-state"))
+            .current_dir(directory.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(stderr)
+            .spawn()
+            .unwrap(),
+        reader: None,
+    };
     let stdout = child.process.stdout.take().unwrap();
     let (tx, lines) = mpsc::channel();
     let reader = std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines() {
-            if tx.send(line).is_err() { break; }
+            if tx.send(line).is_err() {
+                break;
+            }
         }
     });
     child.reader = Some(reader);
@@ -219,10 +276,15 @@ fn native_no_identity_path_refuses_toolkit_ready_before_input_or_publication() {
     loop {
         match lines.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             Ok(Ok(line)) => {
-                if let Ok(message) = serde_json::from_str::<serde_json::Value>(line.trim()) { messages.push(message); }
+                if let Ok(message) = serde_json::from_str::<serde_json::Value>(line.trim()) {
+                    messages.push(message);
+                }
             }
             Ok(Err(_)) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            Err(mpsc::RecvTimeoutError::Timeout) => { timed_out = true; break; }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                timed_out = true;
+                break;
+            }
         }
     }
     drop(stdin);
@@ -235,22 +297,60 @@ fn native_no_identity_path_refuses_toolkit_ready_before_input_or_publication() {
     }
     let status = child.process.wait().unwrap();
     child.reader.take().unwrap().join().unwrap();
-    assert!(!timed_out, "native gateway did not settle within the test backstop");
-    assert!(status.success(),
+    assert!(
+        !timed_out,
+        "native gateway did not settle within the test backstop"
+    );
+    assert!(
+        status.success(),
         "native gateway fixture failed; no readiness-refusal claim; status: {status:?}; stderr: {:?}; messages: {messages:?}",
-        fs::read_to_string(directory.path().join("stderr.log")));
+        fs::read_to_string(directory.path().join("stderr.log"))
+    );
     let report: Report = serde_json::from_slice(&fs::read(report_path).unwrap()).unwrap();
-    assert!(report.trace.prepared && report.trace.runtime_bound, "{report:?}");
-    assert_eq!(report.trace.identity_calls, 0, "native must skip this hook without identity context");
-    assert_eq!(report.trace.ready_calls, 1, "must reach the actual opaque readiness offer");
+    assert!(
+        report.trace.prepared && report.trace.runtime_bound,
+        "{report:?}"
+    );
+    assert_eq!(
+        report.trace.identity_calls, 0,
+        "native must skip this hook without identity context"
+    );
+    assert_eq!(
+        report.trace.ready_calls, 1,
+        "must reach the actual opaque readiness offer"
+    );
     assert!(!report.trace.identity_at_ready, "{report:?}");
-    assert!(report.trace.selection_current_at_ready, "an unrelated closed/stale owner must not satisfy the refusal oracle");
-    assert!(report.trace.ready_refused_unavailable && report.returned_host_unavailable, "{report:?}");
-    assert!(report.trace.close_joined, "actual Toolkit close must settle");
-    assert_eq!((report.sessions, report.inputs, report.source_rows), (Some(0), Some(0), Some(0)), "{report:?}");
-    assert!(report.grant_bytes_unchanged, "no native grant issuance during this failed init");
-    assert!(!messages.iter().any(|m| m["method"] == "meta/init_settled" && m["params"]["outcome"] == "ready"),
-        "a refused opaque publication cannot emit Ready");
-    assert!(!messages.iter().any(|m| m["id"] == "init" && m["result"]["http_base_url"].is_string()),
-        "a refused opaque publication cannot expose a ready HTTP endpoint");
+    assert!(
+        report.trace.selection_current_at_ready,
+        "an unrelated closed/stale owner must not satisfy the refusal oracle"
+    );
+    assert!(
+        report.trace.ready_refused_unavailable && report.returned_host_unavailable,
+        "{report:?}"
+    );
+    assert!(
+        report.trace.close_joined,
+        "actual Toolkit close must settle"
+    );
+    assert_eq!(
+        (report.sessions, report.inputs, report.source_rows),
+        (Some(0), Some(0), Some(0)),
+        "{report:?}"
+    );
+    assert!(
+        report.grant_bytes_unchanged,
+        "no native grant issuance during this failed init"
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|m| m["method"] == "meta/init_settled" && m["params"]["outcome"] == "ready"),
+        "a refused opaque publication cannot emit Ready"
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|m| m["id"] == "init" && m["result"]["http_base_url"].is_string()),
+        "a refused opaque publication cannot expose a ready HTTP endpoint"
+    );
 }

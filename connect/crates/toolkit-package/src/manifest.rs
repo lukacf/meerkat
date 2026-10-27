@@ -403,10 +403,23 @@ impl ActivationManifest {
         self,
         package: &IntegrationPackage,
     ) -> Result<ValidatedManifest, ValidationError> {
-        let components = self.components.iter().map(ComponentContract::from).collect::<Vec<_>>();
-        let initialization_order = validate_selection_contract(self.schema_version, &self.package,
-            &self.package_content_digest, &self.strategy, &components, &self.exports,
-            &self.required_contracts, &self.host_services, &self.portable_mcp_entries, package)?;
+        let components = self
+            .components
+            .iter()
+            .map(ComponentContract::from)
+            .collect::<Vec<_>>();
+        let initialization_order = validate_selection_contract(
+            self.schema_version,
+            &self.package,
+            &self.package_content_digest,
+            &self.strategy,
+            &components,
+            &self.exports,
+            &self.required_contracts,
+            &self.host_services,
+            &self.portable_mcp_entries,
+            package,
+        )?;
         let digest = ContentDigest::of_bytes(
             &canonical_json(&self)
                 .map_err(|_| ValidationError::new("manifest", "canonical serialization failed"))?,
@@ -435,9 +448,19 @@ pub(crate) struct ComponentContract {
     pub rollback: RollbackContract,
 }
 pub(crate) enum ContractSource {
-    Artifact { location: url::Url, content_digest: ContentDigest, dependencies: ArtifactDependencies, entrypoint: Entrypoint },
-    RemoteService { endpoint: url::Url, transport: RemoteTransport },
-    HostProvided { service: HostServiceRequirement },
+    Artifact {
+        location: url::Url,
+        content_digest: ContentDigest,
+        dependencies: ArtifactDependencies,
+        entrypoint: Entrypoint,
+    },
+    RemoteService {
+        endpoint: url::Url,
+        transport: RemoteTransport,
+    },
+    HostProvided {
+        service: HostServiceRequirement,
+    },
 }
 impl From<&Component> for ComponentContract {
     fn from(value: &Component) -> Self {
@@ -455,10 +478,28 @@ impl From<&Component> for ComponentContract {
             shutdown: value.shutdown.clone(),
             rollback: value.rollback.clone(),
             source: match &value.source {
-                ComponentSource::Artifact { location, content_digest, dependencies, entrypoint } => ContractSource::Artifact {
-                    location: location.clone(), content_digest: content_digest.clone(), dependencies: dependencies.clone(), entrypoint: entrypoint.clone() },
-                ComponentSource::RemoteService { endpoint, transport, .. } => ContractSource::RemoteService { endpoint: endpoint.clone(), transport: transport.clone() },
-                ComponentSource::HostProvided { service } => ContractSource::HostProvided { service: service.clone() },
+                ComponentSource::Artifact {
+                    location,
+                    content_digest,
+                    dependencies,
+                    entrypoint,
+                } => ContractSource::Artifact {
+                    location: location.clone(),
+                    content_digest: content_digest.clone(),
+                    dependencies: dependencies.clone(),
+                    entrypoint: entrypoint.clone(),
+                },
+                ComponentSource::RemoteService {
+                    endpoint,
+                    transport,
+                    ..
+                } => ContractSource::RemoteService {
+                    endpoint: endpoint.clone(),
+                    transport: transport.clone(),
+                },
+                ComponentSource::HostProvided { service } => ContractSource::HostProvided {
+                    service: service.clone(),
+                },
             },
         }
     }
@@ -479,7 +520,14 @@ impl From<&RemoteExportComponent> for ComponentContract {
             shutdown: value.shutdown.clone(),
             rollback: value.rollback.clone(),
             source: match &value.source {
-                RemoteExportSource::RemoteService { endpoint, transport, .. } => ContractSource::RemoteService { endpoint: endpoint.clone(), transport: transport.clone() },
+                RemoteExportSource::RemoteService {
+                    endpoint,
+                    transport,
+                    ..
+                } => ContractSource::RemoteService {
+                    endpoint: endpoint.clone(),
+                    transport: transport.clone(),
+                },
             },
         }
     }
@@ -537,8 +585,13 @@ pub(crate) fn validate_selection_contract(
     portable_mcp_entries: &[PortableMcpEntry],
     package: &IntegrationPackage,
 ) -> Result<Vec<Id>, ValidationError> {
-    let strategy = validate_package_selection(schema_version, selected_package,
-        package_content_digest, selected_strategy, package)?;
+    let strategy = validate_package_selection(
+        schema_version,
+        selected_package,
+        package_content_digest,
+        selected_strategy,
+        package,
+    )?;
     for service in host_services {
         validate_service(service, "host_services")?;
     }
@@ -686,9 +739,9 @@ pub(crate) fn validate_selection_contract(
         })?;
         if component.activation_scope != ActivationScope::Independent
             || !required_contracts.is_empty()
-            || host_services.iter().any(|service| {
-                matches!(service.availability, RequirementAvailability::Required)
-            })
+            || host_services
+                .iter()
+                .any(|service| matches!(service.availability, RequirementAvailability::Required))
             || !component.host_services.is_empty()
             || !component.required_contracts.is_empty()
             || !component.dependencies.is_empty()
@@ -702,18 +755,31 @@ pub(crate) fn validate_selection_contract(
         }
         if portable.operation_tools.is_some() || portable.environment_secret_slots.is_some() {
             let mut exports = selected_exports.iter().filter_map(|export| match export {
-                Export::ServiceConnector(service) if service.components.contains(&component.id) => Some(service),
+                Export::ServiceConnector(service) if service.components.contains(&component.id) => {
+                    Some(service)
+                }
                 _ => None,
             });
-            let service = exports.next().ok_or_else(|| ValidationError::new(
-                "portable_mcp_entries.operation_tools", "raw names require a service export"))?;
+            let service = exports.next().ok_or_else(|| {
+                ValidationError::new(
+                    "portable_mcp_entries.operation_tools",
+                    "raw names require a service export",
+                )
+            })?;
             if exports.next().is_some() {
-                return Err(ValidationError::new("portable_mcp_entries.operation_tools",
-                    "raw names must map every operation of one service export exactly once"));
+                return Err(ValidationError::new(
+                    "portable_mcp_entries.operation_tools",
+                    "raw names must map every operation of one service export exactly once",
+                ));
             }
-            if let Some(names) = &portable.operation_tools { validate_operation_names(names, &service.operations)?; }
-            validate_environment_secret_scope(portable, &service.authentication,
-                matches!(component.source, ContractSource::Artifact { .. }))?;
+            if let Some(names) = &portable.operation_tools {
+                validate_operation_names(names, &service.operations)?;
+            }
+            validate_environment_secret_scope(
+                portable,
+                &service.authentication,
+                matches!(component.source, ContractSource::Artifact { .. }),
+            )?;
         }
         if matches!(&component.source, ContractSource::RemoteService { transport, .. } if *transport != RemoteTransport::McpStreamableHttp)
         {
@@ -727,27 +793,48 @@ pub(crate) fn validate_selection_contract(
 }
 
 pub(crate) fn validate_export_role(
-    package: &IntegrationPackage, id: &Id, role: ExportRole,
+    package: &IntegrationPackage,
+    id: &Id,
+    role: ExportRole,
 ) -> Result<(), ValidationError> {
-    if package.known_exports.iter().any(|hint| hint.id == *id && hint.role != role) {
-        return Err(ValidationError::new(format!("export:{id}"),
-            "selected role contradicts the pinned export declaration"));
+    if package
+        .known_exports
+        .iter()
+        .any(|hint| hint.id == *id && hint.role != role)
+    {
+        return Err(ValidationError::new(
+            format!("export:{id}"),
+            "selected role contradicts the pinned export declaration",
+        ));
     }
     Ok(())
 }
 
 pub(crate) fn validate_operation_names(
-    names: &BTreeMap<Id, String>, operations: &[OperationDeclaration],
+    names: &BTreeMap<Id, String>,
+    operations: &[OperationDeclaration],
 ) -> Result<(), ValidationError> {
-    let expected = operations.iter().map(|operation| &operation.id).collect::<BTreeSet<_>>();
+    let expected = operations
+        .iter()
+        .map(|operation| &operation.id)
+        .collect::<BTreeSet<_>>();
     let raw = names.values().collect::<BTreeSet<_>>();
-    if names.is_empty() || names.len() > 128
-        || names.keys().collect::<BTreeSet<_>>() != expected || raw.len() != names.len()
-        || names.values().any(|name| name.is_empty() || name.len() > 128
-            || !name.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte)))
+    if names.is_empty()
+        || names.len() > 128
+        || names.keys().collect::<BTreeSet<_>>() != expected
+        || raw.len() != names.len()
+        || names.values().any(|name| {
+            name.is_empty()
+                || name.len() > 128
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
+        })
     {
-        return Err(ValidationError::new("portable_mcp_entries.operation_tools",
-            "raw names must map every operation of one service export exactly once"));
+        return Err(ValidationError::new(
+            "portable_mcp_entries.operation_tools",
+            "raw names must map every operation of one service export exactly once",
+        ));
     }
     Ok(())
 }
@@ -777,7 +864,11 @@ fn visit(
     Ok(())
 }
 
-fn collect_closure(id: &Id, components: &BTreeMap<Id, &ComponentContract>, reached: &mut BTreeSet<Id>) {
+fn collect_closure(
+    id: &Id,
+    components: &BTreeMap<Id, &ComponentContract>,
+    reached: &mut BTreeSet<Id>,
+) {
     if reached.insert(id.clone()) {
         for dependency in &components[id].dependencies {
             collect_closure(&dependency.component, components, reached);
@@ -805,10 +896,7 @@ pub(crate) fn validate_artifact_source(
     } else {
         validate_url(location, path, true)?;
     }
-    if matches!(
-        *runtime,
-        RuntimeKind::Remote | RuntimeKind::HostProvided
-    ) {
+    if matches!(*runtime, RuntimeKind::Remote | RuntimeKind::HostProvided) {
         return Err(ValidationError::new(
             path,
             "artifact source requires an executable runtime",
@@ -887,8 +975,14 @@ fn validate_component(component: &ComponentContract) -> Result<(), ValidationErr
             dependencies,
             entrypoint,
         } => {
-            validate_artifact_source(location, content_digest, dependencies, entrypoint,
-                &component.runtime, &path)?;
+            validate_artifact_source(
+                location,
+                content_digest,
+                dependencies,
+                entrypoint,
+                &component.runtime,
+                &path,
+            )?;
         }
         ContractSource::RemoteService { endpoint, .. } => {
             validate_url(endpoint, &path, false)?;
@@ -934,15 +1028,15 @@ fn validate_component(component: &ComponentContract) -> Result<(), ValidationErr
 }
 
 pub(crate) fn validate_operations(
-    operations: &[OperationDeclaration], path: &str,
+    operations: &[OperationDeclaration],
+    path: &str,
 ) -> Result<(), ValidationError> {
     let mut ids = BTreeSet::new();
     for operation in operations {
         if !ids.insert(&operation.id) {
             return Err(ValidationError::new(path, "duplicate operation identity"));
         }
-        if operation.result_limits.maximum_bytes == 0
-            || operation.result_limits.maximum_items == 0
+        if operation.result_limits.maximum_bytes == 0 || operation.result_limits.maximum_items == 0
         {
             return Err(ValidationError::new(
                 path,
@@ -1071,12 +1165,20 @@ pub(crate) fn validate_url(
 
 /// Secret names describe local process requirements, not native account identity.
 /// Ecosystem-specific installer support remains with the selected installer.
-pub(crate) fn validate_environment_secret_scope(portable: &PortableMcpEntry,
-    authentication: &AuthenticationRequirement, local_artifact: bool) -> Result<(), ValidationError> {
-    if portable.environment_secret_slots.is_some() && (!local_artifact || portable.operation_tools.is_none()
-        || !matches!(authentication, AuthenticationRequirement::Binding { .. })) {
-        return Err(ValidationError::new("portable_mcp_entries.environment_secret_slots",
-            "secret environment names require a local artifact service, binding authentication and explicit raw operations"));
+pub(crate) fn validate_environment_secret_scope(
+    portable: &PortableMcpEntry,
+    authentication: &AuthenticationRequirement,
+    local_artifact: bool,
+) -> Result<(), ValidationError> {
+    if portable.environment_secret_slots.is_some()
+        && (!local_artifact
+            || portable.operation_tools.is_none()
+            || !matches!(authentication, AuthenticationRequirement::Binding { .. }))
+    {
+        return Err(ValidationError::new(
+            "portable_mcp_entries.environment_secret_slots",
+            "secret environment names require a local artifact service, binding authentication and explicit raw operations",
+        ));
     }
     Ok(())
 }

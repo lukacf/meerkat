@@ -3,37 +3,60 @@
 //! persisted conversation reopen use their existing production owners.
 
 use super::*;
-use crate::forge::{ForgePresenter, FORGE_SELECT_HOST, FORGE_INSPECT,
-    FORGE_PREPARE, FORGE_SUBMIT, FORGE_STATUS, present_forge_selection};
+use crate::forge::{
+    FORGE_INSPECT, FORGE_PREPARE, FORGE_SELECT_HOST, FORGE_STATUS, FORGE_SUBMIT, ForgePresenter,
+    present_forge_selection,
+};
 use crate::session::FinalizationClose;
-use meerkat_core::{AgentToolDispatcher, ToolCallView, ToolDispatchContext};
+use axum::{
+    Router,
+    body::Bytes,
+    extract::State,
+    http::{HeaderMap, Method, StatusCode, Uri},
+    response::IntoResponse,
+};
 use meerkat_core::service::{SessionHistoryQuery, SessionServiceHistoryExt};
+use meerkat_core::{AgentToolDispatcher, ToolCallView, ToolDispatchContext};
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, os::{fd::OwnedFd, unix::fs::PermissionsExt},
-    sync::Mutex, time::{Duration, SystemTime, UNIX_EPOCH}};
-use axum::{Router, body::Bytes, extract::State,
-    http::{HeaderMap, Method, StatusCode, Uri}, response::IntoResponse};
+use std::{
+    collections::BTreeMap,
+    os::{fd::OwnedFd, unix::fs::PermissionsExt},
+    sync::Mutex,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 const COOKIE: &str = "mobkit_console_0123456789abcdef";
 const NONCE: &str = "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn";
 const LOGIN: &str = "sssssssssssssssssssssssssssssssssssssssssss";
 const PASSWORD: &str = "composition fixture password";
 const CHANGE: &str = "composition-change";
-const SUBMITTED: &str = r#"{"application_result":{"state":"configured","extension":[true,null]},"status":"unknown"}"#;
-const OBSERVED: &str = r#"{"application_result":{"state":"still-unobserved","extension":{"v":7}},"status":"unknown"}"#;
+const SUBMITTED: &str =
+    r#"{"application_result":{"state":"configured","extension":[true,null]},"status":"unknown"}"#;
+const OBSERVED: &str =
+    r#"{"application_result":{"state":"still-unobserved","extension":{"v":7}},"status":"unknown"}"#;
 
 fn system_rows(messages: &[meerkat_core::Message]) -> Vec<(usize, String)> {
-    messages.iter().enumerate().filter_map(|(index, message)| match message {
-        meerkat_core::Message::System(message) => Some((index, message.content.clone())),
-        _ => None,
-    }).collect()
+    messages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| match message {
+            meerkat_core::Message::System(message) => Some((index, message.content.clone())),
+            _ => None,
+        })
+        .collect()
 }
 
-fn host() -> Value { json!({"protocol":1,"host_id":format!("forge:{}","a".repeat(64)),
-    "application_id":"composition-fixture","source_digest":"b".repeat(64)}) }
-fn declaration() -> Value { json!({"protocol":1,"host":host(),"private_fields":["PRIVATE_TOKEN"]}) }
-fn proposal() -> Value { json!({"change_id":CHANGE,"configuration":{"mode":"fixture"},
-    "expected_revision":"opaque-v1","owner_extension":{"review":"exact-proposal"}}) }
+fn host() -> Value {
+    json!({"protocol":1,"host_id":format!("forge:{}","a".repeat(64)),
+    "application_id":"composition-fixture","source_digest":"b".repeat(64)})
+}
+fn declaration() -> Value {
+    json!({"protocol":1,"host":host(),"private_fields":["PRIVATE_TOKEN"]})
+}
+fn proposal() -> Value {
+    json!({"change_id":CHANGE,"configuration":{"mode":"fixture"},
+    "expected_revision":"opaque-v1","owner_extension":{"review":"exact-proposal"}})
+}
 
 #[derive(Clone)]
 struct HttpState {
@@ -41,67 +64,138 @@ struct HttpState {
     // Fixture-only HTTP observations, never a second application status owner.
     calls: Arc<Mutex<Vec<(String, String, Value)>>>,
 }
-struct Server { state: HttpState, stop: oneshot::Sender<()>, task: tokio::task::JoinHandle<()> }
+struct Server {
+    state: HttpState,
+    stop: oneshot::Sender<()>,
+    task: tokio::task::JoinHandle<()>,
+}
 impl Server {
     async fn open() -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let state = HttpState { origin:format!("http://{}",listener.local_addr().unwrap()),
-            calls:Default::default() };
+        let state = HttpState {
+            origin: format!("http://{}", listener.local_addr().unwrap()),
+            calls: Default::default(),
+        };
         let app = Router::new().fallback(http).with_state(state.clone());
         let (stop, stopped) = oneshot::channel();
         let task = tokio::spawn(async move {
-            axum::serve(listener,app).with_graceful_shutdown(async {let _=stopped.await;}).await.unwrap();
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = stopped.await;
+                })
+                .await
+                .unwrap();
         });
-        Self {state,stop,task}
+        Self { state, stop, task }
     }
-    async fn finish(self) -> Result<Vec<(String,String,Value)>,ConnectError> {
-        let Self {state,stop,mut task}=self;
-        let _=stop.send(());
-        let observed=tokio::time::timeout(Duration::from_secs(5), &mut task).await;
+    async fn finish(self) -> Result<Vec<(String, String, Value)>, ConnectError> {
+        let Self {
+            state,
+            stop,
+            mut task,
+        } = self;
+        let _ = stop.send(());
+        let observed = tokio::time::timeout(Duration::from_secs(5), &mut task).await;
         match observed {
-            Ok(result)=>result.map_err(|e|ConnectError::native("Join fixture server",e))?,
-            Err(error)=>{
+            Ok(result) => result.map_err(|e| ConnectError::native("Join fixture server", e))?,
+            Err(error) => {
                 // An observation timeout does not release request workers.
                 // Join this same graceful owner before reporting the timeout.
-                let joined=task.await.map_err(|e|ConnectError::native("Join fixture server after timeout",e));
-                return combine(Err(ConnectError::native("Observe fixture server shutdown",error)),joined);
+                let joined = task
+                    .await
+                    .map_err(|e| ConnectError::native("Join fixture server after timeout", e));
+                return combine(
+                    Err(ConnectError::native(
+                        "Observe fixture server shutdown",
+                        error,
+                    )),
+                    joined,
+                );
             }
         }
-        let calls=state.calls.lock().unwrap().clone();
+        let calls = state.calls.lock().unwrap().clone();
         Ok(calls)
     }
 }
-async fn http(State(state):State<HttpState>, method:Method, uri:Uri, headers:HeaderMap, body:Bytes)
-    -> axum::response::Response
-{
-    let path=uri.path();
-    let parsed=serde_json::from_slice(&body).unwrap_or(Value::Null);
-    state.calls.lock().unwrap().push((method.to_string(),path.into(),parsed));
-    if headers.get("host").and_then(|v|v.to_str().ok()) != state.origin.strip_prefix("http://")
-        || uri.query().is_some() {return StatusCode::BAD_REQUEST.into_response();}
-    if method==Method::GET && path=="/login" {
-        let html=format!("<form method=\"post\" action=\"/login\"><input type=\"hidden\" name=\"nonce\" value=\"{NONCE}\"><input type=\"password\" name=\"password\"></form>");
-        let mut response=(StatusCode::OK,[("content-type","text/html"),("cache-control","no-store")],html).into_response();
-        response.headers_mut().insert("set-cookie",format!("{COOKIE}_login={NONCE}; HttpOnly; Max-Age=300; Path=/; SameSite=Strict").parse().unwrap());
+async fn http(
+    State(state): State<HttpState>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    let path = uri.path();
+    let parsed = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    state
+        .calls
+        .lock()
+        .unwrap()
+        .push((method.to_string(), path.into(), parsed));
+    if headers.get("host").and_then(|v| v.to_str().ok()) != state.origin.strip_prefix("http://")
+        || uri.query().is_some()
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    if method == Method::GET && path == "/login" {
+        let html = format!(
+            "<form method=\"post\" action=\"/login\"><input type=\"hidden\" name=\"nonce\" value=\"{NONCE}\"><input type=\"password\" name=\"password\"></form>"
+        );
+        let mut response = (
+            StatusCode::OK,
+            [("content-type", "text/html"), ("cache-control", "no-store")],
+            html,
+        )
+            .into_response();
+        response.headers_mut().insert(
+            "set-cookie",
+            format!("{COOKIE}_login={NONCE}; HttpOnly; Max-Age=300; Path=/; SameSite=Strict")
+                .parse()
+                .unwrap(),
+        );
         return response;
     }
-    if method==Method::POST && path=="/login" {
-        let form=reqwest::Url::parse(&format!("http://127.0.0.1/?{}",String::from_utf8_lossy(&body))).unwrap();
-        let values=form.query_pairs().into_owned().collect::<BTreeMap<_,_>>();
-        if values.get("password").map(String::as_str)!=Some(PASSWORD)
-            || values.get("nonce").map(String::as_str)!=Some(NONCE)
-            || headers.get("cookie").and_then(|v|v.to_str().ok())!=Some(format!("{COOKIE}_login={NONCE}").as_str())
-            || headers.get("origin").and_then(|v|v.to_str().ok())!=Some(state.origin.as_str())
-        {return StatusCode::FORBIDDEN.into_response();}
-        let mut response=(StatusCode::SEE_OTHER,[("location","/console"),("cache-control","no-store")]).into_response();
-        response.headers_mut().append("set-cookie",format!("{COOKIE}={LOGIN}; HttpOnly; Max-Age=28800; Path=/; SameSite=Strict").parse().unwrap());
-        response.headers_mut().append("set-cookie",format!("{COOKIE}_login=\"\"; Max-Age=0; Path=/; SameSite=Lax").parse().unwrap());
+    if method == Method::POST && path == "/login" {
+        let form = reqwest::Url::parse(&format!(
+            "http://127.0.0.1/?{}",
+            String::from_utf8_lossy(&body)
+        ))
+        .unwrap();
+        let values = form.query_pairs().into_owned().collect::<BTreeMap<_, _>>();
+        if values.get("password").map(String::as_str) != Some(PASSWORD)
+            || values.get("nonce").map(String::as_str) != Some(NONCE)
+            || headers.get("cookie").and_then(|v| v.to_str().ok())
+                != Some(format!("{COOKIE}_login={NONCE}").as_str())
+            || headers.get("origin").and_then(|v| v.to_str().ok()) != Some(state.origin.as_str())
+        {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+        let mut response = (
+            StatusCode::SEE_OTHER,
+            [("location", "/console"), ("cache-control", "no-store")],
+        )
+            .into_response();
+        response.headers_mut().append(
+            "set-cookie",
+            format!("{COOKIE}={LOGIN}; HttpOnly; Max-Age=28800; Path=/; SameSite=Strict")
+                .parse()
+                .unwrap(),
+        );
+        response.headers_mut().append(
+            "set-cookie",
+            format!("{COOKIE}_login=\"\"; Max-Age=0; Path=/; SameSite=Lax")
+                .parse()
+                .unwrap(),
+        );
         return response;
     }
-    if headers.get("cookie").and_then(|v|v.to_str().ok())!=Some(format!("{COOKIE}={LOGIN}").as_str()) {
+    if headers.get("cookie").and_then(|v| v.to_str().ok())
+        != Some(format!("{COOKIE}={LOGIN}").as_str())
+    {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    if method==Method::POST && headers.get("origin").and_then(|v|v.to_str().ok())!=Some(state.origin.as_str()) {
+    if method == Method::POST
+        && headers.get("origin").and_then(|v| v.to_str().ok()) != Some(state.origin.as_str())
+    {
         return StatusCode::FORBIDDEN.into_response();
     }
     let envelope=match (method.as_str(),path) {
@@ -113,144 +207,226 @@ async fn http(State(state):State<HttpState>, method:Method, uri:Uri, headers:Hea
         ("GET","/console/forge/frontends/changes/composition-change")=>format!("{{\"protocol\":1,\"host\":{},\"observation\":{OBSERVED}}}",host()),
         _=>return StatusCode::NOT_FOUND.into_response(),
     };
-    (StatusCode::OK,[("content-type","application/json"),("cache-control","no-store")],envelope).into_response()
+    (
+        StatusCode::OK,
+        [
+            ("content-type", "application/json"),
+            ("cache-control", "no-store"),
+        ],
+        envelope,
+    )
+        .into_response()
 }
 
 // The real protected presenter still owns its PTY, including hidden password
 // entry. Answer only each prompt actually rendered, never approval IDs guessed
 // from native state. The second round must render neither origin nor password.
 struct Human {
-    master: OwnedFd, text:String, origin:String,
-    origin_sent:bool, password_sent:bool, approved:BTreeSet<String>,
+    master: OwnedFd,
+    text: String,
+    origin: String,
+    origin_sent: bool,
+    password_sent: bool,
+    approved: BTreeSet<String>,
 }
 impl Write for Human {
-    fn write(&mut self,bytes:&[u8])->io::Result<usize> {self.text.push_str(&String::from_utf8_lossy(bytes));Ok(bytes.len())}
-    fn flush(&mut self)->io::Result<()> {
-        let mut answers=Vec::new();
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.text.push_str(&String::from_utf8_lossy(bytes));
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        let mut answers = Vec::new();
         if !self.origin_sent && self.text.contains("Forge Console origin") {
-            self.origin_sent=true;answers.push(self.origin.clone());
+            self.origin_sent = true;
+            answers.push(self.origin.clone());
         }
         if !self.password_sent && self.text.contains("Forge Console password (hidden)") {
-            self.password_sent=true;answers.push(PASSWORD.into());
+            self.password_sent = true;
+            answers.push(PASSWORD.into());
         }
         for part in self.text.split("Type 'approve ").skip(1) {
-            let Some((id,_))=part.split_once('\'') else {continue};
-            if self.approved.insert(id.into()) {answers.push(format!("approve {id}"));}
+            let Some((id, _)) = part.split_once('\'') else {
+                continue;
+            };
+            if self.approved.insert(id.into()) {
+                answers.push(format!("approve {id}"));
+            }
         }
         for answer in answers {
-            let line=format!("{answer}\n");
-            let written=nix::unistd::write(&self.master,line.as_bytes()).map_err(io::Error::other)?;
-            if written!=line.len() {return Err(io::Error::other("short fixture terminal answer"));}
+            let line = format!("{answer}\n");
+            let written =
+                nix::unistd::write(&self.master, line.as_bytes()).map_err(io::Error::other)?;
+            if written != line.len() {
+                return Err(io::Error::other("short fixture terminal answer"));
+            }
         }
         Ok(())
     }
 }
-fn terminal(origin:&str)->(TerminalInput,Human) {
-    let pair=nix::pty::openpty(None,None).unwrap();
-    (TerminalInput::from_owned_fd(pair.slave),Human {master:pair.master,text:String::new(),origin:origin.into(),
-        origin_sent:false,password_sent:false,approved:BTreeSet::new()})
+fn terminal(origin: &str) -> (TerminalInput, Human) {
+    let pair = nix::pty::openpty(None, None).unwrap();
+    (
+        TerminalInput::from_owned_fd(pair.slave),
+        Human {
+            master: pair.master,
+            text: String::new(),
+            origin: origin.into(),
+            origin_sent: false,
+            password_sent: false,
+            approved: BTreeSet::new(),
+        },
+    )
 }
-fn script(client:&ScriptedProvider,calls:&[(&str,&str,Value)]) {
-    let mut pending=client.1.lock().unwrap();
+fn script(client: &ScriptedProvider, calls: &[(&str, &str, Value)]) {
+    let mut pending = client.1.lock().unwrap();
     assert!(pending.is_empty());
-    pending.extend(calls.iter().map(|(id,name,args)|((*id).into(),(*name).into(),args.clone())));
+    pending.extend(
+        calls
+            .iter()
+            .map(|(id, name, args)| ((*id).into(), (*name).into(), args.clone())),
+    );
 }
-fn result(client:&ScriptedProvider,id:&str)->Result<ObservedToolResult,ConnectError> {
-    client.2.lock().unwrap().get(id).cloned().ok_or_else(||invalid("The actual model did not receive the tool result"))
+fn result(client: &ScriptedProvider, id: &str) -> Result<ObservedToolResult, ConnectError> {
+    client
+        .2
+        .lock()
+        .unwrap()
+        .get(id)
+        .cloned()
+        .ok_or_else(|| invalid("The actual model did not receive the tool result"))
 }
-fn value(result:&ObservedToolResult)->Result<Value,ConnectError> {
-    require(!result.is_error,"Expected a successful actual model tool result")?;
-    serde_json::from_str(&result.text_content()).map_err(|e|ConnectError::native("Read fixture tool result",e))
+fn value(result: &ObservedToolResult) -> Result<Value, ConnectError> {
+    require(
+        !result.is_error,
+        "Expected a successful actual model tool result",
+    )?;
+    serde_json::from_str(&result.text_content())
+        .map_err(|e| ConnectError::native("Read fixture tool result", e))
 }
 
 // Project only closed typed labels from this exact completion. Operator text,
 // provider/model identifiers and nested reason payloads remain undisclosed.
-fn turn_error_labels(error:&meerkat_core::TurnErrorMetadata)->(&'static str,&'static str,&'static str,&'static str,&'static str,&'static str) {
-    use meerkat_core::{TurnTerminalCauseKind as Kind,TurnTerminalOutcome as Outcome,event::AgentErrorReason as Reason};
-    use meerkat_core::error::{LlmProviderErrorKind as ProviderKind,LlmProviderErrorRetryability as Retryability};
-    let kind=match error.kind {
-        Kind::Unknown=>"Unknown",
-        Kind::HookDenied=>"HookDenied",
-        Kind::HookFailure=>"HookFailure",
-        Kind::LlmFailure=>"LlmFailure",
-        Kind::ToolFailure=>"ToolFailure",
-        Kind::StructuredOutputValidationFailed=>"StructuredOutputValidationFailed",
-        Kind::BudgetExhausted=>"BudgetExhausted",
-        Kind::TimeBudgetExceeded=>"TimeBudgetExceeded",
-        Kind::RetryExhausted=>"RetryExhausted",
-        Kind::TurnLimitReached=>"TurnLimitReached",
-        Kind::RuntimeApplyFailure=>"RuntimeApplyFailure",
-        Kind::FatalFailure=>"FatalFailure",
+fn turn_error_labels(
+    error: &meerkat_core::TurnErrorMetadata,
+) -> (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+) {
+    use meerkat_core::error::{
+        LlmProviderErrorKind as ProviderKind, LlmProviderErrorRetryability as Retryability,
     };
-    let outcome=match error.outcome {
-        None=>"Absent",
-        Some(Outcome::None)=>"None",
-        Some(Outcome::Completed)=>"Completed",
-        Some(Outcome::Failed)=>"Failed",
-        Some(Outcome::Cancelled)=>"Cancelled",
-        Some(Outcome::BudgetExhausted)=>"BudgetExhausted",
-        Some(Outcome::TimeBudgetExceeded)=>"TimeBudgetExceeded",
-        Some(Outcome::StructuredOutputValidationFailed)=>"StructuredOutputValidationFailed",
+    use meerkat_core::{
+        TurnTerminalCauseKind as Kind, TurnTerminalOutcome as Outcome,
+        event::AgentErrorReason as Reason,
     };
-    let reason=match error.reason.as_ref() {
-        None=>"Absent",
-        Some(Reason::LlmRateLimited {..})=>"LlmRateLimited",
-        Some(Reason::LlmContextExceeded {..})=>"LlmContextExceeded",
-        Some(Reason::LlmAuthError)=>"LlmAuthError",
-        Some(Reason::ContentFiltered {..})=>"ContentFiltered",
-        Some(Reason::LlmInvalidModel {..})=>"LlmInvalidModel",
-        Some(Reason::LlmProviderError {..})=>"LlmProviderError",
-        Some(Reason::LlmNetworkTimeout {..})=>"LlmNetworkTimeout",
-        Some(Reason::LlmCallTimeout {..})=>"LlmCallTimeout",
-        Some(Reason::HookDenied {..})=>"HookDenied",
-        Some(Reason::HookTimeout {..})=>"HookTimeout",
-        Some(Reason::HookExecutionFailed {..})=>"HookExecutionFailed",
-        Some(Reason::HookConfigInvalid {..})=>"HookConfigInvalid",
-        Some(Reason::StructuredOutputValidationFailed {..})=>"StructuredOutputValidationFailed",
-        Some(Reason::InvalidOutputSchema {..})=>"InvalidOutputSchema",
-        Some(Reason::AuthReauthRequired {..})=>"AuthReauthRequired",
-        Some(Reason::CallbackPending {..})=>"CallbackPending",
-        Some(Reason::TurnTerminalCause {..})=>"TurnTerminalCause",
-        Some(Reason::ModelFallbackResumeHeld {..})=>"ModelFallbackResumeHeld",
-        Some(Reason::HookLaunchRefused {..})=>"HookLaunchRefused",
+    let kind = match error.kind {
+        Kind::Unknown => "Unknown",
+        Kind::HookDenied => "HookDenied",
+        Kind::HookFailure => "HookFailure",
+        Kind::LlmFailure => "LlmFailure",
+        Kind::ToolFailure => "ToolFailure",
+        Kind::StructuredOutputValidationFailed => "StructuredOutputValidationFailed",
+        Kind::BudgetExhausted => "BudgetExhausted",
+        Kind::TimeBudgetExceeded => "TimeBudgetExceeded",
+        Kind::RetryExhausted => "RetryExhausted",
+        Kind::TurnLimitReached => "TurnLimitReached",
+        Kind::RuntimeApplyFailure => "RuntimeApplyFailure",
+        Kind::FatalFailure => "FatalFailure",
     };
-    let (provider_kind,provider_retryability)=match error.reason.as_ref() {
-        Some(Reason::LlmProviderError {provider_error_kind,provider_error_retryability,..})=>{
-            let kind=match provider_error_kind {
-                ProviderKind::InvalidRequest=>"InvalidRequest",
-                ProviderKind::OperationRefused=>"OperationRefused",
-                ProviderKind::OperationObservationUnavailable=>"OperationObservationUnavailable",
-                ProviderKind::OperationAuthorizationUnavailable=>"OperationAuthorizationUnavailable",
-                ProviderKind::AuthorizationRouteChanged=>"AuthorizationRouteChanged",
-                ProviderKind::RequestTooLarge=>"RequestTooLarge",
-                ProviderKind::QuotaExhausted=>"QuotaExhausted",
-                ProviderKind::ContentFiltered=>"ContentFiltered",
-                ProviderKind::PolicyStop=>"PolicyStop",
-                ProviderKind::ServerError=>"ServerError",
-                ProviderKind::ServerOverloaded=>"ServerOverloaded",
-                ProviderKind::ConnectionReset=>"ConnectionReset",
-                ProviderKind::Unknown=>"Unknown",
-                ProviderKind::StreamParseError=>"StreamParseError",
-                ProviderKind::IncompleteResponse=>"IncompleteResponse",
+    let outcome = match error.outcome {
+        None => "Absent",
+        Some(Outcome::None) => "None",
+        Some(Outcome::Completed) => "Completed",
+        Some(Outcome::Failed) => "Failed",
+        Some(Outcome::Cancelled) => "Cancelled",
+        Some(Outcome::BudgetExhausted) => "BudgetExhausted",
+        Some(Outcome::TimeBudgetExceeded) => "TimeBudgetExceeded",
+        Some(Outcome::StructuredOutputValidationFailed) => "StructuredOutputValidationFailed",
+    };
+    let reason = match error.reason.as_ref() {
+        None => "Absent",
+        Some(Reason::LlmRateLimited { .. }) => "LlmRateLimited",
+        Some(Reason::LlmContextExceeded { .. }) => "LlmContextExceeded",
+        Some(Reason::LlmAuthError) => "LlmAuthError",
+        Some(Reason::ContentFiltered { .. }) => "ContentFiltered",
+        Some(Reason::LlmInvalidModel { .. }) => "LlmInvalidModel",
+        Some(Reason::LlmProviderError { .. }) => "LlmProviderError",
+        Some(Reason::LlmNetworkTimeout { .. }) => "LlmNetworkTimeout",
+        Some(Reason::LlmCallTimeout { .. }) => "LlmCallTimeout",
+        Some(Reason::HookDenied { .. }) => "HookDenied",
+        Some(Reason::HookTimeout { .. }) => "HookTimeout",
+        Some(Reason::HookExecutionFailed { .. }) => "HookExecutionFailed",
+        Some(Reason::HookConfigInvalid { .. }) => "HookConfigInvalid",
+        Some(Reason::StructuredOutputValidationFailed { .. }) => "StructuredOutputValidationFailed",
+        Some(Reason::InvalidOutputSchema { .. }) => "InvalidOutputSchema",
+        Some(Reason::AuthReauthRequired { .. }) => "AuthReauthRequired",
+        Some(Reason::CallbackPending { .. }) => "CallbackPending",
+        Some(Reason::TurnTerminalCause { .. }) => "TurnTerminalCause",
+        Some(Reason::ModelFallbackResumeHeld { .. }) => "ModelFallbackResumeHeld",
+        Some(Reason::HookLaunchRefused { .. }) => "HookLaunchRefused",
+    };
+    let (provider_kind, provider_retryability) = match error.reason.as_ref() {
+        Some(Reason::LlmProviderError {
+            provider_error_kind,
+            provider_error_retryability,
+            ..
+        }) => {
+            let kind = match provider_error_kind {
+                ProviderKind::InvalidRequest => "InvalidRequest",
+                ProviderKind::OperationRefused => "OperationRefused",
+                ProviderKind::OperationObservationUnavailable => "OperationObservationUnavailable",
+                ProviderKind::OperationAuthorizationUnavailable => {
+                    "OperationAuthorizationUnavailable"
+                }
+                ProviderKind::AuthorizationRouteChanged => "AuthorizationRouteChanged",
+                ProviderKind::RequestTooLarge => "RequestTooLarge",
+                ProviderKind::QuotaExhausted => "QuotaExhausted",
+                ProviderKind::ContentFiltered => "ContentFiltered",
+                ProviderKind::PolicyStop => "PolicyStop",
+                ProviderKind::ServerError => "ServerError",
+                ProviderKind::ServerOverloaded => "ServerOverloaded",
+                ProviderKind::ConnectionReset => "ConnectionReset",
+                ProviderKind::Unknown => "Unknown",
+                ProviderKind::StreamParseError => "StreamParseError",
+                ProviderKind::IncompleteResponse => "IncompleteResponse",
             };
-            let retryability=match provider_error_retryability {
-                Retryability::Retryable=>"Retryable",
-                Retryability::NonRetryable=>"NonRetryable",
+            let retryability = match provider_error_retryability {
+                Retryability::Retryable => "Retryable",
+                Retryability::NonRetryable => "NonRetryable",
             };
-            (kind,retryability)
-        },
-        _=>("Absent","Absent"),
+            (kind, retryability)
+        }
+        _ => ("Absent", "Absent"),
     };
-    (kind,if error.terminal {"true"} else {"false"},outcome,reason,provider_kind,provider_retryability)
+    (
+        kind,
+        if error.terminal { "true" } else { "false" },
+        outcome,
+        reason,
+        provider_kind,
+        provider_retryability,
+    )
 }
 
-async fn drive(phase:&'static str, session:&ConnectSession, admission:&AcceptOutcome, completion:CompletionHandle,
-    approvals:&LocalApprovals, approval_presenter:&mut ApprovalPresenter,
-    forge:&mut ForgePresenter, input:&mut TerminalInput, output:&mut Human,
-) -> Result<String,ConnectError> {
-    let deadline=tokio::time::Instant::now()+Duration::from_secs(30);
-    let wait=completion.try_wait_with_terminal_outcome();tokio::pin!(wait);
-    let mut completion_observed=false;
+async fn drive(
+    phase: &'static str,
+    session: &ConnectSession,
+    admission: &AcceptOutcome,
+    completion: CompletionHandle,
+    approvals: &LocalApprovals,
+    approval_presenter: &mut ApprovalPresenter,
+    forge: &mut ForgePresenter,
+    input: &mut TerminalInput,
+    output: &mut Human,
+) -> Result<String, ConnectError> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let wait = completion.try_wait_with_terminal_outcome();
+    tokio::pin!(wait);
+    let mut completion_observed = false;
     let observed=async {
         loop {
             tokio::select! {biased;
@@ -319,11 +495,16 @@ async fn drive(phase:&'static str, session:&ConnectSession, admission:&AcceptOut
     if observed.is_err() && !completion_observed {
         // The same completion remains borrowed until native cancellation has
         // settled. No replacement input or retry is submitted during cleanup.
-        let cancelled=session.cancel(admission).await.map(|_|());
-        let settled=wait.as_mut().await
-            .map_err(|e|ConnectError::native("Join actual input after fixture failure",e)).map(|_|());
-        combine(observed,combine(cancelled,settled))
-    } else {observed}
+        let cancelled = session.cancel(admission).await.map(|_| ());
+        let settled = wait
+            .as_mut()
+            .await
+            .map_err(|e| ConnectError::native("Join actual input after fixture failure", e))
+            .map(|_| ());
+        combine(observed, combine(cancelled, settled))
+    } else {
+        observed
+    }
 }
 
 #[tokio::test]
@@ -332,15 +513,19 @@ async fn generic_submit_survives_native_service_finalization_in_same_conversatio
     for secret in [NONCE, LOGIN, PASSWORD] {
         assert!(!host().to_string().contains(secret));
     }
-    let server=Server::open().await;
-    let (front,presenter)=crate::main_connector::standalone_forge(None).unwrap();
-    let mut owner:Option<Opened>=None;
-    let mut failed_closed:Option<crate::session::ClosedSetup>=None;
-    let mut retained_directory:Option<tempfile::TempDir>=None;
-    let mut retained_model_peer:Option<ModelPeer>=None;
+    let server = Server::open().await;
+    let (front, presenter) = crate::main_connector::standalone_forge(None).unwrap();
+    let mut owner: Option<Opened> = None;
+    let mut failed_closed: Option<crate::session::ClosedSetup> = None;
+    let mut retained_directory: Option<tempfile::TempDir> = None;
+    let mut retained_model_peer: Option<ModelPeer> = None;
     // Retain the current native owner outside the caught assertion schedule.
     // The continuation below replaces it only after exact close and cleanup.
-    let mut resumed_owner:Option<(ConnectSession,Arc<NativeSetup>,crate::terminal_connector::TerminalConnectors)>=None;
+    let mut resumed_owner: Option<(
+        ConnectSession,
+        Arc<NativeSetup>,
+        crate::terminal_connector::TerminalConnectors,
+    )> = None;
     let checked=std::panic::AssertUnwindSafe(async {
         owner=Some(Opened::open_with_forge(Some((front.clone(),presenter))).await?);
         let fixture=owner.as_mut().unwrap();
@@ -545,38 +730,90 @@ async fn generic_submit_survives_native_service_finalization_in_same_conversatio
     // A failed finalization may retain a separate native cleanup owner. Keep
     // its peer alive through both ordinary and retained cleanup below.
     if retained_model_peer.is_none() {
-        retained_model_peer=owner.as_mut().and_then(|owner|owner.model_peer.take());
+        retained_model_peer = owner.as_mut().and_then(|owner| owner.model_peer.take());
     }
-    let first_cleanup=match owner.as_mut() {Some(owner)=>owner.finish().await,None=>Ok(())};
-    let next_cleanup=match resumed_owner.take() {
-        Some((session,setup,mut connectors))=>{let result=session.close().await;setup.retire();combine(result,connectors.retire())},None=>Ok(())};
-    let failed_cleanup=match failed_closed.take() {
-        Some(closed)=>match closed.finish_host_cleanup().await {
-            Ok(())=>Ok(()),Err((held,error))=>{failed_closed=Some(held);Err(error)}
-        },None=>Ok(())};
-    let mut calls=None;
-    let server_cleanup=match server.finish().await {Ok(observed)=>{calls=Some(observed);Ok(())},Err(error)=>Err(error)};
-    let peer_cleanup=match retained_model_peer.take() {
-        Some(peer)=>peer.finish().await.map_err(|e|ConnectError::native("Join continued native model fixture peer",e)),
-        None=>Ok(()),
+    let first_cleanup = match owner.as_mut() {
+        Some(owner) => owner.finish().await,
+        None => Ok(()),
     };
-    let cleanup=combine(first_cleanup,combine(next_cleanup,combine(failed_cleanup,combine(server_cleanup,peer_cleanup))));
+    let next_cleanup = match resumed_owner.take() {
+        Some((session, setup, mut connectors)) => {
+            let result = session.close().await;
+            setup.retire();
+            combine(result, connectors.retire())
+        }
+        None => Ok(()),
+    };
+    let failed_cleanup = match failed_closed.take() {
+        Some(closed) => match closed.finish_host_cleanup().await {
+            Ok(()) => Ok(()),
+            Err((held, error)) => {
+                failed_closed = Some(held);
+                Err(error)
+            }
+        },
+        None => Ok(()),
+    };
+    let mut calls = None;
+    let server_cleanup = match server.finish().await {
+        Ok(observed) => {
+            calls = Some(observed);
+            Ok(())
+        }
+        Err(error) => Err(error),
+    };
+    let peer_cleanup = match retained_model_peer.take() {
+        Some(peer) => peer
+            .finish()
+            .await
+            .map_err(|e| ConnectError::native("Join continued native model fixture peer", e)),
+        None => Ok(()),
+    };
+    let cleanup = combine(
+        first_cleanup,
+        combine(
+            next_cleanup,
+            combine(failed_cleanup, combine(server_cleanup, peer_cleanup)),
+        ),
+    );
     drop(retained_directory);
     match checked {
-        Ok(result)=>combine(result,cleanup).expect("the real composed finalization and continuation, including retained cleanup"),
-        Err(panic)=>{
-            if let Err(cleanup)=cleanup {eprintln!("Fixture cleanup also failed: {cleanup:?}; preserving the original panic.");}
+        Ok(result) => combine(result, cleanup)
+            .expect("the real composed finalization and continuation, including retained cleanup"),
+        Err(panic) => {
+            if let Err(cleanup) = cleanup {
+                eprintln!(
+                    "Fixture cleanup also failed: {cleanup:?}; preserving the original panic."
+                );
+            }
             std::panic::resume_unwind(panic)
         }
     }
-    let calls=calls.expect("successful graceful server join retained its observations");
-    let matching=|verb:&str,path:&str|calls.iter().filter(|(v,p,_)|v==verb&&p==path).collect::<Vec<_>>();
-    assert_eq!(matching("POST","/login").len(),1);
-    assert!(matching("GET","/console/forge/frontends/descriptor").len()>=2);
-    assert_eq!(matching("POST","/console/forge/frontends/prepare").len(),1);
-    let submits=matching("POST","/console/forge/frontends/submit");assert_eq!(submits.len(),1);
-    assert_eq!(submits[0].2["proposal"],proposal());assert_eq!(submits[0].2["approval"]["approved"],true);
-    assert_eq!(submits[0].2["approval"]["proof"],"c".repeat(64));
-    assert_eq!(matching("GET","/console/forge/frontends/changes/composition-change").len(),1);
-    assert!(!calls.iter().any(|(_,path,_)|path.contains("foreign-change")));
+    let calls = calls.expect("successful graceful server join retained its observations");
+    let matching = |verb: &str, path: &str| {
+        calls
+            .iter()
+            .filter(|(v, p, _)| v == verb && p == path)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(matching("POST", "/login").len(), 1);
+    assert!(matching("GET", "/console/forge/frontends/descriptor").len() >= 2);
+    assert_eq!(
+        matching("POST", "/console/forge/frontends/prepare").len(),
+        1
+    );
+    let submits = matching("POST", "/console/forge/frontends/submit");
+    assert_eq!(submits.len(), 1);
+    assert_eq!(submits[0].2["proposal"], proposal());
+    assert_eq!(submits[0].2["approval"]["approved"], true);
+    assert_eq!(submits[0].2["approval"]["proof"], "c".repeat(64));
+    assert_eq!(
+        matching("GET", "/console/forge/frontends/changes/composition-change").len(),
+        1
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|(_, path, _)| path.contains("foreign-change"))
+    );
 }

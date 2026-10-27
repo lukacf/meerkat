@@ -3,8 +3,8 @@
 //! Format source: https://agent-plugins.org/specification (checked 2026-09-29).
 
 use crate::{
-    ContentDigest, IntegrationPackage, PackageIdentity, PortableMcpEntry, RemoteTransport, ValidatedManifest,
-    ValidationError, strict_mcpb_json,
+    ContentDigest, IntegrationPackage, PackageIdentity, PortableMcpEntry, RemoteTransport,
+    ValidatedManifest, ValidationError, strict_mcpb_json,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -495,9 +495,19 @@ impl PortablePluginExport {
             }
             (Some(package), Some(selection)) => {
                 let selected = selection.manifest();
-                let components = selected.components.iter().map(crate::manifest::ComponentContract::from).collect::<Vec<_>>();
-                check_selected_entries(&package, servers, &selected.package,
-                    &selected.package_content_digest, &components, &selected.portable_mcp_entries)?;
+                let components = selected
+                    .components
+                    .iter()
+                    .map(crate::manifest::ComponentContract::from)
+                    .collect::<Vec<_>>();
+                check_selected_entries(
+                    &package,
+                    servers,
+                    &selected.package,
+                    &selected.package_content_digest,
+                    &components,
+                    &selected.portable_mcp_entries,
+                )?;
             }
         }
         Ok(export)
@@ -509,13 +519,31 @@ impl PortablePluginExport {
         validated: &crate::remote_export::ValidatedRemoteExportDeclaration,
     ) -> Result<Self, PortableExportError> {
         let export = Self::encode(manifest, servers)?;
-        let package = ImportedPluginManifest { manifest: manifest.clone(), diagnostics: Vec::new() }
-            .toolkit_package()?.ok_or_else(|| unsupported(None,
-                UnsupportedPortableExport::SelectionWithoutToolkitPackage))?;
+        let package = ImportedPluginManifest {
+            manifest: manifest.clone(),
+            diagnostics: Vec::new(),
+        }
+        .toolkit_package()?
+        .ok_or_else(|| {
+            unsupported(
+                None,
+                UnsupportedPortableExport::SelectionWithoutToolkitPackage,
+            )
+        })?;
         let selected = validated.declaration();
-        let components = selected.components.iter().map(crate::manifest::ComponentContract::from).collect::<Vec<_>>();
-        check_selected_entries(&package, servers, &selected.package,
-            &selected.package_content_digest, &components, &selected.portable_mcp_entries)?;
+        let components = selected
+            .components
+            .iter()
+            .map(crate::manifest::ComponentContract::from)
+            .collect::<Vec<_>>();
+        check_selected_entries(
+            &package,
+            servers,
+            &selected.package,
+            &selected.package_content_digest,
+            &components,
+            &selected.portable_mcp_entries,
+        )?;
         Ok(export)
     }
 
@@ -1042,9 +1070,7 @@ fn check_selected_entries(
     components: &[crate::manifest::ComponentContract],
     portable_mcp_entries: &[PortableMcpEntry],
 ) -> Result<(), PortableExportError> {
-    if selected_package != &package.identity
-        || selected_digest != &package.content_digest()?
-    {
+    if selected_package != &package.identity || selected_digest != &package.content_digest()? {
         return Err(unsupported(
             None,
             UnsupportedPortableExport::SelectionForAnotherPackage,

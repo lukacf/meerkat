@@ -4,36 +4,49 @@
 use super::*;
 use crate::private_originals::ContinuationFixture;
 use futures::{FutureExt, StreamExt};
-use meerkat::{
-    ContinuationHostBindings, DetachedJobService, MemoryDetachedJobStore,
-    RuntimeDeliveryOwner, RuntimeDeliveryPass,
-};
 use meerkat::surface::SessionServiceDeliveryHost;
+use meerkat::{
+    ContinuationHostBindings, DetachedJobService, MemoryDetachedJobStore, RuntimeDeliveryOwner,
+    RuntimeDeliveryPass,
+};
 use meerkat_core::{
     AgentToolDispatcher, ControllerModelSelection, Message, Provider, SessionId, StopReason,
     ToolCallView, ToolDef, ToolDispatchContext,
 };
 use meerkat_llm_core::{
-    LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest, LlmStream,
-    PlainModelRoute, PreparedLlmRequest,
+    LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest, LlmStream, PlainModelRoute,
+    PreparedLlmRequest,
 };
 use meerkat_mob_mcp::HostJobSource;
-use meerkat_runtime::{
-    InMemoryRuntimeStore, RuntimeDeliveryInbox, SessionServiceRuntimeExt,
-};
+use meerkat_runtime::{InMemoryRuntimeStore, RuntimeDeliveryInbox, SessionServiceRuntimeExt};
 use meerkat_toolkit::{
-    authority::{Action, ActionPermission, Ceiling, SetupProposalConstraints,
-        SetupRequestEvidence, SetupUseContext},
-    request::{ContextReferenceOwner, FindAndInstallRequest, HostSetupRequest,
-        RequestError, SetupLimits, validate_request},
+    authority::{
+        Action, ActionPermission, Ceiling, SetupProposalConstraints, SetupRequestEvidence,
+        SetupUseContext,
+    },
+    request::{
+        ContextReferenceOwner, FindAndInstallRequest, HostSetupRequest, RequestError, SetupLimits,
+        validate_request,
+    },
     setup::{Resolution, SetupAccess},
 };
-use std::{panic::AssertUnwindSafe, sync::{Mutex, atomic::{AtomicBool, Ordering}}, time::Duration};
+use std::{
+    panic::AssertUnwindSafe,
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 const EVENT_GUARD: Duration = Duration::from_secs(10);
 const PROBE: &str = "continuation_context_probe";
-fn id(value: &str) -> Id { Id::new(value).unwrap() }
-fn revision(value: &str) -> Revision { Revision::new(value).unwrap() }
+fn id(value: &str) -> Id {
+    Id::new(value).unwrap()
+}
+fn revision(value: &str) -> Revision {
+    Revision::new(value).unwrap()
+}
 
 /// Uses the existing native pre-execution resolver, which receives the actual
 /// staged context. It grants no operation and never enters a tool body.
@@ -47,59 +60,99 @@ impl ContextProbe {
     pub(crate) fn with_exact_catalog() -> Self {
         // This probe owns one immutable definition and the default catalog
         // mirrors that complete list. It never supplies a deferred entry.
-        Self { captured: Mutex::new(None), exact_catalog: true, next_input: Arc::new(AtomicBool::new(false)) }
+        Self {
+            captured: Mutex::new(None),
+            exact_catalog: true,
+            next_input: Arc::new(AtomicBool::new(false)),
+        }
     }
     pub(crate) fn definition() -> ToolDef {
-        ToolDef::new(PROBE, "Capture the staged continuation fixture context", serde_json::json!({
-            "type": "object", "additionalProperties": false,
-        }))
+        ToolDef::new(
+            PROBE,
+            "Capture the staged continuation fixture context",
+            serde_json::json!({
+                "type": "object", "additionalProperties": false,
+            }),
+        )
     }
     pub(crate) fn captured(&self) -> ToolDispatchContext {
-        self.captured.lock().unwrap().clone().expect("native plan resolver captured the staged context")
+        self.captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("native plan resolver captured the staged context")
     }
     /// The owning test has joined the prior turn and retained its actual
     /// context before explicitly requesting a probe for one additional input.
     pub(crate) fn arm_next_input(&self) {
-        self.captured.lock().unwrap().take().expect("prior input was captured");
+        self.captured
+            .lock()
+            .unwrap()
+            .take()
+            .expect("prior input was captured");
         self.next_input.store(true, Ordering::SeqCst);
     }
 }
 #[async_trait]
 impl AgentToolDispatcher for ContextProbe {
-    fn tools(&self) -> Arc<[Arc<ToolDef>]> { Arc::from([Arc::new(Self::definition())]) }
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        Arc::from([Arc::new(Self::definition())])
+    }
     fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
         meerkat_core::ToolCatalogCapabilities {
             exact_catalog: self.exact_catalog,
             may_require_catalog_control_plane: false,
         }
     }
-    fn resolve_execution_plan(&self, call: ToolCallView<'_>, context: &ToolDispatchContext,
-        _: &meerkat_core::ToolExecutionResolutionContext)
-        -> Result<meerkat_core::ResolvedToolExecutionPlan, meerkat_core::ToolExecutionResolutionError>
+    fn resolve_execution_plan(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+        _: &meerkat_core::ToolExecutionResolutionContext,
+    ) -> Result<meerkat_core::ResolvedToolExecutionPlan, meerkat_core::ToolExecutionResolutionError>
     {
         assert_eq!(call.name, PROBE);
         assert!(context.retained_work().is_some());
         assert!(context.work_authorization().is_some());
-        assert!(self.captured.lock().unwrap().replace(context.clone()).is_none(), "probe runs once");
-        Err(meerkat_core::ToolExecutionResolutionError::NotFound { tool_name: call.name.into() })
+        assert!(
+            self.captured
+                .lock()
+                .unwrap()
+                .replace(context.clone())
+                .is_none(),
+            "probe runs once"
+        );
+        Err(meerkat_core::ToolExecutionResolutionError::NotFound {
+            tool_name: call.name.into(),
+        })
     }
-    async fn dispatch(&self, _: ToolCallView<'_>)
-        -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError>
-    {
+    async fn dispatch(
+        &self,
+        _: ToolCallView<'_>,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
         panic!("the context probe must refuse during plan resolution")
     }
 }
 
 /// The existing provider still performs its native model authorization and
 /// observation. Only its first scripted response is changed to a probe call.
-pub(crate) struct ProbeProvider { inner: Arc<dyn LlmClient>, first: Arc<AtomicBool> }
+pub(crate) struct ProbeProvider {
+    inner: Arc<dyn LlmClient>,
+    first: Arc<AtomicBool>,
+}
 impl ProbeProvider {
     pub(crate) fn new(inner: Arc<dyn LlmClient>) -> Self {
-        Self { inner, first: Arc::new(AtomicBool::new(true)) }
+        Self {
+            inner,
+            first: Arc::new(AtomicBool::new(true)),
+        }
     }
     pub(crate) fn with_probe(inner: Arc<dyn LlmClient>, probe: &ContextProbe) -> Self {
         probe.next_input.store(true, Ordering::SeqCst);
-        Self { inner, first: probe.next_input.clone() }
+        Self {
+            inner,
+            first: probe.next_input.clone(),
+        }
     }
 }
 #[async_trait]
@@ -108,7 +161,10 @@ impl LlmClient for ProbeProvider {
         self.inner.prepare_controller_credential().await
     }
 
-    fn plain_model_route(&self, model: &str) -> Result<PlainModelRoute, meerkat_core::ControllerFactsUnavailable> {
+    fn plain_model_route(
+        &self,
+        model: &str,
+    ) -> Result<PlainModelRoute, meerkat_core::ControllerFactsUnavailable> {
         self.inner.plain_model_route(model)
     }
     fn controller_model_selection(&self) -> Option<ControllerModelSelection> {
@@ -117,42 +173,70 @@ impl LlmClient for ProbeProvider {
     fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
         self.inner.project_replay_messages(messages)
     }
-    fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> { self.inner.stream(request) }
+    fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+        self.inner.stream(request)
+    }
     fn stream_prepared<'a>(&'a self, request: &'a PreparedLlmRequest) -> LlmStream<'a> {
         let stream = self.inner.stream_prepared(request);
-        if !self.first.swap(false, Ordering::SeqCst) { return stream; }
-        Box::pin(stream.map(|event| event.map(|event| match event {
-            LlmEvent::TextDelta { .. } => LlmEvent::ToolCallComplete {
-                id: "continuation-probe-call".into(), name: PROBE.into(),
-                args: serde_json::json!({}), meta: None,
-            },
-            LlmEvent::Done { outcome: LlmDoneOutcome::Success { .. } } => LlmEvent::Done {
-                outcome: LlmDoneOutcome::success(StopReason::ToolUse),
-            },
-            other => other,
-        })))
+        if !self.first.swap(false, Ordering::SeqCst) {
+            return stream;
+        }
+        Box::pin(stream.map(|event| {
+            event.map(|event| match event {
+                LlmEvent::TextDelta { .. } => LlmEvent::ToolCallComplete {
+                    id: "continuation-probe-call".into(),
+                    name: PROBE.into(),
+                    args: serde_json::json!({}),
+                    meta: None,
+                },
+                LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success { .. },
+                } => LlmEvent::Done {
+                    outcome: LlmDoneOutcome::success(StopReason::ToolUse),
+                },
+                other => other,
+            })
+        }))
     }
-    fn provider(&self) -> Provider { self.inner.provider() }
-    async fn health_check(&self) -> Result<(), LlmError> { self.inner.health_check().await }
+    fn provider(&self) -> Provider {
+        self.inner.provider()
+    }
+    async fn health_check(&self) -> Result<(), LlmError> {
+        self.inner.health_check().await
+    }
 }
 
 struct References(ContextReference);
 impl ContextReferenceOwner for References {
-    fn verify_access(&self, value: &ContextReference, authority: &SetupRequestEvidence,
-        context: &SetupUseContext<'_>) -> Result<(), RequestError>
-    {
+    fn verify_access(
+        &self,
+        value: &ContextReference,
+        authority: &SetupRequestEvidence,
+        context: &SetupUseContext<'_>,
+    ) -> Result<(), RequestError> {
         authority.check_context(context)?;
-        if value == &self.0 { Ok(()) } else { Err(RequestError::ContextUnavailable) }
+        if value == &self.0 {
+            Ok(())
+        } else {
+            Err(RequestError::ContextUnavailable)
+        }
     }
 }
 
-async fn terminal_result<S>(adapter: &InstalledNativeContinuation, fixture: &ContinuationFixture<S>,
-    dispatch: &ToolDispatchContext) -> ContinuationObligation {
+async fn terminal_result<S>(
+    adapter: &InstalledNativeContinuation,
+    fixture: &ContinuationFixture<S>,
+    dispatch: &ToolDispatchContext,
+) -> ContinuationObligation {
     terminal_result_with_work(adapter, fixture, dispatch, None).await
 }
 
-async fn terminal_result_with_work<S>(adapter: &InstalledNativeContinuation, fixture: &ContinuationFixture<S>,
-    dispatch: &ToolDispatchContext, selected: Option<meerkat_core::retained_work::RetainedWorkIdentity>) -> ContinuationObligation {
+async fn terminal_result_with_work<S>(
+    adapter: &InstalledNativeContinuation,
+    fixture: &ContinuationFixture<S>,
+    dispatch: &ToolDispatchContext,
+    selected: Option<meerkat_core::retained_work::RetainedWorkIdentity>,
+) -> ContinuationObligation {
     let tenant = id(&adapter.source_scope.realm);
     let deployment = id(&adapter.source_scope.owner);
     let receiver = id("agent");
@@ -162,57 +246,134 @@ async fn terminal_result_with_work<S>(adapter: &InstalledNativeContinuation, fix
     let authorization = dispatch.work_authorization().unwrap();
     let retained = selected.unwrap_or_else(|| dispatch.retained_work().unwrap().clone());
     assert_eq!(dispatch.origin_session_id(), Some(&fixture.session));
-    assert_eq!(dispatch.run_id(), Some(dispatch.retained_work().unwrap().run_id()));
+    assert_eq!(
+        dispatch.run_id(),
+        Some(dispatch.retained_work().unwrap().run_id())
+    );
     let meerkat_core::exact_operation::OperationExecutionScope::RuntimeInput {
-        owner_session_id, canonical_input_id, ..
-    } = authorization.execution_scope() else { panic!("actual staged input context required") };
+        owner_session_id,
+        canonical_input_id,
+        ..
+    } = authorization.execution_scope()
+    else {
+        panic!("actual staged input context required")
+    };
     assert_eq!(owner_session_id, &fixture.session);
     let now = u64::try_from(adapter.store.now_ms().await.unwrap()).unwrap();
-    let evidence = SetupRequestEvidence::new(association, SetupProposalConstraints {
-        tenant: tenant.clone(), deployment: deployment.clone(), policy_revision: policy.clone(),
-        issued_at_ms: now, expires_at_ms: now + 60_000,
-        ceiling: Ceiling {
-            actions: [ActionPermission { action: Action::FindAndInstall, resource: receiver.clone() }].into(),
-            services: BTreeSet::new(), frontends: BTreeSet::new(), output_audiences: adapter.audience.clone(),
+    let evidence = SetupRequestEvidence::new(
+        association,
+        SetupProposalConstraints {
+            tenant: tenant.clone(),
+            deployment: deployment.clone(),
+            policy_revision: policy.clone(),
+            issued_at_ms: now,
+            expires_at_ms: now + 60_000,
+            ceiling: Ceiling {
+                actions: [ActionPermission {
+                    action: Action::FindAndInstall,
+                    resource: receiver.clone(),
+                }]
+                .into(),
+                services: BTreeSet::new(),
+                frontends: BTreeSet::new(),
+                output_audiences: adapter.audience.clone(),
+            },
         },
-    }).unwrap();
+    )
+    .unwrap();
     let context = SetupUseContext {
-        tenant: &tenant, deployment: &deployment,
+        tenant: &tenant,
+        deployment: &deployment,
         realm: &evidence.association().candidate().ingress_namespace.realm,
-        target: &target, policy_revision: &policy, now_ms: now, authorization,
+        target: &target,
+        policy_revision: &policy,
+        now_ms: now,
+        authorization,
     };
-    let references = References(ContextReference { owner: id("test-detail-owner"),
-        id: id("cancelled"), revision: revision("1"), content_digest: ContentDigest::of_bytes(b"cancelled") });
-    let request = validate_request(FindAndInstallRequest {
-        request: "Find a service for this original task".into(), user_context: vec![], caller_observations: vec![],
-    }, HostSetupRequest {
-        setup_helper: None,
-        target: receiver, correlation: id("original-call"), parent_operation: None,
-        continuation: TaskContinuation {
-            owner: adapter.namespace.clone(), task: id(&retained.run_id().to_string()), revision: revision(&canonical_input_id.to_string()),
-            delivery_key: id("host:installed-regression:original-call"), audience: adapter.audience.clone(),
-            native_original: Some(NativeOriginalTask { origin_session_id: fixture.session.clone(), retained_work: retained, member: None }),
+    let references = References(ContextReference {
+        owner: id("test-detail-owner"),
+        id: id("cancelled"),
+        revision: revision("1"),
+        content_digest: ContentDigest::of_bytes(b"cancelled"),
+    });
+    let request = validate_request(
+        FindAndInstallRequest {
+            request: "Find a service for this original task".into(),
+            user_context: vec![],
+            caller_observations: vec![],
         },
-        environment_revision: revision("test-environment"),
-        limits: SetupLimits { deadline_ms: now + 60_000, max_workers: 1, max_effect_attempts: 2 },
-    }, &evidence, &context, &references).unwrap();
+        HostSetupRequest {
+            setup_helper: None,
+            target: receiver,
+            correlation: id("original-call"),
+            parent_operation: None,
+            continuation: TaskContinuation {
+                owner: adapter.namespace.clone(),
+                task: id(&retained.run_id().to_string()),
+                revision: revision(&canonical_input_id.to_string()),
+                delivery_key: id("host:installed-regression:original-call"),
+                audience: adapter.audience.clone(),
+                native_original: Some(NativeOriginalTask {
+                    origin_session_id: fixture.session.clone(),
+                    retained_work: retained,
+                    member: None,
+                }),
+            },
+            environment_revision: revision("test-environment"),
+            limits: SetupLimits {
+                deadline_ms: now + 60_000,
+                max_workers: 1,
+                max_effect_attempts: 2,
+            },
+        },
+        &evidence,
+        &context,
+        &references,
+    )
+    .unwrap();
     let store = adapter.store().unwrap();
-    let admitted = store.admit(&request, &evidence, &context, &references).await.unwrap().snapshot;
-    let terminal = store.resolve(&admitted, Resolution::Cancelled(references.0.clone()), None,
-        SetupAccess { evidence: &evidence, context: &context, references: &references }).await.unwrap();
-    store.committed_continuation(&id(&terminal.state().operation_id)).await.unwrap().unwrap()
+    let admitted = store
+        .admit(&request, &evidence, &context, &references)
+        .await
+        .unwrap()
+        .snapshot;
+    let terminal = store
+        .resolve(
+            &admitted,
+            Resolution::Cancelled(references.0.clone()),
+            None,
+            SetupAccess {
+                evidence: &evidence,
+                context: &context,
+                references: &references,
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .committed_continuation(&id(&terminal.state().operation_id))
+        .await
+        .unwrap()
+        .unwrap()
 }
 
-async fn wait_applied(service: &ContinuationOwnerService, owner: &ContinuationOwner,
-    key: &ContinuationKey, passes: &mut tokio::sync::watch::Receiver<RuntimeDeliveryPass>) -> ContinuationStatus
-{
+async fn wait_applied(
+    service: &ContinuationOwnerService,
+    owner: &ContinuationOwner,
+    key: &ContinuationKey,
+    passes: &mut tokio::sync::watch::Receiver<RuntimeDeliveryPass>,
+) -> ContinuationStatus {
     tokio::time::timeout(EVENT_GUARD, async {
         loop {
             let status = service.continuation_status(owner, key).await.unwrap();
-            if matches!(status, ContinuationStatus::Applied { .. }) { return status; }
+            if matches!(status, ContinuationStatus::Applied { .. }) {
+                return status;
+            }
             passes.changed().await.unwrap();
         }
-    }).await.expect("native continuation becomes Applied")
+    })
+    .await
+    .expect("native continuation becomes Applied")
 }
 
 /// Move only the test's close schedule across the real canonical read. This
@@ -223,12 +384,20 @@ struct CloseAfterFound {
 }
 #[async_trait]
 impl RetainedJobSource for CloseAfterFound {
-    async fn retained_job(&self, producer: &ContinuationProducer, job_id: &str) -> RetainedJobLookup {
+    async fn retained_job(
+        &self,
+        producer: &ContinuationProducer,
+        job_id: &str,
+    ) -> RetainedJobLookup {
         let result = self.source.retained_job(producer, job_id).await;
         if matches!(&result, RetainedJobLookup::Found(_)) {
             if let Some(lifetime) = self.close.lock().unwrap().take() {
-                use meerkat_toolkit::host_lifetime::control::{PrivateHostLifetimeControl, HostCloseReason};
-                lifetime.begin_close_activation(HostCloseReason::OperatorDisable).unwrap();
+                use meerkat_toolkit::host_lifetime::control::{
+                    HostCloseReason, PrivateHostLifetimeControl,
+                };
+                lifetime
+                    .begin_close_activation(HostCloseReason::OperatorDisable)
+                    .unwrap();
             }
         }
         result
@@ -236,7 +405,13 @@ impl RetainedJobSource for CloseAfterFound {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ResumeCase { Exact, OtherBody, ClosedHost, ClosedBeforeJobRead, ReleasedSource }
+enum ResumeCase {
+    Exact,
+    OtherBody,
+    ClosedHost,
+    ClosedBeforeJobRead,
+    ReleasedSource,
+}
 
 async fn applied_case(case: ResumeCase) {
     let fixture = ContinuationFixture::for_continuation().await;
@@ -384,11 +559,15 @@ async fn applied_case(case: ResumeCase) {
     if let Some(mut passes) = owner_passes {
         tokio::time::timeout(EVENT_GUARD, async {
             while passes.changed().await.is_ok() {}
-        }).await.expect("native delivery owner drops after abort");
+        })
+        .await
+        .expect("native delivery owner drops after abort");
     }
     let cleanup = fixture.shutdown().await;
     assert!(cleanup.is_ok(), "{cleanup:?}");
-    if let Err(panic) = result { std::panic::resume_unwind(panic); }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

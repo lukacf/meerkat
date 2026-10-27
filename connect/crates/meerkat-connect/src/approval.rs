@@ -12,7 +12,7 @@
 //! this gate does not cover descendants, jobs, rebuilds, schedules or bridges.
 
 pub mod installation_policy;
-use installation_policy::{InstalledInstallationPolicy, InstallationPolicySource, PolicyEntry};
+use installation_policy::{InstallationPolicySource, InstalledInstallationPolicy, PolicyEntry};
 
 use std::{
     future::Future,
@@ -39,8 +39,8 @@ use tokio::sync::{mpsc, oneshot, watch};
 use crate::{
     ConnectError, SessionOptions,
     paired_host_tool::{
-        PAIRED_HOST_FRONTEND_CONSENT_TOOLS, PAIRED_HOST_FRONTEND_READ_TOOLS, HeldAction as HeldPairedHostAction,
-        PairedHostFrontend, ReadbackTarget as PairedHostReadback,
+        HeldAction as HeldPairedHostAction, PAIRED_HOST_FRONTEND_CONSENT_TOOLS,
+        PAIRED_HOST_FRONTEND_READ_TOOLS, PairedHostFrontend, ReadbackTarget as PairedHostReadback,
     },
     setup::PREPARATION_TOOLS,
     terminal::{TerminalInput, review_text},
@@ -71,12 +71,18 @@ const DECISION_LIFETIME: Duration = Duration::from_secs(120);
 /// monotonic instant before wall time so the waiter never gets extra time.
 /// Standalone reviews retain their existing lifetime, including zero.
 fn dispatch_review_deadline(
-    lifetime: Duration, task_deadline_ms: Option<u64>, monotonic: Instant, wall: SystemTime,
+    lifetime: Duration,
+    task_deadline_ms: Option<u64>,
+    monotonic: Instant,
+    wall: SystemTime,
 ) -> Option<(Instant, SystemTime)> {
     let mut expires = wall.checked_add(lifetime)?;
     if let Some(task_deadline_ms) = task_deadline_ms {
-        let task_deadline = SystemTime::UNIX_EPOCH.checked_add(Duration::from_millis(task_deadline_ms))?;
-        if task_deadline <= wall { return None; }
+        let task_deadline =
+            SystemTime::UNIX_EPOCH.checked_add(Duration::from_millis(task_deadline_ms))?;
+        if task_deadline <= wall {
+            return None;
+        }
         expires = expires.min(task_deadline);
     }
     let remaining = expires.duration_since(wall).ok()?;
@@ -93,10 +99,20 @@ mod deadline_tests {
         let wall = SystemTime::UNIX_EPOCH + Duration::from_millis(1_000);
         for (task_deadline_ms, expected) in [(61_000, 60), (181_000, 120)] {
             let (wait, shown) = dispatch_review_deadline(
-                Duration::from_secs(120), Some(task_deadline_ms), monotonic, wall,
-            ).unwrap();
-            assert_eq!(wait.duration_since(monotonic), Duration::from_secs(expected));
-            assert_eq!(shown.duration_since(wall).unwrap(), Duration::from_secs(expected));
+                Duration::from_secs(120),
+                Some(task_deadline_ms),
+                monotonic,
+                wall,
+            )
+            .unwrap();
+            assert_eq!(
+                wait.duration_since(monotonic),
+                Duration::from_secs(expected)
+            );
+            assert_eq!(
+                shown.duration_since(wall).unwrap(),
+                Duration::from_secs(expected)
+            );
             assert!(shown <= SystemTime::UNIX_EPOCH + Duration::from_millis(task_deadline_ms));
         }
     }
@@ -106,7 +122,15 @@ mod deadline_tests {
         let monotonic = Instant::now();
         let wall = SystemTime::UNIX_EPOCH + Duration::from_millis(1_000);
         for task_deadline_ms in [0, 999, 1_000] {
-            assert!(dispatch_review_deadline(DECISION_LIFETIME, Some(task_deadline_ms), monotonic, wall).is_none());
+            assert!(
+                dispatch_review_deadline(
+                    DECISION_LIFETIME,
+                    Some(task_deadline_ms),
+                    monotonic,
+                    wall
+                )
+                .is_none()
+            );
         }
         for lifetime in [Duration::ZERO, DECISION_LIFETIME] {
             let (wait, shown) = dispatch_review_deadline(lifetime, None, monotonic, wall).unwrap();
@@ -148,7 +172,8 @@ enum AttemptInput {
 
 struct ServiceReview {
     task: toolkit_mobkit::private_originals::InstalledServiceTask,
-    decision_current: Option<crate::installed_service_review::account_request::console::DecisionCheck>,
+    decision_current:
+        Option<crate::installed_service_review::account_request::console::DecisionCheck>,
 }
 struct Attempt {
     approval_id: ApprovalId,
@@ -192,14 +217,20 @@ struct Shared {
 
 impl Shared {
     fn state(&self) -> Result<MutexGuard<'_, State>, ConnectError> {
-        self.state.lock().map_err(|_| ConnectError::native(
-            "lock local approval custody", io::Error::other("Local approval custody is unavailable"),
-        ))
+        self.state.lock().map_err(|_| {
+            ConnectError::native(
+                "lock local approval custody",
+                io::Error::other("Local approval custody is unavailable"),
+            )
+        })
     }
 
     fn live_state(&self) -> Result<MutexGuard<'_, State>, ConnectError> {
         let state = self.state()?;
-        if self.actor_expires_at.is_some_and(|expiry| SystemTime::now() >= expiry) {
+        if self
+            .actor_expires_at
+            .is_some_and(|expiry| SystemTime::now() >= expiry)
+        {
             return Err(invalid("The retained approval presenter login expired"));
         }
         Ok(state)
@@ -269,18 +300,23 @@ pub struct ApprovalPresenter {
 }
 
 impl LocalApprovals {
-
     // Exercise the existing per-request deadline after the exact prompt is
     // acknowledged. This is not owner retirement or operation-grant revocation.
     #[cfg(test)]
-    pub(crate) fn fixture_expire_waiting_review(&self, id: &ApprovalId)
-        -> Result<(), ConnectError>
-    {
+    pub(crate) fn fixture_expire_waiting_review(
+        &self,
+        id: &ApprovalId,
+    ) -> Result<(), ConnectError> {
         let mut state = self.shared.live_state()?;
-        if state.closed { return Err(invalid("fixture approval owner closed")); }
-        let attempt = state.attempt.as_mut()
-            .filter(|attempt| &attempt.approval_id == id
-                && attempt.custody == Custody::AwaitingDecision)
+        if state.closed {
+            return Err(invalid("fixture approval owner closed"));
+        }
+        let attempt = state
+            .attempt
+            .as_mut()
+            .filter(|attempt| {
+                &attempt.approval_id == id && attempt.custody == Custody::AwaitingDecision
+            })
             .ok_or_else(|| invalid("fixture requires this exact waiting approval"))?;
         attempt.deadline = Instant::now();
         Ok(())
@@ -296,14 +332,20 @@ impl LocalApprovals {
     /// No remote decision or saved approval is accepted by this invocation.
     /// Attribution of this installed presenter only. The actual verified Human
     /// and task/login checks remain with the caller and native decision owner.
-    pub(crate) fn create_console_setup(parent: &Path) -> Result<(Self, ApprovalPresenter), ConnectError> {
+    pub(crate) fn create_console_setup(
+        parent: &Path,
+    ) -> Result<(Self, ApprovalPresenter), ConnectError> {
         let actor = ApprovalPrincipalId::new("connect-console-presenter")
             .map_err(|error| ConnectError::native("identify Console presenter", error))?;
         Self::create_for_actor(parent, DECISION_LIFETIME, &[], actor, None)
     }
 
     pub fn create_paired_host(parent: &Path) -> Result<(Self, ApprovalPresenter), ConnectError> {
-        Self::create_with(parent, DECISION_LIFETIME, PAIRED_HOST_FRONTEND_CONSENT_TOOLS)
+        Self::create_with(
+            parent,
+            DECISION_LIFETIME,
+            PAIRED_HOST_FRONTEND_CONSENT_TOOLS,
+        )
     }
 
     fn create_with(
@@ -323,7 +365,13 @@ impl LocalApprovals {
         actor: ApprovalPrincipalId,
         expires_at: SystemTime,
     ) -> Result<(Self, ApprovalPresenter), ConnectError> {
-        Self::create_for_actor(parent, DECISION_LIFETIME, PAIRED_HOST_FRONTEND_CONSENT_TOOLS, actor, Some(expires_at))
+        Self::create_for_actor(
+            parent,
+            DECISION_LIFETIME,
+            PAIRED_HOST_FRONTEND_CONSENT_TOOLS,
+            actor,
+            Some(expires_at),
+        )
     }
 
     fn create_for_actor(
@@ -333,18 +381,39 @@ impl LocalApprovals {
         actor: ApprovalPrincipalId,
         actor_expires_at: Option<SystemTime>,
     ) -> Result<(Self, ApprovalPresenter), ConnectError> {
-        let (approvals, prompts) = Self::create_owner(parent, lifetime, consent_tools, actor, actor_expires_at, None)?;
-        let presenter = ApprovalPresenter { shared: approvals.shared.clone(), prompts, pending: None };
+        let (approvals, prompts) = Self::create_owner(
+            parent,
+            lifetime,
+            consent_tools,
+            actor,
+            actor_expires_at,
+            None,
+        )?;
+        let presenter = ApprovalPresenter {
+            shared: approvals.shared.clone(),
+            prompts,
+            pending: None,
+        };
         Ok((approvals, presenter))
     }
 
     /// Trusted application composition for software only. No human presenter
     /// is created, and account/service review still requires its own owner.
-    pub fn create_for_installation_policy(parent: &Path, policy: InstalledInstallationPolicy)
-        -> Result<Self, ConnectError>
-    {
-        let actor = policy.actor().map_err(|_| invalid("The installed provisioning policy is unavailable"))?;
-        let (approvals, prompts) = Self::create_owner(parent, DECISION_LIFETIME, &[], actor, None, Some(InstallationPolicySource::Installed(policy)))?;
+    pub fn create_for_installation_policy(
+        parent: &Path,
+        policy: InstalledInstallationPolicy,
+    ) -> Result<Self, ConnectError> {
+        let actor = policy
+            .actor()
+            .map_err(|_| invalid("The installed provisioning policy is unavailable"))?;
+        let (approvals, prompts) = Self::create_owner(
+            parent,
+            DECISION_LIFETIME,
+            &[],
+            actor,
+            None,
+            Some(InstallationPolicySource::Installed(policy)),
+        )?;
         drop(prompts);
         Ok(approvals)
     }
@@ -353,27 +422,44 @@ impl LocalApprovals {
     /// refuses use until its actual installed owner is supplied once. Optional
     /// presentation is the same real terminal/Console owner, not policy authority.
     #[cfg(all(unix, feature = "console"))]
-    pub(crate) fn create_for_selected_policy(parent: &Path,
+    pub(crate) fn create_for_selected_policy(
+        parent: &Path,
         selected: Arc<crate::application_acquisition::selected_policy::SelectedPolicyBinding>,
         console: Option<bool>,
     ) -> Result<(Self, Option<ApprovalPresenter>), ConnectError> {
-        let actor = match console {
-            Some(true) => ApprovalPrincipalId::new("connect-console-presenter"),
-            Some(false) => ApprovalPrincipalId::new("connect-local-terminal"),
-            None => ApprovalPrincipalId::new(serde_json::to_string(selected.owner())
-                .map_err(|error| ConnectError::native("identify selected application", error))?),
-        }.map_err(|error| ConnectError::native("identify selected decision owner", error))?;
-        let (approvals, prompts) = Self::create_owner(parent, DECISION_LIFETIME, &[], actor, None,
-            Some(InstallationPolicySource::Selected(selected)))?;
-        let presenter = console.map(|_| ApprovalPresenter { shared: approvals.shared.clone(), prompts, pending: None });
+        let actor =
+            match console {
+                Some(true) => ApprovalPrincipalId::new("connect-console-presenter"),
+                Some(false) => ApprovalPrincipalId::new("connect-local-terminal"),
+                None => ApprovalPrincipalId::new(serde_json::to_string(selected.owner()).map_err(
+                    |error| ConnectError::native("identify selected application", error),
+                )?),
+            }
+            .map_err(|error| ConnectError::native("identify selected decision owner", error))?;
+        let (approvals, prompts) = Self::create_owner(
+            parent,
+            DECISION_LIFETIME,
+            &[],
+            actor,
+            None,
+            Some(InstallationPolicySource::Selected(selected)),
+        )?;
+        let presenter = console.map(|_| ApprovalPresenter {
+            shared: approvals.shared.clone(),
+            prompts,
+            pending: None,
+        });
         Ok((approvals, presenter))
     }
 
-    fn create_owner(parent: &Path, lifetime: Duration, consent_tools: &'static [&'static str],
-        actor: ApprovalPrincipalId, actor_expires_at: Option<SystemTime>,
-        installation_policy: Option<InstallationPolicySource>)
-        -> Result<(Self, mpsc::Receiver<ApprovalPrompt>), ConnectError>
-    {
+    fn create_owner(
+        parent: &Path,
+        lifetime: Duration,
+        consent_tools: &'static [&'static str],
+        actor: ApprovalPrincipalId,
+        actor_expires_at: Option<SystemTime>,
+        installation_policy: Option<InstallationPolicySource>,
+    ) -> Result<(Self, mpsc::Receiver<ApprovalPrompt>), ConnectError> {
         if !parent.is_absolute()
             || !std::fs::symlink_metadata(parent)
                 .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
@@ -412,14 +498,19 @@ impl LocalApprovals {
         });
         Ok((
             Self {
-                shared: shared.clone(), service_tasks: None,
+                shared: shared.clone(),
+                service_tasks: None,
             },
             rx,
         ))
     }
 
-    pub(crate) fn with_service_tasks(mut self, tasks: Option<toolkit_mobkit::installed_host::acquisition::InstalledServiceTaskSource>) -> Self {
-        self.service_tasks = tasks; self
+    pub(crate) fn with_service_tasks(
+        mut self,
+        tasks: Option<toolkit_mobkit::installed_host::acquisition::InstalledServiceTaskSource>,
+    ) -> Self {
+        self.service_tasks = tasks;
+        self
     }
 
     pub fn store_path(&self) -> &Path {
@@ -441,7 +532,8 @@ impl LocalApprovals {
         &self,
         request: ApprovalRequest,
     ) -> Result<ApprovalRecord, ConnectError> {
-        self.review_access_cancellable(request, std::future::pending(), |_| {}).await
+        self.review_access_cancellable(request, std::future::pending(), |_| {})
+            .await
     }
 
     /// Cancellation belongs to this exact waiter. The existing PendingGuard
@@ -620,7 +712,9 @@ impl LocalApprovals {
         // The held factory has no installed policy before final adoption.
         // Refuse that state before an unavailable task source can obscure it.
         if let Some(source) = &self.shared.installation_policy {
-            source.resolve().map_err(|error| installation_policy::tool_refusal(call.name, error))?;
+            source
+                .resolve()
+                .map_err(|error| installation_policy::tool_refusal(call.name, error))?;
         }
         let held = owner.retain_action(call, session)?;
         let mut reviewed = held.review();
@@ -630,18 +724,35 @@ impl LocalApprovals {
         // requiring service access authority. Its currentness is re-opened after
         // the decision, including on the application-policy branch.
         let task = match &self.service_tasks {
-            Some(tasks) => tasks.prepare_software(call, context, plan).await.map_err(|_| refused())?,
+            Some(tasks) => tasks
+                .prepare_software(call, context, plan)
+                .await
+                .map_err(|_| refused())?,
             None => None,
         };
-        if self.shared.installation_policy.is_some() && self.service_tasks.is_some() && task.is_none() {
-            return Err(ToolError::unavailable(call.name, meerkat_core::ToolUnavailableReason::TemporarilyUnavailable));
+        if self.shared.installation_policy.is_some()
+            && self.service_tasks.is_some()
+            && task.is_none()
+        {
+            return Err(ToolError::unavailable(
+                call.name,
+                meerkat_core::ToolUnavailableReason::TemporarilyUnavailable,
+            ));
         }
         let policy_entry = match &self.shared.installation_policy {
             Some(source) => {
                 let refreshed = context.check_tool_authorization(call, plan)?;
-                let policy = source.resolve().map_err(|error| installation_policy::tool_refusal(call.name, error))?;
+                let policy = source
+                    .resolve()
+                    .map_err(|error| installation_policy::tool_refusal(call.name, error))?;
                 let entry = match policy {
-                    Some(policy) => policy.reserve(held.realm(), call, refreshed.as_ref().unwrap_or(context), &reviewed)
+                    Some(policy) => policy
+                        .reserve(
+                            held.realm(),
+                            call,
+                            refreshed.as_ref().unwrap_or(context),
+                            &reviewed,
+                        )
                         .map_err(|error| installation_policy::tool_refusal(call.name, error))?,
                     None => None,
                 };
@@ -655,48 +766,95 @@ impl LocalApprovals {
             None => None,
         };
         self.check_session(session).map_err(|_| refused())?;
-        self.shared.review_dispatch(call, Some(context), Some(HeldAction::Service(held)), reviewed, task, policy_entry, |held| {
-            match held {
-                HeldAction::Service(held) => owner.arm_action(held),
-                _ => Err(refused()),
-            }
-        }).await?;
+        self.shared
+            .review_dispatch(
+                call,
+                Some(context),
+                Some(HeldAction::Service(held)),
+                reviewed,
+                task,
+                policy_entry,
+                |held| match held {
+                    HeldAction::Service(held) => owner.arm_action(held),
+                    _ => Err(refused()),
+                },
+            )
+            .await?;
         Ok(SoftwareReviewOutcome::Approved)
     }
 
-    pub(crate) fn service_dispatch_guard(&self, call: ToolCallView<'_>, context: &ToolDispatchContext)
-        -> Result<ServiceDispatchGuard, ToolError>
-    {
+    pub(crate) fn service_dispatch_guard(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+    ) -> Result<ServiceDispatchGuard, ToolError> {
         let refused = || ToolError::access_denied(call.name);
         let state = self.shared.state().map_err(|_| refused())?;
-        if context.origin_session_id() != state.session.as_ref() { return Err(refused()); }
-        let attempt = state.attempt.as_ref().filter(|attempt| attempt.custody == Custody::SpentUncertain
-            && matches!(&attempt.input, AttemptInput::Dispatch { call_id, name, arguments }
-                if call_id == call.id && name == call.name && arguments == call.args.get())).ok_or_else(refused)?;
-        Ok(ServiceDispatchGuard { shared: self.shared.clone(), id: attempt.approval_id.clone() })
+        if context.origin_session_id() != state.session.as_ref() {
+            return Err(refused());
+        }
+        let attempt = state
+            .attempt
+            .as_ref()
+            .filter(|attempt| {
+                attempt.custody == Custody::SpentUncertain
+                    && matches!(&attempt.input, AttemptInput::Dispatch { call_id, name, arguments }
+                if call_id == call.id && name == call.name && arguments == call.args.get())
+            })
+            .ok_or_else(refused)?;
+        Ok(ServiceDispatchGuard {
+            shared: self.shared.clone(),
+            id: attempt.approval_id.clone(),
+        })
     }
 
-    pub(crate) fn check_service_entry(&self, call: ToolCallView<'_>, context: &ToolDispatchContext) -> Result<(), ToolError> {
+    pub(crate) fn check_service_entry(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+    ) -> Result<(), ToolError> {
         let refused = || ToolError::access_denied(call.name);
         // Service access holds this phase while checking approvals/session
         // currentness. Never take the phase lock while holding Shared.state.
         if let Some(source) = &self.shared.installation_policy {
-            if let Some(policy) = source.resolve().map_err(|error| installation_policy::tool_refusal(call.name, error))? {
-                policy.check_entry().map_err(|error| installation_policy::tool_refusal(call.name, error))?;
+            if let Some(policy) = source
+                .resolve()
+                .map_err(|error| installation_policy::tool_refusal(call.name, error))?
+            {
+                policy
+                    .check_entry()
+                    .map_err(|error| installation_policy::tool_refusal(call.name, error))?;
             }
         }
         let state = self.shared.live_state().map_err(|_| refused())?;
-        if state.closed || context.origin_session_id() != state.session.as_ref() { return Err(refused()); }
-        let attempt = state.attempt.as_ref().filter(|attempt| attempt.custody == Custody::SpentUncertain
-            && matches!(&attempt.input, AttemptInput::Dispatch { call_id, name, arguments }
-                if call_id == call.id && name == call.name && arguments == call.args.get())).ok_or_else(refused)?;
+        if state.closed || context.origin_session_id() != state.session.as_ref() {
+            return Err(refused());
+        }
+        let attempt = state
+            .attempt
+            .as_ref()
+            .filter(|attempt| {
+                attempt.custody == Custody::SpentUncertain
+                    && matches!(&attempt.input, AttemptInput::Dispatch { call_id, name, arguments }
+                if call_id == call.id && name == call.name && arguments == call.args.get())
+            })
+            .ok_or_else(refused)?;
         if let Some(entry) = &attempt.policy_entry {
-            entry.check_current().map_err(|error| installation_policy::tool_refusal(call.name, error))?;
+            entry
+                .check_current()
+                .map_err(|error| installation_policy::tool_refusal(call.name, error))?;
         }
         if let Some(service) = &attempt.service {
-            if service.task.console_login().is_some() && (attempt.service_entry.is_none()
-                || (attempt.policy_entry.is_none()
-                    && service.decision_current.as_ref().is_none_or(|current| !current()))) { return Err(refused()); }
+            if service.task.console_login().is_some()
+                && (attempt.service_entry.is_none()
+                    || (attempt.policy_entry.is_none()
+                        && service
+                            .decision_current
+                            .as_ref()
+                            .is_none_or(|current| !current())))
+            {
+                return Err(refused());
+            }
         }
         Ok(())
     }
@@ -709,14 +867,21 @@ impl LocalApprovals {
         outcome: LiveBridgeEffectOutcome,
         result: Result<meerkat_core::ops::ToolDispatchOutcome, ToolError>,
     ) -> Result<meerkat_core::ops::ToolDispatchOutcome, ToolError> {
-        let dispatch_error = result.as_ref().err()
+        let dispatch_error = result
+            .as_ref()
+            .err()
             .map(|error| meerkat_core::ToolDispatchTerminalErrorKind::from(error.primary_error()));
-        let failure = self.shared.settle_service_dispatch(owner, call, context, outcome, dispatch_error)
-            .err().map(|error| meerkat_core::ToolDispatchSettlementFailure {
+        let failure = self
+            .shared
+            .settle_service_dispatch(owner, call, context, outcome, dispatch_error)
+            .err()
+            .map(|error| meerkat_core::ToolDispatchSettlementFailure {
                 admission_source: meerkat_core::ToolDispatchAdmissionSource::ConfiguredGate,
                 effect_kind: LiveBridgeEffectKind::ExternalIo,
                 physical_outcome: outcome,
-                failure_kind: meerkat_core::ToolDispatchTerminalErrorKind::from(error.primary_error()),
+                failure_kind: meerkat_core::ToolDispatchTerminalErrorKind::from(
+                    error.primary_error(),
+                ),
             });
         match result {
             Ok(mut result) => {
@@ -737,41 +902,82 @@ impl LocalApprovals {
         plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
     ) -> Result<serde_json::Value, ToolError> {
         let refused = || ToolError::access_denied(call.name);
-        if call.name != "setup_state" { return Err(refused()); }
+        if call.name != "setup_state" {
+            return Err(refused());
+        }
         let session = context.origin_session_id().ok_or_else(refused)?;
         self.check_session(session).map_err(|_| refused())?;
         let (id, task) = {
             let state = self.shared.live_state().map_err(|_| refused())?;
-            if state.closed || state.session.as_ref() != Some(session) { return Err(refused()); }
-            let Some(attempt) = state.attempt.as_ref().filter(|attempt|
-                matches!(attempt.readback, Some(ReadbackTarget::Service(_)))) else {
+            if state.closed || state.session.as_ref() != Some(session) {
+                return Err(refused());
+            }
+            let Some(attempt) = state
+                .attempt
+                .as_ref()
+                .filter(|attempt| matches!(attempt.readback, Some(ReadbackTarget::Service(_))))
+            else {
                 return Ok(serde_json::json!({
                     "scope":"latest_retained_software_attempt_only", "review":null,
                 }));
             };
             if attempt.review_work.as_ref() != context.retained_work()
-                || attempt.review_scope.as_ref() != context.work_authorization()
-                    .map(|authorization| authorization.execution_scope())
-            { return Err(refused()); }
-            (attempt.approval_id.clone(), attempt.service.as_ref().map(|service| service.task.clone()))
+                || attempt.review_scope.as_ref()
+                    != context
+                        .work_authorization()
+                        .map(|authorization| authorization.execution_scope())
+            {
+                return Err(refused());
+            }
+            (
+                attempt.approval_id.clone(),
+                attempt.service.as_ref().map(|service| service.task.clone()),
+            )
         };
-        if let Some(task) = task { task.check_setup_current().await.map_err(|_| refused())?; }
+        if let Some(task) = task {
+            task.check_setup_current().await.map_err(|_| refused())?;
+        }
         context.check_tool_authorization(call, plan)?;
         let state = self.shared.live_state().map_err(|_| refused())?;
-        if state.closed || state.session.as_ref() != Some(session) { return Err(refused()); }
-        let attempt = state.attempt.as_ref().filter(|attempt| attempt.approval_id == id
-            && attempt.review_work.as_ref() == context.retained_work()
-            && attempt.review_scope.as_ref() == context.work_authorization()
-                .map(|authorization| authorization.execution_scope())).ok_or_else(refused)?;
-        let (AttemptInput::Dispatch { call_id, name, arguments }, Some(ReadbackTarget::Service(target))) =
-            (&attempt.input, &attempt.readback) else { return Err(refused()); };
-        let arguments = serde_json::value::RawValue::from_string(arguments.clone()).map_err(|_| refused())?;
-        let reviewed_call = ToolCallView { id: call_id, name, args: &arguments };
+        if state.closed || state.session.as_ref() != Some(session) {
+            return Err(refused());
+        }
+        let attempt = state
+            .attempt
+            .as_ref()
+            .filter(|attempt| {
+                attempt.approval_id == id
+                    && attempt.review_work.as_ref() == context.retained_work()
+                    && attempt.review_scope.as_ref()
+                        == context
+                            .work_authorization()
+                            .map(|authorization| authorization.execution_scope())
+            })
+            .ok_or_else(refused)?;
+        let (
+            AttemptInput::Dispatch {
+                call_id,
+                name,
+                arguments,
+            },
+            Some(ReadbackTarget::Service(target)),
+        ) = (&attempt.input, &attempt.readback)
+        else {
+            return Err(refused());
+        };
+        let arguments =
+            serde_json::value::RawValue::from_string(arguments.clone()).map_err(|_| refused())?;
+        let reviewed_call = ToolCallView {
+            id: call_id,
+            name,
+            args: &arguments,
+        };
         let native = self.shared.service.get(&id).map_err(|_| refused())?;
         let mut review = owner.software_review_binding(target, reviewed_call, session, &native)?;
         review["approval_id"] = serde_json::json!(id);
         review["approval_status"] = serde_json::json!(native.status);
-        review["decision"] = serde_json::json!(native.decision.as_ref().map(|decision| decision.decision));
+        review["decision"] =
+            serde_json::json!(native.decision.as_ref().map(|decision| decision.decision));
         review["dispatch_custody"] = serde_json::json!(match attempt.custody {
             Custody::AwaitingDecision => "awaiting_decision",
             Custody::DecisionRecorded(_) => "decision_recorded",
@@ -939,15 +1145,30 @@ impl LocalApprovals {
         if self.shared.consent_tools != PAIRED_HOST_FRONTEND_CONSENT_TOOLS
             || options.build.tool_dispatch_admission.is_some()
             || !crate::setup::is_direct_paired_host_composition(options)
-            || !options.build.external_tools.as_ref().is_some_and(|tools| lazy.matches(tools))
+            || !options
+                .build
+                .external_tools
+                .as_ref()
+                .is_some_and(|tools| lazy.matches(tools))
         {
-            return Err(invalid("Local lazy setup consent requires its exact fresh composition"));
+            return Err(invalid(
+                "Local lazy setup consent requires its exact fresh composition",
+            ));
         }
-        let ceiling = meerkat_core::ops::ToolAccessPolicy::AllowList(lazy.allowed_tools().into_iter().collect());
-        options.build.tool_access_policy = Some(options.build.tool_access_policy.take()
-            .ok_or_else(|| invalid("Local lazy setup policy is missing"))?
-            .conjoin(ceiling)
-            .map_err(|error| ConnectError::native("conjoin lazy setup consent ceiling", error))?);
+        let ceiling = meerkat_core::ops::ToolAccessPolicy::AllowList(
+            lazy.allowed_tools().into_iter().collect(),
+        );
+        options.build.tool_access_policy = Some(
+            options
+                .build
+                .tool_access_policy
+                .take()
+                .ok_or_else(|| invalid("Local lazy setup policy is missing"))?
+                .conjoin(ceiling)
+                .map_err(|error| {
+                    ConnectError::native("conjoin lazy setup consent ceiling", error)
+                })?,
+        );
         options.build.tool_dispatch_admission = Some(self.native_setup_admission(lazy)?);
         Ok(())
     }
@@ -956,13 +1177,19 @@ impl LocalApprovals {
     /// supplied its actual adapter and checked-install owner. No grant or
     /// session admission is created by this handoff.
     pub(crate) fn native_setup_admission(
-        &self, lazy: &crate::service_preparation::LazySetup,
+        &self,
+        lazy: &crate::service_preparation::LazySetup,
     ) -> Result<Arc<dyn ToolDispatchAdmission>, ConnectError> {
         if self.shared.consent_tools != PAIRED_HOST_FRONTEND_CONSENT_TOOLS {
             return Err(invalid("The selected setup approval owner is incompatible"));
         }
         Ok(Arc::new(Admission(
-            self.shared.clone(), true, Some(lazy.paired_host().clone()), Some(lazy.owner()), Some(lazy.forge().clone()), lazy.installs(),
+            self.shared.clone(),
+            true,
+            Some(lazy.paired_host().clone()),
+            Some(lazy.owner()),
+            Some(lazy.forge().clone()),
+            lazy.installs(),
         )))
     }
 
@@ -972,10 +1199,14 @@ impl LocalApprovals {
     pub fn permits_uncertain_status_readback(&self) -> bool {
         self.shared.state.lock().is_ok_and(|state| {
             state.attempt.as_ref().is_some_and(|attempt| {
-                attempt.custody == Custody::SpentUncertain && attempt.readback.as_ref().is_some_and(|target| match target {
-                    ReadbackTarget::Service(target) => target.available(),
-                    _ => true,
-                })
+                attempt.custody == Custody::SpentUncertain
+                    && attempt
+                        .readback
+                        .as_ref()
+                        .is_some_and(|target| match target {
+                            ReadbackTarget::Service(target) => target.available(),
+                            _ => true,
+                        })
             })
         })
     }
@@ -997,7 +1228,9 @@ impl LocalApprovals {
     pub(crate) fn check_session(&self, session: &SessionId) -> Result<(), ConnectError> {
         let state = self.shared.live_state()?;
         if state.closed || state.session.as_ref() != Some(session) {
-            return Err(invalid("The private review owner does not cover this live session"));
+            return Err(invalid(
+                "The private review owner does not cover this live session",
+            ));
         }
         Ok(())
     }
@@ -1037,7 +1270,11 @@ impl ApprovalPresenter {
                 return None;
             }
             if let Some(prompt) = self.pending.take() {
-                if prompt.response.as_ref().is_some_and(|response| !response.is_closed()) {
+                if prompt
+                    .response
+                    .as_ref()
+                    .is_some_and(|response| !response.is_closed())
+                {
                     return Some(prompt);
                 }
             }
@@ -1056,9 +1293,10 @@ impl ApprovalPresenter {
 }
 
 impl ApprovalPresenter {
-    pub(crate) async fn next_for_review(&mut self, id: &ApprovalId)
-        -> Result<Option<ApprovalPrompt>, ConnectError>
-    {
+    pub(crate) async fn next_for_review(
+        &mut self,
+        id: &ApprovalId,
+    ) -> Result<Option<ApprovalPrompt>, ConnectError> {
         match self.next().await {
             Some(prompt) if &prompt.record.approval_id != id => {
                 self.pending = Some(prompt);
@@ -1103,16 +1341,26 @@ impl ApprovalPrompt {
     pub fn decide(&mut self, decision: ApprovalDecision) -> Result<(), ConnectError> {
         self.decide_current(decision, None)
     }
-    pub(crate) fn console_task(&self) -> Option<&toolkit_mobkit::private_originals::InstalledServiceTask> {
-        self.service_task.as_ref().filter(|task| task.console_login().is_some())
+    pub(crate) fn console_task(
+        &self,
+    ) -> Option<&toolkit_mobkit::private_originals::InstalledServiceTask> {
+        self.service_task
+            .as_ref()
+            .filter(|task| task.console_login().is_some())
     }
-    pub(crate) fn decide_console(&mut self, decision: ApprovalDecision,
+    pub(crate) fn decide_console(
+        &mut self,
+        decision: ApprovalDecision,
         current: crate::installed_service_review::account_request::console::DecisionCheck,
     ) -> Result<(), ConnectError> {
-        if self.console_task().is_none() { return Err(invalid("The software prompt has no Console task")); }
+        if self.console_task().is_none() {
+            return Err(invalid("The software prompt has no Console task"));
+        }
         self.decide_current(decision, Some(current))
     }
-    fn decide_current(&mut self, decision: ApprovalDecision,
+    fn decide_current(
+        &mut self,
+        decision: ApprovalDecision,
         current: Option<crate::installed_service_review::account_request::console::DecisionCheck>,
     ) -> Result<(), ConnectError> {
         let mut state = self.shared.live_state()?;
@@ -1135,22 +1383,39 @@ impl ApprovalPrompt {
                 "This approval is no longer eligible; no dispatch was released",
             ));
         }
-        let login = attempt.service.as_ref().and_then(|service| service.task.console_login());
+        let login = attempt
+            .service
+            .as_ref()
+            .and_then(|service| service.task.console_login());
         if login.is_some() && current.as_ref().is_none_or(|current| !current()) {
             return Err(invalid("The exact Console decision is unavailable"));
         }
-        let reservation = login.map(|login| login.reserve()).transpose()
+        let reservation = login
+            .map(|login| login.reserve())
+            .transpose()
             .map_err(|_| invalid("The Console login refused approval entry"))?;
         if current.as_ref().is_some_and(|current| !current()) {
-            if let Some(reservation) = reservation { reservation.settled(); }
+            if let Some(reservation) = reservation {
+                reservation.settled();
+            }
             return Err(invalid("The Console decision changed before entry"));
         }
         self.shared
             .service
-            .decide(&attempt.approval_id, decision, self.shared.actor.clone(), None, None)
+            .decide(
+                &attempt.approval_id,
+                decision,
+                self.shared.actor.clone(),
+                None,
+                None,
+            )
             .map_err(|e| ConnectError::native("record native approval decision", e))?;
-        if let Some(reservation) = reservation { reservation.settled(); }
-        if let Some(service) = &mut attempt.service { service.decision_current = current; }
+        if let Some(reservation) = reservation {
+            reservation.settled();
+        }
+        if let Some(service) = &mut attempt.service {
+            service.decision_current = current;
+        }
         attempt.custody = Custody::DecisionRecorded(decision);
         self.response
             .take()
@@ -1174,19 +1439,36 @@ impl ApprovalPrompt {
 /// Lives on the actual install dispatch future, not its presentation. A
 /// dropped future cannot keep the retirement drain open forever. The existing
 /// attempt remains SpentUncertain and retains readback and replay exclusion.
-pub(crate) enum SoftwareReviewOutcome { Approved, RequiresHuman }
+pub(crate) enum SoftwareReviewOutcome {
+    Approved,
+    RequiresHuman,
+}
 
-pub(crate) struct ServiceDispatchGuard { shared: Arc<Shared>, id: ApprovalId }
+pub(crate) struct ServiceDispatchGuard {
+    shared: Arc<Shared>,
+    id: ApprovalId,
+}
 impl Drop for ServiceDispatchGuard {
     fn drop(&mut self) {
         // Poison still denies future admission, but must not retain a policy
         // mutation reservation after the physical future has disappeared.
-        let mut state = self.shared.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut policy = None;
-        if let Some(attempt) = state.attempt.as_mut().filter(|attempt| attempt.approval_id == self.id) {
+        if let Some(attempt) = state
+            .attempt
+            .as_mut()
+            .filter(|attempt| attempt.approval_id == self.id)
+        {
             policy = attempt.policy_entry.take();
             if attempt.custody == Custody::SpentUncertain
-                && let Some(entry) = attempt.service_entry.take() { entry.uncertain(); }
+                && let Some(entry) = attempt.service_entry.take()
+            {
+                entry.uncertain();
+            }
         }
         drop(state);
         drop(policy);
@@ -1222,10 +1504,15 @@ impl Shared {
         let (response, receive) = oneshot::channel();
         let (retired, retirement) = watch::channel(false);
         let (deadline, expires) = dispatch_review_deadline(
-            self.lifetime, task.as_ref().map(|task| task.deadline_ms()),
-            Instant::now(), SystemTime::now(),
-        ).ok_or_else(refused)?;
-        let policy_provenance = policy_entry.as_ref().map(|entry| entry.provenance().clone());
+            self.lifetime,
+            task.as_ref().map(|task| task.deadline_ms()),
+            Instant::now(),
+            SystemTime::now(),
+        )
+        .ok_or_else(refused)?;
+        let policy_provenance = policy_entry
+            .as_ref()
+            .map(|entry| entry.provenance().clone());
         let policy_decided = policy_entry.is_some();
         let retain = |policy_entry: Option<PolicyEntry>| -> Result<ApprovalRecord, ToolError> {
             let mut state = self.live_state().map_err(|_| refused())?;
@@ -1268,23 +1555,41 @@ impl Shared {
             }).map_err(|_| refused())?;
             if let Some(entry) = &policy_entry {
                 let actor = entry.actor().map_err(|_| refused())?;
-                self.service.decide(&record.approval_id, ApprovalDecision::Approve, actor, None, None)
+                self.service
+                    .decide(
+                        &record.approval_id,
+                        ApprovalDecision::Approve,
+                        actor,
+                        None,
+                        None,
+                    )
                     .map_err(|_| refused())?;
             }
             state.attempt = Some(Attempt {
                 approval_id: record.approval_id.clone(),
                 input: AttemptInput::Dispatch {
-                    call_id: call.id.into(), name: call.name.into(), arguments: call.args.get().into(),
+                    call_id: call.id.into(),
+                    name: call.name.into(),
+                    arguments: call.args.get().into(),
                 },
-                review_work: context.and_then(ToolDispatchContext::retained_work).cloned(),
-                review_scope: context.and_then(ToolDispatchContext::work_authorization)
+                review_work: context
+                    .and_then(ToolDispatchContext::retained_work)
+                    .cloned(),
+                review_scope: context
+                    .and_then(ToolDispatchContext::work_authorization)
                     .map(|authorization| authorization.execution_scope().clone()),
                 dispatch_error: None,
                 deadline,
-                custody: if policy_decided { Custody::DecisionRecorded(ApprovalDecision::Approve) }
-                    else { Custody::AwaitingDecision },
+                custody: if policy_decided {
+                    Custody::DecisionRecorded(ApprovalDecision::Approve)
+                } else {
+                    Custody::AwaitingDecision
+                },
                 readback: held.as_ref().and_then(HeldAction::readback_target),
-                service: task.clone().map(|task| ServiceReview { task, decision_current: None }),
+                service: task.clone().map(|task| ServiceReview {
+                    task,
+                    decision_current: None,
+                }),
                 service_entry: None,
                 policy_entry,
                 held,
@@ -1295,7 +1600,8 @@ impl Shared {
         let record = match policy_entry {
             // The file fence spans the same native request/decision and exact
             // attempt retention. Its phase observation precedes Shared.state.
-            Some(entry) => entry.record(|entry| retain(Some(entry)))
+            Some(entry) => entry
+                .record(|entry| retain(Some(entry)))
                 .map_err(|error| installation_policy::tool_refusal(call.name, error))??,
             None => retain(None)?,
         };
@@ -1303,24 +1609,27 @@ impl Shared {
             shared: self.clone(),
             id: record.approval_id.clone(),
         };
-        let decision = if policy_decided { ApprovalDecision::Approve } else {
-        self
-            .prompts
-            .try_send(ApprovalPrompt {
-                record,
-                presentation: ApprovalPresentation::ToolCall,
-                service_task: task.clone(),
-                shared: self.clone(),
-                response: Some(response),
-                retired: retirement,
-            })
-            .map_err(|_| refused())?;
-        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), receive)
-            .await
-            .map_err(|_| refused())?
-            .map_err(|_| refused())?
+        let decision = if policy_decided {
+            ApprovalDecision::Approve
+        } else {
+            self.prompts
+                .try_send(ApprovalPrompt {
+                    record,
+                    presentation: ApprovalPresentation::ToolCall,
+                    service_task: task.clone(),
+                    shared: self.clone(),
+                    response: Some(response),
+                    retired: retirement,
+                })
+                .map_err(|_| refused())?;
+            tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), receive)
+                .await
+                .map_err(|_| refused())?
+                .map_err(|_| refused())?
         };
-        if let Some(task) = &task { task.check_setup_current().await.map_err(|_| refused())?; }
+        if let Some(task) = &task {
+            task.check_setup_current().await.map_err(|_| refused())?;
+        }
         let mut state = self.live_state().map_err(|_| refused())?;
         if state.closed {
             return Err(refused());
@@ -1341,13 +1650,29 @@ impl Shared {
         // Mark spent before releasing the one retained native dispatch. Until
         // an exact outcome arrives, including after future drop, it is uncertain.
         let reservation = if let Some(service) = &attempt.service {
-            if service.task.console_login().is_some() && attempt.policy_entry.is_none()
-                && service.decision_current.as_ref().is_none_or(|current| !current()) { return Err(refused()); }
-            service.task.console_login().map(|login| login.reserve()).transpose().map_err(|_| refused())?
-        } else { None };
+            if service.task.console_login().is_some()
+                && attempt.policy_entry.is_none()
+                && service
+                    .decision_current
+                    .as_ref()
+                    .is_none_or(|current| !current())
+            {
+                return Err(refused());
+            }
+            service
+                .task
+                .console_login()
+                .map(|login| login.reserve())
+                .transpose()
+                .map_err(|_| refused())?
+        } else {
+            None
+        };
         if let Some(held) = attempt.held.take() {
             if let Err(error) = arm(held) {
-                if let Some(reservation) = reservation { reservation.settled(); }
+                if let Some(reservation) = reservation {
+                    reservation.settled();
+                }
                 return Err(error);
             }
         }
@@ -1374,17 +1699,24 @@ impl Shared {
         if context.origin_session_id() != state.session.as_ref() {
             return Err(refused());
         }
-        let attempt = state.attempt.as_mut().filter(|attempt| {
-            attempt.custody == Custody::SpentUncertain
-                && matches!(&attempt.input,
+        let attempt = state
+            .attempt
+            .as_mut()
+            .filter(|attempt| {
+                attempt.custody == Custody::SpentUncertain
+                    && matches!(&attempt.input,
                     AttemptInput::Dispatch { call_id, name, arguments }
                     if call_id == call.id && name == call.name && arguments == call.args.get())
-        }).ok_or_else(refused)?;
+            })
+            .ok_or_else(refused)?;
         attempt.dispatch_error = dispatch_error;
         let policy = attempt.policy_entry.take();
         if let Some(reservation) = attempt.service_entry.take() {
-            if outcome == LiveBridgeEffectOutcome::Unknown { reservation.uncertain(); }
-            else { reservation.settled(); }
+            if outcome == LiveBridgeEffectOutcome::Unknown {
+                reservation.uncertain();
+            } else {
+                reservation.settled();
+            }
         }
         if outcome != LiveBridgeEffectOutcome::Unknown {
             attempt.custody = Custody::Settled(outcome);
@@ -1419,27 +1751,40 @@ fn ordinary_preparation(name: &str) -> bool {
 impl Admission {
     fn ordinary_call(&self, name: &str) -> bool {
         if crate::setup::ACQUISITION_TOOLS.contains(&name)
-            && self.3.as_ref().is_some_and(|owner| owner.allows_acquisition())
+            && self
+                .3
+                .as_ref()
+                .is_some_and(|owner| owner.allows_acquisition())
         {
             return true;
         }
-        if self.5.is_some() && name == crate::service_install::SELECTED_CHECK { return true; }
+        if self.5.is_some() && name == crate::service_install::SELECTED_CHECK {
+            return true;
+        }
         if crate::terminal_connector::TOOLS.contains(&name)
-            && self.3.as_ref().is_some_and(|owner| owner.allows_terminal_connectors()) {
+            && self
+                .3
+                .as_ref()
+                .is_some_and(|owner| owner.allows_terminal_connectors())
+        {
             return true;
         }
         if self.3.is_some()
             && (name == crate::service_preparation::TOOLKIT_PREPARE_SERVICES
-                || (crate::forge::FORGE_TOOLS.contains(&name) && name != crate::forge::FORGE_SUBMIT)
+                || (crate::forge::FORGE_TOOLS.contains(&name)
+                    && name != crate::forge::FORGE_SUBMIT)
                 || name == crate::public_document::READ_PUBLIC_DOCUMENT
                 || crate::recipe_discovery::RECIPE_TOOLS.contains(&name))
         {
             return true;
         }
         if let Some(paired_host) = &self.2 {
-            paired_host.read_tool(name) || paired_host.selection_tool(name) || (self.1 && ordinary_preparation(name))
+            paired_host.read_tool(name)
+                || paired_host.selection_tool(name)
+                || (self.1 && ordinary_preparation(name))
         } else {
-            ordinary_preparation(name) || (self.1 && PAIRED_HOST_FRONTEND_READ_TOOLS.contains(&name))
+            ordinary_preparation(name)
+                || (self.1 && PAIRED_HOST_FRONTEND_READ_TOOLS.contains(&name))
         }
     }
 }
@@ -1466,20 +1811,31 @@ impl ToolDispatchAdmission for Admission {
             if let Some(attempt) = state.attempt.as_ref()
                 && attempt.custody == Custody::SpentUncertain
                 && !(attempt
-                        .readback
-                        .as_ref()
-                        .is_some_and(|target| match target {
-                            ReadbackTarget::PairedHost(target) => target.permits(call),
-                            ReadbackTarget::Forge(key) => self.4.as_ref().is_some_and(|forge| forge.permits_readback(key, call)),
-                            ReadbackTarget::Service(target) => self.5.as_ref().is_some_and(|owner| owner.permits_readback(target, call)),
-                        }))
+                    .readback
+                    .as_ref()
+                    .is_some_and(|target| match target {
+                        ReadbackTarget::PairedHost(target) => target.permits(call),
+                        ReadbackTarget::Forge(key) => self
+                            .4
+                            .as_ref()
+                            .is_some_and(|forge| forge.permits_readback(key, call)),
+                        ReadbackTarget::Service(target) => self
+                            .5
+                            .as_ref()
+                            .is_some_and(|owner| owner.permits_readback(target, call)),
+                    }))
             {
                 return Err(refused());
             }
         }
         // A native connection can finish after its activation waiter expired.
         // Its catalog/readiness cannot restore this local invocation's authority.
-        if (ordinary_preparation(call.name) || crate::terminal_connector::TOOLS.contains(&call.name) || crate::setup::ACQUISITION_TOOLS.contains(&call.name) || self.5.is_some() && (call.name == crate::service_install::SELECTED_CHECK || crate::service_install::INSTALL_TOOLS.contains(&call.name)))
+        if (ordinary_preparation(call.name)
+            || crate::terminal_connector::TOOLS.contains(&call.name)
+            || crate::setup::ACQUISITION_TOOLS.contains(&call.name)
+            || self.5.is_some()
+                && (call.name == crate::service_install::SELECTED_CHECK
+                    || crate::service_install::INSTALL_TOOLS.contains(&call.name)))
             && self.3.as_ref().is_some_and(|owner| !owner.accepted())
         {
             return Err(refused());
@@ -1489,15 +1845,17 @@ impl ToolDispatchAdmission for Admission {
         if self.ordinary_call(call.name) {
             return Ok(());
         }
-        let expected_effect =
-            if self.2.is_some() && PAIRED_HOST_FRONTEND_CONSENT_TOOLS.contains(&call.name)
-                || self.4.is_some() && call.name == crate::forge::FORGE_SUBMIT
-                || self.5.is_some() && crate::service_install::INSTALL_TOOLS.contains(&call.name) {
-                LiveBridgeEffectKind::ExternalIo
-            } else {
-                LiveBridgeEffectKind::ToolDispatch
-            };
-        if !(self.0.consent_tools.contains(&call.name) || self.4.is_some() && call.name == crate::forge::FORGE_SUBMIT
+        let expected_effect = if self.2.is_some()
+            && PAIRED_HOST_FRONTEND_CONSENT_TOOLS.contains(&call.name)
+            || self.4.is_some() && call.name == crate::forge::FORGE_SUBMIT
+            || self.5.is_some() && crate::service_install::INSTALL_TOOLS.contains(&call.name)
+        {
+            LiveBridgeEffectKind::ExternalIo
+        } else {
+            LiveBridgeEffectKind::ToolDispatch
+        };
+        if !(self.0.consent_tools.contains(&call.name)
+            || self.4.is_some() && call.name == crate::forge::FORGE_SUBMIT
             || self.5.is_some() && crate::service_install::INSTALL_TOOLS.contains(&call.name))
             || effect_kind != expected_effect
             || call.id.len() > 512
@@ -1509,12 +1867,25 @@ impl ToolDispatchAdmission for Admission {
             Some(paired_host) if PAIRED_HOST_FRONTEND_CONSENT_TOOLS.contains(&call.name) => {
                 Some(HeldAction::PairedHost(paired_host.retain_action(call)?))
             }
-            _ if call.name == crate::forge::FORGE_SUBMIT => Some(HeldAction::Forge(self.4.as_ref().ok_or_else(refused)?.retain_action(call)?)),
-            _ if crate::service_install::INSTALL_TOOLS.contains(&call.name) => Some(HeldAction::Service(self.5.as_ref().ok_or_else(refused)?.retain_action(call, context.and_then(ToolDispatchContext::origin_session_id).ok_or_else(refused)?)?)),
+            _ if call.name == crate::forge::FORGE_SUBMIT => Some(HeldAction::Forge(
+                self.4.as_ref().ok_or_else(refused)?.retain_action(call)?,
+            )),
+            _ if crate::service_install::INSTALL_TOOLS.contains(&call.name) => {
+                Some(HeldAction::Service(
+                    self.5.as_ref().ok_or_else(refused)?.retain_action(
+                        call,
+                        context
+                            .and_then(ToolDispatchContext::origin_session_id)
+                            .ok_or_else(refused)?,
+                    )?,
+                ))
+            }
             _ => None,
         };
         let mut reviewed = match (&self.2, &held) {
-            (Some(paired_host), Some(HeldAction::PairedHost(held))) => paired_host.approval_body(held)?,
+            (Some(paired_host), Some(HeldAction::PairedHost(held))) => {
+                paired_host.approval_body(held)?
+            }
             (_, Some(HeldAction::Forge(held))) => held.review(),
             (_, Some(HeldAction::Service(held))) => held.review(),
             _ => {
@@ -1523,11 +1894,27 @@ impl ToolDispatchAdmission for Admission {
         };
         reviewed["tool"] = call.name.into();
         reviewed["call_id"] = call.id.into();
-        self.0.review_dispatch(call, context, held, reviewed, None, None, |held| match held {
-            HeldAction::PairedHost(held) => self.2.as_ref().ok_or_else(refused)?.arm_action(held),
-            HeldAction::Forge(held) => self.4.as_ref().ok_or_else(refused)?.arm_action(held),
-            HeldAction::Service(held) => self.5.as_ref().ok_or_else(refused)?.arm_action(held),
-        }).await
+        self.0
+            .review_dispatch(
+                call,
+                context,
+                held,
+                reviewed,
+                None,
+                None,
+                |held| match held {
+                    HeldAction::PairedHost(held) => {
+                        self.2.as_ref().ok_or_else(refused)?.arm_action(held)
+                    }
+                    HeldAction::Forge(held) => {
+                        self.4.as_ref().ok_or_else(refused)?.arm_action(held)
+                    }
+                    HeldAction::Service(held) => {
+                        self.5.as_ref().ok_or_else(refused)?.arm_action(held)
+                    }
+                },
+            )
+            .await
     }
 
     async fn record_dispatch_outcome(
@@ -1542,7 +1929,9 @@ impl ToolDispatchAdmission for Admission {
         }
         if crate::service_install::INSTALL_TOOLS.contains(&call.name) {
             return self.0.settle_service_dispatch(
-                self.5.as_ref().ok_or_else(|| ToolError::access_denied(call.name))?,
+                self.5
+                    .as_ref()
+                    .ok_or_else(|| ToolError::access_denied(call.name))?,
                 call,
                 context.ok_or_else(|| ToolError::access_denied(call.name))?,
                 outcome,
@@ -1565,7 +1954,10 @@ impl ToolDispatchAdmission for Admission {
             .ok_or_else(refused)?;
         if outcome != LiveBridgeEffectOutcome::Unknown {
             if call.name == crate::forge::FORGE_SUBMIT {
-                self.4.as_ref().ok_or_else(refused)?.discard_unused_arm(call)?;
+                self.4
+                    .as_ref()
+                    .ok_or_else(refused)?
+                    .discard_unused_arm(call)?;
             } else if let Some(paired_host) = &self.2 {
                 paired_host.discard_unused_arm(call)?;
             }
@@ -1633,23 +2025,49 @@ fn supplied_setup_summary(body: &serde_json::Value) -> Option<String> {
         serde_json::Value::Null => "None".to_owned(),
         previous => review_text(previous.get("name")?.as_str()?),
     };
-    let operations = body.get("operations")?.as_array()?.iter()
+    let operations = body
+        .get("operations")?
+        .as_array()?
+        .iter()
         .map(|operation| operation.as_str().map(review_text))
         .collect::<Option<Vec<_>>>()?;
     let checked = body.get("checked_installation")?;
-    let checked_field = |name: &str| checked.get(name)?.as_str()
-        .filter(|value| !value.is_empty()).map(review_text);
-    let checked_operations = checked.get("operations")?.as_array()?.iter()
-        .map(|operation| operation.as_str().filter(|value| !value.is_empty()).map(review_text))
+    let checked_field = |name: &str| {
+        checked
+            .get(name)?
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .map(review_text)
+    };
+    let checked_operations = checked
+        .get("operations")?
+        .as_array()?
+        .iter()
+        .map(|operation| {
+            operation
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .map(review_text)
+        })
         .collect::<Option<Vec<_>>>()?;
-    if checked_operations.is_empty() { return None; }
+    if checked_operations.is_empty() {
+        return None;
+    }
     Some(format!(
         "Realm: {}\nAgent: {}\nSetup helper: {helper}\nPurpose: {}\nRealm change: {}\nSetup change: {}\nPrevious setup connection: {previous}\nLifetime: {}\nRaw MCP operations ({}): {}\nChecked installation route: {}\nChecked server: {}\nChecked scope: {}\nChecked operations ({}): {}",
-        field("realm")?, field("agent")?, field("purpose")?,
-        field("realm_change")?, field("setup_change")?, field("lifetime")?,
-        operations.len(), operations.join(", "),
-        checked_field("route")?, checked_field("server")?, checked_field("scope")?,
-        checked_operations.len(), checked_operations.join(", "),
+        field("realm")?,
+        field("agent")?,
+        field("purpose")?,
+        field("realm_change")?,
+        field("setup_change")?,
+        field("lifetime")?,
+        operations.len(),
+        operations.join(", "),
+        checked_field("route")?,
+        checked_field("server")?,
+        checked_field("scope")?,
+        checked_operations.len(),
+        checked_operations.join(", "),
     ))
 }
 
@@ -1669,8 +2087,12 @@ pub(crate) async fn present_approval_outcome(
 ) -> Result<ApprovalPromptOutcome, ConnectError> {
     let id = approval.record.approval_id.to_string();
     let body = approval.record.proposed_action.body.as_ref();
-    let action = if matches!(&approval.presentation,
-        ApprovalPresentation::AccessReview | ApprovalPresentation::SuppliedSetup | ApprovalPresentation::ControllerSetup(_)) {
+    let action = if matches!(
+        &approval.presentation,
+        ApprovalPresentation::AccessReview
+            | ApprovalPresentation::SuppliedSetup
+            | ApprovalPresentation::ControllerSetup(_)
+    ) {
         // Access and combined reviews must display every host-held fact even
         // when their software portion also contains a frontend diff/summary.
         review_text(
@@ -1720,7 +2142,9 @@ pub(crate) async fn present_approval_outcome(
     let shown = compact.as_deref().unwrap_or(&action);
     let details_hint = if compact.is_some() {
         format!("\nFull technical details: 'details {id}'.")
-    } else { String::new() };
+    } else {
+        String::new()
+    };
     writeln!(
         output,
         "{}\n{}{details_hint}\nType 'approve {id}' or 'deny {id}', or /quit.",
@@ -1911,7 +2335,9 @@ mod tests {
                 approvals.shared.state().unwrap().attempt = Some(Attempt {
                     approval_id: ApprovalId::new(),
                     input: AttemptInput::Dispatch {
-                        call_id: "prior-submit".into(), name: PAIRED_HOST_FRONTEND_SUBMIT.into(), arguments: "{}".into(),
+                        call_id: "prior-submit".into(),
+                        name: PAIRED_HOST_FRONTEND_SUBMIT.into(),
+                        arguments: "{}".into(),
                     },
                     review_work: None,
                     review_scope: None,
@@ -1921,7 +2347,7 @@ mod tests {
                     held: None,
                     service: None,
                     service_entry: None,
-                policy_entry: None,
+                    policy_entry: None,
                     readback: Some(ReadbackTarget::PairedHost(PairedHostReadback::Change(
                         crate::paired_host::FrontendChangeDigest::new(&format!(
                             "hc-frontend-change-v1:sha256:{}",
@@ -2014,15 +2440,27 @@ mod tests {
 
     impl Fixture {
         fn new(lifetime: Duration, behavior: u8, policy: ToolAccessPolicy) -> Self {
-            Self::with_actor(lifetime,behavior,policy,None)
+            Self::with_actor(lifetime, behavior, policy, None)
         }
 
-        fn with_actor(lifetime:Duration,behavior:u8,policy:ToolAccessPolicy,actor:Option<(ApprovalPrincipalId,SystemTime)>)->Self {
+        fn with_actor(
+            lifetime: Duration,
+            behavior: u8,
+            policy: ToolAccessPolicy,
+            actor: Option<(ApprovalPrincipalId, SystemTime)>,
+        ) -> Self {
             let directory = tempfile::tempdir().unwrap();
             let (approvals, presenter) = match actor {
-                Some((actor,expires))=>LocalApprovals::create_for_actor(directory.path(),lifetime,&[INERT],actor,Some(expires)),
-                None=>LocalApprovals::create_with(directory.path(), lifetime, &[INERT]),
-            }.unwrap();
+                Some((actor, expires)) => LocalApprovals::create_for_actor(
+                    directory.path(),
+                    lifetime,
+                    &[INERT],
+                    actor,
+                    Some(expires),
+                ),
+                None => LocalApprovals::create_with(directory.path(), lifetime, &[INERT]),
+            }
+            .unwrap();
             let session = SessionId::new();
             approvals.bind_session(&session).unwrap();
             let inner = Arc::new(InertTool {
@@ -2181,12 +2619,21 @@ mod tests {
             let mut request = supplied_setup_request(&fixture.session, previous);
             if unsupported {
                 if previous {
-                    request.proposed_action.body.as_mut().unwrap().as_object_mut().unwrap().remove("purpose");
+                    request
+                        .proposed_action
+                        .body
+                        .as_mut()
+                        .unwrap()
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("purpose");
                 } else {
-                    request.proposed_action.body.as_mut().unwrap()["checked_installation"]["operations"] = serde_json::json!([17]);
+                    request.proposed_action.body.as_mut().unwrap()["checked_installation"]["operations"] =
+                        serde_json::json!([17]);
                 }
             }
-            let exact = review_text(&serde_json::to_string_pretty(&request.proposed_action.body).unwrap());
+            let exact =
+                review_text(&serde_json::to_string_pretty(&request.proposed_action.body).unwrap());
             let review = fixture.approvals.review_access(request.clone());
             let presentation = async {
                 let prompt = fixture.presenter.next().await.unwrap();
@@ -2197,37 +2644,90 @@ mod tests {
                 for line in ["yes", "approve an-old-id", "details an-old-id"] {
                     tx.send(Ok(line.to_owned())).await.unwrap();
                 }
-                if !unsupported { tx.send(Ok(format!("details {id}"))).await.unwrap(); }
-                tx.send(Ok(format!("{} {id}", if decision == ApprovalDecision::Approve {"approve"} else {"deny"}))).await.unwrap();
+                if !unsupported {
+                    tx.send(Ok(format!("details {id}"))).await.unwrap();
+                }
+                tx.send(Ok(format!(
+                    "{} {id}",
+                    if decision == ApprovalDecision::Approve {
+                        "approve"
+                    } else {
+                        "deny"
+                    }
+                )))
+                .await
+                .unwrap();
                 let mut output = Vec::new();
-                assert!(present_supplied_setup_approval(prompt, &mut input, &mut output,
-                    std::future::pending()).await.unwrap());
+                assert!(
+                    present_supplied_setup_approval(
+                        prompt,
+                        &mut input,
+                        &mut output,
+                        std::future::pending()
+                    )
+                    .await
+                    .unwrap()
+                );
                 let output = String::from_utf8(output).unwrap();
-                assert_eq!(output.matches(exact.as_str()).count(), 1, "complete retained JSON is shown exactly");
+                assert_eq!(
+                    output.matches(exact.as_str()).count(),
+                    1,
+                    "complete retained JSON is shown exactly"
+                );
                 assert!(output.contains("Use the exact approval ID"));
                 if unsupported {
-                    assert!(!output.contains("Full technical details:"), "unsupported shapes retain the complete view");
+                    assert!(
+                        !output.contains("Full technical details:"),
+                        "unsupported shapes retain the complete view"
+                    );
                 } else {
                     let compact = output.split("Exact technical details for ").next().unwrap();
-                    for operation in ["setup_catalog", "future_exact_operation", "setup_install",
-                        "setup_selected_install", "setup_selected_check"] {
-                        assert_eq!(compact.matches(operation).count(), 1, "every exact operation appears once");
+                    for operation in [
+                        "setup_catalog",
+                        "future_exact_operation",
+                        "setup_install",
+                        "setup_selected_install",
+                        "setup_selected_check",
+                    ] {
+                        assert_eq!(
+                            compact.matches(operation).count(),
+                            1,
+                            "every exact operation appears once"
+                        );
                     }
-                    for fact in ["fixture-realm", "fixture-agent", "supplied-helper", "governed operation",
-                        "persists if setup stops", "Until revoked", "cancellation does not undo",
-                        "fixture-checked-route", "live checked session", "separate human review", "Raw MCP access is unchanged"] {
+                    for fact in [
+                        "fixture-realm",
+                        "fixture-agent",
+                        "supplied-helper",
+                        "governed operation",
+                        "persists if setup stops",
+                        "Until revoked",
+                        "cancellation does not undo",
+                        "fixture-checked-route",
+                        "live checked session",
+                        "separate human review",
+                        "Raw MCP access is unchanged",
+                    ] {
                         assert!(compact.contains(fact), "missing material fact: {fact}");
                     }
-                    assert!(compact.contains(if previous {"Previous setup connection: prior-helper"} else {"Previous setup connection: None"}));
+                    assert!(compact.contains(if previous {
+                        "Previous setup connection: prior-helper"
+                    } else {
+                        "Previous setup connection: None"
+                    }));
                     assert!(!compact.contains("exact-long-launcher-argument"));
                     assert!(!compact.contains("retained-exact-extra-fact"));
-                    assert!(output.contains(&format!("Exact technical details for {id}:\n{exact}")));
+                    assert!(
+                        output.contains(&format!("Exact technical details for {id}:\n{exact}"))
+                    );
                     assert!(output.contains(&format!("Type 'approve {id}' or 'deny {id}'")));
                 }
             };
             let (record, ()) = tokio::time::timeout(Duration::from_secs(3), async {
                 tokio::join!(review, presentation)
-            }).await.unwrap();
+            })
+            .await
+            .unwrap();
             let record = record.unwrap();
             assert_eq!(record.owner, request.owner);
             assert_eq!(record.requester, request.requester);
@@ -2252,8 +2752,11 @@ mod tests {
             let mut fixture = Fixture::new(DECISION_LIFETIME, 0, permitted());
             let request = access_request(&fixture.session);
             let mut expected = request.proposed_action.body.clone().unwrap();
-            if !same_body { expected["realm"] = serde_json::json!("another-realm"); }
-            let exact = review_text(&serde_json::to_string_pretty(&request.proposed_action.body).unwrap());
+            if !same_body {
+                expected["realm"] = serde_json::json!("another-realm");
+            }
+            let exact =
+                review_text(&serde_json::to_string_pretty(&request.proposed_action.body).unwrap());
             let summary = "Model: fixture-model\nScope: fixture-realm, fixture-agent";
             let compact = same_body && supported;
             let review = fixture.approvals.review_access(request.clone());
@@ -2265,21 +2768,48 @@ mod tests {
                 for line in ["yes", "approve an-old-id", "details an-old-id"] {
                     tx.send(Ok(line.to_owned())).await.unwrap();
                 }
-                if compact { tx.send(Ok(format!("details {id}"))).await.unwrap(); }
-                tx.send(Ok(format!("{} {id}", if decision == ApprovalDecision::Approve {"approve"} else {"deny"}))).await.unwrap();
+                if compact {
+                    tx.send(Ok(format!("details {id}"))).await.unwrap();
+                }
+                tx.send(Ok(format!(
+                    "{} {id}",
+                    if decision == ApprovalDecision::Approve {
+                        "approve"
+                    } else {
+                        "deny"
+                    }
+                )))
+                .await
+                .unwrap();
                 let mut output = Vec::new();
-                assert!(present_controller_setup_approval(prompt, &expected, supported.then_some(summary),
-                    &mut input, &mut output, std::future::pending()).await.unwrap());
+                assert!(
+                    present_controller_setup_approval(
+                        prompt,
+                        &expected,
+                        supported.then_some(summary),
+                        &mut input,
+                        &mut output,
+                        std::future::pending()
+                    )
+                    .await
+                    .unwrap()
+                );
                 let output = String::from_utf8(output).unwrap();
                 assert_eq!(output.matches(exact.as_str()).count(), 1);
                 assert!(output.contains("Use the exact approval ID"));
                 assert_eq!(output.contains(summary), compact);
                 assert_eq!(output.contains("Full technical details:"), compact);
-                if compact { assert!(output.contains(&format!("Exact technical details for {id}:\n{exact}"))); }
+                if compact {
+                    assert!(
+                        output.contains(&format!("Exact technical details for {id}:\n{exact}"))
+                    );
+                }
             };
             let (record, ()) = tokio::time::timeout(Duration::from_secs(3), async {
                 tokio::join!(review, presentation)
-            }).await.unwrap();
+            })
+            .await
+            .unwrap();
             let record = record.unwrap();
             assert_eq!(record.owner, request.owner);
             assert_eq!(record.requester, request.requester);
@@ -2301,21 +2831,34 @@ mod tests {
         let presentation = async {
             let prompt = fixture.presenter.next().await.unwrap();
             let id = prompt.record().approval_id.clone();
-            fixture.approvals.fixture_expire_waiting_review(&id).unwrap();
+            fixture
+                .approvals
+                .fixture_expire_waiting_review(&id)
+                .unwrap();
             let (tx, rx) = mpsc::channel(2);
             let mut input = TerminalInput::scripted(rx);
             tx.send(Ok(format!("details {id}"))).await.unwrap();
             tx.send(Ok(format!("approve {id}"))).await.unwrap();
             let mut output = Vec::new();
-            assert!(present_supplied_setup_approval(prompt, &mut input, &mut output,
-                std::future::pending()).await.is_err());
+            assert!(
+                present_supplied_setup_approval(
+                    prompt,
+                    &mut input,
+                    &mut output,
+                    std::future::pending()
+                )
+                .await
+                .is_err()
+            );
             let output = String::from_utf8(output).unwrap();
             assert!(output.contains(&format!("Exact technical details for {id}:")));
             assert!(!output.contains("Decision recorded."));
         };
         let (record, ()) = tokio::time::timeout(Duration::from_secs(3), async {
             tokio::join!(review, presentation)
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         assert!(record.is_err());
         let entries = fixture.entries();
         assert_eq!(entries.len(), 1);
@@ -2349,9 +2892,8 @@ mod tests {
                 let bytes = serde_json::to_vec(&request).unwrap();
                 assert!(bytes.len() > MAX_ARGUMENT_BYTES && bytes.len() <= MAX_ACCESS_REVIEW_BYTES);
             }
-            let exact_review = review_text(
-                &serde_json::to_string_pretty(&request.proposed_action.body).unwrap(),
-            );
+            let exact_review =
+                review_text(&serde_json::to_string_pretty(&request.proposed_action.body).unwrap());
             let review = fixture.approvals.review_access(request.clone());
             let presentation = async {
                 let prompt = fixture.presenter.next().await.unwrap();
@@ -2375,7 +2917,10 @@ mod tests {
                         .unwrap()
                 );
                 let output = String::from_utf8(output).unwrap();
-                assert!(output.contains(&exact_review), "all access fields must be visible");
+                assert!(
+                    output.contains(&exact_review),
+                    "all access fields must be visible"
+                );
                 for fact in [
                     "fixture-account",
                     "messages.list",
@@ -2841,27 +3386,55 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_native_decision_refusal_preserves_same_presenter_for_later_review() {
-        use std::{future::{Future, poll_fn}, task::Poll};
+        use std::{
+            future::{Future, poll_fn},
+            task::Poll,
+        };
         tokio::time::timeout(Duration::from_secs(2), async {
             let mut fixture = Fixture::new(DECISION_LIFETIME, 0, permitted());
-            let review = fixture.approvals.review_access(access_request(&fixture.session));
+            let review = fixture
+                .approvals
+                .review_access(access_request(&fixture.session));
             tokio::pin!(review);
-            assert!(poll_fn(|cx| Poll::Ready(review.as_mut().poll(cx))).await.is_pending());
+            assert!(
+                poll_fn(|cx| Poll::Ready(review.as_mut().poll(cx)))
+                    .await
+                    .is_pending()
+            );
             let prompt = fixture.presenter.next().await.unwrap();
             let id = prompt.record().approval_id.clone();
             // Invalidate only this actual prompt's retained decision lifetime.
             // The waiting native approval and sole presenter remain owned.
-            fixture.approvals.shared.state().unwrap().attempt.as_mut().unwrap().deadline = Instant::now();
+            fixture
+                .approvals
+                .shared
+                .state()
+                .unwrap()
+                .attempt
+                .as_mut()
+                .unwrap()
+                .deadline = Instant::now();
             let (tx, rx) = mpsc::channel(1);
             let mut input = TerminalInput::scripted(rx);
             tx.send(Ok(format!("approve {id}"))).await.unwrap();
-            let shown = present_approval_outcome(prompt, &mut input, &mut Vec::new(), std::future::pending()).await;
+            let shown = present_approval_outcome(
+                prompt,
+                &mut input,
+                &mut Vec::new(),
+                std::future::pending(),
+            )
+            .await;
             assert!(matches!(shown, Ok(ApprovalPromptOutcome::Refused(_))));
             assert!(review.await.is_err());
-            assert_eq!(fixture.approvals.shared.service.get(&id).unwrap().status, ApprovalStatus::Pending);
+            assert_eq!(
+                fixture.approvals.shared.service.get(&id).unwrap().status,
+                ApprovalStatus::Pending
+            );
             fixture.approvals.check_session(&fixture.session).unwrap();
 
-            let later = fixture.approvals.review_access(access_request(&fixture.session));
+            let later = fixture
+                .approvals
+                .review_access(access_request(&fixture.session));
             let respond = async {
                 let mut next = fixture.presenter.next().await.unwrap();
                 assert_ne!(next.record().approval_id, id);
@@ -2869,7 +3442,9 @@ mod tests {
             };
             let (record, ()) = tokio::join!(later, respond);
             assert_eq!(record.unwrap().status, ApprovalStatus::Approved);
-        }).await.expect("request-local terminal refusal stranded the later review");
+        })
+        .await
+        .expect("request-local terminal refusal stranded the later review");
     }
 
     #[tokio::test]
@@ -3029,8 +3604,14 @@ mod tests {
         options.build.tool_access_policy = Some(ToolAccessPolicy::AllowList(
             [tool_name].into_iter().collect(),
         ));
-        options.build.tool_dispatch_admission =
-            Some(Arc::new(Admission(approvals.shared.clone(), false, None, None, None, None)));
+        options.build.tool_dispatch_admission = Some(Arc::new(Admission(
+            approvals.shared.clone(),
+            false,
+            None,
+            None,
+            None,
+            None,
+        )));
         let session = Box::pin(crate::ConnectSession::open_with_config(
             storage,
             meerkat_core::Config::default(),
@@ -3071,65 +3652,210 @@ mod tests {
         assert!(presenter.prompts.try_recv().is_err());
     }
     #[tokio::test]
-    async fn browser_actor_is_retained_and_expired_prompt_is_local_refusal(){
-        let actor=ApprovalPrincipalId::new("fixture-host-viewer").unwrap();
-        let mut f=Fixture::with_actor(DECISION_LIFETIME,0,permitted(),Some((actor.clone(),SystemTime::now()+Duration::from_secs(30))));
-        let first=f.dispatch("expired",INERT,"{}");let mut prompt=f.prompt().await;
-        f.approvals.shared.state().unwrap().attempt.as_mut().unwrap().deadline=Instant::now()-Duration::from_secs(1);
-        assert!(matches!(prompt.decide(ApprovalDecision::Approve),Err(ConnectError::InvalidInput(_))));
-        drop(prompt);assert!(first.await.unwrap().is_err());assert!(!f.approvals.shared.state().unwrap().closed);
-        let second=f.dispatch("valid",INERT,"{}");let mut prompt=f.prompt().await;prompt.decide(ApprovalDecision::Approve).unwrap();second.await.unwrap().unwrap();
-        let records=f.entries();
-        let recorded=records.iter().filter_map(|r|r.decision.as_ref()).collect::<Vec<_>>();
-        assert_eq!(recorded.len(),1);assert_eq!(recorded[0].actor,actor);
-        assert!(prompt.decide(ApprovalDecision::Approve).is_err());assert_eq!(f.inner.entered.load(Ordering::SeqCst),1);
+    async fn browser_actor_is_retained_and_expired_prompt_is_local_refusal() {
+        let actor = ApprovalPrincipalId::new("fixture-host-viewer").unwrap();
+        let mut f = Fixture::with_actor(
+            DECISION_LIFETIME,
+            0,
+            permitted(),
+            Some((actor.clone(), SystemTime::now() + Duration::from_secs(30))),
+        );
+        let first = f.dispatch("expired", INERT, "{}");
+        let mut prompt = f.prompt().await;
+        f.approvals
+            .shared
+            .state()
+            .unwrap()
+            .attempt
+            .as_mut()
+            .unwrap()
+            .deadline = Instant::now() - Duration::from_secs(1);
+        assert!(matches!(
+            prompt.decide(ApprovalDecision::Approve),
+            Err(ConnectError::InvalidInput(_))
+        ));
+        drop(prompt);
+        assert!(first.await.unwrap().is_err());
+        assert!(!f.approvals.shared.state().unwrap().closed);
+        let second = f.dispatch("valid", INERT, "{}");
+        let mut prompt = f.prompt().await;
+        prompt.decide(ApprovalDecision::Approve).unwrap();
+        second.await.unwrap().unwrap();
+        let records = f.entries();
+        let recorded = records
+            .iter()
+            .filter_map(|r| r.decision.as_ref())
+            .collect::<Vec<_>>();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].actor, actor);
+        assert!(prompt.decide(ApprovalDecision::Approve).is_err());
+        assert_eq!(f.inner.entered.load(Ordering::SeqCst), 1);
     }
 
     #[test]
-    fn poisoned_approval_custody_cannot_acknowledge_retirement(){
-        let f=Fixture::new(DECISION_LIFETIME,0,permitted());let shared=f.approvals.shared.clone();
-        let _=std::thread::spawn(move||{let _guard=shared.state.lock().unwrap();panic!("fixture poison");}).join();
-        assert!(matches!(f.approvals.shared.state(),Err(ConnectError::Native{..})));
+    fn poisoned_approval_custody_cannot_acknowledge_retirement() {
+        let f = Fixture::new(DECISION_LIFETIME, 0, permitted());
+        let shared = f.approvals.shared.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = shared.state.lock().unwrap();
+            panic!("fixture poison");
+        })
+        .join();
+        assert!(matches!(
+            f.approvals.shared.state(),
+            Err(ConnectError::Native { .. })
+        ));
         assert!(f.approvals.retire_checked().is_err());
     }
 
-    #[tokio::test(flavor="multi_thread",worker_threads=2)]
-    async fn browser_retirement_waits_for_native_consequence_barrier_and_records_outcome_after_expiry(){
-        use meerkat_core::{PolicyDigest,PolicyEvaluationProvenance,PolicyRevision,ToolConsequencePolicySnapshot,ToolConsequenceRequest,ToolConsequenceVerdict,PolicyProviderId,PolicyProviderGeneration,ToolConsequenceNarrowingPolicy,PolicyId,ToolConsequenceFailure,ToolConsequencePolicyRegistry,PolicyEvaluationSupervisorConfig,MobMemberBinding};
-        struct Barrier{release:std::sync::Mutex<bool>,cv:std::sync::Condvar,entered:tokio::sync::Notify}
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn browser_retirement_waits_for_native_consequence_barrier_and_records_outcome_after_expiry()
+     {
+        use meerkat_core::{
+            MobMemberBinding, PolicyDigest, PolicyEvaluationProvenance,
+            PolicyEvaluationSupervisorConfig, PolicyId, PolicyProviderGeneration, PolicyProviderId,
+            PolicyRevision, ToolConsequenceFailure, ToolConsequenceNarrowingPolicy,
+            ToolConsequencePolicyRegistry, ToolConsequencePolicySnapshot, ToolConsequenceRequest,
+            ToolConsequenceVerdict,
+        };
+        struct Barrier {
+            release: std::sync::Mutex<bool>,
+            cv: std::sync::Condvar,
+            entered: tokio::sync::Notify,
+        }
         impl ToolConsequencePolicySnapshot for Barrier {
-            fn provenance(&self)->PolicyEvaluationProvenance{PolicyEvaluationProvenance{revision:PolicyRevision(1),digest:PolicyDigest::from_canonical_bytes(b"retirement-fixture")}}
-            fn evaluate(&self,_:&ToolConsequenceRequest)->ToolConsequenceVerdict{
-                self.entered.notify_one();let guard=self.release.lock().unwrap();
-                let(guard,_)=self.cv.wait_timeout_while(guard,Duration::from_secs(10),|ready|!*ready).unwrap();assert!(*guard,"bounded test barrier release");ToolConsequenceVerdict::Allow
+            fn provenance(&self) -> PolicyEvaluationProvenance {
+                PolicyEvaluationProvenance {
+                    revision: PolicyRevision(1),
+                    digest: PolicyDigest::from_canonical_bytes(b"retirement-fixture"),
+                }
+            }
+            fn evaluate(&self, _: &ToolConsequenceRequest) -> ToolConsequenceVerdict {
+                self.entered.notify_one();
+                let guard = self.release.lock().unwrap();
+                let (guard, _) = self
+                    .cv
+                    .wait_timeout_while(guard, Duration::from_secs(10), |ready| !*ready)
+                    .unwrap();
+                assert!(*guard, "bounded test barrier release");
+                ToolConsequenceVerdict::Allow
             }
         }
-        struct Provider{ id:PolicyProviderId,barrier:Arc<Barrier> }
-        impl ToolConsequenceNarrowingPolicy for Provider{
-            fn provider_id(&self)->&PolicyProviderId{&self.id}
-            fn generation(&self)->PolicyProviderGeneration{PolicyProviderGeneration(1)}
-            fn snapshot(&self,_:&PolicyId)->Result<Arc<dyn ToolConsequencePolicySnapshot>,ToolConsequenceFailure>{Ok(self.barrier.clone())}
+        struct Provider {
+            id: PolicyProviderId,
+            barrier: Arc<Barrier>,
         }
-        let barrier=Arc::new(Barrier{release:std::sync::Mutex::new(false),cv:std::sync::Condvar::new(),entered:tokio::sync::Notify::new()});
-        let provider_id=PolicyProviderId::new("retirement-fixture").unwrap();
-        let registry=Arc::new(ToolConsequencePolicyRegistry::new(vec![Arc::new(Provider{id:provider_id.clone(),barrier:barrier.clone()})],PolicyEvaluationSupervisorConfig{workers_per_provider:1,queue_capacity_per_provider:1,evaluation_deadline:Duration::from_secs(15)},None).unwrap());
-        let bound=registry.bind(MobMemberBinding{mob_id:"fixture".into(),role:"fixture".into(),member:"fixture".into()},provider_id,PolicyId::new("retirement").unwrap()).unwrap();
-        let expires=SystemTime::now()+Duration::from_secs(1);
-        let mut f=Fixture::with_actor(DECISION_LIFETIME,0,permitted(),Some((ApprovalPrincipalId::new("retained-viewer").unwrap(),expires)));
-        f.dispatcher=Arc::new(ExecutionPolicyGatedDispatcher::new(f.inner.clone(),ToolExecutionPolicy::resolve(permitted()).unwrap()).with_dispatch_admission(Arc::new(Admission(f.approvals.shared.clone(),false,None,None,None,None))).with_consequence_policy(bound));
-        let task=f.dispatch("held",INERT,"{}");let mut prompt=f.prompt().await;prompt.decide(ApprovalDecision::Approve).unwrap();barrier.entered.notified().await;
-        assert!(f.approvals.has_uncertain_dispatch());assert_eq!(f.inner.entered.load(Ordering::SeqCst),0);
-        let approvals=Arc::new(f.approvals);let(retired,observed)=oneshot::channel();
-        let check=tokio::spawn(crate::stdio::tests::retire_joined_dispatch(approvals.clone(),async move{task.await.unwrap().unwrap();},retired));
-        observed.await.unwrap();assert!(!check.is_finished());
+        impl ToolConsequenceNarrowingPolicy for Provider {
+            fn provider_id(&self) -> &PolicyProviderId {
+                &self.id
+            }
+            fn generation(&self) -> PolicyProviderGeneration {
+                PolicyProviderGeneration(1)
+            }
+            fn snapshot(
+                &self,
+                _: &PolicyId,
+            ) -> Result<Arc<dyn ToolConsequencePolicySnapshot>, ToolConsequenceFailure>
+            {
+                Ok(self.barrier.clone())
+            }
+        }
+        let barrier = Arc::new(Barrier {
+            release: std::sync::Mutex::new(false),
+            cv: std::sync::Condvar::new(),
+            entered: tokio::sync::Notify::new(),
+        });
+        let provider_id = PolicyProviderId::new("retirement-fixture").unwrap();
+        let registry = Arc::new(
+            ToolConsequencePolicyRegistry::new(
+                vec![Arc::new(Provider {
+                    id: provider_id.clone(),
+                    barrier: barrier.clone(),
+                })],
+                PolicyEvaluationSupervisorConfig {
+                    workers_per_provider: 1,
+                    queue_capacity_per_provider: 1,
+                    evaluation_deadline: Duration::from_secs(15),
+                },
+                None,
+            )
+            .unwrap(),
+        );
+        let bound = registry
+            .bind(
+                MobMemberBinding {
+                    mob_id: "fixture".into(),
+                    role: "fixture".into(),
+                    member: "fixture".into(),
+                },
+                provider_id,
+                PolicyId::new("retirement").unwrap(),
+            )
+            .unwrap();
+        let expires = SystemTime::now() + Duration::from_secs(1);
+        let mut f = Fixture::with_actor(
+            DECISION_LIFETIME,
+            0,
+            permitted(),
+            Some((
+                ApprovalPrincipalId::new("retained-viewer").unwrap(),
+                expires,
+            )),
+        );
+        f.dispatcher = Arc::new(
+            ExecutionPolicyGatedDispatcher::new(
+                f.inner.clone(),
+                ToolExecutionPolicy::resolve(permitted()).unwrap(),
+            )
+            .with_dispatch_admission(Arc::new(Admission(
+                f.approvals.shared.clone(),
+                false,
+                None,
+                None,
+                None,
+                None,
+            )))
+            .with_consequence_policy(bound),
+        );
+        let task = f.dispatch("held", INERT, "{}");
+        let mut prompt = f.prompt().await;
+        prompt.decide(ApprovalDecision::Approve).unwrap();
+        barrier.entered.notified().await;
+        assert!(f.approvals.has_uncertain_dispatch());
+        assert_eq!(f.inner.entered.load(Ordering::SeqCst), 0);
+        let approvals = Arc::new(f.approvals);
+        let (retired, observed) = oneshot::channel();
+        let check = tokio::spawn(crate::stdio::tests::retire_joined_dispatch(
+            approvals.clone(),
+            async move {
+                task.await.unwrap().unwrap();
+            },
+            retired,
+        ));
+        observed.await.unwrap();
+        assert!(!check.is_finished());
         tokio::time::sleep(Duration::from_secs(1)).await;
         assert!(approvals.shared.live_state().is_err());
-        *barrier.release.lock().unwrap()=true;barrier.cv.notify_all();check.await.unwrap();
-        assert_eq!(f.inner.entered.load(Ordering::SeqCst),1);assert!(!approvals.has_uncertain_dispatch());
+        *barrier.release.lock().unwrap() = true;
+        barrier.cv.notify_all();
+        check.await.unwrap();
+        assert_eq!(f.inner.entered.load(Ordering::SeqCst), 1);
+        assert!(!approvals.has_uncertain_dispatch());
         assert!(prompt.decide(ApprovalDecision::Approve).is_err());
-        let args=serde_json::value::RawValue::from_string("{}".into()).unwrap();
-        assert!(f.dispatcher.dispatch_with_context(ToolCallView{id:"after",name:INERT,args:&args},&ToolDispatchContext::default().with_runtime_identity(f.session,None)).await.is_err());
-        assert_eq!(f.inner.entered.load(Ordering::SeqCst),1);
+        let args = serde_json::value::RawValue::from_string("{}".into()).unwrap();
+        assert!(
+            f.dispatcher
+                .dispatch_with_context(
+                    ToolCallView {
+                        id: "after",
+                        name: INERT,
+                        args: &args
+                    },
+                    &ToolDispatchContext::default().with_runtime_identity(f.session, None)
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(f.inner.entered.load(Ordering::SeqCst), 1);
     }
-
 }

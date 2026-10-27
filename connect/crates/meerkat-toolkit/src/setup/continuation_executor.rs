@@ -446,8 +446,10 @@ pub(super) fn recovery_effect_settled(
     match effect.status {
         EffectStatus::Failed => {
             if canonical.is_some()
-                || !matches!(decode_observation(effect.outcome.as_ref(), obligation)?.kind,
-                    ObservationKind::OwnerRejected { .. })
+                || !matches!(
+                    decode_observation(effect.outcome.as_ref(), obligation)?.kind,
+                    ObservationKind::OwnerRejected { .. }
+                )
             {
                 return Err(SetupError::InvalidRecord);
             }
@@ -455,7 +457,9 @@ pub(super) fn recovery_effect_settled(
         }
         EffectStatus::Succeeded => {
             let observed = decode_receipt(effect, obligation)?;
-            let Some(canonical) = canonical else { return Ok(false); };
+            let Some(canonical) = canonical else {
+                return Ok(false);
+            };
             canonical.check(obligation, &canonical.receipt)?;
             // The standalone acknowledgement and effect settlement can race.
             // Both retain the same exact admission but may observe it at

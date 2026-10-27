@@ -114,8 +114,11 @@ impl SetupStore<'_> {
         if let Some(saved) = self.store.get(&key).await? {
             let prepared = self.recover_prepared_work(&snapshot, &effect, saved, available)?;
             super::installed_input::verify_work_input_reference(
-                snapshot.request(), &prepared.admission.correlation().input_reference,
-                access.evidence, access.context, access.references,
+                snapshot.request(),
+                &prepared.admission.correlation().input_reference,
+                access.evidence,
+                access.context,
+                access.references,
             )?;
             return Ok(prepared);
         }
@@ -125,8 +128,11 @@ impl SetupStore<'_> {
         }
         let proposed = preparer.prepare(snapshot.request())?;
         super::installed_input::verify_work_input_reference(
-            snapshot.request(), &proposed.input_reference,
-            access.evidence, access.context, access.references,
+            snapshot.request(),
+            &proposed.input_reference,
+            access.evidence,
+            access.context,
+            access.references,
         )?;
         let record = PreparedRecord {
             acquisition: snapshot.key().clone(),

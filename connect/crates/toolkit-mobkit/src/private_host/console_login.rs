@@ -113,18 +113,33 @@ impl ConsoleLogins {
     }
 
     #[cfg(test)]
-    pub(crate) fn fixture_enroll(&self, id: u64, selection: ConsoleLoginSelection)
-        -> Result<ConsoleLoginHandle, HostLifetimeError>
-    {
+    pub(crate) fn fixture_enroll(
+        &self,
+        id: u64,
+        selection: ConsoleLoginSelection,
+    ) -> Result<ConsoleLoginHandle, HostLifetimeError> {
         self.enroll(id, selection.clone())?;
-        self.resolve(&selection.issuer, &selection.subject, &selection.login_scope_id)
-            .map_err(|_| HostLifetimeError::Unavailable)
+        self.resolve(
+            &selection.issuer,
+            &selection.subject,
+            &selection.login_scope_id,
+        )
+        .map_err(|_| HostLifetimeError::Unavailable)
     }
 
     #[cfg(test)]
-    pub(crate) fn fixture_retire(&self, id: u64)
-        -> Result<std::pin::Pin<Box<dyn std::future::Future<Output = Result<ConsoleLoginRetirement, HostLifetimeError>> + Send>>, HostLifetimeError>
-    {
+    pub(crate) fn fixture_retire(
+        &self,
+        id: u64,
+    ) -> Result<
+        std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<ConsoleLoginRetirement, HostLifetimeError>>
+                    + Send,
+            >,
+        >,
+        HostLifetimeError,
+    > {
         Ok(Box::pin(self.retire(id)?.drain()))
     }
     pub(super) fn new(
@@ -153,7 +168,9 @@ impl ConsoleLogins {
         }
         // Publish before changing enrollment facts. This source has no phase
         // mutex; activation/component owners retain their phase-first order.
-        let _publication = self.publication.as_ref()
+        let _publication = self
+            .publication
+            .as_ref()
             .map(LocalAuthorizationPublication::begin_owner_change)
             .transpose()
             .map_err(|_| HostLifetimeError::Unavailable)?;
@@ -227,10 +244,20 @@ impl ConsoleLogins {
 
     /// Protected-parent lifetime lookup. The parent separately owns actual
     /// authentication/administration; this never resolves a verified carrier.
-    pub(super) fn parent_enrollment(&self, id: u64) -> Result<ConsoleLoginHandle, HostLifetimeError> {
-        if self.closed.is_closed() { return Err(HostLifetimeError::Unavailable); }
-        let handle = self.rows.lock().map_err(|_| HostLifetimeError::Unavailable)?
-            .get(&id).cloned().ok_or(HostLifetimeError::WrongOwner)?;
+    pub(super) fn parent_enrollment(
+        &self,
+        id: u64,
+    ) -> Result<ConsoleLoginHandle, HostLifetimeError> {
+        if self.closed.is_closed() {
+            return Err(HostLifetimeError::Unavailable);
+        }
+        let handle = self
+            .rows
+            .lock()
+            .map_err(|_| HostLifetimeError::Unavailable)?
+            .get(&id)
+            .cloned()
+            .ok_or(HostLifetimeError::WrongOwner)?;
         handle.check().map_err(|error| match error {
             ConsoleLoginRefusal::Unavailable => HostLifetimeError::Unavailable,
             _ => HostLifetimeError::Denied,
@@ -239,7 +266,9 @@ impl ConsoleLogins {
     }
 
     pub(super) fn retire(&self, id: u64) -> Result<RetirementWait, HostLifetimeError> {
-        let _publication = self.publication.as_ref()
+        let _publication = self
+            .publication
+            .as_ref()
             .map(LocalAuthorizationPublication::begin_owner_change)
             .transpose()
             .map_err(|_| HostLifetimeError::Unavailable)?;
@@ -298,7 +327,11 @@ impl ConsoleLoginHandle {
     /// The existing pipe observer keeps its short watch synchronization.
     /// Contention and poisoned state remain unavailable, not retired/expired.
     pub(crate) fn try_check(&self) -> Result<(), ConsoleLoginRefusal> {
-        let state = self.0.state.try_lock().map_err(|_| ConsoleLoginRefusal::Unavailable)?;
+        let state = self
+            .0
+            .state
+            .try_lock()
+            .map_err(|_| ConsoleLoginRefusal::Unavailable)?;
         self.check_locked(&state)
     }
 
@@ -309,16 +342,25 @@ impl ConsoleLoginHandle {
     /// its try-reservation refuses on that contention, releases these guards,
     /// and lets retirement finish. Never await, reserve/check this login again,
     /// resolve a replacement login, or take a blocking publication writer here.
-    pub(crate) fn with_current_revoke<T>(&self, operation: impl FnOnce() -> T)
-        -> Result<T, ConsoleLoginRefusal>
-    {
+    pub(crate) fn with_current_revoke<T>(
+        &self,
+        operation: impl FnOnce() -> T,
+    ) -> Result<T, ConsoleLoginRefusal> {
         let closed = self.0.closed.0.borrow();
         if *closed || self.0.closed.0.has_changed().is_err() {
             return Err(ConsoleLoginRefusal::Unavailable);
         }
-        let state = self.0.state.try_lock().map_err(|_| ConsoleLoginRefusal::Unavailable)?;
-        if state.retired { return Err(ConsoleLoginRefusal::Retired); }
-        if now_ms()? >= self.0.selection.expires_at_ms { return Err(ConsoleLoginRefusal::Expired); }
+        let state = self
+            .0
+            .state
+            .try_lock()
+            .map_err(|_| ConsoleLoginRefusal::Unavailable)?;
+        if state.retired {
+            return Err(ConsoleLoginRefusal::Retired);
+        }
+        if now_ms()? >= self.0.selection.expires_at_ms {
+            return Err(ConsoleLoginRefusal::Expired);
+        }
         Ok(operation())
     }
 
@@ -345,11 +387,20 @@ impl ConsoleLoginHandle {
     /// its state lock. This creates no new enrollment or native permission.
     /// Retain the reservation until the actual mutation outcome is settled.
     pub fn try_reserve(&self) -> Result<ConsoleLoginReservation, ConsoleLoginRefusal> {
-        let mut state = self.0.state.try_lock().map_err(|_| ConsoleLoginRefusal::Unavailable)?;
+        let mut state = self
+            .0
+            .state
+            .try_lock()
+            .map_err(|_| ConsoleLoginRefusal::Unavailable)?;
         self.check_locked(&state)?;
-        state.reservations = state.reservations.checked_add(1)
+        state.reservations = state
+            .reservations
+            .checked_add(1)
             .ok_or(ConsoleLoginRefusal::Unavailable)?;
-        Ok(ConsoleLoginReservation { handle: self.clone(), finished: false })
+        Ok(ConsoleLoginReservation {
+            handle: self.clone(),
+            finished: false,
+        })
     }
 
     /// Wakes an idle presenter on actual retirement, absolute expiry or terminal
@@ -416,8 +467,11 @@ impl GovernedEntryFence for ConsoleLoginHandle {
             .map_err(|refusal| match refusal {
                 ConsoleLoginRefusal::Retired => GovernedEntryRefusal::Retired,
                 ConsoleLoginRefusal::Expired => GovernedEntryRefusal::Expired,
-                ConsoleLoginRefusal::Unavailable | ConsoleLoginRefusal::Unknown =>
-                    GovernedEntryRefusal::Unavailable("The retained Console login is unavailable".into()),
+                ConsoleLoginRefusal::Unavailable | ConsoleLoginRefusal::Unknown => {
+                    GovernedEntryRefusal::Unavailable(
+                        "The retained Console login is unavailable".into(),
+                    )
+                }
             })
     }
 }
@@ -426,8 +480,10 @@ impl GovernedEntryPermit for ConsoleLoginReservation {
     fn finish(mut self: Box<Self>, outcome: GovernedEntryOutcome) {
         // Entered means the admission decision is known, not that accepted
         // work or source publication completed. Those owners remain native.
-        ConsoleLoginReservation::finish(self.as_mut(),
-            matches!(outcome, GovernedEntryOutcome::Uncertain));
+        ConsoleLoginReservation::finish(
+            self.as_mut(),
+            matches!(outcome, GovernedEntryOutcome::Uncertain),
+        );
     }
 }
 
@@ -481,22 +537,43 @@ mod parent_lifetime_tests {
     async fn parent_id_lookup_is_same_lifetime_and_never_a_verified_carrier() {
         let (send, receive) = watch::channel(false);
         let logins = ConsoleLogins::new(PrivateHostClosed(receive), None);
-        let selection = ConsoleLoginSelection { issuer: "https://parent.example".into(),
-            subject: "actual-parent-auth-subject".into(), login_scope_id: "one-login".into(),
-            expires_at_ms: now_ms().unwrap() + 60_000 };
+        let selection = ConsoleLoginSelection {
+            issuer: "https://parent.example".into(),
+            subject: "actual-parent-auth-subject".into(),
+            login_scope_id: "one-login".into(),
+            expires_at_ms: now_ms().unwrap() + 60_000,
+        };
         logins.enroll(7, selection.clone()).unwrap();
         let held = logins.parent_enrollment(7).unwrap();
-        let verified = logins.resolve(&selection.issuer, &selection.subject, &selection.login_scope_id).unwrap();
+        let verified = logins
+            .resolve(
+                &selection.issuer,
+                &selection.subject,
+                &selection.login_scope_id,
+            )
+            .unwrap();
         assert!(held.same_owner(&verified));
-        assert!(matches!(logins.parent_enrollment(8), Err(HostLifetimeError::WrongOwner)));
-        assert!(matches!(logins.resolve("wrong", &selection.subject, &selection.login_scope_id), Err(ConsoleLoginRefusal::Unknown)));
+        assert!(matches!(
+            logins.parent_enrollment(8),
+            Err(HostLifetimeError::WrongOwner)
+        ));
+        assert!(matches!(
+            logins.resolve("wrong", &selection.subject, &selection.login_scope_id),
+            Err(ConsoleLoginRefusal::Unknown)
+        ));
         let reservation = held.reserve().unwrap();
         let retired = logins.retire(7).unwrap();
-        assert!(matches!(logins.parent_enrollment(7), Err(HostLifetimeError::Denied)));
+        assert!(matches!(
+            logins.parent_enrollment(7),
+            Err(HostLifetimeError::Denied)
+        ));
         reservation.uncertain();
         let observed = retired.drain().await.unwrap();
         assert!(observed.fenced && observed.reservations_drained && observed.uncertain);
         send.send_replace(true);
-        assert!(matches!(logins.parent_enrollment(7), Err(HostLifetimeError::Unavailable)));
+        assert!(matches!(
+            logins.parent_enrollment(7),
+            Err(HostLifetimeError::Unavailable)
+        ));
     }
 }

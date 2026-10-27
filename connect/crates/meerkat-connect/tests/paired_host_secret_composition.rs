@@ -13,7 +13,8 @@ use meerkat_connect::{
     paired_host::{PairedHostClient, PairingCode},
     paired_host_tool::{
         PAIRED_HOST_FRONTEND_INVENTORY, PAIRED_HOST_FRONTEND_STATUS, PAIRED_HOST_FRONTEND_SUBMIT,
-        PAIRED_HOST_SECRET_CANCEL, PAIRED_HOST_SECRET_CREATE, PAIRED_HOST_SECRET_STATUS, PairedHostFrontend,
+        PAIRED_HOST_SECRET_CANCEL, PAIRED_HOST_SECRET_CREATE, PAIRED_HOST_SECRET_STATUS,
+        PairedHostFrontend,
     },
     setup::paired_host_frontend_session,
 };
@@ -819,7 +820,11 @@ async fn candidate_secret_binding_preserves_reviewed_digest_wheel_and_host() {
     let mut setup = Setup::new(&binding, false);
     let proposal = json!({"candidate":{"change_digest":format!("hc-frontend-change-v1:sha256:{}","c".repeat(64)),
         "wheel_sha256":"d".repeat(64)},"binding_name":"telegram_bot_token"});
-    let task = setup.start("candidate-secret", PAIRED_HOST_SECRET_CREATE, proposal.clone());
+    let task = setup.start(
+        "candidate-secret",
+        PAIRED_HOST_SECRET_CREATE,
+        proposal.clone(),
+    );
     let mut prompt = timeout(BOUND, setup.presenter.next())
         .await
         .unwrap()

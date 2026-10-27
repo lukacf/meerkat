@@ -72,9 +72,13 @@ impl ContextReferenceOwner for References {
         authority.check_context(context)?;
         let check = self.checks.fetch_add(1, Ordering::SeqCst) + 1;
         match self.encoding_failure.load(Ordering::SeqCst) {
-            1 => return Err(RequestError::Encoding(
-                <serde_json::Error as serde::ser::Error>::custom("private reference encoding detail"),
-            )),
+            1 => {
+                return Err(RequestError::Encoding(
+                    <serde_json::Error as serde::ser::Error>::custom(
+                        "private reference encoding detail",
+                    ),
+                ));
+            }
             2 => return Err(RequestError::Authority(SetupContextError::InvalidEncoding)),
             _ => {}
         }
@@ -108,7 +112,8 @@ impl Host {
                 target: self.target.clone(),
                 correlation: id(&correlation),
                 parent_operation: Some(id("original-task")),
-                continuation: TaskContinuation { native_original: None,
+                continuation: TaskContinuation {
+                    native_original: None,
                     owner: id("runtime"),
                     task: id("original-task"),
                     revision: rev("2"),
@@ -572,9 +577,7 @@ async fn host_unavailable_and_timeout_are_redacted_and_leave_no_setup() {
     .unwrap();
     for mode in [2, 3] {
         f.host.mode.store(mode, Ordering::SeqCst);
-        let error = invoke(&tool, &f.host, "call-1", input())
-            .await
-            .unwrap_err();
+        let error = invoke(&tool, &f.host, "call-1", input()).await.unwrap_err();
         assert!(matches!(error, ToolError::Unavailable { .. }));
         assert!(!error.to_transcript_content().contains("Paper"));
     }
@@ -593,8 +596,15 @@ async fn reference_encoding_unavailable_is_redacted_and_preserves_first_and_repl
         assert!(matches!(&error, ToolError::Unavailable {
             name, reason: meerkat_core::ToolUnavailableReason::TemporarilyUnavailable,
         } if name == FIND_AND_INSTALL));
-        assert_eq!(error.to_transcript_content(), unavailable().to_transcript_content());
-        assert!(!error.to_transcript_content().contains("private reference encoding detail"));
+        assert_eq!(
+            error.to_transcript_content(),
+            unavailable().to_transcript_content()
+        );
+        assert!(
+            !error
+                .to_transcript_content()
+                .contains("private reference encoding detail")
+        );
         assert!(!error.to_transcript_content().contains("Paper"));
         assert_eq!(f.references.checks.load(Ordering::SeqCst), 1);
         assert!(f.records().await.is_empty());
@@ -605,7 +615,11 @@ async fn reference_encoding_unavailable_is_redacted_and_preserves_first_and_repl
         let records = f.records().await;
         assert_eq!(records.len(), 1);
         let events = f.store.read_events(&records[0].key, 0, 100).await.unwrap();
-        let effects = f.store.list_effects(&records[0].key, None, 20).await.unwrap();
+        let effects = f
+            .store
+            .list_effects(&records[0].key, None, 20)
+            .await
+            .unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(effects.len(), 1);
         let checks = f.references.checks.load(Ordering::SeqCst);
@@ -615,21 +629,46 @@ async fn reference_encoding_unavailable_is_redacted_and_preserves_first_and_repl
         assert!(matches!(&error, ToolError::Unavailable {
             name, reason: meerkat_core::ToolUnavailableReason::TemporarilyUnavailable,
         } if name == FIND_AND_INSTALL));
-        assert_eq!(error.to_transcript_content(), unavailable().to_transcript_content());
-        assert!(!error.to_transcript_content().contains("private reference encoding detail"));
+        assert_eq!(
+            error.to_transcript_content(),
+            unavailable().to_transcript_content()
+        );
+        assert!(
+            !error
+                .to_transcript_content()
+                .contains("private reference encoding detail")
+        );
         assert!(!error.to_transcript_content().contains("Paper"));
         assert_eq!(f.references.checks.load(Ordering::SeqCst), checks + 1);
         assert_eq!(f.records().await, records);
-        assert_eq!(f.store.read_events(&records[0].key, 0, 100).await.unwrap(), events);
-        assert_eq!(f.store.list_effects(&records[0].key, None, 20).await.unwrap(), effects);
+        assert_eq!(
+            f.store.read_events(&records[0].key, 0, 100).await.unwrap(),
+            events
+        );
+        assert_eq!(
+            f.store
+                .list_effects(&records[0].key, None, 20)
+                .await
+                .unwrap(),
+            effects
+        );
 
         f.references.encoding_failure.store(0, Ordering::SeqCst);
         let replay = reply(&invoke(&tool, &f.host, "call-1", input()).await.unwrap());
         assert_eq!(replay["created"], false);
         assert_eq!(replay["operation"], first["operation"]);
         assert_eq!(f.records().await, records);
-        assert_eq!(f.store.read_events(&records[0].key, 0, 100).await.unwrap(), events);
-        assert_eq!(f.store.list_effects(&records[0].key, None, 20).await.unwrap(), effects);
+        assert_eq!(
+            f.store.read_events(&records[0].key, 0, 100).await.unwrap(),
+            events
+        );
+        assert_eq!(
+            f.store
+                .list_effects(&records[0].key, None, 20)
+                .await
+                .unwrap(),
+            effects
+        );
     }
 }
 
@@ -848,9 +887,7 @@ async fn storage_timeout_can_commit_late_and_exact_retry_recovers_one_operation(
     .unwrap();
     let lock = rusqlite::Connection::open(f.directory.path().join("toolkit.sqlite")).unwrap();
     lock.execute_batch("BEGIN IMMEDIATE").unwrap();
-    let error = invoke(&tool, &f.host, "call-1", input())
-        .await
-        .unwrap_err();
+    let error = invoke(&tool, &f.host, "call-1", input()).await.unwrap_err();
     assert!(matches!(error, ToolError::Unavailable { .. }));
     // SQLite's started blocking worker is not cancelled with its async caller.
     // Release it before replay; either commit ordering must converge to one row.
@@ -1079,7 +1116,6 @@ async fn production_dispatch_refuses_before_host_references_and_storage() {
 
 mod native_custody;
 
-
 #[tokio::test]
 async fn installed_admission_clock_race_retains_winner_without_accepting_changed_input() {
     let f = Fixture::new();
@@ -1088,35 +1124,86 @@ async fn installed_admission_clock_race_retains_winner_without_accepting_changed
     let mut constraints = other.evidence.constraints().clone();
     constraints.issued_at_ms = 150;
     constraints.expires_at_ms = 1050;
-    other.evidence = SetupRequestEvidence::new(other.evidence.association().clone(), constraints).unwrap();
+    other.evidence =
+        SetupRequestEvidence::new(other.evidence.association().clone(), constraints).unwrap();
     other.host.limits.deadline_ms = 950;
     assert!(same_installed_admission(&first, &other));
-    let bridge = SetupStore::new_conditional(f.store.as_ref(), SetupScope::new(id("tenant-a"), id("deployment-a"))).unwrap();
+    let bridge = SetupStore::new_conditional(
+        f.store.as_ref(),
+        SetupScope::new(id("tenant-a"), id("deployment-a")),
+    )
+    .unwrap();
     let raw: FindAndInstallRequest = serde_json::from_value(input()).unwrap();
-    let winner = bridge.admit_or_recover(raw.clone(), first.host.clone(), &first.evidence,
-        &first.context.borrowed(&f.host.authorization), f.references.as_ref()).await.unwrap();
-    assert!(matches!(bridge.admit_or_recover(raw.clone(), other.host.clone(), &other.evidence,
-        &other.context.borrowed(&f.host.authorization), f.references.as_ref()).await,
-        Err(SetupError::Store(StoreError::AdmissionConflict))));
-    let saved = bridge.invocation_terms(other.evidence.association(), &other.host.correlation,
-        &other.context.borrowed(&f.host.authorization)).await.unwrap().unwrap();
+    let winner = bridge
+        .admit_or_recover(
+            raw.clone(),
+            first.host.clone(),
+            &first.evidence,
+            &first.context.borrowed(&f.host.authorization),
+            f.references.as_ref(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        bridge
+            .admit_or_recover(
+                raw.clone(),
+                other.host.clone(),
+                &other.evidence,
+                &other.context.borrowed(&f.host.authorization),
+                f.references.as_ref()
+            )
+            .await,
+        Err(SetupError::Store(StoreError::AdmissionConflict))
+    ));
+    let saved = bridge
+        .invocation_terms(
+            other.evidence.association(),
+            &other.host.correlation,
+            &other.context.borrowed(&f.host.authorization),
+        )
+        .await
+        .unwrap()
+        .unwrap();
     other.host = saved.host;
     other.evidence = saved.evidence;
     assert!(same_installed_admission(&first, &other));
-    let replay = bridge.admit_or_recover(raw.clone(), other.host.clone(), &other.evidence,
-        &other.context.borrowed(&f.host.authorization), f.references.as_ref()).await.unwrap();
+    let replay = bridge
+        .admit_or_recover(
+            raw.clone(),
+            other.host.clone(),
+            &other.evidence,
+            &other.context.borrowed(&f.host.authorization),
+            f.references.as_ref(),
+        )
+        .await
+        .unwrap();
     assert!(!replay.created);
     assert_eq!(winner.snapshot.key(), replay.snapshot.key());
     assert_eq!(replay.snapshot.request().host().limits.deadline_ms, 900);
     let mut changed = raw;
-    changed.caller_observations.push("Different exact content".into());
-    assert!(matches!(bridge.admit_or_recover(changed, other.host.clone(), &other.evidence,
-        &other.context.borrowed(&f.host.authorization), f.references.as_ref()).await,
-        Err(SetupError::Store(StoreError::AdmissionConflict))));
-    other.host.continuation.audience.insert(id("foreign-audience"));
+    changed
+        .caller_observations
+        .push("Different exact content".into());
+    assert!(matches!(
+        bridge
+            .admit_or_recover(
+                changed,
+                other.host.clone(),
+                &other.evidence,
+                &other.context.borrowed(&f.host.authorization),
+                f.references.as_ref()
+            )
+            .await,
+        Err(SetupError::Store(StoreError::AdmissionConflict))
+    ));
+    other
+        .host
+        .continuation
+        .audience
+        .insert(id("foreign-audience"));
     assert!(!same_installed_admission(&first, &other));
 }
-
 
 struct FirstAdmissionClockRace {
     original: Arc<Host>,
@@ -1124,16 +1211,19 @@ struct FirstAdmissionClockRace {
 }
 #[async_trait]
 impl SetupToolHost for FirstAdmissionClockRace {
-    async fn admit_invocation(&self, call_id: &str, context: &ToolDispatchContext)
-        -> Result<HostToolAdmission, ToolAdmissionError>
-    {
+    async fn admit_invocation(
+        &self,
+        call_id: &str,
+        context: &ToolDispatchContext,
+    ) -> Result<HostToolAdmission, ToolAdmissionError> {
         let mut admission = self.original.admit_invocation(call_id, context).await?;
         if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
             let mut terms = admission.evidence.constraints().clone();
             terms.issued_at_ms = 150;
             terms.expires_at_ms = 1050;
-            admission.evidence = SetupRequestEvidence::new(admission.evidence.association().clone(), terms)
-                .map_err(|_| ToolAdmissionError::Unavailable)?;
+            admission.evidence =
+                SetupRequestEvidence::new(admission.evidence.association().clone(), terms)
+                    .map_err(|_| ToolAdmissionError::Unavailable)?;
             admission.host.limits.deadline_ms = 950;
         }
         Ok(admission)
@@ -1147,71 +1237,153 @@ impl SetupToolHost for FirstAdmissionClockRace {
 async fn installed_tool_retries_clock_conflict_once_with_exact_raw_input() {
     let f = Fixture::new();
     let canonical = f.host.admission("dispatch-clock-race");
-    let bridge = SetupStore::new_conditional(f.store.as_ref(), SetupScope::new(id("tenant-a"), id("deployment-a"))).unwrap();
+    let bridge = SetupStore::new_conditional(
+        f.store.as_ref(),
+        SetupScope::new(id("tenant-a"), id("deployment-a")),
+    )
+    .unwrap();
     let raw: FindAndInstallRequest = serde_json::from_value(input()).unwrap();
-    let winner = bridge.admit_or_recover(raw, canonical.host.clone(), &canonical.evidence,
-        &canonical.context.borrowed(&f.host.authorization), f.references.as_ref()).await.unwrap();
+    let winner = bridge
+        .admit_or_recover(
+            raw,
+            canonical.host.clone(),
+            &canonical.evidence,
+            &canonical.context.borrowed(&f.host.authorization),
+            f.references.as_ref(),
+        )
+        .await
+        .unwrap();
     let held = f.store.get(winner.snapshot.key()).await.unwrap().unwrap();
-    let host = Arc::new(FirstAdmissionClockRace { original: f.host.clone(), calls: AtomicUsize::new(0) });
-    let mut tool = FindAndInstallTool::new(f.store.clone(), SetupScope::new(id("tenant-a"), id("deployment-a")),
-        host.clone(), f.references.clone(), Duration::from_secs(1)).unwrap();
+    let host = Arc::new(FirstAdmissionClockRace {
+        original: f.host.clone(),
+        calls: AtomicUsize::new(0),
+    });
+    let mut tool = FindAndInstallTool::new(
+        f.store.clone(),
+        SetupScope::new(id("tenant-a"), id("deployment-a")),
+        host.clone(),
+        f.references.clone(),
+        Duration::from_secs(1),
+    )
+    .unwrap();
     match &mut tool.admission {
         FindAndInstallAdmission::Direct(dependencies) => {
             dependencies.conditional_store = Some(f.store.clone());
-            assert!(Arc::ptr_eq(dependencies.conditional_store.as_ref().unwrap(), &f.store));
+            assert!(Arc::ptr_eq(
+                dependencies.conditional_store.as_ref().unwrap(),
+                &f.store
+            ));
         }
         #[cfg(all(feature = "native-host", unix))]
-        FindAndInstallAdmission::Installed(_) => panic!("the protocol fixture must retain direct admission dependencies"),
+        FindAndInstallAdmission::Installed(_) => {
+            panic!("the protocol fixture must retain direct admission dependencies")
+        }
     }
     #[cfg(all(feature = "native-host", unix))]
     assert!(tool.admission_owner().unwrap().acquisition.is_none());
     let args = RawValue::from_string(input().to_string()).unwrap();
     let context = f.host.context();
-    let call = ToolCallView { id: "dispatch-clock-race", name: FIND_AND_INSTALL, args: args.as_ref() };
-    assert!(matches!(tool.dispatch_with_context(call, &context).await,
-        Err(ToolError::Unavailable { .. })), "standalone dependencies cannot enable native execution");
+    let call = ToolCallView {
+        id: "dispatch-clock-race",
+        name: FIND_AND_INSTALL,
+        args: args.as_ref(),
+    };
+    assert!(
+        matches!(
+            tool.dispatch_with_context(call, &context).await,
+            Err(ToolError::Unavailable { .. })
+        ),
+        "standalone dependencies cannot enable native execution"
+    );
     assert_eq!(host.calls.load(Ordering::SeqCst), 0);
-    assert_eq!(f.store.get(winner.snapshot.key()).await.unwrap().unwrap(), held);
-    let outcome = tool.dispatch_protocol_fixture(call, &context).await.unwrap();
+    assert_eq!(
+        f.store.get(winner.snapshot.key()).await.unwrap().unwrap(),
+        held
+    );
+    let outcome = tool
+        .dispatch_protocol_fixture(call, &context)
+        .await
+        .unwrap();
     let observed = reply(&outcome);
     assert_eq!(observed["operation"], winner.snapshot.key().id);
     assert_eq!(observed["created"], false);
-    assert!(observed.get("worker").is_none(), "direct admission must not launch a native worker");
-    assert_eq!(host.calls.load(Ordering::SeqCst), 2, "actual tool requested canonical winning terms exactly once");
-    assert_eq!(f.store.get(winner.snapshot.key()).await.unwrap().unwrap(), held);
+    assert!(
+        observed.get("worker").is_none(),
+        "direct admission must not launch a native worker"
+    );
+    assert_eq!(
+        host.calls.load(Ordering::SeqCst),
+        2,
+        "actual tool requested canonical winning terms exactly once"
+    );
+    assert_eq!(
+        f.store.get(winner.snapshot.key()).await.unwrap().unwrap(),
+        held
+    );
     host.calls.store(0, Ordering::SeqCst);
     let mut changed = input();
     changed["request"] = Value::String("Changed original content".into());
     let args = RawValue::from_string(changed.to_string()).unwrap();
-    let call = ToolCallView { id: "dispatch-clock-race", name: FIND_AND_INSTALL, args: args.as_ref() };
-    assert!(matches!(tool.dispatch_protocol_fixture(call, &context).await, Err(ToolError::InvalidArguments { .. })));
+    let call = ToolCallView {
+        id: "dispatch-clock-race",
+        name: FIND_AND_INSTALL,
+        args: args.as_ref(),
+    };
+    assert!(matches!(
+        tool.dispatch_protocol_fixture(call, &context).await,
+        Err(ToolError::InvalidArguments { .. })
+    ));
     assert_eq!(host.calls.load(Ordering::SeqCst), 2);
-    assert_eq!(f.store.get(winner.snapshot.key()).await.unwrap().unwrap(), held);
+    assert_eq!(
+        f.store.get(winner.snapshot.key()).await.unwrap().unwrap(),
+        held
+    );
 }
-
 
 #[cfg(feature = "native-host")]
 #[tokio::test]
 async fn helper_review_lifetime_binds_exact_canonical_snapshot_and_refuses_changed_or_terminal() {
-    use crate::{original_ingress::helper_originals::HelperOperation,
-        private_originals::{PrivateOriginalError, setup_helpers::bind_snapshot_deadline_fixture}};
+    use crate::{
+        original_ingress::helper_originals::HelperOperation,
+        private_originals::{PrivateOriginalError, setup_helpers::bind_snapshot_deadline_fixture},
+    };
     use std::sync::OnceLock;
     let f = Fixture::new();
     let admission = f.host.admission("call-1");
     let context = SetupUseContext {
-        tenant: &admission.context.tenant, deployment: &admission.context.deployment,
-        realm: &admission.context.realm, target: &admission.context.target,
-        authorization: &f.host.authorization, policy_revision: &admission.context.policy_revision,
+        tenant: &admission.context.tenant,
+        deployment: &admission.context.deployment,
+        realm: &admission.context.realm,
+        target: &admission.context.target,
+        authorization: &f.host.authorization,
+        policy_revision: &admission.context.policy_revision,
         now_ms: 200,
     };
-    let request = validate_request(serde_json::from_value(input()).unwrap(), admission.host.clone(),
-        &admission.evidence, &context, f.references.as_ref()).unwrap();
+    let request = validate_request(
+        serde_json::from_value(input()).unwrap(),
+        admission.host.clone(),
+        &admission.evidence,
+        &context,
+        f.references.as_ref(),
+    )
+    .unwrap();
     let bridge = SetupStore::new(f.store.as_ref(), f.scope()).unwrap();
-    let snapshot = bridge.admit(&request, &admission.evidence, &context, f.references.as_ref())
-        .await.unwrap().snapshot;
+    let snapshot = bridge
+        .admit(
+            &request,
+            &admission.evidence,
+            &context,
+            f.references.as_ref(),
+        )
+        .await
+        .unwrap()
+        .snapshot;
     let operation = HelperOperation {
-        acquisition: snapshot.key().clone(), effect: "work-admission".into(),
-        input_digest: ContentDigest::of_bytes(&toolkit_package::canonical_json(request.request()).unwrap()),
+        acquisition: snapshot.key().clone(),
+        effect: "work-admission".into(),
+        input_digest: ContentDigest::of_bytes(
+            &toolkit_package::canonical_json(request.request()).unwrap(),
+        ),
     };
     let held = OnceLock::new();
     bind_snapshot_deadline_fixture(&held, &operation, &snapshot).unwrap();
@@ -1220,7 +1392,12 @@ async fn helper_review_lifetime_binds_exact_canonical_snapshot_and_refuses_chang
     // These are real independently validated canonical rows, not modified
     // snapshots or model-provided deadline scalars.
     for change in ["acquisition", "input", "deadline"] {
-        let other = SqliteStore::open(f.directory.path().join(format!("deadline-{change}.sqlite3"))).unwrap();
+        let other = SqliteStore::open(
+            f.directory
+                .path()
+                .join(format!("deadline-{change}.sqlite3")),
+        )
+        .unwrap();
         let mut host = admission.host.clone();
         let mut body = request.request().clone();
         match change {
@@ -1229,9 +1406,25 @@ async fn helper_review_lifetime_binds_exact_canonical_snapshot_and_refuses_chang
             "deadline" => host.limits.deadline_ms = 901,
             _ => unreachable!(),
         }
-        let changed = validate_request(body, host, &admission.evidence, &context, f.references.as_ref()).unwrap();
-        let changed = SetupStore::new(&other, f.scope()).unwrap()
-            .admit(&changed, &admission.evidence, &context, f.references.as_ref()).await.unwrap().snapshot;
+        let changed = validate_request(
+            body,
+            host,
+            &admission.evidence,
+            &context,
+            f.references.as_ref(),
+        )
+        .unwrap();
+        let changed = SetupStore::new(&other, f.scope())
+            .unwrap()
+            .admit(
+                &changed,
+                &admission.evidence,
+                &context,
+                f.references.as_ref(),
+            )
+            .await
+            .unwrap()
+            .snapshot;
         let result = bind_snapshot_deadline_fixture(&held, &operation, &changed);
         if change == "deadline" {
             assert!(matches!(result, Err(PrivateOriginalError::Conflict)));
@@ -1240,11 +1433,23 @@ async fn helper_review_lifetime_binds_exact_canonical_snapshot_and_refuses_chang
         }
         assert_eq!(held.get(), Some(&900));
     }
-    let terminal = bridge.resolve(&snapshot, Resolution::Cancelled(context_reference()), None,
-        SetupAccess { evidence: &admission.evidence, context: &context, references: f.references.as_ref() })
-        .await.unwrap();
+    let terminal = bridge
+        .resolve(
+            &snapshot,
+            Resolution::Cancelled(context_reference()),
+            None,
+            SetupAccess {
+                evidence: &admission.evidence,
+                context: &context,
+                references: f.references.as_ref(),
+            },
+        )
+        .await
+        .unwrap();
     let unbound = OnceLock::new();
-    assert!(matches!(bind_snapshot_deadline_fixture(&unbound, &operation, &terminal),
-        Err(PrivateOriginalError::Denied)));
+    assert!(matches!(
+        bind_snapshot_deadline_fixture(&unbound, &operation, &terminal),
+        Err(PrivateOriginalError::Denied)
+    ));
     assert!(unbound.get().is_none());
 }

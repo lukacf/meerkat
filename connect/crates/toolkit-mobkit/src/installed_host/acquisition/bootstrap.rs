@@ -1,8 +1,8 @@
 //! Optional acquisition selection from the actual pre-input MobKit bootstrap.
 //! This module opens no backend and supplies no native execution authority.
 use super::{
-    InstalledAcquisition, InstalledOriginalTaskOwner, InstalledSetupDefaults, InstalledSetupLimits,
-    InstalledSetupSelection, InstalledAcquisitionTools,
+    InstalledAcquisition, InstalledAcquisitionTools, InstalledOriginalTaskOwner,
+    InstalledSetupDefaults, InstalledSetupLimits, InstalledSetupSelection,
 };
 use crate::private_originals::PrivateOriginals;
 use meerkat_core::storage_durability::{DurabilityClass, DurabilityResolution};
@@ -104,11 +104,17 @@ impl AcquisitionBootstrap {
     }
 
     pub(crate) fn deferred_with_tools(
-        store: Arc<SqliteStore>, source_scope: StoreScope, originals: Arc<PrivateOriginals>,
-        native: CompiledNativeHost, defaults: InstalledSetupBootstrap, tools: InstalledAcquisitionTools,
+        store: Arc<SqliteStore>,
+        source_scope: StoreScope,
+        originals: Arc<PrivateOriginals>,
+        native: CompiledNativeHost,
+        defaults: InstalledSetupBootstrap,
+        tools: InstalledAcquisitionTools,
         additional_helpers: Vec<InstalledSetupSelection>,
     ) -> Result<Self, HostLifetimeError> {
-        tools.require_unbound(std::time::Duration::from_millis(defaults.limits.admission_timeout_ms))?;
+        tools.require_unbound(std::time::Duration::from_millis(
+            defaults.limits.admission_timeout_ms,
+        ))?;
         // Validate trusted selections before a missing optional backend can be
         // interpreted as a normal disabled capability. These are the existing
         // configuration owners, not copied policy or current grant checks.
@@ -140,7 +146,6 @@ impl AcquisitionBootstrap {
             })),
         })
     }
-
 
     pub(crate) fn status(&self) -> AcquisitionBootstrapStatus {
         match &self.state {
@@ -208,23 +213,24 @@ impl AcquisitionBootstrap {
                     }
                 };
                 let defaults = deferred.defaults;
-                let acquisition = Arc::new(InstalledAcquisition::from_defaults_with_tools_and_helpers(
-                    deferred.store,
-                    deferred.source_scope,
-                    deferred.originals,
-                    &deferred.native,
-                    InstalledSetupDefaults {
-                        helper: defaults.helper,
-                        proposal_ceiling: defaults.proposal_ceiling,
-                        continuation: defaults.continuation,
-                        work_backend: backend,
-                        references: defaults.references,
-                        limits: defaults.limits,
-                        work_step: defaults.work_step,
-                    },
-                    deferred.tools,
-                    deferred.additional_helpers,
-                )?);
+                let acquisition =
+                    Arc::new(InstalledAcquisition::from_defaults_with_tools_and_helpers(
+                        deferred.store,
+                        deferred.source_scope,
+                        deferred.originals,
+                        &deferred.native,
+                        InstalledSetupDefaults {
+                            helper: defaults.helper,
+                            proposal_ceiling: defaults.proposal_ceiling,
+                            continuation: defaults.continuation,
+                            work_backend: backend,
+                            references: defaults.references,
+                            limits: defaults.limits,
+                            work_step: defaults.work_step,
+                        },
+                        deferred.tools,
+                        deferred.additional_helpers,
+                    )?);
                 acquisition.bind_tool_driver()?;
                 acquisition
             }

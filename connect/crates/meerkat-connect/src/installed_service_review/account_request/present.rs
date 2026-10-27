@@ -30,16 +30,24 @@ impl InstalledAccountRequests {
         output: &mut W,
         interrupt: F,
     ) -> Result<bool, ConnectError> {
-        let result = self.present_inner(request, presenter, input, output, interrupt).await;
+        let result = self
+            .present_inner(request, presenter, input, output, interrupt)
+            .await;
         let retired = if matches!(result, Ok(false))
-            || self.review.approvals.check_session(&self.review.session).is_err()
+            || self
+                .review
+                .approvals
+                .check_session(&self.review.session)
+                .is_err()
         {
             let retired = self.review.retire();
             drop(presenter.take());
             retired
         } else if result.is_err() {
             self.review.control.retire().map_err(refused)
-        } else { Ok(()) };
+        } else {
+            Ok(())
+        };
         match result {
             Ok(more) => retired.map(|()| more),
             Err(error) => join_cleanup(Err(error), retired).map(|()| true),
@@ -57,13 +65,21 @@ impl InstalledAccountRequests {
         if request.response.is_closed() {
             return Ok(true);
         }
-        if request.task.as_ref().and_then(|task| task.console_login()).is_some() {
+        if request
+            .task
+            .as_ref()
+            .and_then(|task| task.console_login())
+            .is_some()
+        {
             // The selected Console human must use its same protected presenter.
             // A local terminal does not inherit that human's live login.
             return join_cleanup(
-                Err(refused("This account request requires its retained Console presenter")),
+                Err(refused(
+                    "This account request requires its retained Console presenter",
+                )),
                 self.review.control.retire().map_err(refused),
-            ).map(|()| false);
+            )
+            .map(|()| false);
         }
         let approvals = self.review.approvals.clone();
         let (login, software) = self
@@ -87,7 +103,11 @@ impl InstalledAccountRequests {
         )
         .await?
         {
-            return Ok(self.review.approvals.check_session(&self.review.session).is_ok());
+            return Ok(self
+                .review
+                .approvals
+                .check_session(&self.review.session)
+                .is_ok());
         }
         // This private observation uses the retained native account owner and
         // reveals no status to the tool. Mutation entry remains unspent until
@@ -111,7 +131,11 @@ impl InstalledAccountRequests {
         )
         .await?
         {
-            return Ok(self.review.approvals.check_session(&self.review.session).is_ok());
+            return Ok(self
+                .review
+                .approvals
+                .check_session(&self.review.session)
+                .is_ok());
         }
         let status = status?;
         let mut login_completed = false;
@@ -152,7 +176,8 @@ impl InstalledAccountRequests {
                         None => self.review.control.retire().map_err(refused),
                     };
                     return join_cleanup(
-                        Err(ConnectError::provider_setup("Bind account callback", error)), retired,
+                        Err(ConnectError::provider_setup("Bind account callback", error)),
+                        retired,
                     )
                     .map(|()| false);
                 }
@@ -174,13 +199,20 @@ impl InstalledAccountRequests {
             )
             .await;
             if !matches!(current, Ok(true)) {
-                let primary = join_cleanup(current.map(|_| ()), self.review.control.retire().map_err(refused));
+                let primary = join_cleanup(
+                    current.map(|_| ()),
+                    self.review.control.retire().map_err(refused),
+                );
                 let cleanup = binding
                     .cancel()
                     .await
                     .map_err(|e| ConnectError::provider_setup("Close account callback", e));
                 join_cleanup(primary, cleanup)?;
-                return Ok(self.review.approvals.check_session(&self.review.session).is_ok());
+                return Ok(self
+                    .review
+                    .approvals
+                    .check_session(&self.review.session)
+                    .is_ok());
             }
             let redirect = binding.redirect_url.clone();
             let (started, stopped) = wait_joined(
@@ -211,8 +243,11 @@ impl InstalledAccountRequests {
                         .cancel()
                         .await
                         .map_err(|e| ConnectError::provider_setup("Close account callback", e));
-                    return join_cleanup(join_cleanup(Err(error), self.review.control.retire().map_err(refused)), cleanup)
-                        .map(|()| false);
+                    return join_cleanup(
+                        join_cleanup(Err(error), self.review.control.retire().map_err(refused)),
+                        cleanup,
+                    )
+                    .map(|()| false);
                 }
             };
             let handle = started.host_attempt_handle.clone();
@@ -221,8 +256,14 @@ impl InstalledAccountRequests {
             let displayed = writeln!(output, "Open this private sign-in URL in your browser:\n{}\nWaiting for account sign-in. Ctrl-C or terminal EOF waits for callback cleanup.", review_text(&started.authorize_url))
                 .and_then(|()| output.flush());
             if let Err(error) = displayed {
-                let primary = join_cleanup(Err(ConnectError::native("Display account sign-in", error)), self.review.retire());
-                let cleanup = callback.cancel().await.map_err(|e| ConnectError::provider_setup("Close account callback", e));
+                let primary = join_cleanup(
+                    Err(ConnectError::native("Display account sign-in", error)),
+                    self.review.retire(),
+                );
+                let cleanup = callback
+                    .cancel()
+                    .await
+                    .map_err(|e| ConnectError::provider_setup("Close account callback", e));
                 return join_cleanup(primary, cleanup).map(|()| false);
             }
             let mut retirement = None;
@@ -257,7 +298,8 @@ impl InstalledAccountRequests {
                     };
                     return join_cleanup(
                         Err(failure),
-                        retirement.map(|result| result.map(|_| ()))
+                        retirement
+                            .map(|result| result.map(|_| ()))
                             .unwrap_or_else(|| self.review.control.retire().map_err(refused)),
                     )
                     .map(|()| false);
@@ -274,7 +316,11 @@ impl InstalledAccountRequests {
             )
             .await?
             {
-                return Ok(self.review.approvals.check_session(&self.review.session).is_ok());
+                return Ok(self
+                    .review
+                    .approvals
+                    .check_session(&self.review.session)
+                    .is_ok());
             }
             let (_live, mut retired) = tokio::sync::watch::channel(false);
             let (cancel, receive) = oneshot::channel();
@@ -298,16 +344,26 @@ impl InstalledAccountRequests {
             let more = stopped.map(|stop| retire_stop(&mut self.review, stop));
             let completed = match completed {
                 Ok(completed) => completed,
-                Err(error) => return join_cleanup(Err(error),
-                    more.map(|result| result.map(|_| ())).unwrap_or(Ok(()))).map(|()| false),
+                Err(error) => {
+                    return join_cleanup(
+                        Err(error),
+                        more.map(|result| result.map(|_| ())).unwrap_or(Ok(())),
+                    )
+                    .map(|()| false);
+                }
             };
             // Preserve actual native completion despite a later cancellation.
             login_completed = completed.result.is_ok();
             if completed.cleanup_unconfirmed {
-                return join_cleanup(Err(refused("Native account cleanup is unconfirmed")),
-                    more.map(|result| result.map(|_| ())).unwrap_or(Ok(()))).map(|()| false);
+                return join_cleanup(
+                    Err(refused("Native account cleanup is unconfirmed")),
+                    more.map(|result| result.map(|_| ())).unwrap_or(Ok(())),
+                )
+                .map(|()| false);
             }
-            if let Some(more) = more { return more; }
+            if let Some(more) = more {
+                return more;
+            }
             if !login_completed {
                 // Clear only this terminal attempt through its existing owner,
                 // so a later integration can use the same helper session.
@@ -329,10 +385,18 @@ impl InstalledAccountRequests {
         )
         .await?
         {
-            return Ok(self.review.approvals.check_session(&self.review.session).is_ok());
+            return Ok(self
+                .review
+                .approvals
+                .check_session(&self.review.session)
+                .is_ok());
         }
         if let Some(entry) = entry.take() {
-            custody = Some(entry.enter().map_err(|_| refused("The current account request cannot enter"))?);
+            custody = Some(
+                entry
+                    .enter()
+                    .map_err(|_| refused("The current account request cannot enter"))?,
+            );
         }
         let task_expires_in_ms = request.selection.expires_in_ms;
         let task_tool_policy = request.selection.tool_policy.clone();
@@ -365,7 +429,11 @@ impl InstalledAccountRequests {
         )
         .await?;
         let Some(reviewed) = reviewed else {
-            return Ok(self.review.approvals.check_session(&self.review.session).is_ok());
+            return Ok(self
+                .review
+                .approvals
+                .check_session(&self.review.session)
+                .is_ok());
         };
         if !checkpoint_or_retire(
             &mut self.review,
@@ -376,7 +444,11 @@ impl InstalledAccountRequests {
         )
         .await?
         {
-            return Ok(self.review.approvals.check_session(&self.review.session).is_ok());
+            return Ok(self
+                .review
+                .approvals
+                .check_session(&self.review.session)
+                .is_ok());
         }
         let reply = match reviewed {
             InstalledAccountReview::Approved(reviewed) => {
@@ -417,7 +489,10 @@ fn check_input_cleanup(
     Ok(())
 }
 
-enum Stop { Caller, Owner(io::Result<()>) }
+enum Stop {
+    Caller,
+    Owner(io::Result<()>),
+}
 
 fn retire_stop(review: &mut InstalledServiceReview, stop: Stop) -> Result<bool, ConnectError> {
     match stop {
@@ -425,13 +500,15 @@ fn retire_stop(review: &mut InstalledServiceReview, stop: Stop) -> Result<bool, 
         Stop::Owner(signal) => join_cleanup(
             signal.map_err(|error| ConnectError::native("Listen for account cancellation", error)),
             review.retire(),
-        ).map(|()| false),
+        )
+        .map(|()| false),
     }
 }
 
-fn join_stop_cleanup(more: Result<bool, ConnectError>, cleanup: Result<(), ConnectError>)
-    -> Result<bool, ConnectError>
-{
+fn join_stop_cleanup(
+    more: Result<bool, ConnectError>,
+    cleanup: Result<(), ConnectError>,
+) -> Result<bool, ConnectError> {
     match more {
         Ok(more) => cleanup.map(|()| more),
         Err(error) => join_cleanup(Err(error), cleanup).map(|()| false),
@@ -667,7 +744,9 @@ mod tests {
     fn expiring_account_request(session: &SessionId, lifetime: Duration) -> ApprovalRequest {
         ApprovalRequest {
             requester: requester().unwrap(),
-            owner: ApprovalOwnerRef::Session { session_id: session.clone() },
+            owner: ApprovalOwnerRef::Session {
+                session_id: session.clone(),
+            },
             resource: ApprovalResourceRef {
                 kind: ApprovalResourceKind::Runtime,
                 id: ApprovalResourceId::new("test-account"),
@@ -679,7 +758,9 @@ mod tests {
             },
             risk: ApprovalRisk::Medium,
             request_body: Some(json!({"verified":"account"})),
-            allowed_decisions: [ApprovalDecision::Approve, ApprovalDecision::Deny].into_iter().collect(),
+            allowed_decisions: [ApprovalDecision::Approve, ApprovalDecision::Deny]
+                .into_iter()
+                .collect(),
             expires_at: Some((SystemTime::now() + lifetime).into()),
             metadata: Default::default(),
             request_provenance: None,
@@ -702,13 +783,32 @@ mod tests {
             let (control, cancellation) = ReviewCancellation::channel();
             let review = approvals.review_access_cancellable(
                 expiring_account_request(&session, Duration::from_millis(500)),
-                cancellation.cancelled(), |id| cancellation.approval_created(id));
+                cancellation.cancelled(),
+                |id| cancellation.approval_created(id),
+            );
             let mut output = Vec::new();
-            let result = drive_review_cancellable(review, &approvals, &mut presenter,
-                &mut input, &mut output, &mut caller, stop.as_mut(), Some(control)).await;
-            assert!(matches!(result, Err(ConnectError::InvalidInput(ref message))
-                if message == "The access review expired without a returned decision"));
-            assert_eq!(String::from_utf8(output).unwrap().matches("Type 'approve ").count(), 1);
+            let result = drive_review_cancellable(
+                review,
+                &approvals,
+                &mut presenter,
+                &mut input,
+                &mut output,
+                &mut caller,
+                stop.as_mut(),
+                Some(control),
+            )
+            .await;
+            assert!(
+                matches!(result, Err(ConnectError::InvalidInput(ref message))
+                if message == "The access review expired without a returned decision")
+            );
+            assert_eq!(
+                String::from_utf8(output)
+                    .unwrap()
+                    .matches("Type 'approve ")
+                    .count(),
+                1
+            );
             assert!(presenter.is_some());
             approvals.check_session(&session).unwrap();
             input.check_cleanup().unwrap();
@@ -719,26 +819,50 @@ mod tests {
             let (created, receive_created) = oneshot::channel();
             let review = approvals.review_access_cancellable(
                 expiring_account_request(&session, Duration::from_secs(120)),
-                cancellation.cancelled(), |id| {
+                cancellation.cancelled(),
+                |id| {
                     cancellation.approval_created(id);
                     created.send(id.clone()).unwrap();
-                });
+                },
+            );
             let shown = std::sync::Arc::new(tokio::sync::Notify::new());
-            let mut output = NoticedOutput { bytes: Vec::new(), shown: shown.clone() };
-            let driver = drive_review_cancellable(review, &approvals, &mut presenter,
-                &mut input, &mut output, &mut caller, stop.as_mut(), Some(control));
+            let mut output = NoticedOutput {
+                bytes: Vec::new(),
+                shown: shown.clone(),
+            };
+            let driver = drive_review_cancellable(
+                review,
+                &approvals,
+                &mut presenter,
+                &mut input,
+                &mut output,
+                &mut caller,
+                stop.as_mut(),
+                Some(control),
+            );
             let respond = async {
                 shown.notified().await;
                 let id = receive_created.await.unwrap();
                 lines.send(Ok(format!("deny {id}"))).await.unwrap();
             };
             let (result, ()) = tokio::join!(driver, respond);
-            assert_eq!(result.unwrap().unwrap().status, meerkat_core::ApprovalStatus::Denied);
-            assert_eq!(String::from_utf8(output.bytes).unwrap().matches("Type 'approve ").count(), 1);
+            assert_eq!(
+                result.unwrap().unwrap().status,
+                meerkat_core::ApprovalStatus::Denied
+            );
+            assert_eq!(
+                String::from_utf8(output.bytes)
+                    .unwrap()
+                    .matches("Type 'approve ")
+                    .count(),
+                1
+            );
             assert!(presenter.is_some());
             approvals.check_session(&session).unwrap();
             input.check_cleanup().unwrap();
-        }).await.expect("displayed terminal account review did not settle at its actual approval deadline");
+        })
+        .await
+        .expect("displayed terminal account review did not settle at its actual approval deadline");
     }
 
     #[tokio::test]
@@ -758,20 +882,44 @@ mod tests {
             let (control, cancellation) = ReviewCancellation::channel();
             let review = approvals.review_access_cancellable(
                 expiring_account_request(&session, Duration::from_secs(120)),
-                cancellation.cancelled(), |id| cancellation.approval_created(id));
+                cancellation.cancelled(),
+                |id| cancellation.approval_created(id),
+            );
             let shown = std::sync::Arc::new(tokio::sync::Notify::new());
-            let mut output = NoticedOutput { bytes: Vec::new(), shown: shown.clone() };
-            let driver = drive_review_cancellable(review, &approvals, &mut presenter,
-                &mut input, &mut output, &mut caller, interrupt.as_mut(), Some(control));
-            let cancel = async { shown.notified().await; stop.send(Ok(())).unwrap(); };
+            let mut output = NoticedOutput {
+                bytes: Vec::new(),
+                shown: shown.clone(),
+            };
+            let driver = drive_review_cancellable(
+                review,
+                &approvals,
+                &mut presenter,
+                &mut input,
+                &mut output,
+                &mut caller,
+                interrupt.as_mut(),
+                Some(control),
+            );
+            let cancel = async {
+                shown.notified().await;
+                stop.send(Ok(())).unwrap();
+            };
             let (result, ()) = tokio::join!(driver, cancel);
             assert!(result.unwrap().is_none());
             assert!(presenter.is_none());
             assert!(approvals.check_session(&session).is_err());
             input.check_cleanup().unwrap();
-            lines.send(Ok("input after cancellation".into())).await.unwrap();
-            assert_eq!(input.recv().await.unwrap().unwrap(), "input after cancellation");
-        }).await.expect("displayed terminal cancellation did not join its review and input");
+            lines
+                .send(Ok("input after cancellation".into()))
+                .await
+                .unwrap();
+            assert_eq!(
+                input.recv().await.unwrap().unwrap(),
+                "input after cancellation"
+            );
+        })
+        .await
+        .expect("displayed terminal cancellation did not join its review and input");
     }
 
     #[tokio::test]
@@ -804,8 +952,9 @@ mod tests {
             request_provenance: None,
         };
         let (cancel_review, cancellation) = ReviewCancellation::channel();
-        let review = approvals.review_access_cancellable(request, cancellation.cancelled(),
-            |id| cancellation.approval_created(id));
+        let review = approvals.review_access_cancellable(request, cancellation.cancelled(), |id| {
+            cancellation.approval_created(id)
+        });
         tokio::pin!(review);
         assert!(
             poll_fn(|cx| Poll::Ready(review.as_mut().poll(cx)))

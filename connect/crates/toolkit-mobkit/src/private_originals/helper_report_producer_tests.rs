@@ -1,10 +1,9 @@
 //! Joined trusted parent producer, ordinary helper child issuance and real
 //! report leaf. Fixture configuration is not Forge publication or Console auth.
-use meerkat_authorization_contracts::constraints::DomainRestriction;
 use super::*;
+use meerkat_authorization_contracts::constraints::DomainRestriction;
 use meerkat_authorization_contracts::{
-    constraints::DelegationDepth,
-    work_association::WorkAuthorityBasis,
+    constraints::DelegationDepth, work_association::WorkAuthorityBasis,
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -17,56 +16,96 @@ async fn deadline_recovery_worker_expires_waiting_setup_and_resumes_original() {
         Fixture::for_configured_helper_report(script.clone(), report.clone()).await;
     let recovery = AcquisitionRecovery::default();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    let checked = std::panic::AssertUnwindSafe(tokio::time::timeout_at(deadline, Box::pin(async {
-        let first = fixture.submit().await;
-        let first_input = match &first {
-            Ok(PrivateOriginalSubmission::Admitted { input_id, .. }) => input_id.clone(),
-            _ => panic!("actual original admission required: {}", submission_context(&first)),
-        };
-        fixture.finish(&first).await.unwrap();
-        let feedback = script.observations().0;
-        assert_eq!(feedback.len(), 1);
-        assert!(!feedback[0].is_error, "{feedback:?}");
-        let context = report.take_context().await;
-        let source = fixture.source.setup_result_source(&context, report.selection.get().unwrap()).await.unwrap();
-        let key = source.operation.acquisition.clone();
-        let before = fixture.store.get(&key).await.unwrap().unwrap();
-        assert_eq!(before.data.body["state"]["lifecycle_phase"], "investigating");
-        assert_eq!(before.data.body["state"]["terminal_revision"], 0);
-        assert!(before.data.body["continuation_receipt"].is_null());
-        // Start exactly the worker selected by HostGateway after native Ready.
-        // No helper report, user request or direct expire call drives progress.
-        recovery.start(recovery.prepare_start().unwrap(), script.installed_owner()).unwrap();
-        let settled = loop {
-            let row = fixture.store.get(&key).await.unwrap().unwrap();
-            if !row.data.body["continuation_receipt"].is_null() { break row; }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        };
-        assert_eq!(settled.data.body["state"]["lifecycle_phase"], "expired");
-        assert_eq!(settled.data.body["state"]["terminal_revision"], 2);
-        assert_eq!(settled.data.body["request"], before.data.body["request"]);
-        assert!(settled.data.body.get("helper_detail").is_none());
-        assert!(settled.data.body.get("approved_service").is_none());
-        assert!(report.feedback.lock().unwrap().is_empty(), "the held helper has not reported");
-        let receipt = &settled.data.body["continuation_receipt"];
-        assert_eq!(receipt["session"], fixture.session.to_string());
-        let resumed_input = receipt["durable_input"]["id"].as_str().unwrap().to_owned();
-        assert_ne!(resumed_input, first_input);
-        loop {
-            let history = acquisition_approved::native_history(runtime_store.as_ref(), &fixture.session).await;
-            let resumed: Vec<_> = history.iter().filter(|row| row.state.input_id.to_string() == resumed_input).collect();
-            assert!(resumed.len() <= 1);
-            if resumed.first().is_some_and(|row| row.seed.phase == InputLifecycleState::Consumed) { break; }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        // A second normal sweep must observe the settled effect, not issue a
-        // second terminal transition or a second original input.
-        tokio::time::sleep(Duration::from_secs(6)).await;
-        assert!(fixture.store.get(&key).await.unwrap().unwrap() == settled);
-        let history = acquisition_approved::native_history(runtime_store.as_ref(), &fixture.session).await;
-        assert_eq!(history.iter().filter(|row| row.state.input_id.to_string() == resumed_input).count(), 1);
-        assert_eq!(script.observations().2, 1, "no reacquisition");
-    }))).catch_unwind().await;
+    let checked = std::panic::AssertUnwindSafe(tokio::time::timeout_at(
+        deadline,
+        Box::pin(async {
+            let first = fixture.submit().await;
+            let first_input = match &first {
+                Ok(PrivateOriginalSubmission::Admitted { input_id, .. }) => input_id.clone(),
+                _ => panic!(
+                    "actual original admission required: {}",
+                    submission_context(&first)
+                ),
+            };
+            fixture.finish(&first).await.unwrap();
+            let feedback = script.observations().0;
+            assert_eq!(feedback.len(), 1);
+            assert!(!feedback[0].is_error, "{feedback:?}");
+            let context = report.take_context().await;
+            let source = fixture
+                .source
+                .setup_result_source(&context, report.selection.get().unwrap())
+                .await
+                .unwrap();
+            let key = source.operation.acquisition.clone();
+            let before = fixture.store.get(&key).await.unwrap().unwrap();
+            assert_eq!(
+                before.data.body["state"]["lifecycle_phase"],
+                "investigating"
+            );
+            assert_eq!(before.data.body["state"]["terminal_revision"], 0);
+            assert!(before.data.body["continuation_receipt"].is_null());
+            // Start exactly the worker selected by HostGateway after native Ready.
+            // No helper report, user request or direct expire call drives progress.
+            recovery
+                .start(recovery.prepare_start().unwrap(), script.installed_owner())
+                .unwrap();
+            let settled = loop {
+                let row = fixture.store.get(&key).await.unwrap().unwrap();
+                if !row.data.body["continuation_receipt"].is_null() {
+                    break row;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            };
+            assert_eq!(settled.data.body["state"]["lifecycle_phase"], "expired");
+            assert_eq!(settled.data.body["state"]["terminal_revision"], 2);
+            assert_eq!(settled.data.body["request"], before.data.body["request"]);
+            assert!(settled.data.body.get("helper_detail").is_none());
+            assert!(settled.data.body.get("approved_service").is_none());
+            assert!(
+                report.feedback.lock().unwrap().is_empty(),
+                "the held helper has not reported"
+            );
+            let receipt = &settled.data.body["continuation_receipt"];
+            assert_eq!(receipt["session"], fixture.session.to_string());
+            let resumed_input = receipt["durable_input"]["id"].as_str().unwrap().to_owned();
+            assert_ne!(resumed_input, first_input);
+            loop {
+                let history =
+                    acquisition_approved::native_history(runtime_store.as_ref(), &fixture.session)
+                        .await;
+                let resumed: Vec<_> = history
+                    .iter()
+                    .filter(|row| row.state.input_id.to_string() == resumed_input)
+                    .collect();
+                assert!(resumed.len() <= 1);
+                if resumed
+                    .first()
+                    .is_some_and(|row| row.seed.phase == InputLifecycleState::Consumed)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            // A second normal sweep must observe the settled effect, not issue a
+            // second terminal transition or a second original input.
+            tokio::time::sleep(Duration::from_secs(6)).await;
+            assert!(fixture.store.get(&key).await.unwrap().unwrap() == settled);
+            let history =
+                acquisition_approved::native_history(runtime_store.as_ref(), &fixture.session)
+                    .await;
+            assert_eq!(
+                history
+                    .iter()
+                    .filter(|row| row.state.input_id.to_string() == resumed_input)
+                    .count(),
+                1
+            );
+            assert_eq!(script.observations().2, 1, "no reacquisition");
+        }),
+    ))
+    .catch_unwind()
+    .await;
     recovery.stop();
     recovery.join().await.unwrap();
     report.release();
@@ -75,7 +114,9 @@ async fn deadline_recovery_worker_expires_waiting_setup_and_resumes_original() {
     assert!(cleanup.is_ok(), "{cleanup:?}");
     match checked {
         Ok(Ok(())) => (),
-        Ok(Err(_)) => panic!("continuous recovery did not resume Original before the fixture deadline"),
+        Ok(Err(_)) => {
+            panic!("continuous recovery did not resume Original before the fixture deadline")
+        }
         Err(payload) => std::panic::resume_unwind(payload),
     }
 }

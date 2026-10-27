@@ -1,7 +1,10 @@
 //! Real source selections serialize through the existing writer. Only the
 //! canonical SQLite CAS is paused; no fixture grabs the writer itself.
 use super::*;
-use std::sync::{OnceLock, atomic::{AtomicUsize, Ordering}};
+use std::sync::{
+    OnceLock,
+    atomic::{AtomicUsize, Ordering},
+};
 use toolkit_store::*;
 
 struct HeldSelectionWrite {
@@ -16,22 +19,39 @@ struct HeldSelectionWrite {
 impl HeldSelectionWrite {
     fn new(inner: Arc<dyn ToolkitStore>) -> Self {
         Self {
-            inner, hold: std::sync::Mutex::new(None), observed: OnceLock::new(),
-            reads: AtomicUsize::new(0), selections: AtomicUsize::new(0),
-            entered: tokio::sync::Notify::new(), release: tokio::sync::Semaphore::new(0),
+            inner,
+            hold: std::sync::Mutex::new(None),
+            observed: OnceLock::new(),
+            reads: AtomicUsize::new(0),
+            selections: AtomicUsize::new(0),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Semaphore::new(0),
         }
     }
 }
 #[async_trait::async_trait]
 impl ToolkitStore for HeldSelectionWrite {
-    fn capabilities(&self) -> StoreCapabilities { self.inner.capabilities() }
-    async fn now_ms(&self) -> StoreResult<i64> { self.inner.now_ms().await }
-    async fn admit(&self, request: AdmissionRequest) -> StoreResult<AdmissionOutcome> { self.inner.admit(request).await }
+    fn capabilities(&self) -> StoreCapabilities {
+        self.inner.capabilities()
+    }
+    async fn now_ms(&self) -> StoreResult<i64> {
+        self.inner.now_ms().await
+    }
+    async fn admit(&self, request: AdmissionRequest) -> StoreResult<AdmissionOutcome> {
+        self.inner.admit(request).await
+    }
     async fn get(&self, key: &StoreKey) -> StoreResult<Option<StoredRecord>> {
-        if self.observed.get() == Some(key) { self.reads.fetch_add(1, Ordering::SeqCst); }
+        if self.observed.get() == Some(key) {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+        }
         self.inner.get(key).await
     }
-    async fn list_records(&self, scope: &StoreScope, after: Option<&str>, limit: u32) -> StoreResult<Vec<StoredRecord>> {
+    async fn list_records(
+        &self,
+        scope: &StoreScope,
+        after: Option<&str>,
+        limit: u32,
+    ) -> StoreResult<Vec<StoredRecord>> {
         self.inner.list_records(scope, after, limit).await
     }
     async fn compare_and_swap(&self, transition: Transition) -> StoreResult<StoredRecord> {
@@ -41,11 +61,17 @@ impl ToolkitStore for HeldSelectionWrite {
         }
         let hold = {
             let mut pending = self.hold.lock().unwrap();
-            let matches = pending.as_ref().is_some_and(|(key, cancelled)|
-                key == &transition.key && if *cancelled {
-                    transition.data.body["operation_cancelled"] == true
-                } else { selected && transition.data.body["final_association"].is_null() });
-            if matches { pending.take(); }
+            let matches = pending.as_ref().is_some_and(|(key, cancelled)| {
+                key == &transition.key
+                    && if *cancelled {
+                        transition.data.body["operation_cancelled"] == true
+                    } else {
+                        selected && transition.data.body["final_association"].is_null()
+                    }
+            });
+            if matches {
+                pending.take();
+            }
             matches
         };
         if hold {
@@ -54,7 +80,13 @@ impl ToolkitStore for HeldSelectionWrite {
         }
         self.inner.compare_and_swap(transition).await
     }
-    async fn claim_record(&self, key: &StoreKey, revision: u64, worker: &str, ttl: u64) -> StoreResult<RecordLease> {
+    async fn claim_record(
+        &self,
+        key: &StoreKey,
+        revision: u64,
+        worker: &str,
+        ttl: u64,
+    ) -> StoreResult<RecordLease> {
         self.inner.claim_record(key, revision, worker, ttl).await
     }
     async fn renew_record_claim(&self, lease: &RecordLease, ttl: u64) -> StoreResult<RecordLease> {
@@ -66,39 +98,77 @@ impl ToolkitStore for HeldSelectionWrite {
     async fn release_record_claim(&self, lease: &RecordLease) -> StoreResult<()> {
         self.inner.release_record_claim(lease).await
     }
-    async fn read_events(&self, key: &StoreKey, after: u64, limit: u32) -> StoreResult<Vec<StoredEvent>> {
+    async fn read_events(
+        &self,
+        key: &StoreKey,
+        after: u64,
+        limit: u32,
+    ) -> StoreResult<Vec<StoredEvent>> {
         self.inner.read_events(key, after, limit).await
     }
-    async fn get_effect(&self, key: &EffectKey) -> StoreResult<Option<StoredEffect>> { self.inner.get_effect(key).await }
-    async fn list_effects(&self, key: &StoreKey, after: Option<&str>, limit: u32) -> StoreResult<Vec<StoredEffect>> {
+    async fn get_effect(&self, key: &EffectKey) -> StoreResult<Option<StoredEffect>> {
+        self.inner.get_effect(key).await
+    }
+    async fn list_effects(
+        &self,
+        key: &StoreKey,
+        after: Option<&str>,
+        limit: u32,
+    ) -> StoreResult<Vec<StoredEffect>> {
         self.inner.list_effects(key, after, limit).await
     }
-    async fn claim_effect(&self, key: &EffectKey, revision: u64, worker: &str, ttl: u64) -> StoreResult<EffectClaimOutcome> {
+    async fn claim_effect(
+        &self,
+        key: &EffectKey,
+        revision: u64,
+        worker: &str,
+        ttl: u64,
+    ) -> StoreResult<EffectClaimOutcome> {
         self.inner.claim_effect(key, revision, worker, ttl).await
     }
-    async fn acknowledge_effect(&self, lease: &EffectLease, outcome: EffectOutcome) -> StoreResult<StoredEffect> {
+    async fn acknowledge_effect(
+        &self,
+        lease: &EffectLease,
+        outcome: EffectOutcome,
+    ) -> StoreResult<StoredEffect> {
         self.inner.acknowledge_effect(lease, outcome).await
     }
-    async fn claim_reconciliation(&self, key: &EffectKey, worker: &str, ttl: u64) -> StoreResult<StoredEffect> {
+    async fn claim_reconciliation(
+        &self,
+        key: &EffectKey,
+        worker: &str,
+        ttl: u64,
+    ) -> StoreResult<StoredEffect> {
         self.inner.claim_reconciliation(key, worker, ttl).await
     }
-    async fn reconcile_effect(&self, lease: &EffectLease, resolution: Reconciliation) -> StoreResult<StoredEffect> {
+    async fn reconcile_effect(
+        &self,
+        lease: &EffectLease,
+        resolution: Reconciliation,
+    ) -> StoreResult<StoredEffect> {
         self.inner.reconcile_effect(lease, resolution).await
     }
 }
 
 #[derive(Clone, Copy)]
-enum WaitingSelection { Both, DropQueued, CancellationFirst }
+enum WaitingSelection {
+    Both,
+    DropQueued,
+    CancellationFirst,
+}
 
 async fn exercise(mode: WaitingSelection) {
     const WAIT: std::time::Duration = std::time::Duration::from_secs(30);
     let captured_store = Arc::new(OnceLock::<Arc<HeldSelectionWrite>>::new());
     let capture = captured_store.clone();
-    let fixture = Box::pin(ContinuationFixture::for_service_input_with_source(Box::new(move |inner| {
-        let selected = Arc::new(HeldSelectionWrite::new(inner));
-        assert!(capture.set(selected.clone()).is_ok());
-        selected
-    }))).await;
+    let fixture = Box::pin(ContinuationFixture::for_service_input_with_source(
+        Box::new(move |inner| {
+            let selected = Arc::new(HeldSelectionWrite::new(inner));
+            assert!(capture.set(selected.clone()).is_ok());
+            selected
+        }),
+    ))
+    .await;
     let store = captured_store.get().unwrap().clone();
     // Keep the actual entered store operation outside the observer timeout.
     // Cleanup releases its one pause and joins it before closing native owners.
@@ -204,7 +274,12 @@ async fn exercise(mode: WaitingSelection) {
     };
     let closed = fixture.shutdown().await;
     assert!(closed.is_ok(), "native cleanup failed: {closed:?}");
-    if let Some(held) = held { assert!(matches!(held, Ok(Ok(()))), "entered source write did not settle"); }
+    if let Some(held) = held {
+        assert!(
+            matches!(held, Ok(Ok(()))),
+            "entered source write did not settle"
+        );
+    }
     match result {
         Ok(Ok(())) => (),
         Ok(Err(_)) => panic!("real configured-selection control timed out"),

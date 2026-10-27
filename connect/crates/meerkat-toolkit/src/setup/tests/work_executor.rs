@@ -1191,8 +1191,13 @@ fn inline_input_fixture() -> Fixture {
     let mut request = f.request.request().clone();
     request.user_context.clear();
     f.request = validate_request(
-        request, f.request.host().clone(), &f.authority, &f.context(200), &f.references,
-    ).unwrap();
+        request,
+        f.request.host().clone(),
+        &f.authority,
+        &f.context(200),
+        &f.references,
+    )
+    .unwrap();
     f
 }
 
@@ -1203,22 +1208,45 @@ async fn legacy_step_accepts_canonical_inline_input_with_denied_external_owner()
     let operation = id(&snapshot.key().id);
     let denied = DeniedInputOwner(AtomicUsize::new(0));
     let context = f.context(200);
-    let access = || SetupAccess { evidence: &f.authority, context: &context, references: &denied };
-    let prepared = f.bridge().prepare_work_protocol_fixture(&operation, access(), &StepInputPrepare("canonical"))
-        .await.unwrap();
+    let access = || SetupAccess {
+        evidence: &f.authority,
+        context: &context,
+        references: &denied,
+    };
+    let prepared = f
+        .bridge()
+        .prepare_work_protocol_fixture(&operation, access(), &StepInputPrepare("canonical"))
+        .await
+        .unwrap();
     let service = service(&f);
     let policy = Policy::new();
     let host = host(&service, &policy);
-    let WorkAdmissionStep::Admitted(done) = f.bridge()
+    let WorkAdmissionStep::Admitted(done) = f
+        .bridge()
         .step_work_admission_protocol_fixture(&operation, &host, Some(access()), &options("inline"))
-        .await.unwrap()
-    else { panic!("canonical input was not admitted") };
-    let WorkAdmissionStep::Admitted(replay) = f.bridge()
-        .step_work_admission_protocol_fixture(&operation, &host, Some(access()), &options("inline-replay"))
-        .await.unwrap()
-    else { panic!("canonical admission did not replay") };
+        .await
+        .unwrap()
+    else {
+        panic!("canonical input was not admitted")
+    };
+    let WorkAdmissionStep::Admitted(replay) = f
+        .bridge()
+        .step_work_admission_protocol_fixture(
+            &operation,
+            &host,
+            Some(access()),
+            &options("inline-replay"),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("canonical admission did not replay")
+    };
     assert_eq!(done, replay);
-    assert_eq!(done.correlation_digest(), prepared.admission().correlation_digest());
+    assert_eq!(
+        done.correlation_digest(),
+        prepared.admission().correlation_digest()
+    );
     assert_eq!(denied.0.load(Ordering::SeqCst), 0);
     assert_eq!(effect(&f, &snapshot).await.attempt, 1);
     assert_eq!(effect(&f, &snapshot).await.status, EffectStatus::Succeeded);
@@ -1227,26 +1255,68 @@ async fn legacy_step_accepts_canonical_inline_input_with_denied_external_owner()
 #[tokio::test]
 async fn legacy_step_preserves_changed_descriptor_and_external_owner_refusal() {
     for kind in ["owner", "id", "revision", "external", "user-context"] {
-        let f = if kind == "user-context" { Fixture::new() } else { inline_input_fixture() };
+        let f = if kind == "user-context" {
+            Fixture::new()
+        } else {
+            inline_input_fixture()
+        };
         let snapshot = f.admit().await;
         let operation = id(&snapshot.key().id);
         let context = f.context(200);
-        let allow = SetupAccess { evidence: &f.authority, context: &context, references: &PermittedInputOwner };
-        let prepared = f.bridge().prepare_work_protocol_fixture(&operation, allow,
-            &StepInputPrepare(if kind == "user-context" { "canonical" } else { kind })).await.unwrap();
+        let allow = SetupAccess {
+            evidence: &f.authority,
+            context: &context,
+            references: &PermittedInputOwner,
+        };
+        let prepared = f
+            .bridge()
+            .prepare_work_protocol_fixture(
+                &operation,
+                allow,
+                &StepInputPrepare(if kind == "user-context" {
+                    "canonical"
+                } else {
+                    kind
+                }),
+            )
+            .await
+            .unwrap();
         let service = service(&f);
         let policy = Policy::new();
         let host = host(&service, &policy);
         let denied = DeniedInputOwner(AtomicUsize::new(0));
-        let access = SetupAccess { evidence: &f.authority, context: &context, references: &denied };
+        let access = SetupAccess {
+            evidence: &f.authority,
+            context: &context,
+            references: &denied,
+        };
         let before = effect(&f, &snapshot).await;
-        assert!(matches!(f.bridge().step_work_admission_protocol_fixture(
-            &operation, &host, Some(access), &options("refused")).await,
-            Err(SetupError::Request(RequestError::ContextUnavailable))), "{kind}");
+        assert!(
+            matches!(
+                f.bridge()
+                    .step_work_admission_protocol_fixture(
+                        &operation,
+                        &host,
+                        Some(access),
+                        &options("refused")
+                    )
+                    .await,
+                Err(SetupError::Request(RequestError::ContextUnavailable))
+            ),
+            "{kind}"
+        );
         assert_eq!(denied.0.load(Ordering::SeqCst), 1, "{kind}");
         assert_eq!(policy.dispatch_calls.load(Ordering::SeqCst), 0, "{kind}");
         assert_eq!(effect(&f, &snapshot).await, before);
-        assert!(service.observe_admission(prepared.admission().admission_key().clone(),
-            prepared.admission().work_request().clone()).await.unwrap().is_none());
+        assert!(
+            service
+                .observe_admission(
+                    prepared.admission().admission_key().clone(),
+                    prepared.admission().work_request().clone()
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

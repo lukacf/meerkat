@@ -2,17 +2,26 @@
 //! The native operation owns completion. Parent values retain attribution only;
 //! the parent SDK retains the actual authenticated exclusion until Joined.
 use super::*;
-use std::sync::{Mutex, atomic::{AtomicBool, Ordering}};
-use tokio::sync::{mpsc, oneshot};
-use toolkit_mobkit::{private_host::{ServiceParentCommand, ServiceParentEndpoint,
-    ServiceParentResponse, ServiceParentAdministrationRequest, ServiceParentDecision,
-    ServiceParentDecisionSource, ConsoleLoginHandle, ConsoleLoginReservation},
-    private_originals::{ApplicationServiceOperation, ServiceParentAuthorization,
-        ServiceParentAdministrationReservation, ServiceParentAuthorizationProposal,
-        ServiceParentOperationObservation, ServiceParentCustody, ServiceToolPolicyApproval}};
 use meerkat_core::PrincipalRef;
 use meerkat_toolkit::host_lifetime::policy::ServiceParentAdministration;
 use serde_json::{Map, Value, json};
+use std::sync::{
+    Mutex,
+    atomic::{AtomicBool, Ordering},
+};
+use tokio::sync::{mpsc, oneshot};
+use toolkit_mobkit::{
+    private_host::{
+        ConsoleLoginHandle, ConsoleLoginReservation, ServiceParentAdministrationRequest,
+        ServiceParentCommand, ServiceParentDecision, ServiceParentDecisionSource,
+        ServiceParentEndpoint, ServiceParentResponse,
+    },
+    private_originals::{
+        ApplicationServiceOperation, ServiceParentAdministrationReservation,
+        ServiceParentAuthorization, ServiceParentAuthorizationProposal, ServiceParentCustody,
+        ServiceParentOperationObservation, ServiceToolPolicyApproval,
+    },
+};
 
 type NextReply = ServiceParentResponse<ServiceParentAdministrationRequest>;
 type ResultReply = ServiceParentResponse<ServiceParentOperationObservation>;
@@ -25,21 +34,35 @@ struct ParentExclusion {
 }
 impl ParentExclusion {
     fn check(&self) -> Result<(), HostLifetimeError> {
-        if !self.open.load(Ordering::Acquire) { return Err(HostLifetimeError::Denied); }
-        if self.closed.is_closed_for_presenter() { return Err(HostLifetimeError::Unavailable); }
+        if !self.open.load(Ordering::Acquire) {
+            return Err(HostLifetimeError::Denied);
+        }
+        if self.closed.is_closed_for_presenter() {
+            return Err(HostLifetimeError::Unavailable);
+        }
         if let Some(login) = &self.login {
             ServiceParentEndpoint::check_parent_login_lifetime(login)?;
         }
         Ok(())
     }
-    fn fence(&self) { self.open.store(false, Ordering::Release); }
+    fn fence(&self) {
+        self.open.store(false, Ordering::Release);
+    }
     fn joined(&self, observed: &ServiceParentOperationObservation) {
         // Never hold the slot/approval/phase mutex while a lifetime drops.
-        let retained = self.lifetime.lock().ok().and_then(|mut lifetime| lifetime.take());
+        let retained = self
+            .lifetime
+            .lock()
+            .ok()
+            .and_then(|mut lifetime| lifetime.take());
         if let Some(retained) = retained {
-            if observed.outcome == Some(toolkit_mobkit::private_originals::ServiceParentOperationOutcome::Uncertain) {
+            if observed.outcome
+                == Some(toolkit_mobkit::private_originals::ServiceParentOperationOutcome::Uncertain)
+            {
                 drop(retained);
-            } else { retained.settled(); }
+            } else {
+                retained.settled();
+            }
         }
     }
 }
@@ -51,41 +74,90 @@ struct AuthorizedParent {
     tool_policy: Option<ServiceToolPolicyApproval>,
 }
 impl ServiceParentAdministrationReservation for AuthorizedParent {
-    fn operator(&self) -> &PrincipalRef { &self.proposal.operator }
-    fn rule(&self) -> &ServiceParentAdministration { &self.proposal.rule }
-    fn proposal_sha256(&self) -> &str { &self.digest }
-    fn provenance(&self) -> &Map<String, Value> { &self.provenance }
-    fn check_current(&self) -> Result<(), HostLifetimeError> { self.exclusion.check() }
-    fn tool_policy_approval(&self) -> Option<&ServiceToolPolicyApproval> { self.tool_policy.as_ref() }
+    fn operator(&self) -> &PrincipalRef {
+        &self.proposal.operator
+    }
+    fn rule(&self) -> &ServiceParentAdministration {
+        &self.proposal.rule
+    }
+    fn proposal_sha256(&self) -> &str {
+        &self.digest
+    }
+    fn provenance(&self) -> &Map<String, Value> {
+        &self.provenance
+    }
+    fn check_current(&self) -> Result<(), HostLifetimeError> {
+        self.exclusion.check()
+    }
+    fn tool_policy_approval(&self) -> Option<&ServiceToolPolicyApproval> {
+        self.tool_policy.as_ref()
+    }
 }
 
-fn authorize(endpoint: &ServiceParentEndpoint, closed: &PrivateHostClosed,
-    request: &ServiceParentAdministrationRequest, decision: ServiceParentDecision,
+fn authorize(
+    endpoint: &ServiceParentEndpoint,
+    closed: &PrivateHostClosed,
+    request: &ServiceParentAdministrationRequest,
+    decision: ServiceParentDecision,
 ) -> Result<(ServiceParentAuthorization, Option<Arc<ParentExclusion>>), HostLifetimeError> {
     let (source, authorization_ref, provenance, tool_policy) = match decision {
-        ServiceParentDecision::Authorized { source, authorization_ref, provenance }
-            if request.proposal.tool_policy.is_none() => (source, authorization_ref, provenance, None),
-        ServiceParentDecision::AuthorizedWithToolPolicy { source, authorization_ref, provenance, tool_policy_sha256 } => {
-            let proposal = request.proposal.tool_policy.as_ref().ok_or(HostLifetimeError::Denied)?;
+        ServiceParentDecision::Authorized {
+            source,
+            authorization_ref,
+            provenance,
+        } if request.proposal.tool_policy.is_none() => {
+            (source, authorization_ref, provenance, None)
+        }
+        ServiceParentDecision::AuthorizedWithToolPolicy {
+            source,
+            authorization_ref,
+            provenance,
+            tool_policy_sha256,
+        } => {
+            let proposal = request
+                .proposal
+                .tool_policy
+                .as_ref()
+                .ok_or(HostLifetimeError::Denied)?;
             let approval = ServiceToolPolicyApproval::until_superseded(proposal)?;
-            if approval.proposal_sha256() != tool_policy_sha256 { return Err(HostLifetimeError::Denied); }
+            if approval.proposal_sha256() != tool_policy_sha256 {
+                return Err(HostLifetimeError::Denied);
+            }
             (source, authorization_ref, provenance, Some(approval))
         }
-        ServiceParentDecision::RequiresHuman => return Ok((ServiceParentAuthorization::RequiresHuman, None)),
+        ServiceParentDecision::RequiresHuman => {
+            return Ok((ServiceParentAuthorization::RequiresHuman, None));
+        }
         ServiceParentDecision::Unavailable => return Err(HostLifetimeError::Unavailable),
         _ => return Err(HostLifetimeError::Denied),
     };
-    if authorization_ref.trim().is_empty() || authorization_ref.len() > 512 || provenance.is_empty()
-        || serde_json::to_vec(&provenance).map_err(|_| HostLifetimeError::InvalidSelection)?.len() > 12 * 1024
-    { return Err(HostLifetimeError::InvalidSelection); }
+    if authorization_ref.trim().is_empty()
+        || authorization_ref.len() > 512
+        || provenance.is_empty()
+        || serde_json::to_vec(&provenance)
+            .map_err(|_| HostLifetimeError::InvalidSelection)?
+            .len()
+            > 12 * 1024
+    {
+        return Err(HostLifetimeError::InvalidSelection);
+    }
     let login = match source {
-        ServiceParentDecisionSource::CurrentLoginDecision { enrollment_id } => Some(endpoint.parent_login_lifetime(enrollment_id)?),
+        ServiceParentDecisionSource::CurrentLoginDecision { enrollment_id } => {
+            Some(endpoint.parent_login_lifetime(enrollment_id)?)
+        }
         ServiceParentDecisionSource::StandingRuleDecision => None,
     };
-    let lifetime = login.as_ref().map(ConsoleLoginHandle::reserve).transpose()
+    let lifetime = login
+        .as_ref()
+        .map(ConsoleLoginHandle::reserve)
+        .transpose()
         .map_err(|_| HostLifetimeError::Unavailable)?;
-    let exclusion = Arc::new(ParentExclusion { open: AtomicBool::new(true), closed: closed.clone(), login,
-        lifetime: Mutex::new(lifetime) });
+    let exclusion = Arc::new(ParentExclusion {
+        open: AtomicBool::new(true),
+        closed: closed.clone(),
+        login,
+        lifetime: Mutex::new(lifetime),
+    });
     exclusion.check()?;
     // Enrollment IDs and transient observation timestamps are deliberately not
     // immutable authorization evidence. A retry retains the same actual rule
@@ -94,18 +166,29 @@ fn authorize(endpoint: &ServiceParentEndpoint, closed: &PrivateHostClosed,
         ("authorization_ref".into(), json!(authorization_ref)),
         ("application_provenance".into(), Value::Object(provenance)),
     ]);
-    let reserved = AuthorizedParent { proposal: request.proposal.clone(), digest: request.proposal_sha256.clone(),
-        provenance, exclusion: exclusion.clone(), tool_policy };
-    Ok((ServiceParentAuthorization::Reserved(Box::new(reserved)), Some(exclusion)))
+    let reserved = AuthorizedParent {
+        proposal: request.proposal.clone(),
+        digest: request.proposal_sha256.clone(),
+        provenance,
+        exclusion: exclusion.clone(),
+        tool_policy,
+    };
+    Ok((
+        ServiceParentAuthorization::Reserved(Box::new(reserved)),
+        Some(exclusion),
+    ))
 }
 
 /// This owns the operation before the first administrative wait or entry.
 /// Dropping a drive observation cannot drop the retained worker/source future.
 /// Final operation observations remain here until explicit exchange retirement.
 pub(super) async fn drive(
-    exchange_id: u64, mut operation: ApplicationServiceOperation,
-    endpoint: &ServiceParentEndpoint, requests: &mut mpsc::Receiver<RemoteControllerCommand>,
-    next: &mut Option<NextReply>, closed: &PrivateHostClosed,
+    exchange_id: u64,
+    mut operation: ApplicationServiceOperation,
+    endpoint: &ServiceParentEndpoint,
+    requests: &mut mpsc::Receiver<RemoteControllerCommand>,
+    next: &mut Option<NextReply>,
+    closed: &PrivateHostClosed,
 ) {
     let control = operation.control();
     let mut request: Option<ServiceParentAdministrationRequest> = None;
@@ -218,7 +301,9 @@ pub(super) async fn drive(
         }
         if let Some(observed) = &final_observation {
             if closing || !retirements.is_empty() || request.is_none() {
-                for response in retirements.drain(..) { let _ = response.send(Ok(observed.clone())); }
+                for response in retirements.drain(..) {
+                    let _ = response.send(Ok(observed.clone()));
+                }
                 break;
             }
         }

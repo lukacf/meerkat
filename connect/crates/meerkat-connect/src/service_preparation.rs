@@ -21,8 +21,8 @@ use meerkat_core::{
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
-    ConnectError, SessionOptions, paired_host_tool::PairedHostFrontend, resources::InstalledResources,
-    setup::PreparedSetupConnection,
+    ConnectError, SessionOptions, paired_host_tool::PairedHostFrontend,
+    resources::InstalledResources, setup::PreparedSetupConnection,
 };
 
 pub const TOOLKIT_PREPARE_SERVICES: &str = "toolkit_prepare_services";
@@ -30,9 +30,11 @@ pub const TOOLKIT_PREPARE_SERVICES: &str = "toolkit_prepare_services";
 pub(crate) mod native;
 pub use native::NativeSetup;
 
-pub(crate) type TerminalToolFactory = Arc<dyn Fn(
-    Arc<crate::service_install::CheckedInstalls>,
-) -> Arc<dyn AgentToolDispatcher> + Send + Sync>;
+pub(crate) type TerminalToolFactory = Arc<
+    dyn Fn(Arc<crate::service_install::CheckedInstalls>) -> Arc<dyn AgentToolDispatcher>
+        + Send
+        + Sync,
+>;
 
 enum HandoffState {
     Unrequested,
@@ -52,7 +54,9 @@ pub(crate) struct ServicePreparationOwner {
 }
 
 impl ServicePreparationOwner {
-    pub(crate) fn allows_terminal_connectors(&self) -> bool { self.terminal_connectors }
+    pub(crate) fn allows_terminal_connectors(&self) -> bool {
+        self.terminal_connectors
+    }
 
     pub(crate) fn allows_acquisition(&self) -> bool {
         self.acquisition
@@ -85,7 +89,9 @@ impl ServicePreparationOwner {
     }
 
     pub(crate) fn retire(&self) {
-        if let Some(installs) = &self.installs { installs.retire(); }
+        if let Some(installs) = &self.installs {
+            installs.retire();
+        }
         if let Ok(mut state) = self.state.lock() {
             *state = HandoffState::Retired;
         }
@@ -262,11 +268,22 @@ impl LazySetup {
 
     /// Terminal setup uses the same checked-install owner for the software
     /// dispatcher and protected native connector presenter.
-    pub fn terminal_services(paired_host: PairedHostFrontend, connectors: &crate::terminal_connector::TerminalConnectors)
-        -> (Self, ServicePreparationPresenter)
-    {
-        Self::compose_selected_with_owner(paired_host, true, true, true, false, true,
-            connectors.router(), None, Some(connectors.dispatcher_factory()), None)
+    pub fn terminal_services(
+        paired_host: PairedHostFrontend,
+        connectors: &crate::terminal_connector::TerminalConnectors,
+    ) -> (Self, ServicePreparationPresenter) {
+        Self::compose_selected_with_owner(
+            paired_host,
+            true,
+            true,
+            true,
+            false,
+            true,
+            connectors.router(),
+            None,
+            Some(connectors.dispatcher_factory()),
+            None,
+        )
     }
 
     /// The initial private-pipe frontend has no service or PairedHost presenter.
@@ -291,8 +308,16 @@ impl LazySetup {
         let (paired_host, hosts) = PairedHostFrontend::deferred_with_research();
         drop(hosts);
         let (setup, presenter) = Self::compose_selected_with_owner(
-            paired_host, false, false, true, false, false,
-            McpRouter::new(), None, None, Some(forge),
+            paired_host,
+            false,
+            false,
+            true,
+            false,
+            false,
+            McpRouter::new(),
+            None,
+            None,
+            Some(forge),
         );
         drop(presenter);
         Ok(setup)
@@ -305,8 +330,15 @@ impl LazySetup {
         include_paired_host: bool,
         include_forge: bool,
     ) -> Self {
-        let (setup, presenter) =
-            Self::compose_selected(paired_host, include_paired_host, false, include_forge, false, false, McpRouter::new());
+        let (setup, presenter) = Self::compose_selected(
+            paired_host,
+            include_paired_host,
+            false,
+            include_forge,
+            false,
+            false,
+            McpRouter::new(),
+        );
         drop(presenter);
         setup
     }
@@ -315,7 +347,15 @@ impl LazySetup {
     /// No service adapter, arbitrary document fetch, research or Forge tool is
     /// installed. The captured definitions also own the native access ceiling.
     pub(crate) fn paired_host_preparation(paired_host: PairedHostFrontend) -> Self {
-        let (setup, presenter) = Self::compose_selected(paired_host, true, false, false, true, false, McpRouter::new());
+        let (setup, presenter) = Self::compose_selected(
+            paired_host,
+            true,
+            false,
+            false,
+            true,
+            false,
+            McpRouter::new(),
+        );
         drop(presenter);
         setup
     }
@@ -331,14 +371,18 @@ impl LazySetup {
 
     /// Retain the caller's fresh native router, configured before session
     /// binding, through the existing adapter and preparation owner.
-    pub(crate) fn private_services_with_router(router: McpRouter) -> (Self, ServicePreparationPresenter) {
+    pub(crate) fn private_services_with_router(
+        router: McpRouter,
+    ) -> (Self, ServicePreparationPresenter) {
         let (paired_host, hosts) = PairedHostFrontend::deferred_with_research();
         drop(hosts);
         Self::compose_selected(paired_host, false, true, false, false, true, router)
     }
 
     #[cfg(test)]
-    pub(crate) fn fixture_services_with_router(router: McpRouter) -> (Self, ServicePreparationPresenter) {
+    pub(crate) fn fixture_services_with_router(
+        router: McpRouter,
+    ) -> (Self, ServicePreparationPresenter) {
         // Connector controls retain the same service owners and router while
         // using TestClient. Optional research requires a native model client.
         let (paired_host, hosts) = PairedHostFrontend::deferred();
@@ -346,8 +390,19 @@ impl LazySetup {
         Self::compose_selected(paired_host, false, true, false, false, true, router)
     }
 
-    fn compose(paired_host: PairedHostFrontend, complete: bool) -> (Self, ServicePreparationPresenter) {
-        Self::compose_selected(paired_host, complete, complete, true, false, false, McpRouter::new())
+    fn compose(
+        paired_host: PairedHostFrontend,
+        complete: bool,
+    ) -> (Self, ServicePreparationPresenter) {
+        Self::compose_selected(
+            paired_host,
+            complete,
+            complete,
+            true,
+            false,
+            false,
+            McpRouter::new(),
+        )
     }
 
     fn compose_selected(
@@ -359,51 +414,97 @@ impl LazySetup {
         checked_installs: bool,
         router: McpRouter,
     ) -> (Self, ServicePreparationPresenter) {
-        Self::compose_selected_with_owner(paired_host, include_paired_host, services,
-            include_forge, preparation_only, checked_installs, router, None, None, None)
+        Self::compose_selected_with_owner(
+            paired_host,
+            include_paired_host,
+            services,
+            include_forge,
+            preparation_only,
+            checked_installs,
+            router,
+            None,
+            None,
+            None,
+        )
     }
 
     #[cfg(test)]
-    pub(crate) fn fixture_services(installs: Arc<crate::service_install::CheckedInstalls>)
-        -> (Self, ServicePreparationPresenter)
-    {
+    pub(crate) fn fixture_services(
+        installs: Arc<crate::service_install::CheckedInstalls>,
+    ) -> (Self, ServicePreparationPresenter) {
         let (paired_host, hosts) = PairedHostFrontend::deferred_with_research();
         drop(hosts);
-        Self::compose_selected_with_owner(paired_host, false, true, false, false, true,
-            McpRouter::new(), Some(installs), None, None)
+        Self::compose_selected_with_owner(
+            paired_host,
+            false,
+            true,
+            false,
+            false,
+            true,
+            McpRouter::new(),
+            Some(installs),
+            None,
+            None,
+        )
     }
 
     fn compose_selected_with_owner(
-        paired_host: PairedHostFrontend, include_paired_host: bool, services: bool,
-        include_forge: bool, preparation_only: bool, checked_installs: bool,
-        router: McpRouter, fixture_installs: Option<Arc<crate::service_install::CheckedInstalls>>,
+        paired_host: PairedHostFrontend,
+        include_paired_host: bool,
+        services: bool,
+        include_forge: bool,
+        preparation_only: bool,
+        checked_installs: bool,
+        router: McpRouter,
+        fixture_installs: Option<Arc<crate::service_install::CheckedInstalls>>,
         terminal_connectors: Option<TerminalToolFactory>,
         selected_forge: Option<(crate::forge::ForgeFrontend, crate::forge::ForgePresenter)>,
     ) -> (Self, ServicePreparationPresenter) {
-        Self::compose_with_adapter(paired_host, include_paired_host, services, include_forge,
-            preparation_only, checked_installs, Arc::new(McpRouterAdapter::new(router)),
-            fixture_installs, terminal_connectors, selected_forge, false)
+        Self::compose_with_adapter(
+            paired_host,
+            include_paired_host,
+            services,
+            include_forge,
+            preparation_only,
+            checked_installs,
+            Arc::new(McpRouterAdapter::new(router)),
+            fixture_installs,
+            terminal_connectors,
+            selected_forge,
+            false,
+        )
     }
 
     fn compose_with_adapter(
-        paired_host: PairedHostFrontend, include_paired_host: bool, services: bool,
-        include_forge: bool, preparation_only: bool, checked_installs: bool,
+        paired_host: PairedHostFrontend,
+        include_paired_host: bool,
+        services: bool,
+        include_forge: bool,
+        preparation_only: bool,
+        checked_installs: bool,
         adapter: Arc<McpRouterAdapter>,
         retained_installs: Option<Arc<crate::service_install::CheckedInstalls>>,
         terminal_connectors: Option<TerminalToolFactory>,
         selected_forge: Option<(crate::forge::ForgeFrontend, crate::forge::ForgePresenter)>,
         native_adapter_owner: bool,
     ) -> (Self, ServicePreparationPresenter) {
-        let (forge, forge_presenter) = selected_forge.unwrap_or_else(crate::forge::ForgeFrontend::new);
+        let (forge, forge_presenter) =
+            selected_forge.unwrap_or_else(crate::forge::ForgeFrontend::new);
         forge.set_available(false);
-        let installs = retained_installs.or_else(|| checked_installs.then(|| crate::service_install::CheckedInstalls::new(adapter.clone())));
+        let installs = retained_installs.or_else(|| {
+            checked_installs.then(|| crate::service_install::CheckedInstalls::new(adapter.clone()))
+        });
         let (requests, receive) = mpsc::channel(1);
         let owner = Arc::new(ServicePreparationOwner {
             adapter: adapter.clone(),
             installs: installs.clone(),
             acquisition: services,
             terminal_connectors: terminal_connectors.is_some(),
-            state: Mutex::new(if native_adapter_owner { HandoffState::Accepted } else { HandoffState::Unrequested }),
+            state: Mutex::new(if native_adapter_owner {
+                HandoffState::Accepted
+            } else {
+                HandoffState::Unrequested
+            }),
             requests,
             native_adapter_owner,
         });
@@ -432,7 +533,11 @@ impl LazySetup {
         }
         let dispatcher = Arc::new(DynamicToolComposite::new(members));
         let preparation_tools = preparation_only.then(|| {
-            dispatcher.tools().iter().map(|tool| tool.name.to_string()).collect()
+            dispatcher
+                .tools()
+                .iter()
+                .map(|tool| tool.name.to_string())
+                .collect()
         });
         (
             Self {
@@ -486,7 +591,11 @@ impl LazySetup {
     }
     pub(crate) fn declared_tools(&self) -> Vec<String> {
         self.preparation_tools.clone().unwrap_or_else(|| {
-            self.dispatcher.tools().iter().map(|tool| tool.name.to_string()).collect()
+            self.dispatcher
+                .tools()
+                .iter()
+                .map(|tool| tool.name.to_string())
+                .collect()
         })
     }
     pub(crate) fn allowed_tools(&self) -> Vec<String> {
@@ -509,7 +618,10 @@ impl LazySetup {
         if self.owner.allows_terminal_connectors() {
             allowed.extend(crate::terminal_connector::TOOLS.iter().copied());
         }
-        allowed.extend([meerkat_core::tool_catalog::TOOL_CATALOG_SEARCH_NAME, meerkat_core::tool_catalog::TOOL_CATALOG_LOAD_NAME]);
+        allowed.extend([
+            meerkat_core::tool_catalog::TOOL_CATALOG_SEARCH_NAME,
+            meerkat_core::tool_catalog::TOOL_CATALOG_LOAD_NAME,
+        ]);
         allowed.into_iter().map(str::to_owned).collect()
     }
     pub(crate) fn matches(&self, dispatcher: &Arc<dyn AgentToolDispatcher>) -> bool {
@@ -640,8 +752,13 @@ pub async fn present_service_preparation(
     if !request.owner.is_live(&request.token) {
         return Err(ended());
     }
-    writeln!(output, "Preparing Connect's supplied service library for this conversation.")
-        .map_err(|error| ConnectError::native("write service preparation", error))?;
+    writeln!(
+        output,
+        "Preparing Connect's supplied service library for this conversation."
+    )
+    .map_err(|error| ConnectError::native("write service preparation", error))?;
     let resources = InstalledResources::locate()?;
-    request.prepare_installed(resources, storage, interrupted).await
+    request
+        .prepare_installed(resources, storage, interrupted)
+        .await
 }

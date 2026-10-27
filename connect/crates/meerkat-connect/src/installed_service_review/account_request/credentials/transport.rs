@@ -31,7 +31,9 @@ impl CredentialDelivery {
     pub(crate) fn channel(
         slots: Vec<ServiceCredentialSlot>,
     ) -> Result<(Self, oneshot::Receiver<CredentialValues>), ConnectError> {
-        let names = slots.iter().map(ServiceCredentialSlot::environment_variable)
+        let names = slots
+            .iter()
+            .map(ServiceCredentialSlot::environment_variable)
             .collect::<BTreeSet<_>>();
         if slots.is_empty() || names.len() != slots.len() {
             return Err(invalid());
@@ -84,8 +86,10 @@ pub(crate) fn answer_retained_credentials(
         return Err(invalid());
     }
     let answer: Answer = serde_json::from_slice(body).map_err(|_| invalid())?;
-    if answer.review_id == 0 || answer.review_id > 9_007_199_254_740_991
-        || answer.review_id != review_id || answer.approval_id.is_empty()
+    if answer.review_id == 0
+        || answer.review_id > 9_007_199_254_740_991
+        || answer.review_id != review_id
+        || answer.approval_id.is_empty()
         || answer.approval_id.len() > 512
     {
         return Err(invalid());
@@ -95,16 +99,24 @@ pub(crate) fn answer_retained_credentials(
         Decision::Deny => "deny",
     };
     let offered = delivery.as_ref().ok_or_else(invalid)?;
-    if offered.send.is_closed() || !exchange.as_ref().is_some_and(|exchange| {
-        exchange.prompt["kind"].as_str() == Some("approval")
-            && exchange.prompt["approval_id"].as_str() == Some(answer.approval_id.as_str())
-            && exchange.prompt["allowed_decisions"].as_array().is_some_and(|allowed|
-                allowed.iter().any(|value| value.as_str() == Some(decision)))
-            && !exchange.response.is_closed()
-    }) {
+    if offered.send.is_closed()
+        || !exchange.as_ref().is_some_and(|exchange| {
+            exchange.prompt["kind"].as_str() == Some("approval")
+                && exchange.prompt["approval_id"].as_str() == Some(answer.approval_id.as_str())
+                && exchange.prompt["allowed_decisions"]
+                    .as_array()
+                    .is_some_and(|allowed| {
+                        allowed.iter().any(|value| value.as_str() == Some(decision))
+                    })
+                && !exchange.response.is_closed()
+        })
+    {
         return Err(invalid());
     }
-    let expected = offered.slots.iter().map(|slot| slot.environment_variable().to_owned())
+    let expected = offered
+        .slots
+        .iter()
+        .map(|slot| slot.environment_variable().to_owned())
         .collect::<BTreeSet<_>>();
     let mut values = BTreeMap::new();
     for credential in answer.credentials {
@@ -125,9 +137,17 @@ pub(crate) fn answer_retained_credentials(
     let offered = delivery.take().ok_or_else(invalid)?;
     // Values move only to the same retained review future. It first awaits
     // the persisted decision; a failed prompt delivery cannot authorize use.
-    offered.send.send(CredentialValues { values }).map_err(|_| invalid())?;
-    exchange.take().ok_or_else(invalid)?.response
-        .send(Ok(PromptAnswer::Approval { decision: answer.decision }))
+    offered
+        .send
+        .send(CredentialValues { values })
+        .map_err(|_| invalid())?;
+    exchange
+        .take()
+        .ok_or_else(invalid)?
+        .response
+        .send(Ok(PromptAnswer::Approval {
+            decision: answer.decision,
+        }))
         .map_err(|_| invalid())
 }
 

@@ -50,8 +50,8 @@ impl ApplicationInventoryInput {
         if self.schema != 1 || self.roster.is_empty() {
             return Err("inventory requires schema 1 and a nonempty declared roster".into());
         }
-        let realm_id = meerkat_core::mob_realm_id(&self.mob_id)
-            .map_err(|error| error.to_string())?;
+        let realm_id =
+            meerkat_core::mob_realm_id(&self.mob_id).map_err(|error| error.to_string())?;
         let mut identities = BTreeSet::new();
         let mut members = BTreeSet::new();
         let mut helper_found = false;
@@ -96,8 +96,8 @@ pub(crate) fn command(args: &[String], progress: &mut InstallerProgress) -> Resu
     }
     progress.phase = "validation";
     let bytes = read_regular_artifact(Path::new(input_path))?;
-    let input: ApplicationInventoryInput = serde_json::from_slice(&bytes)
-        .map_err(|error| error.to_string())?;
+    let input: ApplicationInventoryInput =
+        serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
     let inventory = input.lower()?;
     progress.phase = "receipt";
     emit(&inventory)

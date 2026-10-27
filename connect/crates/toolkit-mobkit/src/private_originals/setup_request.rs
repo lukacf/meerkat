@@ -25,14 +25,24 @@ impl PrivateOriginals {
     /// Called only inside the existing original mutation owner. The same
     /// canonical read refuses missing, cancelled or already-bound sources.
     pub(crate) async fn check_setup_review_source(
-        &self, original: &PrivateOriginalRef,
+        &self,
+        original: &PrivateOriginalRef,
     ) -> Result<Option<PrivateSetupRequestSelection>, PrivateOriginalError> {
-        let stored = self.store.get(&self.key(original)?).await.map_err(store_error)?
+        let stored = self
+            .store
+            .get(&self.key(original)?)
+            .await
+            .map_err(store_error)?
             .ok_or(PrivateOriginalError::Unavailable)?;
         let record = self.decode_record(&stored, original)?;
-        if record.operation_cancelled || record.final_association.is_some()
-            || record.approved_task.is_some() || record.service_admission.is_some() || record.configured_setup.is_some()
-        { return Err(PrivateOriginalError::Denied); }
+        if record.operation_cancelled
+            || record.final_association.is_some()
+            || record.approved_task.is_some()
+            || record.service_admission.is_some()
+            || record.configured_setup.is_some()
+        {
+            return Err(PrivateOriginalError::Denied);
+        }
         Ok(record.setup_request)
     }
 
@@ -169,7 +179,8 @@ impl PrivateOriginals {
             return Err(PrivateOriginalError::Denied);
         }
         if let Some(saved) = record.final_association.as_ref() {
-            self.check_setup_source_binding(record, saved).map_err(|_| PrivateOriginalError::Conflict)?;
+            self.check_setup_source_binding(record, saved)
+                .map_err(|_| PrivateOriginalError::Conflict)?;
             return Ok(Some(saved.candidate().authority_basis.clone()));
         }
         let lifetime = self
@@ -238,8 +249,15 @@ impl PrivateOriginals {
                         Ok(lineage)
                     };
                     let lineage = issue().map_err(|_| HostLifetimeError::Unavailable)?;
-                    let targets = super::setup_targets::issue_targets(&owner, &caller, &executor, represented.as_ref(),
-                        &origin, &child_id, &targets)?;
+                    let targets = super::setup_targets::issue_targets(
+                        &owner,
+                        &caller,
+                        &executor,
+                        represented.as_ref(),
+                        &origin,
+                        &child_id,
+                        &targets,
+                    )?;
                     super::setup_targets::project(lineage, targets)
                 })
             })
@@ -251,12 +269,21 @@ impl PrivateOriginals {
     }
 
     #[cfg(test)]
-    pub(super) async fn setup_request_lineage(&self, record: &SourceRecord, reference: &PrivateOriginalRef,
-        session: &meerkat_core::SessionId, console: Option<super::console_ingress::ConsoleEntry>)
-        -> Result<Option<Vec<GrantLineageRef>>, PrivateOriginalError>
-    {
-        self.setup_request_basis(record, reference, session, console).await?.map(|basis|
-            super::setup_targets::find_lineage(&basis).map(<[_]>::to_vec).ok_or(PrivateOriginalError::Conflict)).transpose()
+    pub(super) async fn setup_request_lineage(
+        &self,
+        record: &SourceRecord,
+        reference: &PrivateOriginalRef,
+        session: &meerkat_core::SessionId,
+        console: Option<super::console_ingress::ConsoleEntry>,
+    ) -> Result<Option<Vec<GrantLineageRef>>, PrivateOriginalError> {
+        self.setup_request_basis(record, reference, session, console)
+            .await?
+            .map(|basis| {
+                super::setup_targets::find_lineage(&basis)
+                    .map(<[_]>::to_vec)
+                    .ok_or(PrivateOriginalError::Conflict)
+            })
+            .transpose()
     }
 
     fn setup_child_id(
@@ -282,9 +309,16 @@ impl PrivateOriginals {
             return Ok(());
         };
         let claims = association.candidate();
-        let child = self.setup_child_id(selection).map_err(|_| OriginalWriterError::Conflict)?;
-        super::setup_targets::check_structure(&selection.parent, &child, &selection.helper_targets, &claims.authority_basis)
+        let child = self
+            .setup_child_id(selection)
             .map_err(|_| OriginalWriterError::Conflict)?;
+        super::setup_targets::check_structure(
+            &selection.parent,
+            &child,
+            &selection.helper_targets,
+            &claims.authority_basis,
+        )
+        .map_err(|_| OriginalWriterError::Conflict)?;
         if selection.parent.len() != 1
             || claims.target.context.as_str() != selection.session_id.to_string()
             || claims.original_work.work != selection.original.original

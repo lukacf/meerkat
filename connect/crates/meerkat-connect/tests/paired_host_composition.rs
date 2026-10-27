@@ -683,7 +683,8 @@ async fn native_external_inventory_then_candidate_without_mcp_launch_preserves_e
         let directory = tempfile::tempdir().unwrap();
         let host = Host::new(revoked).await;
         let binding = host.paired().await;
-        let (approvals, mut presenter) = LocalApprovals::create_paired_host(directory.path()).unwrap();
+        let (approvals, mut presenter) =
+            LocalApprovals::create_paired_host(directory.path()).unwrap();
         let mut options = direct(&binding, None);
         approvals
             .attach_paired_host_direct(&mut options, &binding)

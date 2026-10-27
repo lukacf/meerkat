@@ -40,27 +40,50 @@ impl PrivateHostStartup {
         let (commands, writer) = pipes.into_async()?;
         let mut reader = BufReader::new(commands);
         let mut frame = Vec::new();
-        let request = read_request(&mut reader, &mut frame).await?
+        let request = read_request(&mut reader, &mut frame)
+            .await?
             .ok_or(PrivateHostError::Protocol)?;
-        if request.id != 1 { return Err(PrivateHostError::Protocol); }
+        if request.id != 1 {
+            return Err(PrivateHostError::Protocol);
+        }
         let intent = match request.command {
             Command::Bootstrap { selection } => PrivateHostStartupIntent::Installed(selection),
-            Command::PrepareApplication { plan } => PrivateHostStartupIntent::PrepareApplication(plan),
-            Command::ReplaceApplication { startup } => PrivateHostStartupIntent::ReplaceApplication(startup),
+            Command::PrepareApplication { plan } => {
+                PrivateHostStartupIntent::PrepareApplication(plan)
+            }
+            Command::ReplaceApplication { startup } => {
+                PrivateHostStartupIntent::ReplaceApplication(startup)
+            }
             _ => return Err(PrivateHostError::Protocol),
         };
-        Ok(Self { reader, writer, frame, request_id: 1, intent, lost: false })
+        Ok(Self {
+            reader,
+            writer,
+            frame,
+            request_id: 1,
+            intent,
+            lost: false,
+        })
     }
 
-    pub fn intent(&self) -> &PrivateHostStartupIntent { &self.intent }
+    pub fn intent(&self) -> &PrivateHostStartupIntent {
+        &self.intent
+    }
 
     /// The trusted composition must validate the update and supply its original
     /// predecessor before opening any owner. This consumes request 1 without
     /// another reader, command, preparation result or activation publication.
-    pub fn replace_with_original(mut self, predecessor: HostBootstrapSelection) -> Result<Self, PrivateHostError> {
-        if self.lost || !self.frame.is_empty() || self.request_id != 1
+    pub fn replace_with_original(
+        mut self,
+        predecessor: HostBootstrapSelection,
+    ) -> Result<Self, PrivateHostError> {
+        if self.lost
+            || !self.frame.is_empty()
+            || self.request_id != 1
             || !matches!(self.intent, PrivateHostStartupIntent::ReplaceApplication(_))
-        { return Err(PrivateHostError::Protocol); }
+        {
+            return Err(PrivateHostError::Protocol);
+        }
         self.intent = PrivateHostStartupIntent::Installed(predecessor);
         Ok(self)
     }
@@ -83,14 +106,24 @@ impl PrivateHostStartup {
         mut self,
         manifest: SelectedHostArtifact,
     ) -> Result<Self, PrivateHostError> {
-        if self.lost || self.request_id != 1
+        if self.lost
+            || self.request_id != 1
             || !matches!(self.intent, PrivateHostStartupIntent::PrepareApplication(_))
             || !self.frame.is_empty()
-        { return Err(PrivateHostError::Protocol); }
-        write_response(&mut self.writer, &response(1, Ok(Reply::ApplicationPrepared { manifest }))).await?;
-        let request = read_request(&mut self.reader, &mut self.frame).await?
+        {
+            return Err(PrivateHostError::Protocol);
+        }
+        write_response(
+            &mut self.writer,
+            &response(1, Ok(Reply::ApplicationPrepared { manifest })),
+        )
+        .await?;
+        let request = read_request(&mut self.reader, &mut self.frame)
+            .await?
             .ok_or(PrivateHostError::Protocol)?;
-        if request.id != 2 { return Err(PrivateHostError::Protocol); }
+        if request.id != 2 {
+            return Err(PrivateHostError::Protocol);
+        }
         let Command::Bootstrap { selection } = request.command else {
             return Err(PrivateHostError::Protocol);
         };
@@ -105,16 +138,23 @@ impl PrivateHostStartup {
         write_response(&mut self.writer, &response(self.request_id, Err(error))).await
     }
 
-    pub(super) fn into_installed(self) -> Result<(
-        BufReader<Box<dyn AsyncRead + Unpin + Send>>,
-        Box<dyn AsyncWrite + Unpin + Send>,
-        u64,
-        HostBootstrapSelection,
-    ), PrivateHostError> {
+    pub(super) fn into_installed(
+        self,
+    ) -> Result<
+        (
+            BufReader<Box<dyn AsyncRead + Unpin + Send>>,
+            Box<dyn AsyncWrite + Unpin + Send>,
+            u64,
+            HostBootstrapSelection,
+        ),
+        PrivateHostError,
+    > {
         let PrivateHostStartupIntent::Installed(selection) = self.intent else {
             return Err(PrivateHostError::Protocol);
         };
-        if self.lost || !self.frame.is_empty() { return Err(PrivateHostError::Protocol); }
+        if self.lost || !self.frame.is_empty() {
+            return Err(PrivateHostError::Protocol);
+        }
         Ok((self.reader, self.writer, self.request_id, selection))
     }
 }

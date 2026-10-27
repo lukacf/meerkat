@@ -55,9 +55,10 @@ impl Fixture {
         let now = store.now_ms().await.unwrap() as u64;
         let requester = principal("person", PrincipalKind::Human);
         let destination = native_fixture::target("original-agent", &requester);
-        let mut association = native_fixture::association(
-            requester, destination.clone(), "root-one", "origin-one",
-        ).candidate().clone();
+        let mut association =
+            native_fixture::association(requester, destination.clone(), "root-one", "origin-one")
+                .candidate()
+                .clone();
         association.ingress_namespace.ingress.authority =
             principal(ingress_authority, PrincipalKind::ServiceAccount);
         let authority = SetupRequestEvidence::new(
@@ -109,7 +110,8 @@ impl Fixture {
                 target: id("original-agent"),
                 correlation: id("invocation-one"),
                 parent_operation: Some(id("request-one")),
-                continuation: TaskContinuation { native_original: None,
+                continuation: TaskContinuation {
+                    native_original: None,
                     owner: id("runtime"),
                     task: id("request-one"),
                     revision: rev("1"),

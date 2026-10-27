@@ -15,7 +15,8 @@ use toolkit_store::SqliteStore;
 // cancelled and expired canonical B rows release their own entries.
 const MAX_ACTIVE_ATTACHMENTS_PER_ORIGINAL: usize = 64;
 const OBSERVATION_BUDGET: Duration = Duration::from_millis(250);
-type NativeCall = Pin<Box<dyn Future<Output = Result<LiveMcpAttachmentReceipt, LiveMcpAttachError>> + Send>>;
+type NativeCall =
+    Pin<Box<dyn Future<Output = Result<LiveMcpAttachmentReceipt, LiveMcpAttachError>> + Send>>;
 
 // Only the final successful attachment recheck constructs this value. Its
 // private binding prevents another source or grant from borrowing the facts.
@@ -42,12 +43,15 @@ struct ServiceInputObservation {
 
 impl ServiceInputContext {
     pub(in crate::private_originals) fn into_content(
-        self, original: &PrivateOriginalRef, grant: &PrivateServiceGrantRef,
+        self,
+        original: &PrivateOriginalRef,
+        grant: &PrivateServiceGrantRef,
     ) -> Result<meerkat_core::ContentInput, PrivateOriginalError> {
         if &self.original != original || &self.grant != grant {
             return Err(PrivateOriginalError::Conflict);
         }
-        let bytes = canonical_json(&self.observation).map_err(|_| PrivateOriginalError::Conflict)?;
+        let bytes =
+            canonical_json(&self.observation).map_err(|_| PrivateOriginalError::Conflict)?;
         let text = String::from_utf8(bytes).map_err(|_| PrivateOriginalError::Conflict)?;
         Ok(meerkat_core::ContentInput::Text(text))
     }
@@ -109,17 +113,22 @@ pub(in crate::private_originals) fn attachment_preparation_diagnostic<T>(
     let (outcome, error_class) = match result {
         None => ("entered", None),
         Some(Ok(_)) => ("ok", None),
-        Some(Err(error)) => ("error", Some(match error {
-            PrivateOriginalError::Unavailable => "unavailable",
-            PrivateOriginalError::Conflict => "conflict",
-            PrivateOriginalError::Denied => "denied",
-        })),
+        Some(Err(error)) => (
+            "error",
+            Some(match error {
+                PrivateOriginalError::Unavailable => "unavailable",
+                PrivateOriginalError::Conflict => "conflict",
+                PrivateOriginalError::Denied => "denied",
+            }),
+        ),
     };
     emit_attachment_diagnostic(stage, outcome, error_class);
 }
 
 fn emit_attachment_diagnostic(
-    stage: &'static str, outcome: &'static str, error_class: Option<&'static str>,
+    stage: &'static str,
+    outcome: &'static str,
+    error_class: Option<&'static str>,
 ) {
     use std::io::Write as _;
     static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
@@ -137,7 +146,11 @@ fn emit_attachment_diagnostic(
 
 enum NativeCallState {
     RetiredBeforePoll,
-    Waiting { future: NativeCall, polled: bool, reservation: Option<ConsoleLoginReservation> },
+    Waiting {
+        future: NativeCall,
+        polled: bool,
+        reservation: Option<ConsoleLoginReservation>,
+    },
     Settled(Result<LiveMcpAttachmentReceipt, LiveMcpAttachError>),
 }
 
@@ -162,10 +175,18 @@ impl HeldServiceAttachment {
         future: NativeCall,
         console_login: Option<ConsoleLoginHandle>,
     ) -> Self {
-        Self { reference, task, control, operations, console_login,
+        Self {
+            reference,
+            task,
+            control,
+            operations,
+            console_login,
             call: tokio::sync::Mutex::new(NativeCallState::Waiting {
-                future, polled: false, reservation: None,
-            }) }
+                future,
+                polled: false,
+                reservation: None,
+            }),
+        }
     }
 
     async fn receipt(
@@ -176,15 +197,23 @@ impl HeldServiceAttachment {
         match &mut *state {
             NativeCallState::RetiredBeforePoll => Err(PrivateOriginalError::Denied),
             NativeCallState::Settled(result) => Ok(result.clone()),
-            NativeCallState::Waiting { future, polled, reservation } => {
+            NativeCallState::Waiting {
+                future,
+                polled,
+                reservation,
+            } => {
                 if !*polled {
                     // No await separates this last currentness check from the
                     // first poll. Cleanup never invokes this start path.
                     may_start()?;
                     // The source selected this exact A login during preparation.
                     // Retirement races only this short reserve, never a relookup.
-                    *reservation = self.console_login.as_ref().map(|login| login.reserve())
-                        .transpose().map_err(|_| PrivateOriginalError::Denied)?;
+                    *reservation = self
+                        .console_login
+                        .as_ref()
+                        .map(|login| login.reserve())
+                        .transpose()
+                        .map_err(|_| PrivateOriginalError::Denied)?;
                     *polled = true;
                 }
                 let result = future.as_mut().await;
@@ -198,7 +227,11 @@ impl HeldServiceAttachment {
     async fn join_if_polled(&self) {
         let mut state = self.call.lock().await;
         match &mut *state {
-            NativeCallState::Waiting { future, polled: true, reservation } => {
+            NativeCallState::Waiting {
+                future,
+                polled: true,
+                reservation,
+            } => {
                 let result = future.as_mut().await;
                 settle_login(reservation.take(), &result);
                 *state = NativeCallState::Settled(result);
@@ -229,19 +262,32 @@ fn settle_login(
 
 impl PrivateOriginals {
     fn attachment_parent(
-        &self, task: &ApprovedTaskMember,
+        &self,
+        task: &ApprovedTaskMember,
     ) -> Result<Arc<HeldPrivateOriginal>, PrivateOriginalError> {
-        self.retained.lock().map_err(|_| PrivateOriginalError::Unavailable)?
-            .iter().find(|held| held.reference == task.parent).cloned()
+        self.retained
+            .lock()
+            .map_err(|_| PrivateOriginalError::Unavailable)?
+            .iter()
+            .find(|held| held.reference == task.parent)
+            .cloned()
             .ok_or(PrivateOriginalError::Unavailable)
     }
 
     fn held_service_attachment(
-        &self, reference: &PrivateOriginalRef, task: &ApprovedTaskMember,
+        &self,
+        reference: &PrivateOriginalRef,
+        task: &ApprovedTaskMember,
     ) -> Result<Option<Arc<HeldServiceAttachment>>, PrivateOriginalError> {
         let parent = self.attachment_parent(task)?;
-        let entries = parent.service_attachments.lock().map_err(|_| PrivateOriginalError::Unavailable)?;
-        let held = entries.iter().find(|held| held.reference == *reference && held.task.grant == task.grant).cloned();
+        let entries = parent
+            .service_attachments
+            .lock()
+            .map_err(|_| PrivateOriginalError::Unavailable)?;
+        let held = entries
+            .iter()
+            .find(|held| held.reference == *reference && held.task.grant == task.grant)
+            .cloned();
         if held.as_ref().is_some_and(|held| held.task != *task) {
             return Err(PrivateOriginalError::Conflict);
         }
@@ -250,17 +296,31 @@ impl PrivateOriginals {
 
     fn attachment_current(&self, held: &HeldServiceAttachment) -> Result<(), PrivateOriginalError> {
         self.service_input_host_current()?;
-        let now = self.owner.clock().now().map_err(|_| PrivateOriginalError::Unavailable)?.unix_ms;
-        self.current_service_mcp_control(&held.control,
-            &held.control.effect_binding(McpAttachmentEffect::Apply), now, false)?;
+        let now = self
+            .owner
+            .clock()
+            .now()
+            .map_err(|_| PrivateOriginalError::Unavailable)?
+            .unix_ms;
+        self.current_service_mcp_control(
+            &held.control,
+            &held.control.effect_binding(McpAttachmentEffect::Apply),
+            now,
+            false,
+        )?;
         Ok(())
     }
 
     async fn attachment_current_after_read(
-        &self, held: &HeldServiceAttachment,
+        &self,
+        held: &HeldServiceAttachment,
     ) -> Result<(), PrivateOriginalError> {
-        self.observe_service_mcp_attachment(&held.reference, &held.control,
-            &held.control.effect_binding(McpAttachmentEffect::Apply)).await?;
+        self.observe_service_mcp_attachment(
+            &held.reference,
+            &held.control,
+            &held.control.effect_binding(McpAttachmentEffect::Apply),
+        )
+        .await?;
         self.attachment_current(held)
     }
 
@@ -268,78 +328,161 @@ impl PrivateOriginals {
     /// native owners. Concurrent callers select one keeper before any call is
     /// polled. A cold process cannot reconstruct the missing retained A owner.
     async fn prepare_service_attachment(
-        self: &Arc<Self>, store: &Arc<SqliteStore>, reference: &PrivateOriginalRef,
+        self: &Arc<Self>,
+        store: &Arc<SqliteStore>,
+        reference: &PrivateOriginalRef,
         task: &ApprovedTaskMember,
     ) -> Result<Arc<HeldServiceAttachment>, PrivateOriginalError> {
-        if let Some(held) = self.held_service_attachment(reference, task)? { return Ok(held); }
+        if let Some(held) = self.held_service_attachment(reference, task)? {
+            return Ok(held);
+        }
         // Read the canonical B link and retain its actual parent A handle now.
         // No scope string can reconstruct or replace this custody after waits.
         attachment_diagnostic("prepare_console_login", "entered");
         let console_login = self.console_login_for_approved_source(reference).await;
-        attachment_diagnostic("prepare_console_login", if console_login.is_ok() { "ok" } else { "error" });
+        attachment_diagnostic(
+            "prepare_console_login",
+            if console_login.is_ok() { "ok" } else { "error" },
+        );
         let console_login = console_login?;
         attachment_diagnostic("prepare_installation", "entered");
-        let control = self.prepare_service_mcp_installation_member(store, reference, &task.grant).await;
-        attachment_diagnostic("prepare_installation", if control.is_ok() { "ok" } else { "error" });
+        let control = self
+            .prepare_service_mcp_installation_member(store, reference, &task.grant)
+            .await;
+        attachment_diagnostic(
+            "prepare_installation",
+            if control.is_ok() { "ok" } else { "error" },
+        );
         let control = control?;
         let binding = control.effect_binding(McpAttachmentEffect::Apply);
-        let now = self.owner.clock().now().map_err(|_| PrivateOriginalError::Unavailable)?.unix_ms;
+        let now = self
+            .owner
+            .clock()
+            .now()
+            .map_err(|_| PrivateOriginalError::Unavailable)?
+            .unix_ms;
         let current = self.current_service_mcp_control(&control, &binding, now, false)?;
         let parent = self.attachment_parent(task)?;
         if parent.original.association() != &current.parent {
             return Err(PrivateOriginalError::Conflict);
         }
-        let member = task.original_task.member.as_ref().ok_or(PrivateOriginalError::Unavailable)?;
+        let member = task
+            .original_task
+            .member
+            .as_ref()
+            .ok_or(PrivateOriginalError::Unavailable)?;
         let route = self.route(&reference.route)?;
         if route.grant_target.as_str() != member.member {
             return Err(PrivateOriginalError::Denied);
         }
         let runtime = self.bound_identity_runtime()?;
         attachment_diagnostic("resolve_identity", "entered");
-        let identity = runtime.owned_identity_for_member_alias(&member.member).await;
-        attachment_diagnostic("resolve_identity", if identity.is_some() { "some" } else { "none" });
+        let identity = runtime
+            .owned_identity_for_member_alias(&member.member)
+            .await;
+        attachment_diagnostic(
+            "resolve_identity",
+            if identity.is_some() { "some" } else { "none" },
+        );
         let identity = identity.ok_or(PrivateOriginalError::Unavailable)?;
         attachment_diagnostic("observe_after_identity", "entered");
-        let observed = self.observe_service_mcp_attachment(reference, &control, &binding).await;
-        attachment_diagnostic("observe_after_identity", if observed.is_ok() { "ok" } else { "error" });
+        let observed = self
+            .observe_service_mcp_attachment(reference, &control, &binding)
+            .await;
+        attachment_diagnostic(
+            "observe_after_identity",
+            if observed.is_ok() { "ok" } else { "error" },
+        );
         observed?;
         let machine = self.machine()?;
         attachment_diagnostic("registration_witness", "entered");
-        let registration = machine.current_session_registration_witness(&task.original_task.origin_session_id).await;
-        attachment_diagnostic("registration_witness", if registration.is_some() { "some" } else { "none" });
+        let registration = machine
+            .current_session_registration_witness(&task.original_task.origin_session_id)
+            .await;
+        attachment_diagnostic(
+            "registration_witness",
+            if registration.is_some() {
+                "some"
+            } else {
+                "none"
+            },
+        );
         let registration = registration.ok_or(PrivateOriginalError::Unavailable)?;
         attachment_diagnostic("observe_after_registration", "entered");
-        let observed = self.observe_service_mcp_attachment(reference, &control, &binding).await;
-        attachment_diagnostic("observe_after_registration", if observed.is_ok() { "ok" } else { "error" });
+        let observed = self
+            .observe_service_mcp_attachment(reference, &control, &binding)
+            .await;
+        attachment_diagnostic(
+            "observe_after_registration",
+            if observed.is_ok() { "ok" } else { "error" },
+        );
         observed?;
         attachment_diagnostic("prepare_authority", "entered");
-        let authority = machine.prepare_mcp_attachment(&registration,
-            &current.parent.candidate().target, control.clone()).await;
-        attachment_diagnostic("prepare_authority", if authority.is_ok() { "ok" } else { "error" });
+        let authority = machine
+            .prepare_mcp_attachment(
+                &registration,
+                &current.parent.candidate().target,
+                control.clone(),
+            )
+            .await;
+        attachment_diagnostic(
+            "prepare_authority",
+            if authority.is_ok() { "ok" } else { "error" },
+        );
         let authority = authority.map_err(|_| PrivateOriginalError::Unavailable)?;
         attachment_diagnostic("observe_after_authority", "entered");
-        let observed = self.observe_service_mcp_attachment(reference, &control, &binding).await;
-        attachment_diagnostic("observe_after_authority", if observed.is_ok() { "ok" } else { "error" });
+        let observed = self
+            .observe_service_mcp_attachment(reference, &control, &binding)
+            .await;
+        attachment_diagnostic(
+            "observe_after_authority",
+            if observed.is_ok() { "ok" } else { "error" },
+        );
         observed?;
         let server = control.server().clone();
-        let held = Arc::new(HeldServiceAttachment::new(reference.clone(), task.clone(), control,
-            current.operations, Box::pin(async move {
+        let held = Arc::new(HeldServiceAttachment::new(
+            reference.clone(),
+            task.clone(),
+            control,
+            current.operations,
+            Box::pin(async move {
                 attachment_diagnostic("native_attach", "entered");
-                let result = runtime.attach_live_mcp_server(&identity, LiveMcpAttachment {
-                    control: authority, server, persist: None,
-                }).await;
-                attachment_diagnostic("native_attach", match &result {
-                    Ok(_) => "ok",
-                    Err(LiveMcpAttachError::Busy) => "busy",
-                    Err(_) => "error",
-                });
+                let result = runtime
+                    .attach_live_mcp_server(
+                        &identity,
+                        LiveMcpAttachment {
+                            control: authority,
+                            server,
+                            persist: None,
+                        },
+                    )
+                    .await;
+                attachment_diagnostic(
+                    "native_attach",
+                    match &result {
+                        Ok(_) => "ok",
+                        Err(LiveMcpAttachError::Busy) => "busy",
+                        Err(_) => "error",
+                    },
+                );
                 result
-            }), console_login));
+            }),
+            console_login,
+        ));
         self.attachment_current(&held)?;
-        let mut entries = parent.service_attachments.lock().map_err(|_| PrivateOriginalError::Unavailable)?;
-        if let Some(previous) = entries.iter().find(|entry| entry.reference == *reference && entry.task.grant == task.grant) {
-            return if previous.task == *task { Ok(previous.clone()) }
-                else { Err(PrivateOriginalError::Conflict) };
+        let mut entries = parent
+            .service_attachments
+            .lock()
+            .map_err(|_| PrivateOriginalError::Unavailable)?;
+        if let Some(previous) = entries
+            .iter()
+            .find(|entry| entry.reference == *reference && entry.task.grant == task.grant)
+        {
+            return if previous.task == *task {
+                Ok(previous.clone())
+            } else {
+                Err(PrivateOriginalError::Conflict)
+            };
         }
         if entries.len() >= MAX_ACTIVE_ATTACHMENTS_PER_ORIGINAL {
             return Err(PrivateOriginalError::Unavailable);
@@ -350,7 +493,10 @@ impl PrivateOriginals {
 
     fn remove_service_attachment(&self, held: &Arc<HeldServiceAttachment>) {
         if let Ok(parent) = self.attachment_parent(&held.task) {
-            parent.service_attachments.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+            parent
+                .service_attachments
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .retain(|entry| !Arc::ptr_eq(entry, held));
         }
     }
@@ -359,12 +505,17 @@ impl PrivateOriginals {
     /// observation timeout cancels only this read, never native connection work
     /// or its retained call. It cannot authorize a replacement attachment.
     async fn service_attachment_ready(
-        &self, held: &Arc<HeldServiceAttachment>, receipt: &LiveMcpAttachmentReceipt,
+        &self,
+        held: &Arc<HeldServiceAttachment>,
+        receipt: &LiveMcpAttachmentReceipt,
     ) -> Result<ServiceAttachmentReadiness, PrivateOriginalError> {
-        if !receipt.outcome.staged || receipt.outcome.persisted
+        if !receipt.outcome.staged
+            || receipt.outcome.persisted
             || receipt.attempt.server() != held.control.server().name
             || held.operations.is_empty()
-        { return Err(PrivateOriginalError::Conflict); }
+        {
+            return Err(PrivateOriginalError::Conflict);
+        }
         let deadline = tokio::time::Instant::now() + OBSERVATION_BUDGET;
         let mut generation = None;
         for operation in &held.operations {
@@ -374,31 +525,39 @@ impl PrivateOriginals {
                 return Ok(ServiceAttachmentReadiness::Pending);
             }
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            let observed = tokio::time::timeout_at(deadline,
-                receipt.attempt.wait(operation.as_str(), remaining)).await;
+            let observed = tokio::time::timeout_at(
+                deadline,
+                receipt.attempt.wait(operation.as_str(), remaining),
+            )
+            .await;
             let within_deadline = tokio::time::Instant::now() <= deadline;
             // The canonical source/task/grant owner is reopened after every
             // native await. A cached AccessView or ready bit is insufficient.
             self.attachment_current_after_read(held).await?;
             // Project only the result already observed, after the same currentness
             // fence. Failure detail and server/tool descriptors remain private.
-            attachment_diagnostic("native_readiness", match &observed {
-                Ok(McpAttachmentReadiness::Pending) => "pending",
-                Ok(McpAttachmentReadiness::Usable { .. }) => "usable",
-                Ok(McpAttachmentReadiness::ToolNotRouted { .. }) => "tool_not_routed",
-                Ok(McpAttachmentReadiness::Rejected { .. }) => "rejected",
-                Ok(McpAttachmentReadiness::Failed { .. }) => "failed",
-                Ok(McpAttachmentReadiness::Superseded) => "superseded",
-                Ok(McpAttachmentReadiness::Retired) => "retired",
-                Ok(McpAttachmentReadiness::NotCurrent) => "not_current",
-                Err(_) => "observation_timeout",
-            });
+            attachment_diagnostic(
+                "native_readiness",
+                match &observed {
+                    Ok(McpAttachmentReadiness::Pending) => "pending",
+                    Ok(McpAttachmentReadiness::Usable { .. }) => "usable",
+                    Ok(McpAttachmentReadiness::ToolNotRouted { .. }) => "tool_not_routed",
+                    Ok(McpAttachmentReadiness::Rejected { .. }) => "rejected",
+                    Ok(McpAttachmentReadiness::Failed { .. }) => "failed",
+                    Ok(McpAttachmentReadiness::Superseded) => "superseded",
+                    Ok(McpAttachmentReadiness::Retired) => "retired",
+                    Ok(McpAttachmentReadiness::NotCurrent) => "not_current",
+                    Err(_) => "observation_timeout",
+                },
+            );
             if !within_deadline {
                 attachment_diagnostic("readiness_observation", "budget_elapsed_after_wait");
                 return Ok(ServiceAttachmentReadiness::Pending);
             }
             let connection_generation = match observed {
-                Ok(McpAttachmentReadiness::Usable { connection_generation }) => connection_generation,
+                Ok(McpAttachmentReadiness::Usable {
+                    connection_generation,
+                }) => connection_generation,
                 Ok(
                     terminal @ (McpAttachmentReadiness::Failed { .. }
                     | McpAttachmentReadiness::Rejected { .. }),
@@ -442,11 +601,15 @@ impl PrivateOriginals {
     }
 
     async fn ensure_service_attachment_member(
-        self: &Arc<Self>, store: &Arc<SqliteStore>, reference: &PrivateOriginalRef,
+        self: &Arc<Self>,
+        store: &Arc<SqliteStore>,
+        reference: &PrivateOriginalRef,
         task: &ApprovedTaskMember,
     ) -> Result<bool, PrivateOriginalError> {
         attachment_diagnostic("prepare", "entered");
-        let held = self.prepare_service_attachment(store, reference, task).await;
+        let held = self
+            .prepare_service_attachment(store, reference, task)
+            .await;
         attachment_diagnostic("prepare", if held.is_ok() { "ok" } else { "error" });
         let held = held?;
         // An already polled native call must settle even if authority closed
@@ -463,45 +626,73 @@ impl PrivateOriginals {
         let receipt = result.map_err(|_| PrivateOriginalError::Unavailable)?;
         attachment_diagnostic("current_after_attach", "entered");
         let current = self.attachment_current_after_read(&held).await;
-        attachment_diagnostic("current_after_attach", if current.is_ok() { "ok" } else { "error" });
+        attachment_diagnostic(
+            "current_after_attach",
+            if current.is_ok() { "ok" } else { "error" },
+        );
         current?;
         attachment_diagnostic("readiness", "entered");
         let ready = self.service_attachment_ready(&held, &receipt).await;
-        attachment_diagnostic("readiness", match &ready {
-            Ok(ServiceAttachmentReadiness::Ready) => "ready",
-            Ok(ServiceAttachmentReadiness::Pending) => "not_ready",
-            Ok(ServiceAttachmentReadiness::Failed { .. }) => "failed",
-            Err(_) => "error",
-        });
-        self.settle_service_attachment_observation(&held, ready?).await
+        attachment_diagnostic(
+            "readiness",
+            match &ready {
+                Ok(ServiceAttachmentReadiness::Ready) => "ready",
+                Ok(ServiceAttachmentReadiness::Pending) => "not_ready",
+                Ok(ServiceAttachmentReadiness::Failed { .. }) => "failed",
+                Err(_) => "error",
+            },
+        );
+        self.settle_service_attachment_observation(&held, ready?)
+            .await
     }
 
     /// Repeat the same native observation after the final setup/content read.
     /// Only a ready, current attempt yields host context for the existing B
     /// submission. The observation creates no authority or durable ready bit.
     async fn recheck_service_attachment_member(
-        &self, reference: &PrivateOriginalRef, task: &ApprovedTaskMember,
+        &self,
+        reference: &PrivateOriginalRef,
+        task: &ApprovedTaskMember,
     ) -> Result<Option<ServiceInputContext>, PrivateOriginalError> {
-        let held = self.held_service_attachment(reference, task)?.ok_or(PrivateOriginalError::Unavailable)?;
-        let receipt = held.receipt(|| Err(PrivateOriginalError::Denied)).await?
+        let held = self
+            .held_service_attachment(reference, task)?
+            .ok_or(PrivateOriginalError::Unavailable)?;
+        let receipt = held
+            .receipt(|| Err(PrivateOriginalError::Denied))
+            .await?
             .map_err(|_| PrivateOriginalError::Unavailable)?;
         attachment_diagnostic("recheck_readiness", "entered");
         let ready = self.service_attachment_ready(&held, &receipt).await;
-        attachment_diagnostic("recheck_readiness", match &ready {
-            Ok(ServiceAttachmentReadiness::Ready) => "ready",
-            Ok(ServiceAttachmentReadiness::Pending) => "not_ready",
-            Ok(ServiceAttachmentReadiness::Failed { .. }) => "failed",
-            Err(_) => "error",
-        });
-        if !self.settle_service_attachment_observation(&held, ready?).await? {
+        attachment_diagnostic(
+            "recheck_readiness",
+            match &ready {
+                Ok(ServiceAttachmentReadiness::Ready) => "ready",
+                Ok(ServiceAttachmentReadiness::Pending) => "not_ready",
+                Ok(ServiceAttachmentReadiness::Failed { .. }) => "failed",
+                Err(_) => "error",
+            },
+        );
+        if !self
+            .settle_service_attachment_observation(&held, ready?)
+            .await?
+        {
             return Ok(None);
         }
         // The same canonical control has just passed native readiness and
         // post-await currentness. Project only allowlisted nonsecret facts;
         // never serialize the server, launch arguments or environment.
-        let now = self.owner.clock().now().map_err(|_| PrivateOriginalError::Unavailable)?.unix_ms;
-        let current = self.current_service_mcp_control(&held.control,
-            &held.control.effect_binding(McpAttachmentEffect::Apply), now, false)?;
+        let now = self
+            .owner
+            .clock()
+            .now()
+            .map_err(|_| PrivateOriginalError::Unavailable)?
+            .unix_ms;
+        let current = self.current_service_mcp_control(
+            &held.control,
+            &held.control.effect_binding(McpAttachmentEffect::Apply),
+            now,
+            false,
+        )?;
         Ok(Some(ServiceInputContext {
             original: reference.clone(),
             grant: task.grant.clone(),
@@ -521,7 +712,9 @@ impl PrivateOriginals {
     }
 
     async fn settle_service_attachment_observation(
-        &self, held: &Arc<HeldServiceAttachment>, observed: ServiceAttachmentReadiness,
+        &self,
+        held: &Arc<HeldServiceAttachment>,
+        observed: ServiceAttachmentReadiness,
     ) -> Result<bool, PrivateOriginalError> {
         match observed {
             ServiceAttachmentReadiness::Ready => Ok(true),
@@ -549,7 +742,9 @@ impl PrivateOriginals {
     }
 
     async fn retire_service_attachment_member(
-        &self, reference: &PrivateOriginalRef, task: &ApprovedTaskMember,
+        &self,
+        reference: &PrivateOriginalRef,
+        task: &ApprovedTaskMember,
     ) {
         if let Ok(Some(held)) = self.held_service_attachment(reference, task) {
             held.join_if_polled().await;
@@ -558,26 +753,43 @@ impl PrivateOriginals {
     }
 
     pub(super) async fn ensure_service_attachment(
-        self: &Arc<Self>, store: &Arc<SqliteStore>, reference: &PrivateOriginalRef, task: &ApprovedTaskLink,
+        self: &Arc<Self>,
+        store: &Arc<SqliteStore>,
+        reference: &PrivateOriginalRef,
+        task: &ApprovedTaskLink,
     ) -> Result<bool, PrivateOriginalError> {
         for member in task.attachments() {
-            if !self.ensure_service_attachment_member(store, reference, &member).await? { return Ok(false); }
+            if !self
+                .ensure_service_attachment_member(store, reference, &member)
+                .await?
+            {
+                return Ok(false);
+            }
         }
         Ok(true)
     }
 
     pub(super) async fn recheck_service_attachments(
-        &self, reference: &PrivateOriginalRef, task: &ApprovedTaskLink,
+        &self,
+        reference: &PrivateOriginalRef,
+        task: &ApprovedTaskLink,
     ) -> Result<Option<Vec<ServiceInputContext>>, PrivateOriginalError> {
         let mut contexts = Vec::new();
         for member in task.attachments() {
-            let Some(context) = self.recheck_service_attachment_member(reference, &member).await? else { return Ok(None); };
+            let Some(context) = self
+                .recheck_service_attachment_member(reference, &member)
+                .await?
+            else {
+                return Ok(None);
+            };
             contexts.push(context);
         }
         // Every await may invalidate an earlier member. Reopen all exact controls
         // once more; the final native binder independently validates the set.
         for member in task.attachments() {
-            let held = self.held_service_attachment(reference, &member)?.ok_or(PrivateOriginalError::Unavailable)?;
+            let held = self
+                .held_service_attachment(reference, &member)?
+                .ok_or(PrivateOriginalError::Unavailable)?;
             self.attachment_current_after_read(&held).await?;
         }
         Ok(Some(contexts))
@@ -585,26 +797,52 @@ impl PrivateOriginals {
 
     #[cfg(test)]
     pub(super) async fn recheck_service_attachment(
-        &self, reference: &PrivateOriginalRef, task: &ApprovedTaskLink,
+        &self,
+        reference: &PrivateOriginalRef,
+        task: &ApprovedTaskLink,
     ) -> Result<Option<ServiceInputContext>, PrivateOriginalError> {
         task.singleton_grant()?;
-        self.recheck_service_attachment_member(reference, &task.attachments()[0]).await
+        self.recheck_service_attachment_member(reference, &task.attachments()[0])
+            .await
     }
 
-    pub(super) async fn retire_service_attachment(&self, reference: &PrivateOriginalRef, task: &ApprovedTaskLink) {
-        for member in task.attachments() { self.retire_service_attachment_member(reference, &member).await; }
+    pub(super) async fn retire_service_attachment(
+        &self,
+        reference: &PrivateOriginalRef,
+        task: &ApprovedTaskLink,
+    ) {
+        for member in task.attachments() {
+            self.retire_service_attachment_member(reference, &member)
+                .await;
+        }
     }
 
     pub(super) async fn prune_service_attachments(&self) -> Result<(), PrivateOriginalError> {
-        let now = self.owner.clock().now().map_err(|_| PrivateOriginalError::Unavailable)?.unix_ms;
-        let parents = self.retained.lock().map_err(|_| PrivateOriginalError::Unavailable)?.clone();
+        let now = self
+            .owner
+            .clock()
+            .now()
+            .map_err(|_| PrivateOriginalError::Unavailable)?
+            .unix_ms;
+        let parents = self
+            .retained
+            .lock()
+            .map_err(|_| PrivateOriginalError::Unavailable)?
+            .clone();
         for parent in parents {
-            let entries = parent.service_attachments.lock()
-                .map_err(|_| PrivateOriginalError::Unavailable)?.clone();
+            let entries = parent
+                .service_attachments
+                .lock()
+                .map_err(|_| PrivateOriginalError::Unavailable)?
+                .clone();
             let association = parent.original.association();
-            let cancelled = matches!(self.owner.original_disposition(
-                &association.candidate().ingress_namespace, &association.candidate().original_work),
-                Ok(OriginalDisposition::OperationCancelled { .. }));
+            let cancelled = matches!(
+                self.owner.original_disposition(
+                    &association.candidate().ingress_namespace,
+                    &association.candidate().original_work
+                ),
+                Ok(OriginalDisposition::OperationCancelled { .. })
+            );
             for held in entries {
                 if cancelled || now >= held.task.before_ms {
                     held.join_if_polled().await;
@@ -619,10 +857,17 @@ impl PrivateOriginals {
     /// cannot start an attachment during cleanup. Native router cleanup remains
     /// native-owned; a reply or dropped observation proves no physical cleanup.
     pub(crate) async fn join_service_attachments(&self) {
-        let parents = self.retained.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        let parents = self
+            .retained
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         for parent in parents {
-            let entries = parent.service_attachments.lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+            let entries = parent
+                .service_attachments
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             for held in entries {
                 held.join_if_polled().await;
                 self.remove_service_attachment(&held);

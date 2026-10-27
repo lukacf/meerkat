@@ -219,8 +219,13 @@ fn parse(args: Vec<String>) -> Result<Request, Failure> {
     let action = match verb.as_str() {
         "init" => Action::Init,
         "save" => {
-            let decision = if ["--decision-owner", "--decision-record", "--decision-revision"]
-                .iter().any(|key| values.contains_key(*key))
+            let decision = if [
+                "--decision-owner",
+                "--decision-record",
+                "--decision-revision",
+            ]
+            .iter()
+            .any(|key| values.contains_key(*key))
             {
                 Some(EvidenceReference {
                     owner: Id::new(take(&mut values, "--decision-owner")?)
@@ -240,8 +245,14 @@ fn parse(args: Vec<String>) -> Result<Request, Failure> {
                 if declaration && values.contains_key("--selection") {
                     return Err(Failure::Kind("invalid_arguments"));
                 }
-                let selection = document(absolute_path(take(&mut values,
-                    if declaration { "--declaration" } else { "--selection" })?)?)?;
+                let selection = document(absolute_path(take(
+                    &mut values,
+                    if declaration {
+                        "--declaration"
+                    } else {
+                        "--selection"
+                    },
+                )?)?)?;
                 let profile = match take(&mut values, "--profile")?.as_str() {
                     "python" => LocalSelectionProfile::Python,
                     "node" => LocalSelectionProfile::Node,
@@ -263,12 +274,21 @@ fn parse(args: Vec<String>) -> Result<Request, Failure> {
                     None
                 };
                 if declaration {
-                    if configuration.is_some() { return Err(Failure::Kind("invalid_arguments")); }
-                    let software = RetainedLocalSoftware::parse(&package, &selection, profile,
-                        component, decision, verification)
-                        .map_err(|_| Failure::Kind("invalid_local_selection"))?;
+                    if configuration.is_some() {
+                        return Err(Failure::Kind("invalid_arguments"));
+                    }
+                    let software = RetainedLocalSoftware::parse(
+                        &package,
+                        &selection,
+                        profile,
+                        component,
+                        decision,
+                        verification,
+                    )
+                    .map_err(|_| Failure::Kind("invalid_local_selection"))?;
                     let software = match values.remove("--plugin-source") {
-                        Some(path) => software.with_plugin_source(&document(absolute_path(path)?)?)
+                        Some(path) => software
+                            .with_plugin_source(&document(absolute_path(path)?)?)
                             .map_err(|_| Failure::Kind("invalid_plugin_source"))?,
                         None => software,
                     };
@@ -457,8 +477,10 @@ fn retained_full(recipe: &RetainedLocalRecipe) -> Result<Value, Failure> {
                     .map_err(|_| Failure::Kind("stored_recipe_unverified"))?,
             });
             if let Some(source) = recipe.plugin_source_json() {
-                value["documents"]["plugin_source_json"] = json!(std::str::from_utf8(source)
-                    .map_err(|_| Failure::Kind("stored_recipe_unverified"))?);
+                value["documents"]["plugin_source_json"] = json!(
+                    std::str::from_utf8(source)
+                        .map_err(|_| Failure::Kind("stored_recipe_unverified"))?
+                );
             }
             Ok(value)
         }
@@ -510,8 +532,16 @@ async fn run(request: Request) -> Result<Value, Failure> {
             decision,
         } => {
             let recipe = match decision {
-                Some(reference) => recipes.save(&plugin, mcp.as_deref(), &documents, reference).await,
-                None => recipes.save_current_submission(&plugin, mcp.as_deref(), &documents).await,
+                Some(reference) => {
+                    recipes
+                        .save(&plugin, mcp.as_deref(), &documents, reference)
+                        .await
+                }
+                None => {
+                    recipes
+                        .save_current_submission(&plugin, mcp.as_deref(), &documents)
+                        .await
+                }
             }
             .map_err(|error| Failure::Kind(classify(&error)))?;
             Ok(json!({"status": "retained", "recipe": summary(&recipe)?}))
@@ -526,7 +556,9 @@ async fn run(request: Request) -> Result<Value, Failure> {
             )?}))
         }
         Action::SaveSoftware(selected) => {
-            let recipe = recipes.save_retained_software(*selected).await
+            let recipe = recipes
+                .save_retained_software(*selected)
+                .await
                 .map_err(|error| Failure::Kind(classify(&error)))?;
             Ok(json!({"status": "retained", "recipe": retained_summary(
                 &RetainedLocalRecipe::Software(recipe),

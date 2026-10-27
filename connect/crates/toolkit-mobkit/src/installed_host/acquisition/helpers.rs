@@ -18,33 +18,50 @@ impl InstalledHelpers {
             return Err(HostLifetimeError::InvalidSelection);
         }
         let member = default.selected_member(native)?;
-        let mut selected = Self { default: (default, member), additional: vec![] };
+        let mut selected = Self {
+            default: (default, member),
+            additional: vec![],
+        };
         for helper in additional {
-            if selected.all().any(|(entry, _)| entry.member == helper.member) {
+            if selected
+                .all()
+                .any(|(entry, _)| entry.member == helper.member)
+            {
                 return Err(HostLifetimeError::InvalidSelection);
             }
             let member = helper.selected_member(native)?;
             selected.additional.push((helper, member));
         }
         for member in &native.members {
-            if let Some(helper) = member.setup_capability.as_ref().and_then(|value| value.helper.as_ref()) {
+            if let Some(helper) = member
+                .setup_capability
+                .as_ref()
+                .and_then(|value| value.helper.as_ref())
+            {
                 selected.get(Some(helper))?;
             }
         }
         Ok(selected)
     }
 
-    pub(super) fn get(&self, member: Option<&MobMemberBinding>)
-        -> Result<(&InstalledSetupSelection, &CompiledNativeMember), HostLifetimeError>
-    {
+    pub(super) fn get(
+        &self,
+        member: Option<&MobMemberBinding>,
+    ) -> Result<(&InstalledSetupSelection, &CompiledNativeMember), HostLifetimeError> {
         match member {
             None => Ok((&self.default.0, &self.default.1)),
-            Some(member) => self.all().find(|(helper, _)| &helper.member == member)
+            Some(member) => self
+                .all()
+                .find(|(helper, _)| &helper.member == member)
                 .ok_or(HostLifetimeError::InvalidSelection),
         }
     }
 
-    pub(super) fn all(&self) -> impl Iterator<Item = (&InstalledSetupSelection, &CompiledNativeMember)> {
-        std::iter::once(&self.default).chain(self.additional.iter()).map(|(helper, member)| (helper, member))
+    pub(super) fn all(
+        &self,
+    ) -> impl Iterator<Item = (&InstalledSetupSelection, &CompiledNativeMember)> {
+        std::iter::once(&self.default)
+            .chain(self.additional.iter())
+            .map(|(helper, member)| (helper, member))
     }
 }

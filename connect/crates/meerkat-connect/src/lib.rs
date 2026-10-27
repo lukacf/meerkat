@@ -4,36 +4,36 @@
 //! Presenters supply complete messages and consume native events/outcomes.
 //! A completed conversation turn is not an installation or grant receipt.
 
-pub mod approval;
-pub mod application_tool_policy;
-#[cfg(unix)]
-pub mod application_operator;
-#[cfg(all(unix, feature = "console"))]
-pub mod application_gateway;
-#[cfg(all(feature = "console", unix))]
-pub mod application_remote;
-#[cfg(all(feature = "console", unix))]
-pub mod application_bootstrap;
-#[cfg(all(feature = "console", unix))]
-pub mod application_setup;
 #[cfg(all(feature = "console", unix))]
 pub mod application_acquisition;
 #[cfg(all(feature = "console", unix))]
+pub mod application_bootstrap;
+#[cfg(all(feature = "console", unix))]
 pub mod application_driver;
+#[cfg(all(unix, feature = "console"))]
+pub mod application_gateway;
+#[cfg(unix)]
+pub mod application_operator;
+#[cfg(all(feature = "console", unix))]
+pub mod application_remote;
+#[cfg(all(feature = "console", unix))]
+pub mod application_setup;
+pub mod application_tool_policy;
 #[cfg(all(feature = "console", unix))]
 pub mod application_update;
+pub mod approval;
 mod connector_auth;
 mod connector_install;
-pub mod installed_service_review;
 #[cfg(feature = "console")]
 pub mod console;
-mod frontend_catalog;
 pub mod forge;
+mod frontend_catalog;
+pub mod host_selection;
+pub mod installed_service_review;
 pub mod paired_host;
 pub mod paired_host_device;
-pub mod paired_host_tool;
-pub mod host_selection;
 mod paired_host_stdio;
+pub mod paired_host_tool;
 pub mod pairing;
 pub mod progress;
 pub mod provider_setup;
@@ -46,17 +46,17 @@ pub mod secret_presenter;
 mod service_install;
 pub mod service_preparation;
 pub mod session;
-pub mod stdio;
 pub mod setup;
+pub mod stdio;
 pub mod terminal;
 pub mod terminal_connector;
 
-pub use realm::{RealmChoice, RealmOptions, discover_realms};
-pub use recipe_discovery::{RECIPE_TOOLS, RecipeTools};
-pub use session::{ConnectSession, SessionOptions, SessionStartup};
 pub use paired_host_tool::{
     PAIRED_HOST_PREPARATION_INSTRUCTIONS, PAIRED_HOST_PREPARATION_TOOLS, PairedHostPreparationTools,
 };
+pub use realm::{RealmChoice, RealmOptions, discover_realms};
+pub use recipe_discovery::{RECIPE_TOOLS, RecipeTools};
+pub use session::{ConnectSession, SessionOptions, SessionStartup};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectError {
@@ -102,7 +102,10 @@ impl ConnectError {
         operation: &'static str,
         source: impl std::error::Error + Send + Sync + 'static,
     ) -> Self {
-        Self::ProviderSetup { operation, source: Box::new(source) }
+        Self::ProviderSetup {
+            operation,
+            source: Box::new(source),
+        }
     }
     pub fn native(
         operation: &'static str,

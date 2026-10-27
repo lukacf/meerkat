@@ -25,17 +25,22 @@ type Result<T> = std::result::Result<T, HostLifetimeError>;
 // Fixed local failure labels; no deployment, component or request data is emitted.
 fn selection_refused(stage: &'static str, cause: &'static str) {
     use std::io::Write as _;
-    let _ = writeln!(std::io::stderr().lock(),
-        "{{\"event\":\"toolkit_host_selection_refused\",\"stage\":\"{stage}\",\"cause\":\"{cause}\"}}");
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "{{\"event\":\"toolkit_host_selection_refused\",\"stage\":\"{stage}\",\"cause\":\"{cause}\"}}"
+    );
 }
 fn selection_owner_refused(stage: &'static str, error: HostLifetimeError) {
-    selection_refused(stage, match error {
-        HostLifetimeError::InvalidSelection => "InvalidSelection",
-        HostLifetimeError::Unavailable => "Unavailable",
-        HostLifetimeError::Denied => "Denied",
-        HostLifetimeError::WrongOwner => "WrongOwner",
-        HostLifetimeError::NotSettled => "NotSettled",
-    });
+    selection_refused(
+        stage,
+        match error {
+            HostLifetimeError::InvalidSelection => "InvalidSelection",
+            HostLifetimeError::Unavailable => "Unavailable",
+            HostLifetimeError::Denied => "Denied",
+            HostLifetimeError::WrongOwner => "WrongOwner",
+            HostLifetimeError::NotSettled => "NotSettled",
+        },
+    );
 }
 
 struct ComponentOwner {
@@ -85,7 +90,10 @@ impl ComponentOwner {
         incarnation: Uuid,
         publication: Option<&LocalAuthorizationPublication>,
     ) -> Result<u64> {
-        let _entry = self.entry.write().map_err(|_| HostLifetimeError::Unavailable)?;
+        let _entry = self
+            .entry
+            .write()
+            .map_err(|_| HostLifetimeError::Unavailable)?;
         let _owner_poison = publication.map(LocalAuthorizationPublication::poison_on_unwind);
         let mut machine = self
             .machine
@@ -120,24 +128,20 @@ impl ComponentOwner {
         // Never wait for a phase writer while holding physical/file custody.
         // Pure observations share the generated machine's read guard; another
         // reader does not mean the installed selection has changed.
-        let guard = self
-            .physical
-            .clone()
-            .try_read_owned()
-            .map_err(|_| {
-                selection_refused("lifetime.component_retain.physical_try_read", "unavailable");
-                HostLifetimeError::Unavailable
-            })?;
-        let machine = self
-            .machine
-            .try_read()
-            .map_err(|error| {
-                selection_refused("lifetime.component_retain.phase_try_lock", match error {
+        let guard = self.physical.clone().try_read_owned().map_err(|_| {
+            selection_refused("lifetime.component_retain.physical_try_read", "unavailable");
+            HostLifetimeError::Unavailable
+        })?;
+        let machine = self.machine.try_read().map_err(|error| {
+            selection_refused(
+                "lifetime.component_retain.phase_try_lock",
+                match error {
                     std::sync::TryLockError::WouldBlock => "would_block",
                     std::sync::TryLockError::Poisoned(_) => "poisoned",
-                });
-                HostLifetimeError::Unavailable
-            })?;
+                },
+            );
+            HostLifetimeError::Unavailable
+        })?;
         self.check_entry_poison()?;
         let state = machine.state();
         if state.incarnation != incarnation.to_string()
@@ -194,10 +198,13 @@ impl ComponentOwner {
         operation: impl FnOnce() -> T,
     ) -> Result<T> {
         let _entry = self.entry.try_write().map_err(|error| {
-            selection_refused("lifetime.component_entry.entry_try_write", match error {
-                std::sync::TryLockError::WouldBlock => "would_block",
-                std::sync::TryLockError::Poisoned(_) => "poisoned",
-            });
+            selection_refused(
+                "lifetime.component_entry.entry_try_write",
+                match error {
+                    std::sync::TryLockError::WouldBlock => "would_block",
+                    std::sync::TryLockError::Poisoned(_) => "poisoned",
+                },
+            );
             HostLifetimeError::Unavailable
         })?;
         // This native sentinel never acquires the publication writer. It must
@@ -212,13 +219,10 @@ impl ComponentOwner {
         // Read-only retain may share this guard, without waiting for entry or
         // invoking a callback. No writer can wait on this read while owning
         // a publication/file fence needed by the caller.
-        let machine = self
-            .machine
-            .read()
-            .map_err(|_| {
-                selection_refused("lifetime.component_entry.phase_lock", "poisoned");
-                HostLifetimeError::Unavailable
-            })?;
+        let machine = self.machine.read().map_err(|_| {
+            selection_refused("lifetime.component_entry.phase_lock", "poisoned");
+            HostLifetimeError::Unavailable
+        })?;
         let state = machine.state();
         if state.incarnation != incarnation.to_string()
             || state.lifetime_phase != ComponentLifetimePhase::Open
@@ -240,7 +244,10 @@ impl ComponentOwner {
         reason: HostCloseReason,
         publication: Option<&LocalAuthorizationPublication>,
     ) -> Result<HostCloseObservation> {
-        let _entry = self.entry.write().map_err(|_| HostLifetimeError::Unavailable)?;
+        let _entry = self
+            .entry
+            .write()
+            .map_err(|_| HostLifetimeError::Unavailable)?;
         let _owner_poison = publication.map(LocalAuthorizationPublication::poison_on_unwind);
         let mut machine = self
             .machine
@@ -312,7 +319,10 @@ impl ComponentOwner {
         handle: &HostCloseHandle,
         publication: Option<&LocalAuthorizationPublication>,
     ) -> Result<HostCloseObservation> {
-        let _entry = self.entry.write().map_err(|_| HostLifetimeError::Unavailable)?;
+        let _entry = self
+            .entry
+            .write()
+            .map_err(|_| HostLifetimeError::Unavailable)?;
         let _owner_poison = publication.map(LocalAuthorizationPublication::poison_on_unwind);
         let machine = self
             .machine
@@ -336,7 +346,10 @@ impl ComponentOwner {
         // Every entered bounded physical callback retains its read guard through
         // execution, cancellation settlement and the result-release decision.
         let _settled = self.physical.clone().write_owned().await;
-        let _entry = self.entry.write().map_err(|_| HostLifetimeError::Unavailable)?;
+        let _entry = self
+            .entry
+            .write()
+            .map_err(|_| HostLifetimeError::Unavailable)?;
         let _owner_poison = publication.map(LocalAuthorizationPublication::poison_on_unwind);
         let mut machine = self
             .machine
@@ -442,15 +455,19 @@ impl NativeHostLifetime {
         component_revision: Option<u64>,
         operation: impl FnOnce() -> T,
     ) -> Result<T> {
-        self.activation
-            .with_open(self.incarnation, activation_revision, self.native_publication.as_ref(), || {
+        self.activation.with_open(
+            self.incarnation,
+            activation_revision,
+            self.native_publication.as_ref(),
+            || {
                 self.component(component)?.with_open(
                     self.incarnation,
                     component_revision,
                     self.native_publication.as_ref(),
                     operation,
                 )
-            })?
+            },
+        )?
     }
 
     fn check_selected(&self) -> Result<()> {
@@ -472,12 +489,16 @@ impl NativeHostLifetime {
             // Both guards end before waiting for a later close notification.
             let closed = match self.activation.entry.write() {
                 Ok(_entry) => {
-                    let _owner_poison = self.native_publication.as_ref()
+                    let _owner_poison = self
+                        .native_publication
+                        .as_ref()
                         .map(LocalAuthorizationPublication::poison_on_unwind);
-                    self.activation.machine.read()
+                    self.activation
+                        .machine
+                        .read()
                         .map(|m| m.state().lifetime_phase != ComponentLifetimePhase::Open)
                         .unwrap_or(true)
-                },
+                }
                 Err(_) => true,
             };
             if closed {
@@ -516,7 +537,9 @@ impl NativeHostLifetime {
         // existing entry and publication owners.
         let _activation = self.activation.observe_open(self.incarnation, None)?;
         if let Some(component) = component {
-            let _component = self.component(component)?.observe_open(self.incarnation, None)?;
+            let _component = self
+                .component(component)?
+                .observe_open(self.incarnation, None)?;
         }
         Ok(())
     }
@@ -539,7 +562,12 @@ impl NativeHostLifetime {
     /// it may return the existing login reservation for native settlement.
     /// This is not the grant-publication observation in validate_native_entry.
     pub fn with_native_administration_entry<T>(&self, enter: impl FnOnce() -> T) -> Result<T> {
-        self.activation.with_open(self.incarnation, None, self.native_publication.as_ref(), enter)
+        self.activation.with_open(
+            self.incarnation,
+            None,
+            self.native_publication.as_ref(),
+            enter,
+        )
     }
 
     pub fn validate_current_selection(&self) -> Result<()> {
@@ -551,10 +579,13 @@ impl NativeHostLifetime {
             selection_owner_refused("lifetime.current_selection.selected_files", error);
             error
         })?;
-        let (_activation, _) = self.activation.retain(self.incarnation, None).map_err(|error| {
-            selection_owner_refused("lifetime.current_selection.activation_retain", error);
-            error
-        })?;
+        let (_activation, _) = self
+            .activation
+            .retain(self.incarnation, None)
+            .map_err(|error| {
+                selection_owner_refused("lifetime.current_selection.activation_retain", error);
+                error
+            })?;
         Ok(())
     }
 
@@ -583,8 +614,12 @@ impl NativeHostLifetime {
     pub fn with_current_setup<T>(&self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
         let _fence = self.deny_fence.shared()?;
         self.check_selected()?;
-        self.activation
-            .with_open(self.incarnation, None, self.native_publication.as_ref(), operation)?
+        self.activation.with_open(
+            self.incarnation,
+            None,
+            self.native_publication.as_ref(),
+            operation,
+        )?
     }
 
     /// Application-selected destination facts only. The native registration
@@ -618,7 +653,12 @@ impl NativeHostLifetime {
     pub fn publish_gateway_ready(&self, publish: &mut dyn FnMut() -> Result<()>) -> Result<()> {
         let _fence = self.deny_fence.shared()?;
         self.check_selected()?;
-        self.activation.with_open(self.incarnation, None, self.native_publication.as_ref(), publish)?
+        self.activation.with_open(
+            self.incarnation,
+            None,
+            self.native_publication.as_ref(),
+            publish,
+        )?
     }
 
     pub fn selected_policy(&self) -> &policy::CompiledLocalPolicy {
@@ -635,10 +675,15 @@ impl PrivateHostLifetimeControl for NativeHostLifetime {
     fn open_component(&self, component: &Id) -> Result<HostComponentObservation> {
         let _fence = self.deny_fence.shared()?;
         self.check_selected()?;
-        let revision = self.activation.with_open(self.incarnation, None, self.native_publication.as_ref(), || {
-            self.component(component)?
-                .open(self.incarnation, self.native_publication.as_ref())
-        })??;
+        let revision = self.activation.with_open(
+            self.incarnation,
+            None,
+            self.native_publication.as_ref(),
+            || {
+                self.component(component)?
+                    .open(self.incarnation, self.native_publication.as_ref())
+            },
+        )??;
         Ok(HostComponentObservation {
             incarnation: self.incarnation,
             component: component.clone(),
@@ -690,8 +735,11 @@ impl PrivateHostLifetimeControl for NativeHostLifetime {
             return Err(HostLifetimeError::WrongOwner);
         }
         match &handle.scope {
-            HostCloseScope::Activation => self.activation.observe(handle, self.native_publication.as_ref()),
-            HostCloseScope::Component { component } => self.component(component)?
+            HostCloseScope::Activation => self
+                .activation
+                .observe(handle, self.native_publication.as_ref()),
+            HostCloseScope::Component { component } => self
+                .component(component)?
                 .observe(handle, self.native_publication.as_ref()),
         }
     }
@@ -702,12 +750,17 @@ impl PrivateHostLifetimeControl for NativeHostLifetime {
         }
         match &handle.scope {
             HostCloseScope::Activation => {
-                self.activation.observe(handle, self.native_publication.as_ref())?;
+                self.activation
+                    .observe(handle, self.native_publication.as_ref())?;
                 for (id, component) in &self.components {
                     let observation = {
-                        let _entry = component.entry.write()
+                        let _entry = component
+                            .entry
+                            .write()
                             .map_err(|_| HostLifetimeError::Unavailable)?;
-                        let _owner_poison = self.native_publication.as_ref()
+                        let _owner_poison = self
+                            .native_publication
+                            .as_ref()
                             .map(LocalAuthorizationPublication::poison_on_unwind);
                         let machine = component
                             .machine
@@ -721,15 +774,21 @@ impl PrivateHostLifetimeControl for NativeHostLifetime {
                             },
                         )?
                     };
-                    let result = component.join(&observation.handle, self.native_publication.as_ref()).await?;
+                    let result = component
+                        .join(&observation.handle, self.native_publication.as_ref())
+                        .await?;
                     if result.state != HostCloseState::Settled {
                         return Err(HostLifetimeError::NotSettled);
                     }
                 }
-                self.activation.join(handle, self.native_publication.as_ref()).await
+                self.activation
+                    .join(handle, self.native_publication.as_ref())
+                    .await
             }
             HostCloseScope::Component { component } => {
-                self.component(component)?.join(handle, self.native_publication.as_ref()).await
+                self.component(component)?
+                    .join(handle, self.native_publication.as_ref())
+                    .await
             }
         }
     }

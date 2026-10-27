@@ -196,7 +196,8 @@ pub(crate) fn lazy_setup_session(
     options: SessionOptions,
     lazy: &crate::service_preparation::LazySetup,
 ) -> Result<SessionOptions, ConnectError> {
-    let mut options = compose_paired_host_session(options, lazy.paired_host(), lazy.allowed_tools())?;
+    let mut options =
+        compose_paired_host_session(options, lazy.paired_host(), lazy.allowed_tools())?;
     options.build.external_tools = Some(lazy.dispatcher());
     Ok(options)
 }
@@ -225,7 +226,12 @@ pub(crate) fn compose_paired_host_session<S: Into<String>>(
                 .into(),
         ));
     }
-    let ceiling = ToolAccessPolicy::AllowList(allowed.into_iter().map(|name| -> String { name.into() }).collect());
+    let ceiling = ToolAccessPolicy::AllowList(
+        allowed
+            .into_iter()
+            .map(|name| -> String { name.into() })
+            .collect(),
+    );
     options.build.tool_access_policy = Some(match options.build.tool_access_policy.take() {
         Some(existing) => existing
             .conjoin(ceiling)
@@ -254,7 +260,10 @@ pub(crate) fn is_interactive_paired_host_composition(options: &SessionOptions) -
     let servers = &options.build.mcp_servers;
     servers.len() == 1
         && servers[0].name == SERVER_NAME
-        && matches!(servers[0].transport, meerkat_core::mcp_config::McpTransportConfig::Stdio(_))
+        && matches!(
+            servers[0].transport,
+            meerkat_core::mcp_config::McpTransportConfig::Stdio(_)
+        )
         && has_closed_paired_host_execution(options)
 }
 
@@ -358,7 +367,9 @@ mod tests {
             (Some(ToolAccessPolicy::ReadOnly), true),
             (
                 Some(ToolAccessPolicy::DenyList(
-                    ["setup_inspect_package", "setup_inspect_schema"].into_iter().collect(),
+                    ["setup_inspect_package", "setup_inspect_schema"]
+                        .into_iter()
+                        .collect(),
                 )),
                 false,
             ),

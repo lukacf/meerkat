@@ -52,16 +52,20 @@ impl SetupStore<'_> {
             next_after_id,
             had_unavailable_records: false,
         };
-        let now = u64::try_from(self.store.now_ms().await?)
-            .map_err(|_| SetupError::InvalidRecord)?;
+        let now =
+            u64::try_from(self.store.now_ms().await?).map_err(|_| SetupError::InvalidRecord)?;
         for row in rows {
             let snapshot = match self.recover(row) {
                 Ok(snapshot) => snapshot,
-                Err(_) => { page.had_unavailable_records = true; continue; }
+                Err(_) => {
+                    page.had_unavailable_records = true;
+                    continue;
+                }
             };
             if snapshot.state().terminal_revision == 0 {
                 if snapshot.state().deadline <= now {
-                    page.expiry_operations.push(operation_id(snapshot.request())?);
+                    page.expiry_operations
+                        .push(operation_id(snapshot.request())?);
                 }
                 continue;
             }
@@ -105,7 +109,9 @@ impl SetupStore<'_> {
         // Budget exhaustion alone is not terminal: uncertain/pending prior
         // attempts remain candidates for the existing observation path.
         if super::continuation_executor::recovery_effect_settled(
-            &effect, &obligation, snapshot.record.continuation_receipt.as_ref(),
+            &effect,
+            &obligation,
+            snapshot.record.continuation_receipt.as_ref(),
         )? {
             return Ok(None);
         }

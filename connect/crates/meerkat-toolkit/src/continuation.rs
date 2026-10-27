@@ -133,7 +133,9 @@ impl ContinuationObligation {
         self.approved_service.as_ref()
     }
 
-    pub fn service_attachment_failure(&self) -> Option<crate::setup::ApprovedServiceAttachmentFailure> {
+    pub fn service_attachment_failure(
+        &self,
+    ) -> Option<crate::setup::ApprovedServiceAttachmentFailure> {
         self.service_attachment_failure
     }
 

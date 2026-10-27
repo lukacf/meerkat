@@ -25,10 +25,10 @@ use meerkat_toolkit::host_lifetime::{
 use serde::{Deserialize, Serialize};
 use toolkit_mobkit::installed_host::acquisition::InstalledSetupSelection;
 
-mod surface;
 pub mod compilation;
 pub mod inventory;
 pub(crate) mod resource;
+mod surface;
 
 use crate::{
     application_bootstrap::{InstallerProgress, emit, hash, new_child, write_new},
@@ -229,18 +229,31 @@ impl PreparedApplicationSetup {
             return Err("invalid prepared application resource selection".into());
         }
         if (self.schema == 4) != self.native_owner.is_some() {
-            return Err("schema4 requires its resolved native owner; schema3 cannot carry one".into());
+            return Err(
+                "schema4 requires its resolved native owner; schema3 cannot carry one".into(),
+            );
         }
         if let Some(owner) = &self.native_owner {
             owner.validate().map_err(|error| error.to_string())?;
-            let members = self.native_members.iter().map(|member| meerkat_toolkit::host_lifetime::policy::PreparedNativeMember {
-                member: member.member.clone(), logical_owner: member.logical_owner.clone(),
-                context_generation: member.context_generation, audience: member.audience.clone(),
-                setup_capability: member.setup_capability.clone(),
-            }).collect::<Vec<_>>();
-            if self.schema != 4 || owner.native_host.members != members
+            let members = self
+                .native_members
+                .iter()
+                .map(
+                    |member| meerkat_toolkit::host_lifetime::policy::PreparedNativeMember {
+                        member: member.member.clone(),
+                        logical_owner: member.logical_owner.clone(),
+                        context_generation: member.context_generation,
+                        audience: member.audience.clone(),
+                        setup_capability: member.setup_capability.clone(),
+                    },
+                )
+                .collect::<Vec<_>>();
+            if self.schema != 4
+                || owner.native_host.members != members
                 || owner.native_host.realm.as_str() != self.realm.realm_id
-            { return Err("resolved native owner differs from the completed application".into()); }
+            {
+                return Err("resolved native owner differs from the completed application".into());
+            }
         }
         let bytes = read_regular_artifact(&self.resources.handoff.path)?;
         if hash(&bytes) != self.resources.handoff.sha256 {
@@ -274,11 +287,15 @@ impl PreparedApplicationSetup {
         let member = matching_member(&self.native_members, &self.helper.member)?;
         match self.schema {
             3 => {
-                let original = self.helper_source_surface.as_ref()
+                let original = self
+                    .helper_source_surface
+                    .as_ref()
                     .ok_or("schema3 requires its original helper surface artifact")?;
                 let compiled = surface::compile(original)?;
                 if self.native_members[member].initial_surface != surface::reference(&compiled) {
-                    return Err("prepared helper initial surface differs from its compiler input".into());
+                    return Err(
+                        "prepared helper initial surface differs from its compiler input".into(),
+                    );
                 }
                 surface::require_exclusive_output_name(&self.native_members, member)?;
             }
@@ -307,9 +324,12 @@ impl PreparedApplicationSetup {
     /// policy. Neither absent nor extra public-research ceiling entries can be
     /// repaired during restoration or prewrite completion.
     pub(crate) fn helper_projection_for_policy(
-        &self, policy: &meerkat_core::CompiledApplicationToolPolicy,
+        &self,
+        policy: &meerkat_core::CompiledApplicationToolPolicy,
     ) -> Result<PreparedSetupHelper, String> {
-        let helper = self.helper_projection()?.with_public_research_from_policy(policy);
+        let helper = self
+            .helper_projection()?
+            .with_public_research_from_policy(policy);
         if helper.server() != &self.server {
             return Err("retained helper ceiling differs from its compiled policy".into());
         }
@@ -325,8 +345,13 @@ impl PreparedApplicationSetup {
         &self,
         current: &[DurableAgentSpec],
     ) -> Result<Vec<DurableAgentSpec>, String> {
-        project_roster_selection(&self.source_helper_member, &self.helper.member,
-            &self.source_helper_roster, self.helper_profile, current)
+        project_roster_selection(
+            &self.source_helper_member,
+            &self.helper.member,
+            &self.source_helper_roster,
+            self.helper_profile,
+            current,
+        )
     }
 }
 
@@ -337,32 +362,33 @@ fn project_roster_selection(
     profile: ApplicationSetupProfile,
     current: &[DurableAgentSpec],
 ) -> Result<Vec<DurableAgentSpec>, String> {
-        if source_member.mob_id != helper_member.mob_id
-            || source_member.member != helper_member.member
-            || source_roster.profile.as_str() != source_member.role
-            || (profile == ApplicationSetupProfile::ExclusiveApplicationRole
-                && source_member != helper_member)
-        {
-            return Err("prepared helper roster projection changed its selected binding".into());
-        }
-        let index = matching_roster(current, source_member)?;
-        let selected = &current[index];
-        let mut expected = (*source_roster).clone();
-        // A provider may already return the exact projected dedicated role on
-        // restart. Every other selected row field must still match its source.
-        if selected.profile.as_str() == helper_member.role {
-            expected.profile = selected.profile.clone();
-        }
-        if selected != &expected
-            || current.iter().enumerate().any(|(other, row)| {
-                other != index && row.profile.as_str() == helper_member.role
-            })
-        {
-            return Err("current roster no longer has the exact exclusive setup helper".into());
-        }
-        let mut projected = current.to_vec();
-        projected[index].profile = ProfileName::from(helper_member.role.clone());
-        Ok(projected)
+    if source_member.mob_id != helper_member.mob_id
+        || source_member.member != helper_member.member
+        || source_roster.profile.as_str() != source_member.role
+        || (profile == ApplicationSetupProfile::ExclusiveApplicationRole
+            && source_member != helper_member)
+    {
+        return Err("prepared helper roster projection changed its selected binding".into());
+    }
+    let index = matching_roster(current, source_member)?;
+    let selected = &current[index];
+    let mut expected = (*source_roster).clone();
+    // A provider may already return the exact projected dedicated role on
+    // restart. Every other selected row field must still match its source.
+    if selected.profile.as_str() == helper_member.role {
+        expected.profile = selected.profile.clone();
+    }
+    if selected != &expected
+        || current
+            .iter()
+            .enumerate()
+            .any(|(other, row)| other != index && row.profile.as_str() == helper_member.role)
+    {
+        return Err("current roster no longer has the exact exclusive setup helper".into());
+    }
+    let mut projected = current.to_vec();
+    projected[index].profile = ProfileName::from(helper_member.role.clone());
+    Ok(projected)
 }
 
 struct ValidatedInput {
@@ -586,9 +612,15 @@ fn write_bundle(
     // output directory. The source may have changed while preparation awaited.
     setup.helper_projection()?;
     let artifacts = match setup.schema {
-        3 => vec![(surface::OUTPUT_NAME.to_owned(), surface::compile(
-            setup.helper_source_surface.as_ref().ok_or("schema3 source is missing")?,
-        )?)],
+        3 => vec![(
+            surface::OUTPUT_NAME.to_owned(),
+            surface::compile(
+                setup
+                    .helper_source_surface
+                    .as_ref()
+                    .ok_or("schema3 source is missing")?,
+            )?,
+        )],
         4 => compilation::validate_final_artifacts(setup)?,
         _ => return Err("unsupported prepared application schema".into()),
     };
@@ -601,8 +633,11 @@ fn write_bundle(
         serde_json::json!({"path":"application-setup.json", "sha256":hash(&setup_bytes)}),
         serde_json::json!({"path":setup.application_tool_policy.name, "sha256":hash(policy)}),
     ];
-    manifest_artifacts.extend(artifacts.iter().map(|(name, bytes)|
-        serde_json::json!({"path":name, "sha256":hash(bytes)})));
+    manifest_artifacts.extend(
+        artifacts
+            .iter()
+            .map(|(name, bytes)| serde_json::json!({"path":name, "sha256":hash(bytes)})),
+    );
     let manifest = toolkit_package::canonical_json(&serde_json::json!({
         "schema":1, "kind":"application_setup_preparation", "artifacts":manifest_artifacts
     }))
@@ -613,7 +648,9 @@ fn write_bundle(
         .map_err(|error| error.to_string())?;
     write_new(&output.join("application-setup.json"), &setup_bytes)?;
     write_new(&output.join(&setup.application_tool_policy.name), policy)?;
-    for (name, bytes) in &artifacts { write_new(&output.join(name), bytes)?; }
+    for (name, bytes) in &artifacts {
+        write_new(&output.join(name), bytes)?;
+    }
     let path = output.join("manifest.json");
     // Last file: a partial bundle has no successful manifest/receipt. Existing
     // files are retained and never overwritten or retried automatically.

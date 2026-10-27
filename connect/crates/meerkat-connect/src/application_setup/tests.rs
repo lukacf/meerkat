@@ -1,5 +1,5 @@
-use crate::application_bootstrap::read_json;
 use super::*;
+use crate::application_bootstrap::read_json;
 use meerkat_core::{
     CompiledApplicationToolPolicy, CompiledMemberToolAction, CompiledMemberToolGrant,
     CompiledMemberToolGrants, CompiledPolicySourceProvenance, CompiledToolConsequence,
@@ -234,12 +234,24 @@ fn checked_installation_is_explicit_and_restart_retains_its_exact_projection() {
     let original = selected.clone();
     let expected_policy = selected.tool_policy.clone().compile().unwrap();
     let (result, policy) = finish(selected.validate().unwrap(), prepared(&root)).unwrap();
-    assert_eq!(policy, expected_policy, "the mode cannot issue tool allowances");
+    assert_eq!(
+        policy, expected_policy,
+        "the mode cannot issue tool allowances"
+    );
     assert!(result.helper.operation_basis == original.helper.operation_basis);
-    assert_eq!(result.helper.controller_parent, original.helper.controller_parent);
-    assert_eq!(result.helper.logical_executor, original.helper.logical_executor);
+    assert_eq!(
+        result.helper.controller_parent,
+        original.helper.controller_parent
+    );
+    assert_eq!(
+        result.helper.logical_executor,
+        original.helper.logical_executor
+    );
     assert_eq!(result.native_members[0], original.native_members[0]);
-    assert_eq!(result.project_roster(&original.roster).unwrap()[0], original.roster[0]);
+    assert_eq!(
+        result.project_roster(&original.roster).unwrap()[0],
+        original.roster[0]
+    );
     let output = root.join("checked-bundle");
     write_bundle(&output, &result, &policy).unwrap();
     let restored: PreparedApplicationSetup =
@@ -254,10 +266,16 @@ fn checked_installation_is_explicit_and_restart_retains_its_exact_projection() {
     assert_eq!(projection.member(), &result.helper.member);
     let mut changed = restored.clone();
     changed.helper_tools = ApplicationSetupTools::Preparation;
-    assert!(changed.helper_projection().is_err(), "restart cannot substitute an earlier ceiling");
+    assert!(
+        changed.helper_projection().is_err(),
+        "restart cannot substitute an earlier ceiling"
+    );
     let mut changed = restored;
     changed.helper.member.member = "different-helper".into();
-    assert!(changed.helper_projection().is_err(), "the mode does not select another member");
+    assert!(
+        changed.helper_projection().is_err(),
+        "the mode does not select another member"
+    );
 }
 
 #[test]
@@ -853,7 +871,10 @@ fn legacy_command_rejects_duplicate_known_fields_before_effects() {
     let original = serde_json::to_string(&selected).unwrap();
     for (field, value) in [
         ("schema", "3".to_owned()),
-        ("helper_tools", serde_json::to_string(&selected.helper_tools).unwrap()),
+        (
+            "helper_tools",
+            serde_json::to_string(&selected.helper_tools).unwrap(),
+        ),
     ] {
         let duplicate = format!("{{\"{field}\":{value},{}", &original[1..]);
         let path = root.join(format!("duplicate-{field}.json"));
@@ -868,7 +889,10 @@ fn legacy_command_rejects_duplicate_known_fields_before_effects() {
         ];
         let mut progress = InstallerProgress::default();
         let error = command(&args, &mut progress).unwrap_err();
-        assert!(error.contains(&format!("duplicate field `{field}`")), "{error}");
+        assert!(
+            error.contains(&format!("duplicate field `{field}`")),
+            "{error}"
+        );
         assert_eq!(progress.phase, "validation");
         assert!(!progress.effects_may_have_occurred);
         assert!(!output.exists());
@@ -919,7 +943,14 @@ fn application_policy_preparation_retains_and_validates_setup_closure() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
         let mut selected = input(&root);
-        if matches!(case, "standing_valid" | "task_parent_valid" | "task_parent_drift" | "standing_drift" | "standing_unknown_mode") {
+        if matches!(
+            case,
+            "standing_valid"
+                | "task_parent_valid"
+                | "task_parent_drift"
+                | "standing_drift"
+                | "standing_unknown_mode"
+        ) {
             selected.helper_tools = ApplicationSetupTools::CheckedInstallation;
         }
         let realm = meerkat_core::mob_realm_id(&selected.helper.member.mob_id).unwrap();
@@ -960,7 +991,8 @@ fn application_policy_preparation_retains_and_validates_setup_closure() {
         let requester = Id::new("requester").unwrap();
         let mut config = ApplicationAcquisitionSelection {
             schema: 1,
-            console_setup: None, local_operator_recovery: None,
+            console_setup: None,
+            local_operator_recovery: None,
             standing_policy: None,
             prepared_application_setup: CompiledArtifactReference {
                 name: "application-setup.json".into(),
@@ -977,18 +1009,38 @@ fn application_policy_preparation_retains_and_validates_setup_closure() {
             limits: InstalledSetupLimits::default(),
         };
         match case {
-            "console_valid" | "console_origin_drift" => config.console_setup = Some(
-                crate::application_gateway::console_setup::ConsoleSetupSelection { origin: "https://console.example".into(), access_management: None, recovery_management: None }),
-            "console_invalid_origin" => config.console_setup = Some(
-                crate::application_gateway::console_setup::ConsoleSetupSelection { origin: "https://console.example/path".into(), access_management: None, recovery_management: None }),
-            "standing_valid" | "task_parent_valid" | "task_parent_drift" | "standing_drift" | "standing_unknown_mode" => {
+            "console_valid" | "console_origin_drift" => {
+                config.console_setup = Some(
+                    crate::application_gateway::console_setup::ConsoleSetupSelection {
+                        origin: "https://console.example".into(),
+                        access_management: None,
+                        recovery_management: None,
+                    },
+                )
+            }
+            "console_invalid_origin" => {
+                config.console_setup = Some(
+                    crate::application_gateway::console_setup::ConsoleSetupSelection {
+                        origin: "https://console.example/path".into(),
+                        access_management: None,
+                        recovery_management: None,
+                    },
+                )
+            }
+            "standing_valid"
+            | "task_parent_valid"
+            | "task_parent_drift"
+            | "standing_drift"
+            | "standing_unknown_mode" => {
                 use crate::application_acquisition::selected_policy::*;
                 config.standing_policy = Some(StandingPolicySelection {
                     installation: InstallationSelection::CheckedSoftware,
                     tool_policy: None,
                     access: if matches!(case, "task_parent_valid" | "task_parent_drift") {
                         AccessSelection::ProvisionTaskParent
-                    } else { AccessSelection::ConfiguredParent },
+                    } else {
+                        AccessSelection::ConfiguredParent
+                    },
                 });
                 // The same resource/compiler fixture supplies the checked
                 // setup surface; this is not evidence of executed installation.
@@ -1007,7 +1059,9 @@ fn application_policy_preparation_retains_and_validates_setup_closure() {
             let mut malformed = serde_json::to_value(&config).unwrap();
             malformed["standing_policy"]["installation"] = json!("agent_allow");
             serde_json::to_vec_pretty(&malformed).unwrap()
-        } else { serde_json::to_vec_pretty(&config).unwrap() };
+        } else {
+            serde_json::to_vec_pretty(&config).unwrap()
+        };
         native.setup = Some(CompiledArtifactReference {
             name: "native-setup.json".into(),
             sha256: hash(&config_bytes),
@@ -1020,19 +1074,31 @@ fn application_policy_preparation_retains_and_validates_setup_closure() {
                 let mut changed = config.clone();
                 changed.standing_policy.as_mut().unwrap().access =
                     crate::application_acquisition::selected_policy::AccessSelection::ConfiguredParent;
-                std::fs::write(inputs.join("native-setup.json"), serde_json::to_vec(&changed).unwrap()).unwrap();
+                std::fs::write(
+                    inputs.join("native-setup.json"),
+                    serde_json::to_vec(&changed).unwrap(),
+                )
+                .unwrap();
             }
             "standing_drift" => {
                 let mut changed = config.clone();
                 changed.standing_policy.as_mut().unwrap().installation =
                     crate::application_acquisition::selected_policy::InstallationSelection::HumanReview;
-                std::fs::write(inputs.join("native-setup.json"), serde_json::to_vec(&changed).unwrap()).unwrap();
+                std::fs::write(
+                    inputs.join("native-setup.json"),
+                    serde_json::to_vec(&changed).unwrap(),
+                )
+                .unwrap();
             }
             "console_origin_drift" => {
                 let mut changed = config.clone();
                 changed.console_setup.as_mut().unwrap().origin = "https://other.example".into();
-                std::fs::write(inputs.join("native-setup.json"), serde_json::to_vec(&changed).unwrap()).unwrap();
-            },
+                std::fs::write(
+                    inputs.join("native-setup.json"),
+                    serde_json::to_vec(&changed).unwrap(),
+                )
+                .unwrap();
+            }
             "prepared_missing" => {
                 std::fs::remove_file(inputs.join("application-setup.json")).unwrap()
             }
@@ -1076,7 +1142,10 @@ fn application_policy_preparation_retains_and_validates_setup_closure() {
         ];
         let mut progress = InstallerProgress::default();
         let outcome = crate::application_bootstrap::prepare(&args, &mut progress);
-        if matches!(case, "valid" | "console_valid" | "standing_valid" | "task_parent_valid") {
+        if matches!(
+            case,
+            "valid" | "console_valid" | "standing_valid" | "task_parent_valid"
+        ) {
             outcome.unwrap();
             assert_eq!(progress.phase, "receipt");
             let selection = HostBootstrapSelection {

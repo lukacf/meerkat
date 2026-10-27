@@ -4,10 +4,10 @@
 //! The real worker starts its first round only after stop. Concurrent live-worker
 //! and fresh-binder progress is outside this stopped-window control.
 use super::*;
-use toolkit_store::*;
-use std::sync::OnceLock;
 use crate::original_ingress::custody_attempt::CustodyDecision;
 use crate::private_originals::custody_recovery::HandoffPhase;
+use std::sync::OnceLock;
+use toolkit_store::*;
 
 const ORIGINALS: usize = 33;
 
@@ -18,29 +18,53 @@ struct RefuseTerminalStore {
 }
 impl RefuseTerminalStore {
     fn new(inner: Arc<dyn ToolkitStore>) -> Self {
-        Self { inner, terminal_calls: Mutex::new(BTreeMap::new()), reads: AtomicUsize::new(0) }
+        Self {
+            inner,
+            terminal_calls: Mutex::new(BTreeMap::new()),
+            reads: AtomicUsize::new(0),
+        }
     }
     fn calls(&self) -> (BTreeMap<String, usize>, usize) {
-        (self.terminal_calls.lock().unwrap().clone(), self.reads.load(Ordering::SeqCst))
+        (
+            self.terminal_calls.lock().unwrap().clone(),
+            self.reads.load(Ordering::SeqCst),
+        )
     }
 }
 #[async_trait::async_trait]
 impl ToolkitStore for RefuseTerminalStore {
-    fn capabilities(&self) -> StoreCapabilities { self.inner.capabilities() }
-    async fn now_ms(&self) -> StoreResult<i64> { self.inner.now_ms().await }
-    async fn admit(&self, request: AdmissionRequest) -> StoreResult<AdmissionOutcome> { self.inner.admit(request).await }
+    fn capabilities(&self) -> StoreCapabilities {
+        self.inner.capabilities()
+    }
+    async fn now_ms(&self) -> StoreResult<i64> {
+        self.inner.now_ms().await
+    }
+    async fn admit(&self, request: AdmissionRequest) -> StoreResult<AdmissionOutcome> {
+        self.inner.admit(request).await
+    }
     async fn get(&self, key: &StoreKey) -> StoreResult<Option<StoredRecord>> {
         self.reads.fetch_add(1, Ordering::SeqCst);
         self.inner.get(key).await
     }
-    async fn list_records(&self, scope: &StoreScope, after: Option<&str>, limit: u32) -> StoreResult<Vec<StoredRecord>> {
+    async fn list_records(
+        &self,
+        scope: &StoreScope,
+        after: Option<&str>,
+        limit: u32,
+    ) -> StoreResult<Vec<StoredRecord>> {
         self.inner.list_records(scope, after, limit).await
     }
     async fn compare_and_swap(&self, transition: Transition) -> StoreResult<StoredRecord> {
-        let terminal = transition.data.body["custody_attempt"]["decision"].as_str()
+        let terminal = transition.data.body["custody_attempt"]["decision"]
+            .as_str()
             .is_some_and(|value| value == "promoted" || value == "withdrawn");
         if terminal {
-            *self.terminal_calls.lock().unwrap().entry(transition.key.id.clone()).or_default() += 1;
+            *self
+                .terminal_calls
+                .lock()
+                .unwrap()
+                .entry(transition.key.id.clone())
+                .or_default() += 1;
             return Err(StoreError::OwnerUnavailable);
         }
         self.inner.compare_and_swap(transition).await
@@ -124,33 +148,56 @@ async fn another_original(fixture: &Fixture, index: usize) -> PrivateOriginalSub
     let authentication = event.original_authentication.clone();
     let reference = fixture.source.retain_event(event).await.unwrap();
     let current = fixture.association.candidate();
-    let mut candidate = claims(&label, &current.controller_grant_lineage[0]).candidate().clone();
+    let mut candidate = claims(&label, &current.controller_grant_lineage[0])
+        .candidate()
+        .clone();
     candidate.authority_basis = current.authority_basis.clone();
     candidate.target = current.target.clone();
     candidate.controller_grant_lineage = current.controller_grant_lineage.clone();
     candidate.controller_model = current.controller_model.clone();
     candidate.controller_ceiling = current.controller_ceiling.clone();
     let association = InputAuthorityAssociation::new(candidate).unwrap();
-    let original = fixture.owner.bind_controller_only_async(
-        association.clone(), source_custody(&association), &principal("user"), &principal("frontend"),
-        |final_association| {
-            let source = fixture.source.clone(); let reference = reference.clone();
-            async move { source.persist_binding(&reference, &final_association).await }
-        },
-    ).await.unwrap();
-    fixture.source.hold_binding(reference.clone(), original).await.unwrap();
-    PrivateOriginalSubmit { original: reference, content: PROMPT.into(), transport_authentication: authentication }
+    let original = fixture
+        .owner
+        .bind_controller_only_async(
+            association.clone(),
+            source_custody(&association),
+            &principal("user"),
+            &principal("frontend"),
+            |final_association| {
+                let source = fixture.source.clone();
+                let reference = reference.clone();
+                async move { source.persist_binding(&reference, &final_association).await }
+            },
+        )
+        .await
+        .unwrap();
+    fixture
+        .source
+        .hold_binding(reference.clone(), original)
+        .await
+        .unwrap();
+    PrivateOriginalSubmit {
+        original: reference,
+        content: PROMPT.into(),
+        transport_authentication: authentication,
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stopped_owner_visits_more_than_one_window_and_caches_failed_terminal_writes() {
     let capture = Arc::new(OnceLock::<Arc<RefuseTerminalStore>>::new());
     let selected = capture.clone();
-    let fixture = Fixture::with_source_store(DeliveryMode::Normal, false,
+    let fixture = Fixture::with_source_store(
+        DeliveryMode::Normal,
+        false,
         Some(Box::new(move |inner, _fault| {
             let store = Arc::new(RefuseTerminalStore::new(inner));
-            assert!(selected.set(store.clone()).is_ok()); store
-        }))).await;
+            assert!(selected.set(store.clone()).is_ok());
+            store
+        })),
+    )
+    .await;
     let store = capture.get().unwrap().clone();
     let mut first_round = Some(fixture.source.hold_first_custody_round_for_test());
     let mut native_shutdown = Box::pin(fixture.shutdown());
@@ -226,7 +273,10 @@ async fn stopped_owner_visits_more_than_one_window_and_caches_failed_terminal_wr
     })).catch_unwind().await;
     fixture.source.stop_custody_recovery();
     drop(first_round.take());
-    let native = match native_cleanup { Some(result) => result, None => native_shutdown.as_mut().await };
+    let native = match native_cleanup {
+        Some(result) => result,
+        None => native_shutdown.as_mut().await,
+    };
     let source = fixture.source.join_custody_recovery().await;
     match checked {
         Ok(Ok(())) => {
@@ -235,7 +285,9 @@ async fn stopped_owner_visits_more_than_one_window_and_caches_failed_terminal_wr
         }
         Ok(Err(_)) => panic!("stopped traversal timed out; native={native:?}; source={source:?}"),
         Err(payload) => {
-            if native.is_err() { eprintln!("native cleanup failed: {native:?}"); }
+            if native.is_err() {
+                eprintln!("native cleanup failed: {native:?}");
+            }
             std::panic::resume_unwind(payload);
         }
     }

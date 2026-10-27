@@ -8,9 +8,7 @@ use meerkat_mobkit::{
     rpc_gateway::{PreparedApplicationRequest, PreparedGatewayApplication},
 };
 use meerkat_toolkit::host_lifetime::{
-    NativeHostLifetime,
-    control::HostLifetimeError,
-    policy::CompiledArtifactReference,
+    NativeHostLifetime, control::HostLifetimeError, policy::CompiledArtifactReference,
 };
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -37,7 +35,12 @@ impl PreparedSetupApplication {
         if format!("{:x}", Sha256::digest(&bytes)) != reference.sha256 {
             return Err(HostLifetimeError::InvalidSelection);
         }
-        Ok(Self { reference, bytes: bytes.into(), definition, roster })
+        Ok(Self {
+            reference,
+            bytes: bytes.into(),
+            definition,
+            roster,
+        })
     }
 
     pub(super) fn select(
@@ -50,11 +53,17 @@ impl PreparedSetupApplication {
         // digest is never sufficient and equivalent re-encoding is not replay.
         if request.declared_digest != self.reference.sha256
             || request.bundle.as_slice() != self.bytes.as_ref()
-        { return Err(HostLifetimeError::InvalidSelection); }
-        Ok(PreparedGatewayApplication::new(self.reference.sha256.clone(), self.definition.clone())
-            .with_roster_projection(Arc::new(CurrentApplicationRoster {
-                owner, private_closed, inner: self.roster.clone(),
-            })))
+        {
+            return Err(HostLifetimeError::InvalidSelection);
+        }
+        Ok(
+            PreparedGatewayApplication::new(self.reference.sha256.clone(), self.definition.clone())
+                .with_roster_projection(Arc::new(CurrentApplicationRoster {
+                    owner,
+                    private_closed,
+                    inner: self.roster.clone(),
+                })),
+        )
     }
 }
 
@@ -64,27 +73,40 @@ struct CurrentApplicationRoster {
     inner: Arc<dyn RosterProjection>,
 }
 impl RosterProjection for CurrentApplicationRoster {
-    fn project(&self, context: &RosterContext, roster: Vec<DurableAgentSpec>)
-        -> Result<Vec<DurableAgentSpec>, String>
-    {
+    fn project(
+        &self,
+        context: &RosterContext,
+        roster: Vec<DurableAgentSpec>,
+    ) -> Result<Vec<DurableAgentSpec>, String> {
         // The existing activation/selection fence encloses only this bounded
         // synchronous projection. It never awaits the application's provider,
         // reenters the owner, opens a runtime or obtains a new permission.
-        self.owner.with_current_setup(|| {
-            if self.private_closed.is_closed() { return Err(HostLifetimeError::Denied); }
-            let projected = self.inner.project(context, roster)
-                .map_err(|_| HostLifetimeError::InvalidSelection)?;
-            if self.private_closed.is_closed() { return Err(HostLifetimeError::Denied); }
-            Ok(projected)
-        }).map_err(|error| host_error(error).to_string())
+        self.owner
+            .with_current_setup(|| {
+                if self.private_closed.is_closed() {
+                    return Err(HostLifetimeError::Denied);
+                }
+                let projected = self
+                    .inner
+                    .project(context, roster)
+                    .map_err(|_| HostLifetimeError::InvalidSelection)?;
+                if self.private_closed.is_closed() {
+                    return Err(HostLifetimeError::Denied);
+                }
+                Ok(projected)
+            })
+            .map_err(|error| host_error(error).to_string())
     }
 }
 
 impl ToolkitGatewayHost {
     pub(super) fn require_prepared_application(&self) -> Result<(), HostLifetimeError> {
-        if self.setup_application.is_none() { return Ok(()); }
+        if self.setup_application.is_none() {
+            return Ok(());
+        }
         self.owner.with_current_setup(|| {
-            if self.private_closed.is_closed() || self.prepared_application_selected.get().is_none() {
+            if self.private_closed.is_closed() || self.prepared_application_selected.get().is_none()
+            {
                 return Err(HostLifetimeError::Denied);
             }
             Ok(())

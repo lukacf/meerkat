@@ -3,8 +3,7 @@
 //! its native operation grant; it never submits an input while unbound.
 use super::*;
 use acquisition::{
-    InstalledAcquisition, InstalledNativeContinuation, InstalledSetupDefaults,
-    InstalledSetupLimits,
+    InstalledAcquisition, InstalledNativeContinuation, InstalledSetupDefaults, InstalledSetupLimits,
 };
 use meerkat_core::{
     service::WorkGraphNamespaceGrant,
@@ -63,8 +62,13 @@ pub(crate) fn prepare_approved_acquisition(host: &Host) -> ApprovedAcquisitionPo
     )
     .unwrap();
     ApprovedAcquisitionPorts {
-        continuation, workgraph, work_backend, store: host.store.clone(),
-        scope: host.source_scope.clone(), originals: host.originals.clone(), native: native.clone(),
+        continuation,
+        workgraph,
+        work_backend,
+        store: host.store.clone(),
+        scope: host.source_scope.clone(),
+        originals: host.originals.clone(),
+        native: native.clone(),
     }
 }
 
@@ -82,48 +86,48 @@ impl ApprovedAcquisitionPorts {
         helper: acquisition::InstalledSetupSelection,
         limits: InstalledSetupLimits,
     ) -> Arc<acquisition::InstalledAcquisition> {
-    let id = |value: &str| toolkit_package::Id::new(value).unwrap();
-    let owner = Arc::new(
-        InstalledAcquisition::from_defaults_with_tools(
-            self.store.clone(),
-            self.scope.clone(),
-            self.originals.clone(),
-            &self.native,
-            InstalledSetupDefaults {
-                helper,
-                proposal_ceiling: Ceiling {
-                    actions: [
-                        meerkat_toolkit::authority::ActionPermission {
-                            action: meerkat_toolkit::authority::Action::FindAndInstall,
-                            resource: id("agent"),
-                        },
-                        meerkat_toolkit::authority::ActionPermission {
-                            action: meerkat_toolkit::authority::Action::Delegate,
-                            resource: id("agent"),
-                        },
-                    ]
-                    .into(),
-                    services: Default::default(),
-                    frontends: Default::default(),
-                    output_audiences: [id("person")].into(),
+        let id = |value: &str| toolkit_package::Id::new(value).unwrap();
+        let owner = Arc::new(
+            InstalledAcquisition::from_defaults_with_tools(
+                self.store.clone(),
+                self.scope.clone(),
+                self.originals.clone(),
+                &self.native,
+                InstalledSetupDefaults {
+                    helper,
+                    proposal_ceiling: Ceiling {
+                        actions: [
+                            meerkat_toolkit::authority::ActionPermission {
+                                action: meerkat_toolkit::authority::Action::FindAndInstall,
+                                resource: id("agent"),
+                            },
+                            meerkat_toolkit::authority::ActionPermission {
+                                action: meerkat_toolkit::authority::Action::Delegate,
+                                resource: id("agent"),
+                            },
+                        ]
+                        .into(),
+                        services: Default::default(),
+                        frontends: Default::default(),
+                        output_audiences: [id("person")].into(),
+                    },
+                    continuation: self.continuation.clone(),
+                    work_backend: self.work_backend.clone(),
+                    references: None,
+                    limits,
+                    work_step: WorkAdmissionStepOptions {
+                        worker: id("worker"),
+                        lease_ms: 15_000,
+                        owner_timeout_ms: 5_000,
+                        settlement_budget_ms: 5_000,
+                    },
                 },
-                continuation: self.continuation.clone(),
-                work_backend: self.work_backend.clone(),
-                references: None,
-                limits,
-                work_step: WorkAdmissionStepOptions {
-                    worker: id("worker"),
-                    lease_ms: 15_000,
-                    owner_timeout_ms: 5_000,
-                    settlement_budget_ms: 5_000,
-                },
-            },
-            tools,
-        )
-        .unwrap(),
-    );
-    owner.bind_tool_driver().unwrap();
-    owner
+                tools,
+            )
+            .unwrap(),
+        );
+        owner.bind_tool_driver().unwrap();
+        owner
     }
 }
 

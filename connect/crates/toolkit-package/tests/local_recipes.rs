@@ -993,8 +993,10 @@ async fn current_submission_is_durable_exact_and_scoped_without_an_external_deci
     let reference = {
         let store = SqliteStore::open(&path).unwrap();
         let recipes = LocalRecipeStore::new(&store, scope("alice")).unwrap();
-        let saved = recipes.save_current_submission(&plugin, Some(REMOTE_MCP), REMOTE_RECIPES)
-            .await.unwrap();
+        let saved = recipes
+            .save_current_submission(&plugin, Some(REMOTE_MCP), REMOTE_RECIPES)
+            .await
+            .unwrap();
         let rows = store.list_records(&scope("alice"), None, 10).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].data.body["current_submission"], "v1");
@@ -1004,22 +1006,43 @@ async fn current_submission_is_durable_exact_and_scoped_without_an_external_deci
     };
     let store = SqliteStore::open_existing(&path).unwrap();
     let recipes = LocalRecipeStore::new(&store, scope("alice")).unwrap();
-    let loaded = recipes.load_exact(&identity, &digest).await.unwrap().unwrap();
+    let loaded = recipes
+        .load_exact(&identity, &digest)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(loaded.decision(), &reference);
     assert_eq!(loaded.plugin_json(), plugin);
     assert_eq!(loaded.mcp_json(), Some(REMOTE_MCP));
     assert_eq!(loaded.recipes_json(), REMOTE_RECIPES);
-    assert_eq!(recipes.save_current_submission(&plugin, Some(REMOTE_MCP), REMOTE_RECIPES)
-        .await.unwrap().decision(), &reference);
+    assert_eq!(
+        recipes
+            .save_current_submission(&plugin, Some(REMOTE_MCP), REMOTE_RECIPES)
+            .await
+            .unwrap()
+            .decision(),
+        &reference
+    );
     let rows = store.list_records(&scope("alice"), None, 10).await.unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].revision, 1);
-    for other in [scope("bob"), StoreScope { realm: "other-realm".into(), owner: "alice".into() },
-                  StoreScope { realm: "realm with spaces".into(), owner: "x".repeat(256) }] {
+    for other in [
+        scope("bob"),
+        StoreScope {
+            realm: "other-realm".into(),
+            owner: "alice".into(),
+        },
+        StoreScope {
+            realm: "realm with spaces".into(),
+            owner: "x".repeat(256),
+        },
+    ] {
         let recipes = LocalRecipeStore::new(&store, other).unwrap();
         assert!(recipes.load(&identity).await.unwrap().is_none());
-        let saved = recipes.save_current_submission(&plugin, Some(REMOTE_MCP), REMOTE_RECIPES)
-            .await.unwrap();
+        let saved = recipes
+            .save_current_submission(&plugin, Some(REMOTE_MCP), REMOTE_RECIPES)
+            .await
+            .unwrap();
         assert_ne!(saved.decision().record, reference.record);
         assert_eq!(saved.decision().revision, reference.revision);
         assert!(saved.decision().record.as_str().len() <= 192);
@@ -1027,49 +1050,88 @@ async fn current_submission_is_durable_exact_and_scoped_without_an_external_deci
     // Exact bytes, not only parsed package meaning, bind the submission.
     let mut changed = plugin.clone();
     changed.push(b'\n');
-    assert!(matches!(recipes.save_current_submission(&changed, Some(REMOTE_MCP), REMOTE_RECIPES)
-        .await, Err(LocalRecipeError::ImmutableConflict)));
+    assert!(matches!(
+        recipes
+            .save_current_submission(&changed, Some(REMOTE_MCP), REMOTE_RECIPES)
+            .await,
+        Err(LocalRecipeError::ImmutableConflict)
+    ));
     let independent = SqliteStore::open(temp.path().join("independent.sqlite")).unwrap();
-    let changed = LocalRecipeStore::new(&independent, scope("alice")).unwrap()
-        .save_current_submission(&changed, Some(REMOTE_MCP), REMOTE_RECIPES).await.unwrap();
+    let changed = LocalRecipeStore::new(&independent, scope("alice"))
+        .unwrap()
+        .save_current_submission(&changed, Some(REMOTE_MCP), REMOTE_RECIPES)
+        .await
+        .unwrap();
     assert_eq!(changed.decision().record, reference.record);
     assert_ne!(changed.decision().revision, reference.revision);
 }
 
 #[tokio::test]
 async fn current_submission_reopen_checks_marked_reference_and_exact_documents() {
-    for edit in ["owner", "record", "revision", "documents", "marker_version", "marker_shape", "marker_null"] {
+    for edit in [
+        "owner",
+        "record",
+        "revision",
+        "documents",
+        "marker_version",
+        "marker_shape",
+        "marker_null",
+    ] {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("toolkit.sqlite");
         let plugin = out_of_catalog(REMOTE_PLUGIN, "present-choice");
         let (identity, _) = identity_of(&plugin, Some(REMOTE_MCP), REMOTE_RECIPES);
         {
             let store = SqliteStore::open(&path).unwrap();
-            LocalRecipeStore::new(&store, scope("alice")).unwrap()
-                .save_current_submission(&plugin, Some(REMOTE_MCP), REMOTE_RECIPES).await.unwrap();
+            LocalRecipeStore::new(&store, scope("alice"))
+                .unwrap()
+                .save_current_submission(&plugin, Some(REMOTE_MCP), REMOTE_RECIPES)
+                .await
+                .unwrap();
         }
-        tamper(&path, |body| match edit {
-            "marker_version" => body["current_submission"] = serde_json::json!("v2"),
-            "marker_shape" => body["current_submission"] = serde_json::json!({"v1": null}),
-            "marker_null" => body["current_submission"] = serde_json::Value::Null,
-            "documents" => {
-                let changed = format!("{}\n", body["plugin_json"].as_str().unwrap());
-                let (_, changed_digest) = identity_of(changed.as_bytes(), Some(REMOTE_MCP), REMOTE_RECIPES);
-                body["plugin_json"] = serde_json::json!(changed);
-                body["bundle_digest"] = serde_json::json!(changed_digest);
-            }
-            field => body["decision"][field] = serde_json::json!("substituted"),
-        }, true);
+        tamper(
+            &path,
+            |body| match edit {
+                "marker_version" => body["current_submission"] = serde_json::json!("v2"),
+                "marker_shape" => body["current_submission"] = serde_json::json!({"v1": null}),
+                "marker_null" => body["current_submission"] = serde_json::Value::Null,
+                "documents" => {
+                    let changed = format!("{}\n", body["plugin_json"].as_str().unwrap());
+                    let (_, changed_digest) =
+                        identity_of(changed.as_bytes(), Some(REMOTE_MCP), REMOTE_RECIPES);
+                    body["plugin_json"] = serde_json::json!(changed);
+                    body["bundle_digest"] = serde_json::json!(changed_digest);
+                }
+                field => body["decision"][field] = serde_json::json!("substituted"),
+            },
+            true,
+        );
         let store = SqliteStore::open_existing(&path).unwrap();
         let recipes = LocalRecipeStore::new(&store, scope("alice")).unwrap();
         let before = store.list_records(&scope("alice"), None, 10).await.unwrap();
-        assert!(matches!(recipes.load(&identity).await, Err(LocalRecipeError::Unverified(_))), "{edit}");
+        assert!(
+            matches!(
+                recipes.load(&identity).await,
+                Err(LocalRecipeError::Unverified(_))
+            ),
+            "{edit}"
+        );
         let listing = recipes.list().await.unwrap();
         assert!(listing.verified.is_empty());
         assert_eq!(listing.unverified.len(), 1);
-        assert!(matches!(recipes.save_current_submission(&plugin, Some(REMOTE_MCP), REMOTE_RECIPES)
-            .await, Err(LocalRecipeError::Unverified(_)) | Err(LocalRecipeError::ImmutableConflict)), "{edit}");
-        assert_eq!(store.list_records(&scope("alice"), None, 10).await.unwrap(), before);
+        assert!(
+            matches!(
+                recipes
+                    .save_current_submission(&plugin, Some(REMOTE_MCP), REMOTE_RECIPES)
+                    .await,
+                Err(LocalRecipeError::Unverified(_)) | Err(LocalRecipeError::ImmutableConflict)
+            ),
+            "{edit}"
+        );
+        assert_eq!(
+            store.list_records(&scope("alice"), None, 10).await.unwrap(),
+            before
+        );
     }
 }
 
@@ -1079,15 +1141,45 @@ async fn copied_current_submission_cannot_change_its_store_scope() {
     let store = SqliteStore::open(temp.path().join("toolkit.sqlite")).unwrap();
     let plugin = out_of_catalog(REMOTE_PLUGIN, "present-choice");
     let (identity, _) = identity_of(&plugin, Some(REMOTE_MCP), REMOTE_RECIPES);
-    LocalRecipeStore::new(&store, scope("alice")).unwrap()
-        .save_current_submission(&plugin, Some(REMOTE_MCP), REMOTE_RECIPES).await.unwrap();
-    let original = store.list_records(&scope("alice"), None, 10).await.unwrap().remove(0);
-    for destination in [scope("bob"), StoreScope { realm: "other-realm".into(), owner: "alice".into() }] {
-        let key = StoreKey { realm: destination.realm.clone(), owner: destination.owner.clone(), id: original.key.id.clone() };
-        store.admit(AdmissionRequest { admission_key: key.id.clone(), key,
-            data: original.data.clone(), events: vec![], effects: vec![] }).await.unwrap();
-        assert!(matches!(LocalRecipeStore::new(&store, destination).unwrap().load(&identity).await,
-            Err(LocalRecipeError::Unverified(_))));
+    LocalRecipeStore::new(&store, scope("alice"))
+        .unwrap()
+        .save_current_submission(&plugin, Some(REMOTE_MCP), REMOTE_RECIPES)
+        .await
+        .unwrap();
+    let original = store
+        .list_records(&scope("alice"), None, 10)
+        .await
+        .unwrap()
+        .remove(0);
+    for destination in [
+        scope("bob"),
+        StoreScope {
+            realm: "other-realm".into(),
+            owner: "alice".into(),
+        },
+    ] {
+        let key = StoreKey {
+            realm: destination.realm.clone(),
+            owner: destination.owner.clone(),
+            id: original.key.id.clone(),
+        };
+        store
+            .admit(AdmissionRequest {
+                admission_key: key.id.clone(),
+                key,
+                data: original.data.clone(),
+                events: vec![],
+                effects: vec![],
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            LocalRecipeStore::new(&store, destination)
+                .unwrap()
+                .load(&identity)
+                .await,
+            Err(LocalRecipeError::Unverified(_))
+        ));
     }
 }
 
@@ -1097,12 +1189,18 @@ async fn external_reference_resembling_submission_owner_remains_an_unmarked_lega
     let path = temp.path().join("toolkit.sqlite");
     let plugin = out_of_catalog(REMOTE_PLUGIN, "historical-choice");
     let (identity, digest) = identity_of(&plugin, Some(REMOTE_MCP), REMOTE_RECIPES);
-    let external = EvidenceReference { owner: id("toolkit.local-recipes.current-submission"),
-        record: id("submission/external-history"), revision: Revision::new("old external revision").unwrap() };
+    let external = EvidenceReference {
+        owner: id("toolkit.local-recipes.current-submission"),
+        record: id("submission/external-history"),
+        revision: Revision::new("old external revision").unwrap(),
+    };
     {
         let store = SqliteStore::open(&path).unwrap();
         let recipes = LocalRecipeStore::new(&store, scope("alice")).unwrap();
-        recipes.save(&plugin, Some(REMOTE_MCP), REMOTE_RECIPES, external.clone()).await.unwrap();
+        recipes
+            .save(&plugin, Some(REMOTE_MCP), REMOTE_RECIPES, external.clone())
+            .await
+            .unwrap();
         let rows = store.list_records(&scope("alice"), None, 10).await.unwrap();
         assert_eq!(rows[0].data.version, 1);
         assert!(rows[0].data.body.get("current_submission").is_none());
@@ -1110,11 +1208,29 @@ async fn external_reference_resembling_submission_owner_remains_an_unmarked_lega
     }
     let store = SqliteStore::open_existing(&path).unwrap();
     let recipes = LocalRecipeStore::new(&store, scope("alice")).unwrap();
-    assert_eq!(recipes.load_exact(&identity, &digest).await.unwrap().unwrap().decision(), &external);
-    assert_eq!(recipes.save(&plugin, Some(REMOTE_MCP), REMOTE_RECIPES, external.clone())
-        .await.unwrap().decision(), &external);
-    assert!(matches!(recipes.save_current_submission(&plugin, Some(REMOTE_MCP), REMOTE_RECIPES)
-        .await, Err(LocalRecipeError::ImmutableConflict)));
+    assert_eq!(
+        recipes
+            .load_exact(&identity, &digest)
+            .await
+            .unwrap()
+            .unwrap()
+            .decision(),
+        &external
+    );
+    assert_eq!(
+        recipes
+            .save(&plugin, Some(REMOTE_MCP), REMOTE_RECIPES, external.clone())
+            .await
+            .unwrap()
+            .decision(),
+        &external
+    );
+    assert!(matches!(
+        recipes
+            .save_current_submission(&plugin, Some(REMOTE_MCP), REMOTE_RECIPES)
+            .await,
+        Err(LocalRecipeError::ImmutableConflict)
+    ));
 }
 
 #[tokio::test]
@@ -1125,10 +1241,17 @@ async fn unconfirmed_current_submission_is_observed_without_retrying_admission()
         let plugin = out_of_catalog(REMOTE_PLUGIN, "present-choice");
         let (identity, digest) = identity_of(&plugin, Some(REMOTE_MCP), REMOTE_RECIPES);
         {
-            let faulty = FaultyStore { inner: SqliteStore::open(&path).unwrap(), fault };
+            let faulty = FaultyStore {
+                inner: SqliteStore::open(&path).unwrap(),
+                fault,
+            };
             let recipes = LocalRecipeStore::new(&faulty, scope("alice")).unwrap();
-            assert!(matches!(recipes.save_current_submission(&plugin, Some(REMOTE_MCP), REMOTE_RECIPES)
-                .await, Err(LocalRecipeError::Unconfirmed(_))));
+            assert!(matches!(
+                recipes
+                    .save_current_submission(&plugin, Some(REMOTE_MCP), REMOTE_RECIPES)
+                    .await,
+                Err(LocalRecipeError::Unconfirmed(_))
+            ));
         }
         let store = SqliteStore::open_existing(&path).unwrap();
         let recipes = LocalRecipeStore::new(&store, scope("alice")).unwrap();

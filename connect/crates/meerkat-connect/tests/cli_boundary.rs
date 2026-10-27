@@ -1,5 +1,5 @@
-use std::process::{Command, Stdio};
 use std::io::Write;
+use std::process::{Command, Stdio};
 
 #[test]
 fn noninteractive_invocation_refuses_before_opening_realm_state() {
@@ -41,13 +41,24 @@ fn stdio_frames(input: &str) -> (Vec<serde_json::Value>, std::process::Output) {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn().unwrap();
-    child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
     let output = child.wait_with_output().unwrap();
-    let frames = String::from_utf8(output.stdout.clone()).unwrap().lines()
+    let frames = String::from_utf8(output.stdout.clone())
+        .unwrap()
+        .lines()
         .map(|line| serde_json::from_str(line).expect("protocol-only stdout"))
         .collect();
-    assert!(!root.path().join(".rkat").exists(), "refused input must not open native storage");
+    assert!(
+        !root.path().join(".rkat").exists(),
+        "refused input must not open native storage"
+    );
     (frames, output)
 }
 
@@ -57,7 +68,12 @@ fn stdio_refuses_unbound_controls_without_opening_a_native_session() {
         "{\"jsonrpc\":\"2.0\",\"id\":\"h:send\",\"method\":\"connect/send\",\"params\":{\"scope\":\"forged\",\"text\":\"never admitted\"}}\n",
         "{\"jsonrpc\":\"2.0\",\"id\":\"h:answer\",\"method\":\"connect/prompt\",\"params\":{\"actor\":\"forged-viewer\"}}\n"
     ));
-    assert_eq!(frames.len(), 2, "stdio must return bounded protocol refusals: {:?}", output.status);
+    assert_eq!(
+        frames.len(),
+        2,
+        "stdio must return bounded protocol refusals: {:?}",
+        output.status
+    );
     assert_eq!(frames[0]["id"], "h:send");
     assert_eq!(frames[0]["error"]["data"]["code"], "invalid_binding");
     assert_eq!(frames[1]["error"]["code"], -32601);
@@ -70,9 +86,17 @@ fn stdio_rejects_mutation_notifications_and_duplicate_decoded_keys() {
         "{\"jsonrpc\":\"2.0\",\"method\":\"connect/send\",\"params\":{\"text\":\"private-frame-canary\"}}\n",
         "{\"jsonrpc\":\"2.0\",\"id\":\"h:duplicate\",\"method\":\"connect/initialize\",\"params\":{\"viewer\":{},\"\\u0076iewer\":{\"principal_id\":\"private-frame-canary\"}}}\n"
     ));
-    assert_eq!(frames.len(), 2, "unsupported stdio is not a protocol refusal: {:?}", output.status);
+    assert_eq!(
+        frames.len(),
+        2,
+        "unsupported stdio is not a protocol refusal: {:?}",
+        output.status
+    );
     for frame in frames {
-        assert!(matches!(frame["error"]["code"].as_i64(), Some(-32700 | -32600 | -32602)));
+        assert!(matches!(
+            frame["error"]["code"].as_i64(),
+            Some(-32700 | -32600 | -32602)
+        ));
         assert!(!frame.to_string().contains("private-frame-canary"));
     }
     assert!(!String::from_utf8_lossy(&output.stderr).contains("private-frame-canary"));

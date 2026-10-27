@@ -11,9 +11,14 @@ impl AcquisitionToolBinding {
         let owner = self.owner.get().and_then(Weak::upgrade)?;
         // This is only the existing private owner lifetime precondition. Actual
         // invocation/source/native authorization is still checked by the leaf.
-        owner.host.originals.validate_private_setup_owner(
-            owner.host.tenant.as_str(), owner.host.deployment.as_str(),
-        ).ok()?;
+        owner
+            .host
+            .originals
+            .validate_private_setup_owner(
+                owner.host.tenant.as_str(),
+                owner.host.deployment.as_str(),
+            )
+            .ok()?;
         Some(owner)
     }
 
@@ -44,12 +49,19 @@ struct EnrolledTools {
 pub struct InstalledAcquisitionTools(Arc<EnrolledTools>);
 impl InstalledAcquisitionTools {
     pub fn new(admission_timeout: Duration) -> Result<Self, HostLifetimeError> {
-        let binding = Arc::new(AcquisitionToolBinding { owner: OnceLock::new() });
-        let acquisition = Arc::new(FindAndInstallTool::enrolled(binding.clone(), admission_timeout)
-            .map_err(|_| HostLifetimeError::InvalidSelection)?);
+        let binding = Arc::new(AcquisitionToolBinding {
+            owner: OnceLock::new(),
+        });
+        let acquisition = Arc::new(
+            FindAndInstallTool::enrolled(binding.clone(), admission_timeout)
+                .map_err(|_| HostLifetimeError::InvalidSelection)?,
+        );
         let results = Arc::new(results::SetupResultsTool::new(binding.clone()));
         Ok(Self(Arc::new(EnrolledTools {
-            binding, acquisition, results, admission_timeout,
+            binding,
+            acquisition,
+            results,
+            admission_timeout,
         })))
     }
 
@@ -74,7 +86,10 @@ impl InstalledAcquisitionTools {
         if !Arc::ptr_eq(&self.0, &owner.tools.0) {
             return Err(HostLifetimeError::InvalidSelection);
         }
-        self.0.binding.owner.set(Arc::downgrade(owner))
+        self.0
+            .binding
+            .owner
+            .set(Arc::downgrade(owner))
             .map_err(|_| HostLifetimeError::InvalidSelection)
     }
 }
@@ -85,7 +100,8 @@ mod tests;
 impl InstalledAcquisition {
     pub(crate) fn require_native_runtime(&self) -> Result<(), PrivateOriginalError> {
         self.host.originals.validate_private_setup_owner(
-            self.host.tenant.as_str(), self.host.deployment.as_str(),
+            self.host.tenant.as_str(),
+            self.host.deployment.as_str(),
         )?;
         let _runtime = self.host.originals.bound_identity_runtime()?;
         Ok(())

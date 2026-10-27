@@ -4,14 +4,20 @@
 //! The application's native registration hook owns destination selection and
 //! surface verification. A lifecycle observation is never permission.
 
-mod prepared_application;
 mod console_setup;
 mod local_recovery;
-pub use local_recovery::{LocalRecoveryPageRead, LocalOperatorRecoveryPolicy, LocalServiceRecovery, LocalServiceRecoveryPage, LocalServiceRecoveryResult};
+mod prepared_application;
+pub use local_recovery::{
+    LocalOperatorRecoveryPolicy, LocalRecoveryPageRead, LocalServiceRecovery,
+    LocalServiceRecoveryPage, LocalServiceRecoveryResult,
+};
 mod prepared_runtime;
-pub use prepared_runtime::PreparedGatewayRuntime;
-pub use console_setup::{ConsoleAccessPolicy, ConsoleRecoveryPolicy, ConsoleAccessSnapshot, ConsoleServiceRecoverySnapshot, ConsolePageRead, ConsoleSetupBinding, ConsoleStatusPage};
+pub use console_setup::{
+    ConsoleAccessPolicy, ConsoleAccessSnapshot, ConsolePageRead, ConsoleRecoveryPolicy,
+    ConsoleServiceRecoverySnapshot, ConsoleSetupBinding, ConsoleStatusPage,
+};
 pub use prepared_application::PreparedSetupApplication;
+pub use prepared_runtime::PreparedGatewayRuntime;
 
 use crate::{
     private_host::PrivateHostClosed,
@@ -26,9 +32,9 @@ use meerkat_mobkit::{
     UnifiedRuntime,
     mob_handle_runtime::MobBootstrapSpec,
     rpc_gateway::{
-        GatewayBootstrapReady, GatewayHostCloseReason, GatewayHostComposition, GatewayHostError,
-        PreparedApplicationRequest, PreparedGatewayApplication, GatewayFactoryConstruction,
-        GatewayMcpComposition,
+        GatewayBootstrapReady, GatewayFactoryConstruction, GatewayHostCloseReason,
+        GatewayHostComposition, GatewayHostError, GatewayMcpComposition,
+        PreparedApplicationRequest, PreparedGatewayApplication,
     },
 };
 use meerkat_runtime::{MeerkatMachine, meerkat_machine::NativeGrantWorkConfiguration};
@@ -41,13 +47,20 @@ use std::sync::{Arc, Mutex, OnceLock};
 /// Pure pre-build projection of an already authenticated setup profile.
 /// The application supplies the existing prepared helper; no resolver, backend
 /// constructor or source/grant authority is hidden in this closure.
-pub type SetupBootstrapProjection = Arc<dyn Fn(MobBootstrapSpec) -> Result<MobBootstrapSpec, HostLifetimeError> + Send + Sync>;
+pub type SetupBootstrapProjection =
+    Arc<dyn Fn(MobBootstrapSpec) -> Result<MobBootstrapSpec, HostLifetimeError> + Send + Sync>;
 
 /// Trusted application construction on the actual native factory offer. This
 /// callback creates no factory, machine, policy registry or authorization owner.
 /// It runs synchronously under this host's existing current-selection boundary.
-pub type SetupMemberFactoryComposition = Arc<dyn Fn(&GatewayFactoryConstruction<'_>, crate::installed_host::acquisition::InstalledServiceTaskSource)
-    -> Result<GatewayMcpComposition, HostLifetimeError> + Send + Sync>;
+pub type SetupMemberFactoryComposition = Arc<
+    dyn Fn(
+            &GatewayFactoryConstruction<'_>,
+            crate::installed_host::acquisition::InstalledServiceTaskSource,
+        ) -> Result<GatewayMcpComposition, HostLifetimeError>
+        + Send
+        + Sync,
+>;
 
 pub struct ToolkitGatewayHost {
     owner: Arc<NativeHostLifetime>,
@@ -61,7 +74,8 @@ pub struct ToolkitGatewayHost {
     console_logins: Option<crate::private_host::ConsoleLogins>,
     installed_tool_policy: Option<Arc<meerkat_core::ToolConsequencePolicyRegistry>>,
     acquisition: Arc<Mutex<crate::installed_host::acquisition::AcquisitionBootstrap>>,
-    native_continuation: Option<Arc<crate::installed_host::acquisition::InstalledNativeContinuation>>,
+    native_continuation:
+        Option<Arc<crate::installed_host::acquisition::InstalledNativeContinuation>>,
     setup_projection: Option<SetupBootstrapProjection>,
     setup_application: Option<PreparedSetupApplication>,
     setup_member_factory: Option<SetupMemberFactoryComposition>,
@@ -73,7 +87,6 @@ pub struct ToolkitGatewayHost {
 }
 
 impl ToolkitGatewayHost {
-
     /// Join a trusted configured resource to the existing installed native
     /// owners before bootstrap takes them. The caller composes any existing
     /// attachment provider; the actual registration hook remains authoritative.
@@ -83,18 +96,32 @@ impl ToolkitGatewayHost {
         selected: crate::installed_host::prepared_registration::SelectedDestinationParticipant,
     ) -> Result<Self, HostLifetimeError>
     where
-        F: FnOnce(Option<Arc<dyn meerkat_runtime::meerkat_machine::ConfiguredMcpAttachmentProvider>>)
+        F: FnOnce(
+            Option<Arc<dyn meerkat_runtime::meerkat_machine::ConfiguredMcpAttachmentProvider>>,
+        )
             -> Arc<dyn meerkat_runtime::meerkat_machine::ConfiguredMcpAttachmentProvider>,
     {
         self.owner.validate_current_selection()?;
         if self.private_closed.is_closed() || self.machine.get().is_some() {
             return Err(HostLifetimeError::Denied);
         }
-        let registration = self.member_registration.clone().ok_or(HostLifetimeError::Unavailable)?;
-        let registry = self.installed_tool_policy.clone().ok_or(HostLifetimeError::Unavailable)?;
-        let configuration = self.grant_configuration.get_mut().map_err(|_| HostLifetimeError::Unavailable)?
-            .as_mut().and_then(Option::as_mut).ok_or(HostLifetimeError::Unavailable)?;
-        configuration.configured_mcp_attachment = Some(compose(configuration.configured_mcp_attachment.take()));
+        let registration = self
+            .member_registration
+            .clone()
+            .ok_or(HostLifetimeError::Unavailable)?;
+        let registry = self
+            .installed_tool_policy
+            .clone()
+            .ok_or(HostLifetimeError::Unavailable)?;
+        let configuration = self
+            .grant_configuration
+            .get_mut()
+            .map_err(|_| HostLifetimeError::Unavailable)?
+            .as_mut()
+            .and_then(Option::as_mut)
+            .ok_or(HostLifetimeError::Unavailable)?;
+        configuration.configured_mcp_attachment =
+            Some(compose(configuration.configured_mcp_attachment.take()));
         self.member_registration = Some(Arc::new(
             crate::installed_host::prepared_registration::PreparedMemberRegistration::from_installed(
                 registration, registry, selected,
@@ -113,14 +140,16 @@ impl ToolkitGatewayHost {
         if self.private_closed.is_closed() {
             return Err(PrivateOriginalError::Denied);
         }
-        self.owner.validate_current_selection().map_err(|error| match error {
-            HostLifetimeError::InvalidSelection
-            | HostLifetimeError::Denied
-            | HostLifetimeError::WrongOwner => PrivateOriginalError::Denied,
-            HostLifetimeError::Unavailable | HostLifetimeError::NotSettled => {
-                PrivateOriginalError::Unavailable
-            }
-        })?;
+        self.owner
+            .validate_current_selection()
+            .map_err(|error| match error {
+                HostLifetimeError::InvalidSelection
+                | HostLifetimeError::Denied
+                | HostLifetimeError::WrongOwner => PrivateOriginalError::Denied,
+                HostLifetimeError::Unavailable | HostLifetimeError::NotSettled => {
+                    PrivateOriginalError::Unavailable
+                }
+            })?;
         self.private_originals
             .as_ref()
             .ok_or(PrivateOriginalError::Unavailable)?
@@ -135,8 +164,13 @@ impl ToolkitGatewayHost {
         &self,
         prepared: &crate::private_originals::LocalControllerSetup,
     ) -> Result<crate::installed_host::operator_setup::OperatorSetup, HostLifetimeError> {
-        let captured = prepared.source_owner().ok_or(HostLifetimeError::Unavailable)?;
-        let current = self.private_originals.as_ref().ok_or(HostLifetimeError::Unavailable)?;
+        let captured = prepared
+            .source_owner()
+            .ok_or(HostLifetimeError::Unavailable)?;
+        let current = self
+            .private_originals
+            .as_ref()
+            .ok_or(HostLifetimeError::Unavailable)?;
         if !Arc::ptr_eq(&captured, current) {
             return Err(HostLifetimeError::WrongOwner);
         }
@@ -149,16 +183,30 @@ impl ToolkitGatewayHost {
         &self,
         prepared: &crate::private_originals::LocalControllerSetup,
     ) -> Result<crate::installed_host::operator_setup::OperatorSetup, HostLifetimeError> {
-        let captured = prepared.source_owner().ok_or(HostLifetimeError::Unavailable)?;
-        let current = self.private_originals.as_ref().ok_or(HostLifetimeError::Unavailable)?;
+        let captured = prepared
+            .source_owner()
+            .ok_or(HostLifetimeError::Unavailable)?;
+        let current = self
+            .private_originals
+            .as_ref()
+            .ok_or(HostLifetimeError::Unavailable)?;
         if !Arc::ptr_eq(&captured, current) {
             return Err(HostLifetimeError::WrongOwner);
         }
-        if self.private_closed.is_closed() { return Err(HostLifetimeError::Denied); }
+        if self.private_closed.is_closed() {
+            return Err(HostLifetimeError::Denied);
+        }
         self.owner.validate_current_selection()?;
-        let helpers = self.acquisition.lock().map_err(|_| HostLifetimeError::Unavailable)?
-            .configured().map(|acquisition| acquisition.helper_selections()).unwrap_or_default();
-        current.application_operator_setup(self.owner.clone())?.with_helper_selections(helpers)
+        let helpers = self
+            .acquisition
+            .lock()
+            .map_err(|_| HostLifetimeError::Unavailable)?
+            .configured()
+            .map(|acquisition| acquisition.helper_selections())
+            .unwrap_or_default();
+        current
+            .application_operator_setup(self.owner.clone())?
+            .with_helper_selections(helpers)
     }
 
     /// Prepare the existing local presenter from this member's actual native
@@ -172,14 +220,16 @@ impl ToolkitGatewayHost {
         if self.private_closed.is_closed() {
             return Err(PrivateOriginalError::Denied);
         }
-        self.owner.validate_current_selection().map_err(|error| match error {
-            HostLifetimeError::InvalidSelection
-            | HostLifetimeError::Denied
-            | HostLifetimeError::WrongOwner => PrivateOriginalError::Denied,
-            HostLifetimeError::Unavailable | HostLifetimeError::NotSettled => {
-                PrivateOriginalError::Unavailable
-            }
-        })?;
+        self.owner
+            .validate_current_selection()
+            .map_err(|error| match error {
+                HostLifetimeError::InvalidSelection
+                | HostLifetimeError::Denied
+                | HostLifetimeError::WrongOwner => PrivateOriginalError::Denied,
+                HostLifetimeError::Unavailable | HostLifetimeError::NotSettled => {
+                    PrivateOriginalError::Unavailable
+                }
+            })?;
         self.private_originals
             .as_ref()
             .ok_or(PrivateOriginalError::Unavailable)?
@@ -191,13 +241,21 @@ impl ToolkitGatewayHost {
     /// The current controller policy is unchanged and no native input enters.
     /// A changed session, cancelled source or existing final binding refuses.
     pub async fn select_original_setup_request(
-        &self, prepared: &crate::private_originals::LocalControllerSetup,
+        &self,
+        prepared: &crate::private_originals::LocalControllerSetup,
         parent: Vec<meerkat_authorization_contracts::grant::GrantLineageRef>,
     ) -> Result<crate::private_originals::PrivateSetupRequestSelection, PrivateOriginalError> {
-        if self.private_closed.is_closed() { return Err(PrivateOriginalError::Denied); }
-        self.owner.validate_current_selection().map_err(|_| PrivateOriginalError::Unavailable)?;
-        self.private_originals.as_ref().ok_or(PrivateOriginalError::Unavailable)?
-            .select_setup_request(prepared, parent).await
+        if self.private_closed.is_closed() {
+            return Err(PrivateOriginalError::Denied);
+        }
+        self.owner
+            .validate_current_selection()
+            .map_err(|_| PrivateOriginalError::Unavailable)?;
+        self.private_originals
+            .as_ref()
+            .ok_or(PrivateOriginalError::Unavailable)?
+            .select_setup_request(prepared, parent)
+            .await
     }
 
     /// Same-process OS-operator setup over this installed gateway's existing
@@ -210,10 +268,18 @@ impl ToolkitGatewayHost {
             return Err(HostLifetimeError::Denied);
         }
         self.owner.validate_current_selection()?;
-        let helpers = self.acquisition.lock().map_err(|_| HostLifetimeError::Unavailable)?
-            .configured().map(|acquisition| acquisition.helper_selections()).unwrap_or_default();
-        self.private_originals.as_ref().ok_or(HostLifetimeError::Unavailable)?
-            .local_operator_setup(self.owner.clone())?.with_helper_selections(helpers)
+        let helpers = self
+            .acquisition
+            .lock()
+            .map_err(|_| HostLifetimeError::Unavailable)?
+            .configured()
+            .map(|acquisition| acquisition.helper_selections())
+            .unwrap_or_default();
+        self.private_originals
+            .as_ref()
+            .ok_or(HostLifetimeError::Unavailable)?
+            .local_operator_setup(self.owner.clone())?
+            .with_helper_selections(helpers)
     }
 
     /// Apply an authenticated application's exact access decision through the
@@ -228,14 +294,16 @@ impl ToolkitGatewayHost {
         if self.private_closed.is_closed() {
             return Err(PrivateOriginalError::Denied);
         }
-        self.owner.validate_current_selection().map_err(|error| match error {
-            HostLifetimeError::InvalidSelection
-            | HostLifetimeError::Denied
-            | HostLifetimeError::WrongOwner => PrivateOriginalError::Denied,
-            HostLifetimeError::Unavailable | HostLifetimeError::NotSettled => {
-                PrivateOriginalError::Unavailable
-            }
-        })?;
+        self.owner
+            .validate_current_selection()
+            .map_err(|error| match error {
+                HostLifetimeError::InvalidSelection
+                | HostLifetimeError::Denied
+                | HostLifetimeError::WrongOwner => PrivateOriginalError::Denied,
+                HostLifetimeError::Unavailable | HostLifetimeError::NotSettled => {
+                    PrivateOriginalError::Unavailable
+                }
+            })?;
         self.private_originals
             .as_ref()
             .ok_or(PrivateOriginalError::Unavailable)?
@@ -254,14 +322,16 @@ impl ToolkitGatewayHost {
         if self.private_closed.is_closed() {
             return Err(PrivateOriginalError::Denied);
         }
-        self.owner.validate_current_selection().map_err(|error| match error {
-            HostLifetimeError::InvalidSelection
-            | HostLifetimeError::Denied
-            | HostLifetimeError::WrongOwner => PrivateOriginalError::Denied,
-            HostLifetimeError::Unavailable | HostLifetimeError::NotSettled => {
-                PrivateOriginalError::Unavailable
-            }
-        })?;
+        self.owner
+            .validate_current_selection()
+            .map_err(|error| match error {
+                HostLifetimeError::InvalidSelection
+                | HostLifetimeError::Denied
+                | HostLifetimeError::WrongOwner => PrivateOriginalError::Denied,
+                HostLifetimeError::Unavailable | HostLifetimeError::NotSettled => {
+                    PrivateOriginalError::Unavailable
+                }
+            })?;
         self.private_originals
             .as_ref()
             .ok_or(PrivateOriginalError::Unavailable)?
@@ -362,9 +432,8 @@ impl ToolkitGatewayHost {
         originals: Arc<PrivateOriginals>,
         member_registration: Arc<dyn MemberRuntimeRegistrationHook>,
     ) -> Self {
-        let mut host = Self::with_grant_configuration(
-            owner, private_closed, None, Some(member_registration),
-        );
+        let mut host =
+            Self::with_grant_configuration(owner, private_closed, None, Some(member_registration));
         host.grant_configuration = Mutex::new(None);
         host.private_originals = Some(originals);
         host
@@ -372,12 +441,16 @@ impl ToolkitGatewayHost {
 
     /// Use this gateway's actual private connection login owner. Installed
     /// routes and native verified humans still select every Console original.
-    pub fn with_console_logins(mut self, logins: crate::private_host::ConsoleLogins)
-        -> Result<Self, HostLifetimeError>
-    {
-        if self.console_logins.is_some() || self.machine.get().is_some()
+    pub fn with_console_logins(
+        mut self,
+        logins: crate::private_host::ConsoleLogins,
+    ) -> Result<Self, HostLifetimeError> {
+        if self.console_logins.is_some()
+            || self.machine.get().is_some()
             || self.private_originals.is_none()
-        { return Err(HostLifetimeError::InvalidSelection); }
+        {
+            return Err(HostLifetimeError::InvalidSelection);
+        }
         self.console_logins = Some(logins);
         Ok(self)
     }
@@ -404,14 +477,21 @@ impl ToolkitGatewayHost {
     /// Actual first-party setup composition, before `prepare_bootstrap`.
     /// The exact source must belong to this host; no independent result store
     /// or new delivery owner can be injected through this convenience seam.
-    pub fn with_native_setup_bootstrap(mut self,
+    pub fn with_native_setup_bootstrap(
+        mut self,
         continuation: Arc<crate::installed_host::acquisition::InstalledNativeContinuation>,
         projection: SetupBootstrapProjection,
         application: PreparedSetupApplication,
     ) -> Result<Self, HostLifetimeError> {
-        if self.native_continuation.is_some() || self.machine.get().is_some()
-            || !self.private_originals.as_ref().is_some_and(|source| continuation.shares_source(source))
-        { return Err(HostLifetimeError::InvalidSelection); }
+        if self.native_continuation.is_some()
+            || self.machine.get().is_some()
+            || !self
+                .private_originals
+                .as_ref()
+                .is_some_and(|source| continuation.shares_source(source))
+        {
+            return Err(HostLifetimeError::InvalidSelection);
+        }
         self.native_continuation = Some(continuation);
         self.setup_projection = Some(projection);
         self.setup_application = Some(application);
@@ -422,12 +502,17 @@ impl ToolkitGatewayHost {
     /// native factory construction. Ordinary hosts have no callback. This
     /// requires the already authenticated prepared setup application and cannot
     /// replace a callback or a running host's factory configuration.
-    pub fn with_setup_member_factory(mut self, compose: SetupMemberFactoryComposition)
-        -> Result<Self, HostLifetimeError>
-    {
-        if self.setup_application.is_none() || self.setup_member_factory.is_some()
-            || self.machine.get().is_some() || self.private_closed.is_closed()
-        { return Err(HostLifetimeError::InvalidSelection); }
+    pub fn with_setup_member_factory(
+        mut self,
+        compose: SetupMemberFactoryComposition,
+    ) -> Result<Self, HostLifetimeError> {
+        if self.setup_application.is_none()
+            || self.setup_member_factory.is_some()
+            || self.machine.get().is_some()
+            || self.private_closed.is_closed()
+        {
+            return Err(HostLifetimeError::InvalidSelection);
+        }
         self.owner.validate_current_selection()?;
         self.setup_member_factory = Some(compose);
         Ok(self)
@@ -436,10 +521,14 @@ impl ToolkitGatewayHost {
     /// Select an application-policy factory on this exact installed lifetime.
     /// Matching serialized configuration cannot substitute another live owner.
     /// The ordinary factory slot/currentness checks remain the sole admission.
-    pub fn with_setup_member_factory_for_owner(self, owner: &Arc<NativeHostLifetime>,
+    pub fn with_setup_member_factory_for_owner(
+        self,
+        owner: &Arc<NativeHostLifetime>,
         compose: SetupMemberFactoryComposition,
     ) -> Result<Self, HostLifetimeError> {
-        if !Arc::ptr_eq(owner, &self.owner) { return Err(HostLifetimeError::WrongOwner); }
+        if !Arc::ptr_eq(owner, &self.owner) {
+            return Err(HostLifetimeError::WrongOwner);
+        }
         self.with_setup_member_factory(compose)
     }
 
@@ -447,8 +536,11 @@ impl ToolkitGatewayHost {
     /// Configured does not mean native helper execution or continuation ready.
     pub fn acquisition_bootstrap_status(
         &self,
-    ) -> Result<crate::installed_host::acquisition::AcquisitionBootstrapStatus, GatewayHostError> {
-        self.acquisition.lock().map(|selection| selection.status())
+    ) -> Result<crate::installed_host::acquisition::AcquisitionBootstrapStatus, GatewayHostError>
+    {
+        self.acquisition
+            .lock()
+            .map(|selection| selection.status())
             .map_err(|_| GatewayHostError::Unavailable)
     }
 
@@ -492,52 +584,92 @@ fn host_error(error: HostLifetimeError) -> GatewayHostError {
 
 #[async_trait]
 impl GatewayHostComposition for ToolkitGatewayHost {
-    fn host_app_routes(&self, viewer: meerkat_mobkit::http_console::ConsoleViewerResolver)
-        -> Result<Option<axum::Router>, GatewayHostError>
-    {
-        self.owner.with_current_setup(|| {
-            if self.private_closed.is_closed() { return Err(HostLifetimeError::Denied); }
-            self.console_routes.as_ref().map(|routes| routes(viewer)).transpose()
-        }).map_err(host_error)
+    fn host_app_routes(
+        &self,
+        viewer: meerkat_mobkit::http_console::ConsoleViewerResolver,
+    ) -> Result<Option<axum::Router>, GatewayHostError> {
+        self.owner
+            .with_current_setup(|| {
+                if self.private_closed.is_closed() {
+                    return Err(HostLifetimeError::Denied);
+                }
+                self.console_routes
+                    .as_ref()
+                    .map(|routes| routes(viewer))
+                    .transpose()
+            })
+            .map_err(host_error)
     }
     fn compose_member_factory(
         &self,
         construction: &GatewayFactoryConstruction<'_>,
     ) -> Result<Option<GatewayMcpComposition>, GatewayHostError> {
-        let Some(compose) = &self.setup_member_factory else { return Ok(None); };
-        self.owner.with_current_setup(|| {
-            if self.private_closed.is_closed() || self.prepared_application_selected.get().is_none() {
-                return Err(HostLifetimeError::Denied);
-            }
-            let native = self.owner.selected_policy().native_host.as_ref()
-                .ok_or(HostLifetimeError::InvalidSelection)?;
-            // The factory's installation realm is separate from the member
-            // realm owned by this policy and checked at adapter construction.
-            if native.members.is_empty() || native.members.iter().any(|member|
-                meerkat_core::mob_realm_id(&member.member.mob_id).as_ref().ok() != Some(&native.realm)) {
-                return Err(HostLifetimeError::WrongOwner);
-            }
-            let composition = compose(construction, crate::installed_host::acquisition::InstalledServiceTaskSource::new(&self.acquisition))?;
-            if self.private_closed.is_closed() { return Err(HostLifetimeError::Denied); }
-            Ok(Some(composition))
-        }).map_err(host_error)
+        let Some(compose) = &self.setup_member_factory else {
+            return Ok(None);
+        };
+        self.owner
+            .with_current_setup(|| {
+                if self.private_closed.is_closed()
+                    || self.prepared_application_selected.get().is_none()
+                {
+                    return Err(HostLifetimeError::Denied);
+                }
+                let native = self
+                    .owner
+                    .selected_policy()
+                    .native_host
+                    .as_ref()
+                    .ok_or(HostLifetimeError::InvalidSelection)?;
+                // The factory's installation realm is separate from the member
+                // realm owned by this policy and checked at adapter construction.
+                if native.members.is_empty()
+                    || native.members.iter().any(|member| {
+                        meerkat_core::mob_realm_id(&member.member.mob_id)
+                            .as_ref()
+                            .ok()
+                            != Some(&native.realm)
+                    })
+                {
+                    return Err(HostLifetimeError::WrongOwner);
+                }
+                let composition = compose(
+                    construction,
+                    crate::installed_host::acquisition::InstalledServiceTaskSource::new(
+                        &self.acquisition,
+                    ),
+                )?;
+                if self.private_closed.is_closed() {
+                    return Err(HostLifetimeError::Denied);
+                }
+                Ok(Some(composition))
+            })
+            .map_err(host_error)
     }
 
     async fn prepared_application(
         &self,
         request: Option<&PreparedApplicationRequest>,
     ) -> Result<Option<PreparedGatewayApplication>, GatewayHostError> {
-        let Some(application) = &self.setup_application else { return Ok(None); };
-        self.owner.with_current_setup(|| {
-            if self.private_closed.is_closed() { return Err(HostLifetimeError::Denied); }
-            // Every init must carry this selected application. An earlier
-            // successful selection cannot authenticate a later absent carrier.
-            let request = request.ok_or(HostLifetimeError::Denied)?;
-            let selected = application.select(request, self.owner.clone(), self.private_closed.clone())?;
-            if self.private_closed.is_closed() { return Err(HostLifetimeError::Denied); }
-            self.prepared_application_selected.get_or_init(|| ());
-            Ok(Some(selected))
-        }).map_err(host_error)
+        let Some(application) = &self.setup_application else {
+            return Ok(None);
+        };
+        self.owner
+            .with_current_setup(|| {
+                if self.private_closed.is_closed() {
+                    return Err(HostLifetimeError::Denied);
+                }
+                // Every init must carry this selected application. An earlier
+                // successful selection cannot authenticate a later absent carrier.
+                let request = request.ok_or(HostLifetimeError::Denied)?;
+                let selected =
+                    application.select(request, self.owner.clone(), self.private_closed.clone())?;
+                if self.private_closed.is_closed() {
+                    return Err(HostLifetimeError::Denied);
+                }
+                self.prepared_application_selected.get_or_init(|| ());
+                Ok(Some(selected))
+            })
+            .map_err(host_error)
     }
 
     fn native_grant_work_configuration(
@@ -598,17 +730,24 @@ impl GatewayHostComposition for ToolkitGatewayHost {
         // The same fully composed spec supplies both the actual selected
         // WorkGraph and its original provider-open census, before any inputs.
         // No setter, replacement service or late bind_runtime lookup is used.
-        let acquisition = self.acquisition.lock()
+        let acquisition = self
+            .acquisition
+            .lock()
             .map_err(|_| GatewayHostError::Unavailable)?
             .prepare(spec.workgraph_service(), spec.resolved_storage.as_ref())
             .map_err(host_error)?;
-        self.owner.validate_current_selection().map_err(host_error)?;
+        self.owner
+            .validate_current_selection()
+            .map_err(host_error)?;
         let spec = match acquisition {
             // The native registration owns the RegisteredToolBundleOperation
             // witness. Disabled acquisition has no driver or registration.
             Some(acquisition) => {
                 let spec = if let Some(continuation) = &self.native_continuation {
-                    let projection = self.setup_projection.as_ref().ok_or(GatewayHostError::Unavailable)?;
+                    let projection = self
+                        .setup_projection
+                        .as_ref()
+                        .ok_or(GatewayHostError::Unavailable)?;
                     let spec = projection(spec).map_err(host_error)?;
                     // Core bca71's actual source constructor retains this
                     // exact adapter and namespace. Meta 2835 supplies the
@@ -616,10 +755,15 @@ impl GatewayHostComposition for ToolkitGatewayHost {
                     // Host completion, exact-content reconciliation and matched
                     // tuple execution remain separate qualification requirements.
                     let source = meerkat_mob_mcp::HostJobSource::new(
-                        [continuation.namespace().to_owned()], continuation.clone(),
-                    ).map_err(|_| GatewayHostError::Denied)?;
-                    spec.with_host_job_source(source).map_err(|_| GatewayHostError::Unavailable)?
-                } else { spec };
+                        [continuation.namespace().to_owned()],
+                        continuation.clone(),
+                    )
+                    .map_err(|_| GatewayHostError::Denied)?;
+                    spec.with_host_job_source(source)
+                        .map_err(|_| GatewayHostError::Unavailable)?
+                } else {
+                    spec
+                };
                 spec.register_tool_bundle(crate::FIND_AND_INSTALL_BUNDLE, acquisition.tool())
                     .register_tool_bundle(
                         meerkat_toolkit::setup::SETUP_RESULTS_BUNDLE,
@@ -649,9 +793,13 @@ impl GatewayHostComposition for ToolkitGatewayHost {
         if !Arc::ptr_eq(expected, &actual) {
             return Err(GatewayHostError::Denied);
         }
-        if self.acquisition_bootstrap_status()? == crate::installed_host::acquisition::AcquisitionBootstrapStatus::Configured {
+        if self.acquisition_bootstrap_status()?
+            == crate::installed_host::acquisition::AcquisitionBootstrapStatus::Configured
+        {
             if let Some(continuation) = &self.native_continuation {
-                continuation.bind_native(runtime.mob_runtime()).map_err(host_error)?;
+                continuation
+                    .bind_native(runtime.mob_runtime())
+                    .map_err(host_error)?;
             }
         }
         Ok(())
@@ -669,7 +817,8 @@ impl GatewayHostComposition for ToolkitGatewayHost {
                 .identity_runtime()
                 .ok_or(GatewayHostError::Unavailable)?;
             if let Some(access) = runtime.access_controller() {
-                access.join_authorization_publication(originals.authorization_publication())
+                access
+                    .join_authorization_publication(originals.authorization_publication())
                     .map_err(|_| GatewayHostError::Denied)?;
             }
             originals
@@ -678,14 +827,19 @@ impl GatewayHostComposition for ToolkitGatewayHost {
                     PrivateOriginalError::Unavailable => GatewayHostError::Unavailable,
                     _ => GatewayHostError::Denied,
                 })?;
-            originals.start_custody_recovery(runtime.mob_runtime().continuation_source_announcer())
+            originals
+                .start_custody_recovery(runtime.mob_runtime().continuation_source_announcer())
                 .map_err(|_| GatewayHostError::Unavailable)?;
             if let Some(pins) = runtime.mob_runtime().controller_pin_source() {
-                originals.bind_controller_pin_source(pins).map_err(|_| GatewayHostError::Denied)?;
+                originals
+                    .bind_controller_pin_source(pins)
+                    .map_err(|_| GatewayHostError::Denied)?;
             }
             if let Some(logins) = &self.console_logins {
-                let ingress = originals.console_ingress(logins.clone(), runtime.access_controller().cloned())
-                    .await.map_err(|error| match error {
+                let ingress = originals
+                    .console_ingress(logins.clone(), runtime.access_controller().cloned())
+                    .await
+                    .map_err(|error| match error {
                         PrivateOriginalError::Unavailable => GatewayHostError::Unavailable,
                         _ => GatewayHostError::Denied,
                     })?;
@@ -706,14 +860,22 @@ impl GatewayHostComposition for ToolkitGatewayHost {
                 .bound_identity_runtime()
                 .map_err(|_| GatewayHostError::Unavailable)?;
         }
-        let acquisition = self.acquisition.lock()
-            .map_err(|_| GatewayHostError::Unavailable)?.configured();
+        let acquisition = self
+            .acquisition
+            .lock()
+            .map_err(|_| GatewayHostError::Unavailable)?
+            .configured();
         // bind_runtime already retained the actual native service. Prepare the
         // task handle now, but enter no recovery work before ready publication.
         // A service Arc by itself is not binding or restore readiness.
-        let recovery = acquisition.map(|owner| {
-            self.acquisition_recovery.prepare_start().map(|runtime| (runtime, owner))
-        }).transpose().map_err(host_error)?;
+        let recovery = acquisition
+            .map(|owner| {
+                self.acquisition_recovery
+                    .prepare_start()
+                    .map(|runtime| (runtime, owner))
+            })
+            .transpose()
+            .map_err(host_error)?;
         let mut publication = Some(publication);
         self.owner
             .publish_gateway_ready(&mut || {
@@ -726,14 +888,18 @@ impl GatewayHostComposition for ToolkitGatewayHost {
         // selected this boundary after restore. The task uses the existing
         // canonical recovery and native submission owners for each step.
         if let Some((runtime, acquisition)) = recovery {
-            self.acquisition_recovery.start(runtime, acquisition).map_err(host_error)?;
+            self.acquisition_recovery
+                .start(runtime, acquisition)
+                .map_err(host_error)?;
         }
         Ok(())
     }
 
     fn begin_close(&self, reason: GatewayHostCloseReason) -> Result<(), GatewayHostError> {
         self.acquisition_recovery.stop();
-        if let Some(source) = &self.private_originals { source.stop_custody_recovery(); }
+        if let Some(source) = &self.private_originals {
+            source.stop_custody_recovery();
+        }
         match reason {
             GatewayHostCloseReason::HostDisconnected | GatewayHostCloseReason::CallerCancelled => {
                 self.owner.host_lost()
@@ -751,7 +917,9 @@ impl GatewayHostComposition for ToolkitGatewayHost {
         // initialization-failure path. An entered step retains its own owner
         // and may settle; no task abort turns uncertainty into no effect.
         self.acquisition_recovery.stop();
-        if let Some(source) = &self.private_originals { source.stop_custody_recovery(); }
+        if let Some(source) = &self.private_originals {
+            source.stop_custody_recovery();
+        }
         let closing = self.owner.begin_close_activation(HostCloseReason::Shutdown);
         let native_close = async {
             let closing = closing?;
@@ -762,15 +930,17 @@ impl GatewayHostComposition for ToolkitGatewayHost {
             // even when initialization never started the recovery worker.
             let custody_close = async {
                 match &self.private_originals {
-                    Some(originals) => originals.join_custody_recovery().await
+                    Some(originals) => originals
+                        .join_custody_recovery()
+                        .await
                         .map_err(|_| HostLifetimeError::NotSettled),
                     None => Ok(()),
                 }
             };
             // These independently retained owners must all enter their joins,
             // including when another owner fails or does not settle promptly.
-            let (recovered, custody) = tokio::join!(
-                self.acquisition_recovery.join(), custody_close);
+            let (recovered, custody) =
+                tokio::join!(self.acquisition_recovery.join(), custody_close);
             recovered.and(custody)
         };
         let (recovery, native) = tokio::join!(
@@ -780,7 +950,8 @@ impl GatewayHostComposition for ToolkitGatewayHost {
         let settled = native.map_err(host_error)?;
         // A timed-out join leaves the same task handle retained for a later
         // join_close; native closure was still allowed to complete above.
-        recovery.map_err(|_| GatewayHostError::SettlementIncomplete)?
+        recovery
+            .map_err(|_| GatewayHostError::SettlementIncomplete)?
             .map_err(host_error)?;
         if settled.state != HostCloseState::Settled {
             return Err(GatewayHostError::SettlementIncomplete);
@@ -794,6 +965,8 @@ impl GatewayHostComposition for ToolkitGatewayHost {
             _ = self.private_closed.wait_closed() => {},
         }
         self.acquisition_recovery.stop();
-        if let Some(source) = &self.private_originals { source.stop_custody_recovery(); }
+        if let Some(source) = &self.private_originals {
+            source.stop_custody_recovery();
+        }
     }
 }

@@ -6,7 +6,9 @@
 //! attached recovery therefore consults the current installed owner.
 
 use async_trait::async_trait;
-use meerkat_core::{PreparedToolSurface, ToolConsequencePolicyRegistry, ToolDef, ToolSurfaceSelection};
+use meerkat_core::{
+    PreparedToolSurface, ToolConsequencePolicyRegistry, ToolDef, ToolSurfaceSelection,
+};
 use meerkat_mob::{
     MemberDestinationSelection, MemberRuntimeBuildIdentity, MemberRuntimeRegistrationHook, MobError,
 };
@@ -16,7 +18,11 @@ use std::sync::{Arc, OnceLock};
 
 /// Post-selection composition on the actual native identity and destination.
 /// The installed hook remains the authority for all later constructions.
-pub type SelectedDestinationParticipant = Arc<dyn Fn(&MemberRuntimeBuildIdentity, &MemberDestinationSelection) -> Result<(), MobError> + Send + Sync>;
+pub type SelectedDestinationParticipant = Arc<
+    dyn Fn(&MemberRuntimeBuildIdentity, &MemberDestinationSelection) -> Result<(), MobError>
+        + Send
+        + Sync,
+>;
 
 pub struct PreparedMemberRegistration {
     preparation: Arc<dyn MemberRuntimeRegistrationHook>,
@@ -44,7 +50,12 @@ impl PreparedMemberRegistration {
         registry: Arc<ToolConsequencePolicyRegistry>,
         selected_destination: SelectedDestinationParticipant,
     ) -> Self {
-        Self { preparation, registry, selected_destination, installed: OnceLock::new() }
+        Self {
+            preparation,
+            registry,
+            selected_destination,
+            installed: OnceLock::new(),
+        }
     }
 
     /// Only final installed composition can bind the relay. The driver must
@@ -58,7 +69,9 @@ impl PreparedMemberRegistration {
         if !Arc::ptr_eq(&self.registry, registry) {
             return Err(HostLifetimeError::InvalidSelection);
         }
-        self.installed.set(installed).map_err(|_| HostLifetimeError::Denied)
+        self.installed
+            .set(installed)
+            .map_err(|_| HostLifetimeError::Denied)
     }
 
     fn current(&self) -> Arc<dyn MemberRuntimeRegistrationHook> {
@@ -106,7 +119,9 @@ impl MemberRuntimeRegistrationHook for PreparedMemberRegistration {
         identity: &MemberRuntimeBuildIdentity,
         surface: &PreparedToolSurface,
     ) -> Result<ToolSurfaceSelection, MobError> {
-        self.current().prepare_member_surface(identity, surface).await
+        self.current()
+            .prepare_member_surface(identity, surface)
+            .await
     }
 
     async fn verify_member_surface(
@@ -114,6 +129,8 @@ impl MemberRuntimeRegistrationHook for PreparedMemberRegistration {
         identity: &MemberRuntimeBuildIdentity,
         surface: &[ToolDef],
     ) -> Result<(), MobError> {
-        self.current().verify_member_surface(identity, surface).await
+        self.current()
+            .verify_member_surface(identity, surface)
+            .await
     }
 }

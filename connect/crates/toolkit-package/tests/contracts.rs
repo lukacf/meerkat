@@ -376,7 +376,7 @@ fn optional_service_has_explicit_degraded_outcome() {
 fn generic_projection_rejects_toolkit_dependent_components() {
     let mut selected = manifest();
     selected.portable_mcp_entries.push(PortableMcpEntry {
-            environment_secret_slots: None,
+        environment_secret_slots: None,
         operation_tools: None,
         name: id("mcp"),
         component: id("remote"),
@@ -388,7 +388,7 @@ fn generic_projection_rejects_toolkit_dependent_components() {
     assert!(selected.validate(&package()).is_err());
     let mut selected = manifest();
     selected.portable_mcp_entries.push(PortableMcpEntry {
-            environment_secret_slots: None,
+        environment_secret_slots: None,
         operation_tools: None,
         name: id("mcp"),
         component: id("remote"),
@@ -1036,7 +1036,7 @@ fn toolkit_manifest(package: &IntegrationPackage) -> AgentPluginManifest {
 fn portable_selection() -> ValidatedManifest {
     let mut selected = manifest();
     selected.portable_mcp_entries.push(PortableMcpEntry {
-            environment_secret_slots: None,
+        environment_secret_slots: None,
         operation_tools: None,
         name: id("mcp"),
         component: id("remote"),
@@ -1314,7 +1314,7 @@ fn generic_clients_get_only_entries_the_selection_declared_independent() {
         },
     };
     artifact.portable_mcp_entries.push(PortableMcpEntry {
-            environment_secret_slots: None,
+        environment_secret_slots: None,
         operation_tools: None,
         name: id("mcp"),
         component: id("remote"),
@@ -1353,7 +1353,7 @@ fn generic_clients_get_only_entries_the_selection_declared_independent() {
     };
     let mut declared = dependent.clone();
     declared.portable_mcp_entries.push(PortableMcpEntry {
-            environment_secret_slots: None,
+        environment_secret_slots: None,
         operation_tools: None,
         name: id("mcp"),
         component: id("remote"),

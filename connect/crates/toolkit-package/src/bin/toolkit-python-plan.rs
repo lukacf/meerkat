@@ -7,7 +7,8 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use toolkit_package::{
-    ActivationManifest, LocalSoftwareDeclaration, Id, IntegrationPackage, PythonInstallPlan, canonical_json,
+    ActivationManifest, Id, IntegrationPackage, LocalSoftwareDeclaration, PythonInstallPlan,
+    canonical_json,
 };
 
 const MAX_DOCUMENT: usize = 1024 * 1024;
@@ -87,21 +88,29 @@ fn run(arguments: Vec<String>) -> Result<Vec<u8>, Failure> {
     let declaration = values.contains_key("--declaration");
     let mut take = |name: &str| values.remove(name).ok_or(Failure("invalid_arguments"));
     let package_path = absolute(take("--package")?)?;
-    let selection_path = absolute(take(if declaration { "--declaration" } else { "--selection" })?)?;
+    let selection_path = absolute(take(if declaration {
+        "--declaration"
+    } else {
+        "--selection"
+    })?)?;
     let component = Id::new(take("--component")?).map_err(|_| Failure("invalid_component"))?;
     let package: IntegrationPackage = serde_json::from_slice(&document(&package_path)?)
         .map_err(|_| Failure("invalid_package"))?;
     let selected_bytes = document(&selection_path)?;
     let plan = if declaration {
-        let selection: LocalSoftwareDeclaration = serde_json::from_slice(&selected_bytes)
+        let selection: LocalSoftwareDeclaration =
+            serde_json::from_slice(&selected_bytes).map_err(|_| Failure("invalid_selection"))?;
+        let validated = selection
+            .validate(&package)
             .map_err(|_| Failure("invalid_selection"))?;
-        let validated = selection.validate(&package).map_err(|_| Failure("invalid_selection"))?;
         PythonInstallPlan::from_declaration(&package, &validated, &component)
             .map_err(|_| Failure("unsupported_python_selection"))?
     } else {
-        let selection: ActivationManifest = serde_json::from_slice(&selected_bytes)
+        let selection: ActivationManifest =
+            serde_json::from_slice(&selected_bytes).map_err(|_| Failure("invalid_selection"))?;
+        let validated = selection
+            .validate(&package)
             .map_err(|_| Failure("invalid_selection"))?;
-        let validated = selection.validate(&package).map_err(|_| Failure("invalid_selection"))?;
         PythonInstallPlan::new(&package, &validated, &component)
             .map_err(|_| Failure("unsupported_python_selection"))?
     };

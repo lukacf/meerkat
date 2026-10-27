@@ -9,12 +9,12 @@
 //! decision owner as private account review. A name alone cannot select it.
 
 pub(crate) mod account_request;
-pub use account_request::{InstalledAccountSelection, installed_account_request_definition};
 pub use account_request::public::installed_public_service_request_definition;
+pub use account_request::{InstalledAccountSelection, installed_account_request_definition};
 pub(crate) mod composer;
-pub use composer::configure_installed_service_review;
 #[cfg(all(unix, feature = "console"))]
 pub use composer::configure_installed_account_requests;
+pub use composer::configure_installed_service_review;
 
 use std::{collections::BTreeMap, sync::Arc, time::SystemTime};
 
@@ -79,7 +79,6 @@ pub fn compose_installed_service_review(
     let auth = ConnectorAuth::from_facade(facade, realm.realm.clone())?;
     compose_with_auth(adapter, auth, realm, session, approvals)
 }
-
 
 fn compose_with_auth(
     adapter: Arc<meerkat::McpRouterAdapter>,
@@ -152,7 +151,9 @@ impl<T> ReviewedInstalledAccount<T> {
         &self.installation
     }
     /// A historical fresh-source publication, not input admission or readiness.
-    pub fn fresh_instruction_retained(&self) -> bool { self.fresh_instruction_retained }
+    pub fn fresh_instruction_retained(&self) -> bool {
+        self.fresh_instruction_retained
+    }
     pub fn software_job(&self) -> &str {
         &self.software.job_id
     }
@@ -176,12 +177,23 @@ pub struct ProtectedAccountCompletion {
 impl InstalledServiceReview {
     #[cfg(test)]
     pub(crate) fn fixture_checked(
-        realm: RealmLocator, session: SessionId, checked: Arc<CheckedInstalls>,
-        auth: Arc<ConnectorAuth>, approvals: Arc<LocalApprovals>,
+        realm: RealmLocator,
+        session: SessionId,
+        checked: Arc<CheckedInstalls>,
+        auth: Arc<ConnectorAuth>,
+        approvals: Arc<LocalApprovals>,
     ) -> Result<Self, ConnectError> {
         approvals.check_session(&session)?;
-        if realm.realm != auth.realm { return Err(refused("fixture realm mismatch")); }
-        Ok(Self { realm, session, checked, control: Control::new(auth.clone()), auth, approvals,
+        if realm.realm != auth.realm {
+            return Err(refused("fixture realm mismatch"));
+        }
+        Ok(Self {
+            realm,
+            session,
+            checked,
+            control: Control::new(auth.clone()),
+            auth,
+            approvals,
             #[cfg(all(unix, feature = "console"))]
             realm_installation: None,
         })
@@ -309,11 +321,16 @@ impl InstalledServiceReview {
         operations: BTreeMap<String, McpConnectorOperation>,
         proposal: InstalledAccessProposal<T>,
     ) -> Result<InstalledAccountReview<T>, ConnectError> {
-        self.review_account_with_task(job_id, target, operations, proposal, None, None, None, None, None).await
+        self.review_account_with_task(
+            job_id, target, operations, proposal, None, None, None, None, None,
+        )
+        .await
     }
 
     pub(super) async fn review_account_with_task<T: Serialize>(
-        &self, job_id: &str, target: ConnectorOAuthTarget,
+        &self,
+        job_id: &str,
+        target: ConnectorOAuthTarget,
         operations: BTreeMap<String, McpConnectorOperation>,
         proposal: InstalledAccessProposal<T>,
         task: Option<toolkit_mobkit::private_originals::InstalledServiceTask>,
@@ -322,15 +339,29 @@ impl InstalledServiceReview {
         task_tool_policy: Option<toolkit_mobkit::private_originals::ServiceToolPolicySelection>,
         cancellation: Option<account_request::ReviewCancellation>,
     ) -> Result<InstalledAccountReview<T>, ConnectError> {
-        self.review_account_with_task_refreshed(job_id, target, operations, proposal,
-            task, current_request, task_expires_in_ms, task_tool_policy, None, None, cancellation).await
+        self.review_account_with_task_refreshed(
+            job_id,
+            target,
+            operations,
+            proposal,
+            task,
+            current_request,
+            task_expires_in_ms,
+            task_tool_policy,
+            None,
+            None,
+            cancellation,
+        )
+        .await
     }
 
     // The Console supplies its same-login refresh here as well as at its
     // transport boundary. This check does not mint a native principal or
     // replace the retained request, account, grant or source owners.
     async fn review_account_with_task_refreshed<T: Serialize>(
-        &self, job_id: &str, target: ConnectorOAuthTarget,
+        &self,
+        job_id: &str,
+        target: ConnectorOAuthTarget,
         operations: BTreeMap<String, McpConnectorOperation>,
         proposal: InstalledAccessProposal<T>,
         task: Option<toolkit_mobkit::private_originals::InstalledServiceTask>,
@@ -341,7 +372,9 @@ impl InstalledServiceReview {
         capture_decision: Option<&account_request::console::CaptureDecision<'_>>,
         cancellation: Option<account_request::ReviewCancellation>,
     ) -> Result<InstalledAccountReview<T>, ConnectError> {
-        let operation_ids = operations.keys().map(|name| toolkit_package::Id::new(name.clone()))
+        let operation_ids = operations
+            .keys()
+            .map(|name| toolkit_package::Id::new(name.clone()))
             .collect::<Result<std::collections::BTreeSet<_>, _>>()
             .map_err(|error| refused(error.to_string()))?;
         let (login, software) = self.selected_login(job_id, operations)?;
@@ -362,25 +395,51 @@ impl InstalledServiceReview {
             .and_then(|body| body.get("application_selection"))
             .cloned()
             .ok_or_else(|| refused("The exact application review is missing"))?;
-        if let Some(refresh) = refresh { refresh().await?; }
+        if let Some(refresh) = refresh {
+            refresh().await?;
+        }
         self.approvals.check_session(&self.session)?;
         login.check_current().map_err(refused)?;
         let task = match task {
-            Some(task) => Some(task.prepare_review_with_tool_policy(&installation, operation_ids, task_expires_in_ms, request.clone(), task_tool_policy)
-                .await.map_err(|_| refused("The waiting task cannot be offered for service approval"))?),
-            None if task_tool_policy.is_some() => return Err(refused("A tool policy amendment requires the actual waiting task")),
+            Some(task) => Some(
+                task.prepare_review_with_tool_policy(
+                    &installation,
+                    operation_ids,
+                    task_expires_in_ms,
+                    request.clone(),
+                    task_tool_policy,
+                )
+                .await
+                .map_err(|_| refused("The waiting task cannot be offered for service approval"))?,
+            ),
+            None if task_tool_policy.is_some() => {
+                return Err(refused(
+                    "A tool policy amendment requires the actual waiting task",
+                ));
+            }
             None => None,
         };
         let request = task.as_ref().map_or(request, |task| task.request().clone());
-        let decision = self.approvals.review_access_cancellable(request, async {
-            match &cancellation {
-                Some(cancellation) => cancellation.cancelled().await,
-                None => std::future::pending().await,
-            }
-        }, |id| {
-            if let Some(cancellation) = &cancellation { cancellation.approval_created(id); }
-        }).await?;
-        if let Some(cancellation) = &cancellation { cancellation.check()?; }
+        let decision = self
+            .approvals
+            .review_access_cancellable(
+                request,
+                async {
+                    match &cancellation {
+                        Some(cancellation) => cancellation.cancelled().await,
+                        None => std::future::pending().await,
+                    }
+                },
+                |id| {
+                    if let Some(cancellation) = &cancellation {
+                        cancellation.approval_created(id);
+                    }
+                },
+            )
+            .await?;
+        if let Some(cancellation) = &cancellation {
+            cancellation.check()?;
+        }
         // The transport publishes its exact accepted answer before waking the
         // retained prompt. Capture it once here, before any further await.
         let decision_current = capture_decision.map(|capture| capture()).transpose()?;
@@ -409,22 +468,39 @@ impl InstalledServiceReview {
         // waits, before any new parent/grant/source effect. The terminal owner
         // retires approvals on EOF and joins this entire future.
         if let Some(current) = current_request {
-            if !current.check().await { return Err(refused("The account request is no longer current")); }
+            if !current.check().await {
+                return Err(refused("The account request is no longer current"));
+            }
         }
-        if let Some(refresh) = refresh { refresh().await?; }
+        if let Some(refresh) = refresh {
+            refresh().await?;
+        }
         self.approvals.check_session(&self.session)?;
         login.check_current().map_err(refused)?;
-        if let Some(cancellation) = &cancellation { cancellation.check()?; }
+        if let Some(cancellation) = &cancellation {
+            cancellation.check()?;
+        }
         let fresh_instruction_retained = match task {
-            Some(task) => task.approve(decision.clone(), account_publication_current(
-                login.clone(), self.approvals.clone(), self.session.clone(),
-                cancellation.clone(), decision_current,
-            )).await.map_err(|_| refused("The approved instruction could not be retained"))?,
+            Some(task) => task
+                .approve(
+                    decision.clone(),
+                    account_publication_current(
+                        login.clone(),
+                        self.approvals.clone(),
+                        self.session.clone(),
+                        cancellation.clone(),
+                        decision_current,
+                    ),
+                )
+                .await
+                .map_err(|_| refused("The approved instruction could not be retained"))?,
             None => false,
         };
         self.approvals.check_session(&self.session)?;
         login.check_current().map_err(refused)?;
-        if let Some(cancellation) = &cancellation { cancellation.check()?; }
+        if let Some(cancellation) = &cancellation {
+            cancellation.check()?;
+        }
         Ok(InstalledAccountReview::Approved(ReviewedInstalledAccount {
             selection: proposal.selection,
             decision,
@@ -475,15 +551,21 @@ fn account_publication_current(
     cancellation: Option<account_request::ReviewCancellation>,
     decision_current: Option<account_request::console::DecisionCheck>,
 ) -> impl Fn() -> bool + Send + Sync + 'static {
-    move || approvals.check_session(&session).is_ok()
-        && login.check_current().is_ok()
-        && cancellation.as_ref().is_none_or(|cancellation| cancellation.check().is_ok())
-        && decision_current.as_ref().is_none_or(|current| current())
+    move || {
+        approvals.check_session(&session).is_ok()
+            && login.check_current().is_ok()
+            && cancellation
+                .as_ref()
+                .is_none_or(|cancellation| cancellation.check().is_ok())
+            && decision_current.as_ref().is_none_or(|current| current())
+    }
 }
 
 #[cfg(test)]
 pub(crate) fn account_publication_current_for_test(
-    login: Arc<InstallationLogin>, approvals: Arc<LocalApprovals>, session: SessionId,
+    login: Arc<InstallationLogin>,
+    approvals: Arc<LocalApprovals>,
+    session: SessionId,
     decision_current: Option<account_request::console::DecisionCheck>,
 ) -> impl Fn() -> bool + Send + Sync + 'static {
     account_publication_current(login, approvals, session, None, decision_current)
@@ -503,7 +585,13 @@ fn review_request<T: Serialize>(
     installation: &ConnectorMcpInstallation,
     proposal: &InstalledAccessProposal<T>,
 ) -> Result<ApprovalRequest, ConnectError> {
-    let body = account_review_body(software, target, observed, installation, &proposal.selection)?;
+    let body = account_review_body(
+        software,
+        target,
+        observed,
+        installation,
+        &proposal.selection,
+    )?;
     account_review_request(software, proposal, body)
 }
 
@@ -537,8 +625,11 @@ fn account_review_body<T: Serialize>(
     Ok(body)
 }
 
-fn account_review_request<T: Serialize>(software: &InstalledSelection,
-    proposal: &InstalledAccessProposal<T>, body: Value) -> Result<ApprovalRequest, ConnectError> {
+fn account_review_request<T: Serialize>(
+    software: &InstalledSelection,
+    proposal: &InstalledAccessProposal<T>,
+    body: Value,
+) -> Result<ApprovalRequest, ConnectError> {
     Ok(ApprovalRequest {
         requester: proposal.requester.clone(),
         owner: ApprovalOwnerRef::Session {
@@ -707,8 +798,17 @@ mod tests {
             review_request(&software, &target, &account, &installation, &proposal).unwrap();
         let body = request.request_body.as_ref().unwrap();
         assert_eq!(request.proposed_action.body.as_ref(), Some(body));
-        assert_eq!(&account_review_body(&software, &target, &account, &installation,
-            &proposal.selection).unwrap(), body);
+        assert_eq!(
+            &account_review_body(
+                &software,
+                &target,
+                &account,
+                &installation,
+                &proposal.selection
+            )
+            .unwrap(),
+            body
+        );
         assert_eq!(body["software"]["receipt_sha256"], "1".repeat(64));
         assert_eq!(body["account"]["subject"], "account-one");
         assert_eq!(
@@ -738,12 +838,25 @@ mod tests {
         software.job_id = "1".repeat(32);
         software.validation_id = "2".repeat(32);
         software.recovery_request_sha256 = Some("4".repeat(64));
-        let body = account_review_body(&software, &target, &account, &installation,
-            &proposal.selection).unwrap();
+        let body = account_review_body(
+            &software,
+            &target,
+            &account,
+            &installation,
+            &proposal.selection,
+        )
+        .unwrap();
         let human = review_request(&software, &target, &account, &installation, &proposal).unwrap();
         assert_eq!(human.request_body.as_ref(), Some(&body));
-        assert_eq!(read(&body, installation.config(), &software.realm).unwrap(), *installation.config());
-        for field in ["receipt_sha256", "document_sha256", "recovery_request_sha256"] {
+        assert_eq!(
+            read(&body, installation.config(), &software.realm).unwrap(),
+            *installation.config()
+        );
+        for field in [
+            "receipt_sha256",
+            "document_sha256",
+            "recovery_request_sha256",
+        ] {
             let mut missing = body.clone();
             missing["software"].as_object_mut().unwrap().remove(field);
             assert!(read(&missing, installation.config(), &software.realm).is_err());
@@ -753,8 +866,16 @@ mod tests {
         assert!(read(&changed, installation.config(), &software.realm).is_err());
         let mut unauthorized = account;
         unauthorized.phase = meerkat::ConnectorAuthPhase::AuthorizationRequired;
-        assert!(account_review_body(&software, &target, &unauthorized, &installation,
-            &proposal.selection).is_err());
+        assert!(
+            account_review_body(
+                &software,
+                &target,
+                &unauthorized,
+                &installation,
+                &proposal.selection
+            )
+            .is_err()
+        );
     }
 
     #[test]

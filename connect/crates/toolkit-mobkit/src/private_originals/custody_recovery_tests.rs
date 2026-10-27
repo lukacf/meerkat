@@ -7,13 +7,28 @@ use crate::private_originals::custody_recovery::HandoffPhase;
 use meerkat_runtime::input_state::verify_exact_replay;
 
 #[derive(Clone, Copy)]
-enum CloseOrder { Acknowledged, PublicationFailed, BeforeCallback, PoisonedBeforeCallback }
+enum CloseOrder {
+    Acknowledged,
+    PublicationFailed,
+    BeforeCallback,
+    PoisonedBeforeCallback,
+}
 
 fn pending(fixture: &Fixture) -> Arc<PendingOriginalAdmission> {
-    let held = fixture.source.retained.lock().unwrap().iter()
+    let held = fixture
+        .source
+        .retained
+        .lock()
+        .unwrap()
+        .iter()
         .find(|held| held.reference == fixture.submission.original)
-        .cloned().expect("the actual bound original remains owned");
-    let pending = held.first_custody.lock().unwrap().clone()
+        .cloned()
+        .expect("the actual bound original remains owned");
+    let pending = held
+        .first_custody
+        .lock()
+        .unwrap()
+        .clone()
         .expect("the actual first invocation is enrolled");
     assert!(pending.handoff.enrolled());
     assert!(pending.first_candidate);
@@ -23,8 +38,10 @@ fn pending(fixture: &Fixture) -> Arc<PendingOriginalAdmission> {
 fn publication(pending: &PendingOriginalAdmission) -> Option<(bool, Result<(), String>)> {
     match &*pending.pending.lock().unwrap() {
         SourcePublication::Pending(_) => None,
-        SourcePublication::Settled { source_acknowledged, result } =>
-            Some((*source_acknowledged, result.clone())),
+        SourcePublication::Settled {
+            source_acknowledged,
+            result,
+        } => Some((*source_acknowledged, result.clone())),
     }
 }
 
@@ -32,7 +49,9 @@ async fn exercise(order: CloseOrder) {
     let mode = match order {
         CloseOrder::Acknowledged => DeliveryMode::Normal,
         CloseOrder::PublicationFailed => DeliveryMode::PoisonPublicationAfterAcceptance,
-        CloseOrder::BeforeCallback | CloseOrder::PoisonedBeforeCallback => DeliveryMode::HoldAccepted,
+        CloseOrder::BeforeCallback | CloseOrder::PoisonedBeforeCallback => {
+            DeliveryMode::HoldAccepted
+        }
     };
     let fixture = Fixture::new(mode, false).await;
     // The three existing fixture phases have a finite observation bound. This
@@ -178,13 +197,23 @@ async fn exercise(order: CloseOrder) {
     let source_cleanup = fixture.source.join_custody_recovery().await;
     match checked {
         Ok(Ok(())) => {
-            assert!(native_cleanup.is_ok(), "native cleanup failed: {native_cleanup:?}");
-            assert!(source_cleanup.is_ok(), "source cleanup failed: {source_cleanup:?}");
+            assert!(
+                native_cleanup.is_ok(),
+                "native cleanup failed: {native_cleanup:?}"
+            );
+            assert!(
+                source_cleanup.is_ok(),
+                "source cleanup failed: {source_cleanup:?}"
+            );
         }
-        Ok(Err(_)) => panic!("receipt/close control timed out; native cleanup: {native_cleanup:?}; source cleanup: {source_cleanup:?}"),
+        Ok(Err(_)) => panic!(
+            "receipt/close control timed out; native cleanup: {native_cleanup:?}; source cleanup: {source_cleanup:?}"
+        ),
         Err(payload) => {
             if native_cleanup.is_err() || source_cleanup.is_err() {
-                eprintln!("receipt/close cleanup failed: native={native_cleanup:?}; source={source_cleanup:?}");
+                eprintln!(
+                    "receipt/close cleanup failed: native={native_cleanup:?}; source={source_cleanup:?}"
+                );
             }
             std::panic::resume_unwind(payload);
         }

@@ -7,8 +7,21 @@ use meerkat_core::retained_work::RetainedWorkIdentity;
 use toolkit_store::{ToolkitStore, Transition};
 
 #[derive(Clone, Copy, Debug)]
-enum Case { First, Pending, TargetedFirst, TargetedPending, MissingInput, ChangedInput, Cancelled, ExtraContributor,
-    ExtraSelected, BadRun, BadSubmission, WarmLegacy, CancelWhileObserved }
+enum Case {
+    First,
+    Pending,
+    TargetedFirst,
+    TargetedPending,
+    MissingInput,
+    ChangedInput,
+    Cancelled,
+    ExtraContributor,
+    ExtraSelected,
+    BadRun,
+    BadSubmission,
+    WarmLegacy,
+    CancelWhileObserved,
+}
 
 fn changed_work(work: &RetainedWorkIdentity, case: Case) -> RetainedWorkIdentity {
     let mut contributors = work.contributors().to_vec();
@@ -16,21 +29,47 @@ fn changed_work(work: &RetainedWorkIdentity, case: Case) -> RetainedWorkIdentity
     let mut run = work.run_id().clone();
     match case {
         Case::ExtraContributor => contributors.push(contributors[0].clone()),
-        Case::ExtraSelected => { selected.insert("another-selected-input".into(), selected.values().next().unwrap().clone()); },
+        Case::ExtraSelected => {
+            selected.insert(
+                "another-selected-input".into(),
+                selected.values().next().unwrap().clone(),
+            );
+        }
         Case::BadRun => run = meerkat_core::lifecycle::RunId::new(),
         Case::BadSubmission => contributors[0].submission_digest = "0".repeat(64),
         _ => (),
     }
-    RetainedWorkIdentity::new(work.runtime_id(), run, contributors, selected, work.controller().cloned())
+    RetainedWorkIdentity::new(
+        work.runtime_id(),
+        run,
+        contributors,
+        selected,
+        work.controller().cloned(),
+    )
 }
 
 async fn case(explicit: bool, case: Case) {
-    let fixture = if matches!(case, Case::WarmLegacy) { ContinuationFixture::for_continuation().await }
-        else { ContinuationFixture::for_cold_continuation(explicit, matches!(case, Case::TargetedFirst | Case::TargetedPending)).await };
-    let pins = Arc::new(PausedPins { inner: fixture.service.clone(),
-        pause: matches!(case, Case::CancelWhileObserved), entered: tokio::sync::Notify::new(),
-        release: tokio::sync::Notify::new() });
-    if !matches!(case, Case::WarmLegacy) { fixture.source.bind_controller_pin_source(pins.clone()).unwrap(); }
+    let fixture = if matches!(case, Case::WarmLegacy) {
+        ContinuationFixture::for_continuation().await
+    } else {
+        ContinuationFixture::for_cold_continuation(
+            explicit,
+            matches!(case, Case::TargetedFirst | Case::TargetedPending),
+        )
+        .await
+    };
+    let pins = Arc::new(PausedPins {
+        inner: fixture.service.clone(),
+        pause: matches!(case, Case::CancelWhileObserved),
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    if !matches!(case, Case::WarmLegacy) {
+        fixture
+            .source
+            .bind_controller_pin_source(pins.clone())
+            .unwrap();
+    }
     let mut owner_handle = None;
     let mut owner_passes = None;
     let result = fixture.source.with_synthetic_admission_diagnostics(AssertUnwindSafe(Box::pin(async {
@@ -176,28 +215,46 @@ async fn case(explicit: bool, case: Case) {
     })).catch_unwind()).await;
     drop(owner_handle);
     if let Some(mut passes) = owner_passes {
-        tokio::time::timeout(EVENT_GUARD, async { while passes.changed().await.is_ok() {} }).await.unwrap();
+        tokio::time::timeout(EVENT_GUARD, async {
+            while passes.changed().await.is_ok() {}
+        })
+        .await
+        .unwrap();
     }
     let cleanup = fixture.shutdown().await;
     assert!(cleanup.is_ok(), "{cleanup:?}");
-    if let Err(panic) = result { std::panic::resume_unwind(panic); }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cold_setup_a_first_and_pending_continuation_recover_without_resubmitting_a() {
-    for explicit in [false, true] { for mode in [Case::First, Case::Pending] { Box::pin(case(explicit, mode)).await; } }
+    for explicit in [false, true] {
+        for mode in [Case::First, Case::Pending] {
+            Box::pin(case(explicit, mode)).await;
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cold_setup_a_missing_changed_cancelled_or_incomplete_source_refuses_before_commit() {
-    for mode in [Case::MissingInput, Case::ChangedInput, Case::Cancelled, Case::ExtraContributor, Case::ExtraSelected] {
+    for mode in [
+        Case::MissingInput,
+        Case::ChangedInput,
+        Case::Cancelled,
+        Case::ExtraContributor,
+        Case::ExtraSelected,
+    ] {
         Box::pin(case(false, mode)).await;
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cold_setup_a_historical_custody_cannot_validate_another_run_or_submission() {
-    for mode in [Case::BadRun, Case::BadSubmission] { Box::pin(case(false, mode)).await; }
+    for mode in [Case::BadRun, Case::BadSubmission] {
+        Box::pin(case(false, mode)).await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -217,12 +274,18 @@ struct PausedPins {
 impl meerkat_mobkit::identity_first::ControllerPinSource for PausedPins {
     async fn live_actor(&self, session: &SessionId) -> Option<meerkat::LiveSessionActorWitness> {
         let actor = self.inner.live_actor(session).await;
-        if self.pause { self.entered.notify_one(); self.release.notified().await; }
+        if self.pause {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
         actor
     }
-    async fn pin_actor(&self, _: &meerkat::LiveSessionActorWitness)
-        -> Result<meerkat_core::ControllerModelClient, String>
-    { panic!("the cold caller must not acquire B through pin_actor"); }
+    async fn pin_actor(
+        &self,
+        _: &meerkat::LiveSessionActorWitness,
+    ) -> Result<meerkat_core::ControllerModelClient, String> {
+        panic!("the cold caller must not acquire B through pin_actor");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -232,7 +295,9 @@ async fn cold_setup_a_cancellation_can_enter_during_actor_wait_and_refuses_promo
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cold_setup_a_targeted_selection_restores_its_exact_operation_projection() {
-    for mode in [Case::TargetedFirst, Case::TargetedPending] { Box::pin(case(false, mode)).await; }
+    for mode in [Case::TargetedFirst, Case::TargetedPending] {
+        Box::pin(case(false, mode)).await;
+    }
 }
 
 /// Component acceptance for durable-owner reopen through actual Meta delivery.
@@ -388,9 +453,15 @@ async fn durable_owner_reopen_drains_same_pending_completion_after_source_recove
             &adapter.binding(&obligation).unwrap().retained_work);
         assert!(matches!(adapter.reconcile(&obligation).await, Ok(ContinuationReconciliation::Applied(_))));
     })).catch_unwind().await;
-    let cleanup = if let Some(fixture) = active.as_ref() { fixture.close_durable_owners().await } else { Ok(()) };
+    let cleanup = if let Some(fixture) = active.as_ref() {
+        fixture.close_durable_owners().await
+    } else {
+        Ok(())
+    };
     assert!(cleanup.is_ok(), "{cleanup:?}");
-    if let Err(panic) = result { std::panic::resume_unwind(panic); }
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 #[path = "custody_recovery_wake_tests.rs"]

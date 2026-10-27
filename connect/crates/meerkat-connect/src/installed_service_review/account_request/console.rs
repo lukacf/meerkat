@@ -8,22 +8,31 @@ use crate::{
     stdio::{PromptAnswer, PromptBridge},
 };
 use futures_util::future::BoxFuture;
-use std::{sync::atomic::{AtomicBool, Ordering}, future::Future, pin::Pin, time::Duration};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 
 mod callback;
-pub(crate) use callback::{CallbackDelivery, CallbackResult, answer_retained, answer_retained_authorized,
-    cancel_retained_sign_in_authorized};
+pub(crate) use callback::{
+    CallbackDelivery, CallbackResult, answer_retained, answer_retained_authorized,
+    cancel_retained_sign_in_authorized,
+};
 
 /// The installed HTTP owner supplies a closure over its retained verified
 /// human, login and request. Each call must resolve fresh native access and
 /// exact source disclosure. It is transport eligibility, never a native grant.
 /// The J1 binding is intentionally not constructed from a principal string.
-pub(crate) type Refresh<'a> = dyn Fn() -> BoxFuture<'static, Result<(), ConnectError>> + Send + Sync + 'a;
+pub(crate) type Refresh<'a> =
+    dyn Fn() -> BoxFuture<'static, Result<(), ConnectError>> + Send + Sync + 'a;
 /// Captured once from the exact accepted answer, never a mutable latest viewer.
 /// The synchronous check re-resolves that request's native Human and access at
 /// the existing parent, child and source publication entry checks.
 pub(crate) type DecisionCheck = Arc<dyn Fn() -> bool + Send + Sync>;
-pub(crate) type CaptureDecision<'a> = dyn Fn() -> Result<DecisionCheck, ConnectError> + Send + Sync + 'a;
+pub(crate) type CaptureDecision<'a> =
+    dyn Fn() -> Result<DecisionCheck, ConnectError> + Send + Sync + 'a;
 
 impl InstalledAccountRequests {
     /// Drive an actual account request without terminal input. The caller must
@@ -53,17 +62,27 @@ impl InstalledAccountRequests {
         let result = async {
             // This task comes from the actual borrowed native invocation and
             // its exact parent A. A browser label cannot replace its login.
-            let login = request.task.as_ref().and_then(|task| task.console_login()).cloned()
+            let login = request
+                .task
+                .as_ref()
+                .and_then(|task| task.console_login())
+                .cloned()
                 .ok_or_else(|| refused("The account request has no retained Console login"))?;
-            let reservation = login.reserve().map_err(|_| refused("The Console login refused account entry"))?;
+            let reservation = login
+                .reserve()
+                .map_err(|_| refused("The Console login refused account entry"))?;
             let checked_refresh = || -> BoxFuture<'static, Result<(), ConnectError>> {
                 let login = login.clone();
-                let current = login.check().map_err(|_| refused("The Console login is unavailable"));
+                let current = login
+                    .check()
+                    .map_err(|_| refused("The Console login is unavailable"));
                 let refreshed = current.is_ok().then(|| refresh());
                 Box::pin(async move {
                     current?;
                     refreshed.expect("a current login selected refresh").await?;
-                    login.check().map_err(|_| refused("The Console login is unavailable"))?;
+                    login
+                        .check()
+                        .map_err(|_| refused("The Console login is unavailable"))?;
                     Ok(())
                 })
             };
@@ -76,13 +95,24 @@ impl InstalledAccountRequests {
             };
             let result = self
                 .present_console_inner(
-                    request, presenter, bridge, callbacks, redirect, &checked_refresh, decision, &login, closed,
+                    request,
+                    presenter,
+                    bridge,
+                    callbacks,
+                    redirect,
+                    &checked_refresh,
+                    decision,
+                    &login,
+                    closed,
                     &owner_closed,
                 )
                 .await;
-            if result.is_ok() { reservation.settled(); }
+            if result.is_ok() {
+                reservation.settled();
+            }
             result
-        }.await;
+        }
+        .await;
         if owner_closed.load(Ordering::SeqCst) || presenter.is_none() {
             let retired = self.review.retire();
             drop(presenter.take());
@@ -166,7 +196,9 @@ impl InstalledAccountRequests {
             return Ok(request.response.is_closed());
         }
         let mut login_completed = false;
-        if observed.expect("an unstopped observation was polled")?.phase
+        if observed
+            .expect("an unstopped observation was polled")?
+            .phase
             != meerkat::ConnectorAuthPhase::Authorized
         {
             approvals.check_session(&self.review.session)?;
@@ -182,12 +214,14 @@ impl InstalledAccountRequests {
                             .enter()
                             .map_err(|_| refused("The current account request cannot enter"))?,
                     );
-                    self.review.start_account(
-                        &request.job_id,
-                        request.target.clone(),
-                        request.selection.operations.clone(),
-                        redirect,
-                    ).await
+                    self.review
+                        .start_account(
+                            &request.job_id,
+                            request.target.clone(),
+                            request.selection.operations.clone(),
+                            redirect,
+                        )
+                        .await
                 },
                 &mut request.response,
                 &bridge,
@@ -249,15 +283,20 @@ impl InstalledAccountRequests {
                 &bridge,
                 refresh,
                 closed.as_mut(),
-            ).await;
+            )
+            .await;
             if !matches!(current, Ok(true)) {
                 let retired = self.review.control.retire().map_err(refused);
                 if current.is_ok() {
                     let _ = callback.response.send(CallbackResult::Refused);
-                } else { drop(callback.response); }
+                } else {
+                    drop(callback.response);
+                }
                 let finished = notice.finish(SignInDisposition::Refused).await;
-                present::join_cleanup(current.map(|_| ()),
-                    present::join_cleanup(retired, finished))?;
+                present::join_cleanup(
+                    current.map(|_| ()),
+                    present::join_cleanup(retired, finished),
+                )?;
                 return Ok(request.response.is_closed());
             }
             let Some(code) = callback.code else {
@@ -281,7 +320,8 @@ impl InstalledAccountRequests {
                 sign_in_closed(&mut notice, async {
                     stop(&mut request.response, &bridge, closed.as_mut()).await;
                 }),
-            ).await;
+            )
+            .await;
             let (completed, stopped) = match completion {
                 Ok(value) => value,
                 Err(error) => {
@@ -290,8 +330,11 @@ impl InstalledAccountRequests {
                     let retired = self.review.control.retire().map_err(refused);
                     drop(callback.response);
                     let finished = notice.finish(SignInDisposition::Refused).await;
-                    return present::join_cleanup(Err(error),
-                        present::join_cleanup(retired, finished)).map(|()| true);
+                    return present::join_cleanup(
+                        Err(error),
+                        present::join_cleanup(retired, finished),
+                    )
+                    .map(|()| true);
                 }
             };
             let Some(completed) = completed else {
@@ -299,21 +342,38 @@ impl InstalledAccountRequests {
                 // Explicit Cancel is local to this request, not owner closure.
                 let retired = self.review.control.retire().map_err(refused);
                 let current = if notice.cancel_requested() {
-                    checkpoint(&request.current, &mut request.response, &bridge,
-                        refresh, closed.as_mut()).await
-                } else { Ok(false) };
+                    checkpoint(
+                        &request.current,
+                        &mut request.response,
+                        &bridge,
+                        refresh,
+                        closed.as_mut(),
+                    )
+                    .await
+                } else {
+                    Ok(false)
+                };
                 let reply = matches!(current, Ok(true));
                 if reply {
                     let _ = callback.response.send(if retired.is_ok() {
                         CallbackResult::Refused
-                    } else { CallbackResult::CleanupUnconfirmed });
-                } else { drop(callback.response); }
+                    } else {
+                        CallbackResult::CleanupUnconfirmed
+                    });
+                } else {
+                    drop(callback.response);
+                }
                 let finished = notice.finish(SignInDisposition::Refused).await;
-                present::join_cleanup(current.map(|_| ()),
-                    present::join_cleanup(retired, finished))?;
+                present::join_cleanup(
+                    current.map(|_| ()),
+                    present::join_cleanup(retired, finished),
+                )?;
                 if reply {
                     let _ = request.response.send(AccountReply::new(
-                        AccountState::Unavailable, false, false));
+                        AccountState::Unavailable,
+                        false,
+                        false,
+                    ));
                 }
                 return Ok(true);
             };
@@ -344,7 +404,10 @@ impl InstalledAccountRequests {
                 let retired = self.review.control.retire().map_err(refused);
                 drop(callback.response);
                 let finished = notice.finish(SignInDisposition::Refused).await;
-                present::join_cleanup(current.map(|_| ()), present::join_cleanup(retired, finished))?;
+                present::join_cleanup(
+                    current.map(|_| ()),
+                    present::join_cleanup(retired, finished),
+                )?;
                 return Ok(request.response.is_closed());
             }
             let _ = callback.response.send(disposition);
@@ -458,10 +521,14 @@ impl InstalledAccountRequests {
 }
 
 #[derive(Clone, Copy)]
-enum Stop { Request, Presentation }
+enum Stop {
+    Request,
+    Presentation,
+}
 impl Stop {
     fn owner_closed(self, owner_closed: Option<&AtomicBool>) -> bool {
-        matches!(self, Self::Presentation) && owner_closed.is_none_or(|closed| closed.load(Ordering::SeqCst))
+        matches!(self, Self::Presentation)
+            && owner_closed.is_none_or(|closed| closed.load(Ordering::SeqCst))
     }
 }
 
@@ -516,8 +583,12 @@ pub(crate) async fn join_on_close<T, F: Future<Output = T>, C: Future<Output = (
         // Once polled, the actual future may hold native custody. Retain and
         // join it on close; this bit is poll bookkeeping, not authority.
         polled = true;
-        future.as_mut().poll(cx).map(|result| (Some(result), stopped))
-    }).await
+        future
+            .as_mut()
+            .poll(cx)
+            .map(|result| (Some(result), stopped))
+    })
+    .await
 }
 
 // Keep the private account reply channel inside its owning module while the
@@ -536,7 +607,8 @@ pub(crate) async fn fixture_join_on_close<T, F: Future<Output = T>, C: Future<Ou
 // callback delivery and while native completion is entered. It never closes
 // the Console login, the host, a shared account or the original business task.
 async fn sign_in_closed<C: Future<Output = ()>>(
-    notice: &mut crate::stdio::ProviderNotice, closed: C,
+    notice: &mut crate::stdio::ProviderNotice,
+    closed: C,
 ) {
     tokio::select! { biased; _ = closed => {}, _ = notice.cancelled() => {} }
 }
@@ -566,8 +638,12 @@ pub(crate) async fn complete_joined<C: Future<Output = ()>>(
             let _ = cancel.take().expect("one cancellation sender").send(());
         }
         polled = true;
-        completing.as_mut().poll(cx).map(|result| result.map(|result| (Some(result), stopped)))
-    }).await
+        completing
+            .as_mut()
+            .poll(cx)
+            .map(|result| result.map(|result| (Some(result), stopped)))
+    })
+    .await
 }
 
 #[cfg(test)]
@@ -585,8 +661,19 @@ where
     F: Future<Output = Result<T, ConnectError>>,
     C: Future<Output = ()>,
 {
-    drive_review_cancellable(review, approvals, presenter, bridge, refresh,
-        response, closed, decision_login, None, None).await
+    drive_review_cancellable(
+        review,
+        approvals,
+        presenter,
+        bridge,
+        refresh,
+        response,
+        closed,
+        decision_login,
+        None,
+        None,
+    )
+    .await
 }
 
 pub(super) async fn drive_review_cancellable<T, F, C, R>(

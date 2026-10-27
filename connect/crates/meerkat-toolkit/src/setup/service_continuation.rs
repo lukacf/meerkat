@@ -26,14 +26,23 @@ pub struct ApprovedServiceInput {
 /// selections and receipts cannot choose this implementation or prove access.
 #[async_trait]
 pub trait ApprovedServiceSourceOwner: Send + Sync {
-    async fn verify_selection(&self, snapshot: &SetupSnapshot, selected: &ApprovedServiceSelection)
-        -> Result<(), SetupError>;
-    async fn observe_admission(&self, snapshot: &SetupSnapshot, selected: &ApprovedServiceSelection)
-        -> Result<Option<ApprovedServiceInput>, SetupError>;
+    async fn verify_selection(
+        &self,
+        snapshot: &SetupSnapshot,
+        selected: &ApprovedServiceSelection,
+    ) -> Result<(), SetupError>;
+    async fn observe_admission(
+        &self,
+        snapshot: &SetupSnapshot,
+        selected: &ApprovedServiceSelection,
+    ) -> Result<Option<ApprovedServiceInput>, SetupError>;
     /// Both historical non-entry and a durable fence against later entry are
     /// required. Current denial or an absent native lookup is insufficient.
-    async fn observe_rejection(&self, snapshot: &SetupSnapshot, selected: &ApprovedServiceSelection)
-        -> Result<Option<ContextReference>, SetupError>;
+    async fn observe_rejection(
+        &self,
+        snapshot: &SetupSnapshot,
+        selected: &ApprovedServiceSelection,
+    ) -> Result<Option<ContextReference>, SetupError>;
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -49,7 +58,10 @@ pub(super) struct ApprovedServiceReady {
 /// diagnostic provenance; it proves neither process cleanup nor B non-entry.
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ApprovedServiceAttachmentFailure { Failed, Rejected }
+pub enum ApprovedServiceAttachmentFailure {
+    Failed,
+    Rejected,
+}
 
 /// Bounded host projection of the exact attempt's typed setup observation.
 /// This carries no server text and proves no cause, readiness, cleanup or
@@ -115,7 +127,9 @@ impl SetupStore<'_> {
     /// entered and can no longer enter. Generic/helper result writers cannot
     /// replace the reserved continuation with their own terminal observation.
     pub async fn reject_approved_service(
-        &self, snapshot: &SetupSnapshot, owner: &dyn ApprovedServiceSourceOwner,
+        &self,
+        snapshot: &SetupSnapshot,
+        owner: &dyn ApprovedServiceSourceOwner,
     ) -> Result<SetupSnapshot, SetupError> {
         self.reject_service(snapshot, owner, None, None).await
     }
@@ -124,7 +138,9 @@ impl SetupStore<'_> {
     /// current native attempt. Durable non-entry still comes from the source
     /// owner, never from that failure enum or an absent admission lookup.
     pub async fn reject_failed_service_attachment(
-        &self, snapshot: &SetupSnapshot, owner: &dyn ApprovedServiceSourceOwner,
+        &self,
+        snapshot: &SetupSnapshot,
+        owner: &dyn ApprovedServiceSourceOwner,
         failure: ApprovedServiceAttachmentFailure,
     ) -> Result<SetupSnapshot, SetupError> {
         self.reject_failed_service_attachment_with_observation(snapshot, owner, failure, None)
@@ -145,23 +161,37 @@ impl SetupStore<'_> {
     }
 
     async fn reject_service(
-        &self, snapshot: &SetupSnapshot, owner: &dyn ApprovedServiceSourceOwner,
+        &self,
+        snapshot: &SetupSnapshot,
+        owner: &dyn ApprovedServiceSourceOwner,
         failure: Option<ApprovedServiceAttachmentFailure>,
         observation: Option<ApprovedServiceAttachmentObservation>,
     ) -> Result<SetupSnapshot, SetupError> {
         self.scope.check(&snapshot.request)?;
         let selected = snapshot.approved_service().ok_or(SetupError::Rejected)?;
-        let detail = owner.observe_rejection(snapshot, selected).await?
+        let detail = owner
+            .observe_rejection(snapshot, selected)
+            .await?
             .ok_or(ContinuationError::OwnerUnavailable)?;
-        if !matches!(snapshot.state().lifecycle_phase, AcquisitionPhase::Investigating | AcquisitionPhase::Preparing) {
+        if !matches!(
+            snapshot.state().lifecycle_phase,
+            AcquisitionPhase::Investigating | AcquisitionPhase::Preparing
+        ) {
             return Ok(snapshot.clone());
         }
-        let now = u64::try_from(self.store.now_ms().await?).map_err(|_| SetupError::InvalidRecord)?;
+        let now =
+            u64::try_from(self.store.now_ms().await?).map_err(|_| SetupError::InvalidRecord)?;
         let state = snapshot.state();
-        let (mut record, effects) = apply_selected_source(snapshot, AcquisitionInput::ReportUnavailable {
-            operation_id: state.operation_id.clone(), authority_digest: state.authority_digest.clone(),
-            expected_revision: state.revision, detail_ref: digest(&detail)?.to_string(), now,
-        })?;
+        let (mut record, effects) = apply_selected_source(
+            snapshot,
+            AcquisitionInput::ReportUnavailable {
+                operation_id: state.operation_id.clone(),
+                authority_digest: state.authority_digest.clone(),
+                expected_revision: state.revision,
+                detail_ref: digest(&detail)?.to_string(),
+                now,
+            },
+        )?;
         record.detail = Some(detail);
         // Existing terminal checks and the generated deadline guard still apply.
         // Never attach this cause to another terminal outcome.
@@ -175,24 +205,39 @@ impl SetupStore<'_> {
     /// Reserve B before its attachment/input entry. A failed CAS cannot select
     /// another source implicitly. Identical retries read the canonical winner.
     pub async fn reserve_approved_service(
-        &self, snapshot: &SetupSnapshot, selected: ApprovedServiceSelection,
+        &self,
+        snapshot: &SetupSnapshot,
+        selected: ApprovedServiceSelection,
         owner: &dyn ApprovedServiceSourceOwner,
     ) -> Result<SetupSnapshot, SetupError> {
         self.scope.check(&snapshot.request)?;
         owner.verify_selection(snapshot, &selected).await?;
         if let Some(prior) = &snapshot.record.approved_service {
-            return if prior == &selected { Ok(snapshot.clone()) } else { Err(SetupError::Rejected) };
+            return if prior == &selected {
+                Ok(snapshot.clone())
+            } else {
+                Err(SetupError::Rejected)
+            };
         }
         // Never reinterpret an already selected A-role implementation as B.
-        if !snapshot.record.selections.is_empty() { return Err(SetupError::Rejected); }
+        if !snapshot.record.selections.is_empty() {
+            return Err(SetupError::Rejected);
+        }
         let state = snapshot.state();
         let selected_digest = digest(&selected)?.to_string();
-        let now = u64::try_from(self.store.now_ms().await?).map_err(|_| SetupError::InvalidRecord)?;
-        let (mut record, effects) = apply(snapshot, AcquisitionInput::RecordSelection {
-            operation_id: state.operation_id.clone(), authority_digest: state.authority_digest.clone(),
-            expected_revision: state.revision, selection_digest: selected_digest.clone(),
-            decision_ref: selected_digest, now,
-        })?;
+        let now =
+            u64::try_from(self.store.now_ms().await?).map_err(|_| SetupError::InvalidRecord)?;
+        let (mut record, effects) = apply(
+            snapshot,
+            AcquisitionInput::RecordSelection {
+                operation_id: state.operation_id.clone(),
+                authority_digest: state.authority_digest.clone(),
+                expected_revision: state.revision,
+                selection_digest: selected_digest.clone(),
+                decision_ref: selected_digest,
+                now,
+            },
+        )?;
         record.approved_service = Some(selected);
         self.commit(snapshot, record, effects, None).await
     }
@@ -202,33 +247,56 @@ impl SetupStore<'_> {
     /// generated owner retains cancellation/deadline precedence and emits the
     /// same outbox intent; its delivery owner observes B instead of submitting A.
     pub async fn observe_approved_service(
-        &self, snapshot: &SetupSnapshot, owner: &dyn ApprovedServiceSourceOwner,
+        &self,
+        snapshot: &SetupSnapshot,
+        owner: &dyn ApprovedServiceSourceOwner,
     ) -> Result<SetupSnapshot, SetupError> {
         self.scope.check(&snapshot.request)?;
         let selected = snapshot.approved_service().ok_or(SetupError::Rejected)?;
-        let admission = owner.observe_admission(snapshot, selected).await?
+        let admission = owner
+            .observe_admission(snapshot, selected)
+            .await?
             .ok_or(ContinuationError::OwnerUnavailable)?;
         if let Some(prior) = &snapshot.record.service_ready {
-            return if prior.admission == admission { Ok(snapshot.clone()) }
-                else { Err(SetupError::InvalidRecord) };
+            return if prior.admission == admission {
+                Ok(snapshot.clone())
+            } else {
+                Err(SetupError::InvalidRecord)
+            };
         }
         // A terminal cancellation/failure remains terminal even if B's earlier
         // native admission is published later. Its B selection still prevents
         // a second delivery in the continuation owner.
-        if !matches!(snapshot.state().lifecycle_phase, AcquisitionPhase::Investigating | AcquisitionPhase::Preparing) {
+        if !matches!(
+            snapshot.state().lifecycle_phase,
+            AcquisitionPhase::Investigating | AcquisitionPhase::Preparing
+        ) {
             return Ok(snapshot.clone());
         }
-        let now = u64::try_from(self.store.now_ms().await?).map_err(|_| SetupError::InvalidRecord)?;
+        let now =
+            u64::try_from(self.store.now_ms().await?).map_err(|_| SetupError::InvalidRecord)?;
         let state = snapshot.state();
-        let ready = ApprovedServiceReady { selection_digest: digest(selected)?,
-            selection_generation: state.selection_generation, observed_at_ms: now, admission };
+        let ready = ApprovedServiceReady {
+            selection_digest: digest(selected)?,
+            selection_generation: state.selection_generation,
+            observed_at_ms: now,
+            admission,
+        };
         let readiness_digest = digest(&ready)?.to_string();
-        let (mut record, effects) = apply(snapshot, AcquisitionInput::ResolveReady {
-            operation_id: state.operation_id.clone(), authority_digest: state.authority_digest.clone(),
-            expected_revision: state.revision, selection_digest: state.selection_digest.clone(),
-            selection_generation: state.selection_generation, readiness_ref: readiness_digest.clone(),
-            readiness_digest, observed_at: now, now,
-        })?;
+        let (mut record, effects) = apply(
+            snapshot,
+            AcquisitionInput::ResolveReady {
+                operation_id: state.operation_id.clone(),
+                authority_digest: state.authority_digest.clone(),
+                expected_revision: state.revision,
+                selection_digest: state.selection_digest.clone(),
+                selection_generation: state.selection_generation,
+                readiness_ref: readiness_digest.clone(),
+                readiness_digest,
+                observed_at: now,
+                now,
+            },
+        )?;
         record.service_ready = Some(ready);
         self.commit(snapshot, record, effects, None).await
     }

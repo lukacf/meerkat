@@ -4,10 +4,10 @@
 //! effective configuration or inherited section is copied into the document.
 
 use super::*;
+use meerkat_core::connection::RealmConnectionSet;
 use meerkat_core::{
     Config, ConfigDelta, ConfigRuntime, EffectiveConfigReader, Provider, RealmConfigSource,
 };
-use meerkat_core::connection::RealmConnectionSet;
 use serde_json::Value;
 
 pub(super) struct TargetReview {
@@ -34,7 +34,9 @@ fn direct_backend(provider: Provider) -> Result<&'static str, ConnectError> {
         Provider::OpenAI => Ok("openai_api"),
         Provider::Anthropic => Ok("anthropic_api"),
         Provider::Gemini => Ok("google_genai"),
-        _ => Err(invalid("First-target setup currently supports direct OpenAI, Anthropic and Google API keys. This selected model needs an existing native target.")),
+        _ => Err(invalid(
+            "First-target setup currently supports direct OpenAI, Anthropic and Google API keys. This selected model needs an existing native target.",
+        )),
     }
 }
 
@@ -48,57 +50,86 @@ async fn own_document(startup: &SessionStartup) -> Result<Option<Value>, Connect
         .map_err(|error| ConnectError::native("Retain first-target document presence", error))
 }
 
-fn check_absence(config: &Config, own: Option<&Value>, realm: &meerkat_core::RealmId, name: &str)
-    -> Result<(), ConnectError>
-{
+fn check_absence(
+    config: &Config,
+    own: Option<&Value>,
+    realm: &meerkat_core::RealmId,
+    name: &str,
+) -> Result<(), ConnectError> {
     // Raw presence, not a default-filled Config, decides whether this scalar
     // was already supplied. Even an explicit empty/default value is preserved.
-    if own.and_then(|value| value.get("realm")).and_then(|value| value.get(realm.as_str()))
+    if own
+        .and_then(|value| value.get("realm"))
+        .and_then(|value| value.get(realm.as_str()))
         .is_some_and(|section| section.get("default_binding").is_some())
     {
-        return Err(invalid("This realm already declares a default binding. First-target setup will not replace it; review its native configuration before trying again."));
+        return Err(invalid(
+            "This realm already declares a default binding. First-target setup will not replace it; review its native configuration before trying again.",
+        ));
     }
     let chain = RealmChain::resolve(config, realm)
         .map_err(|error| ConnectError::native("Resolve first-target inheritance", error))?;
     for owner in chain.realms() {
         if let Some(section) = config.realm.get(owner.as_str()) {
             if !section.binding.is_empty() {
-                return Err(invalid("A native model binding appeared while first-target setup was being prepared. Restart setup to review the existing target."));
+                return Err(invalid(
+                    "A native model binding appeared while first-target setup was being prepared. Restart setup to review the existing target.",
+                ));
             }
-            if owner == realm && (section.backend.contains_key(name) || section.auth.contains_key(name)) {
-                return Err(invalid("That connection name is already used by a backend or auth profile in this realm. No profile was replaced."));
+            if owner == realm
+                && (section.backend.contains_key(name) || section.auth.contains_key(name))
+            {
+                return Err(invalid(
+                    "That connection name is already used by a backend or auth profile in this realm. No profile was replaced.",
+                ));
             }
             if owner == realm && section.default_binding.is_some() {
-                return Err(invalid("This realm already has an effective default binding. First-target setup will not replace it."));
+                return Err(invalid(
+                    "This realm already has an effective default binding. First-target setup will not replace it.",
+                ));
             }
         }
     }
     Ok(())
 }
 
-fn check_preserved_realm_fields(current: &Config, preview: &Config, realm: &meerkat_core::RealmId)
-    -> Result<(), ConnectError>
-{
-    let Some(prior) = current.realm.get(realm.as_str()) else { return Ok(()); };
-    let after = preview.realm.get(realm.as_str())
+fn check_preserved_realm_fields(
+    current: &Config,
+    preview: &Config,
+    realm: &meerkat_core::RealmId,
+) -> Result<(), ConnectError> {
+    let Some(prior) = current.realm.get(realm.as_str()) else {
+        return Ok(());
+    };
+    let after = preview
+        .realm
+        .get(realm.as_str())
         .ok_or_else(|| invalid("The native preview lost the selected realm"))?;
     let prior = serde_json::to_value(prior)
         .map_err(|error| ConnectError::native("Retain existing realm fields for review", error))?;
     let after = serde_json::to_value(after)
         .map_err(|error| ConnectError::native("Check native realm preview preservation", error))?;
-    let fields = prior.as_object().ok_or_else(|| invalid("Native realm fields are not an object"))?;
+    let fields = prior
+        .as_object()
+        .ok_or_else(|| invalid("Native realm fields are not an object"))?;
     for (field, value) in fields {
-        if field == "default_binding" { continue; }
+        if field == "default_binding" {
+            continue;
+        }
         if matches!(field.as_str(), "backend" | "auth" | "binding") {
             if let Some(entries) = value.as_object() {
                 for (name, prior) in entries {
                     if after.get(field).and_then(|map| map.get(name)) != Some(prior) {
-                        return Err(invalid("Creating this connection would hide existing settings for this realm from an ancestor document. No configuration was saved. Add the connection manually to the native realm configuration while preserving those settings, then rerun Connect."));
+                        return Err(invalid(
+                            "Creating this connection would hide existing settings for this realm from an ancestor document. No configuration was saved. Add the connection manually to the native realm configuration while preserving those settings, then rerun Connect.",
+                        ));
                     }
                 }
             }
         } else if after.get(field) != Some(value) {
-            return Err(invalid("Creating this connection would change an unreviewed realm setting. No configuration was saved. Add the connection manually to the native realm configuration while preserving that setting, then rerun Connect."));
+            return Err(invalid(
+                "Creating this connection would change an unreviewed realm setting. No configuration was saved. Add the connection manually to the native realm configuration while preserving that setting, then rerun Connect.",
+            ));
         }
     }
     Ok(())
@@ -107,31 +138,54 @@ fn check_preserved_realm_fields(current: &Config, preview: &Config, realm: &meer
 impl TargetReview {
     fn verify(&self, config: &Config, realm: &meerkat_core::RealmId) -> Result<(), ConnectError> {
         let target = resolve_explicit_auth_binding_target(config, &self.target.auth_binding)
-            .map_err(|error| ConnectError::native("Resolve reviewed first-target identity", error))?;
+            .map_err(|error| {
+                ConnectError::native("Resolve reviewed first-target identity", error)
+            })?;
         let owner = meerkat_core::connection::resolve_write_owner(
-            config, realm, &self.target.auth_binding.binding,
-        ).map_err(|error| ConnectError::provider_setup("Resolve first-target credential write owner", error))?;
+            config,
+            realm,
+            &self.target.auth_binding.binding,
+        )
+        .map_err(|error| {
+            ConnectError::provider_setup("Resolve first-target credential write owner", error)
+        })?;
         if target != self.target || owner != *realm || target.auth_binding.realm != *realm {
-            return Err(invalid("The first model target or its credential owner changed after review. Setup cannot continue with that reviewed target."));
+            return Err(invalid(
+                "The first model target or its credential owner changed after review. Setup cannot continue with that reviewed target.",
+            ));
         }
         validate_api_key_target(config, &target)?;
         let selected = resolve_create_session_model(config, self.request.clone())
             .map_err(|error| ConnectError::native("Resolve reviewed first-target model", error))?;
-        let ordinary = resolve_create_session_model(config, CreateSessionModelResolutionRequest::default())
-            .map_err(|error| ConnectError::native("Resolve ordinary model after first-target setup", error))?;
-        if selected.model != self.model || selected.provider != self.provider
-            || ordinary.model != self.model || ordinary.provider != self.provider
+        let ordinary =
+            resolve_create_session_model(config, CreateSessionModelResolutionRequest::default())
+                .map_err(|error| {
+                    ConnectError::native("Resolve ordinary model after first-target setup", error)
+                })?;
+        if selected.model != self.model
+            || selected.provider != self.provider
+            || ordinary.model != self.model
+            || ordinary.provider != self.provider
         {
-            return Err(invalid("Native model resolution no longer matches the reviewed first target. The requested model was not replaced."));
+            return Err(invalid(
+                "Native model resolution no longer matches the reviewed first target. The requested model was not replaced.",
+            ));
         }
         // Session model resolution and realm-scoped credential selection are
         // separate native operations. Verify ordinary selection with no model,
         // provider or auth-binding override, including actual candidate order.
         let candidates = resolve_auth_binding_candidates_for_provider(
-            config, ordinary.provider, ordinary.auth_binding.as_ref(), Some(realm), true,
-        ).map_err(|error| ConnectError::native("Resolve ordinary first-target candidates", error))?;
+            config,
+            ordinary.provider,
+            ordinary.auth_binding.as_ref(),
+            Some(realm),
+            true,
+        )
+        .map_err(|error| ConnectError::native("Resolve ordinary first-target candidates", error))?;
         if candidates.first() != Some(&self.target) {
-            return Err(invalid("The reviewed first target is not the native realm's ordinary credential choice. Setup cannot continue with that selection."));
+            return Err(invalid(
+                "The reviewed first target is not the native realm's ordinary credential choice. Setup cannot continue with that selection.",
+            ));
         }
         Ok(())
     }
@@ -155,26 +209,44 @@ async fn prepare(
     expected_provider: Provider,
 ) -> Result<PreparedTarget, ConnectError> {
     let source = crate::realm::config_source(&startup.storage)?;
-    let snapshot = runtime.get().await
+    let snapshot = runtime
+        .get()
+        .await
         .map_err(|error| ConnectError::native("Read first-target native generation", error))?;
     let own = own_document(startup).await?;
     let current = crate::realm::read_config(&startup.storage).await?;
-    check_absence(&current, own.as_ref(), &startup.storage.locator.realm, name.as_str())?;
+    check_absence(
+        &current,
+        own.as_ref(),
+        &startup.storage.locator.realm,
+        name.as_str(),
+    )?;
     // Snapshot and raw presence are separate native observations, not an atomic
     // reservation. Check snapshot keys as well, and retain the original CAS.
-    if snapshot.config.realm.get(startup.storage.locator.realm.as_str()).is_some_and(|section|
-        !section.binding.is_empty() || section.backend.contains_key(name.as_str())
-            || section.auth.contains_key(name.as_str()))
+    if snapshot
+        .config
+        .realm
+        .get(startup.storage.locator.realm.as_str())
+        .is_some_and(|section| {
+            !section.binding.is_empty()
+                || section.backend.contains_key(name.as_str())
+                || section.auth.contains_key(name.as_str())
+        })
     {
-        return Err(invalid("The own-realm snapshot already contains a binding or the requested profile name. No existing profile was replaced."));
+        return Err(invalid(
+            "The own-realm snapshot already contains a binding or the requested profile name. No existing profile was replaced.",
+        ));
     }
     let selected = resolve_create_session_model(&current, original_request.clone())
         .map_err(|error| ConnectError::native("Resolve first-target requested model", error))?;
     if selected.model != expected_model || selected.provider != expected_provider {
-        return Err(invalid("The native model selection changed while setup was awaiting input. No target was saved; review the model again."));
+        return Err(invalid(
+            "The native model selection changed while setup was awaiting input. No target was saved; review the model again.",
+        ));
     }
-    let ordinary = resolve_create_session_model(&current, CreateSessionModelResolutionRequest::default())
-        .map_err(|error| ConnectError::native("Resolve prior ordinary realm model", error))?;
+    let ordinary =
+        resolve_create_session_model(&current, CreateSessionModelResolutionRequest::default())
+            .map_err(|error| ConnectError::native("Resolve prior ordinary realm model", error))?;
     let previous_default_model = (ordinary.model != selected.model).then_some(ordinary.model);
     let backend = direct_backend(selected.provider)?;
     let mut patch = serde_json::json!({"realm": {
@@ -191,46 +263,75 @@ async fn prepare(
         patch["agent"] = serde_json::json!({"model": selected.model.clone()});
     }
     let delta = ConfigDelta(patch);
-    let preview = runtime.patch_preview(&delta).await
+    let preview = runtime
+        .patch_preview(&delta)
+        .await
         .map_err(|error| ConnectError::native("Preview first native model target", error))?;
     let mut effective = EffectiveConfigReader::new(source)
-        .effective_config_over_head(&startup.storage.locator.realm, preview).await
+        .effective_config_over_head(&startup.storage.locator.realm, preview)
+        .await
         .map_err(|error| ConnectError::native("Compose first-target native preview", error))?;
-    effective.apply_env_overrides()
+    effective
+        .apply_env_overrides()
         .map_err(|error| ConnectError::native("Apply native first-target environment", error))?;
-    effective.validate(meerkat_models::canonical())
+    effective
+        .validate(meerkat_models::canonical())
         .map_err(|error| ConnectError::native("Validate first-target configuration", error))?;
     check_preserved_realm_fields(&current, &effective, &startup.storage.locator.realm)?;
-    let section = effective.realm.get(startup.storage.locator.realm.as_str())
+    let section = effective
+        .realm
+        .get(startup.storage.locator.realm.as_str())
         .ok_or_else(|| invalid("The native preview did not retain the selected realm"))?;
     RealmConnectionSet::from_config(startup.storage.locator.realm.as_str(), section)
         .map_err(|error| ConnectError::native("Validate first-target connection graph", error))?;
-    let reference = AuthBindingRef { realm: startup.storage.locator.realm.clone(),
-        binding: name, profile: None, origin: BindingOrigin::Configured };
+    let reference = AuthBindingRef {
+        realm: startup.storage.locator.realm.clone(),
+        binding: name,
+        profile: None,
+        origin: BindingOrigin::Configured,
+    };
     let target = resolve_explicit_auth_binding_target(&effective, &reference)
         .map_err(|error| ConnectError::native("Resolve first-target native preview", error))?;
     let request = CreateSessionModelResolutionRequest {
-        auth_binding: Some(target.auth_binding.clone()), ..original_request
+        auth_binding: Some(target.auth_binding.clone()),
+        ..original_request
     };
-    let review = TargetReview { target, request,
-        model: selected.model, provider: selected.provider };
+    let review = TargetReview {
+        target,
+        request,
+        model: selected.model,
+        provider: selected.provider,
+    };
     review.verify(&effective, &startup.storage.locator.realm)?;
     if own_document(startup).await? != own {
-        return Err(invalid("The native document changed while the first target was being prepared. Review setup again; nothing was saved by this operation."));
+        return Err(invalid(
+            "The native document changed while the first target was being prepared. Review setup again; nothing was saved by this operation.",
+        ));
     }
-    Ok(PreparedTarget { review, own_document: own, generation: snapshot.generation, delta,
-        previous_default_model })
+    Ok(PreparedTarget {
+        review,
+        own_document: own,
+        generation: snapshot.generation,
+        delta,
+        previous_default_model,
+    })
 }
 
 async fn save<I: Future<Output = io::Result<()>>, W: Write>(
-    startup: &mut SessionStartup, runtime: &ConfigRuntime, prepared: PreparedTarget,
-    output: &mut W, mut interrupt: Pin<&mut I>,
+    startup: &mut SessionStartup,
+    runtime: &ConfigRuntime,
+    prepared: PreparedTarget,
+    output: &mut W,
+    mut interrupt: Pin<&mut I>,
 ) -> Result<Option<TargetReview>, ConnectError> {
     if own_document(startup).await? != prepared.own_document {
-        return Err(invalid("The native document changed after review. Nothing was saved by this operation; review setup again."));
+        return Err(invalid(
+            "The native document changed after review. Nothing was saved by this operation; review setup again.",
+        ));
     }
     if let Some(signal) = interrupt.as_mut().now_or_never() {
-        signal.map_err(|error| ConnectError::native("Listen for first-target cancellation", error))?;
+        signal
+            .map_err(|error| ConnectError::native("Listen for first-target cancellation", error))?;
         return Ok(None);
     }
     let write = runtime.patch(prepared.delta, Some(prepared.generation));
@@ -278,22 +379,32 @@ async fn save<I: Future<Output = io::Result<()>>, W: Write>(
     };
     let interrupted = match interrupted {
         Some(value) => Some(value),
-        None => interrupt.as_mut().now_or_never().map(|signal|
-            signal.map_err(|error| ConnectError::native("Listen for first-target cancellation", error))),
+        None => interrupt.as_mut().now_or_never().map(|signal| {
+            signal.map_err(|error| {
+                ConnectError::native("Listen for first-target cancellation", error)
+            })
+        }),
     };
     match (outcome, interrupted) {
         (Err(error), Some(cleanup)) => Err(combined(error, cleanup)),
         (Err(error), None) => Err(error),
-        (Ok(()), Some(stopped)) => { stopped?; Ok(None) }
+        (Ok(()), Some(stopped)) => {
+            stopped?;
+            Ok(None)
+        }
         (Ok(()), None) => Ok(Some(prepared.review)),
     }
 }
 
 pub(super) async fn present<I: Future<Output = io::Result<()>>, W: Write>(
-    startup: &mut SessionStartup, original_request: CreateSessionModelResolutionRequest,
-    input: &mut TerminalInput, output: &mut W, mut interrupt: Pin<&mut I>,
+    startup: &mut SessionStartup,
+    original_request: CreateSessionModelResolutionRequest,
+    input: &mut TerminalInput,
+    output: &mut W,
+    mut interrupt: Pin<&mut I>,
 ) -> Result<Option<CreateSessionModelResolutionRequest>, ConnectError> {
-    input.require_terminal()
+    input
+        .require_terminal()
         .map_err(|error| ConnectError::native("Require protected first-target terminal", error))?;
     let selected = resolve_create_session_model(&startup.config, original_request.clone())
         .map_err(|error| ConnectError::native("Resolve first-target model", error))?;
@@ -304,8 +415,14 @@ pub(super) async fn present<I: Future<Output = io::Result<()>>, W: Write>(
     let default_name = format!("{}_api_key", selected.provider.as_str());
     let name_prompt = format!("Connection name [{default_name}] (Enter to accept, or /quit): ");
     let name = loop {
-        let Some(name) = line(input, output, &name_prompt, interrupt.as_mut()).await? else { return Ok(None); };
-        let name = if name.trim().is_empty() { default_name.as_str() } else { name.trim() };
+        let Some(name) = line(input, output, &name_prompt, interrupt.as_mut()).await? else {
+            return Ok(None);
+        };
+        let name = if name.trim().is_empty() {
+            default_name.as_str()
+        } else {
+            name.trim()
+        };
         match BindingId::parse(name) {
             Ok(name) => break name,
             Err(_) => writeln!(output, "Choose another connection name, or /quit.")
@@ -313,7 +430,15 @@ pub(super) async fn present<I: Future<Output = io::Result<()>>, W: Write>(
         }
     };
     let runtime = crate::realm::own_config_runtime(&startup.storage)?;
-    let prepared = prepare(startup, &runtime, original_request, name, &selected.model, selected.provider).await?;
+    let prepared = prepare(
+        startup,
+        &runtime,
+        original_request,
+        name,
+        &selected.model,
+        selected.provider,
+    )
+    .await?;
     let target = &prepared.review.target;
     writeln!(output, "Create connection '{}': provider {}; model {}; owner realm {}. Use it as this realm's first default connection. The next step lets you reuse an existing key for this exact connection or explicitly store or replace it. Saved configuration remains if setup stops.",
         review_text(target.auth_binding.binding.as_str()), prepared.review.provider.as_str(),
@@ -324,8 +449,12 @@ pub(super) async fn present<I: Future<Output = io::Result<()>>, W: Write>(
             review_text(previous), review_text(&prepared.review.model))
             .map_err(|error| ConnectError::native("Write first-target model-default review", error))?;
     } else {
-        writeln!(output, "Keep this realm's current default model '{}'; no model override is added.", review_text(&prepared.review.model))
-            .map_err(|error| ConnectError::native("Write retained model-default review", error))?;
+        writeln!(
+            output,
+            "Keep this realm's current default model '{}'; no model override is added.",
+            review_text(&prepared.review.model)
+        )
+        .map_err(|error| ConnectError::native("Write retained model-default review", error))?;
     }
     writeln!(output, "{}", if startup.storage.locator.realm.as_str() == "global" {
         "This writes the global realm configuration. Its defaults are available to realms that inherit global."
@@ -333,10 +462,23 @@ pub(super) async fn present<I: Future<Output = io::Result<()>>, W: Write>(
         "Only the selected realm's own configuration is written. Parent and global documents are unchanged."
     }).map_err(|error| ConnectError::native("Write first-target document scope", error))?;
     loop {
-        let Some(answer) = line(input, output, "Type 'create' to save this model target, or /quit: ", interrupt.as_mut()).await? else { return Ok(None); };
-        if answer.trim() == "create" { break; }
+        let Some(answer) = line(
+            input,
+            output,
+            "Type 'create' to save this model target, or /quit: ",
+            interrupt.as_mut(),
+        )
+        .await?
+        else {
+            return Ok(None);
+        };
+        if answer.trim() == "create" {
+            break;
+        }
     }
-    let Some(review) = save(startup, &runtime, prepared, output, interrupt.as_mut()).await? else { return Ok(None); };
+    let Some(review) = save(startup, &runtime, prepared, output, interrupt.as_mut()).await? else {
+        return Ok(None);
+    };
     let observation = observe(startup, &review.target).await?;
     let prompt = if observation.admits_open() {
         "Type 'enter-key' to store or replace this owner's API key, 'use' for native open, or /quit: "
@@ -344,12 +486,30 @@ pub(super) async fn present<I: Future<Output = io::Result<()>>, W: Write>(
         "Type 'enter-key' to store or replace this owner's API key, or /quit: "
     };
     loop {
-        let Some(answer) = line(input, output, prompt, interrupt.as_mut()).await? else { return Ok(None); };
+        let Some(answer) = line(input, output, prompt, interrupt.as_mut()).await? else {
+            return Ok(None);
+        };
         match answer.trim() {
-            "use" if observation.admits_open() => { review.refresh(startup).await?; return Ok(Some(review.request)); }
-            "enter-key" => return if api_key_login_reviewed(startup, &review.target, Some(&review), input, output, interrupt.as_mut()).await? {
-                Ok(Some(review.request))
-            } else { Ok(None) },
+            "use" if observation.admits_open() => {
+                review.refresh(startup).await?;
+                return Ok(Some(review.request));
+            }
+            "enter-key" => {
+                return if api_key_login_reviewed(
+                    startup,
+                    &review.target,
+                    Some(&review),
+                    input,
+                    output,
+                    interrupt.as_mut(),
+                )
+                .await?
+                {
+                    Ok(Some(review.request))
+                } else {
+                    Ok(None)
+                };
+            }
             _ => {}
         }
     }

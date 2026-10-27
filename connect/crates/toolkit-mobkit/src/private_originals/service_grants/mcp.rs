@@ -3,9 +3,11 @@
 
 use super::*;
 use crate::installed_host::application_operations;
-use meerkat_authorization_contracts::work_association::{InputAuthorityAssociation, NativeWorkTarget};
-use meerkat_core::mcp_attachment_control::{McpAttachmentControlRequest, McpAttachmentEffect};
+use meerkat_authorization_contracts::work_association::{
+    InputAuthorityAssociation, NativeWorkTarget,
+};
 use meerkat_core::authorization::PreparedAuthorizationBinding;
+use meerkat_core::mcp_attachment_control::{McpAttachmentControlRequest, McpAttachmentEffect};
 use meerkat_core::mcp_config::{McpConnectorApproval, McpConnectorBinding, McpServerConfig};
 use meerkat_toolkit::authority::RoleLifetime;
 use std::collections::BTreeSet;
@@ -45,7 +47,9 @@ pub struct PrivateServiceMcpAccessDecision {
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PrivateServiceMcpCatalog { OriginalSession }
+pub enum PrivateServiceMcpCatalog {
+    OriginalSession,
+}
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -126,8 +130,10 @@ impl StoredServiceMcpSelection {
             let destination = &effect.destination;
             let session = meerkat_core::SessionId::parse(destination.context.as_str())
                 .map_err(|_| PrivateOriginalError::Denied)?;
-            if !matches!(&decision.permission.lifetime.scope, LifetimeScope::Task { .. })
-                || decision.permission.lifetime.expires_at_ms.is_none()
+            if !matches!(
+                &decision.permission.lifetime.scope,
+                LifetimeScope::Task { .. }
+            ) || decision.permission.lifetime.expires_at_ms.is_none()
                 || !valid_digest(decision.connection_revision.as_str())
                 || decision.permission.connection.as_str() != self.server
                 || decision.permission.resource.as_str() != self.server
@@ -135,7 +141,9 @@ impl StoredServiceMcpSelection {
                 || destination.logical_runtime.as_str()
                     != meerkat_runtime::LogicalRuntimeId::for_session(&session).to_string()
                 || destination.audience != route.grant_audience
-            { return Err(PrivateOriginalError::Denied); }
+            {
+                return Err(PrivateOriginalError::Denied);
+            }
         }
         Ok(())
     }
@@ -168,25 +176,48 @@ impl StoredServiceMcpSelection {
         };
         Ok(native)
     }
-    fn catalog_operation(&self, route: &PrivateOriginalRoute, decision: &PrivateServiceMcpAccessDecision)
-        -> Result<Option<meerkat_authorization::policy::LocalOperationValues>, PrivateOriginalError> {
-        if decision.catalog.is_none() { return Ok(None); }
-        let attachment = decision.live_attachment.as_ref().ok_or(PrivateOriginalError::Denied)?;
+    fn catalog_operation(
+        &self,
+        route: &PrivateOriginalRoute,
+        decision: &PrivateServiceMcpAccessDecision,
+    ) -> Result<Option<meerkat_authorization::policy::LocalOperationValues>, PrivateOriginalError>
+    {
+        if decision.catalog.is_none() {
+            return Ok(None);
+        }
+        let attachment = decision
+            .live_attachment
+            .as_ref()
+            .ok_or(PrivateOriginalError::Denied)?;
         let session = meerkat_core::SessionId::parse(attachment.destination.context.as_str())
             .map_err(|_| PrivateOriginalError::Denied)?;
-        Ok(Some(application_operations::catalog_read(&route.grant_caller,
-            &route.logical_executor, &route.grant_audience, &session)))
+        Ok(Some(application_operations::catalog_read(
+            &route.grant_caller,
+            &route.logical_executor,
+            &route.grant_audience,
+            &session,
+        )))
     }
     fn attachment_operation(
         &self,
         route: &PrivateOriginalRoute,
         decision: &PrivateServiceMcpAccessDecision,
-    ) -> Result<Option<meerkat_authorization::policy::LocalOperationValues>, PrivateOriginalError> {
-        let Some(effect) = &decision.live_attachment else { return Ok(None); };
-        let exact = canonical_json(&(&self.server, &decision.connection_revision, &effect.destination))
-            .map_err(|_| PrivateOriginalError::Conflict)?;
+    ) -> Result<Option<meerkat_authorization::policy::LocalOperationValues>, PrivateOriginalError>
+    {
+        let Some(effect) = &decision.live_attachment else {
+            return Ok(None);
+        };
+        let exact = canonical_json(&(
+            &self.server,
+            &decision.connection_revision,
+            &effect.destination,
+        ))
+        .map_err(|_| PrivateOriginalError::Conflict)?;
         Ok(Some(application_operations::mcp_live_attachment(
-            &route.grant_caller, &route.logical_executor, &route.grant_audience, &digest(&exact),
+            &route.grant_caller,
+            &route.logical_executor,
+            &route.grant_audience,
+            &digest(&exact),
         )))
     }
 
@@ -203,7 +234,10 @@ impl StoredServiceMcpSelection {
         now_ms: u64,
     ) -> Result<(), PrivateOriginalError> {
         self.validate(route, decision)?;
-        let effect = decision.live_attachment.as_ref().ok_or(PrivateOriginalError::Denied)?;
+        let effect = decision
+            .live_attachment
+            .as_ref()
+            .ok_or(PrivateOriginalError::Denied)?;
         let facts = control.facts();
         let canonical = meerkat_runtime::meerkat_machine::scoped_destination_target(destination);
         if control.effect_of(binding) != Some(McpAttachmentEffect::Apply)
@@ -211,16 +245,20 @@ impl StoredServiceMcpSelection {
             || !decision.permission.lifetime.active_at(now_ms)
             || &effect.destination != destination
             || control.session_id().to_string() != destination.context.as_str()
-            || facts.requester != route.requester || facts.actor != route.ingress_actor
+            || facts.requester != route.requester
+            || facts.actor != route.ingress_actor
             || facts.realm != route.realm
             || facts.destination.authority != canonical.authority
             || facts.destination.namespace != canonical.namespace
             || facts.destination.id != canonical.id
             || control.server().name != self.server
             || control.server().connector != self.connector
-            || digest(&canonical_json(control.server()).map_err(|_| PrivateOriginalError::Conflict)?)
-                != decision.connection_revision.as_str()
-        { return Err(PrivateOriginalError::Denied); }
+            || digest(
+                &canonical_json(control.server()).map_err(|_| PrivateOriginalError::Conflict)?,
+            ) != decision.connection_revision.as_str()
+        {
+            return Err(PrivateOriginalError::Denied);
+        }
         Ok(())
     }
 
@@ -260,9 +298,17 @@ impl StoredServiceMcpSelection {
                 operation.as_str(),
             )
         });
-        let attachment = self.attachment_operation(route, decision).map_err(|_| GrantRefusal::Denied)?;
-        let catalog = self.catalog_operation(route, decision).map_err(|_| GrantRefusal::Denied)?;
-        for values in operations.chain(std::iter::once(connector)).chain(attachment).chain(catalog) {
+        let attachment = self
+            .attachment_operation(route, decision)
+            .map_err(|_| GrantRefusal::Denied)?;
+        let catalog = self
+            .catalog_operation(route, decision)
+            .map_err(|_| GrantRefusal::Denied)?;
+        for values in operations
+            .chain(std::iter::once(connector))
+            .chain(attachment)
+            .chain(catalog)
+        {
             resolved
                 .restrictions()
                 .check_bounds(OperationRestrictionValues {
@@ -294,19 +340,34 @@ impl PrivateOriginals {
         control: &McpAttachmentControlRequest,
         binding: &PreparedAuthorizationBinding,
     ) -> Result<(), PrivateOriginalError> {
-        let stored = self.store.get(&self.access_key(grant)?).await.map_err(store_error)?
+        let stored = self
+            .store
+            .get(&self.access_key(grant)?)
+            .await
+            .map_err(store_error)?
             .ok_or(PrivateOriginalError::Unavailable)?;
         let record = self.decode_access(&stored, grant)?;
         let (AccessDecision::Mcp(decision), Some(selection)) = (&record.decision, &record.mcp)
-            else { return Err(PrivateOriginalError::Denied); };
+        else {
+            return Err(PrivateOriginalError::Denied);
+        };
         let route = self.route(&grant.route)?;
         if original.authority != route.source_authority
             || !matches!(&decision.permission.lifetime.scope,
                 LifetimeScope::Task { task } if task.as_str() == original.work.as_str())
-        { return Err(PrivateOriginalError::Denied); }
-        let now = self.owner.clock().now().map_err(|_| PrivateOriginalError::Unavailable)?.unix_ms;
+        {
+            return Err(PrivateOriginalError::Denied);
+        }
+        let now = self
+            .owner
+            .clock()
+            .now()
+            .map_err(|_| PrivateOriginalError::Unavailable)?
+            .unix_ms;
         selection.validate_live_attachment(route, decision, destination, control, binding, now)?;
-        if self.access_observation(grant.clone(), &record)?.state != PrivateServiceGrantState::GrantIssued {
+        if self.access_observation(grant.clone(), &record)?.state
+            != PrivateServiceGrantState::GrantIssued
+        {
             return Err(PrivateOriginalError::Unavailable);
         }
         Ok(())
@@ -332,7 +393,8 @@ impl PrivateOriginals {
             .ok_or(PrivateOriginalError::Unavailable)?;
         let selected = held
             .service_mcp
-            .iter().find(|selected| selected.selection.server == server)
+            .iter()
+            .find(|selected| selected.selection.server == server)
             .ok_or(PrivateOriginalError::Unavailable)?;
         let route = self.route(&held.reference.route)?;
         selected.selection.validate(route, &selected.decision)?;

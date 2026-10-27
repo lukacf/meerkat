@@ -475,9 +475,13 @@ async fn borrowed_guard_uses_the_same_slot_and_drop_keeps_cleanup_accessible() {
             // Child, before invoking cancellation cleanup. The old no-op Drop
             // leaves this waiter pending; all-exit cleanup still owns the child.
             tokio::time::timeout(BOUND, owner.process.as_mut().unwrap().child.wait())
-                .await.expect("Drop stops the real child before explicit cleanup")
+                .await
+                .expect("Drop stops the real child before explicit cleanup")
                 .expect("same retained Child observes its exit");
-            assert!(owner.process.as_ref().unwrap().input.is_none(), "Drop closes its actual pipe");
+            assert!(
+                owner.process.as_ref().unwrap().input.is_none(),
+                "Drop closes its actual pipe"
+            );
             assert!(
                 owner.begin(std::future::pending()).await.is_err(),
                 "occupied owner refuses overlap"

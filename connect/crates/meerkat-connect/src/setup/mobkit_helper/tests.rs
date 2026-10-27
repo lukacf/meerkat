@@ -19,13 +19,17 @@ fn public_search_policy(member: &str, tools: &[&str]) -> CompiledApplicationTool
         },
         vec![CompiledMemberToolGrants {
             member_identity: member.into(),
-            grants: tools.iter().map(|tool| CompiledMemberToolGrant {
-                tool_name: (*tool).into(),
-                action: CompiledMemberToolAction::Invoke,
-                consequence: CompiledToolConsequence::R0,
-            }).collect(),
+            grants: tools
+                .iter()
+                .map(|tool| CompiledMemberToolGrant {
+                    tool_name: (*tool).into(),
+                    action: CompiledMemberToolAction::Invoke,
+                    consequence: CompiledToolConsequence::R0,
+                })
+                .collect(),
         }],
-    ).unwrap()
+    )
+    .unwrap()
 }
 
 fn source_member() -> MobMemberBinding {
@@ -141,7 +145,10 @@ fn dedicated_profile_preserves_shared_research_and_exact_server_ceiling() {
 
 #[test]
 fn exact_restart_reuses_profile_and_conflict_refuses_without_mutation() {
-    for tools in [SetupHelperTools::Preparation, SetupHelperTools::CheckedInstallation] {
+    for tools in [
+        SetupHelperTools::Preparation,
+        SetupHelperTools::CheckedInstallation,
+    ] {
         let selected = helper(tools);
         let same = helper(tools);
         assert_eq!(selected.member(), same.member());
@@ -151,7 +158,14 @@ fn exact_restart_reuses_profile_and_conflict_refuses_without_mutation() {
         same.compose_definition(&mut definition).unwrap();
         assert_eq!(definition, retained);
         if tools == SetupHelperTools::Preparation {
-            assert!(!selected.server().access.as_ref().unwrap().permits("setup_acquire_python"));
+            assert!(
+                !selected
+                    .server()
+                    .access
+                    .as_ref()
+                    .unwrap()
+                    .permits("setup_acquire_python")
+            );
         }
 
         // A different selected operation ceiling cannot silently replace the
@@ -181,7 +195,10 @@ fn exact_restart_reuses_profile_and_conflict_refuses_without_mutation() {
 
 #[test]
 fn selected_member_guard_preserves_other_users_of_the_source_profile() {
-    for tools in [SetupHelperTools::Preparation, SetupHelperTools::CheckedInstallation] {
+    for tools in [
+        SetupHelperTools::Preparation,
+        SetupHelperTools::CheckedInstallation,
+    ] {
         let selected = helper(tools);
         let guard = SelectedHelperCustomizer(selected.clone());
         let mob = MobId::from("household");
@@ -402,19 +419,24 @@ fn exclusive_role_composition_preserves_role_keys_and_refuses_server_substitutio
 fn public_research_requires_exact_helper_operations_and_acquisition_ceiling() {
     let names = ["setup_search_github", "setup_read_github"];
     let selected = helper(SetupHelperTools::CheckedInstallation);
-    for policy in [public_search_policy("setup-helper", &[]),
+    for policy in [
+        public_search_policy("setup-helper", &[]),
         public_search_policy("other-member", &names),
-        public_search_policy("setup-helper", &["web_search", "setup_search_github_extra"])] {
+        public_search_policy("setup-helper", &["web_search", "setup_search_github_extra"]),
+    ] {
         let configured = selected.clone().with_public_research_from_policy(&policy);
         assert_eq!(configured.server(), selected.server());
     }
     let policy = public_search_policy("setup-helper", &names);
     let preparation = helper(SetupHelperTools::Preparation);
-    let configured = preparation.clone().with_public_research_from_policy(&policy);
+    let configured = preparation
+        .clone()
+        .with_public_research_from_policy(&policy);
     assert_eq!(configured.server(), preparation.server());
     for name in names {
-        let configured = selected.clone().with_public_research_from_policy(
-            &public_search_policy("setup-helper", &[name]));
+        let configured = selected
+            .clone()
+            .with_public_research_from_policy(&public_search_policy("setup-helper", &[name]));
         let access = configured.server().access.as_ref().unwrap();
         assert!(access.permits(name));
         assert!(!access.permits(if name == names[0] { names[1] } else { names[0] }));
@@ -425,15 +447,27 @@ fn public_research_requires_exact_helper_operations_and_acquisition_ceiling() {
 #[test]
 fn public_research_preserves_categories_restrictions_and_policy_bytes() {
     use meerkat_core::ToolCategoryOverride;
-    let policy = public_search_policy("setup-helper", &["setup_search_github", "setup_read_github"]);
+    let policy = public_search_policy(
+        "setup-helper",
+        &["setup_search_github", "setup_read_github"],
+    );
     let bytes = policy.canonical_json().unwrap();
     let restored = CompiledApplicationToolPolicy::parse_canonical_json(&bytes).unwrap();
-    let selected = helper(SetupHelperTools::CheckedInstallation).with_public_research_from_policy(&restored);
+    let selected =
+        helper(SetupHelperTools::CheckedInstallation).with_public_research_from_policy(&restored);
     let access = selected.server().access.as_ref().unwrap();
     assert!(access.permits("setup_search_github") && access.permits("setup_read_github"));
     assert!(access.permits("setup_acquire_python") && access.permits("setup_search_node"));
-    let mut spec = SpawnMemberSpec::new(selected.profile_name().clone(), selected.member().member.as_str());
-    spec.override_profile = Some(definition().profiles[&ProfileName::from("research")].as_inline().unwrap().clone());
+    let mut spec = SpawnMemberSpec::new(
+        selected.profile_name().clone(),
+        selected.member().member.as_str(),
+    );
+    spec.override_profile = Some(
+        definition().profiles[&ProfileName::from("research")]
+            .as_inline()
+            .unwrap()
+            .clone(),
+    );
     spec.tool_access_policy = Some(ToolAccessPolicy::ReadOnly);
     spec.tool_category_overrides.builtins = ToolCategoryOverride::Disable;
     spec.tool_category_overrides.shell = ToolCategoryOverride::Disable;
@@ -441,7 +475,13 @@ fn public_research_preserves_categories_restrictions_and_policy_bytes() {
     let categories = spec.tool_category_overrides;
     let guard = SelectedHelperCustomizer(selected.clone());
     for _ in 0..2 {
-        guard.apply(&MobId::from("household"), selected.profile_name(), &mut spec).unwrap();
+        guard
+            .apply(
+                &MobId::from("household"),
+                selected.profile_name(),
+                &mut spec,
+            )
+            .unwrap();
         assert_eq!(spec.tool_category_overrides, categories);
         assert_eq!(spec.tool_access_policy, Some(ToolAccessPolicy::ReadOnly));
         assert_eq!(policy.canonical_json().unwrap(), bytes);
@@ -450,8 +490,12 @@ fn public_research_preserves_categories_restrictions_and_policy_bytes() {
 
 #[test]
 fn public_research_does_not_reach_another_member_or_survive_deselection() {
-    let selected = helper(SetupHelperTools::CheckedInstallation)
-        .with_public_research_from_policy(&public_search_policy("setup-helper", &["setup_search_github", "setup_read_github"]));
+    let selected = helper(SetupHelperTools::CheckedInstallation).with_public_research_from_policy(
+        &public_search_policy(
+            "setup-helper",
+            &["setup_search_github", "setup_read_github"],
+        ),
+    );
     let guard = SelectedHelperCustomizer(selected.clone());
     let mob = MobId::from("household");
     let role = ProfileName::from("research");
@@ -460,8 +504,27 @@ fn public_research_does_not_reach_another_member_or_survive_deselection() {
     guard.apply(&mob, &role, &mut ordinary).unwrap();
     assert_eq!(ordinary.tool_category_overrides, before);
     let mut foreign = SpawnMemberSpec::new(selected.profile_name().clone(), "ordinary-agent");
-    assert!(guard.apply(&mob, selected.profile_name(), &mut foreign).is_err());
-    let unselected = selected.with_public_research_from_policy(&public_search_policy("setup-helper", &[]));
-    assert!(!unselected.server().access.as_ref().unwrap().permits("setup_search_github"));
-    assert!(!unselected.server().access.as_ref().unwrap().permits("setup_read_github"));
+    assert!(
+        guard
+            .apply(&mob, selected.profile_name(), &mut foreign)
+            .is_err()
+    );
+    let unselected =
+        selected.with_public_research_from_policy(&public_search_policy("setup-helper", &[]));
+    assert!(
+        !unselected
+            .server()
+            .access
+            .as_ref()
+            .unwrap()
+            .permits("setup_search_github")
+    );
+    assert!(
+        !unselected
+            .server()
+            .access
+            .as_ref()
+            .unwrap()
+            .permits("setup_read_github")
+    );
 }

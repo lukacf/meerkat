@@ -85,7 +85,10 @@ impl SelectedReviewComposer {
         ))
     }
 
-    fn is_selected(&self, member: Option<&MobMemberBinding>) -> Result<bool, McpAdapterComposeRefusal> {
+    fn is_selected(
+        &self,
+        member: Option<&MobMemberBinding>,
+    ) -> Result<bool, McpAdapterComposeRefusal> {
         selected_member(&self.selected, member)
     }
 }
@@ -139,7 +142,8 @@ pub fn configure_installed_account_requests(
     presenters: crate::application_gateway::LocalSetupApprovals,
 ) -> Result<AgentFactory, ConnectError> {
     let composer = terminal_composer(selected, facade, realm, presenters)?;
-    Ok(factory.mcp_call_context_provider(composer.auth.context_provider.clone())
+    Ok(factory
+        .mcp_call_context_provider(composer.auth.context_provider.clone())
         .with_mcp_adapter_composer(composer))
 }
 
@@ -167,22 +171,35 @@ pub(crate) fn gateway_account_composition(
     realm: RealmLocator,
     presenters: crate::application_gateway::LocalSetupApprovals,
     tasks: toolkit_mobkit::installed_host::acquisition::InstalledServiceTaskSource,
-) -> Result<meerkat_mobkit::rpc_gateway::GatewayMcpComposition,
-    meerkat_toolkit::host_lifetime::control::HostLifetimeError>
-{
+) -> Result<
+    meerkat_mobkit::rpc_gateway::GatewayMcpComposition,
+    meerkat_toolkit::host_lifetime::control::HostLifetimeError,
+> {
     use meerkat_toolkit::host_lifetime::control::HostLifetimeError;
     require_gateway_member_realm(&selected, &realm)?;
-    let facade = construction.host_auth_service().map_err(|_| HostLifetimeError::Unavailable)?;
-    let realm_installation = if presenters.has_console() {
-        Some(construction.realm_mcp_installation().map_err(|_| HostLifetimeError::Unavailable)?)
-    } else { None };
-    let mut composer = terminal_composer_with_tasks(selected, facade, realm, presenters, Some(tasks))
+    let facade = construction
+        .host_auth_service()
         .map_err(|_| HostLifetimeError::Unavailable)?;
-    Arc::get_mut(&mut composer).ok_or(HostLifetimeError::Unavailable)?.realm_installation =
-        realm_installation;
+    let realm_installation = if presenters.has_console() {
+        Some(
+            construction
+                .realm_mcp_installation()
+                .map_err(|_| HostLifetimeError::Unavailable)?,
+        )
+    } else {
+        None
+    };
+    let mut composer =
+        terminal_composer_with_tasks(selected, facade, realm, presenters, Some(tasks))
+            .map_err(|_| HostLifetimeError::Unavailable)?;
+    Arc::get_mut(&mut composer)
+        .ok_or(HostLifetimeError::Unavailable)?
+        .realm_installation = realm_installation;
     let provider = composer.auth.context_provider.clone();
-    Ok(meerkat_mobkit::rpc_gateway::GatewayMcpComposition::new(composer)
-        .with_call_context_provider(provider))
+    Ok(
+        meerkat_mobkit::rpc_gateway::GatewayMcpComposition::new(composer)
+            .with_call_context_provider(provider),
+    )
 }
 
 #[cfg(all(unix, feature = "console"))]
@@ -197,13 +214,24 @@ pub(crate) fn terminal_composer(
 
 #[cfg(all(unix, feature = "console"))]
 fn terminal_composer_with_tasks(
-    selected: MobMemberBinding, facade: HostAuthService, realm: RealmLocator,
+    selected: MobMemberBinding,
+    facade: HostAuthService,
+    realm: RealmLocator,
     presenters: crate::application_gateway::LocalSetupApprovals,
     tasks: Option<toolkit_mobkit::installed_host::acquisition::InstalledServiceTaskSource>,
 ) -> Result<Arc<TerminalReviewComposer>, ConnectError> {
-    selected.comms_name().map_err(|_| refused("The selected setup member is invalid"))?;
+    selected
+        .comms_name()
+        .map_err(|_| refused("The selected setup member is invalid"))?;
     let auth = ConnectorAuth::from_facade(facade, realm.realm.clone())?;
-    Ok(Arc::new(TerminalReviewComposer { selected, realm, auth, presenters, tasks, realm_installation: None }))
+    Ok(Arc::new(TerminalReviewComposer {
+        selected,
+        realm,
+        auth,
+        presenters,
+        tasks,
+        realm_installation: None,
+    }))
 }
 
 #[cfg(all(unix, feature = "console"))]
@@ -218,16 +246,29 @@ pub(crate) struct TerminalReviewComposer {
 
 #[cfg(all(unix, feature = "console"))]
 impl McpAdapterComposer for TerminalReviewComposer {
-    fn compose(&self, adapter: &Arc<McpRouterAdapter>, session_id: &SessionId,
-        member: Option<&MobMemberBinding>) -> Result<Arc<dyn AgentToolDispatcher>, McpAdapterComposeRefusal> {
-        if !selected_member(&self.selected, member)? { return Ok(adapter.clone()); }
-        self.presenters.create_installed_with_tasks(self.tasks.clone(), |approvals| {
-            approvals.bind_session(session_id)?;
-            let mut review = compose_with_auth(adapter.clone(), self.auth.clone(), self.realm.clone(),
-                session_id.clone(), approvals)?;
-            review.realm_installation = self.realm_installation.clone();
-            Ok(review)
-        }).map_err(|_| composition_refused())
+    fn compose(
+        &self,
+        adapter: &Arc<McpRouterAdapter>,
+        session_id: &SessionId,
+        member: Option<&MobMemberBinding>,
+    ) -> Result<Arc<dyn AgentToolDispatcher>, McpAdapterComposeRefusal> {
+        if !selected_member(&self.selected, member)? {
+            return Ok(adapter.clone());
+        }
+        self.presenters
+            .create_installed_with_tasks(self.tasks.clone(), |approvals| {
+                approvals.bind_session(session_id)?;
+                let mut review = compose_with_auth(
+                    adapter.clone(),
+                    self.auth.clone(),
+                    self.realm.clone(),
+                    session_id.clone(),
+                    approvals,
+                )?;
+                review.realm_installation = self.realm_installation.clone();
+                Ok(review)
+            })
+            .map_err(|_| composition_refused())
     }
 }
 
@@ -243,24 +284,40 @@ pub(crate) fn gateway_policy_composition(
     service: Option<Arc<toolkit_mobkit::private_originals::InstalledApplicationServicePolicy>>,
     artifact_parent: std::path::PathBuf,
     tasks: toolkit_mobkit::installed_host::acquisition::InstalledServiceTaskSource,
-) -> Result<meerkat_mobkit::rpc_gateway::GatewayMcpComposition,
-    meerkat_toolkit::host_lifetime::control::HostLifetimeError>
-{
+) -> Result<
+    meerkat_mobkit::rpc_gateway::GatewayMcpComposition,
+    meerkat_toolkit::host_lifetime::control::HostLifetimeError,
+> {
     use meerkat_toolkit::host_lifetime::control::HostLifetimeError;
     require_gateway_member_realm(&selected, &realm)?;
-    if service.as_ref().is_some_and(|service| !service.belongs_to(installation.lifetime())) {
+    if service
+        .as_ref()
+        .is_some_and(|service| !service.belongs_to(installation.lifetime()))
+    {
         return Err(HostLifetimeError::WrongOwner);
     }
-    selected.comms_name().map_err(|_| HostLifetimeError::InvalidSelection)?;
-    let facade = construction.host_auth_service().map_err(|_| HostLifetimeError::Unavailable)?;
+    selected
+        .comms_name()
+        .map_err(|_| HostLifetimeError::InvalidSelection)?;
+    let facade = construction
+        .host_auth_service()
+        .map_err(|_| HostLifetimeError::Unavailable)?;
     let auth = ConnectorAuth::from_facade(facade, realm.realm.clone())
         .map_err(|_| HostLifetimeError::Unavailable)?;
     let provider = auth.context_provider.clone();
     let composer = Arc::new(PolicyReviewComposer {
-        selected, realm, auth, installation, service, artifact_parent, tasks,
+        selected,
+        realm,
+        auth,
+        installation,
+        service,
+        artifact_parent,
+        tasks,
     });
-    Ok(meerkat_mobkit::rpc_gateway::GatewayMcpComposition::new(composer)
-        .with_call_context_provider(provider))
+    Ok(
+        meerkat_mobkit::rpc_gateway::GatewayMcpComposition::new(composer)
+            .with_call_context_provider(provider),
+    )
 }
 
 #[cfg(all(unix, feature = "console"))]
@@ -276,24 +333,49 @@ struct PolicyReviewComposer {
 
 #[cfg(all(unix, feature = "console"))]
 impl McpAdapterComposer for PolicyReviewComposer {
-    fn compose(&self, adapter: &Arc<McpRouterAdapter>, session_id: &SessionId,
-        member: Option<&MobMemberBinding>) -> Result<Arc<dyn AgentToolDispatcher>, McpAdapterComposeRefusal> {
-        if !selected_member(&self.selected, member)? { return Ok(adapter.clone()); }
+    fn compose(
+        &self,
+        adapter: &Arc<McpRouterAdapter>,
+        session_id: &SessionId,
+        member: Option<&MobMemberBinding>,
+    ) -> Result<Arc<dyn AgentToolDispatcher>, McpAdapterComposeRefusal> {
+        if !selected_member(&self.selected, member)? {
+            return Ok(adapter.clone());
+        }
         // Each actual native router receives a fresh same-session decision
         // owner. No presenter is constructed and then abandoned to retire it.
-        let approvals = Arc::new(LocalApprovals::create_for_installation_policy(
-            &self.artifact_parent, self.installation.clone()).map_err(|_| composition_refused())?
-            .with_service_tasks(Some(self.tasks.clone())));
-        approvals.bind_session(session_id).map_err(|_| composition_refused())?;
+        let approvals = Arc::new(
+            LocalApprovals::create_for_installation_policy(
+                &self.artifact_parent,
+                self.installation.clone(),
+            )
+            .map_err(|_| composition_refused())?
+            .with_service_tasks(Some(self.tasks.clone())),
+        );
+        approvals
+            .bind_session(session_id)
+            .map_err(|_| composition_refused())?;
         match &self.service {
             Some(service) => super::account_request::compose_application_policy_requests(
-                adapter.clone(), self.auth.clone(), self.realm.clone(), session_id.clone(),
-                approvals, self.tasks.clone(), service.clone()).map_err(|_| composition_refused()),
+                adapter.clone(),
+                self.auth.clone(),
+                self.realm.clone(),
+                session_id.clone(),
+                approvals,
+                self.tasks.clone(),
+                service.clone(),
+            )
+            .map_err(|_| composition_refused()),
             None => {
                 // Software authority does not require an access parent. This
                 // selected composition adds no account/public request surface.
-                let checked = crate::service_install::CheckedInstalls::with_software_review(adapter.clone(), approvals);
-                checked.bind_realm(&self.realm).map_err(|_| composition_refused())?;
+                let checked = crate::service_install::CheckedInstalls::with_software_review(
+                    adapter.clone(),
+                    approvals,
+                );
+                checked
+                    .bind_realm(&self.realm)
+                    .map_err(|_| composition_refused())?;
                 Ok(checked)
             }
         }
@@ -305,73 +387,151 @@ impl McpAdapterComposer for PolicyReviewComposer {
 #[cfg(all(unix, feature = "console"))]
 pub(crate) fn gateway_selected_policy_composition(
     construction: &meerkat_mobkit::rpc_gateway::GatewayFactoryConstruction<'_>,
-    selected: MobMemberBinding, realm: RealmLocator,
+    selected: MobMemberBinding,
+    realm: RealmLocator,
     policy: Arc<crate::application_acquisition::selected_policy::SelectedPolicyBinding>,
     presenters: Option<crate::application_gateway::LocalSetupApprovals>,
     artifact_parent: std::path::PathBuf,
     tasks: toolkit_mobkit::installed_host::acquisition::InstalledServiceTaskSource,
-) -> Result<meerkat_mobkit::rpc_gateway::GatewayMcpComposition,
-    meerkat_toolkit::host_lifetime::control::HostLifetimeError> {
+) -> Result<
+    meerkat_mobkit::rpc_gateway::GatewayMcpComposition,
+    meerkat_toolkit::host_lifetime::control::HostLifetimeError,
+> {
     use meerkat_toolkit::host_lifetime::control::HostLifetimeError;
     require_gateway_member_realm(&selected, &realm)?;
-    let facade = construction.host_auth_service().map_err(|_| HostLifetimeError::Unavailable)?;
-    let realm_installation = if presenters.as_ref().is_some_and(|owner| owner.has_console()) {
-        Some(construction.realm_mcp_installation().map_err(|_| HostLifetimeError::Unavailable)?)
-    } else { None };
-    let mut composer = selected_policy_composer(selected, facade, realm, policy, presenters, artifact_parent, tasks)
+    let facade = construction
+        .host_auth_service()
         .map_err(|_| HostLifetimeError::Unavailable)?;
-    Arc::get_mut(&mut composer).ok_or(HostLifetimeError::Unavailable)?.realm_installation =
-        realm_installation;
+    let realm_installation = if presenters.as_ref().is_some_and(|owner| owner.has_console()) {
+        Some(
+            construction
+                .realm_mcp_installation()
+                .map_err(|_| HostLifetimeError::Unavailable)?,
+        )
+    } else {
+        None
+    };
+    let mut composer = selected_policy_composer(
+        selected,
+        facade,
+        realm,
+        policy,
+        presenters,
+        artifact_parent,
+        tasks,
+    )
+    .map_err(|_| HostLifetimeError::Unavailable)?;
+    Arc::get_mut(&mut composer)
+        .ok_or(HostLifetimeError::Unavailable)?
+        .realm_installation = realm_installation;
     let provider = composer.auth.context_provider.clone();
-    Ok(meerkat_mobkit::rpc_gateway::GatewayMcpComposition::new(composer).with_call_context_provider(provider))
+    Ok(
+        meerkat_mobkit::rpc_gateway::GatewayMcpComposition::new(composer)
+            .with_call_context_provider(provider),
+    )
 }
 
 #[cfg(all(unix, feature = "console"))]
-fn selected_policy_composer(selected: MobMemberBinding, facade: HostAuthService, realm: RealmLocator,
+fn selected_policy_composer(
+    selected: MobMemberBinding,
+    facade: HostAuthService,
+    realm: RealmLocator,
     policy: Arc<crate::application_acquisition::selected_policy::SelectedPolicyBinding>,
-    presenters: Option<crate::application_gateway::LocalSetupApprovals>, artifact_parent: std::path::PathBuf,
+    presenters: Option<crate::application_gateway::LocalSetupApprovals>,
+    artifact_parent: std::path::PathBuf,
     tasks: toolkit_mobkit::installed_host::acquisition::InstalledServiceTaskSource,
 ) -> Result<Arc<SelectedPolicyComposer>, ConnectError> {
-    selected.comms_name().map_err(|_| refused("The selected setup member is invalid"))?;
+    selected
+        .comms_name()
+        .map_err(|_| refused("The selected setup member is invalid"))?;
     let auth = ConnectorAuth::from_facade(facade, realm.realm.clone())?;
-    Ok(Arc::new(SelectedPolicyComposer { selected, realm, auth, policy, presenters, artifact_parent, tasks, realm_installation: None }))
+    Ok(Arc::new(SelectedPolicyComposer {
+        selected,
+        realm,
+        auth,
+        policy,
+        presenters,
+        artifact_parent,
+        tasks,
+        realm_installation: None,
+    }))
 }
 #[cfg(all(unix, feature = "console"))]
 struct SelectedPolicyComposer {
-    selected: MobMemberBinding, realm: RealmLocator, auth: Arc<ConnectorAuth>,
+    selected: MobMemberBinding,
+    realm: RealmLocator,
+    auth: Arc<ConnectorAuth>,
     policy: Arc<crate::application_acquisition::selected_policy::SelectedPolicyBinding>,
-    presenters: Option<crate::application_gateway::LocalSetupApprovals>, artifact_parent: std::path::PathBuf,
+    presenters: Option<crate::application_gateway::LocalSetupApprovals>,
+    artifact_parent: std::path::PathBuf,
     tasks: toolkit_mobkit::installed_host::acquisition::InstalledServiceTaskSource,
     realm_installation: Option<meerkat_mobkit::rpc_gateway::GatewayRealmMcpInstallation>,
 }
 #[cfg(all(unix, feature = "console"))]
 impl McpAdapterComposer for SelectedPolicyComposer {
-    fn compose(&self, adapter: &Arc<McpRouterAdapter>, session: &SessionId,
-        member: Option<&MobMemberBinding>) -> Result<Arc<dyn AgentToolDispatcher>, McpAdapterComposeRefusal> {
-        if !selected_member(&self.selected, member)? { return Ok(adapter.clone()); }
+    fn compose(
+        &self,
+        adapter: &Arc<McpRouterAdapter>,
+        session: &SessionId,
+        member: Option<&MobMemberBinding>,
+    ) -> Result<Arc<dyn AgentToolDispatcher>, McpAdapterComposeRefusal> {
+        if !selected_member(&self.selected, member)? {
+            return Ok(adapter.clone());
+        }
         if let Some(presenters) = &self.presenters {
-            return presenters.create_installed_selected(Some(self.tasks.clone()), Some(self.policy.clone()), |approvals| {
-                approvals.bind_session(session)?;
-                let mut review = compose_with_auth(adapter.clone(), self.auth.clone(), self.realm.clone(), session.clone(), approvals)?;
-                review.realm_installation = self.realm_installation.clone();
-                Ok(review)
-            }).map_err(|_| composition_refused());
+            return presenters
+                .create_installed_selected(
+                    Some(self.tasks.clone()),
+                    Some(self.policy.clone()),
+                    |approvals| {
+                        approvals.bind_session(session)?;
+                        let mut review = compose_with_auth(
+                            adapter.clone(),
+                            self.auth.clone(),
+                            self.realm.clone(),
+                            session.clone(),
+                            approvals,
+                        )?;
+                        review.realm_installation = self.realm_installation.clone();
+                        Ok(review)
+                    },
+                )
+                .map_err(|_| composition_refused());
         }
         // No unused presenter or account queue in the headless composition.
-        let (approvals, _) = LocalApprovals::create_for_selected_policy(&self.artifact_parent, self.policy.clone(), None)
-            .map_err(|_| composition_refused())?;
+        let (approvals, _) = LocalApprovals::create_for_selected_policy(
+            &self.artifact_parent,
+            self.policy.clone(),
+            None,
+        )
+        .map_err(|_| composition_refused())?;
         let approvals = Arc::new(approvals.with_service_tasks(Some(self.tasks.clone())));
-        approvals.bind_session(session).map_err(|_| composition_refused())?;
-        super::account_request::compose_selected_policy_requests(adapter.clone(), self.auth.clone(),
-            self.realm.clone(), session.clone(), approvals, self.tasks.clone(), self.policy.clone())
-            .map_err(|_| composition_refused())
+        approvals
+            .bind_session(session)
+            .map_err(|_| composition_refused())?;
+        super::account_request::compose_selected_policy_requests(
+            adapter.clone(),
+            self.auth.clone(),
+            self.realm.clone(),
+            session.clone(),
+            approvals,
+            self.tasks.clone(),
+            self.policy.clone(),
+        )
+        .map_err(|_| composition_refused())
     }
 }
 
-fn selected_member(selected: &MobMemberBinding, member: Option<&MobMemberBinding>)
-    -> Result<bool, McpAdapterComposeRefusal> {
-    let Some(member) = member else { return Ok(false); };
-    if member == selected { return Ok(true); }
+fn selected_member(
+    selected: &MobMemberBinding,
+    member: Option<&MobMemberBinding>,
+) -> Result<bool, McpAdapterComposeRefusal> {
+    let Some(member) = member else {
+        return Ok(false);
+    };
+    if member == selected {
+        return Ok(true);
+    }
     if member.mob_id == selected.mob_id && member.member == selected.member {
         return Err(composition_refused());
     }

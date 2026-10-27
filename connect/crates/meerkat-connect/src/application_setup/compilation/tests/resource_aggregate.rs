@@ -8,7 +8,9 @@ use meerkat_core::{
     SessionId,
     mcp_attachment::{ConfiguredMcpAttachmentAuthority, McpAttachmentRefusal},
 };
-use meerkat_runtime::meerkat_machine::{ConfiguredMcpAttachmentProvider, RuntimeSessionRegistrationWitness, SessionAgentBinding};
+use meerkat_runtime::meerkat_machine::{
+    ConfiguredMcpAttachmentProvider, RuntimeSessionRegistrationWitness, SessionAgentBinding,
+};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Default)]

@@ -26,7 +26,10 @@ const VERSION: u32 = 4;
 #[cold]
 fn publication_failure(branch: &'static str) {
     use std::io::Write as _;
-    let _ = writeln!(std::io::stderr().lock(), "toolkit.setup.publication.refused:{branch}");
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "toolkit.setup.publication.refused:{branch}"
+    );
 }
 
 fn publication_mismatch(branch: &'static str, mismatch: bool) -> bool {
@@ -46,10 +49,7 @@ fn publication_error<E>(branch: &'static str) -> impl FnOnce(E) -> E {
 // Frozen input and final publication share a record owner, but are distinct
 // local admissions. Bind the stable destination, not mutable publication data;
 // WorkGraph admission and effect identities remain unchanged.
-fn publication_admission_key(
-    key: &StoreKey,
-    native_admission: &str,
-) -> Result<String, SetupError> {
+fn publication_admission_key(key: &StoreKey, native_admission: &str) -> Result<String, SetupError> {
     let identity = canonical_json(&(
         "meerkat-toolkit-native-publication-v1",
         key,
@@ -404,8 +404,12 @@ impl SetupStore<'_> {
             let preparation = self.recover_native_input(snapshot, saved).await?;
             preparation.metadata.check_backend(backend)?;
             crate::setup::installed_input::verify_work_input_reference(
-            snapshot.request(), preparation.input_reference(), access.evidence, access.context, access.references,
-        )?;
+                snapshot.request(),
+                preparation.input_reference(),
+                access.evidence,
+                access.context,
+                access.references,
+            )?;
             return Ok(preparation);
         }
         let proposed = preparer.prepare(snapshot.request())?;
@@ -541,7 +545,11 @@ impl SetupStore<'_> {
             .validate(snapshot, &effect, &proposal.work)
             .await?;
         crate::setup::installed_input::verify_work_input_reference(
-            snapshot.request(), &proposal.work.input_reference, access.evidence, access.context, access.references,
+            snapshot.request(),
+            &proposal.work.input_reference,
+            access.evidence,
+            access.context,
+            access.references,
         )?;
         Ok(proposal)
     }
@@ -582,7 +590,11 @@ impl SetupStore<'_> {
         }
         let effect = self.original_work_effect(snapshot).await?;
         crate::setup::installed_input::verify_work_input_reference(
-            snapshot.request(), &proposed.input_reference, access.evidence, access.context, access.references,
+            snapshot.request(),
+            &proposed.input_reference,
+            access.evidence,
+            access.context,
+            access.references,
         )?;
         proposed
             .scope
@@ -674,16 +686,24 @@ impl SetupStore<'_> {
             .map_err(publication_error("publish.conditional_store"))?;
         self.check_snapshot(snapshot, &access, false)
             .map_err(publication_error("publish.snapshot_observation"))?;
-        let effect = self.original_work_effect(snapshot).await
+        let effect = self
+            .original_work_effect(snapshot)
+            .await
             .map_err(publication_error("publish.work_effect"))?;
         validate_proposal_binding(self, snapshot, &effect, proposal)
             .map_err(publication_error("publish.proposal"))?;
         proposal
             .metadata
             .validate(snapshot, &effect, &proposal.work)
-            .await.map_err(publication_error("publish.metadata"))?;
-        if publication_mismatch("publish.dispatch_effect", conditions.dispatch_claim.key != effect.key)
-            || publication_mismatch("publish.owner_conditions_empty", conditions.owners.is_empty()) {
+            .await
+            .map_err(publication_error("publish.metadata"))?;
+        if publication_mismatch(
+            "publish.dispatch_effect",
+            conditions.dispatch_claim.key != effect.key,
+        ) || publication_mismatch(
+            "publish.owner_conditions_empty",
+            conditions.owners.is_empty(),
+        ) {
             return Err(SetupError::InvalidRecord);
         }
         let mut owners = conditions.owners;
@@ -707,19 +727,21 @@ impl SetupStore<'_> {
             basis: basis.clone(),
         };
         validate_child(&candidate, proposal, access.evidence)?;
-        if candidate
-            .helper_source
-            .as_ref()
-            .is_some_and(|source| publication_mismatch("publish.helper_effect", source.effect != effect.key))
-        {
+        if candidate.helper_source.as_ref().is_some_and(|source| {
+            publication_mismatch("publish.helper_effect", source.effect != effect.key)
+        }) {
             return Err(SetupError::InvalidRecord);
         }
         let exact_child = candidate.child.clone();
         let exact_helper = candidate.helper_source.clone();
         // Recovery is observation, including after old publication conditions
         // expire. It must not reissue, overwrite or infer permission to dispatch.
-        if let Some(saved) = self.store.get(&proposal.key).await
-            .map_err(publication_error("publish.existing_read"))? {
+        if let Some(saved) = self
+            .store
+            .get(&proposal.key)
+            .await
+            .map_err(publication_error("publish.existing_read"))?
+        {
             return recover_native(
                 self,
                 snapshot,
@@ -737,24 +759,37 @@ impl SetupStore<'_> {
             publication_failure("publish.terminal");
             return Err(SetupError::Rejected);
         }
-        let issued = i64::try_from(candidate.child.constraints().issued_at_ms)
-            .map_err(|_| { publication_failure("publish.issue_range"); SetupError::InvalidRecord })?;
-        if publication_mismatch("publish.issue_store_clock", issued > store.now_ms().await
-                .map_err(publication_error("publish.store_clock"))?)
-            || publication_mismatch("publish.issue_access_clock", candidate.child.constraints().issued_at_ms > access.context.now_ms)
-        {
+        let issued = i64::try_from(candidate.child.constraints().issued_at_ms).map_err(|_| {
+            publication_failure("publish.issue_range");
+            SetupError::InvalidRecord
+        })?;
+        if publication_mismatch(
+            "publish.issue_store_clock",
+            issued
+                > store
+                    .now_ms()
+                    .await
+                    .map_err(publication_error("publish.store_clock"))?,
+        ) || publication_mismatch(
+            "publish.issue_access_clock",
+            candidate.child.constraints().issued_at_ms > access.context.now_ms,
+        ) {
             return Err(SetupError::InvalidRecord);
         }
-        let expiry = i64::try_from(candidate.child.constraints().expires_at_ms)
-            .map_err(|_| { publication_failure("publish.expiry_range"); SetupError::InvalidRecord })?;
+        let expiry = i64::try_from(candidate.child.constraints().expires_at_ms).map_err(|_| {
+            publication_failure("publish.expiry_range");
+            SetupError::InvalidRecord
+        })?;
         if publication_mismatch("publish.deadline_expiry", conditions.before_ms > expiry)
-            || publication_mismatch("publish.deadline_positive", conditions.before_ms <= 0) {
+            || publication_mismatch("publish.deadline_positive", conditions.before_ms <= 0)
+        {
             return Err(SetupError::InvalidRecord);
         }
         let data = RecordData {
             schema: SCHEMA.into(),
             version: VERSION,
-            body: serde_json::to_value(candidate).map_err(publication_error("publish.encode_record"))?,
+            body: serde_json::to_value(candidate)
+                .map_err(publication_error("publish.encode_record"))?,
         };
         let result = store
             .admit_conditionally(ConditionalAdmission {
@@ -763,7 +798,8 @@ impl SetupStore<'_> {
                     admission_key: publication_admission_key(
                         &proposal.key,
                         &proposal.admission_key,
-                    ).map_err(publication_error("publish.admission_key"))?,
+                    )
+                    .map_err(publication_error("publish.admission_key"))?,
                     data,
                     events: vec![],
                     effects: vec![],
@@ -778,9 +814,12 @@ impl SetupStore<'_> {
                 // Only the same immutable association, proposal and owner basis
                 // may converge on the existing record. A conflict elsewhere is
                 // still a conflict, not a missing-publication result.
-                self.store.get(&proposal.key).await
+                self.store
+                    .get(&proposal.key)
+                    .await
                     .map_err(publication_error("publish.conflict_read"))?
-                    .ok_or(error).map_err(publication_error("publish.conflict_missing"))?
+                    .ok_or(error)
+                    .map_err(publication_error("publish.conflict_missing"))?
             }
             Err(error) => {
                 publication_failure("publish.conditional_admission");
@@ -935,8 +974,12 @@ fn publication_basis(
         basis.push(PublicationBasis {
             key: condition.key.clone(),
             revision: condition.revision,
-            content_digest: ContentDigest::parse(condition.content_digest.clone())
-                .map_err(|_| { publication_failure("basis.content_digest"); SetupError::InvalidRecord })?,
+            content_digest: ContentDigest::parse(condition.content_digest.clone()).map_err(
+                |_| {
+                    publication_failure("basis.content_digest");
+                    SetupError::InvalidRecord
+                },
+            )?,
             record_claim: condition.claim.as_ref().map(|lease| ClaimBasis {
                 store_id: lease.store_id.clone(),
                 worker: lease.worker.clone(),
@@ -970,12 +1013,20 @@ fn validate_saved_basis_shape(
     }
     let mut prior = None;
     for item in basis {
-        item.key.validate().map_err(publication_error("basis.key"))?;
+        item.key
+            .validate()
+            .map_err(publication_error("basis.key"))?;
         if publication_mismatch("basis.realm", item.key.realm != key.realm)
             || publication_mismatch("basis.distinct_key", item.key == *key)
             || publication_mismatch("basis.revision_nonzero", item.revision == 0)
-            || publication_mismatch("basis.revision_range", i64::try_from(item.revision).is_err())
-            || publication_mismatch("basis.unique_order", prior.is_some_and(|previous: &StoreKey| previous >= &item.key))
+            || publication_mismatch(
+                "basis.revision_range",
+                i64::try_from(item.revision).is_err(),
+            )
+            || publication_mismatch(
+                "basis.unique_order",
+                prior.is_some_and(|previous: &StoreKey| previous >= &item.key),
+            )
         {
             return Err(SetupError::InvalidRecord);
         }
@@ -987,7 +1038,8 @@ fn validate_saved_basis_shape(
             // Historical claim generation is fixed; renewed expiry is not.
             if publication_mismatch("basis.claim_store", claim.store_id.is_empty())
                 || publication_mismatch("basis.claim_worker", claim.worker.is_empty())
-                || publication_mismatch("basis.claim_fence", claim.fence == 0) {
+                || publication_mismatch("basis.claim_fence", claim.fence == 0)
+            {
                 return Err(SetupError::InvalidRecord);
             }
         }
@@ -1076,19 +1128,30 @@ fn validate_child(
     let cc = record.child.constraints();
     let d = &record.delegation;
     if publication_mismatch("child.parent", &proposal.parent != parent.original_work())
-        || publication_mismatch("child.original_destination", c.original_work != d.original_work)
-        || publication_mismatch("child.distinct_original", c.original_work == p.original_work)
+        || publication_mismatch(
+            "child.original_destination",
+            c.original_work != d.original_work,
+        )
+        || publication_mismatch(
+            "child.distinct_original",
+            c.original_work == p.original_work,
+        )
         || publication_mismatch("child.requester", c.requester != p.requester)
         || publication_mismatch("child.target", c.target != d.destination)
         || publication_mismatch("child.realm", c.ingress_namespace.realm != d.realm_id)
         || publication_mismatch("child.tenant", cc.tenant != pc.tenant)
         || publication_mismatch("child.deployment", cc.deployment != pc.deployment)
-        || publication_mismatch("child.policy_revision", cc.policy_revision != pc.policy_revision)
+        || publication_mismatch(
+            "child.policy_revision",
+            cc.policy_revision != pc.policy_revision,
+        )
         || publication_mismatch("child.ceiling", cc.ceiling != d.ceiling)
         || publication_mismatch("child.parent_ceiling", !pc.ceiling.contains(&cc.ceiling))
-        || publication_mismatch("child.delegate_resource", !pc
-            .ceiling
-            .permits(crate::authority::Action::Delegate, &d.delegation_resource))
+        || publication_mismatch(
+            "child.delegate_resource",
+            !pc.ceiling
+                .permits(crate::authority::Action::Delegate, &d.delegation_resource),
+        )
         || publication_mismatch("child.expiry", cc.expires_at_ms != d.expires_at_ms)
         || publication_mismatch("child.parent_expiry", cc.expires_at_ms > pc.expires_at_ms)
         || publication_mismatch("child.issue_order", cc.issued_at_ms < pc.issued_at_ms)
@@ -1098,10 +1161,16 @@ fn validate_child(
     }
     if let Some(helper) = &record.helper_source {
         validate_helper_source(record, proposal, parent, helper)?;
-    } else if publication_mismatch("child.legacy_ingress_actor", c.ingress_actor != p.ingress_actor)
-        || publication_mismatch("child.legacy_subject", c.represented_subject != p.represented_subject)
-        || publication_mismatch("child.legacy_authentication", c.original_authentication != p.original_authentication)
-        || publication_mismatch("child.legacy_event", c.root_event != p.root_event)
+    } else if publication_mismatch(
+        "child.legacy_ingress_actor",
+        c.ingress_actor != p.ingress_actor,
+    ) || publication_mismatch(
+        "child.legacy_subject",
+        c.represented_subject != p.represented_subject,
+    ) || publication_mismatch(
+        "child.legacy_authentication",
+        c.original_authentication != p.original_authentication,
+    ) || publication_mismatch("child.legacy_event", c.root_event != p.root_event)
     {
         // Preserve the older historical record contract. A new helper must use
         // the explicit helper-source publication path, never copied auth facts.
@@ -1169,19 +1238,35 @@ fn validate_helper_source(
     {
         return Err(SetupError::InvalidRecord);
     }
-    source.source.key.validate().map_err(publication_error("helper.source_key"))?;
+    source
+        .source
+        .key
+        .validate()
+        .map_err(publication_error("helper.source_key"))?;
     for (index, original) in source.contributors.iter().enumerate() {
         let contributor = original.candidate();
-        if publication_mismatch("helper.contributor_ingress", contributor.ingress_namespace.ingress != p.ingress_namespace.ingress)
-            || publication_mismatch("helper.contributor_realm", contributor.ingress_namespace.realm != p.ingress_namespace.realm)
-            || publication_mismatch("helper.contributor_requester", contributor.requester != p.requester)
-            || publication_mismatch("helper.contributor_not_child", contributor.original_work == c.original_work)
-            || publication_mismatch("helper.contributor_unique", originals[..index].contains(&contributor.original_work))
-            || publication_mismatch("helper.contributor_ancestry", contributor
+        if publication_mismatch(
+            "helper.contributor_ingress",
+            contributor.ingress_namespace.ingress != p.ingress_namespace.ingress,
+        ) || publication_mismatch(
+            "helper.contributor_realm",
+            contributor.ingress_namespace.realm != p.ingress_namespace.realm,
+        ) || publication_mismatch(
+            "helper.contributor_requester",
+            contributor.requester != p.requester,
+        ) || publication_mismatch(
+            "helper.contributor_not_child",
+            contributor.original_work == c.original_work,
+        ) || publication_mismatch(
+            "helper.contributor_unique",
+            originals[..index].contains(&contributor.original_work),
+        ) || publication_mismatch(
+            "helper.contributor_ancestry",
+            contributor
                 .contributing_work
                 .iter()
-                .any(|ancestor| !originals.contains(ancestor)))
-        {
+                .any(|ancestor| !originals.contains(ancestor)),
+        ) {
             return Err(SetupError::InvalidRecord);
         }
     }
@@ -1216,7 +1301,10 @@ fn validate_helper_source(
         true
     }
     for index in 0..originals.len() {
-        if publication_mismatch("helper.ancestry_graph", !visit(index, &source.contributors, &originals, &mut marks)) {
+        if publication_mismatch(
+            "helper.ancestry_graph",
+            !visit(index, &source.contributors, &originals, &mut marks),
+        ) {
             return Err(SetupError::InvalidRecord);
         }
     }
@@ -1257,15 +1345,34 @@ async fn recover_native(
         publication_failure("recover.version");
         return Err(SetupError::UnsupportedRecordVersion);
     }
-    if publication_mismatch("recover.key", saved.key != store.preparation_key(&operation_id(snapshot.request()).map_err(publication_error("recover.operation"))?))
-        || publication_mismatch("recover.revision", saved.revision != 1)
+    if publication_mismatch(
+        "recover.key",
+        saved.key
+            != store.preparation_key(
+                &operation_id(snapshot.request())
+                    .map_err(publication_error("recover.operation"))?,
+            ),
+    ) || publication_mismatch("recover.revision", saved.revision != 1)
         || publication_mismatch("recover.schema", saved.data.schema != SCHEMA)
-        || publication_mismatch("recover.digest", saved.content_digest != saved.data.digest().map_err(publication_error("recover.encode_digest"))?)
+        || publication_mismatch(
+            "recover.digest",
+            saved.content_digest
+                != saved
+                    .data
+                    .digest()
+                    .map_err(publication_error("recover.encode_digest"))?,
+        )
     {
         return Err(SetupError::InvalidRecord);
     }
-    let record: NativePreparedRecord = serde_json::from_value(saved.data.body.clone()).map_err(publication_error("recover.decode"))?;
-    if publication_mismatch("recover.canonical_record", canonical_json(&record).map_err(publication_error("recover.encode_record"))? != canonical_json(&saved.data.body).map_err(publication_error("recover.encode_body"))?) {
+    let record: NativePreparedRecord = serde_json::from_value(saved.data.body.clone())
+        .map_err(publication_error("recover.decode"))?;
+    if publication_mismatch(
+        "recover.canonical_record",
+        canonical_json(&record).map_err(publication_error("recover.encode_record"))?
+            != canonical_json(&saved.data.body)
+                .map_err(publication_error("recover.encode_body"))?,
+    ) {
         return Err(SetupError::InvalidRecord);
     }
     let proposal = NativePreparedWorkProposal {
@@ -1282,13 +1389,12 @@ async fn recover_native(
     record
         .metadata
         .validate(snapshot, effect, &record.work)
-        .await.map_err(publication_error("recover.metadata"))?;
+        .await
+        .map_err(publication_error("recover.metadata"))?;
     validate_child(&record, &proposal, parent)?;
-    if record
-        .helper_source
-        .as_ref()
-        .is_some_and(|source| publication_mismatch("recover.helper_effect", source.effect != effect.key))
-    {
+    if record.helper_source.as_ref().is_some_and(|source| {
+        publication_mismatch("recover.helper_effect", source.effect != effect.key)
+    }) {
         return Err(SetupError::InvalidRecord);
     }
     validate_saved_basis(&record.basis, &saved.key, snapshot.key())?;
@@ -1311,27 +1417,37 @@ async fn recover_native(
             child,
             helper,
             basis,
-        )).map_err(publication_error("recover.encode_expected"))? != canonical_json(&(
-            &proposal.work,
-            proposal.metadata.backend(),
-            &proposal.delegation,
-            &proposal.parent,
-            &record.child,
-            &record.helper_source,
-            &record.basis,
-        )).map_err(publication_error("recover.encode_observed"))?
+        ))
+        .map_err(publication_error("recover.encode_expected"))?
+            != canonical_json(&(
+                &proposal.work,
+                proposal.metadata.backend(),
+                &proposal.delegation,
+                &proposal.parent,
+                &record.child,
+                &record.helper_source,
+                &record.basis,
+            ))
+            .map_err(publication_error("recover.encode_observed"))?
     {
         publication_failure("recover.exact_publication_conflict");
         return Err(StoreError::AdmissionConflict.into());
     }
     if let Some((references, context)) = observation {
         crate::setup::installed_input::verify_work_input_reference(
-            snapshot.request(), &record.work.input_reference, parent, context, references,
-        ).map_err(publication_error("recover.input_reference"))?;
+            snapshot.request(),
+            &record.work.input_reference,
+            parent,
+            context,
+            references,
+        )
+        .map_err(publication_error("recover.input_reference"))?;
     }
     Ok(PublishedSetupWork {
         key: saved.key,
-        digest: ContentDigest::of_bytes(&canonical_json(&saved.data).map_err(publication_error("recover.encode_saved"))?),
+        digest: ContentDigest::of_bytes(
+            &canonical_json(&saved.data).map_err(publication_error("recover.encode_saved"))?,
+        ),
         record,
     })
 }

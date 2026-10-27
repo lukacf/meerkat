@@ -2,15 +2,33 @@
 //! write closure. These controls do not authenticate a Human or issue a grant.
 use super::*;
 use crate::private_host::{ConsoleLoginHandle, ConsoleLoginSelection, ConsoleLogins};
-use std::{sync::atomic::{AtomicUsize, Ordering}, time::{Duration, SystemTime, UNIX_EPOCH}};
+use std::{
+    sync::atomic::{AtomicUsize, Ordering},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
-fn login_owner() -> (tokio::sync::watch::Sender<bool>, ConsoleLogins, ConsoleLoginHandle) {
+fn login_owner() -> (
+    tokio::sync::watch::Sender<bool>,
+    ConsoleLogins,
+    ConsoleLoginHandle,
+) {
     let (connection, owner) = ConsoleLogins::fixture_owner();
-    let expires_at_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64 + 60_000;
-    let login = owner.fixture_enroll(2, ConsoleLoginSelection {
-        issuer: "controller-writer-fixture".into(), subject: "fixture-subject".into(),
-        login_scope_id: "fixture-login".into(), expires_at_ms,
-    }).unwrap();
+    let expires_at_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 60_000;
+    let login = owner
+        .fixture_enroll(
+            2,
+            ConsoleLoginSelection {
+                issuer: "controller-writer-fixture".into(),
+                subject: "fixture-subject".into(),
+                login_scope_id: "fixture-login".into(),
+                expires_at_ms,
+            },
+        )
+        .unwrap();
     (connection, owner, login)
 }
 
@@ -34,10 +52,17 @@ async fn approved_login_remains_with_blocking_writer_after_waiter_cancellation()
     waiter.abort();
     assert!(waiter.await.unwrap_err().is_cancelled());
     let mut retirement = logins.fixture_retire(2).unwrap();
-    assert!(tokio::time::timeout(Duration::from_millis(20), &mut retirement).await.is_err(),
-        "the detached blocking writer still owns the same login reservation");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut retirement)
+            .await
+            .is_err(),
+        "the detached blocking writer still owns the same login reservation"
+    );
     release.send(()).unwrap();
-    let observed = tokio::time::timeout(Duration::from_secs(2), retirement).await.unwrap().unwrap();
+    let observed = tokio::time::timeout(Duration::from_secs(2), retirement)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(observed.fenced && observed.reservations_drained && !observed.uncertain);
     assert_eq!(writes.load(Ordering::SeqCst), 1);
 }
@@ -61,6 +86,9 @@ async fn retired_approved_login_refuses_the_queued_writer_before_its_write() {
     let observed = logins.fixture_retire(2).unwrap().await.unwrap();
     assert!(observed.fenced && observed.reservations_drained && !observed.uncertain);
     release.send(()).unwrap();
-    assert!(matches!(worker.await.unwrap(), Err(HostLifetimeError::Denied)));
+    assert!(matches!(
+        worker.await.unwrap(),
+        Err(HostLifetimeError::Denied)
+    ));
     assert_eq!(writes.load(Ordering::SeqCst), 0);
 }

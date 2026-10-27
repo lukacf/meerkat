@@ -50,8 +50,13 @@ mod first_target;
 // Native operations create these values. Presenters must not recover them from
 // terminal output or infer provider completion from a displayed URL.
 enum SignInNotice {
-    Browser { authorization_url: String },
-    Device { verification_uri: String, user_code: String },
+    Browser {
+        authorization_url: String,
+    },
+    Device {
+        verification_uri: String,
+        user_code: String,
+    },
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SignInDisposition {
@@ -65,20 +70,32 @@ struct SignInPresentation<'a> {
 }
 impl<'a> SignInPresentation<'a> {
     fn new(show: &'a mut (dyn FnMut(SignInNotice) -> io::Result<()> + Send)) -> Self {
-        Self { show, disposition: SignInDisposition::Refused }
+        Self {
+            show,
+            disposition: SignInDisposition::Refused,
+        }
     }
-    fn expired(&mut self) { self.disposition = SignInDisposition::Expired; }
+    fn expired(&mut self) {
+        self.disposition = SignInDisposition::Expired;
+    }
     fn observe_device_poll(&mut self, outcome: &HostAuthDevicePoll) {
-        if matches!(outcome, HostAuthDevicePoll::Expired) { self.expired(); }
+        if matches!(outcome, HostAuthDevicePoll::Expired) {
+            self.expired();
+        }
     }
     fn observe_callback_error(&mut self, error: &OAuthError) {
-        if matches!(error, OAuthError::Timeout) { self.expired(); }
+        if matches!(error, OAuthError::Timeout) {
+            self.expired();
+        }
     }
     fn disposition(&self, result: &Result<bool, ConnectError>) -> SignInDisposition {
-        if matches!(result, Ok(true)) { SignInDisposition::Completed } else { self.disposition }
+        if matches!(result, Ok(true)) {
+            SignInDisposition::Completed
+        } else {
+            self.disposition
+        }
     }
 }
-
 
 fn device_window_elapsed(
     expires_at: std::time::Instant,
@@ -86,7 +103,9 @@ fn device_window_elapsed(
 ) -> bool {
     let elapsed = std::time::Instant::now() >= expires_at;
     if elapsed {
-        if let Some(present) = presentation.as_deref_mut() { present.expired(); }
+        if let Some(present) = presentation.as_deref_mut() {
+            present.expired();
+        }
     }
     elapsed
 }
@@ -172,7 +191,10 @@ async fn observe(
     // controller. The ordinary env/static path still need not open a bundle.
     if startup.standalone.is_some() || startup.persistence.is_some() {
         environment = environment.with_auth_lease_handle(
-            startup.provider_auth_runtime_authority().await?.generated_auth_lease_handle(),
+            startup
+                .provider_auth_runtime_authority()
+                .await?
+                .generated_auth_lease_handle(),
         );
     }
     let status = startup
@@ -219,15 +241,26 @@ pub(crate) async fn ready_for_open(
     let resolution = resolve_create_session_model(&startup.config, request.clone())
         .map_err(|e| ConnectError::native("Resolve native model selection", e))?;
     let candidates = resolve_auth_binding_candidates_for_provider(
-        &startup.config, resolution.provider, resolution.auth_binding.as_ref(),
-        Some(&startup.storage.locator.realm), true,
-    ).map_err(|e| ConnectError::native("Resolve native model candidates", e))?;
+        &startup.config,
+        resolution.provider,
+        resolution.auth_binding.as_ref(),
+        Some(&startup.storage.locator.realm),
+        true,
+    )
+    .map_err(|e| ConnectError::native("Resolve native model candidates", e))?;
     let mut known_oauth_signin_required = false;
     for candidate in candidates {
         let observation = observe(startup, &candidate).await?;
-        if matches!(observation, Observation::Credential(CredentialReadiness::MaterializedAtOpen))
-            && known_oauth_signin_required { continue; }
-        if observation.admits_open() { return Ok(true); }
+        if matches!(
+            observation,
+            Observation::Credential(CredentialReadiness::MaterializedAtOpen)
+        ) && known_oauth_signin_required
+        {
+            continue;
+        }
+        if observation.admits_open() {
+            return Ok(true);
+        }
         known_oauth_signin_required |= matches!(observation, Observation::OAuth(_));
     }
     Ok(false)
@@ -286,10 +319,12 @@ where
     F: Future<Output = io::Result<()>>,
     W: Write,
 {
-    let selected = present_provider_setup_inner(
-        startup, model, choose_model, input, output, interrupt,
-    ).await?;
-    selected.map(|request| retain_model_selection(&startup.config, request)).transpose()
+    let selected =
+        present_provider_setup_inner(startup, model, choose_model, input, output, interrupt)
+            .await?;
+    selected
+        .map(|request| retain_model_selection(&startup.config, request))
+        .transpose()
 }
 
 // Keep the choice used by initial setup explicit when the same conversation
@@ -297,7 +332,8 @@ where
 // a new default model/provider. An absent native auth reference stays absent;
 // credential candidates, currentness and token contents remain native-owned.
 fn retain_model_selection(
-    config: &meerkat_core::Config, mut request: CreateSessionModelResolutionRequest,
+    config: &meerkat_core::Config,
+    mut request: CreateSessionModelResolutionRequest,
 ) -> Result<CreateSessionModelResolutionRequest, ConnectError> {
     let selected = resolve_create_session_model(config, request.clone())
         .map_err(|error| ConnectError::native("Retain setup model selection", error))?;
@@ -592,10 +628,17 @@ mod api_key_tests {
             assert!(actual.to_string().contains("details withheld"));
         }
         use meerkat_core::auth::token_store::TokenStoreRefusal as T;
-        for refusal in [T::Denied, T::InteractionRequired, T::Pending,
-            T::Unavailable, T::NotObserved, T::Unsupported] {
+        for refusal in [
+            T::Denied,
+            T::InteractionRequired,
+            T::Pending,
+            T::Unavailable,
+            T::NotObserved,
+            T::Unsupported,
+        ] {
             let mapped = credential_save_error(E::CredentialAccess {
-                refusal, detail: "private-credential-canary".into(),
+                refusal,
+                detail: "private-credential-canary".into(),
             });
             assert!(!format!("{mapped:?}").contains("private-credential-canary"));
             let ConnectError::ProviderSetup { source, .. } = mapped else {
@@ -610,8 +653,11 @@ mod api_key_tests {
     #[test]
     fn private_native_expiry_keeps_error_and_cleanup_separate_from_display() {
         let mut show = |_| Ok(());
-        for outcome in [HostAuthDevicePoll::Pending, HostAuthDevicePoll::AccessDenied,
-            HostAuthDevicePoll::Expired] {
+        for outcome in [
+            HostAuthDevicePoll::Pending,
+            HostAuthDevicePoll::AccessDenied,
+            HostAuthDevicePoll::Expired,
+        ] {
             let mut presentation = SignInPresentation::new(&mut show);
             presentation.observe_device_poll(&outcome);
             let result = Err(combined(
@@ -619,28 +665,53 @@ mod api_key_tests {
                 Err(ConnectError::InvalidInput("cleanup failure".into())),
             ));
             let original = result.as_ref().unwrap_err().to_string();
-            assert_eq!(presentation.disposition(&result), if matches!(outcome, HostAuthDevicePoll::Expired) {
-                SignInDisposition::Expired
-            } else { SignInDisposition::Refused });
+            assert_eq!(
+                presentation.disposition(&result),
+                if matches!(outcome, HostAuthDevicePoll::Expired) {
+                    SignInDisposition::Expired
+                } else {
+                    SignInDisposition::Refused
+                }
+            );
             assert_eq!(result.as_ref().unwrap_err().to_string(), original);
             assert!(original.contains("cleanup failure"));
         }
         for error in [OAuthError::UserDenied, OAuthError::Timeout] {
             let expected = if matches!(error, OAuthError::Timeout) {
                 SignInDisposition::Expired
-            } else { SignInDisposition::Refused };
+            } else {
+                SignInDisposition::Refused
+            };
             let mut presentation = SignInPresentation::new(&mut show);
             presentation.observe_callback_error(&error);
-            let result = Err(ConnectError::provider_setup("Await native sign-in callback", error));
+            let result = Err(ConnectError::provider_setup(
+                "Await native sign-in callback",
+                error,
+            ));
             assert_eq!(presentation.disposition(&result), expected);
             assert!(result.is_err());
         }
         let mut presentation = SignInPresentation::new(&mut show);
-        assert!(!device_window_elapsed(std::time::Instant::now() + Duration::from_secs(60), &mut Some(&mut presentation)));
-        assert_eq!(presentation.disposition(&Ok(false)), SignInDisposition::Refused);
-        assert_eq!(presentation.disposition(&Ok(true)), SignInDisposition::Completed);
-        assert!(device_window_elapsed(std::time::Instant::now(), &mut Some(&mut presentation)));
-        assert_eq!(presentation.disposition(&Ok(false)), SignInDisposition::Expired);
+        assert!(!device_window_elapsed(
+            std::time::Instant::now() + Duration::from_secs(60),
+            &mut Some(&mut presentation)
+        ));
+        assert_eq!(
+            presentation.disposition(&Ok(false)),
+            SignInDisposition::Refused
+        );
+        assert_eq!(
+            presentation.disposition(&Ok(true)),
+            SignInDisposition::Completed
+        );
+        assert!(device_window_elapsed(
+            std::time::Instant::now(),
+            &mut Some(&mut presentation)
+        ));
+        assert_eq!(
+            presentation.disposition(&Ok(false)),
+            SignInDisposition::Expired
+        );
         // Terminal calls have no private display, but use the same native deadline.
         assert!(device_window_elapsed(std::time::Instant::now(), &mut None));
     }
@@ -882,26 +953,56 @@ parent = "owner"
             let target = target(&config);
             let key = TokenKey::from_credential_identity(&target.credential_identity);
             let inner = Arc::new(FileTokenStore::new(root.join("credentials")));
-            let held = Arc::new(HeldStore { inner: inner.clone(), entered: Semaphore::new(0),
-                release: Semaphore::new(0), saves: AtomicUsize::new(0) });
-            let persistence = ProviderAuthPersistence::new(held.clone(),
-                Arc::new(FileLockCoordinator::new(root.join("locks"))));
-            let storage = crate::RealmOptions { context_root: root.into(),
-                state_root: Some(root.join("state")), user_config_root: Some(root.join("home"))
-            }.resolve("owner").unwrap();
-            let mut startup = SessionStartup { storage, config,
+            let held = Arc::new(HeldStore {
+                inner: inner.clone(),
+                entered: Semaphore::new(0),
+                release: Semaphore::new(0),
+                saves: AtomicUsize::new(0),
+            });
+            let persistence = ProviderAuthPersistence::new(
+                held.clone(),
+                Arc::new(FileLockCoordinator::new(root.join("locks"))),
+            );
+            let storage = crate::RealmOptions {
+                context_root: root.into(),
+                state_root: Some(root.join("state")),
+                user_config_root: Some(root.join("home")),
+            }
+            .resolve("owner")
+            .unwrap();
+            let mut startup = SessionStartup {
+                storage,
+                config,
                 factory: meerkat::AgentFactory::new(root.join("state/owner"))
-                    .with_provider_auth_persistence(persistence.clone()), persistence: None, connector_auth: None, standalone: None };
+                    .with_provider_auth_persistence(persistence.clone()),
+                persistence: None,
+                connector_auth: None,
+                standalone: None,
+            };
             let (cancel, receive) = oneshot::channel();
-            let interrupt = async { receive.await.map_err(|_| io::Error::other("test signal closed")) };
+            let interrupt = async {
+                receive
+                    .await
+                    .map_err(|_| io::Error::other("test signal closed"))
+            };
             tokio::pin!(interrupt);
             let value = "  synthetic-private-native-key-☃ /quit  ";
             let mut output = Output::default();
             let observed = output.clone();
             if before_entry {
                 cancel.send(()).unwrap();
-                assert!(!save_api_key(&mut startup, &target, persistence, PersistedTokens::api_key(value),
-                    &mut output, interrupt.as_mut()).await.unwrap());
+                assert!(
+                    !save_api_key(
+                        &mut startup,
+                        &target,
+                        persistence,
+                        PersistedTokens::api_key(value),
+                        &mut output,
+                        interrupt.as_mut()
+                    )
+                    .await
+                    .unwrap()
+                );
                 assert_eq!(held.saves.load(Ordering::SeqCst), 0);
                 assert!(inner.load(&key).await.unwrap().is_none());
             } else {
@@ -914,12 +1015,35 @@ parent = "owner"
                     held.release.add_permits(1);
                 };
                 let (saved, ()) = tokio::time::timeout(Duration::from_secs(10), async {
-                    tokio::join!(save_api_key(&mut startup, &target, persistence,
-                        PersistedTokens::api_key(value), &mut output, interrupt.as_mut()), owner)
-                }).await.unwrap();
-                assert!(!saved.unwrap(), "joined cancellation cannot continue initialization");
+                    tokio::join!(
+                        save_api_key(
+                            &mut startup,
+                            &target,
+                            persistence,
+                            PersistedTokens::api_key(value),
+                            &mut output,
+                            interrupt.as_mut()
+                        ),
+                        owner
+                    )
+                })
+                .await
+                .unwrap();
+                assert!(
+                    !saved.unwrap(),
+                    "joined cancellation cannot continue initialization"
+                );
                 assert_eq!(held.saves.load(Ordering::SeqCst), 1);
-                assert_eq!(inner.load(&key).await.unwrap().unwrap().primary_secret.as_deref(), Some(value));
+                assert_eq!(
+                    inner
+                        .load(&key)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .primary_secret
+                        .as_deref(),
+                    Some(value)
+                );
             }
             assert!(!observed.contains(value));
         }
@@ -941,7 +1065,9 @@ parent = "owner"
             if self.decisions == 0 {
                 let text = std::str::from_utf8(&self.bytes).unwrap();
                 if let Some((_, decision)) = text.split_once("Type 'approve ") {
-                    assert!(text.contains("Allow the supplied setup helper to prepare choices in this realm?"));
+                    assert!(text.contains(
+                        "Allow the supplied setup helper to prepare choices in this realm?"
+                    ));
                     let (id, _) = decision.split_once('\'').unwrap();
                     self.input.try_send(Ok(format!("approve {id}"))).unwrap();
                     self.decisions += 1;
@@ -956,93 +1082,158 @@ parent = "owner"
             panic!("the native stage refusal must remain the primary error");
         };
         assert_eq!(operation, "Read staged setup authentication authority");
-        assert!(matches!(source.downcast_ref::<meerkat::governed_realm::staged::StagedRealmError>(),
-            Some(meerkat::governed_realm::staged::StagedRealmError::Ended)));
+        assert!(matches!(
+            source.downcast_ref::<meerkat::governed_realm::staged::StagedRealmError>(),
+            Some(meerkat::governed_realm::staged::StagedRealmError::Ended)
+        ));
     }
 
     #[tokio::test]
     async fn staged_api_key_save_and_readiness_share_owner_through_cancellation_and_end() {
         for cancel_after_entry in [false, true] {
-            tokio::time::timeout(Duration::from_secs(30), staged_api_key_scenario(cancel_after_entry))
-                .await.expect("the real staged consumer must settle without a second realm owner");
+            tokio::time::timeout(
+                Duration::from_secs(30),
+                staged_api_key_scenario(cancel_after_entry),
+            )
+            .await
+            .expect("the real staged consumer must settle without a second realm owner");
         }
     }
 
     async fn staged_api_key_scenario(cancel_after_entry: bool) {
-        use meerkat_core::{ConfigStore, FileConfigStore, handles::{AuthLeasePhase, LeaseKey}};
-        use meerkat::governed_realm::{staged::stage_stock_realm_persistence_as,
-            stock::issuance::DEFAULT_STOCK_AGENT};
+        use meerkat::governed_realm::{
+            staged::stage_stock_realm_persistence_as, stock::issuance::DEFAULT_STOCK_AGENT,
+        };
+        use meerkat_core::{
+            ConfigStore, FileConfigStore,
+            handles::{AuthLeasePhase, LeaseKey},
+        };
 
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
-        let storage = crate::RealmOptions { context_root: root.to_owned(),
-            state_root: Some(root.join("state")), user_config_root: Some(root.join("home"))
-        }.resolve("owner").unwrap();
+        let storage = crate::RealmOptions {
+            context_root: root.to_owned(),
+            state_root: Some(root.join("state")),
+            user_config_root: Some(root.join("home")),
+        }
+        .resolve("owner")
+        .unwrap();
         let config = config();
         let target = target(&config);
         let key = TokenKey::from_credential_identity(&target.credential_identity);
         let lease_key = LeaseKey::from_credential_identity(&target.credential_identity);
-        let config_path = crate::realm::config_source(&storage).unwrap()
+        let config_path = crate::realm::config_source(&storage)
+            .unwrap()
             .config_doc_path(&storage.locator.realm);
         FileConfigStore::new(config_path.clone(), meerkat_models::canonical())
-            .set(config).await.unwrap();
+            .set(config)
+            .await
+            .unwrap();
         let artifacts = root.join("artifacts");
         std::fs::create_dir(&artifacts).unwrap();
         let connection = crate::setup::PreparedSetupConnection::from_preparer_output(
             br#"{"mcpServers":{"toolkit-setup":{"command":"/bin/true","args":["staged-auth-consumer"]}}}"#,
         ).unwrap();
         let prepared = crate::resources::PreparedResources {
-            connection, artifact_directory: artifacts.clone(),
+            connection,
+            artifact_directory: artifacts.clone(),
         };
         let session = meerkat::Session::new();
-        let (approvals, mut presenter) = crate::approval::LocalApprovals::create_paired_host(&artifacts).unwrap();
+        let (approvals, mut presenter) =
+            crate::approval::LocalApprovals::create_paired_host(&artifacts).unwrap();
         approvals.bind_session(session.id()).unwrap();
         let (input, receive) = tokio::sync::mpsc::channel(1);
-        let mut input = (ApproveStagedHelper { bytes: Vec::new(), input, decisions: 0 },
-            TerminalInput::scripted(receive));
+        let mut input = (
+            ApproveStagedHelper {
+                bytes: Vec::new(),
+                input,
+                decisions: 0,
+            },
+            TerminalInput::scripted(receive),
+        );
         let interrupt = std::future::pending::<io::Result<()>>();
         tokio::pin!(interrupt);
-        let mut startup = SessionStartup::prepare_standalone(storage.clone(), session, prepared,
-            &approvals, &mut presenter, &mut input.1, &mut input.0, interrupt.as_mut())
-            .await.unwrap().expect("the actual reviewed pre-stage path must enter one stage");
+        let mut startup = SessionStartup::prepare_standalone(
+            storage.clone(),
+            session,
+            prepared,
+            &approvals,
+            &mut presenter,
+            &mut input.1,
+            &mut input.0,
+            interrupt.as_mut(),
+        )
+        .await
+        .unwrap()
+        .expect("the actual reviewed pre-stage path must enter one stage");
         approvals.retire();
         assert_eq!(input.0.decisions, 1);
         assert!(startup.persistence.is_none());
         assert!(startup.standalone.is_some());
         let config_before = std::fs::read(&config_path).unwrap();
         let owner_path = meerkat_store::grant_owner_store_path(
-            &meerkat_store::realm_paths_in(&storage.locator.state_root, "owner").root);
+            &meerkat_store::realm_paths_in(&storage.locator.state_root, "owner").root,
+        );
         let owner_before = std::fs::read(&owner_path).unwrap();
 
         // The fixture holds one actual FileTokenStore save. It does not replace
         // runtime authority, lifecycle publication, refresh coordination or stage.
         let inner = Arc::new(FileTokenStore::new(root.join("credentials")));
-        let held = Arc::new(HeldStore { inner: inner.clone(), entered: Semaphore::new(0),
-            release: Semaphore::new(0), saves: AtomicUsize::new(0) });
-        let persistence = ProviderAuthPersistence::new(held.clone(),
-            Arc::new(FileLockCoordinator::new(root.join("locks"))));
-        startup.factory = startup.factory.clone().with_provider_auth_persistence(persistence.clone());
+        let held = Arc::new(HeldStore {
+            inner: inner.clone(),
+            entered: Semaphore::new(0),
+            release: Semaphore::new(0),
+            saves: AtomicUsize::new(0),
+        });
+        let persistence = ProviderAuthPersistence::new(
+            held.clone(),
+            Arc::new(FileLockCoordinator::new(root.join("locks"))),
+        );
+        startup.factory = startup
+            .factory
+            .clone()
+            .with_provider_auth_persistence(persistence.clone());
         let pair = startup.provider_auth_runtime_authority().await.unwrap();
         let lease = pair.generated_auth_lease_handle();
-        let native_pair = startup.standalone.as_ref().unwrap().stage.provider_auth_runtime_authority().unwrap();
+        let native_pair = startup
+            .standalone
+            .as_ref()
+            .unwrap()
+            .stage
+            .provider_auth_runtime_authority()
+            .unwrap();
         assert!(lease.same_owner(&native_pair.generated_auth_lease_handle()));
-        assert!(std::ptr::addr_eq(Arc::as_ptr(&pair.oauth_flow_authority()),
-            Arc::as_ptr(&native_pair.oauth_flow_authority())));
+        assert!(std::ptr::addr_eq(
+            Arc::as_ptr(&pair.oauth_flow_authority()),
+            Arc::as_ptr(&native_pair.oauth_flow_authority())
+        ));
         drop(native_pair);
         assert!(inner.load(&key).await.unwrap().is_none());
         assert!(!lease.snapshot(&lease_key).credential_present);
-        assert!(matches!(observe(&mut startup, &target).await.unwrap(),
-            Observation::Credential(CredentialReadiness::Missing)));
+        assert!(matches!(
+            observe(&mut startup, &target).await.unwrap(),
+            Observation::Credential(CredentialReadiness::Missing)
+        ));
 
         let value = "synthetic-staged-native-key";
         let (cancel, receive) = oneshot::channel::<()>();
-        let interrupt = async { receive.await.map_err(|_| io::Error::other("test signal closed")) };
+        let interrupt = async {
+            receive
+                .await
+                .map_err(|_| io::Error::other("test signal closed"))
+        };
         tokio::pin!(interrupt);
         let mut output = Output::default();
         let observed = output.clone();
         let continued = {
-            let saving = save_api_key(&mut startup, &target, persistence.clone(),
-                PersistedTokens::api_key(value), &mut output, interrupt.as_mut());
+            let saving = save_api_key(
+                &mut startup,
+                &target,
+                persistence.clone(),
+                PersistedTokens::api_key(value),
+                &mut output,
+                interrupt.as_mut(),
+            );
             tokio::pin!(saving);
             // The same existing native save must enter and remain pending. Do not
             // release it until cancellation has been observed when requested.
@@ -1066,66 +1257,156 @@ parent = "owner"
             held.release.add_permits(1);
             saving.await.unwrap()
         };
-        assert_eq!(continued, !cancel_after_entry,
-            "an entered cancelled save must settle without continuing startup");
+        assert_eq!(
+            continued, !cancel_after_entry,
+            "an entered cancelled save must settle without continuing startup"
+        );
         assert_eq!(held.saves.load(Ordering::SeqCst), 1);
-        assert_eq!(inner.load(&key).await.unwrap().unwrap().primary_secret.as_deref(), Some(value));
-        assert!(lease.snapshot(&lease_key).credential_present,
-            "native credential publication must reach the stage's actual auth owner");
-        assert_eq!(lease.snapshot(&lease_key).phase, Some(AuthLeasePhase::Valid));
-        assert!(matches!(observe(&mut startup, &target).await.unwrap(),
-            Observation::Credential(CredentialReadiness::Ready)));
-        assert!(startup.persistence.is_none(), "no second persistence bundle was opened");
+        assert_eq!(
+            inner
+                .load(&key)
+                .await
+                .unwrap()
+                .unwrap()
+                .primary_secret
+                .as_deref(),
+            Some(value)
+        );
+        assert!(
+            lease.snapshot(&lease_key).credential_present,
+            "native credential publication must reach the stage's actual auth owner"
+        );
+        assert_eq!(
+            lease.snapshot(&lease_key).phase,
+            Some(AuthLeasePhase::Valid)
+        );
+        assert!(matches!(
+            observe(&mut startup, &target).await.unwrap(),
+            Observation::Credential(CredentialReadiness::Ready)
+        ));
+        assert!(
+            startup.persistence.is_none(),
+            "no second persistence bundle was opened"
+        );
         assert!(observed.contains("API key stored by the native credential owner."));
         assert!(!observed.contains(value));
 
         // A nonempty file alone cannot override the actual stage's lifecycle.
         // Removing the staged lease from observe() makes this assertion fail.
         lease.mark_reauth_required(&lease_key).unwrap();
-        assert_eq!(inner.load(&key).await.unwrap().unwrap().primary_secret.as_deref(), Some(value));
-        assert!(matches!(observe(&mut startup, &target).await.unwrap(),
-            Observation::Credential(CredentialReadiness::NeedsReauth)));
-        let request = CreateSessionModelResolutionRequest { model: Some("gpt-6-astra".into()),
-            auth_binding: Some(target.auth_binding.clone()), ..Default::default() };
+        assert_eq!(
+            inner
+                .load(&key)
+                .await
+                .unwrap()
+                .unwrap()
+                .primary_secret
+                .as_deref(),
+            Some(value)
+        );
+        assert!(matches!(
+            observe(&mut startup, &target).await.unwrap(),
+            Observation::Credential(CredentialReadiness::NeedsReauth)
+        ));
+        let request = CreateSessionModelResolutionRequest {
+            model: Some("gpt-6-astra".into()),
+            auth_binding: Some(target.auth_binding.clone()),
+            ..Default::default()
+        };
         assert!(!ready_for_open(&mut startup, &request).await.unwrap());
 
         let mut abort_output = Vec::new();
         startup.abort_standalone(&mut abort_output).await.unwrap();
-        assert!(String::from_utf8(abort_output).unwrap().contains("a native handle still retains this realm owner"),
-            "the held auth pair must not be reported as released custody");
-        assert_ended_stage(startup.provider_auth_runtime_authority().await.err().expect("ended stage must refuse"));
-        assert_ended_stage(observe(&mut startup, &target).await.err().expect("ended readiness must refuse"));
+        assert!(
+            String::from_utf8(abort_output)
+                .unwrap()
+                .contains("a native handle still retains this realm owner"),
+            "the held auth pair must not be reported as released custody"
+        );
+        assert_ended_stage(
+            startup
+                .provider_auth_runtime_authority()
+                .await
+                .err()
+                .expect("ended stage must refuse"),
+        );
+        assert_ended_stage(
+            observe(&mut startup, &target)
+                .await
+                .err()
+                .expect("ended readiness must refuse"),
+        );
         let interrupt = std::future::pending::<io::Result<()>>();
         tokio::pin!(interrupt);
-        assert_ended_stage(save_api_key(&mut startup, &target, persistence,
-            PersistedTokens::api_key("must-not-be-written"), &mut io::sink(), interrupt.as_mut())
-            .await.unwrap_err());
-        assert_eq!(held.saves.load(Ordering::SeqCst), 1, "ended authority cannot start another save");
-        assert!(startup.persistence.is_none(), "Ended cannot choose an ordinary-owner fallback");
+        assert_ended_stage(
+            save_api_key(
+                &mut startup,
+                &target,
+                persistence,
+                PersistedTokens::api_key("must-not-be-written"),
+                &mut io::sink(),
+                interrupt.as_mut(),
+            )
+            .await
+            .unwrap_err(),
+        );
+        assert_eq!(
+            held.saves.load(Ordering::SeqCst),
+            1,
+            "ended authority cannot start another save"
+        );
+        assert!(
+            startup.persistence.is_none(),
+            "Ended cannot choose an ordinary-owner fallback"
+        );
         assert_eq!(std::fs::read(&config_path).unwrap(), config_before);
-        assert_eq!(std::fs::read(&owner_path).unwrap(), owner_before,
-            "provider setup and its abort must not issue another stock grant");
-        assert!(stage_stock_realm_persistence_as(&meerkat::DiskStorageProvider,
-            &storage.locator.state_root, "owner", None, None, Some(storage.layout.clone()), DEFAULT_STOCK_AGENT)
-            .await.is_err(), "the retained auth pair still holds this exact realm");
+        assert_eq!(
+            std::fs::read(&owner_path).unwrap(),
+            owner_before,
+            "provider setup and its abort must not issue another stock grant"
+        );
+        assert!(
+            stage_stock_realm_persistence_as(
+                &meerkat::DiskStorageProvider,
+                &storage.locator.state_root,
+                "owner",
+                None,
+                None,
+                Some(storage.layout.clone()),
+                DEFAULT_STOCK_AGENT
+            )
+            .await
+            .is_err(),
+            "the retained auth pair still holds this exact realm"
+        );
         drop(pair);
         drop(lease);
         drop(startup);
         // Release may complete on an owned native task. Reopen only this same
         // realm, under the outer bound, and abort the resulting stage promptly.
         loop {
-            match stage_stock_realm_persistence_as(&meerkat::DiskStorageProvider,
-                &storage.locator.state_root, "owner", None, None, Some(storage.layout.clone()), DEFAULT_STOCK_AGENT).await {
+            match stage_stock_realm_persistence_as(
+                &meerkat::DiskStorageProvider,
+                &storage.locator.state_root,
+                "owner",
+                None,
+                None,
+                Some(storage.layout.clone()),
+                DEFAULT_STOCK_AGENT,
+            )
+            .await
+            {
                 Ok(mut reopened) => {
-                    assert_eq!(reopened.abort().await.unwrap().custody,
-                        meerkat_runtime::StagedCustodyRelease::Released);
+                    assert_eq!(
+                        reopened.abort().await.unwrap().custody,
+                        meerkat_runtime::StagedCustodyRelease::Released
+                    );
                     break;
                 }
                 Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
             }
         }
     }
-
 }
 
 fn validate_api_key_target(
@@ -1219,14 +1500,24 @@ where
         // before native credential mutation, not the retained old Config.
         review.refresh(startup).await?;
     }
-    let saved = save_api_key(startup, target, persistence, tokens, output, interrupt.as_mut()).await?;
+    let saved = save_api_key(
+        startup,
+        target,
+        persistence,
+        tokens,
+        output,
+        interrupt.as_mut(),
+    )
+    .await?;
     if saved {
         if let Some(review) = review {
             // The native save can also await. Its settled saved effect remains
             // true if fresh configuration now refuses this continuation.
             review.refresh(startup).await?;
             if let Some(signal) = interrupt.as_mut().now_or_never() {
-                signal.map_err(|error| ConnectError::native("Listen for model setup cancellation", error))?;
+                signal.map_err(|error| {
+                    ConnectError::native("Listen for model setup cancellation", error)
+                })?;
                 return Ok(false);
             }
         }
@@ -1315,7 +1606,8 @@ fn credential_save_error(
         E::LockFailed(_) => E::LockFailed("details withheld".into()),
         E::SlotRefused(reason) => E::SlotRefused(reason),
         E::CredentialAccess { refusal, .. } => E::CredentialAccess {
-            refusal, detail: "details withheld".into(),
+            refusal,
+            detail: "details withheld".into(),
         },
         E::RollbackFailed(_) => E::RollbackFailed("details withheld".into()),
     };
@@ -1479,7 +1771,9 @@ async fn device_login_presented<F: Future<Output = io::Result<()>>, W: Write>(
         else {
             return device_stopped(output);
         };
-        if let Some(present) = presentation.as_deref_mut() { present.observe_device_poll(&outcome); }
+        if let Some(present) = presentation.as_deref_mut() {
+            present.observe_device_poll(&outcome);
+        }
         match outcome {
             HostAuthDevicePoll::Ready(_) => {
                 writeln!(output, "Native device sign-in completed for the selected owner. Credentials remain in its native store.")
@@ -1594,10 +1888,14 @@ async fn browser_login_presented<F: Future<Output = io::Result<()>>, W: Write>(
     };
     let handle = binding.expect_state(start.state.clone());
     let printed = if let Some(present) = presentation.as_deref_mut() {
-        (present.show)(SignInNotice::Browser { authorization_url: start.authorize_url.clone() })
-    } else { writeln!(output,
+        (present.show)(SignInNotice::Browser {
+            authorization_url: start.authorize_url.clone(),
+        })
+    } else {
+        writeln!(output,
         "Open this private sign-in URL in your own browser, outside agent control:\n{}\nWaiting for the native browser callback. Ctrl-C cancels sign-in; callback cleanup may take the remaining 120-second window.",
-        review_text(&start.authorize_url)).and_then(|()| output.flush()) };
+        review_text(&start.authorize_url)).and_then(|()| output.flush())
+    };
     if let Err(error) = printed {
         let expired = expire();
         let cleanup = handle
@@ -1637,7 +1935,9 @@ async fn browser_login_presented<F: Future<Output = io::Result<()>>, W: Write>(
     let callback = match callback {
         Ok(callback) => callback,
         Err(error) => {
-            if let Some(present) = presentation.as_deref_mut() { present.observe_callback_error(&error); }
+            if let Some(present) = presentation.as_deref_mut() {
+                present.observe_callback_error(&error);
+            }
             return Err(combined(
                 ConnectError::provider_setup("Await native sign-in callback", error),
                 expire(),

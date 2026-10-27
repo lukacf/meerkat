@@ -119,31 +119,60 @@ async fn recipe_discovery_is_read_only_before_activation_and_keeps_caller_sessio
     let (paired_host, mut hosts) = PairedHostFrontend::deferred();
     let (lazy, mut preparation) = LazySetup::new(paired_host);
     let allowed = Gate::new(&lazy, Some(ToolAccessPolicy::ReadOnly));
-    let page = allowed.call("recipes", LIST_RECIPES, json!({"limit":1})).await.unwrap();
+    let page = allowed
+        .call("recipes", LIST_RECIPES, json!({"limit":1}))
+        .await
+        .unwrap();
     assert!(page.async_ops.is_empty() && page.session_effects.is_empty());
     let page: Value = serde_json::from_str(&page.result.text_content()).unwrap();
     let first = &page["entries"][0];
     let exact = json!({"identity":first["identity"],"digest":first["digest"]});
-    let entry = allowed.call("recipe", READ_RECIPE, exact.clone()).await.unwrap();
+    let entry = allowed
+        .call("recipe", READ_RECIPE, exact.clone())
+        .await
+        .unwrap();
     assert!(entry.async_ops.is_empty() && entry.session_effects.is_empty());
     let catalog = toolkit_package::bundled_recipe_catalog().unwrap();
     let identity = serde_json::from_value(first["identity"].clone()).unwrap();
-    assert_eq!(serde_json::from_str::<Value>(&entry.result.text_content()).unwrap(),
-        serde_json::to_value(catalog.get(&identity).unwrap()).unwrap());
-    let denied = Gate::new(&lazy, Some(ToolAccessPolicy::DenyList(
-        [LIST_RECIPES, READ_RECIPE].into_iter().collect(),
-    )));
+    assert_eq!(
+        serde_json::from_str::<Value>(&entry.result.text_content()).unwrap(),
+        serde_json::to_value(catalog.get(&identity).unwrap()).unwrap()
+    );
+    let denied = Gate::new(
+        &lazy,
+        Some(ToolAccessPolicy::DenyList(
+            [LIST_RECIPES, READ_RECIPE].into_iter().collect(),
+        )),
+    );
     let calls = [(LIST_RECIPES, json!({"limit":1})), (READ_RECIPE, exact)];
     for (name, args) in &calls {
-        assert_eq!(allowed.raw.tool_mutation_class(name), ToolMutationClass::ReadOnly);
-        assert!(matches!(denied.call("denied", name, args.clone()).await, Err(ToolError::AccessDenied { .. })));
+        assert_eq!(
+            allowed.raw.tool_mutation_class(name),
+            ToolMutationClass::ReadOnly
+        );
+        assert!(matches!(
+            denied.call("denied", name, args.clone()).await,
+            Err(ToolError::AccessDenied { .. })
+        ));
         let wrong = ToolDispatchContext::default().with_runtime_identity(SessionId::new(), None);
-        assert!(matches!(call(allowed.dispatcher.as_ref(), &wrong, "wrong-session", name, args.clone()).await,
-            Err(ToolError::AccessDenied { .. })));
+        assert!(matches!(
+            call(
+                allowed.dispatcher.as_ref(),
+                &wrong,
+                "wrong-session",
+                name,
+                args.clone()
+            )
+            .await,
+            Err(ToolError::AccessDenied { .. })
+        ));
     }
     allowed.approvals.retire();
     for (name, args) in calls {
-        assert!(matches!(allowed.call("closed", name, args).await, Err(ToolError::AccessDenied { .. })));
+        assert!(matches!(
+            allowed.call("closed", name, args).await,
+            Err(ToolError::AccessDenied { .. })
+        ));
     }
     assert!(allowed.raw.tool_catalog_capabilities().exact_catalog);
     for name in ["setup_help", "setup_install", "find_and_install"] {
@@ -151,38 +180,75 @@ async fn recipe_discovery_is_read_only_before_activation_and_keeps_caller_sessio
     }
     no_request(&mut preparation).await;
     assert!(!preparation.requires_shutdown());
-    assert!(timeout(Duration::from_millis(20), hosts.next()).await.is_err());
+    assert!(
+        timeout(Duration::from_millis(20), hosts.next())
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
 async fn public_document_refusal_keeps_native_caller_policy_before_any_connection() {
     let name = "read_public_document";
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let args = json!({"url":format!("https://{}/guide?lang=en#part", listener.local_addr().unwrap())});
+    let args =
+        json!({"url":format!("https://{}/guide?lang=en#part", listener.local_addr().unwrap())});
     let (paired_host, mut hosts) = PairedHostFrontend::deferred();
     let (lazy, mut preparation) = LazySetup::new(paired_host);
     let allowed = Gate::new(&lazy, Some(ToolAccessPolicy::ReadOnly));
-    assert_eq!(allowed.raw.tool_mutation_class(name), ToolMutationClass::ReadOnly);
-    let result = allowed.call("public-read", name, args.clone()).await.unwrap();
+    assert_eq!(
+        allowed.raw.tool_mutation_class(name),
+        ToolMutationClass::ReadOnly
+    );
+    let result = allowed
+        .call("public-read", name, args.clone())
+        .await
+        .unwrap();
     assert!(result.async_ops.is_empty() && result.session_effects.is_empty());
     let result: Value = serde_json::from_str(&result.result.text_content()).unwrap();
     assert_eq!(result["error"], "destination_refused");
     assert!(result.get("text").is_none());
-    let denied = Gate::new(&lazy, Some(ToolAccessPolicy::DenyList([name].into_iter().collect())));
-    assert!(matches!(denied.call("denied", name, args.clone()).await, Err(ToolError::AccessDenied { .. })));
+    let denied = Gate::new(
+        &lazy,
+        Some(ToolAccessPolicy::DenyList([name].into_iter().collect())),
+    );
+    assert!(matches!(
+        denied.call("denied", name, args.clone()).await,
+        Err(ToolError::AccessDenied { .. })
+    ));
     for context in [
         ToolDispatchContext::default(),
         ToolDispatchContext::default().with_runtime_identity(SessionId::new(), None),
     ] {
-        assert!(matches!(call(allowed.dispatcher.as_ref(), &context, "other", name, args.clone()).await,
-            Err(ToolError::AccessDenied { .. })));
+        assert!(matches!(
+            call(
+                allowed.dispatcher.as_ref(),
+                &context,
+                "other",
+                name,
+                args.clone()
+            )
+            .await,
+            Err(ToolError::AccessDenied { .. })
+        ));
     }
     allowed.approvals.retire();
-    assert!(matches!(allowed.call("closed", name, args).await, Err(ToolError::AccessDenied { .. })));
-    assert!(timeout(Duration::from_millis(20), listener.accept()).await.is_err());
+    assert!(matches!(
+        allowed.call("closed", name, args).await,
+        Err(ToolError::AccessDenied { .. })
+    ));
+    assert!(
+        timeout(Duration::from_millis(20), listener.accept())
+            .await
+            .is_err()
+    );
     no_request(&mut preparation).await;
     assert!(!preparation.requires_shutdown());
-    assert!(timeout(Duration::from_millis(20), hosts.next()).await.is_err());
+    assert!(
+        timeout(Duration::from_millis(20), hosts.next())
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]

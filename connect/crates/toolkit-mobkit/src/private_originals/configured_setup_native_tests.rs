@@ -236,13 +236,25 @@ async fn issued_child_survives_source_write_failure_without_new_id_or_session() 
             Ok(PrivateOriginalSubmission::NativeOutcomeUnavailable)
         ));
         let selected = fixture.store.get(&key).await.unwrap().unwrap();
-        let mut expected = fixture.source.decode_record(&before, &fixture.submission.original).unwrap();
+        let mut expected = fixture
+            .source
+            .decode_record(&before, &fixture.submission.original)
+            .unwrap();
         assert!(expected.configured_setup.is_none());
         // First binding retains this exact host choice before child issuance.
         // The trigger refuses the later association write, not that selection.
         expected.configured_setup = Some(configured_setup::ConfiguredSetupSelection {
-            capability: fixture.lifetime().selected_policy().native_host.as_ref().unwrap()
-                .members[0].setup_capability.as_ref().unwrap().clone(),
+            capability: fixture
+                .lifetime()
+                .selected_policy()
+                .native_host
+                .as_ref()
+                .unwrap()
+                .members[0]
+                .setup_capability
+                .as_ref()
+                .unwrap()
+                .clone(),
             session_id: fixture.session.clone(),
         });
         assert_eq!(selected.key, before.key);
@@ -385,29 +397,52 @@ async fn committed_binding_and_lost_read_recover_exact_native_child() {
     let captured_fault = Arc::new(Mutex::new(None));
     let capture = captured_fault.clone();
     let fixture = Box::pin(FirstFixture::new_selected_configuration_with_source(
-        true, false, true, None, None, true,
+        true,
+        false,
+        true,
+        None,
+        None,
+        true,
         Some(Box::new(move |store| {
             let fault = store_fault::LostReplyStore::new(store);
             *capture.lock().unwrap() = Some(fault.clone());
             fault
         })),
-    )).await;
-    let fault = captured_fault.lock().unwrap().take().expect("fault installed before source sharing");
+    ))
+    .await;
+    let fault = captured_fault
+        .lock()
+        .unwrap()
+        .take()
+        .expect("fault installed before source sharing");
     let result = AssertUnwindSafe(Box::pin(async {
         // The native policy and binder retain the same source adapter. Only
         // its storage observation is faulted; the canonical SQLite owner stays.
         // Observe canonical storage through the same adapter's decoder without
         // consuming the one injected read failure intended for its next submit.
         let binding = || async {
-            let record = tokio::time::timeout(WAIT, fixture.store.get(
-                &fixture.source.key(&fixture.submission.original).unwrap(),
-            )).await.unwrap().unwrap().unwrap();
-            fixture.source.decode_record(&record, &fixture.submission.original).unwrap().final_association
+            let record = tokio::time::timeout(
+                WAIT,
+                fixture
+                    .store
+                    .get(&fixture.source.key(&fixture.submission.original).unwrap()),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+            fixture
+                .source
+                .decode_record(&record, &fixture.submission.original)
+                .unwrap()
+                .final_association
         };
         let invoke = || async {
             tokio::time::timeout(
                 WAIT,
-                fixture.source.submit_authenticated_original(fixture.submission.clone()),
+                fixture
+                    .source
+                    .submit_authenticated_original(fixture.submission.clone()),
             )
             .await
             .unwrap()
@@ -428,14 +463,22 @@ async fn committed_binding_and_lost_read_recover_exact_native_child() {
         // fault inside the native binder is a projected unavailable outcome.
         // Only that single evidenced fault permits one same-request recovery.
         let mut recovered = invoke().await;
-        if matches!(recovered,
+        if matches!(
+            recovered,
             Err(PrivateOriginalError::Unavailable)
-                | Ok(PrivateOriginalSubmission::NativeOutcomeUnavailable))
-        {
+                | Ok(PrivateOriginalSubmission::NativeOutcomeUnavailable)
+        ) {
             assert_eq!(fault.failed_reads.load(Ordering::SeqCst), 1);
             assert_eq!(binding().await, Some(saved.clone()));
-            assert_eq!(fixture.source.owner.grants()
-                .issued_reference(&exact_child.grant_id).unwrap(), Some(exact_child.clone()));
+            assert_eq!(
+                fixture
+                    .source
+                    .owner
+                    .grants()
+                    .issued_reference(&exact_child.grant_id)
+                    .unwrap(),
+                Some(exact_child.clone())
+            );
             assert_eq!(fixture.model_requests(), 0);
             recovered = invoke().await;
         }

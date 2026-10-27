@@ -22,11 +22,11 @@ pub(super) mod configured_setup;
 pub use configured_setup::AgentSetupCapabilityRequest;
 pub(super) mod configured_report;
 pub use configured_report::HelperReportCapabilityRequest;
-mod service_mcp;
 mod service_batch;
-pub use service_batch::{MAX_PUBLIC_SERVICE_BATCH, ServiceMcpParentBatchReview};
+mod service_mcp;
 pub(crate) use service_batch::ReviewedServiceCatalogParent;
 pub(crate) use service_batch::member_decision_id as service_batch_member_id;
+pub use service_batch::{MAX_PUBLIC_SERVICE_BATCH, ServiceMcpParentBatchReview};
 pub(crate) mod service_recovery;
 mod standing_service;
 pub(crate) use standing_service::{ServiceParentRuleEvidence, StandingServiceParentProposal};
@@ -35,9 +35,9 @@ mod setup_request;
 pub(crate) mod setup_targets;
 pub use setup_targets::SetupTargetRequest;
 mod setup_recovery;
-pub(crate) use setup_request::{validate_setup_selection, validate_retained_setup_selection};
-pub use service_mcp::{ReviewedServiceMcpParent, ServiceMcpParentOutcome, ServiceMcpParentReview};
 pub(crate) use service_mcp::ServiceMcpParentCompensation;
+pub use service_mcp::{ReviewedServiceMcpParent, ServiceMcpParentOutcome, ServiceMcpParentReview};
+pub(crate) use setup_request::{validate_retained_setup_selection, validate_setup_selection};
 
 const SCHEMA: &str = "toolkit.operator-application-parent";
 const RECORD_VERSION: u32 = 2;
@@ -150,7 +150,9 @@ pub enum OperatorParentPurpose {
 pub enum OperatorParentOutcome {
     /// The existing source owner retained this explicit setup-only selection
     /// on its still-unbound original. No native input or service effect entered.
-    SetupRequestSelected { selection: crate::private_originals::PrivateSetupRequestSelection },
+    SetupRequestSelected {
+        selection: crate::private_originals::PrivateSetupRequestSelection,
+    },
     Denied,
     Unavailable,
     PendingReconciliation,
@@ -182,7 +184,13 @@ fn open_owner_pair(
             NativeOwnerStartup::Restore
         },
     )?;
-    open_owner_pair_in(&directory, &native.ingress_domain, Some(operator), startup, false)
+    open_owner_pair_in(
+        &directory,
+        &native.ingress_domain,
+        Some(operator),
+        startup,
+        false,
+    )
 }
 
 /// The stopped application's preparation uses the same canonical owner pair.
@@ -404,29 +412,43 @@ impl OperatorSetup {
         })
     }
 
-    pub(crate) fn with_helper_selection(mut self,
-        helper: Option<crate::installed_host::acquisition::InstalledSetupSelection>) -> Result<Self, HostLifetimeError>
-    {
+    pub(crate) fn with_helper_selection(
+        mut self,
+        helper: Option<crate::installed_host::acquisition::InstalledSetupSelection>,
+    ) -> Result<Self, HostLifetimeError> {
         self.lifetime.validate_current_selection()?;
-        if let Some(helper) = &helper { helper.selected_member(&self.native)?; }
+        if let Some(helper) = &helper {
+            helper.selected_member(&self.native)?;
+        }
         self.helper_selection = helper;
         Ok(self)
     }
 
-    pub(crate) fn with_helper_selections(mut self,
-        helpers: Vec<crate::installed_host::acquisition::InstalledSetupSelection>) -> Result<Self, HostLifetimeError>
-    {
+    pub(crate) fn with_helper_selections(
+        mut self,
+        helpers: Vec<crate::installed_host::acquisition::InstalledSetupSelection>,
+    ) -> Result<Self, HostLifetimeError> {
         self.lifetime.validate_current_selection()?;
-        if helpers.len() > 8 { return Err(HostLifetimeError::InvalidSelection); }
+        if helpers.len() > 8 {
+            return Err(HostLifetimeError::InvalidSelection);
+        }
         let mut selected = Vec::new();
         for helper in helpers {
             helper.selected_member(&self.native)?;
-            if selected.iter().any(|old: &crate::installed_host::acquisition::InstalledSetupSelection| old.member == helper.member) {
+            if selected.iter().any(
+                |old: &crate::installed_host::acquisition::InstalledSetupSelection| {
+                    old.member == helper.member
+                },
+            ) {
                 return Err(HostLifetimeError::InvalidSelection);
             }
             selected.push(helper);
         }
-        self.helper_selection = if selected.is_empty() { None } else { Some(selected.remove(0)) };
+        self.helper_selection = if selected.is_empty() {
+            None
+        } else {
+            Some(selected.remove(0))
+        };
         self.additional_helpers = selected;
         Ok(self)
     }
@@ -604,7 +626,12 @@ impl OperatorSetup {
             request,
             OperatorParentPurpose::SetupRequest,
         )?;
-        proposal.setup_request = Some(SetupRequestIntent { session_id: session.clone(), original: None, origin: None, targets: vec![] });
+        proposal.setup_request = Some(SetupRequestIntent {
+            session_id: session.clone(),
+            original: None,
+            origin: None,
+            targets: vec![],
+        });
         proposal
             .request
             .proposed_action
@@ -659,7 +686,9 @@ impl OperatorSetup {
             .map_err(|_| HostLifetimeError::Denied)?;
         request.proposed_action.summary = match purpose {
             OperatorParentPurpose::Controller => "Allow this application to use the selected model",
-            OperatorParentPurpose::SetupRequest => "Allow this original task to request connector setup",
+            OperatorParentPurpose::SetupRequest => {
+                "Allow this original task to request connector setup"
+            }
             OperatorParentPurpose::Operations => {
                 "Allow this application to delegate the reviewed access"
             }
@@ -686,9 +715,18 @@ impl OperatorSetup {
         })
     }
 
-    fn check_parent_proposal_owner(&self, proposal: &OperatorParentProposal) -> Result<(), HostLifetimeError> {
-        let source = proposal.creating_source.upgrade().ok_or(HostLifetimeError::Unavailable)?;
-        let lifetime = proposal.creating_lifetime.upgrade().ok_or(HostLifetimeError::Unavailable)?;
+    fn check_parent_proposal_owner(
+        &self,
+        proposal: &OperatorParentProposal,
+    ) -> Result<(), HostLifetimeError> {
+        let source = proposal
+            .creating_source
+            .upgrade()
+            .ok_or(HostLifetimeError::Unavailable)?;
+        let lifetime = proposal
+            .creating_lifetime
+            .upgrade()
+            .ok_or(HostLifetimeError::Unavailable)?;
         if !Arc::ptr_eq(&source, &self.source) || !Arc::ptr_eq(&lifetime, &self.lifetime) {
             return Err(HostLifetimeError::WrongOwner);
         }
@@ -704,12 +742,15 @@ impl OperatorSetup {
         proposal: OperatorParentProposal,
         approval: ApprovalRecord,
     ) -> Result<OperatorParentOutcome, HostLifetimeError> {
-        self.apply_parent_decision_current(proposal, approval, Arc::new(|| true)).await
+        self.apply_parent_decision_current(proposal, approval, Arc::new(|| true))
+            .await
     }
 
-    fn parent_decision_record(&self, proposal: &OperatorParentProposal, approval: ApprovalRecord)
-        -> Result<OperatorDecision, HostLifetimeError>
-    {
+    fn parent_decision_record(
+        &self,
+        proposal: &OperatorParentProposal,
+        approval: ApprovalRecord,
+    ) -> Result<OperatorDecision, HostLifetimeError> {
         // An actual approval is applied only by the source and lifetime that
         // created its opaque proposal. Re-prepare after a legitimate restore.
         self.check_parent_proposal_owner(&proposal)?;
@@ -733,8 +774,11 @@ impl OperatorSetup {
         let record = OperatorDecision {
             route: proposal.route.clone(),
             purpose: proposal.purpose,
-            target_issuance: proposal.setup_request.as_ref().map(|intent|
-                vec![setup_targets::TargetIssuance::NotStarted; intent.targets.len()]).unwrap_or_default(),
+            target_issuance: proposal
+                .setup_request
+                .as_ref()
+                .map(|intent| vec![setup_targets::TargetIssuance::NotStarted; intent.targets.len()])
+                .unwrap_or_default(),
             setup_request: proposal.setup_request.clone(),
             batch_member: proposal.batch_member.clone(),
             operator: self.operator.clone(),
@@ -753,7 +797,9 @@ impl OperatorSetup {
     }
 
     async fn apply_parent_decision_current(
-        &self, proposal: OperatorParentProposal, approval: ApprovalRecord,
+        &self,
+        proposal: OperatorParentProposal,
+        approval: ApprovalRecord,
         presented: Arc<dyn Fn() -> bool + Send + Sync>,
     ) -> Result<OperatorParentOutcome, HostLifetimeError> {
         let record = self.parent_decision_record(&proposal, approval)?;
@@ -771,8 +817,13 @@ impl OperatorSetup {
             if decision_body(&existing)? != decision_body(&record)? {
                 return Err(HostLifetimeError::Denied);
             }
-            if approved && record.purpose == OperatorParentPurpose::SetupRequest
-                && record.setup_request.as_ref().is_some_and(|intent| intent.original.is_some()) {
+            if approved
+                && record.purpose == OperatorParentPurpose::SetupRequest
+                && record
+                    .setup_request
+                    .as_ref()
+                    .is_some_and(|intent| intent.original.is_some())
+            {
                 return self.observe_setup_decision(saved, existing).await;
             }
             return self.observe(&existing);
@@ -805,7 +856,9 @@ impl OperatorSetup {
         let id =
             EvidenceId::new(key.id.clone()).map_err(|_| HostLifetimeError::InvalidSelection)?;
         let issued = self.lifetime.with_current_setup(|| {
-            if !presented() { return Ok(Err(meerkat_authorization::grants::GrantRefusal::Denied)); }
+            if !presented() {
+                return Ok(Err(meerkat_authorization::grants::GrantRefusal::Denied));
+            }
             Ok(self.source.grants().issue_root(
                 &self.operator,
                 id,
@@ -858,7 +911,9 @@ impl OperatorSetup {
         record: &OperatorDecision,
     ) -> Result<OperatorParentOutcome, HostLifetimeError> {
         if matches!(record.issued, ParentIssuance::Issued { .. }) {
-            if let Some(outcome) = self.observe_target_progress(record)? { return Ok(outcome); }
+            if let Some(outcome) = self.observe_target_progress(record)? {
+                return Ok(outcome);
+            }
         }
         match &record.issued {
             ParentIssuance::Pending => Ok(OperatorParentOutcome::PendingReconciliation),
@@ -906,11 +961,18 @@ fn same_request(a: &ApprovalRequest, b: &ApprovalRecord) -> bool {
 fn decision_body(record: &OperatorDecision) -> Result<Vec<u8>, HostLifetimeError> {
     if let Some(member) = &record.batch_member {
         return canonical_json(&(
-            "toolkit.public-service-batch-parent.v1", member, &record.route,
-            record.purpose, &record.setup_request, &record.operator,
-            &record.application, &record.represented_subject, &record.approval,
+            "toolkit.public-service-batch-parent.v1",
+            member,
+            &record.route,
+            record.purpose,
+            &record.setup_request,
+            &record.operator,
+            &record.application,
+            &record.represented_subject,
+            &record.approval,
             &record.requested,
-        )).map_err(|_| HostLifetimeError::InvalidSelection);
+        ))
+        .map_err(|_| HostLifetimeError::InvalidSelection);
     }
     // The historical singleton comparison bytes remain exactly unchanged.
     canonical_json(&(
@@ -962,15 +1024,18 @@ fn decode(stored: &StoredRecord, key: &StoreKey) -> Result<OperatorDecision, Hos
 #[cfg(test)]
 pub(crate) fn test_service_lifetime() -> (tempfile::TempDir, Arc<NativeHostLifetime>) {
     let (directory, selection) = super::tests::fixture();
-    (directory, Arc::new(NativeHostLifetime::bootstrap(selection).unwrap()))
+    (
+        directory,
+        Arc::new(NativeHostLifetime::bootstrap(selection).unwrap()),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     mod owner_tests;
-    mod target_tests;
     mod report_parent_tests;
+    mod target_tests;
     use super::*;
     use meerkat_authorization_contracts::constraints::{
         ActionRef, DelegationDepth, ExactRestriction,
@@ -981,9 +1046,7 @@ mod tests {
         ApprovalService, SessionId,
     };
 
-    use meerkat_toolkit::host_lifetime::control::{
-        HostCloseReason, PrivateHostLifetimeControl,
-    };
+    use meerkat_toolkit::host_lifetime::control::{HostCloseReason, PrivateHostLifetimeControl};
 
     fn startup() -> OperatorOwnerStartup {
         OperatorOwnerStartup::Initialize {
@@ -1608,12 +1671,22 @@ mod tests {
         ));
         drop(setup);
         let setup = OperatorSetup::open(selection.clone(), OperatorOwnerStartup::Restore).unwrap();
-        assert!(setup.apply_parent_decision(proposal.clone(), approval.clone()).await.is_err());
+        assert!(
+            setup
+                .apply_parent_decision(proposal.clone(), approval.clone())
+                .await
+                .is_err()
+        );
         // The same durable request/answer is recoverable. Only the process-local
         // proposal custody is refreshed through this restored owner's constructor.
-        let proposal = setup.prepare_parent_review_for(
-            proposal.route, proposal.restrictions, proposal.request, proposal.purpose,
-        ).unwrap();
+        let proposal = setup
+            .prepare_parent_review_for(
+                proposal.route,
+                proposal.restrictions,
+                proposal.request,
+                proposal.purpose,
+            )
+            .unwrap();
         let replay = setup
             .apply_parent_decision(proposal, approval)
             .await
@@ -1699,9 +1772,7 @@ mod tests {
             } else {
                 setup
                     .lifetime
-                    .begin_close_activation(
-                        HostCloseReason::Shutdown,
-                    )
+                    .begin_close_activation(HostCloseReason::Shutdown)
                     .unwrap();
             }
             // Same exact approved decision and native grant, not a new review.
@@ -1737,40 +1808,78 @@ mod tests {
         }
     }
 
-    pub(super) fn service_proposal(setup: &OperatorSetup) -> (
+    pub(super) fn service_proposal(
+        setup: &OperatorSetup,
+    ) -> (
         crate::private_originals::PrivateServiceMcpAccessDecision,
         crate::private_originals::ServiceMcpSelection,
         ApprovalRequest,
     ) {
-        use crate::private_originals::{PrivateAccessChoice, PrivateServiceMcpAccessDecision,
-            PrivateServiceMcpPermission, PrivateSourceEvidence, ServiceMcpSelection};
+        use crate::private_originals::{
+            PrivateAccessChoice, PrivateServiceMcpAccessDecision, PrivateServiceMcpPermission,
+            PrivateSourceEvidence, ServiceMcpSelection,
+        };
         use meerkat_toolkit::authority::{LifetimeScope, RoleLifetime};
-        let route = setup.service_mcp_route(&Id::new("console").unwrap()).unwrap();
+        let route = setup
+            .service_mcp_route(&Id::new("console").unwrap())
+            .unwrap();
         let mut config = meerkat_core::mcp_config::McpServerConfig::stdio(
-            "mail", "not-executed", vec![], Default::default());
+            "mail",
+            "not-executed",
+            vec![],
+            Default::default(),
+        );
         let operation = meerkat_core::mcp_config::McpConnectorOperation {
             required_scopes: ["mail.read".into()].into(),
-            destination_origin: "https://mail.invalid".into(), read_only: true,
+            destination_origin: "https://mail.invalid".into(),
+            read_only: true,
         };
         config.connector = Some(meerkat_core::mcp_config::McpConnectorBinding {
-            realm_id: setup.native.realm.to_string(), slot_id: "slot".into(),
-            issuer: "https://issuer.invalid".into(), client: "client".into(),
-            resource: "https://mail.invalid".into(), strategy_id: "oauth".into(), account: "account-one".into(),
-            operations: [("read".into(), operation.clone()), ("list".into(), operation)].into(),
+            realm_id: setup.native.realm.to_string(),
+            slot_id: "slot".into(),
+            issuer: "https://issuer.invalid".into(),
+            client: "client".into(),
+            resource: "https://mail.invalid".into(),
+            strategy_id: "oauth".into(),
+            account: "account-one".into(),
+            operations: [
+                ("read".into(), operation.clone()),
+                ("list".into(), operation),
+            ]
+            .into(),
         });
         let selection = ServiceMcpSelection::connector(
-            &meerkat::ConnectorMcpInstallation::from_config(&config).unwrap().unwrap());
+            &meerkat::ConnectorMcpInstallation::from_config(&config)
+                .unwrap()
+                .unwrap(),
+        );
         let decision = PrivateServiceMcpAccessDecision {
             catalog: None,
             live_attachment: None,
-            route: route.id, decision: Id::new("service-b").unwrap(),
-            evidence: PrivateSourceEvidence { resource_id: EvidenceId::new("private-review").unwrap(),
-                revision: EvidenceId::new("1").unwrap(), sha256: "a".repeat(64) },
+            route: route.id,
+            decision: Id::new("service-b").unwrap(),
+            evidence: PrivateSourceEvidence {
+                resource_id: EvidenceId::new("private-review").unwrap(),
+                revision: EvidenceId::new("1").unwrap(),
+                sha256: "a".repeat(64),
+            },
             choice: PrivateAccessChoice::Approve,
-            permission: PrivateServiceMcpPermission { target: route.grant_target,
-                connection: Id::new("mail").unwrap(), operations: [Id::new("read").unwrap(), Id::new("list").unwrap()].into(),
-                resource: Id::new("mail").unwrap(), lifetime: RoleLifetime { scope: LifetimeScope::Task { task: Id::new("fresh-b").unwrap() }, expires_at_ms: None } },
-            connection_revision: toolkit_package::Revision::new(digest(&canonical_json(&config).unwrap())).unwrap(),
+            permission: PrivateServiceMcpPermission {
+                target: route.grant_target,
+                connection: Id::new("mail").unwrap(),
+                operations: [Id::new("read").unwrap(), Id::new("list").unwrap()].into(),
+                resource: Id::new("mail").unwrap(),
+                lifetime: RoleLifetime {
+                    scope: LifetimeScope::Task {
+                        task: Id::new("fresh-b").unwrap(),
+                    },
+                    expires_at_ms: None,
+                },
+            },
+            connection_revision: toolkit_package::Revision::new(digest(
+                &canonical_json(&config).unwrap(),
+            ))
+            .unwrap(),
         };
         let mut request = request();
         request.proposed_action.body = Some(serde_json::json!({
@@ -1778,17 +1887,38 @@ mod tests {
         }));
         (decision, selection, request)
     }
-    fn service_approval(review: &ServiceMcpParentReview, choice: ApprovalDecision) -> ApprovalRecord {
+    fn service_approval(
+        review: &ServiceMcpParentReview,
+        choice: ApprovalDecision,
+    ) -> ApprovalRecord {
         let approvals = ApprovalService::new();
         let pending = approvals.request(review.request().clone()).unwrap();
-        approvals.decide(&pending.approval_id, choice,
-            ApprovalPrincipalId::new("fixture-protected-presenter").unwrap(), None, None).unwrap()
+        approvals
+            .decide(
+                &pending.approval_id,
+                choice,
+                ApprovalPrincipalId::new("fixture-protected-presenter").unwrap(),
+                None,
+                None,
+            )
+            .unwrap()
     }
     async fn service_adapter(setup: &OperatorSetup) -> crate::private_originals::PrivateOriginals {
-        crate::private_originals::PrivateOriginals::new(StoreScope {
-            realm: setup.native.realm.to_string(), owner: setup.lifetime.selected_policy().deployment.to_string(),
-        }, setup.originals.clone(), setup.source.clone(),
-            vec![setup.service_mcp_route(&Id::new("console").unwrap()).unwrap()]).await.unwrap()
+        crate::private_originals::PrivateOriginals::new(
+            StoreScope {
+                realm: setup.native.realm.to_string(),
+                owner: setup.lifetime.selected_policy().deployment.to_string(),
+            },
+            setup.originals.clone(),
+            setup.source.clone(),
+            vec![
+                setup
+                    .service_mcp_route(&Id::new("console").unwrap())
+                    .unwrap(),
+            ],
+        )
+        .await
+        .unwrap()
     }
 
     #[tokio::test]
@@ -1796,43 +1926,99 @@ mod tests {
         use crate::private_originals::{PrivateOriginalError, PrivateServiceGrantState};
         let (_directory, selection) = super::super::tests::fixture();
         let setup = OperatorSetup::open(selection.clone(), startup()).unwrap();
-        let directory = state_directory(&selection, &setup.native, NativeOwnerStartup::Restore).unwrap();
+        let directory =
+            state_directory(&selection, &setup.native, NativeOwnerStartup::Restore).unwrap();
         let (decision, mcp, request) = service_proposal(&setup);
-        let review = setup.prepare_service_mcp_parent_review(decision.clone(), mcp.clone(), request).unwrap();
+        let review = setup
+            .prepare_service_mcp_parent_review(decision.clone(), mcp.clone(), request)
+            .unwrap();
         let body = review.request().proposed_action.body.as_ref().unwrap();
-        assert_eq!(body["access_request"]["instruction"], "Read the reviewed inbox");
-        assert_eq!(body["service_access"]["permission"]["operations"], serde_json::json!(["list", "read"]));
-        assert_eq!(body["connector_selection"]["connector"]["account"], "account-one");
+        assert_eq!(
+            body["access_request"]["instruction"],
+            "Read the reviewed inbox"
+        );
+        assert_eq!(
+            body["service_access"]["permission"]["operations"],
+            serde_json::json!(["list", "read"])
+        );
+        assert_eq!(
+            body["connector_selection"]["connector"]["account"],
+            "account-one"
+        );
         assert_eq!(body["purpose"], "operations");
         let approval = service_approval(&review, ApprovalDecision::Approve);
-        let ServiceMcpParentOutcome::Approved(approved) = setup.apply_service_mcp_parent_decision(review, approval).await.unwrap()
-            else { panic!("expected actual reviewed native parent") };
+        let ServiceMcpParentOutcome::Approved(approved) = setup
+            .apply_service_mcp_parent_decision(review, approval)
+            .await
+            .unwrap()
+        else {
+            panic!("expected actual reviewed native parent")
+        };
         assert!(approved.decision() == &decision);
         assert!(approved.selection() == &mcp);
-        assert!(setup.route(&decision.route).unwrap().application_parent.is_none());
+        assert!(
+            setup
+                .route(&decision.route)
+                .unwrap()
+                .application_parent
+                .is_none()
+        );
         let adapter = service_adapter(&setup).await;
-        let observed = adapter.apply_mcp_service_access_decision(approved.clone()).await.unwrap();
+        let observed = adapter
+            .apply_mcp_service_access_decision(approved.clone())
+            .await
+            .unwrap();
         assert_eq!(observed.state, PrivateServiceGrantState::GrantIssued);
         let original = meerkat_authorization_contracts::work_association::OriginalWorkRef {
-            authority: setup.route(&decision.route).unwrap().source_authority.clone(), work: EvidenceId::new("fresh-b").unwrap(),
+            authority: setup
+                .route(&decision.route)
+                .unwrap()
+                .source_authority
+                .clone(),
+            work: EvidenceId::new("fresh-b").unwrap(),
         };
-        let lineage = adapter.service_grant_lineage(&observed.grant, &original).await.unwrap();
+        let lineage = adapter
+            .service_grant_lineage(&observed.grant, &original)
+            .await
+            .unwrap();
         assert_eq!(lineage.len(), 2);
         let route = setup.service_mcp_route(&decision.route).unwrap();
-        let resolved = setup.source.grants().resolve_lineage(&lineage, &route.logical_executor, None).unwrap();
-        let expected = mcp.restrictions(&route, &decision, setup.source.clock().now().unwrap().unix_ms).unwrap();
+        let resolved = setup
+            .source
+            .grants()
+            .resolve_lineage(&lineage, &route.logical_executor, None)
+            .unwrap();
+        let expected = mcp
+            .restrictions(
+                &route,
+                &decision,
+                setup.source.clock().now().unwrap().unix_ms,
+            )
+            .unwrap();
         assert_eq!(resolved.restrictions(), &expected);
         drop(resolved);
         let bytes = fs::read(directory.join("grants.jsonl")).unwrap();
-        assert_eq!(adapter.apply_mcp_service_access_decision(approved.clone()).await.unwrap().state, PrivateServiceGrantState::GrantIssued);
+        assert_eq!(
+            adapter
+                .apply_mcp_service_access_decision(approved.clone())
+                .await
+                .unwrap()
+                .state,
+            PrivateServiceGrantState::GrantIssued
+        );
         assert_eq!(fs::read(directory.join("grants.jsonl")).unwrap(), bytes);
         let (_other_directory, other_selection) = super::super::tests::fixture();
         let other = OperatorSetup::open(other_selection, startup()).unwrap();
-        assert!(matches!(approved.clone().into_parts(&other.source), Err(PrivateOriginalError::Denied)));
+        assert!(matches!(
+            approved.clone().into_parts(&other.source),
+            Err(PrivateOriginalError::Denied)
+        ));
         other.finish().await.unwrap();
         setup.finish().await.unwrap();
-        assert!(matches!(adapter.apply_mcp_service_access_decision(approved).await,
-            Err(PrivateOriginalError::Denied | PrivateOriginalError::Unavailable)));
+        assert!(matches!(
+            adapter.apply_mcp_service_access_decision(approved).await,
+            Err(PrivateOriginalError::Denied | PrivateOriginalError::Unavailable)
+        ));
         assert_eq!(fs::read(directory.join("grants.jsonl")).unwrap(), bytes);
     }
 
@@ -1840,21 +2026,51 @@ mod tests {
     async fn service_review_rejects_changed_set_context_and_denial_before_native_issue() {
         let (_directory, selection) = super::super::tests::fixture();
         let setup = OperatorSetup::open(selection.clone(), startup()).unwrap();
-        let directory = state_directory(&selection, &setup.native, NativeOwnerStartup::Restore).unwrap();
+        let directory =
+            state_directory(&selection, &setup.native, NativeOwnerStartup::Restore).unwrap();
         let (decision, mcp, request) = service_proposal(&setup);
-        let original = setup.prepare_service_mcp_parent_review(decision.clone(), mcp.clone(), request.clone()).unwrap();
+        let original = setup
+            .prepare_service_mcp_parent_review(decision.clone(), mcp.clone(), request.clone())
+            .unwrap();
         let approval = service_approval(&original, ApprovalDecision::Approve);
         let bytes = fs::read(directory.join("grants.jsonl")).unwrap();
-        let mut subset = decision.clone(); subset.permission.operations.remove(&Id::new("list").unwrap());
-        let changed = setup.prepare_service_mcp_parent_review(subset, mcp.clone(), request.clone()).unwrap();
-        assert!(matches!(setup.apply_service_mcp_parent_decision(changed, approval.clone()).await, Err(HostLifetimeError::Denied)));
+        let mut subset = decision.clone();
+        subset
+            .permission
+            .operations
+            .remove(&Id::new("list").unwrap());
+        let changed = setup
+            .prepare_service_mcp_parent_review(subset, mcp.clone(), request.clone())
+            .unwrap();
+        assert!(matches!(
+            setup
+                .apply_service_mcp_parent_decision(changed, approval.clone())
+                .await,
+            Err(HostLifetimeError::Denied)
+        ));
         let mut changed_request = request.clone();
-        changed_request.proposed_action.body.as_mut().unwrap()["instruction"] = "Send a message instead".into();
-        let changed = setup.prepare_service_mcp_parent_review(decision.clone(), mcp.clone(), changed_request).unwrap();
-        assert!(matches!(setup.apply_service_mcp_parent_decision(changed, approval).await, Err(HostLifetimeError::Denied)));
-        let review = setup.prepare_service_mcp_parent_review(decision, mcp, request).unwrap();
+        changed_request.proposed_action.body.as_mut().unwrap()["instruction"] =
+            "Send a message instead".into();
+        let changed = setup
+            .prepare_service_mcp_parent_review(decision.clone(), mcp.clone(), changed_request)
+            .unwrap();
+        assert!(matches!(
+            setup
+                .apply_service_mcp_parent_decision(changed, approval)
+                .await,
+            Err(HostLifetimeError::Denied)
+        ));
+        let review = setup
+            .prepare_service_mcp_parent_review(decision, mcp, request)
+            .unwrap();
         let denial = service_approval(&review, ApprovalDecision::Deny);
-        assert!(matches!(setup.apply_service_mcp_parent_decision(review, denial).await.unwrap(), ServiceMcpParentOutcome::Denied));
+        assert!(matches!(
+            setup
+                .apply_service_mcp_parent_decision(review, denial)
+                .await
+                .unwrap(),
+            ServiceMcpParentOutcome::Denied
+        ));
         assert_eq!(fs::read(directory.join("grants.jsonl")).unwrap(), bytes);
         setup.finish().await.unwrap();
     }
@@ -1862,61 +2078,119 @@ mod tests {
     #[tokio::test]
     async fn protected_live_effect_is_explicit_and_cannot_reuse_a_tool_only_answer() {
         use crate::private_originals::{PrivateServiceGrantState, PrivateServiceMcpLiveAttachment};
-        use meerkat_authorization_contracts::work_association::NativeWorkTarget;
         use meerkat_authorization_contracts::constraints::OperationRestrictionValues;
+        use meerkat_authorization_contracts::work_association::NativeWorkTarget;
         let (_directory, selection) = super::super::tests::fixture();
         let setup = OperatorSetup::open(selection.clone(), startup()).unwrap();
-        let directory = state_directory(&selection, &setup.native, NativeOwnerStartup::Restore).unwrap();
+        let directory =
+            state_directory(&selection, &setup.native, NativeOwnerStartup::Restore).unwrap();
         let (mut decision, mcp, request) = service_proposal(&setup);
-        let tool_only = setup.prepare_service_mcp_parent_review(decision.clone(), mcp.clone(), request.clone()).unwrap();
-        assert!(tool_only.request().proposed_action.body.as_ref().unwrap()["service_access"].get("live_attachment").is_none());
+        let tool_only = setup
+            .prepare_service_mcp_parent_review(decision.clone(), mcp.clone(), request.clone())
+            .unwrap();
+        assert!(
+            tool_only.request().proposed_action.body.as_ref().unwrap()["service_access"]
+                .get("live_attachment")
+                .is_none()
+        );
         let tool_only_answer = service_approval(&tool_only, ApprovalDecision::Approve);
         let member = &setup.native.members[0];
         let session = meerkat_core::SessionId::new();
         let destination = NativeWorkTarget {
             logical_owner: member.logical_owner.clone(),
-            logical_runtime: EvidenceId::new(meerkat_runtime::LogicalRuntimeId::for_session(&session).to_string()).unwrap(),
+            logical_runtime: EvidenceId::new(
+                meerkat_runtime::LogicalRuntimeId::for_session(&session).to_string(),
+            )
+            .unwrap(),
             context: EvidenceId::new(session.to_string()).unwrap(),
-            context_generation: member.context_generation, audience: member.audience.clone(),
+            context_generation: member.context_generation,
+            audience: member.audience.clone(),
         };
-        decision.live_attachment = Some(PrivateServiceMcpLiveAttachment { destination: destination.clone() });
+        decision.live_attachment = Some(PrivateServiceMcpLiveAttachment {
+            destination: destination.clone(),
+        });
         decision.permission.lifetime.expires_at_ms = Some(u64::MAX);
-        let live = setup.prepare_service_mcp_parent_review(decision.clone(), mcp.clone(), request.clone()).unwrap();
-        assert_eq!(live.request().proposed_action.body.as_ref().unwrap()["service_access"]["live_attachment"]["destination"],
-            serde_json::to_value(&destination).unwrap());
+        let live = setup
+            .prepare_service_mcp_parent_review(decision.clone(), mcp.clone(), request.clone())
+            .unwrap();
+        assert_eq!(
+            live.request().proposed_action.body.as_ref().unwrap()["service_access"]["live_attachment"]
+                ["destination"],
+            serde_json::to_value(&destination).unwrap()
+        );
         let bytes = fs::read(directory.join("grants.jsonl")).unwrap();
-        assert!(matches!(setup.apply_service_mcp_parent_decision(live, tool_only_answer).await,
-            Err(HostLifetimeError::Denied)));
+        assert!(matches!(
+            setup
+                .apply_service_mcp_parent_decision(live, tool_only_answer)
+                .await,
+            Err(HostLifetimeError::Denied)
+        ));
         assert_eq!(fs::read(directory.join("grants.jsonl")).unwrap(), bytes);
         let mut wrong = decision.clone();
-        wrong.live_attachment.as_mut().unwrap().destination.context_generation += 1;
-        assert!(matches!(setup.prepare_service_mcp_parent_review(wrong, mcp.clone(), request.clone()), Err(HostLifetimeError::Denied)));
+        wrong
+            .live_attachment
+            .as_mut()
+            .unwrap()
+            .destination
+            .context_generation += 1;
+        assert!(matches!(
+            setup.prepare_service_mcp_parent_review(wrong, mcp.clone(), request.clone()),
+            Err(HostLifetimeError::Denied)
+        ));
         assert_eq!(fs::read(directory.join("grants.jsonl")).unwrap(), bytes);
-        let live = setup.prepare_service_mcp_parent_review(decision.clone(), mcp.clone(), request).unwrap();
+        let live = setup
+            .prepare_service_mcp_parent_review(decision.clone(), mcp.clone(), request)
+            .unwrap();
         let answer = service_approval(&live, ApprovalDecision::Approve);
-        let ServiceMcpParentOutcome::Approved(approved) = setup.apply_service_mcp_parent_decision(live, answer).await.unwrap()
-            else { panic!("expected real protected parent issuance") };
+        let ServiceMcpParentOutcome::Approved(approved) = setup
+            .apply_service_mcp_parent_decision(live, answer)
+            .await
+            .unwrap()
+        else {
+            panic!("expected real protected parent issuance")
+        };
         let adapter = service_adapter(&setup).await;
-        let observed = adapter.apply_mcp_service_access_decision(approved).await.unwrap();
+        let observed = adapter
+            .apply_mcp_service_access_decision(approved)
+            .await
+            .unwrap();
         assert_eq!(observed.state, PrivateServiceGrantState::GrantIssued);
         let route = setup.service_mcp_route(&decision.route).unwrap();
         let original = meerkat_authorization_contracts::work_association::OriginalWorkRef {
-            authority: route.source_authority.clone(), work: EvidenceId::new("fresh-b").unwrap(),
+            authority: route.source_authority.clone(),
+            work: EvidenceId::new("fresh-b").unwrap(),
         };
-        let lineage = adapter.service_grant_lineage(&observed.grant, &original).await.unwrap();
-        let resolved = setup.source.grants().resolve_lineage(&lineage, &route.logical_executor, None).unwrap();
-        let exact = digest(&canonical_json(&("mail", &decision.connection_revision, &destination)).unwrap());
+        let lineage = adapter
+            .service_grant_lineage(&observed.grant, &original)
+            .await
+            .unwrap();
+        let resolved = setup
+            .source
+            .grants()
+            .resolve_lineage(&lineage, &route.logical_executor, None)
+            .unwrap();
+        let exact = digest(
+            &canonical_json(&("mail", &decision.connection_revision, &destination)).unwrap(),
+        );
         let values = super::super::application_operations::mcp_live_attachment(
-            &route.grant_caller, &route.logical_executor, &route.grant_audience, &exact);
-        resolved.restrictions().check_bounds(OperationRestrictionValues {
-            action: &values.action, resource_domain: &values.resource_domain,
-            processor: &values.processor, audience: &values.audience,
-            now_ms: setup.source.clock().now().unwrap().unix_ms,
-        }).unwrap();
+            &route.grant_caller,
+            &route.logical_executor,
+            &route.grant_audience,
+            &exact,
+        );
+        resolved
+            .restrictions()
+            .check_bounds(OperationRestrictionValues {
+                action: &values.action,
+                resource_domain: &values.resource_domain,
+                processor: &values.processor,
+                audience: &values.audience,
+                now_ms: setup.source.clock().now().unwrap().unix_ms,
+            })
+            .unwrap();
         drop(resolved);
         setup.finish().await.unwrap();
     }
-
 
     #[tokio::test]
     async fn retained_service_review_uses_exact_existing_parent_without_writes() {
@@ -1924,23 +2198,43 @@ mod tests {
         let (_directory, selection) = super::super::tests::fixture();
         let setup = OperatorSetup::open(selection.clone(), startup()).unwrap();
         let (decision, mcp, request) = service_proposal(&setup);
-        let review = setup.prepare_service_mcp_parent_review(decision.clone(), mcp, request).unwrap();
+        let review = setup
+            .prepare_service_mcp_parent_review(decision.clone(), mcp, request)
+            .unwrap();
         let approval = service_approval(&review, ApprovalDecision::Approve);
         let expected = approval.clone();
-        let ServiceMcpParentOutcome::Approved(approved) = setup.apply_service_mcp_parent_decision(review, approval).await.unwrap()
-            else { panic!("real reviewed parent required") };
+        let ServiceMcpParentOutcome::Approved(approved) = setup
+            .apply_service_mcp_parent_decision(review, approval)
+            .await
+            .unwrap()
+        else {
+            panic!("real reviewed parent required")
+        };
         let (_, _, parent, _) = approved.into_parts(&setup.source).unwrap();
         let evidence = PrivateSourceEvidence {
             resource_id: EvidenceId::new(expected.approval_id.to_string()).unwrap(),
             revision: EvidenceId::new("settled-review-v1").unwrap(),
             sha256: digest(&canonical_json(&expected).unwrap()),
         };
-        let scope = toolkit_store::StoreScope { realm: setup.native.realm.to_string(),
-            owner: setup.lifetime.selected_policy().deployment.to_string() };
-        let before = setup.originals.list_records(&scope, None, 256).await.unwrap();
-        let directory = state_directory(&selection, &setup.native, NativeOwnerStartup::Restore).unwrap();
+        let scope = toolkit_store::StoreScope {
+            realm: setup.native.realm.to_string(),
+            owner: setup.lifetime.selected_policy().deployment.to_string(),
+        };
+        let before = setup
+            .originals
+            .list_records(&scope, None, 256)
+            .await
+            .unwrap();
+        let directory =
+            state_directory(&selection, &setup.native, NativeOwnerStartup::Restore).unwrap();
         let grants = std::fs::read(directory.join("grants.jsonl")).unwrap();
-        assert_eq!(setup.retained_service_review(&decision.route, &evidence, &parent).await.unwrap(), expected);
+        assert_eq!(
+            setup
+                .retained_service_review(&decision.route, &evidence, &parent)
+                .await
+                .unwrap(),
+            expected
+        );
         for change in ["digest", "evidence", "legacy", "parent", "missing"] {
             let mut evidence = evidence.clone();
             let mut parent = parent.clone();
@@ -1952,10 +2246,25 @@ mod tests {
                 "missing" => parent.clear(),
                 _ => unreachable!(),
             }
-            assert!(setup.retained_service_review(&decision.route, &evidence, &parent).await.is_err(), "{change}");
+            assert!(
+                setup
+                    .retained_service_review(&decision.route, &evidence, &parent)
+                    .await
+                    .is_err(),
+                "{change}"
+            );
         }
-        assert_eq!(setup.originals.list_records(&scope, None, 256).await.unwrap(), before);
-        assert_eq!(std::fs::read(directory.join("grants.jsonl")).unwrap(), grants);
+        assert_eq!(
+            setup
+                .originals
+                .list_records(&scope, None, 256)
+                .await
+                .unwrap(),
+            before
+        );
+        assert_eq!(
+            std::fs::read(directory.join("grants.jsonl")).unwrap(),
+            grants
+        );
     }
-
 }

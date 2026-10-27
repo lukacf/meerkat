@@ -3,14 +3,20 @@
 //! are real. Terminal answers and loopback provider responses are fixture inputs.
 //! These controls do not qualify provider credentials, MCP readiness or a product build.
 
-use super::*;
 use super::super::{RetainedSetupCloseError, StockSubmissionError};
+use super::*;
 use meerkat::governed_realm::stock::{StockGovernance, originals::StockCustodyError};
-use meerkat_runtime::{AcceptOutcome, LogicalRuntimeId, RuntimeStore,
-    completion::{CompletionHandle, CompletionOutcome}, input_admission_custody::NativeInputAdmissionSettlement,
-    input_state::InputTerminalOutcome};
-use std::{collections::BTreeSet, os::unix::fs::PermissionsExt,
-    sync::atomic::{AtomicUsize, Ordering}};
+use meerkat_runtime::{
+    AcceptOutcome, LogicalRuntimeId, RuntimeStore,
+    completion::{CompletionHandle, CompletionOutcome},
+    input_admission_custody::NativeInputAdmissionSettlement,
+    input_state::InputTerminalOutcome,
+};
+use std::{
+    collections::BTreeSet,
+    os::unix::fs::PermissionsExt,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 use tokio::sync::{mpsc, oneshot};
 
 const REALM: &str = "stock-submission";
@@ -23,56 +29,89 @@ use native_model_peer::ModelPeer;
 // These are observations of actual native HTTP request blocks, not native
 // ToolResult holders or authority. Non-text fixture results are refused.
 #[derive(Clone)]
-struct ObservedToolResult { is_error: bool, text: String }
+struct ObservedToolResult {
+    is_error: bool,
+    text: String,
+}
 impl ObservedToolResult {
-    fn text_content(&self) -> String { self.text.clone() }
+    fn text_content(&self) -> String {
+        self.text.clone()
+    }
 }
 
 #[derive(Default)]
-struct ScriptedProvider(AtomicUsize,
+struct ScriptedProvider(
+    AtomicUsize,
     std::sync::Mutex<std::collections::VecDeque<(String, String, serde_json::Value)>>,
     std::sync::Mutex<std::collections::BTreeMap<String, ObservedToolResult>>,
     std::sync::Mutex<Vec<Vec<serde_json::Value>>>,
-    std::sync::Mutex<Option<(String, String)>>);
+    std::sync::Mutex<Option<(String, String)>>,
+);
 
-fn observed_tool_results(messages: &[serde_json::Value])
-    -> io::Result<Vec<(String, ObservedToolResult)>>
-{
+fn observed_tool_results(
+    messages: &[serde_json::Value],
+) -> io::Result<Vec<(String, ObservedToolResult)>> {
     let mut results = Vec::new();
     for message in messages.iter().filter(|message| message["role"] == "user") {
-        let Some(blocks) = message["content"].as_array() else { continue; };
+        let Some(blocks) = message["content"].as_array() else {
+            continue;
+        };
         for block in blocks.iter().filter(|block| block["type"] == "tool_result") {
-            let id = block["tool_use_id"].as_str()
+            let id = block["tool_use_id"]
+                .as_str()
                 .ok_or_else(|| io::Error::other("Native fixture tool result has no ID"))?;
-            let text = block["content"].as_str()
+            let text = block["content"]
+                .as_str()
                 .ok_or_else(|| io::Error::other("Native fixture tool result is not text"))?;
-            let is_error = block["is_error"].as_bool()
-                .ok_or_else(|| io::Error::other("Native fixture tool result has no error status"))?;
-            results.push((id.into(), ObservedToolResult { is_error, text: text.into() }));
+            let is_error = block["is_error"].as_bool().ok_or_else(|| {
+                io::Error::other("Native fixture tool result has no error status")
+            })?;
+            results.push((
+                id.into(),
+                ObservedToolResult {
+                    is_error,
+                    text: text.into(),
+                },
+            ));
         }
     }
     Ok(results)
 }
 
 fn resumed_context_matches(messages: &[serde_json::Value], submitted: &str, notice: &str) -> bool {
-    if notice.is_empty() { return false; }
-    let Ok(results) = observed_tool_results(messages) else { return false; };
-    let original_results = results.iter().filter(|(id, _)| id == "submit-once").collect::<Vec<_>>();
-    let original_matches = original_results.len() == 1 && !original_results[0].1.is_error
+    if notice.is_empty() {
+        return false;
+    }
+    let Ok(results) = observed_tool_results(messages) else {
+        return false;
+    };
+    let original_results = results
+        .iter()
+        .filter(|(id, _)| id == "submit-once")
+        .collect::<Vec<_>>();
+    let original_matches = original_results.len() == 1
+        && !original_results[0].1.is_error
         && serde_json::from_str::<serde_json::Value>(&original_results[0].1.text_content())
-            .is_ok_and(|value| value["observation_json"] == submitted && value["recovery_only"] == true);
+            .is_ok_and(|value| {
+                value["observation_json"] == submitted && value["recovery_only"] == true
+            });
     // Count the complete native projection of the actual input, not a fact
     // substring that native may repeat within one SystemNotice. User text and
     // explicit text blocks are eligible; tool-result content is excluded.
-    let notice_count = messages.iter().filter(|message| message["role"] == "user")
+    let notice_count = messages
+        .iter()
+        .filter(|message| message["role"] == "user")
         .map(|message| match &message["content"] {
             serde_json::Value::String(text) => text.matches(notice).count(),
-            serde_json::Value::Array(blocks) => blocks.iter()
+            serde_json::Value::Array(blocks) => blocks
+                .iter()
                 .filter(|block| block["type"] == "text")
                 .filter_map(|block| block["text"].as_str())
-                .map(|text| text.matches(notice).count()).sum(),
+                .map(|text| text.matches(notice).count())
+                .sum(),
             _ => 0,
-        }).sum::<usize>();
+        })
+        .sum::<usize>();
     original_matches && notice_count == 1
 }
 
@@ -86,40 +125,65 @@ fn resumed_context_requires_one_complete_native_notice_projection() {
         source_name: "meerkat-connect-finalization".into(),
     };
     let input = meerkat_runtime::Input::ExternalEvent(meerkat_runtime::ExternalEventInput {
-        header, event_type: "connect_finalization_observation".into(),
-        payload: json!({"body":body}), blocks: None,
-        handling_mode: meerkat_runtime::HandlingMode::default(), render_metadata: None, objective_id: None,
+        header,
+        event_type: "connect_finalization_observation".into(),
+        payload: json!({"body":body}),
+        blocks: None,
+        handling_mode: meerkat_runtime::HandlingMode::default(),
+        render_metadata: None,
+        objective_id: None,
     });
     let Some(meerkat_core::types::ContentInput::Text(projection)) =
         meerkat_runtime::input::runtime_input_run_started_content(&input)
-        else { panic!("the native no-media event must have a text projection") };
+    else {
+        panic!("the native no-media event must have a text projection")
+    };
     assert!(!projection.is_empty());
-    assert_ne!(projection, body, "the expected notice is the complete native projection");
+    assert_ne!(
+        projection, body,
+        "the expected notice is the complete native projection"
+    );
     let original = json!({"role":"user","content":[{"type":"tool_result",
         "tool_use_id":"submit-once","is_error":false,
         "content":json!({"observation_json":submitted,"recovery_only":true}).to_string()}]});
-    for content in [json!(projection), json!([{"type":"text","text":projection}])] {
+    for content in [
+        json!(projection),
+        json!([{"type":"text","text":projection}]),
+    ] {
         let messages = vec![original.clone(), json!({"role":"user","content":content})];
         assert!(resumed_context_matches(&messages, submitted, &projection));
         assert!(!resumed_context_matches(&messages, submitted, ""));
     }
     // Missing, partial, altered and duplicated complete notices are refusals.
-    for content in [json!(""), json!(body), json!(projection.replace("saved", "changed")),
+    for content in [
+        json!(""),
+        json!(body),
+        json!(projection.replace("saved", "changed")),
         json!(format!("{projection}\n{projection}")),
         json!([{"type":"text","text":projection},{"type":"text","text":projection}]),
-        json!([{"type":"tool_result","tool_use_id":"other-result","is_error":false,"content":projection}])] {
+        json!([{"type":"tool_result","tool_use_id":"other-result","is_error":false,"content":projection}]),
+    ] {
         let messages = vec![original.clone(), json!({"role":"user","content":content})];
         assert!(!resumed_context_matches(&messages, submitted, &projection));
     }
     let notice = json!({"role":"user","content":projection});
-    assert!(!resumed_context_matches(&[original.clone(),notice.clone(),notice.clone()], submitted, &projection));
-    assert!(!resumed_context_matches(&[original.clone(),original,notice.clone()], submitted, &projection));
+    assert!(!resumed_context_matches(
+        &[original.clone(), notice.clone(), notice.clone()],
+        submitted,
+        &projection
+    ));
+    assert!(!resumed_context_matches(
+        &[original.clone(), original, notice.clone()],
+        submitted,
+        &projection
+    ));
     assert!(!resumed_context_matches(&[notice], submitted, &projection));
 }
 
 impl ScriptedProvider {
     fn reply(&self, body: serde_json::Value) -> io::Result<String> {
-        let messages = body["messages"].as_array()
+        let messages = body["messages"]
+            .as_array()
             .ok_or_else(|| io::Error::other("Native fixture request has no messages"))?;
         let results = observed_tool_results(messages)?;
         self.0.fetch_add(1, Ordering::SeqCst);
@@ -130,35 +194,50 @@ impl ScriptedProvider {
             if !resumed_context_matches(messages, &submitted, &notice) {
                 // Failure-only observations of this same request. Emit no IDs,
                 // result text, notice body or other conversation content.
-                let original_results = results.iter().filter(|(id, _)| id == "submit-once")
+                let original_results = results
+                    .iter()
+                    .filter(|(id, _)| id == "submit-once")
                     .collect::<Vec<_>>();
                 let original_count = original_results.len();
                 let original = (original_count == 1).then(|| &original_results[0].1);
                 let original_is_error = original.map(|result| result.is_error);
-                let original_json = original.map(|result|
-                    serde_json::from_str::<serde_json::Value>(&result.text));
+                let original_json =
+                    original.map(|result| serde_json::from_str::<serde_json::Value>(&result.text));
                 let original_json_parsed = original_json.as_ref().map(|value| value.is_ok());
                 let original_value = original_json.as_ref().and_then(|value| value.as_ref().ok());
-                let observation_equal = original_value.map(|value| value["observation_json"] == submitted);
+                let observation_equal =
+                    original_value.map(|value| value["observation_json"] == submitted);
                 let recovery_only = original_value.map(|value| value["recovery_only"] == true);
-                let notice_count = messages.iter().filter(|message| message["role"] == "user")
+                let notice_count = messages
+                    .iter()
+                    .filter(|message| message["role"] == "user")
                     .map(|message| match &message["content"] {
                         serde_json::Value::String(text) => text.matches(&notice).count(),
-                        serde_json::Value::Array(blocks) => blocks.iter()
+                        serde_json::Value::Array(blocks) => blocks
+                            .iter()
                             .filter(|block| block["type"] == "text")
                             .filter_map(|block| block["text"].as_str())
-                            .map(|text| text.matches(&notice).count()).sum(),
+                            .map(|text| text.matches(&notice).count())
+                            .sum(),
                         _ => 0,
-                    }).sum::<usize>();
-                let _ = writeln!(io::stderr(),
-                    "forge resumed-context mismatch: submit_result_count={original_count}; submit_is_error={original_is_error:?}; submit_json_parsed={original_json_parsed:?}; submit_observation_equal={observation_equal:?}; submit_recovery_only={recovery_only:?}; notice_occurrences={notice_count}");
-                return Err(io::Error::other("Native restored context is missing or duplicated"));
+                    })
+                    .sum::<usize>();
+                let _ = writeln!(
+                    io::stderr(),
+                    "forge resumed-context mismatch: submit_result_count={original_count}; submit_is_error={original_is_error:?}; submit_json_parsed={original_json_parsed:?}; submit_observation_equal={observation_equal:?}; submit_recovery_only={recovery_only:?}; notice_occurrences={notice_count}"
+                );
+                return Err(io::Error::other(
+                    "Native restored context is missing or duplicated",
+                ));
             }
         }
         self.2.lock().unwrap().extend(results);
         if let Some((id, name, args)) = self.1.lock().unwrap().pop_front() {
-            if !body["tools"].as_array().is_some_and(|tools|
-                tools.iter().any(|tool| tool["name"].as_str() == Some(name.as_str()))) {
+            if !body["tools"].as_array().is_some_and(|tools| {
+                tools
+                    .iter()
+                    .any(|tool| tool["name"].as_str() == Some(name.as_str()))
+            }) {
                 return Err(io::Error::other("Scripted native tool is not offered"));
             }
             return Ok(native_model_peer::tool_reply(&id, &name, &args));
@@ -199,9 +278,13 @@ impl Write for ApproveDisplayed {
     fn flush(&mut self) -> io::Result<()> {
         let text = std::str::from_utf8(&self.bytes).map_err(io::Error::other)?;
         for part in text.split("Type 'approve ").skip(1) {
-            let Some((id, _)) = part.split_once('\'') else { continue; };
+            let Some((id, _)) = part.split_once('\'') else {
+                continue;
+            };
             if self.answered.insert(id.to_owned()) {
-                self.input.try_send(Ok(format!("approve {id}"))).map_err(io::Error::other)?;
+                self.input
+                    .try_send(Ok(format!("approve {id}")))
+                    .map_err(io::Error::other)?;
             }
         }
         Ok(())
@@ -237,19 +320,33 @@ impl Opened {
     ) -> Result<Self, ConnectError> {
         let client = Arc::new(ScriptedProvider::default());
         let observed = client.clone();
-        let peer = ModelPeer::open(MODEL, Arc::new(move |body| {
-            Box::pin(std::future::ready(observed.reply(body)))
-        })).await.map_err(|e| ConnectError::native("Open native model fixture peer", e))?;
+        let peer = ModelPeer::open(
+            MODEL,
+            Arc::new(move |body| Box::pin(std::future::ready(observed.reply(body)))),
+        )
+        .await
+        .map_err(|e| ConnectError::native("Open native model fixture peer", e))?;
         use futures_util::FutureExt;
         let opened = std::panic::AssertUnwindSafe(Self::open_with_transport(forge, &peer, client))
-            .catch_unwind().await;
+            .catch_unwind()
+            .await;
         match opened {
-            Ok(Ok(mut opened)) => { opened.model_peer = Some(peer); Ok(opened) },
-            Ok(Err(primary)) => combine(Err(primary), peer.finish().await
-                .map_err(|e| ConnectError::native("Join failed native model fixture peer", e))),
+            Ok(Ok(mut opened)) => {
+                opened.model_peer = Some(peer);
+                Ok(opened)
+            }
+            Ok(Err(primary)) => combine(
+                Err(primary),
+                peer.finish()
+                    .await
+                    .map_err(|e| ConnectError::native("Join failed native model fixture peer", e)),
+            ),
             Err(panic) => {
                 let cleanup = peer.finish().await;
-                assert!(cleanup.is_ok(), "Panicked native model fixture peer cleanup failed: {cleanup:?}");
+                assert!(
+                    cleanup.is_ok(),
+                    "Panicked native model fixture peer cleanup failed: {cleanup:?}"
+                );
                 std::panic::resume_unwind(panic)
             }
         }
@@ -257,19 +354,23 @@ impl Opened {
 
     async fn open_with_transport(
         forge: Option<(crate::forge::ForgeFrontend, crate::forge::ForgePresenter)>,
-        peer: &ModelPeer, client: Arc<ScriptedProvider>,
+        peer: &ModelPeer,
+        client: Arc<ScriptedProvider>,
     ) -> Result<Self, ConnectError> {
         // Forge recovery checks the setup artifact directory and its parent.
         // Declare this owned fixture root private instead of relying on umask.
         let directory = tempfile::Builder::new()
             .permissions(std::fs::Permissions::from_mode(0o700))
-            .tempdir().map_err(|e| ConnectError::native("fixture directory", e))?;
+            .tempdir()
+            .map_err(|e| ConnectError::native("fixture directory", e))?;
         let storage = crate::RealmOptions {
             context_root: directory.path().to_owned(),
             state_root: Some(directory.path().join("state")),
             user_config_root: Some(directory.path().join("home")),
-        }.resolve(REALM)?;
-        peer.configure(&storage).await
+        }
+        .resolve(REALM)?;
+        peer.configure(&storage)
+            .await
             .map_err(|e| ConnectError::native("Configure isolated native model peer", e))?;
         let options = SessionOptions {
             model: native_model_peer::model_request(REALM, MODEL)
@@ -277,16 +378,21 @@ impl Opened {
             build: Default::default(),
         };
         let artifacts = directory.path().join("artifacts");
-        std::fs::create_dir(&artifacts).map_err(|e| ConnectError::native("fixture artifacts", e))?;
+        std::fs::create_dir(&artifacts)
+            .map_err(|e| ConnectError::native("fixture artifacts", e))?;
         let mcp_calls = directory.path().join("unexpected-mcp-calls");
         let descriptor = serde_json::to_vec(&serde_json::json!({
             "mcpServers": { "toolkit-setup": {
                 "command": "/bin/sh",
                 "args": ["-c", MCP_PEER, "stock-submission-control", mcp_calls.to_str().unwrap()]
             }}
-        })).map_err(|e| ConnectError::native("Encode actual fixture endpoint", e))?;
+        }))
+        .map_err(|e| ConnectError::native("Encode actual fixture endpoint", e))?;
         let connection = crate::setup::PreparedSetupConnection::from_preparer_output(&descriptor)?;
-        let prepared = crate::resources::PreparedResources { connection, artifact_directory: artifacts.clone() };
+        let prepared = crate::resources::PreparedResources {
+            connection,
+            artifact_directory: artifacts.clone(),
+        };
         let native_session = Session::new();
         let id = native_session.id().clone();
         let (approvals, mut presenter) = LocalApprovals::create_paired_host(&artifacts)?;
@@ -294,14 +400,30 @@ impl Opened {
         approvals.bind_session(&id)?;
         let (send, receive) = mpsc::channel(1);
         let mut input = TerminalInput::scripted(receive);
-        let mut output = ApproveDisplayed { bytes: Vec::new(), answered: BTreeSet::new(), input: send };
+        let mut output = ApproveDisplayed {
+            bytes: Vec::new(),
+            answered: BTreeSet::new(),
+            input: send,
+        };
         let interrupt = std::future::pending::<io::Result<()>>();
         tokio::pin!(interrupt);
-        let mut startup = SessionStartup::prepare_standalone(storage.clone(), native_session,
-            prepared, &approvals, &mut presenter, &mut input, &mut output, interrupt.as_mut())
-            .await?.ok_or_else(|| invalid("The actual staged fixture was not opened"))?;
+        let mut startup = SessionStartup::prepare_standalone(
+            storage.clone(),
+            native_session,
+            prepared,
+            &approvals,
+            &mut presenter,
+            &mut input,
+            &mut output,
+            interrupt.as_mut(),
+        )
+        .await?
+        .ok_or_else(|| invalid("The actual staged fixture was not opened"))?;
         let continuation = startup.standalone_continuation()?;
-        let staged = startup.standalone.as_mut().ok_or_else(|| invalid("Missing actual setup stage"))?;
+        let staged = startup
+            .standalone
+            .as_mut()
+            .ok_or_else(|| invalid("Missing actual setup stage"))?;
         let stock = staged.stage.stock_governance().clone();
         let (send_store, receive_store) = oneshot::channel();
         staged.materialization_observer = Some(Box::new(move |bundle| {
@@ -310,20 +432,34 @@ impl Opened {
             let _ = send_store.send(bundle.runtime_store());
         }));
         let configured = async {
-            let mut connectors = crate::terminal_connector::TerminalConnectors::open(&mut startup).await?;
-            let (paired_host, host_presenter) = crate::paired_host_tool::PairedHostFrontend::deferred();
+            let mut connectors =
+                crate::terminal_connector::TerminalConnectors::open(&mut startup).await?;
+            let (paired_host, host_presenter) =
+                crate::paired_host_tool::PairedHostFrontend::deferred();
             let setup = match forge {
-                Some(forge) => NativeSetup::with_forge(id, storage.locator.clone(), paired_host,
-                    &connectors, approvals.clone(), forge),
-                None => NativeSetup::new(id, storage.locator.clone(), paired_host,
-                    &connectors, approvals.clone()),
+                Some(forge) => NativeSetup::with_forge(
+                    id,
+                    storage.locator.clone(),
+                    paired_host,
+                    &connectors,
+                    approvals.clone(),
+                    forge,
+                ),
+                None => NativeSetup::new(
+                    id,
+                    storage.locator.clone(),
+                    paired_host,
+                    &connectors,
+                    approvals.clone(),
+                ),
             };
             let setup = match setup {
                 Ok(setup) => setup,
                 Err(primary) => return combine(Err(primary), connectors.retire()),
             };
             Ok::<_, ConnectError>((connectors, setup, host_presenter))
-        }.await;
+        }
+        .await;
         let (mut connectors, setup, host_presenter) = match configured {
             Ok(value) => value,
             Err(primary) => {
@@ -331,33 +467,69 @@ impl Opened {
                 return combine(Err(primary), startup.abort_standalone(&mut output).await);
             }
         };
-        let result = Box::pin(startup.open_native_setup(options, setup.clone(), &approvals,
-            &mut presenter, &mut input, &mut output, interrupt.as_mut())).await;
+        let result = Box::pin(startup.open_native_setup(
+            options,
+            setup.clone(),
+            &approvals,
+            &mut presenter,
+            &mut input,
+            &mut output,
+            interrupt.as_mut(),
+        ))
+        .await;
         let session = match result {
             Ok(Some(session)) => session,
             other => {
                 approvals.retire();
                 let cleanup = connectors.retire();
-                return combine(other.and_then(|_| Err(invalid("The real native fixture did not open"))), cleanup);
+                return combine(
+                    other.and_then(|_| Err(invalid("The real native fixture did not open"))),
+                    cleanup,
+                );
             }
         };
-        let observed = receive_store.await.map_err(|e| ConnectError::native("Observe actual finished bundle", e));
-        let matches = session.stock.as_ref().is_some_and(|owner| Arc::ptr_eq(owner, &stock));
+        let observed = receive_store
+            .await
+            .map_err(|e| ConnectError::native("Observe actual finished bundle", e));
+        let matches = session
+            .stock
+            .as_ref()
+            .is_some_and(|owner| Arc::ptr_eq(owner, &stock));
         let store = match observed {
             Ok(store) if matches && output.answered.len() == 2 => store,
             observed => {
                 approvals.retire();
-                let primary = observed.err().unwrap_or_else(|| invalid("Fixture did not retain its reviewed stage owner"));
-                return combine(Err(primary), combine(session.close().await, connectors.retire()));
+                let primary = observed
+                    .err()
+                    .unwrap_or_else(|| invalid("Fixture did not retain its reviewed stage owner"));
+                return combine(
+                    Err(primary),
+                    combine(session.close().await, connectors.retire()),
+                );
             }
         };
-        Ok(Self { session: Some(session), store, stock, client, model_peer: None, mcp_calls, setup, approvals, connectors,
-            refused_close: None, continuation, approval_presenter: presenter,
-            _host_presenter: host_presenter, _directory: directory })
+        Ok(Self {
+            session: Some(session),
+            store,
+            stock,
+            client,
+            model_peer: None,
+            mcp_calls,
+            setup,
+            approvals,
+            connectors,
+            refused_close: None,
+            continuation,
+            approval_presenter: presenter,
+            _host_presenter: host_presenter,
+            _directory: directory,
+        })
     }
 
     fn session(&self) -> Result<&ConnectSession, ConnectError> {
-        self.session.as_ref().ok_or_else(|| invalid("The fixture session was consumed"))
+        self.session
+            .as_ref()
+            .ok_or_else(|| invalid("The fixture session was consumed"))
     }
 
     async fn finish(&mut self) -> Result<(), ConnectError> {
@@ -371,12 +543,17 @@ impl Opened {
         // Inspect only after the actual session shutdown. This does not stand
         // in for a process join or for live setup-server qualification.
         let calls = match std::fs::read(&self.mcp_calls) {
-            Ok(bytes) => require(bytes.is_empty(), "The stock control invoked an unexpected MCP operation"),
+            Ok(bytes) => require(
+                bytes.is_empty(),
+                "The stock control invoked an unexpected MCP operation",
+            ),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(ConnectError::native("Read fixture MCP calls", error)),
         };
         let peer = match self.model_peer.take() {
-            Some(peer) => peer.finish().await
+            Some(peer) => peer
+                .finish()
+                .await
                 .map_err(|e| ConnectError::native("Join native model fixture peer", e)),
             None => Ok(()),
         };
@@ -390,21 +567,31 @@ fn require(value: bool, message: &str) -> Result<(), ConnectError> {
 
 fn retained_submission(error: &ConnectError) -> Result<&StockSubmissionError, ConnectError> {
     match error {
-        ConnectError::Native { operation: "Governed submission ownership", source } =>
-            source.downcast_ref::<StockSubmissionError>().ok_or_else(|| invalid("The actual submission owner was not retained")),
-        _ => Err(invalid("The native submission returned a different error owner")),
+        ConnectError::Native {
+            operation: "Governed submission ownership",
+            source,
+        } => source
+            .downcast_ref::<StockSubmissionError>()
+            .ok_or_else(|| invalid("The actual submission owner was not retained")),
+        _ => Err(invalid(
+            "The native submission returned a different error owner",
+        )),
     }
 }
 
-async fn expect_refused(session: &ConnectSession,
+async fn expect_refused(
+    session: &ConnectSession,
     result: Result<(AcceptOutcome, CompletionHandle), ConnectError>,
 ) -> Result<ConnectError, ConnectError> {
     match result {
         Err(error) => Ok(error),
         Ok((admission, completion)) => {
             let cancelled = session.cancel(&admission).await.map(|_| ());
-            let settled = completion.try_wait_with_terminal_outcome().await
-                .map(|_| ()).map_err(|e| ConnectError::native("Settle unexpected fixture admission", e));
+            let settled = completion
+                .try_wait_with_terminal_outcome()
+                .await
+                .map(|_| ())
+                .map_err(|e| ConnectError::native("Settle unexpected fixture admission", e));
             combine(cancelled, settled)?;
             Err(invalid("A refused submission was unexpectedly admitted"))
         }
@@ -413,20 +600,32 @@ async fn expect_refused(session: &ConnectSession,
 
 // Completion delivery and durable terminal publication are separate native
 // observations. Wait only for these exact rows; never submit another input.
-async fn settled_history(store: &dyn RuntimeStore, runtime: &LogicalRuntimeId,
+async fn settled_history(
+    store: &dyn RuntimeStore,
+    runtime: &LogicalRuntimeId,
     expected: &[meerkat_core::lifecycle::InputId],
 ) -> Result<Vec<meerkat_runtime::input_state::StoredInputState>, ConnectError> {
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
-            let rows = store.load_input_states_strict(runtime).await
+            let rows = store
+                .load_input_states_strict(runtime)
+                .await
                 .map_err(|e| ConnectError::native("Read exact terminal input history", e))?;
-            require(rows.len() == expected.len() && expected.iter().all(|id|
-                rows.iter().any(|row| &row.state.input_id == id)),
-                "Canonical history contains a missing or unexpected input occurrence")?;
-            if rows.iter().all(|row| row.seed.terminal_outcome.is_some()) { return Ok(rows); }
+            require(
+                rows.len() == expected.len()
+                    && expected
+                        .iter()
+                        .all(|id| rows.iter().any(|row| &row.state.input_id == id)),
+                "Canonical history contains a missing or unexpected input occurrence",
+            )?;
+            if rows.iter().all(|row| row.seed.terminal_outcome.is_some()) {
+                return Ok(rows);
+            }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-    }).await.map_err(|e| ConnectError::native("Wait for exact durable terminal observations", e))?
+    })
+    .await
+    .map_err(|e| ConnectError::native("Wait for exact durable terminal observations", e))?
 }
 
 #[tokio::test]
@@ -710,64 +909,108 @@ async fn successful_actual_stock_promotion_releases_slot_for_an_explicit_next_in
 // fixture. The direct Toolkit dispatcher check below proves prompt custody only:
 // it does not claim native tool admission, authenticated Forge or a live frontend.
 fn inspect_native_forge_composition(
-    setup: &NativeSetup, lazy: &crate::service_preparation::LazySetup,
+    setup: &NativeSetup,
+    lazy: &crate::service_preparation::LazySetup,
     application: Option<&crate::forge::ForgeFrontend>,
 ) -> Result<(), ConnectError> {
     use futures_util::FutureExt;
-    require(setup.take_composition().is_err(), "A native composition was handed out twice")?;
+    require(
+        setup.take_composition().is_err(),
+        "A native composition was handed out twice",
+    )?;
     let before = lazy.dispatcher().tools();
-    require(!before.iter().any(|tool|
-        tool.name.as_ref() == crate::forge::FORGE_PREPARE),
-        "Forge was advertised before its protected presenter was transferred")?;
+    require(
+        !before
+            .iter()
+            .any(|tool| tool.name.as_ref() == crate::forge::FORGE_PREPARE),
+        "Forge was advertised before its protected presenter was transferred",
+    )?;
     let mut presenter = lazy.take_forge_presenter()?;
-    require(lazy.take_forge_presenter().is_err(), "The Forge receiver was handed out twice")?;
+    require(
+        lazy.take_forge_presenter().is_err(),
+        "The Forge receiver was handed out twice",
+    )?;
     // The clone was retained before construction by the embedding application.
     // Matching it to the published receiver proves the original pair survived.
     let frontend = application.unwrap_or_else(|| lazy.forge());
     frontend.check_presenter(&presenter)?;
-    require(frontend.claim_native_setup(&presenter).is_err(),
-        "The native constructor did not claim its still-unused Forge binding")?;
+    require(
+        frontend.claim_native_setup(&presenter).is_err(),
+        "The native constructor did not claim its still-unused Forge binding",
+    )?;
     let tools = lazy.dispatcher().tools();
-    let prepare = tools.iter().find(|tool| tool.name.as_ref() == crate::forge::FORGE_PREPARE)
+    let prepare = tools
+        .iter()
+        .find(|tool| tool.name.as_ref() == crate::forge::FORGE_PREPARE)
         .ok_or_else(|| invalid("The native composition omitted Forge preparation"))?;
     let revision = &prepare.input_schema["properties"]["expected_revision"];
-    let same_recipe = if application.is_some() { revision == &serde_json::json!({}) }
-        else { revision["type"] == "integer" };
-    require(same_recipe, "The native composition replaced the selected application recipe")?;
+    let same_recipe = if application.is_some() {
+        revision == &serde_json::json!({})
+    } else {
+        revision["type"] == "integer"
+    };
+    require(
+        same_recipe,
+        "The native composition replaced the selected application recipe",
+    )?;
     // No paired host has been selected. Keep its initial selection/catalog
     // tools and service preparation live, without inventing authenticated tools.
-    for name in [crate::host_selection::PAIRED_HOST_SELECT_HOST,
+    for name in [
+        crate::host_selection::PAIRED_HOST_SELECT_HOST,
         crate::paired_host_tool::TOOLKIT_FRONTEND_CATALOG,
-        crate::service_preparation::TOOLKIT_PREPARE_SERVICES] {
-        require(before.iter().any(|tool| tool.name.as_ref() == name)
-            && tools.iter().any(|tool| tool.name.as_ref() == name),
-            "Selecting Forge removed an existing PairedHost or service operation")?;
+        crate::service_preparation::TOOLKIT_PREPARE_SERVICES,
+    ] {
+        require(
+            before.iter().any(|tool| tool.name.as_ref() == name)
+                && tools.iter().any(|tool| tool.name.as_ref() == name),
+            "Selecting Forge removed an existing PairedHost or service operation",
+        )?;
     }
     let paired_host_ceiling = lazy.paired_host().allowed_tools();
-    for name in [crate::paired_host_tool::PAIRED_HOST_FRONTEND_INVENTORY,
-        crate::paired_host_tool::PAIRED_HOST_FRONTEND_PREPARE] {
-        require(paired_host_ceiling.contains(&name) && setup.bundle_operations().contains(name),
-            "Selecting Forge removed a declared PairedHost operation")?;
-        require(!before.iter().chain(tools.iter()).any(|tool| tool.name.as_ref() == name),
-            "An unselected paired host exposed authenticated operations")?;
+    for name in [
+        crate::paired_host_tool::PAIRED_HOST_FRONTEND_INVENTORY,
+        crate::paired_host_tool::PAIRED_HOST_FRONTEND_PREPARE,
+    ] {
+        require(
+            paired_host_ceiling.contains(&name) && setup.bundle_operations().contains(name),
+            "Selecting Forge removed a declared PairedHost operation",
+        )?;
+        require(
+            !before
+                .iter()
+                .chain(tools.iter())
+                .any(|tool| tool.name.as_ref() == name),
+            "An unselected paired host exposed authenticated operations",
+        )?;
     }
-    require(lazy.installs().is_some() && lazy.owner().allows_acquisition(),
-        "Selecting Forge removed the existing checked-install/service owner")?;
+    require(
+        lazy.installs().is_some() && lazy.owner().allows_acquisition(),
+        "Selecting Forge removed the existing checked-install/service owner",
+    )?;
     let dispatcher = frontend.dispatcher();
     let args = serde_json::value::RawValue::from_string("{}".into())
         .map_err(|error| ConnectError::native("Encode synthetic selection", error))?;
     let mut selection = Box::pin(dispatcher.dispatch(meerkat_core::types::ToolCallView {
-        id: "native-forge-custody", name: crate::forge::FORGE_SELECT_HOST, args: &args,
+        id: "native-forge-custody",
+        name: crate::forge::FORGE_SELECT_HOST,
+        args: &args,
     }));
-    require(selection.as_mut().now_or_never().is_none(),
-        "The selected frontend did not await its protected presenter")?;
-    let prompt = presenter.next().now_or_never().flatten()
+    require(
+        selection.as_mut().now_or_never().is_none(),
+        "The selected frontend did not await its protected presenter",
+    )?;
+    let prompt = presenter
+        .next()
+        .now_or_never()
+        .flatten()
         .ok_or_else(|| invalid("The original frontend request reached a different receiver"))?;
     // No origin or password is supplied. Dropping this exact offered prompt
     // retires its existing waiter before any HTTP or authenticated action.
     drop(prompt);
-    require(matches!(selection.as_mut().now_or_never(), Some(Err(_))),
-        "The retired pre-auth prompt did not settle its exact original waiter")?;
+    require(
+        matches!(selection.as_mut().now_or_never(), Some(Err(_))),
+        "The retired pre-auth prompt did not settle its exact original waiter",
+    )?;
     Ok(())
 }
 
@@ -776,13 +1019,15 @@ async fn native_setup_keeps_application_forge_pair_through_public_startup() {
     let host = serde_json::from_value(serde_json::json!({
         "protocol":1, "host_id":format!("forge:{}", "a".repeat(64)),
         "application_id":"native-application", "source_digest":"b".repeat(64),
-    })).expect("declared synthetic application identity");
-    let (frontend, presenter) = crate::forge::ForgeFrontend::for_application(
-        host, ["PRIVATE_TOKEN".to_owned()].into(),
-    ).expect("application-selected generic recipe");
+    }))
+    .expect("declared synthetic application identity");
+    let (frontend, presenter) =
+        crate::forge::ForgeFrontend::for_application(host, ["PRIVATE_TOKEN".to_owned()].into())
+            .expect("application-selected generic recipe");
     // Keep native ownership outside observer timeouts and assertions. Every
     // inspected result is propagated only after the exact fixture has closed.
-    let mut fixture = Opened::open_with_forge(Some((frontend.clone(), presenter))).await
+    let mut fixture = Opened::open_with_forge(Some((frontend.clone(), presenter)))
+        .await
         .expect("one actual native startup with the application-created pair");
     let checked = match fixture.setup.take_composition() {
         Ok((lazy, _services)) => {
@@ -799,7 +1044,9 @@ async fn native_setup_keeps_application_forge_pair_through_public_startup() {
 
 #[tokio::test]
 async fn native_setup_default_keeps_reading_and_existing_service_paired_host_tools() {
-    let mut fixture = Opened::open().await.expect("one actual default native startup");
+    let mut fixture = Opened::open()
+        .await
+        .expect("one actual default native startup");
     let checked = match fixture.setup.take_composition() {
         Ok((lazy, _services)) => {
             let result = inspect_native_forge_composition(&fixture.setup, &lazy, None);

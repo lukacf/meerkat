@@ -37,11 +37,20 @@ impl ToolkitOriginalOwner {
             for original in evidence.contributors() {
                 let claims = original.association().candidate();
                 meerkat_runtime::meerkat_machine::require_source_original_live(
-                    owner.grants.as_ref(), owner.as_ref(), &claims.ingress_namespace,
-                    &claims.original_work, &claims.logical_executor, claims.represented_subject.as_ref(),
-                ).map_err(|error| match error {
-                    meerkat_runtime::input_authority::NativeAdmissionError::Refused(refusal) => RetainedResumeError::Refused(refusal),
-                    meerkat_runtime::input_authority::NativeAdmissionError::Readiness(reason) => RetainedResumeError::Readiness(reason),
+                    owner.grants.as_ref(),
+                    owner.as_ref(),
+                    &claims.ingress_namespace,
+                    &claims.original_work,
+                    &claims.logical_executor,
+                    claims.represented_subject.as_ref(),
+                )
+                .map_err(|error| match error {
+                    meerkat_runtime::input_authority::NativeAdmissionError::Refused(refusal) => {
+                        RetainedResumeError::Refused(refusal)
+                    }
+                    meerkat_runtime::input_authority::NativeAdmissionError::Readiness(reason) => {
+                        RetainedResumeError::Readiness(reason)
+                    }
                 })?;
             }
             let controller = owner.retained_input_controller(runtime, evidence)?;
@@ -59,7 +68,9 @@ impl ToolkitOriginalOwner {
         })
     }
 
-    fn validate_retained_sources(&self, runtime: &LogicalRuntimeId,
+    fn validate_retained_sources(
+        &self,
+        runtime: &LogicalRuntimeId,
         evidence: &RetainedResumeEvidence,
     ) -> Result<(), RetainedResumeError> {
         if evidence.identity().controller().is_none() || evidence.contributors().is_empty() {
@@ -69,15 +80,23 @@ impl ToolkitOriginalOwner {
         for original in evidence.contributors() {
             let association = original.association();
             let claims = association.candidate();
-            if claims.target.logical_runtime.as_str() != runtime.to_string() { return Err(malformed()); }
-            let known = originals.iter().find(|entry|
-                entry.names(&claims.ingress_namespace.realm, &claims.original_work));
+            if claims.target.logical_runtime.as_str() != runtime.to_string() {
+                return Err(malformed());
+            }
+            let known = originals
+                .iter()
+                .find(|entry| entry.names(&claims.ingress_namespace.realm, &claims.original_work));
             let retained = match known {
                 Some(OriginalRecord::Bound(held)) => Some(&held.association),
-                Some(OriginalRecord::UnboundCancellation { withdrawn_association, .. }) => withdrawn_association.as_ref(),
+                Some(OriginalRecord::UnboundCancellation {
+                    withdrawn_association,
+                    ..
+                }) => withdrawn_association.as_ref(),
                 None => None,
             };
-            if retained.is_some_and(|retained| retained != association) { return Err(malformed()); }
+            if retained.is_some_and(|retained| retained != association) {
+                return Err(malformed());
+            }
         }
         Ok(())
     }
@@ -99,18 +118,23 @@ impl ToolkitOriginalOwner {
             if claims.target.logical_runtime.as_str() != runtime.to_string() {
                 return Err(malformed());
             }
-            let held = originals.iter().filter_map(OriginalRecord::bound).find(|held| {
-                held.names(&claims.ingress_namespace, &claims.original_work)
-            }).ok_or_else(unavailable)?;
+            let held = originals
+                .iter()
+                .filter_map(OriginalRecord::bound)
+                .find(|held| held.names(&claims.ingress_namespace, &claims.original_work))
+                .ok_or_else(unavailable)?;
             if held.association != *association {
                 return Err(malformed());
             }
             if held.source_custody != Some(SourceCustody::Admitted) {
                 return Err(unavailable());
             }
-            let controller = held.controller.as_ref().ok_or(RetainedResumeError::Readiness(
-                ControllerReadinessFailure::UnsupportedScope,
-            ))?;
+            let controller = held
+                .controller
+                .as_ref()
+                .ok_or(RetainedResumeError::Readiness(
+                    ControllerReadinessFailure::UnsupportedScope,
+                ))?;
             if controller.selection() != selection {
                 return Err(malformed());
             }

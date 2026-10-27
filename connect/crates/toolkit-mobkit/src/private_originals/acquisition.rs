@@ -31,11 +31,31 @@ pub(crate) struct AcquisitionOriginal {
 }
 
 impl AcquisitionOriginal {
-    pub(crate) fn setup_origin(&self) -> crate::original_ingress::helper_originals::HelperSetupOrigin {
+    pub(crate) fn setup_origin(
+        &self,
+    ) -> crate::original_ingress::helper_originals::HelperSetupOrigin {
         crate::original_ingress::helper_originals::HelperSetupOrigin {
-            realm: self.original.association().candidate().ingress_namespace.realm.clone(),
-            source_owner: self.original.association().candidate().ingress_namespace.ingress.clone(),
-            original_authority: self.original.association().candidate().original_work.authority.clone(),
+            realm: self
+                .original
+                .association()
+                .candidate()
+                .ingress_namespace
+                .realm
+                .clone(),
+            source_owner: self
+                .original
+                .association()
+                .candidate()
+                .ingress_namespace
+                .ingress
+                .clone(),
+            original_authority: self
+                .original
+                .association()
+                .candidate()
+                .original_work
+                .authority
+                .clone(),
             original: self.reference.clone(),
         }
     }
@@ -54,28 +74,41 @@ impl PrivateOriginals {
     ) -> Result<bool, PrivateOriginalError> {
         let mut before = self.decode_record(prior, reference)?;
         let mut after = self.decode_record(current, reference)?;
-        if current.key != prior.key || current.data.schema != prior.data.schema
+        if current.key != prior.key
+            || current.data.schema != prior.data.schema
             || current.data.version != prior.data.version
-        { return Ok(false); }
+        {
+            return Ok(false);
+        }
         if current.revision == prior.revision {
             return Ok(current.content_digest == prior.content_digest && before == after);
         }
-        if current.revision < prior.revision { return Ok(false); }
+        if current.revision < prior.revision {
+            return Ok(false);
+        }
         let (Some(first), Some(last)) =
             (before.custody_attempt.take(), after.custody_attempt.take())
-        else { return Ok(false); };
+        else {
+            return Ok(false);
+        };
         if before != after || first == last || !first.same_attempt(&last) {
             return Ok(false);
         }
         use crate::original_ingress::custody_attempt::{CustodyChange, CustodyDecision};
         // A newly withdrawn source preserves the previous changed-row refusal.
         // This is not evidence of native cancellation or nonadmission.
-        if last.decision() == CustodyDecision::Withdrawn { return Ok(false); }
+        if last.decision() == CustodyDecision::Withdrawn {
+            return Ok(false);
+        }
         let mut reachable = first;
         let mut revisions_left = current.revision - prior.revision;
         loop {
-            if reachable == last { return Ok(true); }
-            if revisions_left == 0 { return Ok(false); }
+            if reachable == last {
+                return Ok(true);
+            }
+            if revisions_left == 0 {
+                return Ok(false);
+            }
             if reachable.changed(CustodyChange::Promote).ok().as_ref() == Some(&last) {
                 return Ok(true);
             }
@@ -84,9 +117,14 @@ impl PrivateOriginals {
             // step still requires an observed canonical revision increment.
             let change = if reachable.observation_entered() {
                 CustodyChange::ResolutionSettled
-            } else { CustodyChange::ChargeResolution };
+            } else {
+                CustodyChange::ChargeResolution
+            };
             match reachable.changed(change) {
-                Ok(next) => { reachable = next; revisions_left -= 1; }
+                Ok(next) => {
+                    reachable = next;
+                    revisions_left -= 1;
+                }
                 Err(_) => return Ok(false),
             }
         }
@@ -243,7 +281,9 @@ impl PrivateOriginals {
             }
             self.require_acquisition_source(
                 association,
-                own_originals.iter().any(|own| Arc::ptr_eq(own, &current.original)),
+                own_originals
+                    .iter()
+                    .any(|own| Arc::ptr_eq(own, &current.original)),
             )?;
             if Arc::ptr_eq(&current, &held) {
                 source_record = Some(Arc::new(stored));
@@ -288,7 +328,9 @@ impl PrivateOriginals {
         for original in &pending {
             self.require_acquisition_source(
                 original.original.association(),
-                own_originals.iter().any(|own| Arc::ptr_eq(own, &original.original)),
+                own_originals
+                    .iter()
+                    .any(|own| Arc::ptr_eq(own, &original.original)),
             )?;
         }
         Ok(AcquisitionOriginal {
@@ -863,40 +905,79 @@ mod tests {
             fixture.identity(&fixture.input),
         );
         let c = fixture.original.association().candidate();
-        let retained_basis = || fixture.adapter.owner
-            .admitted_original_basis(&c.ingress_namespace, &c.original_work).unwrap();
+        let retained_basis = || {
+            fixture
+                .adapter
+                .owner
+                .admitted_original_basis(&c.ingress_namespace, &c.original_work)
+                .unwrap()
+        };
         assert!(retained_basis().is_none());
-        let resolved = fixture.adapter.acquisition_original(&context).await.unwrap();
+        let resolved = fixture
+            .adapter
+            .acquisition_original(&context)
+            .await
+            .unwrap();
         assert!(Arc::ptr_eq(&resolved.original, &fixture.original));
         assert_eq!(resolved.own_originals.len(), 1);
         assert!(Arc::ptr_eq(&resolved.own_originals[0], &fixture.original));
         assert!(retained_basis().is_none());
         // A later named use still waits for the real acknowledgement. Lookup
         // did not perform that source transition on behalf of native admission.
-        assert!(matches!(fixture.adapter.require_acquisition_source(
-            fixture.original.association(), false,
-        ), Err(PrivateOriginalError::Unavailable)));
+        assert!(matches!(
+            fixture
+                .adapter
+                .require_acquisition_source(fixture.original.association(), false,),
+            Err(PrivateOriginalError::Unavailable)
+        ));
         fixture.pending.take().unwrap().admit().unwrap();
-        fixture.adapter.require_acquisition_source(fixture.original.association(), false).unwrap();
-        let after = fixture.adapter.acquisition_original(&context).await.unwrap();
-        assert_eq!(after.source_record.content_digest, resolved.source_record.content_digest);
+        fixture
+            .adapter
+            .require_acquisition_source(fixture.original.association(), false)
+            .unwrap();
+        let after = fixture
+            .adapter
+            .acquisition_original(&context)
+            .await
+            .unwrap();
+        assert_eq!(
+            after.source_record.content_digest,
+            resolved.source_record.content_digest
+        );
     }
 
     #[tokio::test]
     async fn own_lookup_never_recreates_withdrawn_custody_or_ignores_cancellation() {
         let mut fixture = Fixture::new(false).await;
         let context = fixture.context(
-            fixture.session.clone(), fixture.input.clone(), fixture.identity(&fixture.input),
+            fixture.session.clone(),
+            fixture.input.clone(),
+            fixture.identity(&fixture.input),
         );
         drop(fixture.pending.take());
-        fixture.adapter.acquisition_original(&context).await.unwrap();
+        fixture
+            .adapter
+            .acquisition_original(&context)
+            .await
+            .unwrap();
         let c = fixture.original.association().candidate();
-        assert!(fixture.adapter.owner.admitted_original_basis(
-            &c.ingress_namespace, &c.original_work,
-        ).unwrap().is_none());
-        fixture.adapter.record_operation_cancelled(&fixture.reference).await.unwrap();
-        assert!(matches!(fixture.adapter.acquisition_original(&context).await,
-            Err(PrivateOriginalError::Denied)));
+        assert!(
+            fixture
+                .adapter
+                .owner
+                .admitted_original_basis(&c.ingress_namespace, &c.original_work,)
+                .unwrap()
+                .is_none()
+        );
+        fixture
+            .adapter
+            .record_operation_cancelled(&fixture.reference)
+            .await
+            .unwrap();
+        assert!(matches!(
+            fixture.adapter.acquisition_original(&context).await,
+            Err(PrivateOriginalError::Denied)
+        ));
     }
 
     #[tokio::test]
@@ -905,30 +986,53 @@ mod tests {
         let (child, _, input) = fixture.descendant("child", &fixture.original).await;
         let child_identity = fixture.identity_for(&child, &input, &input);
         let child_context = fixture.context(
-            fixture.session.clone(), input.clone(), child_identity.clone(),
+            fixture.session.clone(),
+            input.clone(),
+            child_identity.clone(),
         );
-        fixture.adapter.owner.release_original(&fixture.original).unwrap();
+        fixture
+            .adapter
+            .owner
+            .release_original(&fixture.original)
+            .unwrap();
         // The child is current and retained, but its named-only parent is not.
-        assert!(matches!(fixture.adapter.acquisition_original(&child_context).await,
-            Err(PrivateOriginalError::Unavailable)));
+        assert!(matches!(
+            fixture.adapter.acquisition_original(&child_context).await,
+            Err(PrivateOriginalError::Unavailable)
+        ));
         let root_identity = fixture.identity(&fixture.input);
         let context = fixture.context(
-            fixture.session.clone(), input,
+            fixture.session.clone(),
+            input,
             RetainedWorkIdentity::new(
-                child_identity.runtime_id(), child_identity.run_id().clone(),
-                vec![child_identity.contributors()[0].clone(), root_identity.contributors()[0].clone()],
-                child_identity.selected_input_bindings().clone(), child_identity.controller().cloned(),
+                child_identity.runtime_id(),
+                child_identity.run_id().clone(),
+                vec![
+                    child_identity.contributors()[0].clone(),
+                    root_identity.contributors()[0].clone(),
+                ],
+                child_identity.selected_input_bindings().clone(),
+                child_identity.controller().cloned(),
             ),
         );
-        let resolved = fixture.adapter.acquisition_original(&context).await.unwrap();
+        let resolved = fixture
+            .adapter
+            .acquisition_original(&context)
+            .await
+            .unwrap();
         assert_eq!(resolved.own_originals.len(), 2);
         assert_eq!(resolved.contributors.len(), 2);
         assert!(Arc::ptr_eq(&resolved.original, &child));
         assert!(Arc::ptr_eq(&resolved.own_originals[1], &fixture.original));
         let c = fixture.original.association().candidate();
-        assert!(fixture.adapter.owner.admitted_original_basis(
-            &c.ingress_namespace, &c.original_work,
-        ).unwrap().is_none());
+        assert!(
+            fixture
+                .adapter
+                .owner
+                .admitted_original_basis(&c.ingress_namespace, &c.original_work,)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -967,7 +1071,10 @@ mod tests {
             fixture
                 .adapter
                 .owner
-                .admitted_original_basis(&child_claims.ingress_namespace, &child_claims.original_work)
+                .admitted_original_basis(
+                    &child_claims.ingress_namespace,
+                    &child_claims.original_work
+                )
                 .unwrap()
                 .is_some()
         );

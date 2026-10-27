@@ -25,8 +25,13 @@ pub struct DeclaredRemoteMcpService {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 enum RemoteSelectionDigest {
-    Activation { manifest_digest: ContentDigest },
-    Declaration { selection_kind: &'static str, declaration_digest: ContentDigest },
+    Activation {
+        manifest_digest: ContentDigest,
+    },
+    Declaration {
+        selection_kind: &'static str,
+        declaration_digest: ContentDigest,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,7 +247,8 @@ impl IntegrationBundle {
         &self,
         selected_bundle: &ContentDigest,
         selection: ActivationManifest,
-    ) -> Result<(PortablePluginExport, Option<DeclaredRemoteMcpService>), LibraryPortableExportError> {
+    ) -> Result<(PortablePluginExport, Option<DeclaredRemoteMcpService>), LibraryPortableExportError>
+    {
         let validated = self.validate_selection_contract(selected_bundle, selection)?;
         let recipe = self
             .document
@@ -263,7 +269,9 @@ impl IntegrationBundle {
         let servers = BTreeMap::from([(server.clone(), endpoint.clone())]);
         let export = PortablePluginExport::new(&self.plugin, &servers, Some(&validated))?;
         let selected = validated.manifest();
-        let portable = selected.portable_mcp_entries.iter()
+        let portable = selected
+            .portable_mcp_entries
+            .iter()
             .find(|entry| entry.name.as_str() == server.as_str())
             .ok_or_else(|| invalid("selected portable entry is absent"))?;
         let Export::ServiceConnector(service) = &selected.exports[0] else {
@@ -271,7 +279,9 @@ impl IntegrationBundle {
         };
         let declaration = crate::local_install::DeclaredMcpService::from_export(service, portable)
             .map(|service| DeclaredRemoteMcpService {
-                selection: RemoteSelectionDigest::Activation { manifest_digest: validated.digest().clone() },
+                selection: RemoteSelectionDigest::Activation {
+                    manifest_digest: validated.digest().clone(),
+                },
                 component: portable.component.clone(),
                 export: recipe.export.clone(),
                 mcp_name: server.clone(),
@@ -302,17 +312,40 @@ impl IntegrationBundle {
         selection: ActivationManifest,
     ) -> Result<ValidatedManifest, LibrarySelectionError> {
         // Preserve legacy typed-refusal order before inspecting selected fields.
-        let (recipe, retained_endpoint) = self.retained_remote_recipe(selected_bundle, &selection.strategy)?;
+        let (recipe, retained_endpoint) =
+            self.retained_remote_recipe(selected_bundle, &selection.strategy)?;
         if selection.components.len() != 1 || selection.exports.len() != 1 {
-            return Err(invalid("remote recipe selects one component and one service export").into());
+            return Err(
+                invalid("remote recipe selects one component and one service export").into(),
+            );
         }
-        let ComponentSource::RemoteService { endpoint, publisher, configuration_revision, transport, .. } = &selection.components[0].source else {
-            return Err(invalid("selection changes the retained endpoint, publisher or configuration").into());
+        let ComponentSource::RemoteService {
+            endpoint,
+            publisher,
+            configuration_revision,
+            transport,
+            ..
+        } = &selection.components[0].source
+        else {
+            return Err(invalid(
+                "selection changes the retained endpoint, publisher or configuration",
+            )
+            .into());
         };
         if configuration_revision != &selection.configuration.revision {
-            return Err(invalid("selection changes the retained endpoint, publisher or configuration").into());
+            return Err(invalid(
+                "selection changes the retained endpoint, publisher or configuration",
+            )
+            .into());
         }
-        self.validate_remote_recipe_fields(recipe, retained_endpoint, endpoint, publisher, transport, &selection.exports)?;
+        self.validate_remote_recipe_fields(
+            recipe,
+            retained_endpoint,
+            endpoint,
+            publisher,
+            transport,
+            &selection.exports,
+        )?;
         Ok(selection.validate(&self.package)?)
     }
 
@@ -322,22 +355,42 @@ impl IntegrationBundle {
         &self,
         selected_bundle: &ContentDigest,
         declaration: RemoteExportDeclaration,
-    ) -> Result<(PortablePluginExport, Option<DeclaredRemoteMcpService>), LibraryPortableExportError> {
+    ) -> Result<(PortablePluginExport, Option<DeclaredRemoteMcpService>), LibraryPortableExportError>
+    {
         if declaration.components.len() != 1 {
-            return Err(invalid("remote recipe selects one component and one service export").into());
+            return Err(
+                invalid("remote recipe selects one component and one service export").into(),
+            );
         }
-        let RemoteExportSource::RemoteService { endpoint, publisher, transport, .. } = &declaration.components[0].source;
-        let recipe = self.validate_remote_recipe(selected_bundle, &declaration.strategy,
-            endpoint, publisher, transport, &declaration.exports)?;
+        let RemoteExportSource::RemoteService {
+            endpoint,
+            publisher,
+            transport,
+            ..
+        } = &declaration.components[0].source;
+        let recipe = self.validate_remote_recipe(
+            selected_bundle,
+            &declaration.strategy,
+            endpoint,
+            publisher,
+            transport,
+            &declaration.exports,
+        )?;
         let RecipePlan::RemoteMcp { server, .. } = &recipe.plan else {
             return Err(LibrarySelectionError::GuidanceOnly.into());
         };
         let validated = declaration.validate(&self.package)?;
-        let endpoint = self.servers.get(server).ok_or_else(|| invalid("selected portable endpoint is absent"))?;
+        let endpoint = self
+            .servers
+            .get(server)
+            .ok_or_else(|| invalid("selected portable endpoint is absent"))?;
         let servers = BTreeMap::from([(server.clone(), endpoint.clone())]);
-        let export = PortablePluginExport::from_remote_declaration(&self.plugin, &servers, &validated)?;
+        let export =
+            PortablePluginExport::from_remote_declaration(&self.plugin, &servers, &validated)?;
         let selected = validated.declaration();
-        let portable = selected.portable_mcp_entries.iter()
+        let portable = selected
+            .portable_mcp_entries
+            .iter()
             .find(|entry| entry.name.as_str() == server.as_str())
             .ok_or_else(|| invalid("selected portable entry is absent"))?;
         let Export::ServiceConnector(service) = &selected.exports[0] else {
@@ -346,9 +399,13 @@ impl IntegrationBundle {
         let declaration = crate::local_install::DeclaredMcpService::from_export(service, portable)
             .map(|service| DeclaredRemoteMcpService {
                 selection: RemoteSelectionDigest::Declaration {
-                    selection_kind: REMOTE_EXPORT_DECLARATION, declaration_digest: validated.digest().clone() },
-                component: portable.component.clone(), export: recipe.export.clone(),
-                mcp_name: server.clone(), service,
+                    selection_kind: REMOTE_EXPORT_DECLARATION,
+                    declaration_digest: validated.digest().clone(),
+                },
+                component: portable.component.clone(),
+                export: recipe.export.clone(),
+                mcp_name: server.clone(),
+                service,
             });
         Ok((export, declaration))
     }
@@ -361,7 +418,11 @@ impl IntegrationBundle {
         if selected_bundle != &self.digest {
             return Err(LibrarySelectionError::StaleBundle);
         }
-        let recipe = self.document.recipes.iter().find(|recipe| &recipe.strategy == strategy)
+        let recipe = self
+            .document
+            .recipes
+            .iter()
+            .find(|recipe| &recipe.strategy == strategy)
             .ok_or_else(|| invalid("selected recipe is absent"))?;
         let RecipePlan::RemoteMcp { server, .. } = &recipe.plan else {
             return Err(LibrarySelectionError::GuidanceOnly);
@@ -382,7 +443,14 @@ impl IntegrationBundle {
         exports: &[Export],
     ) -> Result<&LibraryRecipe, LibrarySelectionError> {
         let (recipe, retained_endpoint) = self.retained_remote_recipe(selected_bundle, strategy)?;
-        self.validate_remote_recipe_fields(recipe, retained_endpoint, endpoint, publisher, transport, exports)?;
+        self.validate_remote_recipe_fields(
+            recipe,
+            retained_endpoint,
+            endpoint,
+            publisher,
+            transport,
+            exports,
+        )?;
         Ok(recipe)
     }
 
@@ -395,30 +463,57 @@ impl IntegrationBundle {
         transport: &RemoteTransport,
         exports: &[Export],
     ) -> Result<(), LibrarySelectionError> {
-        let RecipePlan::RemoteMcp { publisher: retained_publisher, read_only, authentication, .. } = &recipe.plan else {
+        let RecipePlan::RemoteMcp {
+            publisher: retained_publisher,
+            read_only,
+            authentication,
+            ..
+        } = &recipe.plan
+        else {
             return Err(LibrarySelectionError::GuidanceOnly);
         };
-        if endpoint != retained_endpoint || publisher != retained_publisher || *transport != RemoteTransport::McpStreamableHttp {
-            return Err(invalid("selection changes the retained endpoint, publisher or configuration").into());
+        if endpoint != retained_endpoint
+            || publisher != retained_publisher
+            || *transport != RemoteTransport::McpStreamableHttp
+        {
+            return Err(invalid(
+                "selection changes the retained endpoint, publisher or configuration",
+            )
+            .into());
         }
         if exports.len() != 1 {
-            return Err(invalid("remote recipe selects one component and one service export").into());
+            return Err(
+                invalid("remote recipe selects one component and one service export").into(),
+            );
         }
         let Export::ServiceConnector(export) = &exports[0] else {
             return Err(invalid("MCP service recipes cannot expose an agent frontend").into());
         };
         if export.id != recipe.export
-            || !matches!((authentication, &export.authentication),
-                (RemoteAuthentication::Binding, AuthenticationRequirement::Binding { .. }) |
-                (RemoteAuthentication::Unauthenticated { .. }, AuthenticationRequirement::None))
+            || !matches!(
+                (authentication, &export.authentication),
+                (
+                    RemoteAuthentication::Binding,
+                    AuthenticationRequirement::Binding { .. }
+                ) | (
+                    RemoteAuthentication::Unauthenticated { .. },
+                    AuthenticationRequirement::None
+                )
+            )
             || !export.events.is_empty()
-            || (*read_only && export.operations.iter().any(|op| op.declared_effect != DeclaredEffect::Read))
+            || (*read_only
+                && export
+                    .operations
+                    .iter()
+                    .any(|op| op.declared_effect != DeclaredEffect::Read))
         {
-            return Err(invalid("selection changes the recipe export, auth or documented operation scope").into());
+            return Err(invalid(
+                "selection changes the recipe export, auth or documented operation scope",
+            )
+            .into());
         }
         Ok(())
     }
-
 }
 
 #[derive(Debug, thiserror::Error)]

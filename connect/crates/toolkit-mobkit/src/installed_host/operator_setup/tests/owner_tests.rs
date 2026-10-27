@@ -16,7 +16,8 @@ impl StoreProbe {
     pub(super) fn new(inner: Arc<dyn ToolkitStore>, pause: bool) -> Arc<Self> {
         Arc::new(Self {
             inner,
-            target_fault: AtomicUsize::new(0),            writes: AtomicUsize::new(0),
+            target_fault: AtomicUsize::new(0),
+            writes: AtomicUsize::new(0),
             pause_access_admission: AtomicBool::new(pause),
             pause_parent_admission: AtomicBool::new(false),
             entered: tokio::sync::Notify::new(),
@@ -36,7 +37,7 @@ impl ToolkitStore for StoreProbe {
         let pause = request.data.schema == "toolkit.authenticated-service-access-decision"
             && self.pause_access_admission.swap(false, Ordering::SeqCst)
             || request.data.schema == "toolkit.operator-application-parent"
-            && self.pause_parent_admission.swap(false, Ordering::SeqCst);
+                && self.pause_parent_admission.swap(false, Ordering::SeqCst);
         self.writes.fetch_add(1, Ordering::SeqCst);
         let result = self.inner.admit(request).await;
         if pause {
@@ -65,7 +66,12 @@ impl ToolkitStore for StoreProbe {
         let selected = transition.data.schema == "toolkit.operator-application-parent"
             && (fault == 1 && state == "pending" || fault == 2 && state == "issued");
         let result = self.inner.compare_and_swap(transition).await;
-        if selected && self.target_fault.compare_exchange(fault, 0, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+        if selected
+            && self
+                .target_fault
+                .compare_exchange(fault, 0, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+        {
             result?;
             return Err(StoreError::OwnerUnavailable);
         }
@@ -350,7 +356,9 @@ async fn captured_answer_loss_during_parent_admission_prevents_native_root_write
     let mut setup = OperatorSetup::open(selection.clone(), startup()).unwrap();
     let path = state_directory(&selection, &setup.native, NativeOwnerStartup::Restore).unwrap();
     let (decision, mcp, request) = service_proposal(&setup);
-    let review = setup.prepare_service_mcp_parent_review(decision, mcp, request).unwrap();
+    let review = setup
+        .prepare_service_mcp_parent_review(decision, mcp, request)
+        .unwrap();
     let approval = service_approval(&review, ApprovalDecision::Approve);
     let before = fs::read(path.join("grants.jsonl")).unwrap();
     let store = StoreProbe::new(setup.originals.clone(), false);
@@ -358,8 +366,11 @@ async fn captured_answer_loss_during_parent_admission_prevents_native_root_write
     setup.originals = store.clone();
     let eligible = Arc::new(AtomicBool::new(true));
     let current = eligible.clone();
-    let pending = setup.apply_service_mcp_parent_decision_current(review, approval,
-        Arc::new(move || current.load(Ordering::SeqCst)));
+    let pending = setup.apply_service_mcp_parent_decision_current(
+        review,
+        approval,
+        Arc::new(move || current.load(Ordering::SeqCst)),
+    );
     tokio::pin!(pending);
     tokio::select! {
         _ = store.entered.notified() => {},
@@ -369,7 +380,10 @@ async fn captured_answer_loss_during_parent_admission_prevents_native_root_write
     assert_eq!(store.writes.load(Ordering::SeqCst), 1);
     assert_eq!(fs::read(path.join("grants.jsonl")).unwrap(), before);
     store.release.notify_one();
-    assert!(matches!(pending.await.unwrap(), ServiceMcpParentOutcome::Unavailable));
+    assert!(matches!(
+        pending.await.unwrap(),
+        ServiceMcpParentOutcome::Unavailable
+    ));
     assert_eq!(fs::read(path.join("grants.jsonl")).unwrap(), before);
     assert_eq!(store.writes.load(Ordering::SeqCst), 2);
     // The host remains open: only the exact answer predicate refused entry.
@@ -383,18 +397,27 @@ async fn captured_answer_loss_during_child_admission_prevents_native_child_write
     let mut setup = OperatorSetup::open(selection.clone(), startup()).unwrap();
     let path = state_directory(&selection, &setup.native, NativeOwnerStartup::Restore).unwrap();
     let (decision, mcp, request) = service_proposal(&setup);
-    let review = setup.prepare_service_mcp_parent_review(decision, mcp, request).unwrap();
+    let review = setup
+        .prepare_service_mcp_parent_review(decision, mcp, request)
+        .unwrap();
     let approval = service_approval(&review, ApprovalDecision::Approve);
-    let ServiceMcpParentOutcome::Approved(approved) = setup.apply_service_mcp_parent_decision(review, approval).await.unwrap()
-        else { panic!("actual native reviewed parent") };
+    let ServiceMcpParentOutcome::Approved(approved) = setup
+        .apply_service_mcp_parent_decision(review, approval)
+        .await
+        .unwrap()
+    else {
+        panic!("actual native reviewed parent")
+    };
     let before = fs::read(path.join("grants.jsonl")).unwrap();
     let store = StoreProbe::new(setup.originals.clone(), true);
     setup.originals = store.clone();
     let adapter = service_adapter(&setup).await;
     let eligible = Arc::new(AtomicBool::new(true));
     let current = eligible.clone();
-    let pending = adapter.apply_mcp_service_access_decision_current(approved,
-        Arc::new(move || current.load(Ordering::SeqCst)));
+    let pending = adapter.apply_mcp_service_access_decision_current(
+        approved,
+        Arc::new(move || current.load(Ordering::SeqCst)),
+    );
     tokio::pin!(pending);
     tokio::select! {
         _ = store.entered.notified() => {},
@@ -402,7 +425,10 @@ async fn captured_answer_loss_during_child_admission_prevents_native_child_write
     }
     eligible.store(false, Ordering::SeqCst);
     store.release.notify_one();
-    assert_eq!(pending.await.unwrap().state, PrivateServiceGrantState::GrantUnavailable);
+    assert_eq!(
+        pending.await.unwrap().state,
+        PrivateServiceGrantState::GrantUnavailable
+    );
     assert_eq!(fs::read(path.join("grants.jsonl")).unwrap(), before);
     assert_eq!(store.writes.load(Ordering::SeqCst), 2);
     setup.lifetime.with_current_setup(|| Ok(())).unwrap();

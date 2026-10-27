@@ -7,14 +7,15 @@ use std::{
     sync::{Arc, Mutex as StateMutex},
 };
 
+use crate::host_selection::{HostSelection, HostSelectionPresenter, PAIRED_HOST_SELECT_HOST};
 use async_trait::async_trait;
 use meerkat_core::{
     AgentToolDispatcher, ExecutionPolicyGatedDispatcher, ToolDef, ToolError, ToolExecutionPolicy,
     ToolMutationClass, ToolProvenance, ToolResult, ToolSourceKind,
-    ops::{ToolAccessPolicy, ToolDispatchOutcome}, types::ToolCallView,
+    ops::{ToolAccessPolicy, ToolDispatchOutcome},
+    types::ToolCallView,
 };
 use tokio::sync::mpsc;
-use crate::host_selection::{HostSelection, HostSelectionPresenter, PAIRED_HOST_SELECT_HOST};
 
 use crate::secret_presenter::{SecretEntryNotice, SecretEntryPresenter};
 
@@ -24,7 +25,8 @@ use crate::paired_host::{
     FrontendCandidateRequest, FrontendChange, FrontendChangeBase, FrontendChangeDigest,
     FrontendChangeRead, FrontendInventoryRead, FrontendNewExtensionChange,
     FrontendNewExtensionPreparation, FrontendNewExtensionRequest, FrontendNewExtensionSubmission,
-    FrontendPreparation, FrontendSourceRead, FrontendSubmission, FrontendPackagePath, PairedHostClient,
+    FrontendPackagePath, FrontendPreparation, FrontendSourceRead, FrontendSubmission,
+    PairedHostClient,
 };
 
 mod recovery;
@@ -90,10 +92,12 @@ fn paired_host_tool_definition(
     description: &str,
     input_schema: serde_json::Value,
 ) -> Arc<ToolDef> {
-    Arc::new(ToolDef::new(name, description, input_schema).with_provenance(ToolProvenance::new(
-        ToolSourceKind::Callback,
-        "meerkat-connect:paired-host-frontend",
-    )))
+    Arc::new(
+        ToolDef::new(name, description, input_schema).with_provenance(ToolProvenance::new(
+            ToolSourceKind::Callback,
+            "meerkat-connect:paired-host-frontend",
+        )),
+    )
 }
 
 impl PairedHostPreparationTools {
@@ -102,7 +106,11 @@ impl PairedHostPreparationTools {
             PAIRED_HOST_PREPARATION_TOOLS.iter().copied().collect(),
         ))
         .map_err(|error| crate::ConnectError::native("resolve preparation tool ceiling", error))?;
-        let tool = Arc::new(FrontendTools::new(client, None, FrontendSurface::Preparation));
+        let tool = Arc::new(FrontendTools::new(
+            client,
+            None,
+            FrontendSurface::Preparation,
+        ));
         Ok(Self {
             dispatcher: Arc::new(ExecutionPolicyGatedDispatcher::new(tool, policy)),
         })
@@ -117,11 +125,23 @@ impl PairedHostPreparationTools {
         let paired_host = PairedHostFrontend::private_preparation(client);
         let presenter = paired_host.take_secret_entry_presenter()?;
         let policy = ToolExecutionPolicy::resolve(ToolAccessPolicy::AllowList(
-            paired_host.dispatcher().tools().iter().map(|tool| tool.name.clone()).collect(),
-        )).map_err(|error| crate::ConnectError::native("resolve preparation tool ceiling", error))?;
-        Ok((Self {
-            dispatcher: Arc::new(ExecutionPolicyGatedDispatcher::new(paired_host.dispatcher(), policy)),
-        }, presenter))
+            paired_host
+                .dispatcher()
+                .tools()
+                .iter()
+                .map(|tool| tool.name.clone())
+                .collect(),
+        ))
+        .map_err(|error| crate::ConnectError::native("resolve preparation tool ceiling", error))?;
+        Ok((
+            Self {
+                dispatcher: Arc::new(ExecutionPolicyGatedDispatcher::new(
+                    paired_host.dispatcher(),
+                    policy,
+                )),
+            },
+            presenter,
+        ))
     }
 
     /// Compose into the selected member's native external-tool surface. This
@@ -147,7 +167,11 @@ mod preparation_surface_tests {
         }
         let mut mixed = channel;
         mixed["new_extension"] = package["new_extension"].clone();
-        for raw in [mixed, serde_json::json!({}), serde_json::json!({"extension_id":"reading"})] {
+        for raw in [
+            mixed,
+            serde_json::json!({}),
+            serde_json::json!({"extension_id":"reading"}),
+        ] {
             assert!(serde_json::from_value::<PrepareRequest>(raw).is_err());
         }
         let ledger = serde_json::json!({"extension_id":"reading","binding_name":"bot",
@@ -175,10 +199,17 @@ mod preparation_surface_tests {
         assert!(tool.review_notices.is_none());
         assert!(tool.presenter.lock().unwrap().is_none());
         assert!(tool.research.is_none());
-        let names: BTreeSet<_> = tool.tools().iter().map(|tool| tool.name.as_str().to_owned()).collect();
+        let names: BTreeSet<_> = tool
+            .tools()
+            .iter()
+            .map(|tool| tool.name.as_str().to_owned())
+            .collect();
         assert_eq!(
             names,
-            PAIRED_HOST_PREPARATION_TOOLS.iter().map(|name| (*name).to_owned()).collect(),
+            PAIRED_HOST_PREPARATION_TOOLS
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect(),
         );
         let args = serde_json::value::RawValue::from_string("{}".into()).unwrap();
         for name in [
@@ -191,7 +222,12 @@ mod preparation_surface_tests {
             "unknown",
         ] {
             assert!(matches!(
-                tool.dispatch(ToolCallView { id: "forged", name, args: &args }).await,
+                tool.dispatch(ToolCallView {
+                    id: "forged",
+                    name,
+                    args: &args
+                })
+                .await,
                 Err(ToolError::NotFound { .. }),
             ));
         }
@@ -211,17 +247,31 @@ impl PairedHostFrontend {
     /// This stores no approval, pairing credential, status or submission object.
     /// Other application compositions keep their existing surfaces by default.
     pub fn bind_recovery_artifacts(
-        &self, realm: &meerkat_core::RealmLocator, directory: &std::path::Path,
+        &self,
+        realm: &meerkat_core::RealmLocator,
+        directory: &std::path::Path,
     ) -> Result<(), crate::ConnectError> {
         if self.tool.surface != FrontendSurface::Interactive {
             return Err(recovery::unavailable());
         }
-        let mut recovery = self.tool.recovery.lock().map_err(|_| recovery::unavailable())?;
-        if recovery.is_some() { return Err(recovery::unavailable()); }
+        let mut recovery = self
+            .tool
+            .recovery
+            .lock()
+            .map_err(|_| recovery::unavailable())?;
+        if recovery.is_some() {
+            return Err(recovery::unavailable());
+        }
         let opened = recovery::Store::open(realm, directory);
         match opened {
-            Ok(store) => { *recovery = Some(Ok(store)); Ok(()) },
-            Err(error) => { *recovery = Some(Err(())); Err(error) },
+            Ok(store) => {
+                *recovery = Some(Ok(store));
+                Ok(())
+            }
+            Err(error) => {
+                *recovery = Some(Err(()));
+                Err(error)
+            }
         }
     }
 
@@ -229,7 +279,11 @@ impl PairedHostFrontend {
     /// does not offer pairing, secret entry, submission or research.
     pub(crate) fn private_preparation(client: PairedHostClient) -> Self {
         Self {
-            tool: Arc::new(FrontendTools::new(client, None, FrontendSurface::PrivatePreparation)),
+            tool: Arc::new(FrontendTools::new(
+                client,
+                None,
+                FrontendSurface::PrivatePreparation,
+            )),
         }
     }
 
@@ -249,7 +303,11 @@ impl PairedHostFrontend {
         research: Option<crate::research::ResearchBinding>,
     ) -> Self {
         Self {
-            tool: Arc::new(FrontendTools::new(client, research, FrontendSurface::Interactive)),
+            tool: Arc::new(FrontendTools::new(
+                client,
+                research,
+                FrontendSurface::Interactive,
+            )),
         }
     }
 
@@ -268,19 +326,37 @@ impl PairedHostFrontend {
         research: Option<crate::research::ResearchBinding>,
     ) -> (Self, HostSelectionPresenter) {
         let (host, presenter) = HostSelection::deferred();
-        (Self { tool: Arc::new(FrontendTools::with_host(host, research, FrontendSurface::Interactive)) }, presenter)
+        (
+            Self {
+                tool: Arc::new(FrontendTools::with_host(
+                    host,
+                    research,
+                    FrontendSurface::Interactive,
+                )),
+            },
+            presenter,
+        )
     }
 
     /// After native close, consume the old composition and move its original
     /// private connection into fresh selection, research and presenter owners.
     /// This retains pairing custody, not a new login or renewed host authority.
     /// Sharing an old dispatcher/selection makes continuation unavailable.
-    pub fn continue_after_close(self) -> Result<(Self, Option<HostSelectionPresenter>), crate::ConnectError> {
-        let unavailable = || crate::ConnectError::InvalidInput(
-            "Previous PairedHost composition references remain or settlement is unconfirmed. Connection custody is uncertain; no fresh setup composition was created.".into());
+    pub fn continue_after_close(
+        self,
+    ) -> Result<(Self, Option<HostSelectionPresenter>), crate::ConnectError> {
+        let unavailable = || {
+            crate::ConnectError::InvalidInput(
+            "Previous PairedHost composition references remain or settlement is unconfirmed. Connection custody is uncertain; no fresh setup composition was created.".into())
+        };
         let old = Arc::try_unwrap(self.tool).map_err(|_| unavailable())?;
-        if old.surface != FrontendSurface::Interactive { return Err(unavailable()); }
-        let research = old.research.is_some().then(crate::research::ResearchBinding::default);
+        if old.surface != FrontendSurface::Interactive {
+            return Err(unavailable());
+        }
+        let research = old
+            .research
+            .is_some()
+            .then(crate::research::ResearchBinding::default);
         let host = Arc::try_unwrap(old.host).map_err(|_| unavailable())?;
         host.retire()?;
         match host.into_continuation_client()? {
@@ -340,8 +416,17 @@ impl PairedHostFrontend {
                     .as_ref()
                     .map(|_| crate::research::FRONTEND_RESEARCH),
             )
-            .chain(self.tool.host.offers_selection().then_some(PAIRED_HOST_SELECT_HOST))
-            .chain(self.tool.has_recovery().then_some(PAIRED_HOST_FRONTEND_PREVIOUS))
+            .chain(
+                self.tool
+                    .host
+                    .offers_selection()
+                    .then_some(PAIRED_HOST_SELECT_HOST),
+            )
+            .chain(
+                self.tool
+                    .has_recovery()
+                    .then_some(PAIRED_HOST_FRONTEND_PREVIOUS),
+            )
             .collect()
     }
 
@@ -354,7 +439,10 @@ impl PairedHostFrontend {
     }
 
     pub(crate) fn retain_action(&self, call: ToolCallView<'_>) -> Result<HeldAction, ToolError> {
-        self.tool.host.captured().ok_or_else(|| refused(call.name))?;
+        self.tool
+            .host
+            .captured()
+            .ok_or_else(|| refused(call.name))?;
         let state = self.tool.retained.lock().map_err(|_| refused(call.name))?;
         if state.armed.is_some() || state.spent_calls.contains(call.id) {
             return Err(refused(call.name));
@@ -391,7 +479,11 @@ impl PairedHostFrontend {
     }
 
     pub(crate) fn approval_body(&self, held: &HeldAction) -> Result<serde_json::Value, ToolError> {
-        let host = self.tool.host.captured().ok_or_else(|| refused(&held.name))?;
+        let host = self
+            .tool
+            .host
+            .captured()
+            .ok_or_else(|| refused(&held.name))?;
         let change = match &held.effect {
             HeldEffect::Submit(change) => change,
             HeldEffect::CreateSecret(request) => {
@@ -616,10 +708,13 @@ impl FrontendTools {
         // No await after the validated response. The protected presenter renders only
         // after joining native completion, so output failure cannot interrupt
         // this effect's settlement. Queue failure never undoes the host result.
-        if self.host.captured().is_some_and(|host| self.notices.as_ref().is_some_and(|notices| {
-            notices.try_send(SecretEntryNotice::captured(&host.origin, intent)).is_ok()
-        }))
-        {
+        if self.host.captured().is_some_and(|host| {
+            self.notices.as_ref().is_some_and(|notices| {
+                notices
+                    .try_send(SecretEntryNotice::captured(&host.origin, intent))
+                    .is_ok()
+            })
+        }) {
             "queued"
         } else {
             "unavailable"
@@ -821,13 +916,13 @@ impl AgentToolDispatcher for FrontendTools {
                 "Create a protected PairedHost secret-entry intent after a fresh protected approval of this exact binding. Use only current ledger base and a source:vault inventory binding name, or an exact built candidate request digest/wheel hash and host-verified declared binding. Legacy/env inventory names are environment variables, not vault bindings; never invent a migration. This supersedes older pending intents for the same slot and discards their pending values. Never send a secret, URL, cookie or confirmation. The private entry link goes only to the protected setup controls; the browser must pair independently, and PairedHost owns entry and confirmation. Created proves only the intent exists. entry_presentation says queued or unavailable, never displayed; if unavailable, retain the ID and request status/link readback when the person asks, never recreate. If creation is uncertain, no ID can be recovered here: stop without recreating, cancelling or guessing status.",
                 // The closed untagged request decoder still requires exactly one source.
                 serde_json::json!({"type":"object","additionalProperties":false,
-                    "required":["binding_name"],"properties":{
-                        "extension_id":{"type":"string"},"binding_name":{"type":"string"},
-                        "base":{"type":"object","additionalProperties":false,"required":["activation_id","policy_digest","ledger_digest"],"properties":{
-                            "activation_id":{"type":["string","null"]},"policy_digest":{"type":["string","null"]},"ledger_digest":{"type":"string"}}},
-                        "candidate":{"type":"object","additionalProperties":false,"required":["change_digest","wheel_sha256"],"properties":{
-                            "change_digest":{"type":"string"},"wheel_sha256":{"type":"string"}}}
-                    }}),
+                "required":["binding_name"],"properties":{
+                    "extension_id":{"type":"string"},"binding_name":{"type":"string"},
+                    "base":{"type":"object","additionalProperties":false,"required":["activation_id","policy_digest","ledger_digest"],"properties":{
+                        "activation_id":{"type":["string","null"]},"policy_digest":{"type":["string","null"]},"ledger_digest":{"type":"string"}}},
+                    "candidate":{"type":"object","additionalProperties":false,"required":["change_digest","wheel_sha256"],"properties":{
+                        "change_digest":{"type":"string"},"wheel_sha256":{"type":"string"}}}
+                }}),
             ),
             paired_host_tool_definition(
                 PAIRED_HOST_SECRET_STATUS,
@@ -942,7 +1037,8 @@ impl AgentToolDispatcher for FrontendTools {
         {
             ToolMutationClass::ReadOnly
         } else if PAIRED_HOST_FRONTEND_CONSENT_TOOLS.contains(&name)
-            || (self.host.offers_selection() && name == PAIRED_HOST_SELECT_HOST) {
+            || (self.host.offers_selection() && name == PAIRED_HOST_SELECT_HOST)
+        {
             ToolMutationClass::Mutating
         } else {
             ToolMutationClass::Unknown
@@ -982,7 +1078,10 @@ impl AgentToolDispatcher for FrontendTools {
         if call.name == PAIRED_HOST_FRONTEND_PREVIOUS {
             return self.previous(call, host).await;
         }
-        if matches!(call.name, PAIRED_HOST_FRONTEND_PREPARE | PAIRED_HOST_FRONTEND_SUBMIT) {
+        if matches!(
+            call.name,
+            PAIRED_HOST_FRONTEND_PREPARE | PAIRED_HOST_FRONTEND_SUBMIT
+        ) {
             self.require_recovery_available()?;
         }
         // One captured-origin request, no retry and no auth fallback. The

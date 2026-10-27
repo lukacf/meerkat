@@ -123,8 +123,24 @@ async function sideChats() {
     // Fork.
     const before = await sourceState(fixture);
     const requestsBeforeFork = (await modelRequests(fixture)).length;
-    await forkAction().click();
+    // The runtime may still settle the source's last turn when the console
+    // already reads it idle: that fork is refused typed, and the operator
+    // forks again.
     const sidePane = page.locator(`[data-testid^="chat-pane:${router}-side-"]`);
+    for (let attempt = 0; attempt < 5 && !(await sidePane.count()); attempt += 1) {
+      await forkAction().click();
+      const answer = await eventually(async () => {
+        if (await sidePane.count()) return "forked";
+        const banner = page.getByTestId("console-action-error");
+        if (await banner.count() && /when it is idle/.test(await banner.innerText())) return "busy";
+        return null;
+      }, "the fork answers", 15_000);
+      if (answer === "busy") {
+        result.busyRetries = (result.busyRetries || 0) + 1;
+        await page.getByTestId("console-action-error-dismiss").click();
+        await page.waitForTimeout(500);
+      }
+    }
     await sidePane.waitFor();
     alias = (await sidePane.getAttribute("data-testid")).slice("chat-pane:".length);
     result.alias = alias;

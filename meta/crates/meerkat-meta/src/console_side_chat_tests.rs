@@ -137,6 +137,23 @@ async fn seeded_member(runtime: &MobRuntime, role: &str, alias: &str) -> TestRes
     Ok(())
 }
 
+/// `meta/fork_member` for `source`, retried while the runtime still settles
+/// the source's last turn (a typed busy refusal), as the console waits for an
+/// idle agent.
+async fn fork_when_idle(runtime: &MobRuntime, source: &str, side_chat: &str) -> Value {
+    let params = json!({ "source_member_id": source, "agent_identity": side_chat });
+    for _ in 0..50 {
+        let answer = call(runtime, "meta/fork_member", params.clone()).await;
+        let busy = answer["error"]["data"]["kind"] == json!("fork_source_unavailable")
+            && answer["error"]["data"]["cause"] == json!("running");
+        if !busy {
+            return answer;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    call(runtime, "meta/fork_member", params).await
+}
+
 async fn bridge_session(runtime: &MobRuntime, alias: &str) -> Option<String> {
     runtime
         .handle()
@@ -183,12 +200,7 @@ async fn a_side_chat_forks_the_source_unwired_and_closes_on_retire() -> TestResu
         "a console over persistent sessions offers side chats: {capabilities:#?}"
     );
 
-    let forked = call(
-        &runtime,
-        "meta/fork_member",
-        json!({ "source_member_id": "alpha", "agent_identity": "alpha-side" }),
-    )
-    .await;
+    let forked = fork_when_idle(&runtime, "alpha", "alpha-side").await;
     assert!(forked["error"].is_null(), "the fork succeeds: {forked:#?}");
     let result = &forked["result"];
     assert_eq!(result["agent_identity"], json!("alpha-side"));

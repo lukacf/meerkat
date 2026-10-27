@@ -10,6 +10,11 @@ publish = false
 # existing owner lane qualifies this exact graph and protected installation.
 [workspace]
 
+[[test]]
+name = "startup_ownership"
+path = "tests/startup_ownership.rs"
+harness = false
+
 [dependencies]
 forge-ghe-collections = { path = "../ghe-collections" }
 forge-history-archive = { path = "../history-archive" }

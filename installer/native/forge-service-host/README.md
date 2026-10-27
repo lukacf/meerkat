@@ -223,6 +223,24 @@ FD 0/1 owners, CLOEXEC before helpers, closed/aliased/wrong-mode object refusal,
 and joined original pipe closure. Parser controls do not establish any of these
 kernel or lifecycle facts. The original process-entry unsafe boundary still
 needs actual Linux qualification on the existing lane.
+
+The separate `startup_ownership` test target supplies six pending Linux kernel
+controls for the private entry function. Its harness is disabled so each case
+can execute the exact production module in a fresh, single-thread child before
+any stdin/stdout wrappers, logger or runtime. It checks original descriptor
+numbers and object identities, unchanged open-FD inventory, CLOEXEC, repeated
+acquisition refusal, closure on drop, FD 2 preservation, and refusal when each
+of the four inputs is closed. Restoring a closed descriptor before the second
+attempt distinguishes the consumed guard from another closed-FD refusal.
+Each child has a 30-second deadline and is killed and joined on timeout.
+The target lists its six cases with `--list`, runs one with `--run CASE`, and
+runs all six with no arguments. The validation owner must select its actual
+emitted test executable; no guessed artifact path is an execution contract.
+On non-Linux hosts it exits 77 rather than reporting a passing kernel check.
+These controls are source-only and unrun. They do not prove the real binary's
+first-action ordering, Connect's object-type/peer/mapping checks, root custody,
+helper isolation, joined native I/O or the installed journey.
+
 The original owner must also exercise real factory target rejection in both
 `accepts_target` and `start`, distinct starts with different installed descriptors,
 and refusal of changed targets within an existing cursor, as well as real

@@ -25,6 +25,12 @@ exclude = [
     "tests/fixtures/released_0_9_3_started_0_9_2_adopted_store/",
 ]
 
+[package.metadata.release]
+# Core's `cargo release` (shared version, tag v{{version}}) must never bump
+# this crate: its product releases on a version line of its own
+# (ci/products.json).
+release = false
+
 [package.metadata.cargo-machete]
 # `meerkat-openai` is an OPTIONAL dependency that exists solely as a feature
 # forwarding edge - see `openai-live = [... "meerkat-openai?/live"]` and

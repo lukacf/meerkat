@@ -129,17 +129,22 @@ fn cargo_and_bazel_set_the_declared_sqlite_flags() {
     );
 }
 
-/// Every workspace member directory: the root manifest's
-/// `[workspace].members`, with `dir/*` expanded to the directories under
-/// `dir` that hold a `Cargo.toml`.
+/// Every member directory of Core: the root manifest's
+/// `[workspace].default-members` (its `members` when it has none), with
+/// `dir/*` expanded to the directories under `dir` that hold a `Cargo.toml`.
+/// The other products' crates (`meta/`, `connect/`) are members too, but
+/// their binaries keep their own lock profile rules.
 fn workspace_members(root: &Path) -> Vec<PathBuf> {
     let manifest: toml::Table = fs::read_to_string(root.join("Cargo.toml"))
         .unwrap()
         .parse()
         .unwrap();
-    let members = manifest["workspace"]["members"]
+    let workspace = &manifest["workspace"];
+    let members = workspace
+        .get("default-members")
+        .unwrap_or(&workspace["members"])
         .as_array()
-        .expect("[workspace].members is an array");
+        .expect("[workspace].default-members (or members) is an array");
     let mut dirs = Vec::new();
     for member in members {
         let member = member.as_str().expect("a workspace member is a path");

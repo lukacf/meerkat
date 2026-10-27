@@ -128,10 +128,26 @@ fi
 # scripts/check_rust_release_packaging.py holds every packaged requirement to
 # the same rule.
 
+# The other products (ci/products.json: meta/, connect/) are workspace members
+# on version lines of their own; their entries and crates are their own
+# product's parity checks, not Core's.
+PRODUCT_ROOTS=$(jq -r '.products[] | select(.root != "") | .root' "$ROOT/ci/products.json")
+is_product_path() {
+    local path="$1" product_root
+    for product_root in $PRODUCT_ROOTS; do
+        case "$path" in "$product_root"/*|"$ROOT/$product_root"/*) return 0 ;; esac
+    done
+    return 1
+}
+
 echo ""
 echo "Internal dependency versions:"
 INTERNAL_OK=true
 while IFS= read -r line; do
+    dep_path=$(echo "$line" | sed -n 's/.*path = "\([^"]*\)".*/\1/p')
+    if [ -n "$dep_path" ] && is_product_path "$dep_path"; then
+        continue
+    fi
     # Extract: crate-name = { version = "=X.Y.Z", ... }
     dep_name=$(echo "$line" | sed 's/ *=.*//')
     dep_ver=$(echo "$line" | sed -n 's/.*version = "\([^"]*\)".*/\1/p')
@@ -157,6 +173,9 @@ echo ""
 echo "Per-crate package version inheritance:"
 PER_CRATE_OK=true
 while IFS= read -r manifest; do
+    if is_product_path "$manifest"; then
+        continue
+    fi
     if grep -qE '^version[[:space:]]*=[[:space:]]*"' "$manifest"; then
         ver=$(grep -E '^version[[:space:]]*=[[:space:]]*"' "$manifest" \
             | sed -n 's/.*"\([^"]*\)".*/\1/p')

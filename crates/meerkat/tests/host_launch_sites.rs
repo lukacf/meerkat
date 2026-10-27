@@ -211,14 +211,37 @@ fn repo_root() -> PathBuf {
     }
 }
 
+/// The roots of the repository's products other than Core
+/// (`ci/products.json`): each holds a product with its own crates and its
+/// own Clippy and Cargo configuration, which this test leaves to it. Core's
+/// launch confinement, its Clippy configuration and its Cargo configuration
+/// are the root's.
+fn product_roots(root: &Path) -> Vec<PathBuf> {
+    let path = root.join("ci/products.json");
+    let text = fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    let registry: serde_json::Value = serde_json::from_str(&text)
+        .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()));
+    registry["products"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{} lists products", path.display()))
+        .iter()
+        .filter_map(|product| product["root"].as_str())
+        .filter(|product_root| !product_root.is_empty())
+        .map(|product_root| root.join(product_root))
+        .collect()
+}
+
 /// Every `.rs` file under `root`, skipping build output and VCS metadata.
 fn walk_rust_sources(root: &Path) -> Vec<PathBuf> {
     walk_files(root, |name| name.ends_with(".rs"))
 }
 
 /// Every directory under `root`, `root` included, skipping build output,
-/// VCS metadata and Cargo's own directories.
+/// VCS metadata, Cargo's own directories and the product roots
+/// ([`product_roots`]).
 fn walk_directories(root: &Path) -> Vec<PathBuf> {
+    let products = product_roots(root);
     let mut out = Vec::new();
     let mut pending = vec![root.to_path_buf()];
     while let Some(dir) = pending.pop() {
@@ -232,6 +255,7 @@ fn walk_directories(root: &Path) -> Vec<PathBuf> {
                         "target" | ".git" | "node_modules" | ".cargo" | "dist"
                     )
                     && !name.starts_with("bazel-")
+                    && !products.contains(&entry.path())
                 {
                     pending.push(entry.path());
                 }
@@ -1006,9 +1030,10 @@ fn manifest_launch_lint_entries(manifest: &toml::Table) -> Vec<String> {
 /// so a shipped witness site `WITNESS_SITES` lists allows it once per use
 /// too, and nothing else does.
 ///
-/// Nothing turns the lint off in bulk either: the workspace has one Clippy
+/// Nothing turns the lint off in bulk either: Core's tree has one Clippy
 /// configuration file (a crate's own `clippy.toml` or `.clippy.toml` would
-/// replace the root one, and its disallowed list, for that crate), shipped
+/// replace the root one, and its disallowed list, for that crate; a product
+/// root keeps its own for its own crates, [`product_roots`]), shipped
 /// code allows neither `warnings` nor the `clippy::all` or `clippy::style`
 /// group, no Cargo manifest configures the lint or allows its group, and no
 /// Cargo configuration file in the tree passes rustc such an allow or a
@@ -1078,7 +1103,7 @@ fn the_launch_lint_is_allowed_only_at_the_listed_launch_sites() {
     assert_eq!(
         clippy_configs,
         ["clippy.toml"],
-        "the workspace has one Clippy configuration, at its root"
+        "Core has one Clippy configuration, at the root (each product root keeps its own)"
     );
     for config in cargo_config_files(&root) {
         let text = fs::read_to_string(&config)

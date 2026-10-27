@@ -6,6 +6,12 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[package.metadata.release]
+# Core's `cargo release` (shared version, tag v{{version}}) must never bump
+# this crate: its product releases on a version line of its own
+# (ci/products.json).
+release = false
+
 [lints.rust]
 unsafe_code = "forbid"
 

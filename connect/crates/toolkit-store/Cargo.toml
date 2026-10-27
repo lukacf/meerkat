@@ -6,6 +6,12 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[package.metadata.release]
+# Core's `cargo release` (shared version, tag v{{version}}) must never bump
+# this crate: its product releases on a version line of its own
+# (ci/products.json).
+release = false
+
 # This crate denies unsafe code by default. The macOS custody helper has one
 # audited FFI exception; other crates retain the workspace-wide prohibition.
 [lints.rust]

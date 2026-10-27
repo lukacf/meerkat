@@ -7,6 +7,12 @@ license.workspace = true
 description = "Meerkat Connect's standalone terminal and reusable native setup conversation"
 publish = false
 
+[package.metadata.release]
+# Core's `cargo release` (shared version, tag v{{version}}) must never bump
+# this crate: its product releases on a version line of its own
+# (ci/products.json).
+release = false
+
 [[bin]]
 name = "toolkit_gateway"
 path = "src/bin/toolkit_gateway.rs"

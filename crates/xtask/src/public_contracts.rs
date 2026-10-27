@@ -68,6 +68,30 @@ fn starts_with_any(path: &str, prefixes: &[&str]) -> bool {
     prefixes.iter().any(|prefix| path.starts_with(prefix))
 }
 
+/// The roots of the repository's products other than Core, from
+/// `ci/products.json` (`meta`, `connect`): each is one top-level directory
+/// that holds that product's crates, its own Clippy and Cargo configuration
+/// and its own conventions. Core's governance gates and whole-checkout scans
+/// cover the rest of the tree and leave these to their products. A checkout
+/// without the registry (a Bazel runfiles tree that does not declare it) has
+/// no product roots.
+pub fn product_roots(root: &Path) -> Vec<PathBuf> {
+    let Ok(text) = std::fs::read_to_string(root.join("ci/products.json")) else {
+        return Vec::new();
+    };
+    let Ok(registry) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    registry["products"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|product| product["root"].as_str())
+        .filter(|product_root| !product_root.is_empty())
+        .map(|product_root| root.join(product_root))
+        .collect()
+}
+
 pub fn repo_root() -> Result<PathBuf> {
     if let Some(root) = bazel_runfiles_workspace_root() {
         return Ok(root);

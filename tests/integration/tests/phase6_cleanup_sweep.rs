@@ -39,15 +39,28 @@ fn repo_root() -> PathBuf {
 }
 
 /// Recursively walk a directory collecting all `*.rs` file paths,
-/// skipping `target/`, `.git/`, generated-artifact directories and other
-/// checkouts nested below the root.
+/// skipping `target/`, `.git/`, generated-artifact directories, other
+/// checkouts nested below the root and the roots of the repository's
+/// other products (`ci/products.json`), whose sources are theirs.
 fn walk_rust_sources(root: &Path) -> Vec<PathBuf> {
+    let registry: serde_json::Value = fs::read_to_string(root.join("ci/products.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let products: Vec<PathBuf> = registry["products"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|product| product["root"].as_str())
+        .filter(|product_root| !product_root.is_empty())
+        .map(|product_root| root.join(product_root))
+        .collect();
     let mut out = Vec::new();
-    walk_rec(root, &mut out);
+    walk_rec(root, &products, &mut out);
     out
 }
 
-fn walk_rec(dir: &Path, out: &mut Vec<PathBuf>) {
+fn walk_rec(dir: &Path, products: &[PathBuf], out: &mut Vec<PathBuf>) {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(_) => return,
@@ -67,10 +80,10 @@ fn walk_rec(dir: &Path, out: &mut Vec<PathBuf>) {
             // A directory with a `.git` entry of its own is another checkout
             // (a worktree under the gitignored `.claude/worktrees/`, say):
             // its sources are another branch's, not this tree's.
-            if path.join(".git").exists() {
+            if path.join(".git").exists() || products.contains(&path) {
                 continue;
             }
-            walk_rec(&path, out);
+            walk_rec(&path, products, out);
         } else if name.ends_with(".rs") {
             out.push(path);
         }

@@ -1057,7 +1057,7 @@ publish-dry-run:
 verify-version:
 	@echo "$(GREEN)Verifying version...$(NC)"
 	@VERSION=$$($(CARGO) metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "meerkat") | .version'); \
-	TAG=$$(git describe --tags --exact-match 2>/dev/null | sed 's/^v//'); \
+	TAG=$$(git describe --tags --exact-match --match 'v[0-9]*' 2>/dev/null | sed 's/^v//'); \
 	if [ -z "$$TAG" ]; then \
 		echo "$(YELLOW)No tag found on current commit$(NC)"; \
 	elif [ "$$VERSION" != "$$TAG" ]; then \

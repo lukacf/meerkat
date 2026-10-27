@@ -82,6 +82,13 @@ counts and observed final state/count/update changes. Missing counts remain
 unknown. Full pages require a short followup, including an empty page for exact
 multiples of 100 comments. The budget reserves both issue-detail reads.
 
+`RepositoryPullRequests` enumerates all, open or closed PRs with explicit
+creation-order paging. It checks unique numbers, exact PR URLs, the selected
+base repository and head/base commit SHAs. A deleted head repository remains
+absent, and fork metadata never changes the selected repository. Full pages
+require a followup, including an empty page at an exact multiple of 100.
+It uses no date cutoff, head/base filter or field projection.
+
 ## Pinned upstream behavior
 
 Contract: GitHub MCP server v2.0.3, source
@@ -160,11 +167,28 @@ filtered-after-pagination implementation as ordinary PR comments, so a short
 page does not independently prove complete unfiltered coverage. Matching detail
 reads cannot rule out intervening edits. These remain reported page sets.
 
-Remaining work includes the native bridge/adapter and the other required GHE
-collection programs: repository PR discovery. Repository metadata and
+The pinned PR list supplies no total, discards pagination headers, skips nil
+rows and exposes no date filter. A short-page observation therefore does not
+independently prove exhaustive recent history or outstanding-work coverage.
+Oversized histories refuse at the finite budget. Provider conversion can turn
+absent merged/draft fields into false, so those flags remain reported metadata,
+not proof that a PR was never merged or is ready. Listing also does not establish
+an atomic or still-current set of PR revisions.
+
+Remaining work includes the native bridge/adapter, native selection and
+composition of these programs, and installed qualification. Repository metadata and
 historical non-PR commit checks still need a supported source.
 These programs do not close those requirements or the overall shared ingestion
 outcome.
+
+Native compatibility is not established by the pure controls. Connect source
+`762c4f4a5fab6f3f2cbb7e4441ffebbaeb3217f6` rejects a repeated requirement,
+operation and canonical-argument digest before dispatch. `PullRequestChanges`,
+`WorkflowRunJobs` and `IssueComments` intentionally repeat their initial detail
+read after paging, so that native engine cannot consume them unchanged. A
+supported fresh-observation contract is required. Final verification must not
+be removed or bypassed with dummy arguments, requirement relabeling or reused
+receipts; failed or uncertain calls must remain non-retryable.
 
 ## Verification
 

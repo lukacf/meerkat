@@ -110,6 +110,12 @@
       "git_blob": "79eeb22100a1e56d66ede6071779f17cba9ff26f",
       "sha256": "cc608e7fa3f0e4f4d58c27d7626d0ec5a669167ba10f5ec5addacab956d863ca",
       "bytes": 260110
+    },
+    {
+      "path": "pkg/github/__toolsnaps__/list_pull_requests.snap",
+      "git_blob": "d37986d529cc883367367038a455955205bbf4ba",
+      "sha256": "d5d621c6f4a83c551fa6ef398c67ad85ded9f2b83ebddae2d187d05a6e6aec89",
+      "bytes": 2670
     }
   ],
   "verification": "All file bytes match the pinned commit tree Git blob IDs. No upstream executable or authenticated provider request was run."

@@ -10,6 +10,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
+mod pull_requests;
+pub use pull_requests::{
+    PullRequestBranch, PullRequestBranchRepository, PullRequestListLimits, PullRequestQuery,
+    PullRequestSummary, ReportedPullRequests, RepositoryPullRequests,
+};
 mod issues;
 pub use issues::{
     IssueComments, IssueQuery, IssueReadLimits, IssueRecord, ReportedIssueComments, ReportedIssues,

@@ -968,7 +968,7 @@ impl PrivateOriginals {
             .await
             .map_err(store_error)?
             .ok_or(PrivateOriginalError::Unavailable)?;
-        let record = self.decode_record(&stored, &held.reference)?;
+        let _record = self.decode_record(&stored, &held.reference)?;
         if !held.original.first_binding_for(&stored.key) {
             // Legacy absence cannot prove that native never saw an input.
             return Err(PrivateOriginalError::Unavailable);
@@ -1538,14 +1538,13 @@ fn decode_source_record(stored: &StoredRecord) -> Result<SourceRecord, PrivateOr
     if let Some(task) = &value.approved_task {
         task.validate()?;
     }
-    if let Some(member) = &value.service_attachment_member {
-        if value.service_attachment_failure.is_none()
+    if let Some(member) = &value.service_attachment_member
+        && (value.service_attachment_failure.is_none()
             || !value.operation_cancelled
             || !matches!(&value.approved_task, Some(service_approved_input::ApprovedTaskLink::Batch(batch))
-                if batch.members.iter().any(|selected| &selected.grant == member))
-        {
-            return Err(PrivateOriginalError::Conflict);
-        }
+                if batch.members.iter().any(|selected| &selected.grant == member)))
+    {
+        return Err(PrivateOriginalError::Conflict);
     }
     if value.service_attachment_observation.is_some() && value.service_attachment_failure.is_none()
     {
@@ -1571,13 +1570,12 @@ fn validate_custody_record(record: &SourceRecord) -> Result<(), PrivateOriginalE
         attempt
             .validate_binding(association)
             .map_err(|_| PrivateOriginalError::Conflict)?;
-        if let Some(input) = &record.bound_service_input {
-            if !attempt
+        if let Some(input) = &record.bound_service_input
+            && !attempt
                 .matches_input(&input.decode()?)
                 .map_err(|_| PrivateOriginalError::Conflict)?
-            {
-                return Err(PrivateOriginalError::Conflict);
-            }
+        {
+            return Err(PrivateOriginalError::Conflict);
         }
     }
     Ok(())

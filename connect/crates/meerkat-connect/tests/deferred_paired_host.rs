@@ -203,8 +203,8 @@ impl Host {
             .await
             .unwrap()
             .unwrap();
-        let requests = self.state.requests.lock().unwrap().clone();
-        requests
+
+        self.state.requests.lock().unwrap().clone()
     }
 }
 impl Drop for Host {

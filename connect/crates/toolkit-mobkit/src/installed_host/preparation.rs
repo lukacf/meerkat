@@ -126,9 +126,8 @@ impl PreparedInstallationOwner {
             }
         }
         for route in &mut self.selected.native_host.routes {
-            if let meerkat_toolkit::host_lifetime::policy::CompiledNativeSourceOrigin::LocalConsole { member, .. } = &mut route.origin {
-                if member == source { *member = projected.clone(); }
-            }
+            if let meerkat_toolkit::host_lifetime::policy::CompiledNativeSourceOrigin::LocalConsole { member, .. } = &mut route.origin
+                && member == source { *member = projected.clone(); }
         }
         self.selected.validate()
     }

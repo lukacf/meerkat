@@ -1454,9 +1454,8 @@ mod real_model_judgment {
                 }
                 event = events.next(), if stream_open => match event {
                     Some(event) => {
-                        if let Err(error) = trace.event(event) {
-                            if first_failure.is_none() { first_failure = Some(error); }
-                        }
+                        if let Err(error) = trace.event(event)
+                            && first_failure.is_none() { first_failure = Some(error); }
                     }
                     None => {
                         stream_open = false;
@@ -1479,10 +1478,10 @@ mod real_model_judgment {
             }
         };
         while let Some(Some(event)) = events.next().now_or_never() {
-            if let Err(error) = trace.event(event) {
-                if first_failure.is_none() {
-                    first_failure = Some(error);
-                }
+            if let Err(error) = trace.event(event)
+                && first_failure.is_none()
+            {
+                first_failure = Some(error);
             }
         }
         trace.record(json!({"kind":"native_completion","joined":true,

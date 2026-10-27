@@ -19,16 +19,14 @@ use meerkat_mob::{
     ProfileBinding, ProfileName, SpawnMemberSpec, ToolConfig,
 };
 use meerkat_mobkit::identity_first::{
-    AgentAddressability, AgentIdentity, AgentRuntimeId, CheckpointVersion, ContinuityGeneration,
-    ContinuityRecord, DurabilityPolicy, DurableAgentSpec, IdentityFirstRuntimeContext,
-    IdentityLifecycleState, IdentityRuntime, IdentityRuntimeConfig, LeaseAcquireResult,
-    LeaseProvider, LocalContinuityStore, LocalLeaseProvider, MobSessionBridge,
-    MutableRosterProvider, PublicIdentityRuntime,
+    AgentAddressability, AgentIdentity, DurabilityPolicy, DurableAgentSpec,
+    IdentityFirstRuntimeContext, IdentityLifecycleState, IdentityRuntime, IdentityRuntimeConfig,
+    LocalContinuityStore, LocalLeaseProvider, MobSessionBridge, MutableRosterProvider,
+    PublicIdentityRuntime,
 };
 use meerkat_mobkit::{
     DiscoverySpec, MetaConfig, MobBootstrapSpec, MobTerminalShutdownOutcome, UnifiedRuntime,
 };
-use meerkat_runtime::service_ext::SessionServiceRuntimeExt;
 use std::{
     collections::{BTreeMap, HashMap},
     os::unix::fs::PermissionsExt,

@@ -9,7 +9,7 @@ use std::sync::{
     Mutex,
     atomic::{AtomicBool, Ordering},
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use toolkit_mobkit::{
     private_host::{
         ConsoleLoginHandle, ConsoleLoginReservation, ServiceParentAdministrationRequest,
@@ -299,13 +299,13 @@ pub(super) async fn drive(
                 }
             }
         }
-        if let Some(observed) = &final_observation {
-            if closing || !retirements.is_empty() || request.is_none() {
-                for response in retirements.drain(..) {
-                    let _ = response.send(Ok(observed.clone()));
-                }
-                break;
+        if let Some(observed) = &final_observation
+            && (closing || !retirements.is_empty() || request.is_none())
+        {
+            for response in retirements.drain(..) {
+                let _ = response.send(Ok(observed.clone()));
             }
+            break;
         }
     }
 }

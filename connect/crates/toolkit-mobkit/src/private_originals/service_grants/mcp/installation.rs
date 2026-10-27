@@ -125,11 +125,11 @@ impl PrivateOriginals {
         }
         let access_stored = self
             .store
-            .get(&self.access_key(&grant)?)
+            .get(&self.access_key(grant)?)
             .await
             .map_err(store_error)?
             .ok_or(PrivateOriginalError::Unavailable)?;
-        let access = self.decode_access(&access_stored, &grant)?;
+        let access = self.decode_access(&access_stored, grant)?;
         let AccessDecision::Mcp(decision) = &access.decision else {
             return Err(PrivateOriginalError::Denied);
         };
@@ -181,7 +181,7 @@ impl PrivateOriginals {
             );
             return Err(PrivateOriginalError::Denied);
         }
-        let current_access = self.decode_access(&current_access, &grant);
+        let current_access = self.decode_access(&current_access, grant);
         attachment_preparation_diagnostic("installation_access_decode", Some(&current_access));
         if current_access? != access {
             attachment_preparation_diagnostic(

@@ -37,7 +37,7 @@ fn acquisition(
     let id = |value: &str| Id::new(value).unwrap();
     let native = &installed.native;
     let service = WorkGraphService::with_namespace_grant(
-        Arc::new(SqliteWorkGraphStore::open(&directory.join("workgraph.sqlite")).unwrap()),
+        Arc::new(SqliteWorkGraphStore::open(directory.join("workgraph.sqlite")).unwrap()),
         WorkGraphNamespaceGrant::new(native.realm.as_str(), "setup").unwrap(),
     )
     .unwrap();
@@ -270,7 +270,7 @@ async fn production_leaves_reach_actual_bound_owner_but_not_missing_native_conti
         let continuation = InstalledNativeContinuation::new(fixture.store.clone(), fixture.scope.clone(),
             fixture.source.clone(), id("availability-control"), [id("person")].into()).unwrap();
         let service = WorkGraphService::with_namespace_grant(
-            Arc::new(SqliteWorkGraphStore::open(&fixture.source_path.with_file_name("availability-workgraph.sqlite")).unwrap()),
+            Arc::new(SqliteWorkGraphStore::open(fixture.source_path.with_file_name("availability-workgraph.sqlite")).unwrap()),
             WorkGraphNamespaceGrant::new(native.realm.as_str(), "setup").unwrap(),
         ).unwrap();
         let backend = SetupWorkBackend::new(service, "fixture".into(), id("generation"), &[

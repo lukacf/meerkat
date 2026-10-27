@@ -1922,13 +1922,12 @@ fn proposal(mut raw: Value) -> Result<Proposal, ToolError> {
     }
     // The terminal tool accepts null as the same profile choice as omission.
     // Keep the shared private-pipe decoder's stricter optional-field contract.
-    if let Some(connector) = raw.get_mut("connector").and_then(Value::as_object_mut) {
-        if connector
+    if let Some(connector) = raw.get_mut("connector").and_then(Value::as_object_mut)
+        && connector
             .get("client_auth_profile")
             .is_some_and(Value::is_null)
-        {
-            connector.remove("client_auth_profile");
-        }
+    {
+        connector.remove("client_auth_profile");
     }
     let proposal: Proposal = serde_json::from_value(raw).map_err(|_| refused())?;
     if proposal.expires_in_ms == Some(0) {

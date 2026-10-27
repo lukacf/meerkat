@@ -116,15 +116,13 @@ fn parse_change(raw: Value) -> Result<Change, ToolError> {
         expires_in_ms,
         ..
     } = &change
-    {
-        if operations.is_empty()
+        && (operations.is_empty()
             || operations.len() > 256
             || *expires_in_ms == Some(0)
             || operations.iter().any(|name| !valid_name(name))
-            || operations.iter().collect::<BTreeSet<_>>().len() != operations.len()
-        {
-            return Err(refused());
-        }
+            || operations.iter().collect::<BTreeSet<_>>().len() != operations.len())
+    {
+        return Err(refused());
     }
     Ok(change)
 }

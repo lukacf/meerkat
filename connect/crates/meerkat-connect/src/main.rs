@@ -30,9 +30,11 @@ use meerkat_connect::{
         FinalizationNotice, FinalizedAction, FinalizedInstallation, TerminalConnectors,
     },
 };
+#[cfg(test)]
+use meerkat_runtime::completion::CompletionOutcome;
 use meerkat_runtime::{
     AcceptOutcome,
-    completion::{CompletionHandle, CompletionObservation, CompletionOutcome, CompletionWaitError},
+    completion::{CompletionHandle, CompletionObservation, CompletionWaitError},
     input_state::InputTerminalOutcome,
 };
 

@@ -336,10 +336,10 @@ impl PrivateOriginals {
             Ok(())
         }
         .await;
-        if result.is_ok() {
-            if let Some(reservation) = reservation {
-                reservation.settled();
-            }
+        if result.is_ok()
+            && let Some(reservation) = reservation
+        {
+            reservation.settled();
         }
         result
     }

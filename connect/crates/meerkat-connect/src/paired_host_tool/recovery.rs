@@ -340,12 +340,11 @@ impl Store {
         restart: bool,
     ) -> Result<Arc<ReadPage>, crate::ConnectError> {
         owned(&self.parent, true)?;
-        if !restart {
-            if let Some(page) = &self.pending {
-                if page.origin == origin {
-                    return Ok(page.clone());
-                }
-            }
+        if !restart
+            && let Some(page) = &self.pending
+            && page.origin == origin
+        {
+            return Ok(page.clone());
         }
         let restart = restart
             || self

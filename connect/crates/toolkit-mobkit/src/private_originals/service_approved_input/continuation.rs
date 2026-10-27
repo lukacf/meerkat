@@ -418,10 +418,9 @@ impl PrivateOriginals {
             admission: committed,
             ..
         } = obligation.outcome()
+            && committed != &admission
         {
-            if committed != &admission {
-                return Err(ContinuationError::InvalidReceipt);
-            }
+            return Err(ContinuationError::InvalidReceipt);
         }
         let now = u64::try_from(
             self.store

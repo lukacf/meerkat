@@ -114,7 +114,7 @@ impl ServiceToolPolicySelection {
             .map(|tool| CompiledMemberToolGrant {
                 tool_name: tool.name.clone(),
                 action: CompiledMemberToolAction::Invoke,
-                consequence: tool.consequence.clone(),
+                consequence: tool.consequence,
             })
             .collect::<Vec<_>>();
         if let Some(consequence) = &self.catalog {
@@ -122,7 +122,7 @@ impl ServiceToolPolicySelection {
                 grants.push(CompiledMemberToolGrant {
                     tool_name: name.into(),
                     action: CompiledMemberToolAction::Invoke,
-                    consequence: consequence.clone(),
+                    consequence: *consequence,
                 });
             }
         }
@@ -408,17 +408,17 @@ impl ServicePolicyOwner {
             .map_err(|_| unavailable())?
             .clone()
             .ok_or_else(unavailable)?;
-        if let Some(reservation) = &selected.reservation {
-            if let Err(error) = reservation.check_current() {
-                let mut observed = self.observed_current.lock().map_err(|_| unavailable())?;
-                if observed
-                    .as_ref()
-                    .is_some_and(|current| Arc::ptr_eq(current, &selected))
-                {
-                    *observed = None;
-                }
-                return Err(error);
+        if let Some(reservation) = &selected.reservation
+            && let Err(error) = reservation.check_current()
+        {
+            let mut observed = self.observed_current.lock().map_err(|_| unavailable())?;
+            if observed
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &selected))
+            {
+                *observed = None;
             }
+            return Err(error);
         }
         if !self
             .observed_current
@@ -765,23 +765,24 @@ impl ServicePolicyOwner {
         if slot.pending.is_some() || selection.catalog.is_some() != catalog_session.is_some() {
             return Err(unavailable());
         }
-        if let Some(decision) = &slot.decision {
-            if decision.original == original && decision.acquisition == acquisition {
-                if decision.proposal.member != member
-                    || decision.proposal.selection != selection
-                    || decision.proposal.catalog_session != catalog_session
-                {
-                    return Err(HostLifetimeError::Denied);
-                }
-                return Ok(PreparedServiceToolPolicy {
-                    owner: self.clone(),
-                    prior,
-                    proposal: decision.proposal.clone(),
-                    original,
-                    acquisition,
-                    already_current: true,
-                });
+        if let Some(decision) = &slot.decision
+            && decision.original == original
+            && decision.acquisition == acquisition
+        {
+            if decision.proposal.member != member
+                || decision.proposal.selection != selection
+                || decision.proposal.catalog_session != catalog_session
+            {
+                return Err(HostLifetimeError::Denied);
             }
+            return Ok(PreparedServiceToolPolicy {
+                owner: self.clone(),
+                prior,
+                proposal: decision.proposal.clone(),
+                original,
+                acquisition,
+                already_current: true,
+            });
         }
         let current = CompiledApplicationToolPolicy::parse_canonical_json(slot.current.as_bytes())
             .map_err(|_| invalid())?;

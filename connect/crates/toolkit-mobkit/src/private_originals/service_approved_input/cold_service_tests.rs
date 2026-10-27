@@ -95,18 +95,17 @@ async fn admitted_without_ack<S>(
                 .await
                 .unwrap()
                 .unwrap();
-            if let Some(run) = &actual.seed.last_run_id {
-                if (actual.seed.phase
+            if let Some(run) = &actual.seed.last_run_id
+                && (actual.seed.phase
                     == meerkat_runtime::input_state::InputLifecycleState::Consumed
                     || fixture
                         .machine
                         .run_turn_terminal(&fixture.session, run)
                         .await
                         == Some(TurnTerminalOutcome::Completed))
-                    && fixture.machine.current_run(&fixture.session).await.as_ref() != Some(run)
-                {
-                    break;
-                }
+                && fixture.machine.current_run(&fixture.session).await.as_ref() != Some(run)
+            {
+                break;
             }
             settlements.changed().await.unwrap();
         }
@@ -382,7 +381,7 @@ async fn bound_input_persistence_failure_prevents_native_entry_and_cannot_be_rep
         let (current, record) = row(&fixture, &b).await;
         assert!(record.final_association.is_some());
         assert!(record.bound_service_input.is_none());
-        assert_eq!(fixture.source.owner.historical_task_custody_for_test(record.final_association.as_ref().unwrap()).unwrap().0, false);
+        assert!(!fixture.source.owner.historical_task_custody_for_test(record.final_association.as_ref().unwrap()).unwrap().0);
         assert!(matches!(fixture.source.step_service_input(&current).await, Err(PrivateOriginalError::Unavailable)));
         assert_eq!(fixture.inputs().await.unwrap(), inputs);
         assert_eq!(fixture.model_requests(), requests);

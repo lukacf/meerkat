@@ -627,10 +627,10 @@ async fn helper_review_lifetime_publication_change_still_refuses_entry_after_wai
         // must still refuse; observing a publication change is not permission.
         let entries = std::sync::atomic::AtomicUsize::new(0);
         let current = context.authorization().prepare(&binding);
-        if let Ok(current) = &current {
-            if current.check_current(&binding).is_ok() {
-                entries.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            }
+        if let Ok(current) = &current
+            && current.check_current(&binding).is_ok()
+        {
+            entries.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         assert!(current.is_err(), "{change}");
         assert_eq!(

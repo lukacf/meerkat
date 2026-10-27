@@ -472,7 +472,7 @@ impl Initialize {
                     })
             }
         };
-        matches!(self.protocol_version, 1 | 2 | 3 | 4)
+        matches!(self.protocol_version, 1..=4)
             && targets_valid
             && composition_valid
             && opaque(&self.application.application_id)

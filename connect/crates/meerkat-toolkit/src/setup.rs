@@ -996,15 +996,14 @@ fn validate_record(
     {
         return Err(SetupError::InvalidRecord);
     }
-    if let Some(selected) = &record.approved_service {
-        if !record.selections.is_empty()
+    if let Some(selected) = &record.approved_service
+        && (!record.selections.is_empty()
             || selected.source.realm != request.constraints().tenant.as_str()
             || selected.original_work == *request.original_work()
             || state.selection_digest != digest(selected)?.as_str()
-            || state.decision_ref != state.selection_digest
-        {
-            return Err(SetupError::InvalidRecord);
-        }
+            || state.decision_ref != state.selection_digest)
+    {
+        return Err(SetupError::InvalidRecord);
     }
     if record.service_attachment_observation.is_some()
         && record.service_attachment_failure.is_none()
@@ -1018,18 +1017,17 @@ fn validate_record(
     {
         return Err(SetupError::InvalidRecord);
     }
-    if let Some(ready) = &record.service_ready {
-        if record.approved_service.is_none()
+    if let Some(ready) = &record.service_ready
+        && (record.approved_service.is_none()
             || record.ready.is_some()
             || state.lifecycle_phase != AcquisitionPhase::Ready
             || ready.selection_digest.as_str() != state.selection_digest
             || ready.selection_generation != state.selection_generation
             || ready.observed_at_ms != state.readiness_observed_at
             || digest(ready)?.as_str() != state.readiness_digest
-            || state.readiness_ref != state.readiness_digest
-        {
-            return Err(SetupError::InvalidRecord);
-        }
+            || state.readiness_ref != state.readiness_digest)
+    {
+        return Err(SetupError::InvalidRecord);
     }
     match &record.ready {
         Some(ready)
@@ -1056,10 +1054,7 @@ fn validate_record(
             }
         }
         None if state.lifecycle_phase != AcquisitionPhase::Ready
-            || record.service_ready.is_some() =>
-        {
-            ()
-        }
+            || record.service_ready.is_some() => {}
         _ => return Err(SetupError::InvalidRecord),
     }
     match &record.detail {

@@ -314,7 +314,7 @@ impl CustodyHandoff {
         self.last_observation
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .map_or(true, |last| {
+            .is_none_or(|last| {
                 tokio::time::Instant::now().saturating_duration_since(last) >= ROUND_PAUSE
             })
     }

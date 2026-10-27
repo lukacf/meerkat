@@ -81,12 +81,12 @@ impl SessionStartup {
             .runtime_root(realm_paths.root)
             .builtins(false)
             .shell(false);
-        let factory = if let Some(root) = storage.layout.user_home_root() {
+
+        if let Some(root) = storage.layout.user_home_root() {
             factory.user_config_root(root)
         } else {
             factory
-        };
-        factory
+        }
     }
 
     pub(crate) async fn persistence(

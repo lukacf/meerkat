@@ -396,10 +396,10 @@ mod platform {
     pub(super) fn read(origin: &str) -> Result<Option<Vec<u8>>, DeviceStoreError> {
         let service = service()?;
         let collection = collection(&service)?;
-        let result = item(&collection, origin)?
+
+        item(&collection, origin)?
             .map(|item| item.get_secret().map_err(|_| DeviceStoreError::Unavailable))
-            .transpose();
-        result
+            .transpose()
     }
     pub(super) fn write(origin: &str, bytes: &[u8]) -> Result<(), DeviceStoreError> {
         let service = service()?;

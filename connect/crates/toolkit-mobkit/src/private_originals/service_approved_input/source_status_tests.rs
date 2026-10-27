@@ -710,10 +710,10 @@ async fn actual_admitted_b_pending_and_permanent_publication_are_read_without_re
                 .await
                 .unwrap();
             assert_eq!(current, last.unwrap());
-            if matches!(mode, DeliveryMode::PoisonPublicationAfterSecondAcceptance) {
-                if let Some(path) = std::env::var_os("TOOLKIT_SOURCE_STATUS_NATIVE_FIXTURE") {
-                    std::fs::write(path, canonical_json(&current).unwrap()).unwrap();
-                }
+            if matches!(mode, DeliveryMode::PoisonPublicationAfterSecondAcceptance)
+                && let Some(path) = std::env::var_os("TOOLKIT_SOURCE_STATUS_NATIVE_FIXTURE")
+            {
+                std::fs::write(path, canonical_json(&current).unwrap()).unwrap();
             }
         }))
         .catch_unwind()
@@ -1055,7 +1055,7 @@ async fn application_access_reads_retained_sources_and_revokes_only_the_exact_is
             .unwrap();
         let requests = fixture.model_requests();
         let read = source
-            .read_application_access_from(probe.as_ref(), &human, &[member.clone()])
+            .read_application_access_from(probe.as_ref(), &human, std::slice::from_ref(&member))
             .await
             .unwrap();
         assert_eq!(read.rows.len(), 2);
@@ -1089,7 +1089,7 @@ async fn application_access_reads_retained_sources_and_revokes_only_the_exact_is
         .unwrap();
         assert!(
             source
-                .read_application_access_from(probe.as_ref(), &other, &[member.clone()])
+                .read_application_access_from(probe.as_ref(), &other, std::slice::from_ref(&member))
                 .await
                 .unwrap()
                 .rows
@@ -1187,7 +1187,7 @@ async fn application_access_reads_retained_sources_and_revokes_only_the_exact_is
             "old offers are never relabelled after mutation"
         );
         let current = source
-            .read_application_access_from(probe.as_ref(), &human, &[member.clone()])
+            .read_application_access_from(probe.as_ref(), &human, std::slice::from_ref(&member))
             .await
             .unwrap();
         assert_eq!(
@@ -1339,7 +1339,7 @@ async fn completed_access_policy_swap_refuses_revoke_then_fresh_review_revokes_o
             lineages.push(
                 source
                     .service_grant_lineage(
-                        &record
+                        record
                             .approved_task
                             .as_ref()
                             .unwrap()
@@ -1410,7 +1410,7 @@ async fn completed_access_policy_swap_refuses_revoke_then_fresh_review_revokes_o
             .observe(|| controller.view_for_subject(Some(&subject)))
             .unwrap();
         let read = source
-            .read_application_access(&human, &[member.clone()])
+            .read_application_access(&human, std::slice::from_ref(&member))
             .await
             .unwrap();
         assert_eq!(read.rows.len(), 2);
@@ -1487,7 +1487,7 @@ async fn completed_access_policy_swap_refuses_revoke_then_fresh_review_revokes_o
         // action. Policy denial and unchanged Toolkit records cannot prove this.
         let live_after_race = lineages.iter().map(&live).collect::<Vec<_>>();
         let after_race = source
-            .read_application_access(&human, &[member.clone()])
+            .read_application_access(&human, std::slice::from_ref(&member))
             .await;
         let restored = controller.set_group("selected-requester", original_group);
         let denied_after_restore = denied
@@ -1496,48 +1496,45 @@ async fn completed_access_policy_swap_refuses_revoke_then_fresh_review_revokes_o
             .map(|(_, stamp)| stamp.check_current());
         let restored_view = publication.observe(|| controller.view_for_subject(Some(&subject)));
         let fresh = source
-            .read_application_access(&human, &[member.clone()])
+            .read_application_access(&human, std::slice::from_ref(&member))
             .await;
         let mut fresh_native = None;
         let mut fresh_terminal = None;
-        if let (Ok(fresh), Ok((view, stamp))) = (&fresh, &restored_view) {
-            if let Some(row) = fresh.rows.iter().find(|row| row.id == selected_id) {
-                let visible = restored.is_ok()
-                    && stamp.check_current().is_ok()
-                    && view.enforced()
-                    && fresh
-                        .check_visible(|candidate| {
-                            candidate == &member && view.can_view_agent(identity.as_str())
-                        })
-                        .is_ok();
-                if visible && source.recheck_application_access(fresh, row).await.is_ok() {
-                    let reservation = login.reserve().unwrap();
-                    let fresh_revoke = lifetime.with_current_setup(|| {
-                        login
-                            .with_current_revoke(|| {
-                                source.revoke_application_access_now(fresh, row)
-                            })
-                            .map_err(|_| HostLifetimeError::Denied)
-                    });
-                    fresh_native = fresh_revoke
-                        .as_ref()
-                        .ok()
-                        .and_then(|result| result.as_ref().ok())
-                        .copied();
-                    fresh_terminal = Some(
-                        crate::host_gateway::ConsoleSetupBinding::finish_access_revoke(
-                            reservation,
-                            fresh_revoke.and_then(|result| {
-                                result.map_err(|_| HostLifetimeError::Unavailable)
-                            }),
-                        ),
-                    );
-                }
+        if let (Ok(fresh), Ok((view, stamp))) = (&fresh, &restored_view)
+            && let Some(row) = fresh.rows.iter().find(|row| row.id == selected_id)
+        {
+            let visible = restored.is_ok()
+                && stamp.check_current().is_ok()
+                && view.enforced()
+                && fresh
+                    .check_visible(|candidate| {
+                        candidate == &member && view.can_view_agent(identity.as_str())
+                    })
+                    .is_ok();
+            if visible && source.recheck_application_access(fresh, row).await.is_ok() {
+                let reservation = login.reserve().unwrap();
+                let fresh_revoke = lifetime.with_current_setup(|| {
+                    login
+                        .with_current_revoke(|| source.revoke_application_access_now(fresh, row))
+                        .map_err(|_| HostLifetimeError::Denied)
+                });
+                fresh_native = fresh_revoke
+                    .as_ref()
+                    .ok()
+                    .and_then(|result| result.as_ref().ok())
+                    .copied();
+                fresh_terminal = Some(
+                    crate::host_gateway::ConsoleSetupBinding::finish_access_revoke(
+                        reservation,
+                        fresh_revoke
+                            .and_then(|result| result.map_err(|_| HostLifetimeError::Unavailable)),
+                    ),
+                );
             }
         }
         let live_after_fresh = lineages.iter().map(&live).collect::<Vec<_>>();
         let final_read = source
-            .read_application_access(&human, &[member.clone()])
+            .read_application_access(&human, std::slice::from_ref(&member))
             .await;
         let retired = logins.fixture_retire(4).unwrap().await;
         let after = fixture.store.list_records(&fixture.scope, None, 256).await;
@@ -1581,8 +1578,8 @@ async fn completed_access_policy_swap_refuses_revoke_then_fresh_review_revokes_o
         assert!(matches!(restored, Ok(2)), "{restored:?}");
         assert_eq!(fresh_native, Some(Ok(())));
         assert_eq!(fresh_terminal.unwrap().unwrap()["state"], "revoked");
-        assert_eq!(live_after_fresh[selected], false);
-        assert_eq!(live_after_fresh[1 - selected], true);
+        assert!(!live_after_fresh[selected]);
+        assert!(live_after_fresh[1 - selected]);
         let final_read = final_read.unwrap();
         assert_eq!(
             final_read
@@ -1643,7 +1640,7 @@ async fn application_access_binds_historical_requester_and_retains_unknown_issua
         let record = source.decode_record(&source_row, &b).unwrap();
         let access_key = crate::private_originals::service_grants::tests::fixture_access_key(
             source,
-            &record
+            record
                 .approved_task
                 .as_ref()
                 .unwrap()
@@ -1676,7 +1673,7 @@ async fn application_access_binds_historical_requester_and_retains_unknown_issua
             .await
             .unwrap();
         let read = source
-            .read_application_access_from(probe.as_ref(), &human, &[member.clone()])
+            .read_application_access_from(probe.as_ref(), &human, std::slice::from_ref(&member))
             .await
             .unwrap();
         assert_eq!(read.rows.len(), 1);
@@ -1885,7 +1882,7 @@ async fn shared_source_pages_cross_sparse_history_and_sixty_four_real_approvals_
                 .read_application_access_page_with_read_probe(
                     probe.as_ref(),
                     &human,
-                    &[member.clone()],
+                    std::slice::from_ref(&member),
                     &first_page.rows
                 )
                 .await
@@ -1938,7 +1935,7 @@ async fn shared_source_pages_cross_sparse_history_and_sixty_four_real_approvals_
                 .read_application_access_page_with_read_probe(
                     probe.as_ref(),
                     &human,
-                    &[member.clone()],
+                    std::slice::from_ref(&member),
                     &page.rows,
                 )
                 .await

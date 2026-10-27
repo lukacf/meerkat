@@ -467,10 +467,10 @@ impl InstalledServiceReview {
         // Refresh the actual borrowed native call after all human and account
         // waits, before any new parent/grant/source effect. The terminal owner
         // retires approvals on EOF and joins this entire future.
-        if let Some(current) = current_request {
-            if !current.check().await {
-                return Err(refused("The account request is no longer current"));
-            }
+        if let Some(current) = current_request
+            && !current.check().await
+        {
+            return Err(refused("The account request is no longer current"));
         }
         if let Some(refresh) = refresh {
             refresh().await?;

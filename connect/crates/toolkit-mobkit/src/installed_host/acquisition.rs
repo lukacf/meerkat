@@ -19,7 +19,6 @@ pub use bootstrap::{
     AcquisitionBootstrapStatus, AcquisitionDisabledReason, InstalledSetupBootstrap,
 };
 mod admission;
-pub(crate) use admission::installed_invocation_correlation;
 mod continuation;
 pub use admission::{
     InstalledOriginalInvocation, InstalledOriginalTaskOwner, InstalledSetupDefaults,

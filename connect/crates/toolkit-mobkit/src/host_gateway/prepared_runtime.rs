@@ -47,7 +47,7 @@ impl ConsoleGovernedIngress for PreparedConsoleIngress {
     fn governs(&self, identity: &AgentIdentity) -> bool {
         self.installed
             .get()
-            .map_or(true, |ingress| ingress.governs(identity))
+            .is_none_or(|ingress| ingress.governs(identity))
     }
 
     fn binder_for(

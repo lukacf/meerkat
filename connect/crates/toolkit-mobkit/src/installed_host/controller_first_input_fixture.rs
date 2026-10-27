@@ -5,7 +5,6 @@ use meerkat_authorization_contracts::evidence::EvidenceId;
 use meerkat_core::ControllerModelFacts;
 use meerkat_runtime::meerkat_machine::NativeGrantWorkConfiguration;
 use meerkat_toolkit::host_lifetime::policy::CompiledLocalPolicy;
-use toolkit_package::Id;
 
 pub(crate) struct Host {
     pub selection: HostBootstrapSelection,
@@ -1239,7 +1238,7 @@ fn bind_acquisition_parts(
     });
     let workgraph = WorkGraphService::with_namespace_grant(
         Arc::new(
-            SqliteWorkGraphStore::open(&source_path.with_file_name("denial-workgraph.sqlite"))
+            SqliteWorkGraphStore::open(source_path.with_file_name("denial-workgraph.sqlite"))
                 .unwrap(),
         ),
         WorkGraphNamespaceGrant::new(native.realm.as_str(), "setup").unwrap(),
@@ -1358,7 +1357,7 @@ pub(crate) async fn open_for_helper_recovery(
 }
 #[path = "controller_first_input_acquisition_fixture.rs"]
 mod approved_acquisition;
-pub(crate) use approved_acquisition::{bind_approved_acquisition, prepare_approved_acquisition};
+pub(crate) use approved_acquisition::prepare_approved_acquisition;
 pub(crate) const REPORT_PROFILE: &str = "setup-report-only";
 pub(crate) async fn open_for_helper_report(
     facts: &ControllerModelFacts,

@@ -47,10 +47,7 @@ async fn retirement_orders_reservations_and_keeps_another_login_usable() {
             uncertain: false
         }
     );
-    assert_eq!(
-        logins.retire(2).unwrap().drain().await.unwrap().uncertain,
-        false
-    );
+    assert!(!logins.retire(2).unwrap().drain().await.unwrap().uncertain);
     assert!(
         logins.enroll(4, selection("a", expires)).is_err(),
         "retired unexpired scope must not retarget a token"

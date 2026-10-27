@@ -639,7 +639,10 @@ async fn wait_helper(
                         assert_eq!(receipt.terminal(), &InputTerminalOutcome::Consumed);
                         assert_eq!(receipt.run_id(), Some(run));
                         assert_eq!(receipt.owner_input_id(), &row.state.input_id);
-                        assert_eq!(receipt.recipient_input_ids(), &[row.state.input_id.clone()]);
+                        assert_eq!(
+                            receipt.recipient_input_ids(),
+                            std::slice::from_ref(&row.state.input_id)
+                        );
                         assert!(matches!(receipt.outcome(), CompletionOutcome::Completed(_)));
                         // The live machine retains only its latest terminal run.
                         // Earlier helper runs remain proven by their exact durable
@@ -731,31 +734,29 @@ async fn wait_original(
                 .iter()
                 .find(|row| row.state.input_id.to_string() == admission.input_id)
                 .unwrap();
-            if row.seed.phase == InputLifecycleState::Consumed {
-                if let Some(run) = &row.seed.last_run_id {
-                    if fixture
-                        .machine
-                        .run_turn_terminal(&fixture.session, run)
-                        .await
-                        == Some(TurnTerminalOutcome::Completed)
-                    {
-                        let receipt = fixture
-                            .machine
-                            .input_terminal_receipt(
-                                &fixture.session,
-                                InteractionSelector::InputId(row.state.input_id.clone()),
-                            )
-                            .await
-                            .unwrap()
-                            .unwrap();
-                        if let InputTerminalReceiptRead::Finalized(receipt) = receipt.report {
-                            let CompletionOutcome::Completed(result) = receipt.outcome() else {
-                                panic!("native Original must complete");
-                            };
-                            assert_eq!(result.text, FINAL);
-                            break;
-                        }
-                    }
+            if row.seed.phase == InputLifecycleState::Consumed
+                && let Some(run) = &row.seed.last_run_id
+                && fixture
+                    .machine
+                    .run_turn_terminal(&fixture.session, run)
+                    .await
+                    == Some(TurnTerminalOutcome::Completed)
+            {
+                let receipt = fixture
+                    .machine
+                    .input_terminal_receipt(
+                        &fixture.session,
+                        InteractionSelector::InputId(row.state.input_id.clone()),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if let InputTerminalReceiptRead::Finalized(receipt) = receipt.report {
+                    let CompletionOutcome::Completed(result) = receipt.outcome() else {
+                        panic!("native Original must complete");
+                    };
+                    assert_eq!(result.text, FINAL);
+                    break;
                 }
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -826,8 +827,8 @@ impl WarmScript {
     ) -> Option<(String, String, serde_json::Value)> {
         let first = {
             let mut state = self.state.lock().unwrap();
-            if let Some(last) = &state.last {
-                if let Some(result) = request
+            if let Some(last) = &state.last
+                && let Some(result) = request
                     .request()
                     .messages
                     .iter()
@@ -836,43 +837,41 @@ impl WarmScript {
                         _ => &[],
                     })
                     .find(|result| &result.tool_use_id == last)
-                {
-                    let expected_refusal =
-                        (state.mode == 1 && state.phase == 2 && self.setup_refusal)
-                            || (state.mode == 2 && state.phase == 1);
-                    if result.is_error {
-                        assert_public_refusal(result);
-                        if expected_refusal {
-                            state.results.push(result.clone());
-                            state.phase += 1;
-                            state.last = None;
-                        }
-                        // The public refusal intentionally erases Denied versus
-                        // ReprepareRequired. Other phases may make a bounded
-                        // fresh choice, never infer a private terminal cause.
-                    } else {
-                        assert!(!expected_refusal, "revoked target cannot succeed");
-                        assert!(result.settlement_failures.is_empty());
-                        if state.phase == 0 || (state.mode == 2 && state.phase == 3) {
-                            let catalog: serde_json::Value =
-                                serde_json::from_str(&result.text_content()).unwrap();
-                            assert_eq!(catalog["catalog_exact"], true);
-                            let names: BTreeSet<_> = ["accepted_names", "noop_names"]
-                                .into_iter()
-                                .flat_map(|key| catalog[key].as_array().into_iter().flatten())
-                                .map(|name| name.as_str().unwrap().to_owned())
-                                .collect();
-                            let expected: BTreeSet<_> = if state.mode == 1 {
-                                [X_READ].into_iter().map(str::to_owned).collect()
-                            } else {
-                                [X_READ, Y_READ].into_iter().map(str::to_owned).collect()
-                            };
-                            assert_eq!(names, expected);
-                        }
+            {
+                let expected_refusal = (state.mode == 1 && state.phase == 2 && self.setup_refusal)
+                    || (state.mode == 2 && state.phase == 1);
+                if result.is_error {
+                    assert_public_refusal(result);
+                    if expected_refusal {
                         state.results.push(result.clone());
                         state.phase += 1;
                         state.last = None;
                     }
+                    // The public refusal intentionally erases Denied versus
+                    // ReprepareRequired. Other phases may make a bounded
+                    // fresh choice, never infer a private terminal cause.
+                } else {
+                    assert!(!expected_refusal, "revoked target cannot succeed");
+                    assert!(result.settlement_failures.is_empty());
+                    if state.phase == 0 || (state.mode == 2 && state.phase == 3) {
+                        let catalog: serde_json::Value =
+                            serde_json::from_str(&result.text_content()).unwrap();
+                        assert_eq!(catalog["catalog_exact"], true);
+                        let names: BTreeSet<_> = ["accepted_names", "noop_names"]
+                            .into_iter()
+                            .flat_map(|key| catalog[key].as_array().into_iter().flatten())
+                            .map(|name| name.as_str().unwrap().to_owned())
+                            .collect();
+                        let expected: BTreeSet<_> = if state.mode == 1 {
+                            [X_READ].into_iter().map(str::to_owned).collect()
+                        } else {
+                            [X_READ, Y_READ].into_iter().map(str::to_owned).collect()
+                        };
+                        assert_eq!(names, expected);
+                    }
+                    state.results.push(result.clone());
+                    state.phase += 1;
+                    state.last = None;
                 }
             }
             if !state.started {

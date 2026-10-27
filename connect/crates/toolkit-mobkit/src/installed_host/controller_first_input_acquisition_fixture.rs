@@ -44,7 +44,7 @@ pub(crate) fn prepare_approved_acquisition(host: &Host) -> ApprovedAcquisitionPo
     let workgraph = WorkGraphService::with_namespace_grant(
         Arc::new(
             SqliteWorkGraphStore::open(
-                &host.source_path.with_file_name("approved-workgraph.sqlite"),
+                host.source_path.with_file_name("approved-workgraph.sqlite"),
             )
             .unwrap(),
         ),

@@ -6,7 +6,6 @@ use crate::private_originals::service_approved_input::admission_tests::{
     acquisition, reviewed_config,
 };
 use futures::FutureExt;
-use meerkat_runtime::SessionServiceRuntimeExt;
 use std::{panic::AssertUnwindSafe, sync::atomic::AtomicUsize, time::Duration};
 
 const WAIT: Duration = Duration::from_secs(10);

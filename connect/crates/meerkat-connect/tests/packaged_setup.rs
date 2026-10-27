@@ -86,16 +86,16 @@ impl LlmClient for Probe {
         let command = guard.as_mut().expect("one test-selected native call");
         if command.issued {
             for message in &request.messages {
-                if let Message::ToolResults { results, .. } = message {
-                    if let Some(result) = results
+                if let Message::ToolResults { results, .. } = message
+                    && let Some(result) = results
                         .iter()
                         .find(|result| result.tool_use_id == command.id)
-                    {
-                        if command.result.is_none() {
-                            self.record(json!({"kind":"native_tool_result","name":command.name,"result":result}));
-                            command.result = Some(result.clone());
-                        }
-                    }
+                    && command.result.is_none()
+                {
+                    self.record(
+                        json!({"kind":"native_tool_result","name":command.name,"result":result}),
+                    );
+                    command.result = Some(result.clone());
                 }
             }
             drop(guard);

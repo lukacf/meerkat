@@ -816,15 +816,14 @@ impl LocalApprovals {
         let refused = || ToolError::access_denied(call.name);
         // Service access holds this phase while checking approvals/session
         // currentness. Never take the phase lock while holding Shared.state.
-        if let Some(source) = &self.shared.installation_policy {
-            if let Some(policy) = source
+        if let Some(source) = &self.shared.installation_policy
+            && let Some(policy) = source
                 .resolve()
                 .map_err(|error| installation_policy::tool_refusal(call.name, error))?
-            {
-                policy
-                    .check_entry()
-                    .map_err(|error| installation_policy::tool_refusal(call.name, error))?;
-            }
+        {
+            policy
+                .check_entry()
+                .map_err(|error| installation_policy::tool_refusal(call.name, error))?;
         }
         let state = self.shared.live_state().map_err(|_| refused())?;
         if state.closed || context.origin_session_id() != state.session.as_ref() {
@@ -844,17 +843,16 @@ impl LocalApprovals {
                 .check_current()
                 .map_err(|error| installation_policy::tool_refusal(call.name, error))?;
         }
-        if let Some(service) = &attempt.service {
-            if service.task.console_login().is_some()
-                && (attempt.service_entry.is_none()
-                    || (attempt.policy_entry.is_none()
-                        && service
-                            .decision_current
-                            .as_ref()
-                            .is_none_or(|current| !current())))
-            {
-                return Err(refused());
-            }
+        if let Some(service) = &attempt.service
+            && service.task.console_login().is_some()
+            && (attempt.service_entry.is_none()
+                || (attempt.policy_entry.is_none()
+                    && service
+                        .decision_current
+                        .as_ref()
+                        .is_none_or(|current| !current())))
+        {
+            return Err(refused());
         }
         Ok(())
     }
@@ -1269,14 +1267,13 @@ impl ApprovalPresenter {
             if self.shared.state().map_or(true, |state| state.closed) {
                 return None;
             }
-            if let Some(prompt) = self.pending.take() {
-                if prompt
+            if let Some(prompt) = self.pending.take()
+                && prompt
                     .response
                     .as_ref()
                     .is_some_and(|response| !response.is_closed())
-                {
-                    return Some(prompt);
-                }
+            {
+                return Some(prompt);
             }
             tokio::select! {
                 biased;
@@ -1668,13 +1665,13 @@ impl Shared {
         } else {
             None
         };
-        if let Some(held) = attempt.held.take() {
-            if let Err(error) = arm(held) {
-                if let Some(reservation) = reservation {
-                    reservation.settled();
-                }
-                return Err(error);
+        if let Some(held) = attempt.held.take()
+            && let Err(error) = arm(held)
+        {
+            if let Some(reservation) = reservation {
+                reservation.settled();
             }
+            return Err(error);
         }
         attempt.service_entry = reservation;
         attempt.custody = Custody::SpentUncertain;
@@ -2010,10 +2007,9 @@ pub(crate) async fn present_controller_setup_approval(
 ) -> Result<bool, ConnectError> {
     if matches!(&approval.presentation, ApprovalPresentation::AccessReview)
         && approval.record.proposed_action.body.as_ref() == Some(expected_body)
+        && let Some(summary) = summary
     {
-        if let Some(summary) = summary {
-            approval.presentation = ApprovalPresentation::ControllerSetup(summary.to_owned());
-        }
+        approval.presentation = ApprovalPresentation::ControllerSetup(summary.to_owned());
     }
     present_approval(approval, lines, output, interrupted).await
 }

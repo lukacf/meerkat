@@ -417,10 +417,10 @@ impl PrivateOriginals {
             let claims = association.candidate();
             let session = meerkat_core::SessionId::parse(claims.target.context.as_str())
                 .map_err(|_| PrivateOriginalError::Conflict)?;
-            if let Some(saved) = &record.final_association {
-                if saved != association {
-                    return Err(PrivateOriginalError::Conflict);
-                }
+            if let Some(saved) = &record.final_association
+                && saved != association
+            {
+                return Err(PrivateOriginalError::Conflict);
             }
             if let Some(retained) = &record.configured_setup {
                 if retained.session_id != session || retained.capability.route != reference.route {
@@ -453,12 +453,11 @@ impl PrivateOriginals {
                     base: None,
                     targets,
                 } if targets.is_empty() => {
-                    if record.final_association.is_none() {
-                        if let Some(cap) = &facts.selection {
-                            if self.configured_parent_current(&facts, &cap.parent)? {
-                                return Err(PrivateOriginalError::Conflict);
-                            }
-                        }
+                    if record.final_association.is_none()
+                        && let Some(cap) = &facts.selection
+                        && self.configured_parent_current(&facts, &cap.parent)?
+                    {
+                        return Err(PrivateOriginalError::Conflict);
                     }
                     Ok(())
                 }

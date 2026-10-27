@@ -2002,7 +2002,7 @@ mod tests {
                 .filter(|line| !line.is_empty())
                 .collect();
             assert_eq!(lines.len(), 2);
-            assert!(lines[0].len() + 1 <= MAX_FRAME_BYTES as usize);
+            assert!(lines[0].len() < MAX_FRAME_BYTES as usize);
             assert_eq!(lines[1], expected);
             assert_eq!(
                 serde_json::from_slice::<serde_json::Value>(lines[0]).unwrap()["result"]["error"],
@@ -2045,7 +2045,7 @@ mod tests {
                 .filter(|line| !line.is_empty())
                 .collect();
             assert_eq!(lines.len(), 2);
-            assert!(lines[0].len() + 1 <= MAX_FRAME_BYTES as usize);
+            assert!(lines[0].len() < MAX_FRAME_BYTES as usize);
             assert_eq!(lines[1], serde_json::to_vec(&next).unwrap());
         }
     }

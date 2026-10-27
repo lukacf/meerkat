@@ -255,13 +255,12 @@ pub(super) fn validate_progress(
         if target.requested.delegation_depth != DelegationDepth::remaining(1) {
             return Err(HostLifetimeError::InvalidSelection);
         }
-        if let TargetIssuance::Issued { parent } = progress {
-            if parent.validate().is_err()
+        if let TargetIssuance::Issued { parent } = progress
+            && (parent.validate().is_err()
                 || parent.root_authority != record.operator
-                || parent.grant_id != target_id(key, &target.target)?
-            {
-                return Err(HostLifetimeError::InvalidSelection);
-            }
+                || parent.grant_id != target_id(key, &target.target)?)
+        {
+            return Err(HostLifetimeError::InvalidSelection);
         }
     }
     Ok(())

@@ -2,12 +2,9 @@
 //! WorkGraph admission precedes every call here. No frontend event is fabricated.
 
 use super::*;
-use crate::original_ingress::{
-    PendingToolkitOriginal,
-    helper_originals::{
-        AdmittedHelperWork, HelperAdmissionSelection, HelperNativeBinding, HelperOperation,
-        RetainedHelperSource,
-    },
+use crate::original_ingress::helper_originals::{
+    AdmittedHelperWork, HelperAdmissionSelection, HelperNativeBinding, HelperOperation,
+    RetainedHelperSource,
 };
 use async_trait::async_trait;
 use meerkat_authorization_contracts::{
@@ -1117,10 +1114,10 @@ impl GovernedInputBinder for SubmitHelperBinder {
                     .lock()
                     .map_err(|_| PrivateOriginalError::Unavailable)?;
                 let prior = retained.as_ref().filter(|_| selected);
-                if let Some(invoked) = invocation.upgrade() {
-                    if !prior.is_some_and(|prior| Arc::ptr_eq(prior, &invoked)) {
-                        return Err(PrivateOriginalError::Unavailable);
-                    }
+                if let Some(invoked) = invocation.upgrade()
+                    && !prior.is_some_and(|prior| Arc::ptr_eq(prior, &invoked))
+                {
+                    return Err(PrivateOriginalError::Unavailable);
                 }
                 let (input, pending, handoff) = match admitted {
                     Some((input, pending)) => {
@@ -1290,7 +1287,8 @@ impl GovernedSettlement for HelperSettlement {
                     result: Err(unavailable()),
                 },
             );
-            let result = match prior {
+
+            match prior {
                 SourcePublication::Pending(pending) => {
                     let result = pending.admit().map(|_| ()).map_err(|_| unavailable());
                     publication.source = SourcePublication::Settled {
@@ -1303,8 +1301,7 @@ impl GovernedSettlement for HelperSettlement {
                     publication.source = settled;
                     Err("Toolkit helper source settlement was already consumed".into())
                 }
-            };
-            result
+            }
         });
         if result.is_err() {
             // Native acceptance is final even when this later source step

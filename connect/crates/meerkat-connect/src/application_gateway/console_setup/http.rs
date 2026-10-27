@@ -285,16 +285,15 @@ async fn data_from(
         }
     };
     let active = active.filter(|active| active.login.same_owner(&login));
-    if let Some(active) = &active {
-        if active
+    if let Some(active) = &active
+        && (active
             .task
             .check_console_viewer(&current, &login)
             .await
             .is_err()
-            || current().is_none()
-        {
-            return failure(StatusCode::FORBIDDEN);
-        }
+            || current().is_none())
+    {
+        return failure(StatusCode::FORBIDDEN);
     }
     let selected = request
         .as_ref()

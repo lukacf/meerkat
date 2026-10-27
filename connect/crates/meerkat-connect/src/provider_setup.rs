@@ -102,10 +102,8 @@ fn device_window_elapsed(
     presentation: &mut Option<&mut SignInPresentation<'_>>,
 ) -> bool {
     let elapsed = std::time::Instant::now() >= expires_at;
-    if elapsed {
-        if let Some(present) = presentation.as_deref_mut() {
-            present.expired();
-        }
+    if elapsed && let Some(present) = presentation.as_deref_mut() {
+        present.expired();
     }
     elapsed
 }
@@ -1509,17 +1507,15 @@ where
         interrupt.as_mut(),
     )
     .await?;
-    if saved {
-        if let Some(review) = review {
-            // The native save can also await. Its settled saved effect remains
-            // true if fresh configuration now refuses this continuation.
-            review.refresh(startup).await?;
-            if let Some(signal) = interrupt.as_mut().now_or_never() {
-                signal.map_err(|error| {
-                    ConnectError::native("Listen for model setup cancellation", error)
-                })?;
-                return Ok(false);
-            }
+    if saved && let Some(review) = review {
+        // The native save can also await. Its settled saved effect remains
+        // true if fresh configuration now refuses this continuation.
+        review.refresh(startup).await?;
+        if let Some(signal) = interrupt.as_mut().now_or_never() {
+            signal.map_err(|error| {
+                ConnectError::native("Listen for model setup cancellation", error)
+            })?;
+            return Ok(false);
         }
     }
     Ok(saved)
@@ -1935,7 +1931,7 @@ async fn browser_login_presented<F: Future<Output = io::Result<()>>, W: Write>(
     let callback = match callback {
         Ok(callback) => callback,
         Err(error) => {
-            if let Some(present) = presentation.as_deref_mut() {
+            if let Some(present) = presentation {
                 present.observe_callback_error(&error);
             }
             return Err(combined(

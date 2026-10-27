@@ -269,7 +269,7 @@ fn sibling_cancellation_restores_only_the_other_original_and_rejects_old_handles
     assert!(
         owner
             .grants()
-            .resolve_lineage(&[base.clone()], &principal("admin"), None)
+            .resolve_lineage(std::slice::from_ref(&base), &principal("admin"), None)
             .is_ok()
     );
     drop(native);

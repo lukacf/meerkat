@@ -674,10 +674,10 @@ impl Driver {
             self.failed = true;
         }
         self.secret_presenter.take();
-        if let Some(control) = &mut self.connector {
-            if control.retire().is_err() {
-                self.failed = true;
-            }
+        if let Some(control) = &mut self.connector
+            && control.retire().is_err()
+        {
+            self.failed = true;
         }
         self.private_notices.clear();
         if self
@@ -1926,10 +1926,8 @@ async fn run_io<R: AsyncRead + Unpin, W: AsyncWrite + Unpin + std::marker::Send 
     }
     let failed = driver.failed;
     drop(driver);
-    if !writer_done {
-        if writer.await.map_err(|_| ended())?.is_err() {
-            return Err(ended());
-        }
+    if !writer_done && writer.await.map_err(|_| ended())?.is_err() {
+        return Err(ended());
     }
     if failed { Err(ended()) } else { Ok(()) }
 }

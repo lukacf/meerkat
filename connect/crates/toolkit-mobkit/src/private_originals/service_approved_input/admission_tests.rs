@@ -576,16 +576,15 @@ async fn admitted_b_survives_lost_source_ack_after_a_terminal_is_overwritten() {
                     .await
                     .unwrap()
                     .unwrap();
-                if let Some(run) = &actual.seed.last_run_id {
-                    if fixture
+                if let Some(run) = &actual.seed.last_run_id
+                    && fixture
                         .machine
                         .run_turn_terminal(&fixture.session, run)
                         .await
                         == Some(TurnTerminalOutcome::Completed)
-                        && fixture.machine.current_run(&fixture.session).await.as_ref() != Some(run)
-                    {
-                        break;
-                    }
+                    && fixture.machine.current_run(&fixture.session).await.as_ref() != Some(run)
+                {
+                    break;
                 }
                 settlements.changed().await.unwrap();
             }

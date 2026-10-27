@@ -291,10 +291,10 @@ async fn failure_cleanup(
 ) {
     let released = fixture.release();
     probe.record(json!({"kind":"failure_cleanup_started", "gate_release_error":released.err().map(|error| error.to_string())}));
-    if closed.is_none() {
-        if let Ok(outcome) = tokio::time::timeout(BOUND, close.as_mut()).await {
-            *closed = Some(outcome);
-        }
+    if closed.is_none()
+        && let Ok(outcome) = tokio::time::timeout(BOUND, close.as_mut()).await
+    {
+        *closed = Some(outcome);
     }
     // Failure only. Give the actual adapter the chance to reap after release.
     // A PID is signalable only while it still has the recorded session/group.

@@ -795,12 +795,11 @@ impl GatewayHostComposition for ToolkitGatewayHost {
         }
         if self.acquisition_bootstrap_status()?
             == crate::installed_host::acquisition::AcquisitionBootstrapStatus::Configured
+            && let Some(continuation) = &self.native_continuation
         {
-            if let Some(continuation) = &self.native_continuation {
-                continuation
-                    .bind_native(runtime.mob_runtime())
-                    .map_err(host_error)?;
-            }
+            continuation
+                .bind_native(runtime.mob_runtime())
+                .map_err(host_error)?;
         }
         Ok(())
     }

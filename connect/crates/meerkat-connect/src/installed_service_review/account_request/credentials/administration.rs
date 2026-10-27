@@ -36,13 +36,13 @@ impl AdministrationAttempt {
 
     /// Call only after the native future returns its actual settled outcome.
     pub(super) fn settled(&self, unknown: bool) {
-        if let Ok(mut state) = self.reservation.lock() {
-            if let Some(held) = state.held.take() {
-                if unknown {
-                    held.uncertain();
-                } else {
-                    held.settled();
-                }
+        if let Ok(mut state) = self.reservation.lock()
+            && let Some(held) = state.held.take()
+        {
+            if unknown {
+                held.uncertain();
+            } else {
+                held.settled();
             }
         }
     }

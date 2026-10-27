@@ -8,7 +8,6 @@ use meerkat_authorization_contracts::work_association::{
 use meerkat_core::{
     auth::{PrincipalKind, PrincipalRef},
     authorization::WorkAuthorizationContext,
-    connection::RealmId,
 };
 fn principal(value: &str) -> PrincipalRef {
     native_fixture::principal(PrincipalKind::Human, value)

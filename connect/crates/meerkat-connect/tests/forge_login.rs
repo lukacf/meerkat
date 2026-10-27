@@ -837,7 +837,7 @@ async fn forge_reauthentication_login_refusal_keeps_same_origin_and_presenter_su
     };
     assert!(error.contains("Forge Console sign-in was refused"));
     assert!(
-        matches!(retry, Err(_)),
+        retry.is_err(),
         "spent reauthentication must not start another prompt"
     );
     for private in [PASSWORD, NONCE, SESSION, origin.as_str(), "canary"] {

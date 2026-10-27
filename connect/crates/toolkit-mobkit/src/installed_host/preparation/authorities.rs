@@ -339,10 +339,10 @@ fn project_helper_requests(
     previous: &meerkat_core::MobMemberBinding,
     compiled: &meerkat_core::MobMemberBinding,
 ) {
-    if let Some(request) = report {
-        if &request.member == previous {
-            request.member = compiled.clone();
-        }
+    if let Some(request) = report
+        && &request.member == previous
+    {
+        request.member = compiled.clone();
     }
     for request in setup {
         if &request.member == previous {

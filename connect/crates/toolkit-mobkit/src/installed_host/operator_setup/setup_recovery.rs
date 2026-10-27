@@ -332,14 +332,14 @@ fn decision_id(
             )
         ));
     }
-    if approved(record) && record.purpose == OperatorParentPurpose::SetupRequest {
-        if let Some(original) = record
+    if approved(record)
+        && record.purpose == OperatorParentPurpose::SetupRequest
+        && let Some(original) = record
             .setup_request
             .as_ref()
             .and_then(|intent| intent.original.as_ref())
-        {
-            return original_decision_id(native, original);
-        }
+    {
+        return original_decision_id(native, original);
     }
     // Controller, generic, tuple-only setup and denied decisions keep their
     // established approval-ID format. Only approved original setup is stable.

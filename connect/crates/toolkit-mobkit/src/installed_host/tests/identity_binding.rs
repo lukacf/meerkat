@@ -403,7 +403,7 @@ async fn ordinary_access_hook_control(prejoined: bool) {
         host.bind_identity_runtime(&mut native).await.unwrap();
         assert!(originals.bound_identity_runtime().is_ok());
         // The retained recovery task may also hold this same source during a round.
-        assert!(Arc::strong_count(&originals) >= before_ingress + 1);
+        assert!(Arc::strong_count(&originals) > before_ingress);
         assert_hook_joined_source_publication(&originals, &native);
         assert_eq!(
             store.list_records(&scope, None, 32).await.unwrap(),

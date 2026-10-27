@@ -2639,10 +2639,9 @@ impl Write for KeyCompletionOutput {
             .captured
             .text()
             .contains("API key stored by the native credential owner.")
+            && let Some(signal) = self.interrupt.take()
         {
-            if let Some(signal) = self.interrupt.take() {
-                signal.send(()).unwrap();
-            }
+            signal.send(()).unwrap();
         }
         Ok(())
     }

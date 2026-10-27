@@ -2698,13 +2698,14 @@ impl PairedHostClient {
                 error: String,
                 code: String,
             }
-            if let Ok(denied) = decode::<Denied>(&bytes, operation) {
-                if denied.error == "forbidden" && denied.code == "console_owner_required" {
-                    return Err(PairedHostError::Refused {
-                        operation,
-                        reason: PairedHostRefusal::ConsoleOwnerRequired,
-                    });
-                }
+            if let Ok(denied) = decode::<Denied>(&bytes, operation)
+                && denied.error == "forbidden"
+                && denied.code == "console_owner_required"
+            {
+                return Err(PairedHostError::Refused {
+                    operation,
+                    reason: PairedHostRefusal::ConsoleOwnerRequired,
+                });
             }
         }
         Ok((status, bytes))

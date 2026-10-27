@@ -40,15 +40,15 @@ impl LocalRoundCleanup {
         if self.owner.is_none() {
             self.owner = attempts.take_closed_owner();
         }
-        if let Some(owner) = self.owner.as_mut() {
-            if !self.owner_clean {
-                // The owner is stored outside this borrowed future. Timeout or
-                // caller cancellation leaves its exact Child for the next join.
-                match tokio::time::timeout_at(deadline, owner.cancel_pending_round()).await {
-                    Ok(Ok(())) => self.owner_clean = !owner.has_pending_round(),
-                    Ok(Err(_)) => self.failed = true,
-                    Err(_) => (),
-                }
+        if let Some(owner) = self.owner.as_mut()
+            && !self.owner_clean
+        {
+            // The owner is stored outside this borrowed future. Timeout or
+            // caller cancellation leaves its exact Child for the next join.
+            match tokio::time::timeout_at(deadline, owner.cancel_pending_round()).await {
+                Ok(Ok(())) => self.owner_clean = !owner.has_pending_round(),
+                Ok(Err(_)) => self.failed = true,
+                Err(_) => (),
             }
         }
         if self.native_drained && self.owner_clean && !self.failed {

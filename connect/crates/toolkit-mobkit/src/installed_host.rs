@@ -842,17 +842,16 @@ impl InstalledApplicationPolicy {
         purpose: LocalPolicyPurpose,
         now_ms: u64,
     ) -> Result<u64, OperationAuthorizationError> {
-        if purpose == LocalPolicyPurpose::Operation {
-            if let Some(deadline) = self
+        if purpose == LocalPolicyPurpose::Operation
+            && let Some(deadline) = self
                 .originals
                 .helper_operation_deadline(association)
                 .map_err(mcp_control_error)?
-            {
-                if now_ms >= deadline {
-                    return Err(OperationRefused::new(OperationRefusalKind::Denied).into());
-                }
-                return Ok(deadline);
+        {
+            if now_ms >= deadline {
+                return Err(OperationRefused::new(OperationRefusalKind::Denied).into());
             }
+            return Ok(deadline);
         }
         // Ordinary work and already-admitted controllers retain their existing
         // policy lifetime. Native grant/restriction minima still apply to all.
@@ -1147,14 +1146,12 @@ impl AdmittedWorkPolicyOwner for InstalledApplicationPolicy {
         purpose: LocalPolicyPurpose,
         now_ms: u64,
     ) -> Result<WorkOwnerAllowance, OperationAuthorizationError> {
-        self.member(association).map_err(|error| {
-            installed_operation_unavailable("work.member", &error);
-            error
+        self.member(association).inspect_err(|error| {
+            installed_operation_unavailable("work.member", error);
         })?;
         if purpose == LocalPolicyPurpose::Operation {
-            self.current_invocation(association).map_err(|error| {
-                installed_operation_unavailable("work.current_invocation", &error);
-                error
+            self.current_invocation(association).inspect_err(|error| {
+                installed_operation_unavailable("work.current_invocation", error);
             })?;
         }
         // Closing stops new ingress and ordinary effects. Already-admitted
@@ -1223,14 +1220,12 @@ impl OperationPolicyOwner for InstalledApplicationPolicy {
         purpose: LocalPolicyPurpose,
         now_ms: u64,
     ) -> Result<LocalPolicyAllowance, OperationAuthorizationError> {
-        self.member(association).map_err(|error| {
-            installed_operation_unavailable("operation.member", &error);
-            error
+        self.member(association).inspect_err(|error| {
+            installed_operation_unavailable("operation.member", error);
         })?;
         if purpose == LocalPolicyPurpose::Operation {
-            self.current_invocation(association).map_err(|error| {
-                installed_operation_unavailable("operation.current_invocation", &error);
-                error
+            self.current_invocation(association).inspect_err(|error| {
+                installed_operation_unavailable("operation.current_invocation", error);
             })?;
         }
         let claims = association.candidate();
@@ -2256,7 +2251,7 @@ mod tests {
 
     #[tokio::test]
     async fn native_factory_rejects_changed_artifact_without_creating_owner() {
-        let (_directory, mut selection) = fixture();
+        let (_directory, selection) = fixture();
         let bundle = selection.policy_manifest.path.parent().unwrap();
         fs::write(bundle.join("agent-surface.json"), b"[{}]").unwrap();
         assert!(matches!(

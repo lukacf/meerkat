@@ -571,21 +571,18 @@ impl NativeHostLifetime {
     }
 
     pub fn validate_current_selection(&self) -> Result<()> {
-        let _fence = self.deny_fence.shared().map_err(|error| {
+        let _fence = self.deny_fence.shared().inspect_err(|&error| {
             selection_owner_refused("lifetime.current_selection.deny_fence", error);
-            error
         })?;
-        self.check_selected().map_err(|error| {
+        self.check_selected().inspect_err(|&error| {
             selection_owner_refused("lifetime.current_selection.selected_files", error);
-            error
         })?;
-        let (_activation, _) = self
-            .activation
-            .retain(self.incarnation, None)
-            .map_err(|error| {
-                selection_owner_refused("lifetime.current_selection.activation_retain", error);
-                error
-            })?;
+        let (_activation, _) =
+            self.activation
+                .retain(self.incarnation, None)
+                .inspect_err(|&error| {
+                    selection_owner_refused("lifetime.current_selection.activation_retain", error);
+                })?;
         Ok(())
     }
 

@@ -317,9 +317,8 @@ impl ApplicationSetupCompilation {
             }
         }
         for route in &mut selected.native_host.routes {
-            if let meerkat_toolkit::host_lifetime::policy::CompiledNativeSourceOrigin::LocalConsole { member, .. } = &mut route.origin {
-                if member == &self.source_helper_member { *member = self.input.helper.member.clone(); }
-            }
+            if let meerkat_toolkit::host_lifetime::policy::CompiledNativeSourceOrigin::LocalConsole { member, .. } = &mut route.origin
+                && member == &self.source_helper_member { *member = self.input.helper.member.clone(); }
         }
         selected.validate().map_err(|error| error.to_string())?;
         Ok(selected)

@@ -32,10 +32,10 @@ impl ToolkitOriginalOwner {
             tokio::pin!(acquiring);
             std::future::poll_fn(|cx| {
                 let polled = acquiring.as_mut().poll(cx);
-                if polled.is_pending() {
-                    if let Some(entered) = self.source_writer_wait.lock().unwrap().take() {
-                        let _ = entered.send(());
-                    }
+                if polled.is_pending()
+                    && let Some(entered) = self.source_writer_wait.lock().unwrap().take()
+                {
+                    let _ = entered.send(());
                 }
                 polled
             })
@@ -219,16 +219,15 @@ impl ToolkitOriginalOwner {
         )?;
         let route = Self::admitted_controller_route(association, admitted)?;
         let check_route = |held: &HeldOriginal| -> Result<(), OriginalWriterError> {
-            if let Some(controller) = &held.controller {
-                if controller.selection() != admitted.controller().selection()
+            if let Some(controller) = &held.controller
+                && (controller.selection() != admitted.controller().selection()
                     || controller
                         .plain_facts()
                         .map_err(|_| OriginalWriterError::Unavailable)?
                         .route_key()
-                        != route
-                {
-                    return Err(OriginalWriterError::Conflict);
-                }
+                        != route)
+            {
+                return Err(OriginalWriterError::Conflict);
             }
             Ok(())
         };

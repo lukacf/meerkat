@@ -146,7 +146,7 @@ async fn exercise(mutation: Option<Mutation>) {
         let b_record = fixture.source.decode_record(&b_stored, &b).unwrap();
         let access_key = crate::private_originals::service_grants::tests::fixture_access_key(
             &fixture.source,
-            &b_record
+            b_record
                 .approved_task
                 .as_ref()
                 .unwrap()

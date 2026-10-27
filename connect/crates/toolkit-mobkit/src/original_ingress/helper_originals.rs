@@ -1022,7 +1022,7 @@ impl ToolkitOriginalOwner {
             return Err(OriginalWriterError::Conflict);
         }
         let parent = contributor.association.candidate();
-        let authentication = admission_evidence(&self.ingress_domain, &facts)?;
+        let authentication = admission_evidence(&self.ingress_domain, facts)?;
         // These identities come from the actual admitted WorkGraph item. They
         // are not hashes of an operation, model argument or frontend event.
         let helper_id = helper_identity(&facts.namespace, &facts.item)?;
@@ -1208,7 +1208,7 @@ impl ToolkitOriginalOwner {
             .await
             .map_err(|_| OriginalWriterError::Unavailable)?
             .ok_or(OriginalWriterError::Unavailable)?;
-        let record = HelperSourceRecord::decode(&stored)?;
+        let _record = HelperSourceRecord::decode(&stored)?;
         if !source.original.first_binding_for(&stored.key) {
             return Err(OriginalWriterError::Unavailable);
         }
@@ -1934,7 +1934,7 @@ mod tests {
             &mut final_request,
             &operation,
             &origin,
-            &[one.clone()],
+            std::slice::from_ref(&one),
             &selection,
         )
         .unwrap();
@@ -1943,7 +1943,7 @@ mod tests {
             &final_request,
             &operation,
             &origin,
-            &[one.clone()],
+            std::slice::from_ref(&one),
             &selection,
         )
         .unwrap();
@@ -1965,7 +1965,7 @@ mod tests {
                 &final_request,
                 &operation,
                 &origin,
-                &[one.clone()],
+                std::slice::from_ref(&one),
                 &changed_selection
             )
             .is_err()
@@ -2012,14 +2012,20 @@ mod tests {
     fn live_own_membership_does_not_exempt_a_named_ancestor_or_foreign_handle() {
         let (_directory, owner, base) = fixture();
         let ancestor = retained(&owner, &base, "ancestor", "user", &[]);
-        let (one, pending) = pending_source(&owner, &base, "pending", "user", &[ancestor.clone()]);
+        let (one, pending) = pending_source(
+            &owner,
+            &base,
+            "pending",
+            "user",
+            std::slice::from_ref(&ancestor),
+        );
         let all = [one.clone(), ancestor.clone()];
         owner
-            .check_helper_sources(&one, &all, &[one.clone()])
+            .check_helper_sources(&one, &all, std::slice::from_ref(&one))
             .unwrap();
         owner.release_original(&ancestor).unwrap();
         assert!(matches!(
-            owner.check_helper_sources(&one, &all, &[one.clone()]),
+            owner.check_helper_sources(&one, &all, std::slice::from_ref(&one)),
             Err(OriginalWriterError::WrongOwner)
         ));
         let foreign = retained(&owner, &base, "foreign", "other-user", &[]);
@@ -2044,7 +2050,11 @@ mod tests {
             .unwrap()
             .operation = OriginalOperationDisposition::CancellationPending;
         assert!(matches!(
-            owner.check_helper_sources(&one, &[one.clone()], &[one.clone()]),
+            owner.check_helper_sources(
+                &one,
+                std::slice::from_ref(&one),
+                std::slice::from_ref(&one)
+            ),
             Err(OriginalWriterError::Unavailable)
         ));
     }
@@ -2053,8 +2063,20 @@ mod tests {
     fn helper_source_requires_complete_canonical_ancestors() {
         let (_directory, owner, base) = fixture();
         let grandparent = retained(&owner, &base, "grandparent", "user", &[]);
-        let parent = retained(&owner, &base, "parent", "user", &[grandparent.clone()]);
-        let child = retained(&owner, &base, "child", "user", &[parent.clone()]);
+        let parent = retained(
+            &owner,
+            &base,
+            "parent",
+            "user",
+            std::slice::from_ref(&grandparent),
+        );
+        let child = retained(
+            &owner,
+            &base,
+            "child",
+            "user",
+            std::slice::from_ref(&parent),
+        );
         assert!(
             owner
                 .check_helper_contributors(&child, &[child.clone(), parent.clone()])
@@ -2089,8 +2111,20 @@ mod tests {
     fn native_helper_set_preserves_batched_and_transitive_originals() {
         let (_directory, owner, base) = fixture();
         let ancestor = retained(&owner, &base, "ancestor", "user", &[]);
-        let parent = retained(&owner, &base, "parent", "user", &[ancestor.clone()]);
-        let child = retained(&owner, &base, "child", "user", &[parent.clone()]);
+        let parent = retained(
+            &owner,
+            &base,
+            "parent",
+            "user",
+            std::slice::from_ref(&ancestor),
+        );
+        let child = retained(
+            &owner,
+            &base,
+            "child",
+            "user",
+            std::slice::from_ref(&parent),
+        );
         let batched = retained(&owner, &base, "batched", "user", &[]);
         let exact = [
             child.clone(),
@@ -2207,7 +2241,7 @@ mod tests {
         owner.release_original(&one).unwrap();
         assert!(
             owner
-                .check_helper_contributors(&one, &[one.clone()])
+                .check_helper_contributors(&one, std::slice::from_ref(&one))
                 .is_err()
         );
     }
@@ -2240,7 +2274,14 @@ mod tests {
             ..Default::default()
         };
         let mut exact = request.clone();
-        bind_work_request(&mut exact, &operation, &origin, &[one.clone()], &target).unwrap();
+        bind_work_request(
+            &mut exact,
+            &operation,
+            &origin,
+            std::slice::from_ref(&one),
+            &target,
+        )
+        .unwrap();
         let key = WorkAdmissionKey::new("exact-original-effect").unwrap();
         // This test intentionally uses the keyed storage owner directly to
         // isolate payload replay. It is not a production admission fence.
@@ -2825,7 +2866,13 @@ mod tests {
     async fn split_helper_recovers_exact_work_before_source_binding_without_promoting_custody() {
         let (directory, owner, base) = fixture();
         let ancestor = retained(&owner, &base, "ancestor", "user", &[]);
-        let parent = retained(&owner, &base, "parent", "user", &[ancestor.clone()]);
+        let parent = retained(
+            &owner,
+            &base,
+            "parent",
+            "user",
+            std::slice::from_ref(&ancestor),
+        );
         let service = WorkGraphService::with_namespace_grant(
             Arc::new(
                 SqliteWorkGraphStore::open(directory.path().join("split-work.sqlite3")).unwrap(),
@@ -2833,9 +2880,8 @@ mod tests {
             WorkGraphNamespaceGrant::new("test-realm", "setup").unwrap(),
         )
         .unwrap();
-        let store =
-            toolkit_store::SqliteStore::open(&directory.path().join("split-source.sqlite3"))
-                .unwrap();
+        let store = toolkit_store::SqliteStore::open(directory.path().join("split-source.sqlite3"))
+            .unwrap();
         let (admitted, native_binding) = admitted_source_fixture(
             &owner,
             &service,
@@ -2918,7 +2964,13 @@ mod tests {
     async fn split_helper_refuses_cancelled_ancestor_after_work_commit_and_keeps_exact_item() {
         let (directory, owner, base) = fixture();
         let ancestor = retained(&owner, &base, "ancestor", "user", &[]);
-        let parent = retained(&owner, &base, "parent", "user", &[ancestor.clone()]);
+        let parent = retained(
+            &owner,
+            &base,
+            "parent",
+            "user",
+            std::slice::from_ref(&ancestor),
+        );
         let service = WorkGraphService::with_namespace_grant(
             Arc::new(
                 SqliteWorkGraphStore::open(directory.path().join("cancel-work.sqlite3")).unwrap(),
@@ -2927,7 +2979,7 @@ mod tests {
         )
         .unwrap();
         let store =
-            toolkit_store::SqliteStore::open(&directory.path().join("cancel-source.sqlite3"))
+            toolkit_store::SqliteStore::open(directory.path().join("cancel-source.sqlite3"))
                 .unwrap();
         let (admitted, native_binding) = admitted_source_fixture(
             &owner,
@@ -3006,7 +3058,7 @@ mod tests {
     async fn helper_source_admission_keys_preserve_native_namespace_scope() {
         let directory = tempfile::tempdir().unwrap();
         let store =
-            toolkit_store::SqliteStore::open(&directory.path().join("sources.sqlite3")).unwrap();
+            toolkit_store::SqliteStore::open(directory.path().join("sources.sqlite3")).unwrap();
         let native_key = WorkAdmissionKey::new("same-key").unwrap();
         let mut records = Vec::new();
         for namespace in ["first", "second"] {

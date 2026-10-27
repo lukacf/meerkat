@@ -199,10 +199,7 @@ impl PrivateOriginals {
                     || self.scope.owner != policy.deployment.as_str()
                     || native.ingress_domain != *self.owner.ingress_domain()
                     || facts.selection.grant_caller != native.grant_administrator
-                    || !native
-                        .members
-                        .iter()
-                        .any(|member| *member == facts.selection.member)
+                    || !native.members.contains(&facts.selection.member)
                 {
                     return Err(HostLifetimeError::Denied);
                 }

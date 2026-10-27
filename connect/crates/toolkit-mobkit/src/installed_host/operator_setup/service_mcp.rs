@@ -264,7 +264,7 @@ impl OperatorSetup {
             .map_err(|_| HostLifetimeError::Unavailable)?
             .unix_ms;
         let mut restrictions = selection
-            .restrictions(&route, &decision, now)
+            .restrictions(&route, decision, now)
             .map_err(|_| HostLifetimeError::Denied)?;
         restrictions.delegation_depth =
             meerkat_authorization_contracts::constraints::DelegationDepth::remaining(1);

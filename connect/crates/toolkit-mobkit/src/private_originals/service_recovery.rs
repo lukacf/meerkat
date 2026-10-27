@@ -403,7 +403,7 @@ impl PrivateOriginals {
                 (Err(_), _) => "unavailable",
                 (_, None) => "not_observed",
                 (_, Some(parent)) => match self.owner.grants().resolve_lineage(
-                    &[parent.clone()],
+                    std::slice::from_ref(parent),
                     &approval.application,
                     approval.represented_subject.as_ref(),
                 ) {

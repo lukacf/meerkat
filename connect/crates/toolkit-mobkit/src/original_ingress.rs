@@ -436,11 +436,10 @@ impl Drop for PendingToolkitOriginal {
             .iter_mut()
             .filter_map(OriginalRecord::bound_mut)
             .find(|entry| Arc::ptr_eq(&entry.retained, &self.original))
+            && held.source_custody == Some(SourceCustody::Candidate)
         {
-            if held.source_custody == Some(SourceCustody::Candidate) {
-                held.source_custody = None;
-                held.controller = None;
-            }
+            held.source_custody = None;
+            held.controller = None;
         }
     }
 }
@@ -1415,20 +1414,17 @@ impl ToolkitOriginalOwner {
             if matches!(
                 existing.grant_binding,
                 OriginalGrantBinding::Task { .. } | OriginalGrantBinding::ServiceSet { .. }
-            ) {
-                if existing
-                    .custody
-                    .authority_basis
-                    .grant_lineages()
-                    .any(|old| {
-                        old.last().is_some_and(|child| {
-                            lineage.contains(child)
-                                || claims.controller_grant_lineage.contains(child)
-                        })
+            ) && existing
+                .custody
+                .authority_basis
+                .grant_lineages()
+                .any(|old| {
+                    old.last().is_some_and(|child| {
+                        lineage.contains(child) || claims.controller_grant_lineage.contains(child)
                     })
-                {
-                    return Err(OriginalWriterError::Conflict);
-                }
+                })
+            {
+                return Err(OriginalWriterError::Conflict);
             }
         }
         Ok(())
@@ -1614,26 +1610,22 @@ impl ToolkitOriginalOwner {
         if let Some(index) = originals
             .iter()
             .position(|entry| entry.names(&claims.ingress_namespace.realm, &claims.original_work))
-        {
-            if let OriginalRecord::UnboundCancellation {
+            && let OriginalRecord::UnboundCancellation {
                 source_record,
                 operation,
                 first_binding: prepared,
                 ..
             } = &originals[index]
-            {
-                match operation {
-                    OriginalOperationDisposition::Open
-                        if prepared.as_ref() == Some(&association) =>
-                    {
-                        first_binding = Some(source_record.clone());
-                        first_index = Some(index);
-                    }
-                    OriginalOperationDisposition::Cancelled { .. } => {
-                        return Err(OriginalWriterError::OperationCancelled);
-                    }
-                    _ => return Err(OriginalWriterError::Unavailable),
+        {
+            match operation {
+                OriginalOperationDisposition::Open if prepared.as_ref() == Some(&association) => {
+                    first_binding = Some(source_record.clone());
+                    first_index = Some(index);
                 }
+                OriginalOperationDisposition::Cancelled { .. } => {
+                    return Err(OriginalWriterError::OperationCancelled);
+                }
+                _ => return Err(OriginalWriterError::Unavailable),
             }
         }
         if let Some(existing) = originals

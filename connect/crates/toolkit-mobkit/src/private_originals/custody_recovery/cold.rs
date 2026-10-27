@@ -96,7 +96,7 @@ impl ColdEntry {
         }
     }
     fn due(&self) -> bool {
-        self.last_observation.map_or(true, |last| {
+        self.last_observation.is_none_or(|last| {
             tokio::time::Instant::now().saturating_duration_since(last) >= ROUND_PAUSE
         })
     }

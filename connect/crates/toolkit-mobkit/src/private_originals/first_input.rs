@@ -500,10 +500,10 @@ pub(super) fn with_controller_login<T>(
         (Some(_), Some(_)) => return Err(HostLifetimeError::Denied),
     };
     let result = write();
-    if result.is_ok() {
-        if let Some(reservation) = reservation {
-            reservation.settled();
-        }
+    if result.is_ok()
+        && let Some(reservation) = reservation
+    {
+        reservation.settled();
     }
     result
 }

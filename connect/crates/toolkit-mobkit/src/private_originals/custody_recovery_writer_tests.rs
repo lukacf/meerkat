@@ -280,12 +280,11 @@ async fn exercise(mode: WaitingCaller) {
                         assert_eq!(receipt.input_id, *pending.input.id());
                         assert_eq!(receipt.session_id, fixture.session);
                         assert!(!receipt.deduplicated);
-                        if let Some(native) = fixture.machine.input_state(&fixture.session, pending.input.id()).await.unwrap() {
-                            if native.seed.phase == meerkat_runtime::input_state::InputLifecycleState::Consumed {
+                        if let Some(native) = fixture.machine.input_state(&fixture.session, pending.input.id()).await.unwrap()
+                            && native.seed.phase == meerkat_runtime::input_state::InputLifecycleState::Consumed {
                                 meerkat_runtime::input_state::verify_exact_replay(&native.state, &pending.input).unwrap();
                                 break;
                             }
-                        }
                     }
                 }
                 tokio::time::sleep(Duration::from_millis(5)).await;

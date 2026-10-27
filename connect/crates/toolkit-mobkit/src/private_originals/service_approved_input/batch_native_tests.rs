@@ -555,35 +555,34 @@ async fn assert_completed(
                 .iter()
                 .find(|row| row.state.input_id.to_string() == admission.input_id)
                 .unwrap();
-            if let Some(run) = &row.seed.last_run_id {
-                if row.seed.phase == InputLifecycleState::Consumed
-                    && fixture
-                        .machine
-                        .run_turn_terminal(&fixture.session, run)
-                        .await
-                        == Some(TurnTerminalOutcome::Completed)
-                {
-                    let receipt = fixture
-                        .machine
-                        .input_terminal_receipt(
-                            &fixture.session,
-                            InteractionSelector::InputId(row.state.input_id.clone()),
-                        )
-                        .await
-                        .unwrap()
-                        .unwrap();
-                    let InputTerminalReceiptRead::Finalized(receipt) = receipt.report else {
-                        continue;
-                    };
-                    let CompletionOutcome::Completed(result) = receipt.outcome() else {
-                        panic!("B must complete");
-                    };
-                    assert_eq!(
-                        result.text,
-                        "Both selected targets were checked through native authority"
-                    );
-                    return record;
-                }
+            if let Some(run) = &row.seed.last_run_id
+                && row.seed.phase == InputLifecycleState::Consumed
+                && fixture
+                    .machine
+                    .run_turn_terminal(&fixture.session, run)
+                    .await
+                    == Some(TurnTerminalOutcome::Completed)
+            {
+                let receipt = fixture
+                    .machine
+                    .input_terminal_receipt(
+                        &fixture.session,
+                        InteractionSelector::InputId(row.state.input_id.clone()),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let InputTerminalReceiptRead::Finalized(receipt) = receipt.report else {
+                    continue;
+                };
+                let CompletionOutcome::Completed(result) = receipt.outcome() else {
+                    panic!("B must complete");
+                };
+                assert_eq!(
+                    result.text,
+                    "Both selected targets were checked through native authority"
+                );
+                return record;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }

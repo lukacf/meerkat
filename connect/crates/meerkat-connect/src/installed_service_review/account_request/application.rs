@@ -307,7 +307,7 @@ pub(super) async fn connector(
         return human_action(call, "connector_authentication", human);
     }
     let joined = login
-        .join_authorized(&target, &account)
+        .join_authorized(target, &account)
         .map_err(|_| ToolError::access_denied(call.name))?;
     let config =
         reviewed_configuration(&joined).map_err(|_| ToolError::access_denied(call.name))?;
@@ -344,11 +344,11 @@ pub(super) async fn connector(
         .await
         .map_err(|_| unavailable())?;
     context.check_tool_authorization(call, plan)?;
-    if authorized_account(&target, &latest).map_err(|_| ToolError::access_denied(call.name))?
-        != authorized_account(&target, &account).map_err(|_| ToolError::access_denied(call.name))?
+    if authorized_account(target, &latest).map_err(|_| ToolError::access_denied(call.name))?
+        != authorized_account(target, &account).map_err(|_| ToolError::access_denied(call.name))?
         || reviewed_configuration(
             &login
-                .join_authorized(&target, &latest)
+                .join_authorized(target, &latest)
                 .map_err(|_| unavailable())?,
         )
         .ok()

@@ -768,43 +768,6 @@ pub(crate) fn same_source_human(
         && represented.is_none_or(|subject| subject == human)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use meerkat_core::auth::principal::TrustDomainId;
-
-    #[test]
-    fn qualified_direct_human_allows_absent_or_same_subject_only() {
-        // These are component identity values. Constructing them does not
-        // authenticate a Console request or stand in for its native carrier.
-        let human = PrincipalRef::in_domain(
-            PrincipalKind::Human,
-            "subject-7",
-            TrustDomainId::new("oidc-issuer:https://issuer.example").unwrap(),
-        )
-        .unwrap();
-        let other_issuer = PrincipalRef::in_domain(
-            PrincipalKind::Human,
-            "subject-7",
-            TrustDomainId::new("oidc-issuer:https://other.example").unwrap(),
-        )
-        .unwrap();
-        let service = PrincipalRef::in_domain(
-            PrincipalKind::ServiceAccount,
-            "subject-7",
-            TrustDomainId::new("oidc-issuer:https://issuer.example").unwrap(),
-        )
-        .unwrap();
-        let unqualified = PrincipalRef::new(PrincipalKind::Human, "subject-7").unwrap();
-        assert!(same_source_human(&human, &human, None));
-        assert!(same_source_human(&human, &human, Some(&human)));
-        assert!(!same_source_human(&human, &human, Some(&other_issuer)));
-        assert!(!same_source_human(&human, &other_issuer, Some(&human)));
-        assert!(!same_source_human(&service, &service, None));
-        assert!(!same_source_human(&unqualified, &unqualified, None));
-    }
-}
-
 impl SourcePublicationStatus {
     fn presentation(self) -> (&'static str, &'static str, &'static str) {
         match self {
@@ -939,5 +902,42 @@ impl PrivateOriginals {
             projection,
             visible_members: selected.into_iter().map(|(_, identity)| identity).collect(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use meerkat_core::auth::principal::TrustDomainId;
+
+    #[test]
+    fn qualified_direct_human_allows_absent_or_same_subject_only() {
+        // These are component identity values. Constructing them does not
+        // authenticate a Console request or stand in for its native carrier.
+        let human = PrincipalRef::in_domain(
+            PrincipalKind::Human,
+            "subject-7",
+            TrustDomainId::new("oidc-issuer:https://issuer.example").unwrap(),
+        )
+        .unwrap();
+        let other_issuer = PrincipalRef::in_domain(
+            PrincipalKind::Human,
+            "subject-7",
+            TrustDomainId::new("oidc-issuer:https://other.example").unwrap(),
+        )
+        .unwrap();
+        let service = PrincipalRef::in_domain(
+            PrincipalKind::ServiceAccount,
+            "subject-7",
+            TrustDomainId::new("oidc-issuer:https://issuer.example").unwrap(),
+        )
+        .unwrap();
+        let unqualified = PrincipalRef::new(PrincipalKind::Human, "subject-7").unwrap();
+        assert!(same_source_human(&human, &human, None));
+        assert!(same_source_human(&human, &human, Some(&human)));
+        assert!(!same_source_human(&human, &human, Some(&other_issuer)));
+        assert!(!same_source_human(&human, &other_issuer, Some(&human)));
+        assert!(!same_source_human(&service, &service, None));
+        assert!(!same_source_human(&unqualified, &unqualified, None));
     }
 }

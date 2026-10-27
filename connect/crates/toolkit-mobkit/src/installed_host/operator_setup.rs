@@ -753,7 +753,7 @@ impl OperatorSetup {
     ) -> Result<OperatorDecision, HostLifetimeError> {
         // An actual approval is applied only by the source and lifetime that
         // created its opaque proposal. Re-prepare after a legitimate restore.
-        self.check_parent_proposal_owner(&proposal)?;
+        self.check_parent_proposal_owner(proposal)?;
         let route = self.route(&proposal.route)?;
         if !same_request(&proposal.request, &approval) {
             return Err(HostLifetimeError::Denied);
@@ -910,10 +910,10 @@ impl OperatorSetup {
         &self,
         record: &OperatorDecision,
     ) -> Result<OperatorParentOutcome, HostLifetimeError> {
-        if matches!(record.issued, ParentIssuance::Issued { .. }) {
-            if let Some(outcome) = self.observe_target_progress(record)? {
-                return Ok(outcome);
-            }
+        if matches!(record.issued, ParentIssuance::Issued { .. })
+            && let Some(outcome) = self.observe_target_progress(record)?
+        {
+            return Ok(outcome);
         }
         match &record.issued {
             ParentIssuance::Pending => Ok(OperatorParentOutcome::PendingReconciliation),
@@ -1009,10 +1009,10 @@ fn decode(stored: &StoredRecord, key: &StoreKey) -> Result<OperatorDecision, Hos
     {
         return Err(HostLifetimeError::InvalidSelection);
     }
-    if let ParentIssuance::Issued { lineage } = &record.issued {
-        if lineage.len() != 1 || lineage[0].grant_id.as_str() != key.id {
-            return Err(HostLifetimeError::InvalidSelection);
-        }
+    if let ParentIssuance::Issued { lineage } = &record.issued
+        && (lineage.len() != 1 || lineage[0].grant_id.as_str() != key.id)
+    {
+        return Err(HostLifetimeError::InvalidSelection);
     }
     setup_targets::validate_progress(&record, key)?;
     service_batch::validate_member(&record)?;

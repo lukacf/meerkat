@@ -589,14 +589,13 @@ impl PrivateOriginals {
         let result = runtime
             .send_governed_with_turn_ticket(&identity, Some(alias), input, binder.clone())
             .await;
-        if let Some(pending) = binder.pending.get() {
-            if result
+        if let Some(pending) = binder.pending.get()
+            && result
                 .as_ref()
                 .err()
                 .is_some_and(|error| definite_original_refusal(error, &pending.session))
-            {
-                pending.handoff.record_definite_refusal();
-            }
+        {
+            pending.handoff.record_definite_refusal();
         }
         Ok(match result {
             Ok(outcome) => PrivateOriginalSubmission::Admitted {
@@ -713,10 +712,10 @@ impl GovernedInputBinder for OriginalBinder {
             _ => return Err("The original has conflicting login custody".into()),
         };
         let result = self.bind_retained(context, input).await;
-        if result.is_ok() {
-            if let Some(reservation) = reservation {
-                reservation.settled();
-            }
+        if result.is_ok()
+            && let Some(reservation) = reservation
+        {
+            reservation.settled();
         }
         // A failed or dropped entered binder retains uncertainty on its exact
         // login. This does not cancel work or replace native source custody.
@@ -782,40 +781,37 @@ impl OriginalBinder {
         })?;
         if let Some(entry) = &self.console {
             entry.check()?;
-            if let Err(candidate) = held.console_login.set(entry.login().clone()) {
-                if !held
+            if let Err(candidate) = held.console_login.set(entry.login().clone())
+                && !held
                     .console_login
                     .get()
                     .is_some_and(|current| current.same_owner(&candidate))
-                {
-                    return Err("The original belongs to another Console login".into());
-                }
+            {
+                return Err("The original belongs to another Console login".into());
             }
         }
         if let Some(login) = &self.approved_login {
             login
                 .check()
                 .map_err(|_| "The approved Console login is unavailable")?;
-            if let Err(candidate) = held.console_login.set(login.clone()) {
-                if !held
+            if let Err(candidate) = held.console_login.set(login.clone())
+                && !held
                     .console_login
                     .get()
                     .is_some_and(|current| current.same_owner(&candidate))
-                {
-                    return Err("The approved original belongs to another Console login".into());
-                }
+            {
+                return Err("The approved original belongs to another Console login".into());
             }
         }
         // A binder never changes the keeper after returning a settlement.
         // Native may retain that settlement after the caller has disappeared.
-        if let Err(existing_candidate) = self.held.set(held.clone()) {
-            if !self
+        if let Err(existing_candidate) = self.held.set(held.clone())
+            && !self
                 .held
                 .get()
                 .is_some_and(|existing| Arc::ptr_eq(existing, &existing_candidate))
-            {
-                return Err("Toolkit original custody changed".to_owned());
-            }
+        {
+            return Err("Toolkit original custody changed".to_owned());
         }
         self.source
             .restore_promoted_custody(
@@ -852,26 +848,25 @@ impl OriginalBinder {
         let admitted = prepared
             .admitted()
             .map_err(|_| "Toolkit admitted original is unavailable".to_owned())?;
-        if admitted.is_none() {
-            if let Some(exact) = cold_service_admission::RetainedBoundInput::retain_for_attempt(
+        if admitted.is_none()
+            && let Some(exact) = cold_service_admission::RetainedBoundInput::retain_for_attempt(
                 &held.first_input,
                 prepared.input(),
             )
             .map_err(|_| "Toolkit first original input changed")?
-            {
-                prepared = self
-                    .source
-                    .owner
-                    .prepare_authenticated_input(
-                        &held.original,
-                        &context.session_id,
-                        exact,
-                        self.event_key.clone(),
-                        self.authentication.clone(),
-                        context.controller.clone(),
-                    )
-                    .map_err(|_| "Toolkit could not rebind the exact first original input")?;
-            }
+        {
+            prepared = self
+                .source
+                .owner
+                .prepare_authenticated_input(
+                    &held.original,
+                    &context.session_id,
+                    exact,
+                    self.event_key.clone(),
+                    self.authentication.clone(),
+                    context.controller.clone(),
+                )
+                .map_err(|_| "Toolkit could not rebind the exact first original input")?;
         }
         if self.grant.is_some() || self.batch.is_some() || held.retain_bound_input {
             self.source

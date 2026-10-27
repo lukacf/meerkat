@@ -244,7 +244,7 @@ async fn operator_recovery_restores_file_owner_and_cleans_unpublished_intent_wit
         .unwrap();
         assert!(matches!(
             source
-                .read_service_recovery_page(&other, &[row.member.clone()], &page.rows)
+                .read_service_recovery_page(&other, std::slice::from_ref(&row.member), &page.rows)
                 .await,
             Err(PrivateOriginalError::Denied)
         ));

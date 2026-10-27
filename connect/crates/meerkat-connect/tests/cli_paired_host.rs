@@ -788,23 +788,22 @@ fn deferred_model_response(request: &Request, phase: usize, mode: DeferredMode) 
         );
         return deferred_call_response(&id, name, args);
     }
-    if let Some(message) = catalog_results.last() {
-        if message["tool_call_id"]
+    if let Some(message) = catalog_results.last()
+        && message["tool_call_id"]
             .as_str()
             .unwrap()
             .starts_with("catalog-load-")
-        {
-            let load: Value = serde_json::from_str(message["content"].as_str().unwrap()).unwrap();
-            assert_eq!(load["catalog_exact"], true);
-            for name in mode.service_tools() {
-                assert!(
-                    load["resolutions"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .any(|row| row["name"] == *name && row["accepted"] == true)
-                );
-            }
+    {
+        let load: Value = serde_json::from_str(message["content"].as_str().unwrap()).unwrap();
+        assert_eq!(load["catalog_exact"], true);
+        for name in mode.service_tools() {
+            assert!(
+                load["resolutions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|row| row["name"] == *name && row["accepted"] == true)
+            );
         }
     }
     let phase = phase.checked_sub(catalog_results.len()).unwrap();
@@ -2888,13 +2887,14 @@ impl Drop for Cli {
             let _ = killpg(Pid::from_raw(self.child.id() as i32), Signal::SIGKILL);
             let _ = self.child.wait();
         }
-        if self.retain_on_failure && std::thread::panicking() {
-            if let Some(root) = self._root.take() {
-                eprintln!(
-                    "Real supplied CLI failure artifacts retained at {}",
-                    root.keep().display()
-                );
-            }
+        if self.retain_on_failure
+            && std::thread::panicking()
+            && let Some(root) = self._root.take()
+        {
+            eprintln!(
+                "Real supplied CLI failure artifacts retained at {}",
+                root.keep().display()
+            );
         }
     }
 }
@@ -4105,7 +4105,7 @@ fn assert_device_stopped_before_setup(cli: &Cli, host: &Server, config: &[u8]) {
     assert!(host.requests.lock().unwrap().is_empty());
     assert!(!cli.transcript.contains("Setup session: "));
     assert!(!cli.transcript.contains("You: "));
-    cli.assert_reviewed_setup(&config);
+    cli.assert_reviewed_setup(config);
 }
 
 #[tokio::test]

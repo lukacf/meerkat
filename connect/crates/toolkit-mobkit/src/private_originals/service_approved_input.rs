@@ -583,7 +583,7 @@ impl PrivateOriginals {
         // waiting task's selected target. Source authentication was checked
         // above without requiring either installation or service permission.
         let (member, _, _) = compiled
-            .source_binding(&selected)
+            .source_binding(selected)
             .map_err(|_| PrivateOriginalError::Denied)?;
         if agent != member.member
             || task.member.as_ref() != Some(member)
@@ -1531,7 +1531,7 @@ impl PrivateOriginals {
             .as_ref()
             .ok_or(PrivateOriginalError::Unavailable)?;
         self.observe_reviewed_mcp_attachment(
-            &grant,
+            grant,
             &meerkat_authorization_contracts::work_association::OriginalWorkRef {
                 authority: record.source.source_authority.clone(),
                 work: record.event.original.clone(),
@@ -1848,7 +1848,7 @@ impl PrivateOriginals {
             .await
             .map_err(store_error)?
             .ok_or(PrivateOriginalError::Unavailable)?;
-        let mut current_record = self.decode_record(&current, &reference)?;
+        let mut current_record = self.decode_record(&current, reference)?;
         if current_record.approved_task != record.approved_task
             || (record.final_association.is_some()
                 && current_record.final_association != record.final_association)

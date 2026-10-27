@@ -390,15 +390,15 @@ impl RetainedJobSource for CloseAfterFound {
         job_id: &str,
     ) -> RetainedJobLookup {
         let result = self.source.retained_job(producer, job_id).await;
-        if matches!(&result, RetainedJobLookup::Found(_)) {
-            if let Some(lifetime) = self.close.lock().unwrap().take() {
-                use meerkat_toolkit::host_lifetime::control::{
-                    HostCloseReason, PrivateHostLifetimeControl,
-                };
-                lifetime
-                    .begin_close_activation(HostCloseReason::OperatorDisable)
-                    .unwrap();
-            }
+        if matches!(&result, RetainedJobLookup::Found(_))
+            && let Some(lifetime) = self.close.lock().unwrap().take()
+        {
+            use meerkat_toolkit::host_lifetime::control::{
+                HostCloseReason, PrivateHostLifetimeControl,
+            };
+            lifetime
+                .begin_close_activation(HostCloseReason::OperatorDisable)
+                .unwrap();
         }
         result
     }

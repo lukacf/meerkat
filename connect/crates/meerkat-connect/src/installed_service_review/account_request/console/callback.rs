@@ -51,6 +51,7 @@ impl CallbackDelivery {
     /// access, same login, Origin and request. Invalid input leaves this exact
     /// delivery available; an accepted delivery consumes it even if its answer
     /// is later lost. Repeating a POST cannot re-enter native completion.
+    #[cfg(test)]
     pub(crate) fn deliver_json(
         &mut self,
         body: &[u8],
@@ -134,6 +135,7 @@ struct Answer {
 /// route owns `review_id` and the slot; bytes cannot choose a new prompt or
 /// reconstruct an ApprovalRecord. Native ApprovalPrompt::decide remains the
 /// decision owner, and rechecks eligibility after transport refresh.
+#[cfg(test)]
 pub(crate) fn answer_retained(
     review_id: u64,
     exchange: &mut Option<Exchange>,

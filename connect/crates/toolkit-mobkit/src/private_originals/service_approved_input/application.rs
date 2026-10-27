@@ -249,14 +249,13 @@ impl PreparedApplicationServiceInstruction {
                 login.as_ref().is_none_or(|login| login.try_check().is_ok()) && current()
             }))
             .await;
-        if result.is_ok() {
-            if let Some(reservation) = retained_login
+        if result.is_ok()
+            && let Some(reservation) = retained_login
                 .lock()
                 .map_err(|_| PrivateOriginalError::Unavailable)?
                 .take()
-            {
-                reservation.settled();
-            }
+        {
+            reservation.settled();
         }
         result
     }
@@ -829,8 +828,7 @@ impl PrivateOriginals {
             .iter()
             .find(|route| route.id == reference.route)
             .ok_or(PrivateOriginalError::Denied)?;
-        let (member, requester, actor) =
-            compiled.source_binding(&selected).map_err(policy_error)?;
+        let (member, requester, actor) = compiled.source_binding(selected).map_err(policy_error)?;
         if task.member.as_ref() != Some(member)
             || requester != &route.requester
             || actor != &route.ingress_actor

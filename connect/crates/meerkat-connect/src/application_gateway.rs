@@ -147,13 +147,13 @@ async fn present_approval_with_review<T>(
             result = review => ReviewPresentation::Reviewed(result),
         }
     };
-    if matches!(&result, ReviewPresentation::Reviewed(_)) {
-        if let Err(error) = input.check_cleanup() {
-            return ReviewPresentation::Reviewed(Err(ConnectError::native(
-                "restore operator terminal",
-                error,
-            )));
-        }
+    if matches!(&result, ReviewPresentation::Reviewed(_))
+        && let Err(error) = input.check_cleanup()
+    {
+        return ReviewPresentation::Reviewed(Err(ConnectError::native(
+            "restore operator terminal",
+            error,
+        )));
     }
     result
 }

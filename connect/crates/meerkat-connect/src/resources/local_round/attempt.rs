@@ -85,10 +85,10 @@ impl LocalRoundAttempts {
         if state.closed {
             return Err("local round custody is closed".into());
         }
-        if let Some(previous) = &state.registration {
-            if previous.participant.current().is_ok() {
-                return Err("previous local round registration remains current".into());
-            }
+        if let Some(previous) = &state.registration
+            && previous.participant.current().is_ok()
+        {
+            return Err("previous local round registration remains current".into());
         }
         state.registration = Some(Registration {
             session,

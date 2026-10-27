@@ -173,10 +173,10 @@ impl SetupContinuationOwner for Delivery {
             return Err(ContinuationError::Denied);
         }
         let mut saved = self.admission.lock().unwrap().clone();
-        if self.advance_observation.load(Ordering::SeqCst) {
-            if let Some(saved) = &mut saved {
-                saved.observed_at_ms += call as u64;
-            }
+        if self.advance_observation.load(Ordering::SeqCst)
+            && let Some(saved) = &mut saved
+        {
+            saved.observed_at_ms += call as u64;
         }
         if let Some(saved) = &saved {
             assert!(saved.receipt == *receipt);

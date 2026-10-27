@@ -334,7 +334,7 @@ impl PrivateOriginals {
     ) -> Result<AccessRecord, PrivateOriginalError> {
         if stored.key != self.access_key(reference)?
             || stored.data.schema != SCHEMA
-            || !matches!(stored.data.version, 2 | 3 | 4 | 5 | 6)
+            || !matches!(stored.data.version, 2..=6)
             || stored.data.digest().ok().as_deref() != Some(stored.content_digest.as_str())
         {
             return Err(PrivateOriginalError::Conflict);
@@ -375,17 +375,16 @@ impl PrivateOriginals {
                 evidence.validate(self.route(&reference.route)?, decision, &self.scope.owner)?;
             }
         }
-        if let IssuanceObservation::Issued { lineage } = &record.issuance {
-            if record.decision.choice() != PrivateAccessChoice::Approve
+        if let IssuanceObservation::Issued { lineage } = &record.issuance
+            && (record.decision.choice() != PrivateAccessChoice::Approve
                 || record.parent.is_empty()
                 || lineage.len() != record.parent.len() + 1
                 || lineage[..record.parent.len()] != record.parent
                 || lineage.last().is_none_or(|leaf| {
                     leaf.grant_id.as_str() != format!("access-{}", stored.key.id)
-                })
-            {
-                return Err(PrivateOriginalError::Conflict);
-            }
+                }))
+        {
+            return Err(PrivateOriginalError::Conflict);
         }
         Ok(record)
     }

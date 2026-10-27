@@ -103,15 +103,14 @@ impl ConfiguredHelperReportCapability {
             return Err(HostLifetimeError::InvalidSelection);
         }
         for (parent, target) in optional {
-            if let Some(parent) = parent {
-                if parent.is_empty()
+            if let Some(parent) = parent
+                && (parent.is_empty()
                     || parent.len() >= MAX_ASSOCIATION_REFERENCES
                     || parent.iter().any(|reference| reference.validate().is_err())
                     || parent == &self.parent
-                    || targets.iter().any(|selected| selected.target == target)
-                {
-                    return Err(HostLifetimeError::InvalidSelection);
-                }
+                    || targets.iter().any(|selected| selected.target == target))
+            {
+                return Err(HostLifetimeError::InvalidSelection);
             }
         }
         Ok(())

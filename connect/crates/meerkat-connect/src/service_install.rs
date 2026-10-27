@@ -1683,15 +1683,14 @@ impl CheckedInstalls {
         context: &ToolDispatchContext,
         plan: Option<&meerkat_core::ResolvedToolExecutionPlan>,
     ) -> Result<ToolDispatchOutcome, ToolError> {
-        let outcome = match plan {
+        match plan {
             Some(plan) => {
                 self.inner
                     .dispatch_resolved_with_context(call, context, plan)
                     .await
             }
             None => self.inner.dispatch_with_context(call, context).await,
-        };
-        outcome
+        }
     }
 
     async fn delegate(

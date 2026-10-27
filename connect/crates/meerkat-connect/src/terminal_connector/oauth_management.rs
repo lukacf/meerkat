@@ -103,12 +103,11 @@ fn decode(tool: &str, raw: &str) -> Result<Requested, ToolError> {
     if tool != OAUTH_MANAGE_TOOL {
         return Err(refused());
     }
-    if raw.get("action").and_then(Value::as_str) == Some("reconnect") {
-        if raw.get("scopes").is_some() != raw.get("client_auth_profile").is_some()
-            || raw.get("scopes").is_some_and(Value::is_null)
-        {
-            return Err(refused());
-        }
+    if raw.get("action").and_then(Value::as_str) == Some("reconnect")
+        && (raw.get("scopes").is_some() != raw.get("client_auth_profile").is_some()
+            || raw.get("scopes").is_some_and(Value::is_null))
+    {
+        return Err(refused());
     }
     let change: Change = serde_json::from_value(raw).map_err(|_| refused())?;
     if !name(change.service(), 256) {
@@ -119,17 +118,15 @@ fn decode(tool: &str, raw: &str) -> Result<Requested, ToolError> {
         client_auth_profile,
         ..
     } = &change
-    {
-        if scopes.as_ref().is_some_and(|scopes| {
+        && (scopes.as_ref().is_some_and(|scopes| {
             scopes.len() > 128
                 || scopes.iter().any(|scope| !name(scope, 2048))
                 || scopes.iter().collect::<BTreeSet<_>>().len() != scopes.len()
         }) || client_auth_profile
             .as_ref()
-            .is_some_and(|profile| !name(profile, 256))
-        {
-            return Err(refused());
-        }
+            .is_some_and(|profile| !name(profile, 256)))
+    {
+        return Err(refused());
     }
     Ok(Requested::Change(change))
 }
@@ -496,14 +493,14 @@ async fn manage<F: Future<Output = io::Result<()>> + Send, W: Write>(
             if let Err(reason) = selected.check_current().await {
                 return request_refused(reason, response, output);
             }
-            if let Some(recovered) = recovered {
-                if native_defaults(owner, &selected).await.as_ref() != Ok(&recovered) {
-                    return request_refused(
-                        "reconnect_defaults_changed_or_unavailable",
-                        response,
-                        output,
-                    );
-                }
+            if let Some(recovered) = recovered
+                && native_defaults(owner, &selected).await.as_ref() != Ok(&recovered)
+            {
+                return request_refused(
+                    "reconnect_defaults_changed_or_unavailable",
+                    response,
+                    output,
+                );
             }
             if let Err(error) = profiles::recheck(&owner.profiles, &target, profile.as_ref()).await
             {

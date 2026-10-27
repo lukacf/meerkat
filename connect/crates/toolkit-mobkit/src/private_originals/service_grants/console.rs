@@ -243,11 +243,11 @@ impl PrivateOriginals {
                 self.service_task_snapshot(&record).await?;
                 for grant in link.grants() {
                     let access = store
-                        .get(&self.access_key(&grant)?)
+                        .get(&self.access_key(grant)?)
                         .await
                         .map_err(store_error)?
                         .ok_or(PrivateOriginalError::Unavailable)?;
-                    let access_record = self.decode_access(&access, &grant)?;
+                    let access_record = self.decode_access(&access, grant)?;
                     // Old rows without native correspondence remain historical.
                     // Neither a missing source join nor v2 becomes a live account.
                     if result.rows.iter().any(|row| row.access.key == access.key) {

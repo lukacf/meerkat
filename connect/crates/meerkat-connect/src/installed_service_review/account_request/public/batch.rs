@@ -211,7 +211,7 @@ impl InstalledAccountRequests {
             let checked_refresh = || -> futures_util::future::BoxFuture<'static, Result<(), ConnectError>> {
                 let login = login.clone();
                 let current = login.check().map_err(|_| refused("The Console login is unavailable"));
-                let refreshed = current.is_ok().then(|| refresh());
+                let refreshed = current.is_ok().then(refresh);
                 Box::pin(async move {
                     current?;
                     refreshed.expect("a current login selected refresh").await?;

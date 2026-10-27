@@ -134,21 +134,18 @@ impl ConsoleSetupBinding {
     ) -> Result<ConsoleStatusPage, HostLifetimeError> {
         let viewer = current()
             .ok_or(HostLifetimeError::Denied)
-            .map_err(|error| {
+            .inspect_err(|&error| {
                 status_owner_refused("binding.status_page.current_viewer", error);
-                error
             })?;
-        let login = self.current_login(&viewer).map_err(|error| {
+        let login = self.current_login(&viewer).inspect_err(|&error| {
             status_owner_refused("binding.status_page.current_login", error);
-            error
         })?;
         let principal = viewer
             .human
             .as_ref()
             .ok_or(HostLifetimeError::Denied)
-            .map_err(|error| {
+            .inspect_err(|&error| {
                 status_owner_refused("binding.status_page.human", error);
-                error
             })?
             .principal()
             .map_err(|_| {
@@ -164,14 +161,14 @@ impl ConsoleSetupBinding {
                 }
                 match direction {
                     ConsolePageRead::Refresh => page.start.clone(),
-                    ConsolePageRead::Next => {
-                        Some(page.next.clone().ok_or(HostLifetimeError::Denied).map_err(
-                            |error| {
+                    ConsolePageRead::Next => Some(
+                        page.next
+                            .clone()
+                            .ok_or(HostLifetimeError::Denied)
+                            .inspect_err(|&error| {
                                 status_owner_refused("binding.status_page.next_position", error);
-                                error
-                            },
-                        )?)
-                    }
+                            })?,
+                    ),
                 }
             }
         };
@@ -242,10 +239,10 @@ impl ConsoleSetupBinding {
             access,
             recovery,
         };
-        self.check_status_page(&result, current).map_err(|error| {
-            status_owner_refused("binding.status_page.final_currentness", error);
-            error
-        })?;
+        self.check_status_page(&result, current)
+            .inspect_err(|&error| {
+                status_owner_refused("binding.status_page.final_currentness", error);
+            })?;
         Ok(result)
     }
 
@@ -258,9 +255,8 @@ impl ConsoleSetupBinding {
     ) -> Result<(), HostLifetimeError> {
         let fresh = current()
             .ok_or(HostLifetimeError::Denied)
-            .map_err(|error| {
+            .inspect_err(|&error| {
                 status_owner_refused("binding.check_status_page.viewer", error);
-                error
             })?;
         if !Arc::ptr_eq(&self.source, &page.source) {
             status_read_refused("binding.check_status_page.source", "Denied");
@@ -324,17 +320,17 @@ impl ConsoleSetupBinding {
             status_read_refused("binding.current_login.service_identity", "Denied");
             return Err(HostLifetimeError::Denied);
         }
-        self.owner.validate_current_selection().map_err(|error| {
-            status_owner_refused("binding.current_login.selection", error);
-            error
-        })?;
+        self.owner
+            .validate_current_selection()
+            .inspect_err(|&error| {
+                status_owner_refused("binding.current_login.selection", error);
+            })?;
         let human = viewer
             .human
             .as_ref()
             .ok_or(HostLifetimeError::Denied)
-            .map_err(|error| {
+            .inspect_err(|&error| {
                 status_owner_refused("binding.current_login.human", error);
-                error
             })?;
         human.current().map_err(|_| {
             status_read_refused("binding.current_login.current", "Denied");
@@ -347,9 +343,8 @@ impl ConsoleSetupBinding {
         let scope = human
             .login_scope()
             .ok_or(HostLifetimeError::Denied)
-            .map_err(|error| {
+            .inspect_err(|&error| {
                 status_owner_refused("binding.current_login.scope", error);
-                error
             })?;
         self.logins
             .resolve(human.issuer(), human.subject(), scope)
@@ -454,9 +449,8 @@ impl ConsoleServiceRecoverySnapshot {
             .human
             .as_ref()
             .ok_or(HostLifetimeError::Denied)
-            .map_err(|error| {
+            .inspect_err(|&error| {
                 status_owner_refused("recovery.check_visible.human", error);
-                error
             })?;
         let subject = human.current().map_err(|_| {
             status_read_refused("recovery.check_visible.current", "Denied");

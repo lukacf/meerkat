@@ -16,8 +16,10 @@ use std::{
 };
 
 mod callback;
+#[cfg(test)]
+pub(crate) use callback::answer_retained;
 pub(crate) use callback::{
-    CallbackDelivery, CallbackResult, answer_retained, answer_retained_authorized,
+    CallbackDelivery, CallbackResult, answer_retained_authorized,
     cancel_retained_sign_in_authorized,
 };
 
@@ -76,7 +78,7 @@ impl InstalledAccountRequests {
                 let current = login
                     .check()
                     .map_err(|_| refused("The Console login is unavailable"));
-                let refreshed = current.is_ok().then(|| refresh());
+                let refreshed = current.is_ok().then(refresh);
                 Box::pin(async move {
                     current?;
                     refreshed.expect("a current login selected refresh").await?;
@@ -121,13 +123,13 @@ impl InstalledAccountRequests {
                 Err(error) => present::join_cleanup(Err(error), retired).map(|()| false),
             };
         }
-        if result.is_err() {
-            if let Err(cleanup) = self.review.control.retire().map_err(refused) {
-                return Err(ConnectError::Cleanup {
-                    primary: Box::new(result.unwrap_err()),
-                    cleanup: Box::new(cleanup),
-                });
-            }
+        if result.is_err()
+            && let Err(cleanup) = self.review.control.retire().map_err(refused)
+        {
+            return Err(ConnectError::Cleanup {
+                primary: Box::new(result.unwrap_err()),
+                cleanup: Box::new(cleanup),
+            });
         }
         // Login loss, caller loss and request failure never close the host.
         result.map(|_| true)
@@ -754,9 +756,8 @@ where
                         }),
                         _ => Err(refused("The protected account answer is invalid")),
                     };
-                    if result.is_ok() {
-                        if let Some(reservation) = reservation { reservation.settled(); }
-                    }
+                    if result.is_ok()
+                        && let Some(reservation) = reservation { reservation.settled(); }
                     result
                 };
                 let result = tokio::select! { biased;

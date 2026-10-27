@@ -569,16 +569,15 @@ impl PreparedNativeHost {
         {
             return Err(HostLifetimeError::InvalidSelection);
         }
-        if let Some(rule) = &self.service_parent_administration {
-            if self.remote_operator.is_none()
+        if let Some(rule) = &self.service_parent_administration
+            && (self.remote_operator.is_none()
                 || rule.routes().is_empty()
                 || rule
                     .routes()
                     .iter()
-                    .any(|id| !self.routes.iter().any(|route| &route.id == id))
-            {
-                return Err(HostLifetimeError::InvalidSelection);
-            }
+                    .any(|id| !self.routes.iter().any(|route| &route.id == id)))
+        {
+            return Err(HostLifetimeError::InvalidSelection);
         }
         let mut members = BTreeSet::new();
         for member in &self.members {

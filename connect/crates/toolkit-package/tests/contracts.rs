@@ -913,8 +913,7 @@ fn mcpb_duplicate_configurations() -> [Vec<u8>; 2] {
 fn mcpb_canonical_json_rejects_duplicate_sensitive_configuration() {
     for bytes in mcpb_duplicate_configurations() {
         let error = ImportedMcpbManifest::parse(&bytes)
-            .err()
-            .expect("duplicate keys must not erase the original sensitive declaration");
+            .expect_err("duplicate keys must not erase the original sensitive declaration");
         assert_eq!(error.path, "manifest.json");
         assert_eq!(error.message, "invalid MCPB manifest");
     }
@@ -937,8 +936,7 @@ fn mcpb_canonical_json_rejects_nested_duplicate_declarations() {
         ),
     ] {
         let error = ImportedMcpbManifest::parse(&mcpb_with_raw_member(name, raw))
-            .err()
-            .expect("nested duplicate declarations must not be normalized away");
+            .expect_err("nested duplicate declarations must not be normalized away");
         assert_eq!(error.path, "manifest.json");
         assert_eq!(error.message, "invalid MCPB manifest");
     }

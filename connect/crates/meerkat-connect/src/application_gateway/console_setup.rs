@@ -699,10 +699,10 @@ impl ConsoleSetup {
         }.await;
         // Always retire transport, and release only this actual owner's slot.
         // present_console itself joins entered native account work on close.
-        if let Ok(mut slot) = self.0.active.lock() {
-            if slot.as_ref().is_some_and(|held| Arc::ptr_eq(held, &active)) {
-                slot.take();
-            }
+        if let Ok(mut slot) = self.0.active.lock()
+            && slot.as_ref().is_some_and(|held| Arc::ptr_eq(held, &active))
+        {
+            slot.take();
         }
         result
     }

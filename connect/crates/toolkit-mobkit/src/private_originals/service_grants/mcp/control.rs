@@ -162,11 +162,11 @@ impl PrivateOriginals {
         })?;
         let access_stored = self
             .store
-            .get(&self.access_key(&grant)?)
+            .get(&self.access_key(grant)?)
             .await
             .map_err(store_error)?
             .ok_or(PrivateOriginalError::Unavailable)?;
-        let access = self.decode_access(&access_stored, &grant)?;
+        let access = self.decode_access(&access_stored, grant)?;
         let route = self.route(&reference.route)?;
         let control = McpAttachmentControlRequest::from_trusted_ingress(
             task.original_task.origin_session_id.clone(),

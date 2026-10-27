@@ -341,7 +341,7 @@ impl Fixture {
         )
         .await;
         let store = FaultStore {
-            inner: SqliteStore::open(&directory.path().join("sources.sqlite3")).unwrap(),
+            inner: SqliteStore::open(directory.path().join("sources.sqlite3")).unwrap(),
             fault: AtomicU8::new(0),
         };
         Self {

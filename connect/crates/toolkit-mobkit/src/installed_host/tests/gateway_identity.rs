@@ -11,7 +11,6 @@ use meerkat_mobkit::{
         PreparedApplicationRequest, PreparedGatewayApplication,
     },
 };
-use meerkat_runtime::service_ext::SessionServiceRuntimeExt;
 use serde::{Deserialize, Serialize};
 use std::{
     io::{BufRead, BufReader, Write},

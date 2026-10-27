@@ -273,6 +273,7 @@ import {
   workspaceFeatures,
 } from "./ci-hook-coverage.mjs";
 import { loadNonRustReaders, readerPackagesFor, readerSelectionsFor, WHOLE_CHECKOUT } from "./ci-non-rust-readers.mjs";
+import { CORE, PRODUCTS_PATH, loadProducts, productOfPath, productRootPrefixes } from "./ci-products.mjs";
 import {
   REUSE_CLASSIFIER,
   RELEASE_PROJECTION_MODE,
@@ -672,6 +673,10 @@ export const CLIPPY_HEAD_SHARDS = [
 export const MOB_CHAIN_CLIPPY_HEADS = ["rkat", "meerkat-integration-tests", "meerkat-rpc"];
 export const MOB_CHAIN_INVALIDATED = "mob chain invalidated";
 export const CLIPPY_PACKED_SHARDS = 5;
+// The main unit rows of a product other than Core: its packages pack into at
+// most this many rows (a product's integration tests are closure-tests rows
+// of their own, CLOSURE_TESTS_PER_ROW targets each).
+export const PRODUCT_MAIN_UNIT_SHARDS = 2;
 
 // The inputs of the two exact-profile lanes, which select exact lists of
 // tests (the governed JSONL step in ci.yml, the CONFINEMENT_* filters and
@@ -1325,7 +1330,9 @@ function isLaneDefinitionPath(path) {
     path === "scripts/ci-push-plan-base.mjs" ||
     path === "scripts/ci-push-base-selftest.mjs" ||
     path === "scripts/release-projection-only.mjs" ||
-    path === "scripts/release-version-pins.mjs"
+    path === "scripts/release-version-pins.mjs" ||
+    path === PRODUCTS_PATH ||
+    path === "scripts/ci-products.mjs"
   );
 }
 
@@ -1430,7 +1437,9 @@ function isGlobalPath(path) {
     path === "scripts/rust-test-selector.mjs" ||
     path === "scripts/ci-pin-rust-toolchain-env" ||
     path === "scripts/ci-clippy-sccache-wrapper" ||
-    path === ".github/workflows/ci.yml"
+    path === ".github/workflows/ci.yml" ||
+    path === PRODUCTS_PATH ||
+    path === "scripts/ci-products.mjs"
   ) {
     return true;
   }
@@ -1438,6 +1447,18 @@ function isGlobalPath(path) {
     path.startsWith(".cargo/") ||
     path.startsWith("scripts/cargo-") ||
     path.startsWith(".github/actions/setup-rust-ci/")
+  );
+}
+
+// A product's own build configuration: the files at its root that Clippy,
+// rustfmt, Cargo or rustup read for a build of its crates (they read the
+// file nearest to the crate or the working directory).
+const PRODUCT_BUILD_CONFIG_FILES = ["clippy.toml", ".clippy.toml", "rustfmt.toml", ".rustfmt.toml", "rust-toolchain.toml", "rust-toolchain"];
+function isProductBuildConfigPath(path, products) {
+  return products.some(
+    (product) =>
+      product.name !== CORE &&
+      (PRODUCT_BUILD_CONFIG_FILES.some((file) => path === `${product.root}/${file}`) || path.startsWith(`${product.root}/.cargo/`)),
   );
 }
 
@@ -1760,7 +1781,7 @@ function countCanaryTests(source, prefix) {
 // b45c8e60: `--workspace --test ...` rows 472/472 and 380/380 units identical
 // to the hook's, `--workspace --lib` 572/572; package-scoped rows differed in
 // 31-39 units (dependency features), and so does `--workspace --exclude`.
-function hookParityRows({ scope, byName, unified, model, maxTestRows, nextestText, hook, libRowRunner }) {
+function hookParityRows({ scope, byName, unified, model, maxTestRows, nextestText, hook, libRowRunner, productOf = () => "core", productStack = () => null }) {
   const rows = [];
   const testTargets = (name) =>
     byName.get(name).targets.filter((target) => target.kind.length === 1 && target.kind[0] === "test");
@@ -1784,6 +1805,7 @@ function hookParityRows({ scope, byName, unified, model, maxTestRows, nextestTex
     rows.push({
       name: "lib",
       lane: "lib",
+      product: "core",
       runner: libRowRunner,
       packages: libPackages,
       package_flags: "--workspace",
@@ -1809,14 +1831,23 @@ function hookParityRows({ scope, byName, unified, model, maxTestRows, nextestTex
       if (!home.has(target.name)) home.set(target.name, name);
     }
   }
-  const binariesOf = (test) => allNames.filter((name) => {
-    const target = testTargets(name).find((candidate) => candidate.name === test);
-    if (!target) return false;
-    if (!hookBuilt(name, target)) {
-      throw new Error(`test target name ${test} is hook-built in ${home.get(test)} but not in ${name}; --test ${test} would make Cargo refuse the row`);
+  const binariesOf = (test) => {
+    const owners = allNames.filter((name) => {
+      const target = testTargets(name).find((candidate) => candidate.name === test);
+      if (!target) return false;
+      if (!hookBuilt(name, target)) {
+        throw new Error(`test target name ${test} is hook-built in ${home.get(test)} but not in ${name}; --test ${test} would make Cargo refuse the row`);
+      }
+      return true;
+    });
+    // `--workspace --test NAME` runs every member's target of that name, so
+    // a name two products share would put both in one row.
+    const owningProducts = [...new Set(owners.map(productOf))];
+    if (owningProducts.length > 1) {
+      throw new Error(`test target name ${test} belongs to ${owningProducts.join(" and ")} (${owners.join(", ")}); one row would run both products' binaries, so rename one`);
     }
-    return true;
-  }).map((name) => `${name}::${test}`);
+    return owners.map((name) => `${name}::${test}`);
+  };
   const byHome = new Map();
   for (const [test, name] of home) byHome.set(name, [...(byHome.get(name) ?? []), test]);
   // The nested-Cargo canaries' binary (CANARY_TEST_GROUP) leaves the packed
@@ -1845,6 +1876,7 @@ function hookParityRows({ scope, byName, unified, model, maxTestRows, nextestTex
       );
       units.push({
         package: name,
+        product: productOf(name),
         part: parts > 1 ? ` ${index + 1}/${parts}` : "",
         tests: slice,
         weight: model.lines.get(name) + LINK_COST_PER_DEP * model.closures.get(name).size + TEST_TARGET_COST * slice.length,
@@ -1854,12 +1886,15 @@ function hookParityRows({ scope, byName, unified, model, maxTestRows, nextestTex
   // Two parts of one package never share a row, or the split would not
   // parallelize; a target name lives in exactly one unit.
   units.sort((a, b) => b.weight - a.weight || a.package.localeCompare(b.package) || a.part.localeCompare(b.part));
+  // A row never mixes products, and each product packs into at most
+  // maxTestRows rows of its own.
   const bins = [];
   for (const unit of units) {
-    const open = bins.filter((bin) => !bin.units.some((other) => other.package === unit.package));
+    const mine = bins.filter((bin) => bin.product === unit.product);
+    const open = mine.filter((bin) => !bin.units.some((other) => other.package === unit.package));
     let bin;
-    if (bins.length < maxTestRows || open.length === 0) {
-      bin = { units: [], weight: 0 };
+    if (mine.length < maxTestRows || open.length === 0) {
+      bin = { units: [], weight: 0, product: unit.product };
       bins.push(bin);
     } else {
       bin = open.sort((a, b) => a.weight - b.weight || a.units.length - b.units.length)[0];
@@ -1882,13 +1917,14 @@ function hookParityRows({ scope, byName, unified, model, maxTestRows, nextestTex
     rows.push({
       name: `tests ${shortName(heaviest.package)}${heaviest.part}${bin.units.length > 1 ? `+${bin.units.length - 1}` : ""}`,
       lane: "tests",
+      product: bin.product,
       packages,
       package_flags: "--workspace",
       test_flags: tests.map((test) => `--test ${test}`).join(" "),
       profile: CLOSURE_TEST_PROFILE,
       binaries,
       no_tests: "warn",
-      rust_min_stack: HOOK_TEST_STACK,
+      rust_min_stack: productStack(bin.product) ?? HOOK_TEST_STACK,
       estimated_minutes: estimatedMinutes(lines + LINK_COST_PER_DEP * union.size + TEST_TARGET_COST * binaries.length),
     });
   }
@@ -1905,6 +1941,7 @@ function hookParityRows({ scope, byName, unified, model, maxTestRows, nextestTex
       rows.push({
         name: `tests ${shortName(canaryRows.owner)} canaries ${index}/${canaryRows.count}`,
         lane: "tests",
+        product: productOf(canaryRows.owner),
         packages,
         package_flags: "--workspace",
         test_flags: `--test ${canaryRows.test}`,
@@ -1931,6 +1968,7 @@ function hookParityRows({ scope, byName, unified, model, maxTestRows, nextestTex
     rows.push({
       name: "HeadCanonical",
       lane: "headcanonical",
+      product: productOf(headCanonical.package),
       packages: [headCanonical.package],
       package_flags: `-p ${headCanonical.package} --features ${headCanonical.features.map((feature) => `${headCanonical.package}/${feature}`).join(",")}`,
       test_flags: `--test ${headCanonical.test}`,
@@ -1949,6 +1987,7 @@ function hookParityRows({ scope, byName, unified, model, maxTestRows, nextestTex
     rows.push({
       name: "e2e-fast",
       lane: "e2e-fast",
+      product: productOf(e2eOwners[0]),
       packages: [e2eOwners[0]],
       package_flags: "--workspace",
       test_flags: `--test ${hook.e2eFast.binary}`,
@@ -2012,6 +2051,22 @@ function plan(args) {
   const byId = new Map(packages.map((pkg) => [pkg.id, pkg]));
   const dirs = packageDirs(packages);
   const allNames = packages.map((pkg) => pkg.name).sort();
+  // Each package's product (ci/products.json): Core, or the product whose
+  // root holds its manifest. No row below mixes products.
+  const products = loadProducts();
+  const productOf = new Map(packages.map((pkg) => [pkg.name, productOfPath(packageDir(pkg), products)]));
+  const productPackages = (product) => allNames.filter((name) => productOf.get(name) === product);
+  // Names grouped by product, Core first, then the registry's order.
+  const byProduct = (names) =>
+    products
+      .map((product) => [product.name, names.filter((name) => productOf.get(name) === product.name)])
+      .filter(([, group]) => group.length > 0);
+  // A row of one product, with that product's test-thread stack when it
+  // sets one (ci/products.json test_stack; Core's is .cargo/config.toml's).
+  const withProduct = (row, product) => {
+    const stack = products.find((candidate) => candidate.name === product)?.testStack;
+    return { ...row, product, ...(stack && !row.rust_min_stack ? { rust_min_stack: stack } : {}) };
+  };
 
   const reverse = new Map(packages.map((pkg) => [pkg.id, new Set()]));
   for (const pkg of packages) {
@@ -2053,7 +2108,14 @@ function plan(args) {
     example_web_wasm: false,
     docs_only: false,
     release_projection: releaseProjection,
+    // Per product (see productPlan): the products whose roots hold changed
+    // paths, the changed packages per product, a product-wide selection for
+    // an unowned Rust path or a product's own build configuration, the
+    // published-floor checks, the downstream type-check rows and the
+    // products' non-Rust lanes.
+    products: null,
   };
+  const productEscalations = {};
 
   let workspaceReason = "";
   const seeds = new Set();
@@ -2092,6 +2154,16 @@ function plan(args) {
         }`;
         continue;
       }
+      // A product's own build configuration (its clippy.toml, rustfmt.toml,
+      // Cargo configuration or toolchain file) changes what every package of
+      // that product compiles or lints, and nothing of Core's: the product's
+      // packages, never the whole workspace.
+      const owner = productOfPath(path, products);
+      if (owner !== CORE && isProductBuildConfigPath(path, products)) {
+        productEscalations[owner] ||= `${owner} build configuration changed: ${path}`;
+        for (const name of productPackages(owner)) seeds.add(name);
+        continue;
+      }
       if (!isRustSourcePath(path)) {
         // Non-Rust paths can still select a package: fixtures, SQL, TOML,
         // JSON and snapshot data a crate reads at test time, and the
@@ -2112,6 +2184,13 @@ function plan(args) {
       const pathPackages = packagesForFile(path, dirs);
       if (pathPackages.length > 0) {
         for (const pkg of pathPackages) seeds.add(pkg.name);
+      } else if (owner !== CORE) {
+        // A Rust path inside a product's root that no package owns (an
+        // example or fixture source outside the crate directories) selects
+        // that product's packages: the fail-closed escalation stays inside
+        // the product and never reaches Core's lanes.
+        productEscalations[owner] ||= `Rust path outside any ${owner} package: ${path}`;
+        for (const name of productPackages(owner)) seeds.add(name);
       } else {
         result.unmapped_rust_paths.push(path);
       }
@@ -2220,6 +2299,7 @@ function plan(args) {
       dependency_closure: closures.get(name).size,
       estimated_minutes: estimatedMinutes(weights.get(name)),
       heavy_chain: heavyChain.has(name),
+      product: productOf.get(name),
     }]),
   );
   result.pr_unit_budget_minutes = PR_UNIT_BUDGET_MINUTES;
@@ -2258,7 +2338,9 @@ function plan(args) {
     mcp_confinement_positive: false,
     reader_rows: [],
     example_web_wasm: false,
+    downstream_type_check: [],
   };
+  const downstreamRows = [];
   result.reader_not_run = [];
 
   const archivedPackages = new Map(
@@ -2324,6 +2406,18 @@ function plan(args) {
       (path) => /^(docs\/|docs\/internal\/|CHANGELOG\.md|README\.md|AGENTS\.md|CLAUDE\.md|.*\.mdx?$)/.test(path),
     );
   }
+  // Core's own lanes (its whole-workspace unit sweep and feature suites, the
+  // exact-profile guard lanes, the wasm and SDK lanes of a push) run when the
+  // plan reaches a Core package: a Core package changed, by path or through
+  // the lock, or the plan is the whole workspace. Core depends on no
+  // product, so a change inside a product's root reaches that product and
+  // its dependents only, and plans none of them.
+  result.core_changed =
+    result.rust_changed && (result.mode === "workspace" || result.packages.some((name) => productOf.get(name) === CORE));
+  // A changed path in Core's tree (outside every product root), or an
+  // unknown diff: the push's path-selected Core lanes (the example web
+  // suites and WASM timers, which every Core push runs) need one.
+  result.core_paths_changed = changed === null || changed.some((path) => productOfPath(path, products) === CORE);
 
   // The browser examples and WASM timer tests execute this runtime. The push
   // selects them for any changed package that reaches it through the same
@@ -2381,20 +2475,62 @@ function plan(args) {
       }
     }
     const mobInvalidated = result.mode === "workspace" || result.packages.some((name) => mobBuild.has(name));
+    // A product's packages in the meerkat-mob chain (their library compiles
+    // meerkat-mob) are chain heads of their own: a pull request that
+    // invalidates meerkat-mob's build leaves their Clippy to the push too, or
+    // their lane would compile the whole chain uncached first.
     deferred.clippy_packages = deferToPush && mobInvalidated
-      ? result.packages.filter((name) => MOB_CHAIN_CLIPPY_HEADS.includes(name))
+      ? result.packages.filter(
+        (name) => MOB_CHAIN_CLIPPY_HEADS.includes(name) || (productOf.get(name) !== CORE && heavyChain.has(name)),
+      )
       : [];
     deferred.clippy_packages_reason = deferred.clippy_packages.length > 0 ? MOB_CHAIN_INVALIDATED : "";
     const clippyPackages = result.packages.filter((name) => !deferred.clippy_packages.includes(name));
-    result.shards = clippyShards(
-      clippyPackages,
-      weights,
-      result.mode,
-      shardCap,
-      byName,
-      deferToPush ? heavyChain : null,
-    );
+    // Per product: Core's packages pack with Core's head groups up to the
+    // shard cap; each other product lints its packages in one shard (its
+    // crates build on each other, so one invocation checks the shared
+    // dependencies once), or two in a pull request that splits the mob
+    // chain's lib and bin targets from the rest.
+    result.shards = byProduct(clippyPackages)
+      .flatMap(([product, names]) =>
+        clippyShards(
+          names,
+          weights,
+          product === CORE ? result.mode : "packages",
+          product === CORE ? shardCap : 1,
+          byName,
+          deferToPush ? heavyChain : null,
+        ).map((shard) => ({ ...shard, product })),
+      )
+      .sort((a, b) => b.estimated_cost - a.estimated_cost || a.name.localeCompare(b.name));
     deferred.clippy_test_targets = deferToPush ? clippyPackages.filter((name) => heavyChain.has(name)) : [];
+    // Downstream type-check rows (pull requests). A product whose packages
+    // the change reaches only through another product's or Core's packages
+    // (the reverse-dependency closure) gets one Clippy row over those
+    // packages, every target, so an API break fails the pull request that
+    // causes it rather than the product's next build. When the change
+    // invalidates meerkat-mob's build, a product package in the mob chain
+    // would compile the whole chain uncached first, as the chain heads
+    // would: that product's row is left to the push (deferred_to_push),
+    // whose closure check and closure tests compile it. A push needs no such
+    // row for the same reason.
+    if (deferToPush) {
+      const changedProducts = new Set(result.packages.map((name) => productOf.get(name)));
+      const downstream = byProduct(
+        result.closure.filter((name) => productOf.get(name) !== CORE && !changedProducts.has(productOf.get(name))),
+      );
+      for (const [product, names] of downstream) {
+        if (mobInvalidated && names.some((name) => heavyChain.has(name))) {
+          deferred.downstream_type_check.push(product);
+          continue;
+        }
+        for (const shard of clippyShards(names, weights, "packages", 1, byName, null)) {
+          result.shards.push({ ...shard, name: `downstream ${shard.name}`, product, downstream: true });
+        }
+        downstreamRows.push({ product, packages: names });
+      }
+      result.shards.sort((a, b) => b.estimated_cost - a.estimated_cost || a.name.localeCompare(b.name));
+    }
     if (result.shards.length === 0) {
       throw new Error("internal error: Rust-relevant change produced no lanes");
     }
@@ -2413,13 +2549,12 @@ function plan(args) {
       (name) => UNIT_SOLO_PACKAGES.includes(name) || partitionedUnits.has(name),
     );
     result.unit_shards = [
-      ...packWithinBudget(
-        result.unit_packages.filter((name) => !soloUnits.includes(name)),
-        weights,
-        Math.max(1, shardCap - soloUnits.length),
-        model,
+      ...byProduct(result.unit_packages.filter((name) => !soloUnits.includes(name))).flatMap(([product, names]) =>
+        packWithinBudget(names, weights, Math.max(1, shardCap - soloUnits.length), model).map((shard) => withProduct(shard, product)),
       ),
-      ...soloUnits.flatMap((name) => partitionRows(packShards([name], weights, 1, model)[0], partitionedUnits.get(name))),
+      ...soloUnits.flatMap((name) =>
+        partitionRows(withProduct(packShards([name], weights, 1, model)[0], productOf.get(name)), partitionedUnits.get(name)),
+      ),
     ];
     for (const shard of result.unit_shards) {
       if (shard.estimated_minutes > PR_UNIT_BUDGET_MINUTES) {
@@ -2434,25 +2569,27 @@ function plan(args) {
     // workspace around them (see the header).
     const unitOnMain = !deferToPush;
     const unitOnMainPackages = new Set(unitOnMain ? result.unit_packages : []);
+    // The main unit sweep covers the whole workspace when the plan reaches
+    // Core, and only the changed products' closure otherwise.
+    const mainUnitScope = result.core_changed ? allNames : result.closure;
     result.main_unit_shards = [
       ...(unitOnMain ? result.unit_shards : []),
-      ...packShards(
-        allNames.filter((name) => !archivedPackages.has(name) && !unitOnMainPackages.has(name)),
-        weights,
-        args.workspaceShards,
-        model,
+      ...byProduct(mainUnitScope.filter((name) => !archivedPackages.has(name) && !unitOnMainPackages.has(name))).flatMap(
+        ([product, names]) =>
+          packShards(names, weights, product === CORE ? args.workspaceShards : Math.min(PRODUCT_MAIN_UNIT_SHARDS, names.length), model)
+            .map((shard) => withProduct(shard, product)),
       ),
     ];
-    const archived = archivedLanes(archivedPackages, featureSuites);
+    const archived = result.core_changed ? archivedLanes(archivedPackages, featureSuites) : { builds: [], runs: [] };
     result.main_archive_builds = archived.builds;
     result.main_archive_runs = archived.runs;
     // Feature-gated suites: all of them on main (an archived package's
     // suites run as archived lanes); with the unit lanes, those of a changed
     // package outside the heavy chain, but in a pull request only the suites
     // not marked `pullRequest: false`.
-    result.main_feature_unit_shards = featureSuites.filter(
-      (suite) => !archivedPackages.has(suite.packages[0]),
-    );
+    result.main_feature_unit_shards = result.core_changed
+      ? featureSuites.filter((suite) => !archivedPackages.has(suite.packages[0]))
+      : [];
     const changedSuites = featureSuites.filter(
       (suite) => result.unit_packages.includes(suite.packages[0]) && !heavyChain.has(suite.packages[0]),
     );
@@ -2488,7 +2625,9 @@ function plan(args) {
     // Feature checks keep the weight-packed shards: they compile one Bazel
     // set and a few matrix rows per shard, and the head split would only
     // multiply their jobs. A pull request leaves them to the push.
-    result.feature_check_shards = packShards(result.packages, weights, shardCap);
+    // Core's packages only: the checks replay the feature sets Core's Bazel
+    // graph builds, and no Bazel target builds a product's crates.
+    result.feature_check_shards = packShards(result.packages.filter((name) => productOf.get(name) === CORE), weights, shardCap);
     const featureJobs = featureChecks(result.feature_check_shards, byName);
     result.feature_check_jobs = deferToPush ? [] : featureJobs;
     deferred.feature_check_jobs = featureJobs.length - result.feature_check_jobs.length;
@@ -2574,6 +2713,7 @@ function plan(args) {
   // that plan carries no other reason.
   const guardReasons = (lane) => {
     if (!result.rust_changed) return [];
+    if (!result.core_changed) return [];
     if (!deferToPush) return ["every_rust_change"];
     if (changed === null) return ["diff_unknown"];
     return [
@@ -2591,12 +2731,21 @@ function plan(args) {
   // Every crate's documentation, with rustdoc's lints denied: the push
   // runs it on a Rust change, like the closure check.
   result.rustdoc = result.rust_changed && !deferToPush;
+  // What the rustdoc lane documents: Core's members (every workspace member
+  // but the products') when the plan reaches Core, the changed products'
+  // packages otherwise. Products keep their own rustdoc rules.
+  const productNamesInWorkspace = allNames.filter((name) => productOf.get(name) !== CORE);
+  result.rustdoc_flags = result.core_changed
+    ? ["--workspace", ...productNamesInWorkspace.map((name) => `--exclude ${name}`)].join(" ")
+    : result.packages.map((name) => `-p ${name}`).join(" ");
   result.governed_jsonl = guardRuns("governed_jsonl");
   result.mcp_confinement_positive = guardRuns("mcp_confinement_positive");
   deferred.closure_check = result.rust_changed && deferToPush;
   deferred.rustdoc = result.rust_changed && deferToPush;
-  deferred.governed_jsonl = result.rust_changed && !result.governed_jsonl;
-  deferred.mcp_confinement_positive = result.rust_changed && !result.mcp_confinement_positive;
+  // The guard lanes are Core's: a plan that does not reach Core leaves
+  // nothing of theirs to the push.
+  deferred.governed_jsonl = result.core_changed && !result.governed_jsonl;
+  deferred.mcp_confinement_positive = result.core_changed && !result.mcp_confinement_positive;
 
   // Hook-parity rows for the test scope. scripts/ci-hook-coverage.mjs checks
   // them against the hook's own selection; a gap fails the plan.
@@ -2604,7 +2753,8 @@ function plan(args) {
   const hookText = readFileSync(resolve(root, HOOK_SCRIPT), "utf8");
   // A release projection keeps the readers of its changed files, as any
   // plan does: their tests ran on the parent's bytes, not these.
-  result.reader_packages = changed === null ? [] : readerPackagesFor(changed, readerInventory);
+  const readerOptions = { excludedRoots: productRootPrefixes(products) };
+  result.reader_packages = changed === null ? [] : readerPackagesFor(changed, readerInventory, readerOptions);
   for (const name of result.reader_packages) {
     if (!byName.has(name)) throw new Error(`the non-Rust reader inventory names unknown package ${name}`);
   }
@@ -2621,7 +2771,7 @@ function plan(args) {
   }
   result.test_scope = [...new Set([...result.closure, ...result.reader_packages])].sort();
   result.reader_rows = readerRows({
-    selections: changed === null ? [] : readerSelectionsFor(changed, readerInventory),
+    selections: changed === null ? [] : readerSelectionsFor(changed, readerInventory, readerOptions),
     result,
     byName,
     heavyChain,
@@ -2630,6 +2780,25 @@ function plan(args) {
     compiledInDocs,
     unified: workspaceFeatures(metadata, packages),
     canary: canaryGroup(nextestText),
+  });
+  // A product's published-floor check runs when its own packages changed
+  // (by path, by a scoped lock entry or by its build configuration), or
+  // when an input of every floor check changed: the root manifest or lock
+  // (its declared and locked dependencies), the toolchain, the floor
+  // script, or the plan's definition. A workspace-mode plan for any other
+  // global path changes no product's published dependencies.
+  const floorAll = changed === null || changed.some((path) => FLOOR_CHECK_INPUTS.includes(path) || isLaneDefinitionPath(path));
+  result.products = productPlan({
+    products,
+    changed,
+    packages: result.packages,
+    productOf,
+    escalations: productEscalations,
+    downstream: downstreamRows,
+    floor: products
+      .map((product) => product.name)
+      .filter((name) => name !== CORE && productPackages(name).length > 0)
+      .filter((name) => floorAll || [...seeds].some((pkg) => productOf.get(pkg) === name)),
   });
   const hook = hookModel(hookText);
   // The `--workspace --lib` row runs only on a runner that can build it in
@@ -2647,6 +2816,8 @@ function plan(args) {
       nextestText,
       hook,
       libRowRunner: result.lib_row_runner,
+      productOf: (name) => productOf.get(name) ?? CORE,
+      productStack: (product) => products.find((candidate) => candidate.name === product)?.testStack ?? null,
     })
     : [];
   // A pull-request plan is checked against the rows its push runs.
@@ -2687,6 +2858,50 @@ function plan(args) {
     feature_check: waveOf("feature-check", result.feature_check_jobs, durations),
   };
   return result;
+}
+
+// Non-Rust lanes of the products (ported from their own workflows): a
+// changed path under one of `paths` selects the lane. Connect's checks are
+// its packaging unit tests, its docs check and the embedded Console panel's
+// Node test (connect/.github/workflows/checks.yml before the import); every
+// Connect path selects them, since the docs check reads the whole tree.
+// Meta's console, Flow Editor and SDK lanes keep Meta's own classifier
+// (meta/scripts/ci-changes.py) in the transition workflow meta-ci.yml.
+export const PRODUCT_LANES = [{ product: "connect", lane: "connect_checks", paths: ["connect/"] }];
+
+// The plan's product section (see the header of ci-products.mjs):
+//   changed       the products whose roots hold a changed path (every
+//                 product when the diff is unknown);
+//   packages      the plan's changed packages, by product;
+//   escalations   why a product's packages were all selected (an unowned
+//                 Rust path or the product's own build configuration);
+//   floor_checks  the products whose published-floor check runs: their
+//                 crates built against crates.io at the versions they declare
+//                 (scripts/published_crates_standalone.py floor), when their
+//                 own packages or an input of every floor check changed.
+//                 Core changes need none: published Core did not change.
+//                 Advisory on pull requests and main pushes, required on a
+//                 product's release branch;
+//   downstream    the downstream type-check rows the plan added;
+//   lanes         the product non-Rust lanes the changed paths select.
+export const FLOOR_CHECK_INPUTS = ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "scripts/published_crates_standalone.py"];
+export function productPlan({ products, changed, packages, productOf, escalations, downstream, floor }) {
+  const names = products.map((product) => product.name);
+  const touched = changed === null ? names : [...new Set(changed.map((path) => productOfPath(path, products)))];
+  const byProductNames = Object.fromEntries(
+    names.map((name) => [name, packages.filter((pkg) => (productOf.get(pkg) ?? CORE) === name)]).filter(([, group]) => group.length > 0),
+  );
+  const allLanes = changed === null || changed.some(isLaneDefinitionPath);
+  return {
+    changed: names.filter((name) => touched.includes(name)),
+    packages: byProductNames,
+    escalations: { ...escalations },
+    floor_checks: floor,
+    downstream,
+    lanes: PRODUCT_LANES.filter(
+      (lane) => allLanes || (changed ?? []).some((path) => lane.paths.some((prefix) => path.startsWith(prefix))),
+    ).map((lane) => lane.lane),
+  };
 }
 
 // The package whose lib tests every release-projection plan runs: it owns
@@ -2875,6 +3090,9 @@ function deferredSummary(deferred) {
   if (deferred.mcp_confinement_positive) parts.push("MCP confinement positive");
   if (deferred.example_web_wasm) parts.push("the web wasm build and browser suites");
   if (deferred.rustdoc) parts.push("the workspace rustdoc");
+  if (deferred.downstream_type_check?.length > 0) {
+    parts.push(`the downstream type-check of ${deferred.downstream_type_check.join(", ")} (${MOB_CHAIN_INVALIDATED})`);
+  }
   return parts.join("; ");
 }
 
@@ -2907,6 +3125,9 @@ function githubOutput(result) {
   scalar("closure_flags", result.closure_flags);
   scalar("closure_check", String(result.closure_check));
   scalar("rustdoc", String(result.rustdoc));
+  scalar("rustdoc_flags", result.rustdoc_flags ?? "");
+  scalar("core_changed", String(result.core_changed));
+  scalar("core_paths_changed", String(result.core_paths_changed));
   scalar("governed_jsonl", String(result.governed_jsonl));
   scalar("mcp_confinement_positive", String(result.mcp_confinement_positive));
   scalar("guard_lane_reasons", JSON.stringify(result.guard_lane_reasons));
@@ -2974,6 +3195,21 @@ function githubOutput(result) {
   scalar("feature_check_rest_count", String(featureRest.length));
   scalar("feature_check_matrix", featureMatrixOf(featureFirst));
   scalar("feature_check_rest_matrix", featureMatrixOf(featureRest));
+  // Products (ci/products.json): the published-floor checks, one row per
+  // product, and the products' non-Rust lanes.
+  const productSection = result.products ?? { changed: [], floor_checks: [], lanes: [], downstream: [] };
+  scalar("products_changed", productSection.changed.join(" "));
+  scalar("floor_check_count", String(productSection.floor_checks.length));
+  scalar(
+    "floor_check_matrix",
+    JSON.stringify({
+      include: productSection.floor_checks.length > 0
+        ? productSection.floor_checks.map((product) => ({ product }))
+        : [{ product: "none" }],
+    }),
+  );
+  scalar("downstream_products", productSection.downstream.map((row) => row.product).join(" "));
+  scalar("connect_checks", String(productSection.lanes.includes("connect_checks")));
   return `${lines.join("\n")}\n`;
 }
 
@@ -3001,7 +3237,7 @@ function main() {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   }
   process.stderr.write(
-    `ci-cargo-lanes: event=${result.event} mode=${result.mode} release_projection=${result.release_projection !== null} packages=${result.packages.length} closure=${result.closure.length} clippy_shards=${result.shards.length} unit_shards=${result.unit_shards.length} feature_suites=${result.unit_feature_shards.length}/${result.main_feature_unit_shards.length} unit_deferred=${result.unit_deferred.length} unit_rows_on_main=${result.unit_rows_on_main.length} integration=${result.integration_suites.length} reader_rows=${result.reader_rows.length} reader_not_run=${result.reader_not_run.length} feature_check_jobs=${result.feature_check_jobs.length} test_scope=${result.test_scope.length} closure_tests=${result.closure_test_rows.length} first_wave=${Object.values(result.waves).reduce((sum, wave) => sum + wave.first.length, 0)} rest_wave=${Object.values(result.waves).reduce((sum, wave) => sum + wave.rest.length, 0)} hook_binaries=${result.hook_coverage.hook_binaries} hook_retained=${result.hook_coverage.hook_retained} deferred_to_push=[${deferredSummary(result.deferred_to_push)}] (${result.reason})\n`,
+    `ci-cargo-lanes: event=${result.event} mode=${result.mode} release_projection=${result.release_projection !== null} packages=${result.packages.length} closure=${result.closure.length} clippy_shards=${result.shards.length} unit_shards=${result.unit_shards.length} feature_suites=${result.unit_feature_shards.length}/${result.main_feature_unit_shards.length} unit_deferred=${result.unit_deferred.length} unit_rows_on_main=${result.unit_rows_on_main.length} integration=${result.integration_suites.length} reader_rows=${result.reader_rows.length} reader_not_run=${result.reader_not_run.length} feature_check_jobs=${result.feature_check_jobs.length} test_scope=${result.test_scope.length} closure_tests=${result.closure_test_rows.length} first_wave=${Object.values(result.waves).reduce((sum, wave) => sum + wave.first.length, 0)} rest_wave=${Object.values(result.waves).reduce((sum, wave) => sum + wave.rest.length, 0)} hook_binaries=${result.hook_coverage.hook_binaries} hook_retained=${result.hook_coverage.hook_retained} products=[${result.products?.changed.join(",") ?? ""}] floor_checks=[${result.products?.floor_checks.join(",") ?? ""}] downstream=[${result.products?.downstream.map((row) => row.product).join(",") ?? ""}] product_lanes=[${result.products?.lanes.join(",") ?? ""}] deferred_to_push=[${deferredSummary(result.deferred_to_push)}] (${result.reason})\n`,
   );
 }
 

@@ -33,7 +33,9 @@ export const READER_DEFINITION_PATHS = [
 ];
 
 // The key of a reader that walks the whole checkout (a live-workspace audit,
-// a command run in the repository root): every changed path selects it.
+// a command run in the repository root): every changed path selects it,
+// except paths under the roots of the products other than Core
+// (ci/products.json), which those audits leave to their products.
 export const WHOLE_CHECKOUT = "./";
 
 const TARGET_RE = /^(lib|build|(bin|test|example|bench):[A-Za-z0-9_.-]+)$/;
@@ -112,8 +114,8 @@ export function loadNonRustReaders(file = resolve(dirname(fileURLToPath(import.m
 // Does an inventory key (exact file, or directory prefix ending in "/")
 // cover a changed path? A deleted or renamed-away input is still a changed
 // path, so a deletion selects its readers like an edit does.
-export function inventoryPathCovers(key, changedPath) {
-  if (key === WHOLE_CHECKOUT) return true;
+export function inventoryPathCovers(key, changedPath, excludedRoots = []) {
+  if (key === WHOLE_CHECKOUT) return !excludedRoots.some((root) => changedPath.startsWith(root));
   return key.endsWith("/") ? changedPath.startsWith(key) : changedPath === key;
 }
 
@@ -123,12 +125,14 @@ export function inventoryPathCovers(key, changedPath) {
 // names that read the inputs (a filter for nextest). `paths` may mix
 // additions, edits, deletions and both sides of renames; paths no inventory
 // key covers select nothing.
-export function readerSelectionsFor(paths, inventory) {
+// `excludedRoots` (path prefixes ending in "/") are the product roots the
+// whole-checkout readers do not scan.
+export function readerSelectionsFor(paths, inventory, { excludedRoots = [] } = {}) {
   const changed = [...new Set((paths ?? []).map(normalize).filter(Boolean))].sort();
   const all = changed.some((path) => READER_DEFINITION_PATHS.includes(path));
   const rows = new Map();
   for (const entry of inventory.entries) {
-    const hits = all ? changed.filter((path) => READER_DEFINITION_PATHS.includes(path)) : changed.filter((path) => inventoryPathCovers(entry.path, path));
+    const hits = all ? changed.filter((path) => READER_DEFINITION_PATHS.includes(path)) : changed.filter((path) => inventoryPathCovers(entry.path, path, excludedRoots));
     if (hits.length === 0) continue;
     const key = `${entry.package}\0${entry.target}`;
     const row = rows.get(key) ?? {
@@ -155,6 +159,6 @@ export function readerSelectionsFor(paths, inventory) {
 
 // The reader packages for a changed path list (sorted, unique): the seeds
 // the planner adds for non-Rust inputs.
-export function readerPackagesFor(paths, inventory) {
-  return [...new Set(readerSelectionsFor(paths, inventory).map((row) => row.package))].sort();
+export function readerPackagesFor(paths, inventory, options = {}) {
+  return [...new Set(readerSelectionsFor(paths, inventory, options).map((row) => row.package))].sort();
 }

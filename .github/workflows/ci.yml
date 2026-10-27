@@ -376,6 +376,14 @@ jobs:
       feature_check_rest_count: ${{ steps.plan.outputs.feature_check_rest_count }}
       feature_check_matrix: ${{ steps.plan.outputs.feature_check_matrix }}
       feature_check_rest_matrix: ${{ steps.plan.outputs.feature_check_rest_matrix }}
+      core_changed: ${{ steps.plan.outputs.core_changed }}
+      core_paths_changed: ${{ steps.plan.outputs.core_paths_changed }}
+      rustdoc_flags: ${{ steps.plan.outputs.rustdoc_flags }}
+      products_changed: ${{ steps.plan.outputs.products_changed }}
+      floor_check_count: ${{ steps.plan.outputs.floor_check_count }}
+      floor_check_matrix: ${{ steps.plan.outputs.floor_check_matrix }}
+      downstream_products: ${{ steps.plan.outputs.downstream_products }}
+      connect_checks: ${{ steps.plan.outputs.connect_checks }}
     steps:
       # Depth 2 is HEAD and its parents. The classifier diffs a pull
       # request's merge commit against its first parent, or a push against
@@ -867,7 +875,51 @@ jobs:
           cache-on-failure: true
 
       - name: Typed governance gates
-        run: make rmat-audit seam-inventory runtime-authority-bypass machine-authority-docs-gate
+        run: make rmat-audit seam-inventory runtime-authority-bypass
+
+  # The machine-authority docs gate in a job of its own, beside the other
+  # typed governance gates: in one job the four gates ran 664-1048 s on
+  # hosted runners (runs 40399556131, 40402047748, 40411814108 and
+  # 40413996978), and the docs gate's own run is the part the others do not
+  # share. Both jobs take xtask's build from sccache.
+  governance-docs-gate:
+    name: Typed governance gates (machine-authority docs)
+    needs: changes
+    if: ${{ needs.changes.outputs.governance_gates == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+
+      - name: Setup mold linker
+        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: ${{ github.event_name != 'workflow_dispatch' }}
+          # Registry only; compiled objects come from sccache (see ratchets).
+          shared-key: ci-registry
+          cache-targets: "false"
+          cache-on-failure: true
+
+      - name: Machine-authority docs gate
+        run: make machine-authority-docs-gate
 
   # Bounded TLC on machine-authority changes. The hand-written audits model
   # check the generated machines against their invariants and goals (drift
@@ -2152,7 +2204,7 @@ jobs:
           retention-days: 3
 
   rustdoc:
-    name: Rustdoc (whole workspace, ${{ matrix.features }} features)
+    name: Rustdoc (${{ matrix.features }} features)
     needs: changes
     # Push only, like the closure check: every crate documented with
     # rustdoc's lints denied, in two parallel legs, default features and
@@ -2198,15 +2250,22 @@ jobs:
           cache-on-failure: true
 
       # --keep-going reports every crate that fails, not only the first.
-      - name: Document the workspace with rustdoc's lints denied (${{ matrix.features }} features)
+      # The plan's rustdoc_flags name what it documents: Core's members
+      # (`--workspace` without the products' packages) when the change
+      # reaches Core, the changed products' packages otherwise
+      # (scripts/ci-cargo-lanes.mjs).
+      - name: Document the plan's packages with rustdoc's lints denied (${{ matrix.features }} features)
         env:
           RUSTDOCFLAGS: -Dwarnings
           FEATURES: ${{ matrix.features }}
+          RUSTDOC_FLAGS: ${{ needs.changes.outputs.rustdoc_flags }}
         run: |
           set -euo pipefail
+          if [[ -z "${RUSTDOC_FLAGS}" ]]; then echo "::error::the plan names no rustdoc packages"; exit 1; fi
+          read -r -a rustdoc_packages <<<"${RUSTDOC_FLAGS}"
           case "${FEATURES}" in
-            default) ./scripts/repo-cargo doc --workspace --no-deps --keep-going ;;
-            all) ./scripts/repo-cargo doc --workspace --no-deps --keep-going --all-features ;;
+            default) ./scripts/repo-cargo doc "${rustdoc_packages[@]}" --no-deps --keep-going ;;
+            all) ./scripts/repo-cargo doc "${rustdoc_packages[@]}" --no-deps --keep-going --all-features ;;
             *) echo "::error::unexpected rustdoc features '${FEATURES}'"; exit 1 ;;
           esac
 
@@ -2393,7 +2452,7 @@ jobs:
     # whole workspace (the classifier's `wasm` flag): the wasm32 clippy of
     # the web runtime and the provider crates it links caught breaks only
     # after merge before (#1108).
-    if: ${{ (github.event_name == 'push' && needs.changes.outputs.rust_changed == 'true') || needs.changes.outputs.wasm == 'true' }}
+    if: ${{ (github.event_name == 'push' && needs.changes.outputs.core_changed == 'true') || needs.changes.outputs.wasm == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -2443,7 +2502,7 @@ jobs:
     # (examples/037-live-webrtc-web in Playwright Chromium and the examples
     # SDK suite) also run on pull requests that touch their inputs, without
     # the Rust build.
-    if: ${{ (github.event_name == 'push' && (needs.changes.outputs.rust_changed == 'true' || needs.changes.outputs.sdk_host == 'true' || needs.changes.outputs.examples_browser == 'true')) || (github.event_name != 'push' && needs.changes.outputs.examples_browser == 'true') }}
+    if: ${{ (github.event_name == 'push' && (needs.changes.outputs.core_changed == 'true' || needs.changes.outputs.sdk_host == 'true' || needs.changes.outputs.examples_browser == 'true')) || (github.event_name != 'push' && needs.changes.outputs.examples_browser == 'true') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     env:
@@ -2543,7 +2602,7 @@ jobs:
     # runtime's whole dependency closure cold, 1181 s of pull request
     # 39209102985's 1329 s lane, over the 1080 s lane budget. The push runs
     # the wasm build and the browser suites (deferred_to_push names them).
-    if: ${{ (github.event_name == 'push' && needs.changes.outputs.release_projection != 'true') || needs.changes.outputs.example_web == 'true' }}
+    if: ${{ (github.event_name == 'push' && needs.changes.outputs.release_projection != 'true' && needs.changes.outputs.core_paths_changed == 'true') || needs.changes.outputs.example_web == 'true' }}
     runs-on: ubuntu-24.04
     # Sized from measurement (2026-09-29). Warm (sccache 100% hits, e.g. job
     # 109577859270): 4.5 min, 2 min of it the wasm build. Cold, a pull request
@@ -2694,7 +2753,7 @@ jobs:
     # workspace, leaves both to the push,
     # since this lane compiles the same closure for wasm32 (893 s cold at
     # opt-level 0 on pull request 39209102985).
-    if: ${{ (github.event_name == 'push' && needs.changes.outputs.release_projection != 'true') || needs.changes.outputs.example_web_wasm == 'true' }}
+    if: ${{ (github.event_name == 'push' && needs.changes.outputs.release_projection != 'true' && needs.changes.outputs.core_paths_changed == 'true') || needs.changes.outputs.example_web_wasm == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -2791,6 +2850,121 @@ jobs:
       - name: Bazel analysis
         run: bazel build --nobuild //... --repository_cache="${HOME}/.cache/bazel-repo" --disk_cache="${HOME}/.cache/bazel-disk"
 
+  published-floor:
+    name: Published floor (${{ matrix.product }})
+    needs: [changes, stagger]
+    # The published-floor check of every product whose own packages, or an
+    # input of every floor check, changed (the plan's floor_checks,
+    # ci/products.json): the product's crates built against crates.io at the
+    # versions they declare (`scripts/published_crates_standalone.py floor`),
+    # so a product that uses unreleased Core API says so on the pull request
+    # that adds the use. Advisory on pull requests and main pushes (the step
+    # reports and the job passes); required on the product's own release
+    # branch (release/meta-*, release/connect-*) and in its release workflow.
+    if: ${{ needs.changes.outputs.floor_check_count != '0' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.floor_check_matrix) }}
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
+
+      - name: Setup sccache
+        uses: ./.github/actions/setup-sccache-ci
+        with:
+          bucket: ${{ env.SCCACHE_GCS_BUCKET_NAME }}
+          workload_identity_provider: ${{ vars.MEERKAT_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.MEERKAT_GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.MEERKAT_GCP_PROJECT_ID }}
+          key_prefix: sccache/${{ env.RUSTUP_TOOLCHAIN }}/linux-x64
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: ${{ github.event_name != 'workflow_dispatch' }}
+          shared-key: ci-registry
+          cache-targets: "false"
+          cache-on-failure: true
+
+      # The scratch target sits at a fixed runner path, so the registry
+      # crates it compiles keep their sccache keys from run to run.
+      - name: Build ${{ matrix.product }} against its published dependencies
+        id: floor
+        continue-on-error: ${{ !startsWith(github.ref, format('refs/heads/release/{0}-', matrix.product)) && !startsWith(github.base_ref, format('release/{0}-', matrix.product)) }}
+        env:
+          PRODUCT: ${{ matrix.product }}
+        run: python3 scripts/published_crates_standalone.py floor --product "${PRODUCT}" --out "${RUNNER_TEMP}/floor-${PRODUCT}" --mode pr
+
+      - name: Report an advisory floor
+        if: ${{ steps.floor.outcome == 'failure' }}
+        env:
+          PRODUCT: ${{ matrix.product }}
+        run: echo "::warning title=Published floor::${PRODUCT} is not releasable against its published dependencies (advisory here; required on release/${PRODUCT}-* and at its release)."
+
+      - name: Upload the floor report
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: published-floor-${{ matrix.product }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/floor-${{ matrix.product }}/floor.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  connect-checks:
+    name: Connect packaging, Console panel and docs
+    needs: [changes, stagger]
+    # Meerkat Connect's non-Rust checks (its former checks.yml): the
+    # packaging scripts' unit tests, the docs check and the embedded Console
+    # panel's Node test. Every change under connect/ selects them (the
+    # plan's product lane connect_checks).
+    if: ${{ needs.changes.outputs.connect_checks == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: connect
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Check inert package construction and validation
+        run: >-
+          python3 -m unittest -v
+          scripts.test_package_connect_resources
+          scripts.test_assemble_connect_product
+
+      - name: Check documentation
+        run: python3 scripts/check-docs.py
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+
+      - name: Install locked panel test dependencies
+        working-directory: connect/sdk/typescript
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Test the embedded Console panel
+        run: node --test sdk/typescript/tests/console-setup-panel.test.mjs
+
   gate:
     name: CI gate
     # Not `always()`: a superseded run (cancel-in-progress) must surface as
@@ -2801,6 +2975,7 @@ jobs:
       - fmt-governance
       - ratchets
       - governance-gates
+      - governance-docs-gate
       - tlc-audits
       - stagger
       - clippy
@@ -2824,6 +2999,8 @@ jobs:
       - example-web
       - wasm-timers
       - bazel-graph
+      - published-floor
+      - connect-checks
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -2836,6 +3013,7 @@ jobs:
           TLC_AUDITS_RESULT: ${{ needs.tlc-audits.result }}
           MACHINE_AUTHORITY: ${{ needs.changes.outputs.machine_authority }}
           GOVERNANCE_GATES_RESULT: ${{ needs.governance-gates.result }}
+          GOVERNANCE_DOCS_GATE_RESULT: ${{ needs.governance-docs-gate.result }}
           GOVERNANCE_GATES: ${{ needs.changes.outputs.governance_gates }}
           STAGGER_RESULT: ${{ needs.stagger.result }}
           CLIPPY_FIRST_RESULT: ${{ needs.clippy.result }}
@@ -2906,6 +3084,14 @@ jobs:
           RELEASE_EVIDENCE_COMMIT: ${{ needs.changes.outputs.release_evidence_commit }}
           RELEASE_EVIDENCE_RUN_ID: ${{ needs.changes.outputs.release_evidence_run_id }}
           RELEASE_EVIDENCE_RUN_ATTEMPT: ${{ needs.changes.outputs.release_evidence_run_attempt }}
+          CORE_CHANGED: ${{ needs.changes.outputs.core_changed }}
+          CORE_PATHS_CHANGED: ${{ needs.changes.outputs.core_paths_changed }}
+          PRODUCTS_CHANGED: ${{ needs.changes.outputs.products_changed }}
+          FLOOR_CHECK_COUNT: ${{ needs.changes.outputs.floor_check_count }}
+          PUBLISHED_FLOOR_RESULT: ${{ needs.published-floor.result }}
+          DOWNSTREAM_PRODUCTS: ${{ needs.changes.outputs.downstream_products }}
+          CONNECT_CHECKS: ${{ needs.changes.outputs.connect_checks }}
+          CONNECT_CHECKS_RESULT: ${{ needs.connect-checks.result }}
         run: |
           set -euo pipefail
           # A two-wave lane (long rows first, the rest after the stagger job)
@@ -3043,8 +3229,10 @@ jobs:
           fi
           if [[ "${GOVERNANCE_GATES}" == "true" ]]; then
             require_ran "Typed governance gates" "${GOVERNANCE_GATES_RESULT}"
+            require_ran "Typed governance gates (machine-authority docs)" "${GOVERNANCE_DOCS_GATE_RESULT}"
           else
             forbid_failure "Typed governance gates" "${GOVERNANCE_GATES_RESULT}"
+            forbid_failure "Typed governance gates (machine-authority docs)" "${GOVERNANCE_DOCS_GATE_RESULT}"
           fi
           if [[ "${RUST_CHANGED}" == "true" ]]; then
             if ! [[ "${SHARD_COUNT}" =~ ^[0-9]+$ ]] || (( SHARD_COUNT < 1 )); then
@@ -3055,8 +3243,12 @@ jobs:
             # The push runs every lane; a pull request leaves these to it
             # (an exact-profile lane runs when it touches that lane's own
             # inputs). A push plan that deferred one cannot be trusted.
+            # The guard lanes are Core's: a plan that does not reach Core
+            # (a change inside a product's root) runs them on no event.
             push_plan_whole=true
-            for flag in "${CLOSURE_CHECK}" "${RUSTDOC}" "${GOVERNED_JSONL}" "${MCP_CONFINEMENT_POSITIVE}"; do
+            push_flags=("${CLOSURE_CHECK}" "${RUSTDOC}")
+            if [[ "${CORE_CHANGED}" == "true" ]]; then push_flags+=("${GOVERNED_JSONL}" "${MCP_CONFINEMENT_POSITIVE}"); fi
+            for flag in "${push_flags[@]}"; do
               [[ "${flag}" == "true" ]] || push_plan_whole=false
             done
             if [[ "${PLAN_EVENT}" != "push" || -n "${DEFERRED_TO_PUSH}" ]]; then push_plan_whole=false; fi
@@ -3113,11 +3305,22 @@ jobs:
               forbid_failure "${lane%%:*}" "${lane##*:}"
             done
           fi
-          if [[ "${IS_MAIN_PUSH}" == "true" && "${RUST_CHANGED}" == "true" ]]; then
+          if [[ "${IS_MAIN_PUSH}" == "true" && "${RUST_CHANGED}" == "true" && "${CORE_CHANGED}" == "true" ]]; then
             # Post-merge coverage of everything the pull request deferred.
             require_ran "Main unit tests" "${MAIN_UNIT_RESULT}"
             require_ran "wasm32 check" "${WASM_CHECK_RESULT}"
             require_ran "Python + TypeScript SDK suites" "${SDK_HOST_RESULT}"
+          elif [[ "${IS_MAIN_PUSH}" == "true" && "${RUST_CHANGED}" == "true" ]]; then
+            # A change inside a product's root: the main unit rows cover the
+            # product's closure; Core's wasm and SDK lanes have nothing new.
+            echo "products only (${PRODUCTS_CHANGED}): Core's wasm and SDK lanes are not required on this push."
+            require_ran "Main unit tests" "${MAIN_UNIT_RESULT}"
+            forbid_failure "wasm32 check" "${WASM_CHECK_RESULT}"
+            if [[ "${SDK_HOST}" == "true" || "${EXAMPLES_BROWSER}" == "true" ]]; then
+              require_ran "Python + TypeScript SDK suites" "${SDK_HOST_RESULT}"
+            else
+              forbid_failure "Python + TypeScript SDK suites" "${SDK_HOST_RESULT}"
+            fi
           elif [[ "${IS_MAIN_PUSH}" == "true" ]]; then
             # No Rust-relevant change on main: no unit lanes are required,
             # exactly as on a pull request; the SDK suites run only when SDK
@@ -3173,7 +3376,7 @@ jobs:
           # Example web suites: every main push but a release projection's
           # (it reuses its parent's), and pull requests that touch the web
           # runtime, its crates, or examples 031-033.
-          if [[ ( "${IS_MAIN_PUSH}" == "true" && "${RELEASE_PROJECTION}" != "true" ) || "${EXAMPLE_WEB}" == "true" ]]; then
+          if [[ ( "${IS_MAIN_PUSH}" == "true" && "${RELEASE_PROJECTION}" != "true" && "${CORE_PATHS_CHANGED}" == "true" ) || "${EXAMPLE_WEB}" == "true" ]]; then
             require_ran "Example web suites" "${EXAMPLE_WEB_RESULT}"
           else
             forbid_failure "Example web suites" "${EXAMPLE_WEB_RESULT}"
@@ -3182,7 +3385,7 @@ jobs:
           # (example_web_wasm), which a pull request that changes a crate the
           # web runtime builds on, or plans the whole workspace, leaves to the
           # push: it is required exactly when the job's condition selects it.
-          if [[ ( "${IS_MAIN_PUSH}" == "true" && "${RELEASE_PROJECTION}" != "true" ) || "${EXAMPLE_WEB_WASM}" == "true" ]]; then
+          if [[ ( "${IS_MAIN_PUSH}" == "true" && "${RELEASE_PROJECTION}" != "true" && "${CORE_PATHS_CHANGED}" == "true" ) || "${EXAMPLE_WEB_WASM}" == "true" ]]; then
             require_ran "WASM timer ownership" "${WASM_TIMERS_RESULT}"
           else
             forbid_failure "WASM timer ownership" "${WASM_TIMERS_RESULT}"
@@ -3193,6 +3396,23 @@ jobs:
             require_ran "Bazel graph check" "${BAZEL_GRAPH_RESULT}"
           else
             forbid_failure "Bazel graph check" "${BAZEL_GRAPH_RESULT}"
+          fi
+          # Products (ci/products.json). The published-floor job passes when
+          # its check is advisory (the job reports a not-releasable product in
+          # a warning); on a product release branch the check itself must
+          # pass. Connect's checks run for every change under connect/.
+          if [[ "${FLOOR_CHECK_COUNT}" =~ ^[0-9]+$ ]] && (( FLOOR_CHECK_COUNT > 0 )); then
+            require_ran "Published floor" "${PUBLISHED_FLOOR_RESULT}"
+          else
+            forbid_failure "Published floor" "${PUBLISHED_FLOOR_RESULT}"
+          fi
+          if [[ "${CONNECT_CHECKS}" == "true" ]]; then
+            require_ran "Connect packaging, Console panel and docs" "${CONNECT_CHECKS_RESULT}"
+          else
+            forbid_failure "Connect packaging, Console panel and docs" "${CONNECT_CHECKS_RESULT}"
+          fi
+          if [[ -n "${DOWNSTREAM_PRODUCTS}" ]]; then
+            echo "downstream type-check rows (in the Clippy lane): ${DOWNSTREAM_PRODUCTS}"
           fi
           if (( failed )); then
             exit 1

@@ -103,11 +103,13 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
             "closure-check",
             "closure-tests",
             "closure-tests-rest",
+            "connect-checks",
             "example-web",
             "feature-check",
             "feature-check-rest",
             "fmt-governance",
             "gate",
+            "governance-docs-gate",
             "governance-gates",
             "governed-jsonl",
             "integration",
@@ -116,6 +118,7 @@ fn ci_runs_fail_closed_cargo_lanes_on_hosted_runners() {
             "main-unit-archive-run",
             "main-unit-rest",
             "mcp-confinement-positive",
+            "published-floor",
             "ratchets",
             "rustdoc",
             "sdk-host",
@@ -451,10 +454,13 @@ fn pull_requests_leave_the_chain_and_closure_lanes_to_the_push() {
         "a push plan left lanes to a later push",
         "forbid_failure \"Closure check\" \"${CLOSURE_CHECK_RESULT}\"",
         "forbid_failure \"Rustdoc\" \"${RUSTDOC_RESULT}\"",
-        // Every crate documented with rustdoc's lints denied, once per leg.
+        // Every crate the plan names (Core's members, or the changed
+        // products' packages) documented with rustdoc's lints denied, once per
+        // leg.
         "RUSTDOCFLAGS: -Dwarnings",
-        "default) ./scripts/repo-cargo doc --workspace --no-deps --keep-going ;;",
-        "all) ./scripts/repo-cargo doc --workspace --no-deps --keep-going --all-features ;;",
+        "RUSTDOC_FLAGS: ${{ needs.changes.outputs.rustdoc_flags }}",
+        "default) ./scripts/repo-cargo doc \"${rustdoc_packages[@]}\" --no-deps --keep-going ;;",
+        "all) ./scripts/repo-cargo doc \"${rustdoc_packages[@]}\" --no-deps --keep-going --all-features ;;",
         "forbid_failure \"Governed JSONL\" \"${GOVERNED_JSONL_RESULT}\"",
         "forbid_failure \"MCP confinement positive\" \"${MCP_CONFINEMENT_POSITIVE_RESULT}\"",
         "left to the push (main or release/**): ${DEFERRED_TO_PUSH}",
@@ -949,16 +955,31 @@ fn ci_runs_the_typed_governance_gates_on_governance_changes() {
     );
     let job_text = job_step_text(job);
     assert!(
-        job_text.contains(
-            "make rmat-audit seam-inventory runtime-authority-bypass machine-authority-docs-gate"
-        ),
-        "governance-gates must run every typed governance gate; job:\n{job_text}"
+        job_text.contains("make rmat-audit seam-inventory runtime-authority-bypass"),
+        "governance-gates must run the audit gates; job:\n{job_text}"
+    );
+    // The machine-authority docs gate runs in a job of its own, on the same
+    // condition, so the two halves run in parallel.
+    let docs = jobs
+        .get("governance-docs-gate")
+        .and_then(serde_json::Value::as_object)
+        .expect("governance-docs-gate job");
+    assert_eq!(
+        docs.get("if").and_then(serde_json::Value::as_str),
+        Some("${{ needs.changes.outputs.governance_gates == 'true' }}"),
+        "the docs gate runs exactly on governance changes"
+    );
+    let docs_text = job_step_text(docs);
+    assert!(
+        docs_text.contains("make machine-authority-docs-gate"),
+        "governance-docs-gate must run the machine-authority docs gate; job:\n{docs_text}"
     );
     let ci = std::fs::read_to_string(&ci_yml).expect("read ci.yml");
     for contract in [
         "governance_gates: ${{ steps.plan.outputs.governance_gates }}",
         "GOVERNANCE_GATES: ${{ needs.changes.outputs.governance_gates }}",
         "require_ran \"Typed governance gates\" \"${GOVERNANCE_GATES_RESULT}\"",
+        "require_ran \"Typed governance gates (machine-authority docs)\" \"${GOVERNANCE_DOCS_GATE_RESULT}\"",
     ] {
         assert!(ci.contains(contract), "CI must carry `{contract}`");
     }

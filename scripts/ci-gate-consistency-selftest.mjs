@@ -58,6 +58,13 @@ for (const event of ["pull_request", "push"]) {
     ["example 031", ["examples/031-wasm-mini-diplomacy-sh/web/package.json"]],
     ["the Web SDK", ["sdks/web/src/index.ts"]],
     ["the CI workflow", [".github/workflows/ci.yml"]],
+    // Products (ci/products.json): their own rows, the published-floor job
+    // and Connect's checks, and none of Core's push lanes.
+    ["a Meta crate", ["meta/crates/meerkat-meta/src/lib.rs"]],
+    ["a Connect crate", ["connect/crates/meerkat-connect/src/main.rs"]],
+    ["Connect docs", ["connect/docs/site/index.mdx"]],
+    ["Meta's Console", ["meta/console/src/main.tsx"]],
+    ["meerkat-mob-mcp, which Meta builds on", ["crates/meerkat-mob-mcp/src/lib.rs"]],
   ]) {
     SCENARIOS.push([`${event}: ${label}`, event, ["--", ...paths]]);
   }

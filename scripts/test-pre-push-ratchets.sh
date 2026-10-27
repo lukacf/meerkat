@@ -214,7 +214,7 @@ def run(*args):
 # building the wasm in the job (a pull request that changes a crate the web
 # runtime builds on leaves those to the push).
 RATCHETS = {
-    "machine-authority-docs-gate": ("governance-gates", "governance_gates"),
+    "machine-authority-docs-gate": ("governance-docs-gate", "governance_gates"),
     "runtime-authority-bypass": ("governance-gates", "governance_gates"),
     "seam-inventory": ("governance-gates", "governance_gates"),
     "rmat-audit": ("governance-gates", "governance_gates"),

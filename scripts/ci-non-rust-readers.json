@@ -142,6 +142,14 @@
         "sources": [
           "crates/xtask/tests/runtime_authority_bypass.rs"
         ]
+      },
+      {
+        "package": "meerkat-meta",
+        "target": "bin:meta_gateway",
+        "scope": "package",
+        "sources": [
+          "meta/crates/meerkat-meta/src/bin/meta_gateway.rs"
+        ]
       }
     ],
     ".cargo/config.toml": [
@@ -647,6 +655,143 @@
         ],
         "sources": [
           "crates/meerkat/tests/host_launch_sites.rs"
+        ]
+      }
+    ],
+    "connect/crates/meerkat-connect/src/setup-instructions.md": [
+      {
+        "package": "meerkat-connect",
+        "target": "lib",
+        "scope": "package",
+        "sources": [
+          "connect/crates/meerkat-connect/src/session.rs"
+        ]
+      }
+    ],
+    "connect/crates/toolkit-mobkit/src/discovery.rs": [
+      {
+        "package": "meerkat-connect",
+        "target": "test:recipe_candidate_adapter",
+        "scope": "target",
+        "sources": [
+          "connect/crates/meerkat-connect/tests/recipe_candidate_adapter.rs"
+        ]
+      }
+    ],
+    "connect/crates/toolkit-package/integrations/connectors/github-readonly/0.1.0/mcp.json": [
+      {
+        "package": "toolkit-mobkit",
+        "target": "test:discovery",
+        "scope": "target",
+        "tests": [
+          "changed_prerequisites_invalidate_library_pagination_snapshot"
+        ],
+        "sources": [
+          "connect/crates/toolkit-mobkit/tests/discovery.rs"
+        ]
+      }
+    ],
+    "connect/crates/toolkit-package/integrations/connectors/github-readonly/0.1.0/plugin.json": [
+      {
+        "package": "meerkat-connect",
+        "target": "lib",
+        "scope": "target",
+        "sources": [
+          "connect/crates/meerkat-connect/src/stdio_tests.rs"
+        ]
+      },
+      {
+        "package": "toolkit-mobkit",
+        "target": "test:discovery",
+        "scope": "target",
+        "tests": [
+          "changed_prerequisites_invalidate_library_pagination_snapshot"
+        ],
+        "sources": [
+          "connect/crates/toolkit-mobkit/tests/discovery.rs"
+        ]
+      }
+    ],
+    "connect/crates/toolkit-package/integrations/connectors/github-readonly/0.1.0/recipes.json": [
+      {
+        "package": "meerkat-connect",
+        "target": "lib",
+        "scope": "target",
+        "sources": [
+          "connect/crates/meerkat-connect/src/stdio_tests.rs"
+        ]
+      },
+      {
+        "package": "toolkit-mobkit",
+        "target": "test:discovery",
+        "scope": "target",
+        "tests": [
+          "changed_prerequisites_invalidate_library_pagination_snapshot"
+        ],
+        "sources": [
+          "connect/crates/toolkit-mobkit/tests/discovery.rs"
+        ]
+      }
+    ],
+    "connect/crates/toolkit-package/tests/fixtures/python-install/package.json": [
+      {
+        "package": "meerkat-connect",
+        "target": "lib",
+        "scope": "target",
+        "sources": [
+          "connect/crates/meerkat-connect/src/stdio_tests.rs"
+        ]
+      }
+    ],
+    "connect/sdk/python/src/meerkat_toolkit/data/": [
+      {
+        "package": "toolkit-package",
+        "target": "example:export_frontend_catalog",
+        "scope": "target",
+        "sources": [
+          "connect/crates/toolkit-package/examples/export_frontend_catalog.rs"
+        ]
+      }
+    ],
+    "connect/sdk/python/src/meerkat_toolkit/data/frontend_catalog.json": [
+      {
+        "package": "toolkit-package",
+        "target": "example:export_frontend_catalog",
+        "scope": "target",
+        "sources": [
+          "connect/crates/toolkit-package/examples/export_frontend_catalog.rs"
+        ]
+      },
+      {
+        "package": "toolkit-package",
+        "target": "test:frontend_catalog_resource",
+        "scope": "target",
+        "tests": [
+          "packaged_python_resource_is_the_exact_canonical_projection_and_pin"
+        ],
+        "sources": [
+          "connect/crates/toolkit-package/tests/frontend_catalog_resource.rs"
+        ]
+      }
+    ],
+    "connect/sdk/python/src/meerkat_toolkit/data/frontend_catalog.sha256": [
+      {
+        "package": "toolkit-package",
+        "target": "example:export_frontend_catalog",
+        "scope": "target",
+        "sources": [
+          "connect/crates/toolkit-package/examples/export_frontend_catalog.rs"
+        ]
+      },
+      {
+        "package": "toolkit-package",
+        "target": "test:frontend_catalog_resource",
+        "scope": "target",
+        "tests": [
+          "packaged_python_resource_is_the_exact_canonical_projection_and_pin"
+        ],
+        "sources": [
+          "connect/crates/toolkit-package/tests/frontend_catalog_resource.rs"
         ]
       }
     ],
@@ -1655,6 +1800,292 @@
         ],
         "sources": [
           "crates/xtask/tests/effect_authority.rs"
+        ]
+      }
+    ],
+    "meta/.claude/skills/": [
+      {
+        "package": "meerkat-meta",
+        "target": "lib",
+        "scope": "package",
+        "sources": [
+          "meta/crates/meerkat-meta/src/mobpack.rs"
+        ]
+      }
+    ],
+    "meta/.claude/skills/meerkat-meta/SKILL.md": [
+      {
+        "package": "meerkat-meta",
+        "target": "lib",
+        "scope": "target",
+        "sources": [
+          "meta/crates/meerkat-meta/src/http_flow_editor.rs",
+          "meta/crates/meerkat-meta/src/mobpack.rs"
+        ]
+      }
+    ],
+    "meta/console/": [
+      {
+        "package": "meerkat-meta",
+        "target": "lib",
+        "scope": "target",
+        "tests": [
+          "writes_the_console_sandbox_sources_over_stale_copies"
+        ],
+        "sources": [
+          "meta/crates/meerkat-meta/src/mcp_apps_sandbox.rs"
+        ]
+      },
+      {
+        "package": "meerkat-meta",
+        "target": "test:meta_gateway_bootstrap",
+        "scope": "target",
+        "tests": [
+          "gateways_write_the_mcp_apps_sandbox_they_embed_byte_for_byte"
+        ],
+        "sources": [
+          "meta/crates/meerkat-meta/tests/meta_gateway_bootstrap.rs"
+        ]
+      }
+    ],
+    "meta/console/fixtures/configured-host-shell/config/console.toml": [
+      {
+        "package": "meerkat-meta",
+        "target": "test:console_customization_fixtures",
+        "scope": "target",
+        "tests": [
+          "configured_host_shell_fixture_preserves_stock_console_config_contract"
+        ],
+        "sources": [
+          "meta/crates/meerkat-meta/tests/console_customization_fixtures.rs"
+        ]
+      }
+    ],
+    "meta/console/mcp-apps-sandbox.cjs": [
+      {
+        "package": "meerkat-meta",
+        "target": "lib",
+        "scope": "target",
+        "tests": [
+          "writes_the_console_sandbox_sources_over_stale_copies"
+        ],
+        "sources": [
+          "meta/crates/meerkat-meta/src/mcp_apps_sandbox.rs"
+        ]
+      }
+    ],
+    "meta/console/src/mcp-apps/sandbox.js": [
+      {
+        "package": "meerkat-meta",
+        "target": "lib",
+        "scope": "target",
+        "tests": [
+          "writes_the_console_sandbox_sources_over_stale_copies"
+        ],
+        "sources": [
+          "meta/crates/meerkat-meta/src/mcp_apps_sandbox.rs"
+        ]
+      }
+    ],
+    "meta/crates/meerkat-meta/src/memory/distiller_prompt_v0.md": [
+      {
+        "package": "meerkat-meta",
+        "target": "lib",
+        "scope": "package",
+        "sources": [
+          "meta/crates/meerkat-meta/src/memory/distiller.rs"
+        ]
+      }
+    ],
+    "meta/crates/meerkat-meta/src/memory/hygienist_prompt_v0.md": [
+      {
+        "package": "meerkat-meta",
+        "target": "lib",
+        "scope": "package",
+        "sources": [
+          "meta/crates/meerkat-meta/src/memory/hygienist.rs"
+        ]
+      }
+    ],
+    "meta/crates/meerkat-meta/src/memory/steward_prompt_v0.md": [
+      {
+        "package": "meerkat-meta",
+        "target": "lib",
+        "scope": "package",
+        "sources": [
+          "meta/crates/meerkat-meta/src/memory/steward.rs"
+        ]
+      }
+    ],
+    "meta/docs/rct/console-rest-sse-contract-v0.5.0.json": [
+      {
+        "package": "meerkat-meta",
+        "target": "test:console_route_auth",
+        "scope": "target",
+        "tests": [
+          "console_contract_requests_take_no_interaction_or_frame_ids",
+          "phase0_contract_004_console_rest_sse_contract_version_is_pinned_and_enforced"
+        ],
+        "sources": [
+          "meta/crates/meerkat-meta/tests/console_route_auth.rs"
+        ]
+      }
+    ],
+    "meta/examples/001-incident-command-center-pack/": [
+      {
+        "package": "meerkat-meta",
+        "target": "example:incident_command_center",
+        "scope": "target",
+        "sources": [
+          "meta/examples/001-incident-command-center-pack/incident_command_center.rs"
+        ]
+      },
+      {
+        "package": "meerkat-meta",
+        "target": "test:incident_command_center_pack",
+        "scope": "target",
+        "sources": [
+          "meta/examples/001-incident-command-center-pack/incident_command_center.rs"
+        ]
+      }
+    ],
+    "meta/examples/001-incident-command-center-pack/incident_command_center.rs": [
+      {
+        "package": "meerkat-meta",
+        "target": "example:incident_command_center",
+        "scope": "target",
+        "sources": [
+          "meta/examples/001-incident-command-center-pack/server.rs"
+        ]
+      },
+      {
+        "package": "meerkat-meta",
+        "target": "test:incident_command_center_pack",
+        "scope": "target",
+        "sources": [
+          "meta/crates/meerkat-meta/tests/incident_command_center_pack.rs"
+        ]
+      }
+    ],
+    "meta/scripts/memory-evals": [
+      {
+        "package": "meerkat-meta",
+        "target": "test:distiller_eval_harness",
+        "scope": "target",
+        "tests": [
+          "memory_evals_mock_mode_runs_distiller_eval_end_to_end"
+        ],
+        "sources": [
+          "meta/crates/meerkat-meta/tests/distiller_eval_harness.rs"
+        ]
+      },
+      {
+        "package": "meerkat-meta",
+        "target": "test:hygienist_eval_harness",
+        "scope": "target",
+        "tests": [
+          "memory_evals_mock_mode_runs_hygienist_eval_end_to_end"
+        ],
+        "sources": [
+          "meta/crates/meerkat-meta/tests/hygienist_eval_harness.rs"
+        ]
+      },
+      {
+        "package": "meerkat-meta",
+        "target": "test:steward_eval_harness",
+        "scope": "target",
+        "tests": [
+          "memory_evals_mock_mode_runs_steward_eval_end_to_end"
+        ],
+        "sources": [
+          "meta/crates/meerkat-meta/tests/steward_eval_harness.rs"
+        ]
+      }
+    ],
+    "meta/sdk/python/": [
+      {
+        "package": "meerkat-meta",
+        "target": "test:reference_app",
+        "scope": "target",
+        "tests": [
+          "phase_h2_req_h2_001_req_h2_002_python_rpc_reference_app_parity_contracts"
+        ],
+        "sources": [
+          "meta/crates/meerkat-meta/tests/reference_app.rs"
+        ]
+      },
+      {
+        "package": "meerkat-meta",
+        "target": "test:sdk_parity",
+        "scope": "target",
+        "tests": [
+          "phase11_sdk_001_sdk_002_choke_110_and_e2e_1101_parity_contracts"
+        ],
+        "sources": [
+          "meta/crates/meerkat-meta/tests/sdk_parity.rs"
+        ]
+      },
+      {
+        "package": "meerkat-meta",
+        "target": "test:sdk_productization",
+        "scope": "target",
+        "tests": [
+          "phase_g_req_g_001_req_g_002_sdk_productization_contracts"
+        ],
+        "sources": [
+          "meta/crates/meerkat-meta/tests/sdk_productization.rs"
+        ]
+      }
+    ],
+    "meta/tests/memory-evals/profiles/distiller-v0.toml": [
+      {
+        "package": "meerkat-meta",
+        "target": "lib",
+        "scope": "target",
+        "tests": [
+          "external_profile_loads_from_evals_layout"
+        ],
+        "sources": [
+          "meta/crates/meerkat-meta/src/memory/distiller.rs"
+        ]
+      }
+    ],
+    "meta/tests/memory-evals/prompts/distiller-v0.md": [
+      {
+        "package": "meerkat-meta",
+        "target": "lib",
+        "scope": "target",
+        "tests": [
+          "embedded_prompt_matches_calibration_bundle"
+        ],
+        "sources": [
+          "meta/crates/meerkat-meta/src/memory/distiller.rs"
+        ]
+      }
+    ],
+    "meta/tests/memory-evals/prompts/hygienist-v0.md": [
+      {
+        "package": "meerkat-meta",
+        "target": "lib",
+        "scope": "target",
+        "tests": [
+          "embedded_prompt_matches_calibration_bundle"
+        ],
+        "sources": [
+          "meta/crates/meerkat-meta/src/memory/hygienist.rs"
+        ]
+      }
+    ],
+    "meta/tests/memory-evals/prompts/steward-v0.md": [
+      {
+        "package": "meerkat-meta",
+        "target": "lib",
+        "scope": "target",
+        "tests": [
+          "embedded_prompt_matches_calibration_bundle"
+        ],
+        "sources": [
+          "meta/crates/meerkat-meta/src/memory/steward.rs"
         ]
       }
     ],

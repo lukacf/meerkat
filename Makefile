@@ -202,11 +202,14 @@ test-sdk-web:
 		npm test && \
 		npm run test:packed)
 
-# WASM runtime compile and lint gate
+# WASM runtime compile and lint gate. `cargo clippy` checks every crate
+# `cargo check` does (clippy-driver runs the compiler's checks before its
+# lints), so a separate `cargo check` of the same targets compiled the web
+# runtime's closure twice: 5m20s-7m18s of the CI lane on pull request runs
+# 40399556131, 40402047748 and 40411814108, whose changes missed the cache.
 wasm-check:
 	@echo "$(GREEN)Running WASM runtime check...$(NC)"
 	@rustup target add wasm32-unknown-unknown
-	RUSTFLAGS='--cfg getrandom_backend="wasm_js"' $(CARGO) check -p meerkat-web-runtime --target wasm32-unknown-unknown --all-targets
 	RUSTFLAGS='--cfg getrandom_backend="wasm_js"' $(CARGO) clippy -p meerkat-web-runtime --target wasm32-unknown-unknown --all-targets -- -D warnings
 
 # Combined SDK test suites

@@ -173,6 +173,13 @@ async fn bridge_session(runtime: &MobRuntime, alias: &str) -> Option<String> {
         .and_then(|entry| entry.bridge_session_id().map(ToString::to_string))
 }
 
+/// The sidebar row of `member` among an experience's sidebar `rows`.
+fn sidebar_row(rows: &[Value], member: &str) -> Option<Value> {
+    rows.iter()
+        .find(|row| row["member_id"] == json!(member))
+        .cloned()
+}
+
 /// The fork is a spawn of the side chat and a read of its source: the
 /// console gates it on `agent.spawn` for the new member (the source's
 /// `agent.view` is judged in the handler), refuses it on a read-only console
@@ -271,10 +278,17 @@ async fn a_side_chat_forks_the_source_unwired_and_closes_on_retire() -> TestResu
         .expect("the source stays seated");
     assert!(source.wired_to.is_empty(), "the source gained no peer");
 
+    let source_session_id = source_session.clone().expect("the source has a session");
     assert_eq!(
         crate::side_chat::verified_side_chats(&runtime.handle()).await,
-        BTreeMap::from([("alpha-side".to_string(), "alpha".to_string())]),
-        "the roster's fork facts name the side chat's source"
+        BTreeMap::from([(
+            "alpha-side".to_string(),
+            crate::side_chat::SideChatLineage {
+                source_identity: "alpha".to_string(),
+                source_session_id: source_session_id.clone(),
+            },
+        )]),
+        "the roster's fork facts name the side chat's source and the session it was forked from"
     );
     let (snapshot, _) = Box::pin(build_live_snapshot(
         &runtime,
@@ -285,21 +299,24 @@ async fn a_side_chat_forks_the_source_unwired_and_closes_on_retire() -> TestResu
         None,
     ))
     .await;
-    assert_eq!(
-        snapshot.side_chats.get("alpha-side").map(String::as_str),
-        Some("alpha"),
-        "the console snapshot lists the side chat under its source"
-    );
     let side_row = snapshot
         .members
         .iter()
         .find(|member| member.agent_identity == "alpha-side")
         .expect("the side chat is a console member");
-    assert!(
-        !side_row
-            .labels
-            .contains_key(crate::side_chat::SIDE_CHAT_OF_LABEL),
-        "the marker label is never projected; the verified relation is"
+    assert_eq!(
+        (
+            side_row
+                .labels
+                .get(crate::side_chat::SIDE_CHAT_OF_LABEL)
+                .map(String::as_str),
+            side_row
+                .labels
+                .get(crate::side_chat::SIDE_CHAT_OF_SESSION_LABEL)
+                .map(String::as_str),
+        ),
+        (Some("alpha"), Some(source_session_id.as_str())),
+        "the console labels the side chat with the source the roster's fork facts name"
     );
 
     let retired = call(
@@ -314,6 +331,129 @@ async fn a_side_chat_forks_the_source_unwired_and_closes_on_retire() -> TestResu
         source_session,
         "closing the side chat leaves the source as it was"
     );
+    Ok(())
+}
+
+/// A side chat's audience is its source's: the access rules follow a side
+/// chat to its source for view, send and retire. A grant that names the
+/// source's identity covers the side chat, on the console experience and on
+/// every route's access priming alike, and a grant on another identity does
+/// not.
+#[tokio::test]
+async fn a_grant_on_the_source_covers_its_side_chat_and_no_other_grant_does() -> TestResult {
+    let (_temp_dir, runtime) =
+        persistent_console_runtime("console-side-chat-access", "", "").await?;
+    seeded_member(&runtime, "worker", "alpha", &[("team", "review")]).await?;
+    seeded_member(&runtime, "worker", "gamma", &[]).await?;
+    let forked = fork_when_idle(&runtime, "alpha", "alpha-side").await;
+    assert!(forked["error"].is_null(), "the fork succeeds: {forked:#?}");
+
+    let actions = [ACTION_AGENT_VIEW, ACTION_AGENT_SEND, ACTION_AGENT_RETIRE];
+    let grant = |id: &str, subject: &str, agent: &str| AccessRule {
+        id: id.to_string(),
+        subjects: vec![subject.to_string()],
+        actions: Vec::from(actions.map(String::from)),
+        agents: vec![agent.to_string()],
+        ..AccessRule::default()
+    };
+    let controller = AccessController::new(crate::access::AccessControlConfig {
+        enabled: true,
+        admins: vec!["root@example.test".to_string()],
+        rules: vec![
+            grant("source-grant", "source-reader@example.test", "alpha"),
+            grant("other-grant", "other-reader@example.test", "gamma"),
+        ],
+        ..crate::access::AccessControlConfig::default()
+    })?;
+    let publication = meerkat_authorization::publication::LocalAuthorizationPublication::new();
+    controller
+        .join_authorization_publication(publication.clone())
+        .map_err(|_| "a fresh controller joins its first publication")?;
+
+    let (snapshot, _) = Box::pin(build_live_snapshot(
+        &runtime,
+        &[],
+        None,
+        &AllowAllConsoleVisibilityPolicy,
+        &ConsoleSnapshotReadModel::default(),
+        None,
+    ))
+    .await;
+    // The console experience's sidebar rows for `subject`.
+    let sidebar = |subject: &str| -> Vec<Value> {
+        let decisions = RuntimeDecisionState::local_console(
+            crate::ConsolePolicy {
+                require_app_auth: false,
+                ..Default::default()
+            },
+            None,
+        );
+        let response = crate::runtime::handle_console_rest_json_route_with_snapshot_and_access(
+            &decisions,
+            &ConsoleRestJsonRequest {
+                method: "GET".to_string(),
+                path: "/console/experience".to_string(),
+                auth: Some(crate::ConsoleAccessRequest {
+                    provider: crate::AuthProvider::GoogleOAuth,
+                    email: subject.to_string(),
+                }),
+            },
+            Some(&snapshot),
+            Some(&controller),
+        );
+        assert_eq!(response.status, 200, "experience: {:?}", response.body);
+        response.body["agent_sidebar"]["live_snapshot"]["agents"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    };
+
+    let source_reader_rows = sidebar("source-reader@example.test");
+    let side_chat = sidebar_row(&source_reader_rows, "alpha-side")
+        .expect("a grant on the source shows its side chat");
+    assert_eq!(side_chat["side_chat_of"], json!("alpha"));
+    assert_eq!(
+        (
+            &side_chat["affordances"]["can_send_message"],
+            &side_chat["affordances"]["can_retire"],
+        ),
+        (&json!(true), &json!(true)),
+        "a grant on the source lets its reader send to and close the side chat"
+    );
+    assert!(sidebar_row(&source_reader_rows, "gamma").is_none());
+
+    let other_reader_rows = sidebar("other-reader@example.test");
+    assert!(
+        sidebar_row(&other_reader_rows, "alpha-side").is_none(),
+        "a grant on another identity does not show the side chat"
+    );
+    assert!(sidebar_row(&other_reader_rows, "gamma").is_some());
+
+    // Every route records the side chat's value as the experience does, so
+    // alternating them publishes no access change.
+    prime_access_cache_from_runtime(&runtime, &controller).await;
+    let quiet = publication
+        .observe(|| ())
+        .map_err(|_| "a quiet publication")?
+        .1;
+    sidebar("source-reader@example.test");
+    prime_access_cache_from_runtime(&runtime, &controller).await;
+    assert!(
+        quiet.check_current().is_ok(),
+        "the console experience and the roster priming record one value"
+    );
+    let source_reader = controller.view_for_subject(Some("source-reader@example.test"));
+    let other_reader = controller.view_for_subject(Some("other-reader@example.test"));
+    for action in actions {
+        assert!(
+            source_reader.allows_agent(action, "alpha-side"),
+            "a grant naming the source covers its side chat: {action}"
+        );
+        assert!(
+            !other_reader.allows_agent(action, "alpha-side"),
+            "a grant on another identity does not cover the side chat: {action}"
+        );
+    }
     Ok(())
 }
 

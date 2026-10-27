@@ -616,18 +616,26 @@ The side chat:
 
 - takes the agent's role, profile and model overrides and runtime mode, and
   through the fork its application labels, context and tool overlay: it runs
-  with the agent's tools, and the people who may see the agent may see it;
+  with the agent's tools;
+- has the agent's audience: the access rules follow a side chat to the
+  agent, as they follow a spawned member to its spawner (see
+  [Spawn-lineage inheritance](/concepts/access-control#spawn-lineage-inheritance)).
+  A rule that matches the agent, by identity, role or labels, covers its side
+  chats for every action (`agent.view`, `agent.send`, `agent.retire`, ...), a
+  rule on another identity does not, and a deny on the agent hides them;
 - is never wired to a peer. A role the mob definition wires is refused
   (`-32055`, `unwired_seat_unavailable`), and the definition-wiring reconcile
   leaves side chats out;
 - is kept until it is retired (`meta/retire` or `meta/retire_member`): the
   fork sets an explicit keep-until-retired idle-retire override, so no idle
   sweep retires it. It survives a gateway restart; the runtime may unload it
-  while it is idle;
-- is listed in the experience's sidebar rows with `side_chat_of`, the agent's
-  identity, read from Meerkat's durable roster (the member's fork source); a
-  `side_chat_of` label supplied any other way is ignored, and the Console's
-  label projections drop the label itself;
+  while it is idle. `meta/reset_all` retires it with the other members that
+  have no registered identity;
+- names the agent in its console labels, `side_chat_of` (the agent's
+  identity) and `side_chat_of_session` (the session it was forked from), and
+  in its experience sidebar row's `side_chat_of`. They are read from
+  Meerkat's durable roster (the member's fork source); either label supplied
+  any other way, in spawn or roster labels, is dropped;
 - does not take the agent's own console flags: where the agent carries them,
   `addressable`, `singleton`, `console_watched`, `console_degraded`,
   `console_degraded_reason`, `console_alert_level`, `console_inbox_count`
@@ -664,6 +672,12 @@ Errors: `-32055` (typed refusal, see the error codes above), `-32037`,
 and `-32603`. A fork that
 committed its session but could not seat the side chat keeps Meerkat's
 `fork_member_provision_failed` data with the `fork_session_id`.
+
+Known limitation: a side chat is in no declared roster. A host that
+reconciles the whole mob against a declared roster (`UnifiedRuntime::reconcile`
+on a runtime without identity-first authority) retires its side chats there,
+as it retires every member the roster does not name. The stock gateway is
+identity-first, does not reconcile that way, and keeps them.
 
 ### `meta/ensure_member`
 

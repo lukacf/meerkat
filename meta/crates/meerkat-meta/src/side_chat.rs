@@ -6,8 +6,11 @@
 //!
 //! - takes its source's role, profile and model overrides and runtime mode,
 //!   and (through the durable fork) its application labels, context and tool
-//!   overlay, so it runs with the source's tools and its audience is the
-//!   source's;
+//!   overlay, so it runs with the source's tools;
+//! - has its source's audience: the access rules follow a side chat to its
+//!   source, as they follow a spawned member to its spawner, so a rule that
+//!   matches the source (by identity, role or labels) matches its side chats
+//!   for every action, and a deny on the source hides them too;
 //! - is kept until the human closes it (`meta/retire_member`): the fork sets
 //!   an explicit keep-until-retired idle override, so no idle sweep retires
 //!   it. The runtime may still unload it while it is idle; that keeps the
@@ -20,9 +23,12 @@
 //! - names its source in the [`SIDE_CHAT_OF_LABEL`] roster label. The label
 //!   counts only where Meerkat's roster agrees ([`verified_side_chat_source`]):
 //!   the member's typed `fork_source` names that same source and no member's
-//!   own turn created it. The console projects the verified relation as the
-//!   `side_chat_of` field of a member row, so a side chat nests under its
-//!   source across restarts, and strips the label everywhere else.
+//!   own turn created it. The console strips the roster label from every
+//!   projection and writes the verified relation into the side chat's console
+//!   labels instead ([`project_side_chat_lineage`]): its source's console
+//!   identity and the source session it was forked from. The access rules'
+//!   lineage walk reads them, and a side chat nests under its source across
+//!   restarts.
 //!
 //! Instructions: a durable fork copies the source's activated instructions as
 //! history only. For each inherited key whose head is an activation the
@@ -46,10 +52,19 @@ use serde::Serialize;
 use crate::fork::{ForkChildRetention, ForkMemberError, ForkMemberOutcome};
 use crate::mob_handle_runtime::MobRuntime;
 
-/// The roster label a side chat names its source in: the source's public
-/// member alias. Projected only where Meerkat's roster agrees
-/// ([`verified_side_chat_source`]).
+/// The label a side chat names its source in. On Meerkat's roster it is the
+/// marker the fork writes: the source's public member alias, which counts
+/// only where the roster agrees ([`verified_side_chat_source`]). In the
+/// console's labels of a member it is the verified source's console
+/// identity, which only [`project_side_chat_lineage`] writes; every
+/// projection strips it from roster, spawn and registry labels.
 pub const SIDE_CHAT_OF_LABEL: &str = "side_chat_of";
+
+/// The console label a verified side chat names the source session it was
+/// forked from in. It binds the side chat's lineage to that incarnation of
+/// its source, as `spawned_by_session` binds a spawned member's to its
+/// spawner's.
+pub const SIDE_CHAT_OF_SESSION_LABEL: &str = "side_chat_of_session";
 
 const DISPLAY_NAME_LABEL: &str = "display_name";
 /// Console labels of the source that describe the source itself, not its
@@ -109,42 +124,99 @@ pub(crate) fn any_side_chat_marker<'a>(
         .any(|labels| labels.contains_key(SIDE_CHAT_OF_LABEL))
 }
 
-/// Every verified side chat of `handle`'s mob, keyed by the side chat's
-/// public alias, with its source's console identity: the source's durable
-/// identity label when it is still on the roster, else its public alias.
-pub(crate) async fn verified_side_chats(
-    handle: &meerkat_mob::MobHandle,
-) -> BTreeMap<String, String> {
-    let entries = handle.list_all_members().await;
-    let console_identity_by_alias: BTreeMap<String, String> = entries
+/// A verified side chat's lineage, as Meerkat's durable roster records its
+/// fork.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SideChatLineage {
+    /// The source's console identity: its durable identity label while it is
+    /// on the roster, else its public alias.
+    pub(crate) source_identity: String,
+    /// The source session the side chat's transcript was forked from.
+    pub(crate) source_session_id: String,
+}
+
+/// The roster facts of one member that decide whether it is a side chat. The
+/// roster entry type is not nameable outside meerkat-mob, so callers lend its
+/// fields.
+pub(crate) struct SideChatRosterRow<'a> {
+    /// The member's public alias.
+    pub(crate) alias: String,
+    pub(crate) labels: &'a BTreeMap<String, String>,
+    pub(crate) spawned_by: Option<&'a meerkat_mob::AgentIdentity>,
+    pub(crate) fork_source: Option<&'a meerkat_core::ForkBuildSource>,
+}
+
+/// Every verified side chat among `rows`, one mob's roster, keyed by the side
+/// chat's public alias, with its lineage. Reads nothing when no row carries
+/// the marker.
+pub(crate) fn side_chat_lineages(
+    rows: &[SideChatRosterRow<'_>],
+) -> BTreeMap<String, SideChatLineage> {
+    if !any_side_chat_marker(rows.iter().map(|row| row.labels)) {
+        return BTreeMap::new();
+    }
+    let console_identity_by_alias: BTreeMap<&str, &str> = rows
         .iter()
-        .map(|entry| {
-            let alias = crate::member_comms_id::runtime_alias_str(entry.agent_identity.as_str())
-                .into_owned();
-            let identity = crate::member_comms_id::durable_identity_label(&entry.labels)
-                .map_or_else(|| alias.clone(), str::to_string);
-            (alias, identity)
+        .map(|row| {
+            (
+                row.alias.as_str(),
+                crate::member_comms_id::durable_identity_label(row.labels)
+                    .unwrap_or(row.alias.as_str()),
+            )
         })
         .collect();
-    entries
-        .iter()
-        .filter_map(|entry| {
-            let source_alias = verified_side_chat_source(
-                &entry.labels,
-                entry.spawned_by.as_ref(),
-                entry.fork_source.as_ref(),
-            )?;
-            let source_identity = console_identity_by_alias
-                .get(&source_alias)
-                .cloned()
-                .unwrap_or(source_alias);
+    rows.iter()
+        .filter_map(|row| {
+            let source_alias =
+                verified_side_chat_source(row.labels, row.spawned_by, row.fork_source)?;
+            let source_session_id = row.fork_source?.source_session_id.to_string();
+            let source_identity = match console_identity_by_alias.get(source_alias.as_str()) {
+                Some(identity) => String::from(*identity),
+                None => source_alias,
+            };
             Some((
-                crate::member_comms_id::runtime_alias_str(entry.agent_identity.as_str())
-                    .into_owned(),
-                source_identity,
+                row.alias.clone(),
+                SideChatLineage {
+                    source_identity,
+                    source_session_id,
+                },
             ))
         })
         .collect()
+}
+
+/// Every verified side chat of `handle`'s mob, keyed by the side chat's
+/// public alias, with its lineage ([`side_chat_lineages`]).
+pub(crate) async fn verified_side_chats(
+    handle: &meerkat_mob::MobHandle,
+) -> BTreeMap<String, SideChatLineage> {
+    let entries = handle.list_all_members().await;
+    let rows = entries
+        .iter()
+        .map(|entry| SideChatRosterRow {
+            alias: crate::member_comms_id::runtime_alias_str(entry.agent_identity.as_str())
+                .into_owned(),
+            labels: &entry.labels,
+            spawned_by: entry.spawned_by.as_ref(),
+            fork_source: entry.fork_source.as_ref(),
+        })
+        .collect::<Vec<_>>();
+    side_chat_lineages(&rows)
+}
+
+/// The lineage of `member_id`, a member of `handle`'s mob whose roster labels
+/// are `labels`, when it is a verified side chat. Reads the roster's fork
+/// facts only when `labels` carry the marker.
+pub(crate) async fn verified_side_chat_lineage(
+    handle: &meerkat_mob::MobHandle,
+    member_id: &meerkat_mob::AgentIdentity,
+    labels: &BTreeMap<String, String>,
+) -> Option<SideChatLineage> {
+    if !labels.contains_key(SIDE_CHAT_OF_LABEL) {
+        return None;
+    }
+    let alias = crate::member_comms_id::runtime_alias_str(member_id.as_str()).into_owned();
+    verified_side_chats(handle).await.remove(&alias)
 }
 
 /// The aliases of the verified side chats among `members` (public aliases
@@ -158,6 +230,32 @@ pub(crate) async fn verified_side_chat_aliases<'a>(
         return BTreeSet::new();
     }
     verified_side_chats(handle).await.into_keys().collect()
+}
+
+/// Write a verified side chat's lineage into its console labels: its
+/// source's console identity ([`SIDE_CHAT_OF_LABEL`]) and the source session
+/// it was forked from ([`SIDE_CHAT_OF_SESSION_LABEL`]). Applied after the
+/// roster labels lost every unverified lineage claim and took the spawn
+/// registry's gaps. The access rules follow the label to the source, so a
+/// side chat's audience is its source's. Meerkat's roster says no agent
+/// spawned a side chat, so a spawn lineage the registry holds under its
+/// identity names an earlier member and is dropped.
+pub(crate) fn project_side_chat_lineage(
+    labels: &mut BTreeMap<String, String>,
+    lineage: Option<&SideChatLineage>,
+) {
+    let Some(lineage) = lineage else {
+        return;
+    };
+    crate::console_spawn::sanitize_unverified_lineage_labels(labels);
+    labels.insert(
+        SIDE_CHAT_OF_LABEL.to_string(),
+        lineage.source_identity.clone(),
+    );
+    labels.insert(
+        SIDE_CHAT_OF_SESSION_LABEL.to_string(),
+        lineage.source_session_id.clone(),
+    );
 }
 
 /// A mob definition wiring rule that would wire a member of a role when
@@ -904,6 +1002,106 @@ mod tests {
         assert_eq!(
             verified_side_chat_source(&marked("review:alpha"), None, Some(&source)),
             Some("review:alpha".to_string())
+        );
+    }
+
+    /// The lineage of each verified side chat among one roster's rows: its
+    /// source's console identity (the source's durable identity label while
+    /// it is on the roster, else its alias) and the forked session. No other
+    /// row has one.
+    #[test]
+    fn side_chat_lineages_name_the_source_identity_and_the_forked_session() {
+        let source = fork_source("alpha");
+        let session = source.source_session_id.to_string();
+        let spawner = meerkat_mob::AgentIdentity::from("alpha");
+        let source_labels =
+            BTreeMap::from([("agent_identity".to_string(), "domain:alpha".to_string())]);
+        let side_labels = marked("alpha");
+        let rows = [
+            SideChatRosterRow {
+                alias: "alpha".to_string(),
+                labels: &source_labels,
+                spawned_by: None,
+                fork_source: None,
+            },
+            SideChatRosterRow {
+                alias: "alpha-side".to_string(),
+                labels: &side_labels,
+                spawned_by: None,
+                fork_source: Some(&source),
+            },
+            SideChatRosterRow {
+                alias: "alpha-fork".to_string(),
+                labels: &side_labels,
+                spawned_by: Some(&spawner),
+                fork_source: Some(&source),
+            },
+        ];
+        assert_eq!(
+            side_chat_lineages(&rows),
+            BTreeMap::from([(
+                "alpha-side".to_string(),
+                SideChatLineage {
+                    source_identity: "domain:alpha".to_string(),
+                    source_session_id: session,
+                },
+            )]),
+            "only the side chat has a lineage, and it names the source's console identity"
+        );
+        assert_eq!(
+            side_chat_lineages(&rows[1..])
+                .get("alpha-side")
+                .map(|lineage| lineage.source_identity.as_str()),
+            Some("alpha"),
+            "a source that left the roster is named by its alias"
+        );
+        let unmarked = BTreeMap::new();
+        assert!(
+            side_chat_lineages(&[SideChatRosterRow {
+                alias: "beta".to_string(),
+                labels: &unmarked,
+                spawned_by: None,
+                fork_source: Some(&source),
+            }])
+            .is_empty(),
+            "a durable fork without the marker has no side chat lineage"
+        );
+    }
+
+    /// A verified side chat's console labels name its source and the forked
+    /// session, and lose any spawn lineage the registry held under its
+    /// identity; without a lineage nothing changes.
+    #[test]
+    fn the_projection_writes_only_the_verified_lineage() {
+        let lineage = SideChatLineage {
+            source_identity: "alpha".to_string(),
+            source_session_id: "alpha-session".to_string(),
+        };
+        let mut labels = BTreeMap::from([
+            ("team".to_string(), "review".to_string()),
+            (
+                crate::console_spawn::SPAWNED_BY_LABEL.to_string(),
+                "earlier-parent".to_string(),
+            ),
+            (
+                crate::console_spawn::SPAWNED_BY_SESSION_LABEL.to_string(),
+                "earlier-session".to_string(),
+            ),
+        ]);
+        let unchanged = labels.clone();
+        project_side_chat_lineage(&mut labels, None);
+        assert_eq!(labels, unchanged);
+        project_side_chat_lineage(&mut labels, Some(&lineage));
+        assert_eq!(
+            labels,
+            BTreeMap::from([
+                ("team".to_string(), "review".to_string()),
+                (SIDE_CHAT_OF_LABEL.to_string(), "alpha".to_string()),
+                (
+                    SIDE_CHAT_OF_SESSION_LABEL.to_string(),
+                    "alpha-session".to_string()
+                ),
+            ])
         );
     }
 

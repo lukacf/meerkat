@@ -961,7 +961,7 @@
               "retention",
               "instructions"
             ],
-            "note": "retention is until_closed. instructions lists each instruction the side chat inherited as history: state inherited (the source's revision activated in the side chat) or inactive with a reason (not_effective_in_source, body_unreadable, activation_refused); the side chat refuses its first turn naming an inactive key. The experience lists a side chat's sidebar row with side_chat_of, its source's identity."
+            "note": "retention is until_closed. instructions lists each instruction the side chat inherited as history: state inherited (the source's revision activated in the side chat) or inactive with a reason (not_effective_in_source, body_unreadable, activation_refused); the side chat refuses its first turn naming an inactive key. The experience lists a side chat's sidebar row with side_chat_of, its source's identity; its console labels carry side_chat_of and side_chat_of_session (the forked source session), read from the durable fork record, and the access rules follow a side chat to its source."
           },
           "errors": [
             {

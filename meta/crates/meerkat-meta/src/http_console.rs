@@ -240,14 +240,6 @@ struct ConsoleSnapshotReadModelState {
     /// fixups. The snapshot hot path extends `members` with these instead
     /// of walking delegate handles per-request.
     delegate_member_groups: Vec<Vec<ConsoleMember>>,
-    /// Whether a walked roster row carries the side chat marker, so the
-    /// walk reads the primary roster's fork facts only when a side chat may
-    /// be among its rows.
-    side_chat_marked: bool,
-    /// The primary mob's verified side chats: each side chat's public alias
-    /// with its source's console identity
-    /// ([`crate::side_chat::verified_side_chats`]).
-    side_chat_sources: BTreeMap<String, String>,
 }
 
 /// One read of the identity runtime for every identity it knows: the
@@ -7430,7 +7422,8 @@ pub(crate) async fn sse_member_authorization_projection(
 
     let mut labels = alias.member.labels.clone();
     // Roster labels are untrusted for lineage. Only the spawn registry may
-    // restore `spawned_by` and related inheritance metadata.
+    // restore `spawned_by` and related inheritance metadata, and only
+    // Meerkat's fork record a side chat's source.
     crate::console_spawn::sanitize_unverified_lineage_labels(&mut labels);
     if let Some(runtime) = runtime {
         let registered = runtime.console_identity_labels().await;
@@ -7438,6 +7431,13 @@ pub(crate) async fn sse_member_authorization_projection(
             crate::console_spawn::merge_registered_labels(&mut labels, spawn_labels);
         }
     }
+    let side_chat = crate::side_chat::verified_side_chat_lineage(
+        handle,
+        &alias.member.agent_identity,
+        &alias.member.labels,
+    )
+    .await;
+    crate::side_chat::project_side_chat_lineage(&mut labels, side_chat.as_ref());
     let visible = runtime_alias_visible_to_console(handle, visibility_policy, &alias);
     Some(SseMemberAuthorizationProjection {
         identity: alias.identity.clone(),
@@ -13506,8 +13506,7 @@ async fn build_live_snapshot(
             agents,
             members,
             true,
-        )
-        .with_side_chats(read_model_state.side_chat_sources),
+        ),
         pending,
     )
 }
@@ -13648,12 +13647,6 @@ async fn walk_console_snapshot_read_model(
     )
     .await;
     state.primary_members = primary_members;
-    // Side chats live in the primary mob. Their source comes from Meerkat's
-    // durable roster (the typed fork source), never from a label, so a side
-    // chat nests under its source across restarts.
-    if state.side_chat_marked {
-        state.side_chat_sources = crate::side_chat::verified_side_chats(&handle).await;
-    }
 
     let Some(mcp_state) = runtime.agent_mob_mcp_state() else {
         return state;
@@ -13738,9 +13731,6 @@ async fn collect_console_session_index_for_handle(
         // from the comms-safe roster id, meerkat 0.7).
         let identity =
             crate::member_comms_id::runtime_alias_str(entry.agent_identity.as_str()).into_owned();
-        state.side_chat_marked |= entry
-            .labels
-            .contains_key(crate::side_chat::SIDE_CHAT_OF_LABEL);
         let Some(session_id) = handle
             .resolve_bridge_session_id_observation(&entry.agent_identity)
             .await
@@ -13761,15 +13751,12 @@ fn apply_console_visibility_policy(
     visibility_policy: &dyn ConsoleVisibilityPolicy,
 ) {
     let mut hidden = BTreeSet::new();
-    // Console identities of hidden members, which side chat sources name.
-    let mut hidden_identities = BTreeSet::new();
     snapshot.members.retain(|member| {
         let visible = visibility_policy.member_visible(member)
             && visibility_policy
                 .identity_visible(&console_identity_record_from_console_member(member));
         if !visible {
             hidden.insert(member.agent_identity.clone());
-            hidden_identities.insert(console_member_console_identity(member).to_string());
         }
         visible
     });
@@ -13779,11 +13766,6 @@ fn apply_console_visibility_policy(
     snapshot
         .loaded_modules
         .retain(|module_id| !hidden.contains(module_id));
-    snapshot.side_chats.retain(|side_chat, source| {
-        !hidden.contains(side_chat)
-            && !hidden.contains(source)
-            && !hidden_identities.contains(source)
-    });
 }
 
 async fn reset_all_live_console_agents(
@@ -14733,8 +14715,10 @@ fn namespace_console_attributes(
     attributes.agent_id = attributes
         .agent_id
         .map(|id| namespace_console_identity(&id, namespace));
-    if let Some(parent) = attributes.labels.get_mut("spawned_by") {
-        *parent = namespace_console_identity(parent, namespace);
+    for key in crate::console_spawn::LINEAGE_PARENT_LABELS {
+        if let Some(parent) = attributes.labels.get_mut(key) {
+            *parent = namespace_console_identity(parent, namespace);
+        }
     }
     attributes
 }
@@ -14804,6 +14788,19 @@ async fn live_member_access_attributes(
                 .to_string(),
         );
     }
+    // A side chat names its source as this roster records its fork.
+    let side_chats = crate::side_chat::side_chat_lineages(
+        &entries
+            .iter()
+            .map(|entry| crate::side_chat::SideChatRosterRow {
+                alias: crate::member_comms_id::runtime_alias_str(entry.agent_identity.as_str())
+                    .into_owned(),
+                labels: &entry.labels,
+                spawned_by: entry.spawned_by.as_ref(),
+                fork_source: entry.fork_source.as_ref(),
+            })
+            .collect::<Vec<_>>(),
+    );
     entries
         .into_iter()
         .map(|entry| {
@@ -14817,6 +14814,7 @@ async fn live_member_access_attributes(
                 host_identity,
                 source_mob_id,
                 registered,
+                side_chats.get(&alias),
             );
             crate::runtime::console_member_access_attributes(&alias, entry.role.as_str(), &labels)
         })
@@ -14904,17 +14902,21 @@ async fn delegate_mobs_with_hosts(runtime: &MobRuntime) -> Vec<(String, MobHandl
 
 /// The console labels of one roster member, as the console projects them:
 /// the roster labels without unverified lineage, gaps filled from the spawn
-/// registry (looked up under the member's console identity), and, for a
-/// member of an agent-created sub-mob, its delegate host and source mob.
-/// Roster labels win, except lineage, which only the spawn registry may
-/// assert. The console's member rows and every route's access priming use
-/// this projection, so all of them record one value per identity.
+/// registry (looked up under the member's console identity), a side chat's
+/// verified source (`side_chat`, from the roster's fork record:
+/// [`crate::side_chat::project_side_chat_lineage`]), and, for a member of an
+/// agent-created sub-mob, its delegate host and source mob. Roster labels
+/// win, except lineage, which only the spawn registry and Meerkat's fork
+/// record may assert. The console's member rows and every route's access
+/// priming use this projection, so all of them record one value per
+/// identity.
 fn projected_console_member_labels(
     roster_labels: &BTreeMap<String, String>,
     alias: &str,
     host_identity: Option<&str>,
     source_mob_id: Option<&str>,
     registered_labels: &BTreeMap<String, BTreeMap<String, String>>,
+    side_chat: Option<&crate::side_chat::SideChatLineage>,
 ) -> BTreeMap<String, String> {
     let mut labels = roster_labels.clone();
     crate::console_spawn::sanitize_unverified_lineage_labels(&mut labels);
@@ -14923,6 +14925,7 @@ fn projected_console_member_labels(
     if let Some(spawn_labels) = registered_labels.get(console_identity_key) {
         crate::console_spawn::merge_registered_labels(&mut labels, spawn_labels);
     }
+    crate::side_chat::project_side_chat_lineage(&mut labels, side_chat);
     if let Some(host_identity) = host_identity {
         labels
             .entry("delegate_host_identity".to_string())
@@ -14952,6 +14955,14 @@ async fn project_console_members_from_handle(
     // `MobMemberListEntry`; the structural `list_all_members` roster no longer
     // carries it, so the console projection reads the operational list.
     let entries = handle.list_members_including_retiring().await;
+    // A side chat names its source as the roster records its fork; the
+    // fork facts are read only when a row carries the side chat marker.
+    let side_chats =
+        if crate::side_chat::any_side_chat_marker(entries.iter().map(|entry| &entry.labels)) {
+            crate::side_chat::verified_side_chats(handle).await
+        } else {
+            BTreeMap::new()
+        };
     // A delegate mob's members are built by the same member builder, against
     // its own definition's `[models.<id>]` entries.
     let model_registry = member_model_registry(member_model_config, handle.definition());
@@ -14973,14 +14984,16 @@ async fn project_console_members_from_handle(
         );
         // Spawn-time console metadata (group/display labels, spawned_by
         // lineage) fills gaps the roster does not carry; roster labels win —
-        // except lineage, which only the spawn registry may assert (this
-        // projection feeds the experience-path ABAC attribute rebuild).
+        // except lineage, which only the spawn registry (and, for a side
+        // chat, Meerkat's fork record) may assert (this projection feeds the
+        // experience-path ABAC attribute rebuild).
         let labels = projected_console_member_labels(
             &entry.labels,
             &identity,
             host_identity,
             source_mob_id,
             registered_labels,
+            side_chats.get(&identity),
         );
         let mut wired_to: Vec<String> = entry
             .wired_to

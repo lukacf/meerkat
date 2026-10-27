@@ -374,8 +374,11 @@ side chat on its own; the agent's session, transcript and queued work stay
 as they were.
 
 - The side chat runs with the agent's role, profile and model overrides and
-  tools. It inherits the agent's labels, so the people who may see the agent
-  may see its side chats.
+  tools, and inherits the agent's labels.
+- Its audience is the agent's: the access rules follow a side chat to its
+  agent, so whoever may see the agent, send to it or retire it may do the
+  same with its side chats, and a deny on the agent hides them (see
+  [Spawn-lineage inheritance](/concepts/access-control#spawn-lineage-inheritance)).
 - It is never wired to a peer: no other agent can address it, and none lists
   it as a peer. A side chat of an agent whose role the mob definition wires
   (`auto_wire_orchestrator`, `role_wiring`) is refused, because the runtime
@@ -383,6 +386,11 @@ as they were.
 - It is listed under its agent in the sidebar, marked **Side chat**, and is
   kept until you close it: across a console reload and a gateway restart.
   **Close side chat** in its pane retires it; the agent is not touched.
+  `meta/reset_all` retires side chats with the other members that have no
+  registered identity. A host that reconciles the whole mob against a
+  declared roster (`UnifiedRuntime::reconcile`, without identity-first
+  authority) retires them too, since no declared roster names them; the
+  stock gateway does not.
 - The action is offered only to a viewer who may spawn members
   (`agent.spawn`), and only where the gateway's sessions persist. It is
   disabled while the agent works and enabled when it is idle.

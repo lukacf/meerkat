@@ -61,6 +61,8 @@ This is what makes agent-fanned-out workers governable without per-worker rules:
 
 Lineage is **runtime-derived only**: `spawned_by` and `via_tool` come from the spawn path's own record of who performed the spawn. A `spawned_by` claim arriving through caller-controlled labels (spawn specs, roster labels) is stripped at every enforcement seam — an unverified claim could otherwise mint inherited visibility, or hide a member behind a denied parent. The lineage registry is in-memory: it repopulates as members are spawned and does not survive a runtime restart.
 
+A Console **side chat** (`meta/fork_member`) follows the agent it was forked from the same way: its `side_chat_of` label names that agent, and agent checks evaluate the side chat and then the agent (and the agent's own ancestors). Its audience is the agent's: a rule that matches the agent covers its side chats for every action, a rule on another identity does not, and a deny on the agent hides them. The relation is runtime-derived too, from Meerkat's durable record of the fork, so unlike the spawn registry it survives a restart; a `side_chat_of` claim in caller-controlled labels is stripped like `spawned_by`.
+
 <Warning>
 Upgrading changes what existing rules grant: an operator holding `agent.view`/`agent.send` on a coordinator now also holds those actions on every member that coordinator spawns. This is the intended default — agent-spawned workers are part of the parent's work — but deployments with tight per-agent rules should review coordinator grants, and can add member-specific `deny` rules where inheritance is unwanted.
 </Warning>

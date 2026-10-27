@@ -128,12 +128,6 @@ pub struct ConsoleLiveSnapshot {
     /// ([`crate::unobserved`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unobserved: Option<UnobservedFacts>,
-    /// The console side chats among `members`: each side chat's member id
-    /// (`ConsoleMember::agent_identity`) with its source's console identity,
-    /// as Meerkat's durable roster records the fork. The sidebar row of a
-    /// side chat carries it as `side_chat_of`.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub side_chats: BTreeMap<String, String>,
 }
 
 fn console_member_console_identity(member: &ConsoleMember) -> &str {
@@ -174,15 +168,7 @@ impl ConsoleLiveSnapshot {
             unobserved: running
                 .is_none()
                 .then(|| UnobservedFacts::new(UnobservedReason::NotObserved, &["running"])),
-            side_chats: BTreeMap::new(),
         }
-    }
-
-    /// The same snapshot naming its console side chats
-    /// ([`Self::side_chats`]).
-    pub fn with_side_chats(mut self, side_chats: BTreeMap<String, String>) -> Self {
-        self.side_chats = side_chats;
-        self
     }
 }
 
@@ -553,8 +539,8 @@ fn filter_snapshot_for_access(snapshot: &mut ConsoleLiveSnapshot, view: &AccessV
         return;
     }
     // Each member is judged by the attributes its row carries, then along
-    // its spawn lineage, as every agent-scoped check judges it: a member an
-    // agent spawned follows its spawner.
+    // its lineage, as every agent-scoped check judges it: a member an agent
+    // spawned follows its spawner, and a side chat its source.
     snapshot.members.retain(|member| {
         view.decide_agent_with_attributes(
             crate::access::ACTION_AGENT_VIEW,
@@ -572,11 +558,6 @@ fn filter_snapshot_for_access(snapshot: &mut ConsoleLiveSnapshot, view: &AccessV
     snapshot
         .loaded_modules
         .retain(|module_id| view.allows_agent(crate::access::ACTION_AGENT_VIEW, module_id));
-    // A side chat names its source only to a caller who may view both.
-    snapshot.side_chats.retain(|side_chat, source| {
-        view.allows_agent(crate::access::ACTION_AGENT_VIEW, side_chat)
-            && view.allows_agent(crate::access::ACTION_AGENT_VIEW, source)
-    });
 }
 
 /// Intersect the projected experience with the caller's grants and append
@@ -928,7 +909,10 @@ fn build_console_experience_contract(
                     if let Some(phase) = response_phases.get(console_identity) {
                         record["response_phase"] = serde_json::json!(phase);
                     }
-                    if let Some(source) = live_snapshot.side_chats.get(&member.agent_identity) {
+                    // A side chat names its source as the console projected
+                    // it from Meerkat's durable fork record
+                    // (`crate::side_chat::project_side_chat_lineage`).
+                    if let Some(source) = member.labels.get(crate::side_chat::SIDE_CHAT_OF_LABEL) {
                         record["side_chat_of"] = serde_json::json!(source);
                     }
                     record
@@ -2453,7 +2437,6 @@ mod access_priming_tests {
             members: vec![member("scout", "worker", "public")],
             has_mob_runtime: true,
             unobserved: None,
-            side_chats: BTreeMap::new(),
         };
         // The first poll records the roster.
         prime_access_attributes(&controller, &snapshot);

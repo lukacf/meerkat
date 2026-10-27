@@ -657,9 +657,10 @@ fn persist_config(path: &Path, config: &AccessControlConfig) -> Result<(), Acces
     std::fs::rename(&tmp, path).map_err(|err| AccessConfigError::Io(err.to_string()))
 }
 
-/// One link in an agent's spawn lineage: the agent itself first, then its
-/// spawn ancestors. Ancestors may be uncached (identity known only from a
-/// child's `spawned_by` label).
+/// One link in an agent's lineage: the agent itself first, then its
+/// ancestors (see [`crate::console_spawn::lineage_parent`]). Ancestors may be
+/// uncached (identity known only from a child's `spawned_by` or
+/// `side_chat_of` label).
 struct LineageLink {
     identity: String,
     attributes: Option<Arc<AgentResourceAttributes>>,
@@ -829,6 +830,9 @@ impl AccessView {
     /// the agent-tool spawn path). A spawned member inherits its spawning
     /// parent's permissions: rules that match the parent — or any ancestor —
     /// also match the member, with deny-overrides preserved across the chain.
+    /// A console side chat carries its source as a `side_chat_of` label
+    /// (projected from Meerkat's durable fork record) and follows it the same
+    /// way, so its audience is its source's.
     pub fn decide_agent(&self, action: &str, identity: &str) -> AccessDecision {
         if !self.config.enabled {
             return AccessDecision::Allow;
@@ -918,10 +922,11 @@ impl AccessView {
         super::engine::evaluate_access_lineage(&self.config, &self.principal, action, &resources)
     }
 
-    /// Resolve the agent's cached attributes followed by its spawn ancestors
-    /// (`spawned_by` chain). Bounded and cycle-safe. An ancestor without
-    /// cached attributes still contributes an identity-only resource so
-    /// identity-selector rules naming the parent apply to its descendants.
+    /// Resolve the agent's cached attributes followed by its ancestors (the
+    /// `spawned_by` chain, through a side chat's `side_chat_of` source).
+    /// Bounded and cycle-safe. An ancestor without cached attributes still
+    /// contributes an identity-only resource so identity-selector rules
+    /// naming the parent apply to its descendants.
     /// Classify an agent spelling: not a runtime alias, the current alias of
     /// a known identity (with that member's cache key), or a runtime alias
     /// that is stale, unknown, or malformed.
@@ -1017,12 +1022,12 @@ impl AccessView {
             attributes: Some(own),
         }];
         while lineage.len() < MAX_LINEAGE_DEPTH {
+            // The spawner, else a side chat's source.
             let Some(parent) = lineage
                 .last()
                 .and_then(|link| link.attributes.as_deref())
-                .and_then(|attributes| attributes.labels.get("spawned_by"))
-                .map(|parent| parent.trim().to_string())
-                .filter(|parent| !parent.is_empty())
+                .and_then(|attributes| crate::console_spawn::lineage_parent(&attributes.labels))
+                .map(|parent| parent.identity.to_string())
             else {
                 break;
             };
@@ -1873,6 +1878,90 @@ mod tests {
             !bob.can_view_agent("covert-worker"),
             "a deny on the spawning parent must propagate to its descendants"
         );
+    }
+
+    /// A console side chat follows its source (`side_chat_of`) like a
+    /// spawned member follows its spawner: a grant that names the source's
+    /// identity covers its side chats for view, send and retire, a grant on
+    /// another identity does not, and a deny on the source hides them.
+    #[test]
+    fn a_side_chat_follows_its_source_in_the_lineage() {
+        let actions = [
+            crate::access::ACTION_AGENT_VIEW,
+            crate::access::ACTION_AGENT_SEND,
+            crate::access::ACTION_AGENT_RETIRE,
+        ];
+        let grant = |id: &str, subject: &str, agent: &str| AccessRule {
+            id: id.to_string(),
+            subjects: vec![subject.to_string()],
+            actions: Vec::from(actions.map(String::from)),
+            agents: vec![agent.to_string()],
+            ..AccessRule::default()
+        };
+        let mut config = enabled_config();
+        config
+            .rules
+            .push(grant("bob-on-the-source", "bob@example.test", "ops-lead"));
+        config
+            .rules
+            .push(grant("carol-on-a-scout", "carol@example.test", "scout-1"));
+        config.rules.push(AccessRule {
+            id: "hide-secret-lead".to_string(),
+            effect: AccessEffect::Deny,
+            actions: vec!["agent.*".to_string()],
+            agents: vec!["secret-lead".to_string()],
+            ..AccessRule::default()
+        });
+        config
+            .rules
+            .push(grant("dave-on-everything", "dave@example.test", "*"));
+        let controller = AccessController::new(config).expect("controller");
+        let side_chat_of = |source: &str| {
+            BTreeMap::from([
+                (
+                    crate::side_chat::SIDE_CHAT_OF_LABEL.to_string(),
+                    source.to_string(),
+                ),
+                (
+                    crate::side_chat::SIDE_CHAT_OF_SESSION_LABEL.to_string(),
+                    format!("{source}-session"),
+                ),
+            ])
+        };
+        for (identity, labels) in [
+            ("ops-lead", BTreeMap::new()),
+            ("ops-lead-side", side_chat_of("ops-lead")),
+            ("scout-1", BTreeMap::new()),
+            ("secret-lead", BTreeMap::new()),
+            ("secret-lead-side", side_chat_of("secret-lead")),
+        ] {
+            controller.record_agent_attributes(AgentResourceAttributes {
+                identity: identity.to_string(),
+                agent_id: Some(identity.to_string()),
+                role: Some("worker".to_string()),
+                labels,
+            });
+        }
+
+        let bob = controller.view_for_subject(Some("bob@example.test"));
+        let carol = controller.view_for_subject(Some("carol@example.test"));
+        let dave = controller.view_for_subject(Some("dave@example.test"));
+        for action in actions {
+            assert!(
+                bob.allows_agent(action, "ops-lead-side"),
+                "a grant naming the source covers its side chat: {action}"
+            );
+            assert!(
+                !carol.allows_agent(action, "ops-lead-side"),
+                "a grant on another identity does not cover the side chat: {action}"
+            );
+            assert!(carol.allows_agent(action, "scout-1"));
+            assert!(
+                !dave.allows_agent(action, "secret-lead-side"),
+                "a deny on the source hides its side chat: {action}"
+            );
+            assert!(dave.allows_agent(action, "ops-lead-side"));
+        }
     }
 
     /// Broad `agent.view` for bob plus a deny on `tier=secret` members.

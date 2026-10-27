@@ -358,6 +358,72 @@ fn label_selector_rules_filter_experience() {
     assert_eq!(sidebar_identities(&experience), ["pay-analyst"]);
 }
 
+/// A console side chat follows its source in the access rules, for view,
+/// send and retire: a grant that names the source's identity shows the side
+/// chat and lets the caller send to and close it, and a grant on another
+/// identity does not. The console labels a side chat with its source
+/// (`side_chat_of`) only from Meerkat's durable fork record.
+#[test]
+fn a_side_chat_follows_its_source_for_view_send_and_retire() {
+    let grant = |id: &str, subject: &str, agent: &str| AccessRule {
+        id: id.to_string(),
+        subjects: vec![subject.to_string()],
+        actions: vec![
+            "agent.view".to_string(),
+            "agent.send".to_string(),
+            "agent.retire".to_string(),
+        ],
+        agents: vec![agent.to_string()],
+        ..AccessRule::default()
+    };
+    let controller = AccessController::new(AccessControlConfig {
+        enabled: true,
+        admins: vec!["root@example.test".to_string()],
+        rules: vec![
+            grant("alice-on-the-source", "alice@example.test", "ops-lead"),
+            grant("carol-on-another-agent", "carol@example.test", "scout-1"),
+        ],
+        ..AccessControlConfig::default()
+    })
+    .expect("controller");
+    let snapshot = snapshot_with_members(vec![
+        member("ops-lead", "lead", &[("team", "ops")]),
+        member(
+            "ops-lead-side-1",
+            "lead",
+            &[
+                ("team", "ops"),
+                ("side_chat_of", "ops-lead"),
+                ("side_chat_of_session", "ops-lead-session"),
+            ],
+        ),
+        member("scout-1", "scout", &[]),
+    ]);
+
+    let alice = experience_for(&controller, "alice@example.test", &snapshot);
+    assert_eq!(sidebar_identities(&alice), ["ops-lead", "ops-lead-side-1"]);
+    let side_chat = alice["agent_sidebar"]["live_snapshot"]["agents"]
+        .as_array()
+        .expect("agents")
+        .iter()
+        .find(|agent| agent["identity"] == "ops-lead-side-1")
+        .expect("the side chat row");
+    assert_eq!(side_chat["side_chat_of"], json!("ops-lead"));
+    assert_eq!(side_chat["affordances"]["can_send_message"], json!(true));
+    assert_eq!(side_chat["affordances"]["can_retire"], json!(true));
+
+    let carol = experience_for(&controller, "carol@example.test", &snapshot);
+    assert_eq!(
+        sidebar_identities(&carol),
+        ["scout-1"],
+        "a grant on another identity does not show the side chat"
+    );
+    let carol = controller.view_for_subject(Some("carol@example.test"));
+    for action in ["agent.view", "agent.send", "agent.retire"] {
+        assert!(!carol.allows_agent(action, "ops-lead-side-1"), "{action}");
+    }
+}
+
 /// The experience lists a member along its spawn lineage, as every agent
 /// check decides it: a grant on the spawner shows the members it spawned,
 /// and a deny on the spawner hides them even under a broad grant.

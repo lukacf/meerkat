@@ -50,6 +50,7 @@ test("shipping runners discover every registered scenario and shard default acce
     require("./scenarios/real-tab-isolation.cjs").scenarios,
     require("./scenarios/real-legacy-import.cjs").scenarios,
     require("./scenarios/real-sidebar-activity.cjs").scenarios,
+    require("./scenarios/real-side-chats.cjs").scenarios,
   ];
   const requiredBrowser = browserModules.flat();
   assert(requiredBrowser.length >= 25, "real backend acceptance families must remain registered");

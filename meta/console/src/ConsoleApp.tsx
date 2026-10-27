@@ -119,6 +119,16 @@ import {
 } from "./lib/topology";
 import { findPaneResizeRoot } from "./lib/pane-resize";
 import { activeRunIdFromFrames, describeRunStopReceipt, parseRunStopResult } from "./lib/run-stop";
+import {
+  findSideChatAgent,
+  inactiveInstructionNotice,
+  parseSideChatForkResult,
+  sideChatAlias,
+  sideChatForkBlockedReason,
+  sideChatForkErrorMessage,
+  sideChatSource,
+  sideChatSourceMemberId,
+} from "./lib/side-chat";
 import { resolveConsoleReadOnlyOverride } from "./lib/read-only-override";
 import { Icon, SpriteSheet } from "./icon";
 import type {
@@ -432,6 +442,10 @@ function isWorkGraphSignalFrame(frame: ConsoleFrame): boolean {
   return name.startsWith("workgraph_");
 }
 const DOCK_LAYOUT_STORAGE_PREFIX = "meta-console-dock-state";
+// A fork's side chat is listed once the console's read model has walked it;
+// the refreshes right after the fork may predate that walk.
+const SIDE_CHAT_LIST_ATTEMPTS = 6;
+const SIDE_CHAT_LIST_RETRY_MS = 500;
 
 function createIdempotencyKey(): string {
   return createConsoleId("console");
@@ -978,6 +992,12 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
   const [actionError, setActionError] = React.useState("");
   // Last run-stop receipt summary per identity (shown in the chat header).
   const [runStopNotices, setRunStopNotices] = React.useState<Record<string, string>>({});
+  // Side chats: whether this gateway offers `meta/fork_member`, the notice
+  // each side chat shows (instructions its fork could not inherit), and the
+  // panes whose fork is in flight.
+  const [sideChatsOffered, setSideChatsOffered] = React.useState(false);
+  const [sideChatNotices, setSideChatNotices] = React.useState<Record<string, string>>({});
+  const [forkingPanels, setForkingPanels] = React.useState<ReadonlySet<string>>(() => new Set());
   const [transportState, setTransportState] = React.useState<ConsoleTransportState>({
     phase: "connecting", stale: true, freshness: "unknown",
   });
@@ -2627,6 +2647,32 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
       experience?.runtime_capabilities?.can_send_messages === false);
   const consoleReadOnlyRef = React.useRef(false);
   consoleReadOnlyRef.current = consoleReadOnly;
+  // "Fork to side chat" is offered only where the gateway advertises
+  // `meta/fork_member` (its sessions persist) and the viewer may spawn, so
+  // the action never dead-ends; the gateway still judges every fork.
+  const canSpawnMembers = experience?.runtime_capabilities?.can_spawn_members === true;
+  React.useEffect(() => {
+    if (!canSpawnMembers) {
+      setSideChatsOffered(false);
+      return;
+    }
+    let active = true;
+    void Promise.resolve()
+      .then(() => consoleTransport.capabilities())
+      .then((capabilities) => {
+        if (active) {
+          setSideChatsOffered(
+            capabilities.methods.includes(consoleCommandMethod(CONSOLE_COMMAND_NAMES.forkMember)),
+          );
+        }
+      })
+      .catch(() => {
+        if (active) setSideChatsOffered(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [consoleTransport, canSpawnMembers, sendScope]);
   // Same-key resend of an uncertain send is safe only against a durable
   // dedupe store; older gateways (field absent) and in-memory stores are not.
   const resendUncertain = experience?.send_dedupe?.durable === true;
@@ -4387,6 +4433,82 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
     }
   }
 
+  // =========================================================================
+  // SIDE CHATS
+  // =========================================================================
+
+  /// Fork the conversation in `panelId` into a side chat and open it beside
+  /// the source. The source agent's session, transcript and queued work stay
+  /// as they are; the side chat is a new member that starts from them.
+  async function onForkSideChat(panelId: string, source: ConsoleAgent) {
+    if (consoleReadOnly || forkingPanels.has(panelId)) return;
+    const sourceMemberId = sideChatSourceMemberId(source);
+    const alias = sideChatAlias(sourceMemberId, createConsoleId("side").slice(-8));
+    setForkingPanels((current) => new Set(current).add(panelId));
+    try {
+      const result = parseSideChatForkResult(
+        await executeHeadlessCommand(
+          CONSOLE_COMMAND_NAMES.forkMember,
+          identityWorkbenchTarget(sourceMemberId, "chat"),
+          { source_member_id: sourceMemberId, agent_identity: alias },
+        ),
+      );
+      setActionError("");
+      const notice = inactiveInstructionNotice(result.instructions);
+      if (notice) {
+        setSideChatNotices((current) => ({ ...current, [result.agentIdentity]: notice }));
+      }
+      let sideChat: ConsoleAgent | null = null;
+      for (let attempt = 0; attempt < SIDE_CHAT_LIST_ATTEMPTS && !sideChat; attempt += 1) {
+        if (attempt > 0) {
+          await new Promise<void>((resolve) => window.setTimeout(resolve, SIDE_CHAT_LIST_RETRY_MS));
+        }
+        sideChat = findSideChatAgent(await loadExperience(), result.agentIdentity);
+      }
+      if (!sideChat) {
+        setActionError(`${result.displayName} was created and appears in the sidebar once the console lists it.`);
+        return;
+      }
+      // Split the source's pane: the side chat opens beside the conversation
+      // it branched from.
+      dock.focusPanel(panelId);
+      openAgentChat(sideChat, "split_right");
+    } catch (forkError) {
+      setActionError(sideChatForkErrorMessage(forkError));
+    } finally {
+      setForkingPanels((current) => {
+        const next = new Set(current);
+        next.delete(panelId);
+        return next;
+      });
+    }
+  }
+
+  /// Close a side chat: retire its member and close its pane. The source
+  /// agent is not touched.
+  async function onCloseSideChat(panelId: string, identity: string) {
+    if (consoleReadOnly) return;
+    try {
+      await executeHeadlessCommand(
+        CONSOLE_COMMAND_NAMES.retireIdentity,
+        identityWorkbenchTarget(identity, "chat"),
+        { identity },
+      );
+      setActionError("");
+    } catch (closeError) {
+      setActionError(errorMessage(closeError));
+      return;
+    }
+    dock.closePanel(panelId);
+    setSideChatNotices((current) => {
+      if (!(identity in current)) return current;
+      const next = { ...current };
+      delete next[identity];
+      return next;
+    });
+    await loadExperience().catch(() => []);
+  }
+
   async function onGatingDecision(
     pendingId: string,
     decision: "approve" | "reject" | "escalate",
@@ -5031,6 +5153,24 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
         && (Boolean(storage.getItem(`mobkit-pending-stack:${identity}`)) || readPredecessorConsoleQueue(storage, namespace, identity).attempts.length > 0));
     } catch { /* Queue reader reports preserved invalid bytes separately. */ }
     const agentBusy = isIdentityBusy(identity);
+    // Side chats: this pane may fork its agent, or be a side chat itself.
+    const sideChatOf = sideChatSource(agent);
+    const sideChatSourceAgent = sideChatOf
+      ? agents.find((candidate) =>
+          [candidate.identity, candidate.member_id, candidate.agent_id].includes(sideChatOf),
+        ) ?? null
+      : null;
+    const canForkSideChat = !consoleReadOnly && sideChatsOffered && canSpawnMembers && agent !== null;
+    const forkSideChatBlocked = forkingPanels.has(panel.id)
+      ? "Forking the conversation"
+      : sideChatForkBlockedReason({
+          busy: agentBusy,
+          phase,
+          responsePhase: agent?.response_phase,
+          queued: stackItems.length,
+        });
+    const canCloseSideChat =
+      sideChatOf !== null && !consoleReadOnly && agent?.affordances?.can_retire === true;
     const stackSlot = <>
       {stackItems.length > 0 ? <small className="queue-storage-note" role="status">{persistentSendScopeRef.current ? "Saved in this browser until sent" : "Not saved: these messages are lost if you reload"}</small> : null}
       {pendingStorageErrorRef.current[identity] && <p role="alert">{pendingStorageErrorRef.current[identity]}</p>}
@@ -5161,7 +5301,8 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             : undefined
         }
         onRetire={
-          canRetire
+          // A side chat closes through its own banner action.
+          canRetire && sideChatOf === null
             ? () => void onLifecycleAction(identity, "meta/retire")
             : undefined
         }
@@ -5171,6 +5312,19 @@ function ConsoleAppInstance({ baseUrl, transport, storageNamespace, markdownUrlP
             : undefined
         }
         runStopNotice={runStopNotices[identity] ?? null}
+        onForkSideChat={
+          canForkSideChat && agent
+            ? () => void onForkSideChat(panel.id, agent)
+            : undefined
+        }
+        forkSideChatDisabledReason={canForkSideChat ? forkSideChatBlocked : null}
+        sideChatOfLabel={sideChatOf ? sideChatSourceAgent?.label || sideChatOf : null}
+        onCloseSideChat={
+          canCloseSideChat
+            ? () => void onCloseSideChat(panel.id, identity)
+            : undefined
+        }
+        sideChatNotice={sideChatNotices[identity] ?? null}
         inspectLabel={configuredActionLabels.inspect}
         respawnLabel={configuredActionLabels.respawn}
         retireLabel={configuredActionLabels.retire}

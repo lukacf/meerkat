@@ -87,6 +87,10 @@ export interface ConsoleAgent extends SidebarWatchFields {
   addressable?: boolean;
   affordances?: ConsoleAgentAffordances;
   model_capabilities?: ConsoleModelCapabilities;
+  /** The source agent's identity when this agent is a side chat: a
+   * human's branch of that agent's conversation (`meta/fork_member`),
+   * as the runtime's roster records the fork. */
+  side_chat_of?: string;
   unobserved?: UnobservedFacts;
 }
 
@@ -107,6 +111,7 @@ export interface ConsoleExperienceAgentSnapshotRow extends Partial<IdentityStatu
   addressable?: boolean;
   affordances?: ConsoleAgentAffordances;
   model_capabilities?: ConsoleModelCapabilities;
+  side_chat_of?: string;
 }
 
 export interface ConsoleSidebarButtonConfig {

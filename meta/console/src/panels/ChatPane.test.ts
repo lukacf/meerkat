@@ -349,6 +349,92 @@ test("chat pane offers Stop run only when handed an active run, and shows the re
   assert.match(active, /That run already ended; nothing was stopped\./);
 });
 
+test("chat pane offers Fork to side chat only when handed the action, disabled while the agent works", () => {
+  const props = {
+    agent: {
+      agent_id: "alpha",
+      member_id: "alpha",
+      identity: "alpha",
+      label: "Alpha",
+      kind: "mob_agent",
+      role: "worker",
+      state: "active",
+      model_capabilities: { image_input: true },
+    },
+    agentLabel: "Alpha",
+    identity: "alpha",
+    entries: [],
+    phase: null,
+    draft: "",
+    sending: false,
+    readOnly: false,
+    staged: [],
+    onDraftChange: () => undefined,
+    onStagedChange: () => undefined,
+    onSend: () => true,
+  };
+  const withoutGrant = renderToStaticMarkup(React.createElement(ChatPane, props));
+  assert.doesNotMatch(withoutGrant, /conv-action:fork-side-chat/);
+  assert.doesNotMatch(withoutGrant, /side-chat-banner:alpha/);
+
+  const idle = renderToStaticMarkup(
+    React.createElement(ChatPane, { ...props, onForkSideChat: () => undefined }),
+  );
+  assert.match(idle, /data-testid="conv-action:fork-side-chat"/);
+  assert.match(idle, /Fork to side chat/);
+  assert.doesNotMatch(idle, /<button[^>]*disabled=""[^>]*data-testid="conv-action:fork-side-chat"/);
+
+  const working = renderToStaticMarkup(
+    React.createElement(ChatPane, {
+      ...props,
+      onForkSideChat: () => undefined,
+      forkSideChatDisabledReason: "Available when the agent is idle",
+    }),
+  );
+  assert.match(
+    working,
+    /<button[^>]*disabled=""[^>]*title="Fork to side chat - Available when the agent is idle"[^>]*data-testid="conv-action:fork-side-chat"/,
+  );
+});
+
+test("a side chat pane names its source and offers Close side chat", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(ChatPane, {
+      agent: {
+        agent_id: "alpha-side-ab12",
+        member_id: "alpha-side-ab12",
+        identity: "alpha-side-ab12",
+        label: "Alpha (side chat)",
+        kind: "mob_agent",
+        role: "worker",
+        state: "active",
+        side_chat_of: "alpha",
+        model_capabilities: { image_input: true },
+      },
+      agentLabel: "Alpha (side chat)",
+      identity: "alpha-side-ab12",
+      entries: [],
+      phase: null,
+      draft: "",
+      sending: false,
+      readOnly: false,
+      staged: [],
+      onDraftChange: () => undefined,
+      onStagedChange: () => undefined,
+      onSend: () => true,
+      sideChatOfLabel: "Alpha",
+      onCloseSideChat: () => undefined,
+      sideChatNotice: "Not inherited: app.skills/billing (not active in the source).",
+    }),
+  );
+  assert.match(html, /data-testid="side-chat-banner:alpha-side-ab12"/);
+  assert.match(html, /Side chat of <strong>Alpha<\/strong>/);
+  assert.match(html, /data-testid="side-chat-close:alpha-side-ab12"/);
+  assert.match(html, /Close side chat/);
+  assert.match(html, /data-testid="side-chat-notice:alpha-side-ab12"/);
+  assert.match(html, /Not inherited: app\.skills\/billing/);
+});
+
 function renderChat(args: {
   entries: ConversationTimelineEntry[];
   phase: "waiting" | "tool-executing" | "generating" | null;

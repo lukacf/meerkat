@@ -189,6 +189,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- The Console offers side chats. **Fork to side chat** in a conversation's
+  header forks the agent's durable transcript into a new member that opens in
+  a pane beside the agent (`meta/fork_member` on `/console/rpc`); the agent's
+  session, transcript and queued work stay as they were. A side chat runs with
+  the agent's role, profile and model overrides and tools and inherits its
+  labels; it is never wired to a peer, so a role the mob definition wires is
+  refused, typed (`-32055`, `unwired_seat_unavailable`); it is kept until
+  **Close side chat** retires it, across a console reload and a gateway
+  restart; and the sidebar lists it under the agent from Meerkat's durable
+  roster fork source (`side_chat_of` on the experience's sidebar rows, and
+  `ConsoleLiveSnapshot::side_chats`). The fork needs `agent.spawn` for the
+  side chat and `agent.view` for the agent, is offered where sessions
+  persist, and is refused typed while the agent works (the Console disables
+  the action until it is idle). Instructions the agent activated and had in
+  effect at the fork are activated in the side chat; any other stays inactive
+  and the side chat names it.
 - A host composing the stdio gateway can install Meerkat's operation review
   on the gateway's member agents through
   `GatewayHostComposition::operation_review`, asked once per member factory

@@ -1241,3 +1241,53 @@ test("sidebar prunes stale-namespace keys for the active scope while preserving 
   assert.equal(storage.getItem(staleSectionsKey), null, "stale sections pruned");
   assert.notEqual(storage.getItem(otherScopeKey), null, "other scope preserved");
 });
+
+test("sidebar lists a side chat under the agent it branched from", () => {
+  const source: ConsoleAgent = {
+    agent_id: "alpha",
+    member_id: "alpha",
+    identity: "alpha",
+    label: "Alpha",
+    kind: "mob_agent",
+    role: "analyst",
+    group: "Analysts",
+    wired_to: [],
+  };
+  const sideChat: ConsoleAgent = {
+    agent_id: "alpha-side-ab12",
+    member_id: "alpha-side-ab12",
+    identity: "alpha-side-ab12",
+    label: "Alpha (side chat)",
+    kind: "mob_agent",
+    role: "analyst",
+    group: "Analysts",
+    wired_to: [],
+    side_chat_of: "alpha",
+  };
+  const peer: ConsoleAgent = {
+    agent_id: "beta",
+    member_id: "beta",
+    identity: "beta",
+    label: "Beta",
+    kind: "mob_agent",
+    role: "analyst",
+    group: "Analysts",
+    wired_to: [],
+  };
+
+  assert.equal(
+    __sidebarTest.findSpawnHost(sideChat, [peer, sideChat, source], null)?.member_id,
+    "alpha",
+  );
+  assert.deepEqual(
+    __sidebarTest.groupSidebarAgents([sideChat, peer, source]).get("Domains")?.map((row) => [
+      row.agent.member_id,
+      row.depth,
+    ]),
+    [
+      ["alpha", 0],
+      ["alpha-side-ab12", 1],
+      ["beta", 0],
+    ],
+  );
+});

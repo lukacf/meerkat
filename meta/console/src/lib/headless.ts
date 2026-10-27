@@ -106,6 +106,7 @@ export const CONSOLE_COMMAND_NAMES = {
   respawnIdentity: "respawnIdentity",
   resetIdentity: "resetIdentity",
   stopMemberRun: "stopMemberRun",
+  forkMember: "forkMember",
   listRoutingRoutes: "listRoutingRoutes",
   listDeliveryHistory: "listDeliveryHistory",
   listGatingPending: "listGatingPending",
@@ -192,6 +193,15 @@ const CONSOLE_COMMAND_SPECS: Record<ConsoleCommandName, ConsoleCommandSpec> = {
   // explicitly (the run id comes from the member's `run_started`).
   [CONSOLE_COMMAND_NAMES.stopMemberRun]: {
     method: CONSOLE_RPC_METHODS.stopMemberRun,
+    targetKinds: new Set<MetaWorkbenchTarget["kind"]>([
+      "meta/identity-chat",
+      "meta/identity-inspect",
+    ]),
+  },
+  // Side chat: params carry `source_member_id` and the side chat's
+  // `agent_identity` explicitly; the source is the conversation's agent.
+  [CONSOLE_COMMAND_NAMES.forkMember]: {
+    method: CONSOLE_RPC_METHODS.forkMember,
     targetKinds: new Set<MetaWorkbenchTarget["kind"]>([
       "meta/identity-chat",
       "meta/identity-inspect",

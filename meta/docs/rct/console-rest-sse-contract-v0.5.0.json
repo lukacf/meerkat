@@ -524,7 +524,7 @@
           "data": {
             "kind": "candidate_launch"
           },
-          "applicability": "A runtime-backed console of a candidate launch (runtime_options.mob_composition.authority = candidate) refuses, before anything is read or written, the methods that retire, respawn or reset a member, recompute the roster or rewire members (meta/retire, meta/retire_member, meta/respawn, meta/respawn_member, meta/reset, meta/reset_all, meta/delete_identity, meta/reconcile_identity and meta/topology/apply; meta/reconcile_edges answers a dry run flagged applied: false instead), meta/gating/decide, the ones that create a session (meta/ensure_member, meta/spawn_helper, meta/fork_helper and meta/attach_existing_session), the ones that admit member input or act on a member's runs (among them meta/console/send, including multipart, meta/console/voice/open, meta/console/recover_send, meta/run_flow, meta/reload_member, meta/stop_member_run and meta/force_cancel_member), the member declaration mutations (mob/adopt_member_identity_declaration and mob/apply_member_tool_declaration), and the operator mutations: the WorkGraph writes, meta/memory/quarantine/decide, the agent memory writes, the label sets and deletes, the access policy writes, meta/console/revoke_sessions, meta/blob/upload, meta/cancel_flow, the live channel verbs, a mobpack deploy with execute or a validation with rkat_validate, and a draft write (meta/mobpacks/create, save, delete, undo and redo) except to a store file the caller names outside the state directory and the gateway home that is not the store META_FLOW_EDITOR_DRAFT_STORE names. Reads still answer."
+          "applicability": "A runtime-backed console of a candidate launch (runtime_options.mob_composition.authority = candidate) refuses, before anything is read or written, the methods that retire, respawn or reset a member, recompute the roster or rewire members (meta/retire, meta/retire_member, meta/respawn, meta/respawn_member, meta/reset, meta/reset_all, meta/delete_identity, meta/reconcile_identity and meta/topology/apply; meta/reconcile_edges answers a dry run flagged applied: false instead), meta/gating/decide, the ones that create a session (meta/ensure_member, meta/spawn_helper, meta/fork_helper, meta/fork_member and meta/attach_existing_session), the ones that admit member input or act on a member's runs (among them meta/console/send, including multipart, meta/console/voice/open, meta/console/recover_send, meta/run_flow, meta/reload_member, meta/stop_member_run and meta/force_cancel_member), the member declaration mutations (mob/adopt_member_identity_declaration and mob/apply_member_tool_declaration), and the operator mutations: the WorkGraph writes, meta/memory/quarantine/decide, the agent memory writes, the label sets and deletes, the access policy writes, meta/console/revoke_sessions, meta/blob/upload, meta/cancel_flow, the live channel verbs, a mobpack deploy with execute or a validation with rkat_validate, and a draft write (meta/mobpacks/create, save, delete, undo and redo) except to a store file the caller names outside the state directory and the gateway home that is not the store META_FLOW_EDITOR_DRAFT_STORE names. Reads still answer."
         }
       },
       "policy_error_inventory": "policy_error_refs supplement each endpoint or method's local errors array. Endpoint references are conditional on the dispatched method, not all requests.",
@@ -932,6 +932,47 @@
                 -32000
               ],
               "note": "Mob refusals (unknown member, unsupported member mode, host refusal) carry meerkat's typed code and structured data."
+            }
+          ]
+        },
+        "meta/fork_member": {
+          "policy_error_refs": [
+            "#/surfaces/rpc/policy_errors/read_only",
+            "#/surfaces/rpc/policy_errors/access_denied"
+          ],
+          "request": {
+            "required_fields": [
+              "source_member_id",
+              "agent_identity"
+            ],
+            "optional_fields": [
+              "display_name"
+            ],
+            "note": "A side chat: a durable fork of the source's committed transcript end into a new member named agent_identity, with the source's role, profile and model overrides, runtime mode and tools, never wired to a peer, kept until it is retired. Gated on agent.spawn for agent_identity and agent.view for the source. A message_count (prefix) is refused. Offered in meta/capabilities only where sessions persist."
+          },
+          "success": {
+            "body": "side_chat_fork_result",
+            "required_fields": [
+              "agent_identity",
+              "session_id",
+              "display_name",
+              "side_chat_of",
+              "source_member_id",
+              "retention",
+              "instructions"
+            ],
+            "note": "retention is until_closed. instructions lists each instruction the side chat inherited as history: state inherited (the source's revision activated in the side chat) or inactive with a reason (not_effective_in_source, body_unreadable, activation_refused); the side chat refuses its first turn naming an inactive key. The experience lists a side chat's sidebar row with side_chat_of, its source's identity."
+          },
+          "errors": [
+            {
+              "codes": [
+                -32055,
+                -32037,
+                -32004,
+                -32602,
+                -32603
+              ],
+              "note": "-32055 is a typed refusal, nothing forked: data.kind fork_source_unavailable (cause running, no_session, remote_read_unavailable or authority_unavailable) or unwired_seat_unavailable (the mob definition wires the source's role, data.wiring names the rule). -32037 is meerkat's fork_instruction_refused under the refuse policy. A committed fork whose seat failed keeps meerkat's fork_member_provision_failed data with its fork_session_id."
             }
           ]
         },

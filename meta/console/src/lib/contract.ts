@@ -31,6 +31,7 @@ export const CONSOLE_RPC_METHODS = {
   respawnIdentity: "meta/respawn",
   resetIdentity: "meta/reset",
   stopMemberRun: "meta/stop_member_run",
+  forkMember: "meta/fork_member",
   routingRoutesList: "meta/routing/routes/list",
   deliveryHistory: "meta/delivery/history",
   gatingPending: "meta/gating/pending",

@@ -101,6 +101,21 @@ interface ChatPaneProps extends ConversationApprovalProps {
   stopRunLabel?: string;
   /// Operator-facing summary of the last run-stop receipt, if any.
   runStopNotice?: string | null;
+  /// Fork this conversation into a side chat (`meta/fork_member`). ConsoleApp
+  /// passes it only when the viewer may fork; omitted renders no action.
+  onForkSideChat?: () => void;
+  forkSideChatLabel?: string;
+  /// Why the fork is unavailable right now (the agent is working); the
+  /// action renders disabled with this reason.
+  forkSideChatDisabledReason?: string | null;
+  /// The source agent's label when this conversation is a side chat.
+  sideChatOfLabel?: string | null;
+  /// Close (retire) this side chat. Omitted renders no close action.
+  onCloseSideChat?: () => void;
+  closeSideChatLabel?: string;
+  /// The side chat's own notice, such as instructions its fork could not
+  /// inherit.
+  sideChatNotice?: string | null;
   inspectLabel?: string;
   respawnLabel?: string;
   retireLabel?: string;
@@ -1809,6 +1824,13 @@ export function ChatPane({
   onStopRun,
   stopRunLabel = "Stop run",
   runStopNotice = null,
+  onForkSideChat,
+  forkSideChatLabel = "Fork to side chat",
+  forkSideChatDisabledReason = null,
+  sideChatOfLabel = null,
+  onCloseSideChat,
+  closeSideChatLabel = "Close side chat",
+  sideChatNotice = null,
   inspectLabel = "Details",
   respawnLabel = "Respawn",
   retireLabel = "Retire",
@@ -2505,14 +2527,16 @@ export function ChatPane({
           </div> : null}
         </div>
         <div className="conv__actions">
-          {[
+          {([
             { id: "details", label: inspectLabel, icon: "i-info", onClick: onInspect },
+            { id: "fork-side-chat", label: forkSideChatLabel, icon: "i-branch", onClick: onForkSideChat, disabledReason: forkSideChatDisabledReason },
             { id: "stop-run", label: stopRunLabel, icon: "i-stop", onClick: onStopRun },
             { id: "respawn", label: respawnLabel, icon: "i-refresh", onClick: agent?.affordances?.can_respawn ? onRespawn : undefined },
             { id: "retire", label: retireLabel, icon: "i-archive", onClick: agent?.affordances?.can_retire ? onRetire : undefined },
-          ].filter(action => action.onClick).map(action => (
+          ] as { id: string; label: string; icon: string; onClick?: () => void; disabledReason?: string | null }[]).filter(action => action.onClick).map(action => (
             <button key={action.id} type="button" className="conv__action" onClick={action.onClick}
-              aria-label={action.label} title={`${action.label} - ${identity}`} data-testid={`conv-action:${action.id}`}>
+              disabled={Boolean(action.disabledReason)}
+              aria-label={action.label} title={action.disabledReason ? `${action.label} - ${action.disabledReason}` : `${action.label} - ${identity}`} data-testid={`conv-action:${action.id}`}>
               <span className="conv__action-icon" aria-hidden="true"><Icon name={action.icon} /></span>
               <span className="conv__action-label">{action.label}</span>
             </button>
@@ -2520,6 +2544,25 @@ export function ChatPane({
         </div>
       </div>
       </div>
+      {sideChatOfLabel ? (
+        <div className="conv__notice conv__notice--side-chat" role="note" data-testid={`side-chat-banner:${identity}`}>
+          <span className="conv__notice-text">
+            Side chat of <strong>{sideChatOfLabel}</strong>. It started from the agent's conversation; the agent itself is unchanged.
+          </span>
+          {onCloseSideChat ? (
+            <button type="button" className="conv__notice-action" onClick={onCloseSideChat}
+              aria-label={closeSideChatLabel} data-testid={`side-chat-close:${identity}`}>
+              <Icon name="i-close" />
+              <span>{closeSideChatLabel}</span>
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+      {sideChatNotice ? (
+        <div className="conv__notice" role="status" data-testid={`side-chat-notice:${identity}`}>
+          {sideChatNotice}
+        </div>
+      ) : null}
       {runStopNotice ? (
         <div className="conv__notice" role="status" data-testid={`run-stop-notice:${identity}`}>
           {runStopNotice}

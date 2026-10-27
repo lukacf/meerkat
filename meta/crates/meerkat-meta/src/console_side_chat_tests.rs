@@ -114,14 +114,23 @@ async fn call(runtime: &MobRuntime, method: &str, params: Value) -> Value {
     .await
 }
 
-/// Spawn `alias` as a member of `role` and run one committed turn on it, so
-/// its session holds a transcript to fork.
-async fn seeded_member(runtime: &MobRuntime, role: &str, alias: &str) -> TestResult {
+/// Spawn `alias` as a member of `role` with `labels` and run one committed
+/// turn on it, so its session holds a transcript to fork.
+async fn seeded_member(
+    runtime: &MobRuntime,
+    role: &str,
+    alias: &str,
+    labels: &[(&str, &str)],
+) -> TestResult {
     let identity = AgentIdentity::from(alias);
+    let labels = labels
+        .iter()
+        .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+        .collect::<BTreeMap<_, _>>();
     Box::pin(
         runtime
             .handle()
-            .spawn_spec(SpawnMemberSpec::new(role, identity.clone())),
+            .spawn_spec(SpawnMemberSpec::new(role, identity.clone()).with_labels(labels)),
     )
     .await?;
     let member = runtime.handle().member(&identity).await?;
@@ -188,7 +197,18 @@ fn fork_member_is_gated_as_a_spawn_of_the_side_chat() {
 #[tokio::test]
 async fn a_side_chat_forks_the_source_unwired_and_closes_on_retire() -> TestResult {
     let (_temp_dir, runtime) = persistent_console_runtime("console-side-chat-fork", "", "").await?;
-    seeded_member(&runtime, "worker", "alpha").await?;
+    // The source's own console flags: a side chat must not take them.
+    seeded_member(
+        &runtime,
+        "worker",
+        "alpha",
+        &[
+            ("team", "review"),
+            ("singleton", "true"),
+            ("console_watched", "true"),
+        ],
+    )
+    .await?;
     let source_session = bridge_session(&runtime, "alpha").await;
     assert!(source_session.is_some(), "the source has a session");
 
@@ -234,6 +254,15 @@ async fn a_side_chat_forks_the_source_unwired_and_closes_on_retire() -> TestResu
     assert_eq!(
         side.labels.get(crate::side_chat::SIDE_CHAT_OF_LABEL),
         Some(&"alpha".to_string())
+    );
+    assert_eq!(
+        (
+            side.labels.get("team").map(String::as_str),
+            side.labels.get("singleton").map(String::as_str),
+            side.labels.get("console_watched").map(String::as_str),
+        ),
+        (Some("review"), Some("false"), Some("false")),
+        "the side chat keeps the source's application labels, not its console flags"
     );
     let source = runtime
         .handle()
@@ -299,7 +328,7 @@ async fn a_side_chat_of_a_wired_role_is_refused_before_anything_is_forked() -> T
         "[wiring]\nauto_wire_orchestrator = true\n",
     )
     .await?;
-    seeded_member(&runtime, "worker", "beta").await?;
+    seeded_member(&runtime, "worker", "beta", &[]).await?;
 
     let refused = call(
         &runtime,

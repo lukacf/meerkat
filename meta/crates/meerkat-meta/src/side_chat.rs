@@ -52,6 +52,25 @@ use crate::mob_handle_runtime::MobRuntime;
 pub const SIDE_CHAT_OF_LABEL: &str = "side_chat_of";
 
 const DISPLAY_NAME_LABEL: &str = "display_name";
+/// Console labels of the source that describe the source itself, not its
+/// conversation, with the value a side chat takes instead when its source
+/// carries them. A fork copies every application label of its source, and a
+/// child's own label wins key by key, so each one present is overridden: a
+/// side chat is addressable, closable, not watched, degraded or alerting,
+/// has an empty inbox, and is never idle-retired by a label.
+const SOURCE_ONLY_LABELS: [(&str, &str); 8] = [
+    ("addressable", "true"),
+    ("singleton", "false"),
+    ("console_watched", "false"),
+    ("console_degraded", "false"),
+    ("console_degraded_reason", ""),
+    ("console_alert_level", "none"),
+    ("console_inbox_count", "0"),
+    (
+        crate::mob_handle_runtime::DELEGATE_IDLE_RETIRE_SECS_LABEL,
+        crate::mob_handle_runtime::DELEGATE_IDLE_RETIRE_DISABLED_LABEL,
+    ),
+];
 /// The most a caller-chosen side chat display name may take.
 const MAX_DISPLAY_NAME_CHARS: usize = 80;
 /// Prefix of the activation ids a side chat's inherited instructions get.
@@ -374,12 +393,21 @@ pub async fn fork_side_chat(
         format!("{source_name} (side chat)")
     });
     // The child's own labels win over the ones it inherits from its source,
-    // key by key: the marker names this source, and the display name keeps
-    // the side chat apart from the agent it branched from.
-    let labels = BTreeMap::from([
+    // key by key: the marker names this source, the display name keeps the
+    // side chat apart from the agent it branched from, and the source's own
+    // console flags do not follow it.
+    let mut labels = BTreeMap::from([
         (SIDE_CHAT_OF_LABEL.to_string(), source_alias),
         (DISPLAY_NAME_LABEL.to_string(), display_name.clone()),
     ]);
+    for (key, value) in SOURCE_ONLY_LABELS {
+        if source.labels.contains_key(key) {
+            labels.insert(key.to_string(), value.to_string());
+        }
+    }
+    // The session the fork reads, as the roster names it now; the child's
+    // durable fork source names the exact one once it is seated.
+    let source_session_before_fork = source.bridge_session_id().cloned();
     // The source's role, profile and model overrides and runtime mode, as a
     // `fork_off` child gets them: the side chat runs with the source's tools.
     let mut spec = SpawnMemberSpec::new(source.role, meerkat_mob::AgentIdentity::from(child_alias))
@@ -401,7 +429,20 @@ pub async fn fork_side_chat(
     .map_err(SideChatError::Fork)?;
 
     let child_id = outcome.result.agent_identity.clone();
-    let child = handle.get_member(&child_id).await.ok().flatten();
+    // The seated child as the roster holds it. The fork has committed, so a
+    // failed read does not undo it: the side chat is answered, and only what
+    // the read would have added (the exact source session) falls back.
+    let child = match handle.get_member(&child_id).await {
+        Ok(child) => child,
+        Err(error) => {
+            tracing::warn!(
+                member_id = %child_id,
+                error = %error,
+                "a seated side chat's roster entry could not be read"
+            );
+            None
+        }
+    };
     if let Some(child) = child.as_ref()
         && !child.wired_to.is_empty()
     {
@@ -417,7 +458,8 @@ pub async fn fork_side_chat(
     }
     let source_session_id = child
         .and_then(|child| child.fork_source)
-        .map(|fork_source| fork_source.source_session_id);
+        .map(|fork_source| fork_source.source_session_id)
+        .or(source_session_before_fork);
     let instructions = inherit_source_instructions(
         mob_runtime,
         &child_id,
@@ -434,10 +476,12 @@ pub async fn fork_side_chat(
     })
 }
 
-/// JSON-RPC code of a typed `meta/fork_member` refusal: nothing was forked.
-/// `data.kind` is `fork_source_unavailable` (with `source_member_id` and
-/// `cause`: `running`, `no_session`, `remote_read_unavailable` or
-/// `authority_unavailable`) or `unwired_seat_unavailable` (with `wiring`).
+/// JSON-RPC code of a typed `meta/fork_member` refusal. `data.kind` is
+/// `fork_source_unavailable` (with `source_member_id` and `cause`: `running`,
+/// `no_session`, `remote_read_unavailable` or `authority_unavailable`) or
+/// `unwired_seat_unavailable` (with `wiring`); nothing was forked, except for
+/// a child seated with peer edges (`wiring.rule` `seated_with_peers`), whose
+/// `retired` says whether it was retired again.
 pub const SIDE_CHAT_FORK_REFUSED_CODE: i64 = -32055;
 
 /// Whether `runtime` can hold a durable fork: its sessions persist, or its
@@ -644,20 +688,17 @@ async fn inherit_source_instructions(
         }
     };
     let messages = session.messages();
+    let heads = inherited_activation_heads(child_session, messages);
+    if heads.is_empty() {
+        return Vec::new();
+    }
     let requiring = meerkat_core::session::inherited_instruction_keys_requiring_activation(
         child_session,
         messages,
     );
-    if requiring.is_empty() {
-        return Vec::new();
-    }
-    let heads = inherited_activation_heads(child_session, messages);
     let handle = mob_runtime.handle();
-    let mut instructions = Vec::with_capacity(requiring.len());
-    for key in requiring {
-        let Some((head, content)) = heads.get(&key) else {
-            continue;
-        };
+    let mut instructions = Vec::with_capacity(heads.len());
+    for (key, (head, content)) in &heads {
         let mut instruction = SideChatInstruction {
             namespace: key.0.as_str().to_string(),
             key: key.1.as_str().to_string(),
@@ -666,6 +707,13 @@ async fn inherit_source_instructions(
             state: SideChatInstructionState::Inactive,
             reason: None,
         };
+        // A key the child already activated itself (the gateway's
+        // `reactivate_inherited` fork policy wrote it) is in effect.
+        if !requiring.contains(key) {
+            instruction.state = SideChatInstructionState::Inherited;
+            instructions.push(instruction);
+            continue;
+        }
         if source_session != Some(&head.origin_session_id) {
             instruction.reason = Some(SideChatInstructionGap::NotEffectiveInSource);
             instructions.push(instruction);
@@ -731,6 +779,9 @@ fn activation_body<'a>(
     identity: &InstructionActivationIdentity,
     content: &'a str,
 ) -> Option<&'a str> {
+    if identity.render_version != meerkat_core::INSTRUCTION_ACTIVATION_RENDER_VERSION_V1 {
+        return None;
+    }
     let (_, body) = content.split_once("\n\n")?;
     (InstructionContentDigest::for_body(body) == identity.revision.content_sha256).then_some(body)
 }

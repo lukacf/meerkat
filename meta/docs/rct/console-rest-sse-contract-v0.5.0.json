@@ -972,7 +972,7 @@
                 -32602,
                 -32603
               ],
-              "note": "-32055 is a typed refusal, nothing forked: data.kind fork_source_unavailable (cause running, no_session, remote_read_unavailable or authority_unavailable) or unwired_seat_unavailable (the mob definition wires the source's role, data.wiring names the rule). -32037 is meerkat's fork_instruction_refused under the refuse policy. A committed fork whose seat failed keeps meerkat's fork_member_provision_failed data with its fork_session_id."
+              "note": "-32055 is a typed refusal: data.kind fork_source_unavailable (cause running, no_session, remote_read_unavailable or authority_unavailable) or unwired_seat_unavailable (the mob definition wires the source's role, data.wiring names the rule); nothing was forked, except a seated side chat with peer edges (wiring.rule seated_with_peers), which is retired again and data.retired says whether that succeeded. -32037 is meerkat's fork_instruction_refused under the refuse policy. A committed fork whose seat failed keeps meerkat's fork_member_provision_failed data with its fork_session_id."
             }
           ]
         },

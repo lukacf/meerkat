@@ -572,10 +572,11 @@ fn filter_snapshot_for_access(snapshot: &mut ConsoleLiveSnapshot, view: &AccessV
     snapshot
         .loaded_modules
         .retain(|module_id| view.allows_agent(crate::access::ACTION_AGENT_VIEW, module_id));
-    // A side chat names its source only to a caller who may view the source.
-    snapshot
-        .side_chats
-        .retain(|_, source| view.allows_agent(crate::access::ACTION_AGENT_VIEW, source));
+    // A side chat names its source only to a caller who may view both.
+    snapshot.side_chats.retain(|side_chat, source| {
+        view.allows_agent(crate::access::ACTION_AGENT_VIEW, side_chat)
+            && view.allows_agent(crate::access::ACTION_AGENT_VIEW, source)
+    });
 }
 
 /// Intersect the projected experience with the caller's grants and append

@@ -12724,24 +12724,29 @@ async fn handle_console_runtime_rpc_with_visibility(
                     None,
                 ),
                 Err(error) => {
+                    let mut rpc_error = crate::side_chat::fork_member_error(&error);
                     // A side chat seated with peer edges is never kept: it
-                    // would be a second member of the society.
-                    if let crate::side_chat::SideChatError::WiredAtSeat { member_id, .. } = &error
-                        && let Err(retire_error) =
-                            retire_console_member(&runtime.handle(), member_id).await
-                    {
-                        tracing::error!(
-                            target: "meta::console",
-                            member_id = %member_id,
-                            error = %retire_error,
-                            "a side chat seated with peer edges could not be retired"
-                        );
+                    // would be a second member of the society. The answer
+                    // says whether it is gone.
+                    if let crate::side_chat::SideChatError::WiredAtSeat { member_id, .. } = &error {
+                        let retired = match retire_console_member(&runtime.handle(), member_id).await
+                        {
+                            Ok(()) => true,
+                            Err(retire_error) => {
+                                tracing::error!(
+                                    target: "meta::console",
+                                    member_id = %member_id,
+                                    error = %retire_error,
+                                    "a side chat seated with peer edges could not be retired"
+                                );
+                                false
+                            }
+                        };
+                        if let Some(data) = rpc_error.data.as_mut() {
+                            data["retired"] = json!(retired);
+                        }
                     }
-                    response_value(
-                        response_id,
-                        None,
-                        Some(crate::side_chat::fork_member_error(&error)),
-                    )
+                    response_value(response_id, None, Some(rpc_error))
                 }
             }
         })
@@ -13756,12 +13761,15 @@ fn apply_console_visibility_policy(
     visibility_policy: &dyn ConsoleVisibilityPolicy,
 ) {
     let mut hidden = BTreeSet::new();
+    // Console identities of hidden members, which side chat sources name.
+    let mut hidden_identities = BTreeSet::new();
     snapshot.members.retain(|member| {
         let visible = visibility_policy.member_visible(member)
             && visibility_policy
                 .identity_visible(&console_identity_record_from_console_member(member));
         if !visible {
             hidden.insert(member.agent_identity.clone());
+            hidden_identities.insert(console_member_console_identity(member).to_string());
         }
         visible
     });
@@ -13771,9 +13779,11 @@ fn apply_console_visibility_policy(
     snapshot
         .loaded_modules
         .retain(|module_id| !hidden.contains(module_id));
-    snapshot
-        .side_chats
-        .retain(|side_chat, source| !hidden.contains(side_chat) && !hidden.contains(source));
+    snapshot.side_chats.retain(|side_chat, source| {
+        !hidden.contains(side_chat)
+            && !hidden.contains(source)
+            && !hidden_identities.contains(source)
+    });
 }
 
 async fn reset_all_live_console_agents(

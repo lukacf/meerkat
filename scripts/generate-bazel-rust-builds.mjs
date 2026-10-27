@@ -69,9 +69,23 @@ const allFeaturesMetadata = JSON.parse(
 );
 
 const workspaceMembers = new Set(metadata.workspace_members);
+// The products other than Core (ci/products.json) build with Cargo only: no
+// Bazel target builds their crates, so their members get a BUILD file that
+// only exports the manifest crate_universe reads (productBuild below), and
+// every rule, feature union and check here covers Core's members alone.
+const productRoots = JSON.parse(readFileSync(resolve(root, "ci/products.json"), "utf8"))
+  .products.filter((product) => product.root)
+  .map((product) => product.root);
+const isProductPackage = (pkg) => {
+  const dir = relative(root, dirname(pkg.manifest_path)).split(sep).join("/");
+  return productRoots.some((productRoot) => dir === productRoot || dir.startsWith(`${productRoot}/`));
+};
+const productPackages = metadata.packages.filter(
+  (pkg) => pkg.source === null && workspaceMembers.has(pkg.id) && isProductPackage(pkg),
+);
 const localPackages = new Map(
   metadata.packages
-    .filter((pkg) => pkg.source === null && workspaceMembers.has(pkg.id))
+    .filter((pkg) => pkg.source === null && workspaceMembers.has(pkg.id) && !isProductPackage(pkg))
     .map((pkg) => [pkg.id, pkg]),
 );
 const inTreePathPackages = metadata.packages.filter((pkg) => {
@@ -3031,6 +3045,23 @@ for (const pkg of localPackages.values()) {
       ...packageRules,
       "",
     ].join("\n\n"),
+  );
+}
+
+// A product crate's BUILD file: its manifest as a source of the package, so
+// crate_universe can read the workspace member, and no rule.
+for (const pkg of productPackages) {
+  const product = productRoots.find((productRoot) =>
+    relative(root, dirname(pkg.manifest_path)).split(sep).join("/").startsWith(`${productRoot}/`),
+  );
+  writeGenerated(
+    resolve(dirname(pkg.manifest_path), "BUILD.bazel"),
+    [
+      `# ${pkg.name} belongs to ${product}/, which builds with Cargo only: no Bazel`,
+      "# target builds it. Its manifest is a workspace member manifest that",
+      "# crate_universe reads (MODULE.bazel crate.from_cargo).",
+      'exports_files(["Cargo.toml"])',
+    ].join("\n"),
   );
 }
 

@@ -1,0 +1,4 @@
+# toolkit-store belongs to connect/, which builds with Cargo only: no Bazel
+# target builds it. Its manifest is a workspace member manifest that
+# crate_universe reads (MODULE.bazel crate.from_cargo).
+exports_files(["Cargo.toml"])

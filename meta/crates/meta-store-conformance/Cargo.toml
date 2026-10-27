@@ -16,37 +16,111 @@ description = "Storage conformance harness for Meta store backends (console time
 # adding it to release.yml - at which point this line comes out and the gate
 # in scripts/verify-crate-publication.py starts asserting the new answer.
 publish = false
-version.workspace = true
+version = "0.9.5"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-repository.workspace = true
-homepage.workspace = true
-documentation.workspace = true
-keywords.workspace = true
+repository = "https://github.com/lukacf/meerkat"
+homepage = "https://docs.rkat.ai/meta/introduction"
+documentation = "https://docs.rkat.ai/meta/introduction"
+keywords = ["agent", "llm", "ai", "meerkat", "orchestration"]
 categories.workspace = true
 rust-version.workspace = true
 
-[lints]
-workspace = true
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+# Lint groups
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+
+# Hard denies
+panic = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+mutex_integer = "deny"
+mutex_atomic = "deny"
+redundant_clone = "deny"
+implicit_clone = "deny"
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+print_stdout = "allow"
+print_stderr = "allow"
+
+# Pedantic allows (noisy or inapplicable)
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+missing_docs_in_private_items = "allow"
+return_self_not_must_use = "allow"
+manual_string_new = "allow"
+cast_sign_loss = "allow"
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_lossless = "allow"
+cast_possible_wrap = "allow"
+missing_fields_in_debug = "allow"
+unreadable_literal = "allow"
+float_cmp = "allow"
+single_match_else = "allow"
+similar_names = "allow"
+doc_markdown = "allow"
+match_bool = "allow"
+items_after_statements = "allow"
+too_many_lines = "allow"
+# Large async orchestration futures are expected here (meerkat allows this too);
+# boxing every one is noise. meerkat 0.7.4 nudged an rpc dispatch future over the limit.
+large_futures = "allow"
+wildcard_imports = "allow"
+struct_excessive_bools = "allow"
+fn_params_excessive_bools = "allow"
+needless_pass_by_value = "allow"
+needless_continue = "allow"
+trivially_copy_pass_by_ref = "allow"
+unnecessary_wraps = "allow"
+unused_self = "allow"
+used_underscore_binding = "allow"
+struct_field_names = "allow"
+doc_link_with_quotes = "allow"
+missing_const_for_fn = "allow"
+default_trait_access = "allow"
+let_underscore_untyped = "allow"
+allow_attributes_without_reason = "allow"
+ignore_without_reason = "allow"
+manual_let_else = "allow"
+unused_async = "allow"
+assigning_clones = "allow"
+format_push_string = "allow"
+match_same_arms = "allow"
+match_wildcard_for_single_variants = "allow"
+map_unwrap_or = "allow"
+case_sensitive_file_extension_comparisons = "allow"
+ref_option = "allow"
+# Cargo
+multiple_crate_versions = "allow"
+cargo_common_metadata = "allow"
 
 [dependencies]
 async-trait = "0.1"
 base64 = "0.22"
 bytes = "1"
-meerkat-core = { version = "=0.9.5" }
+meerkat-core = { workspace = true }
 # The one-remote-bundle reference provider (M4b) implements both levels of
 # the composite seam: meerkat's RealmStorageProvider (facade storage_provider
 # module + in-memory store implementations) next to Meta's realm store set.
-meerkat = { version = "=0.9.5", features = ["session-store", "memory-store"] }
-meerkat-runtime = { version = "=0.9.5" }
-meerkat-store = { version = "=0.9.5", features = ["memory"] }
-meerkat-store-conformance = { version = "=0.9.5" }
-meerkat-meta = { path = "../meerkat-meta" }
+meerkat = { workspace = true, default-features = true, features = ["session-store", "memory-store"] }
+meerkat-runtime = { workspace = true, default-features = true }
+meerkat-store = { workspace = true, default-features = true, features = ["memory"] }
+meerkat-store-conformance = { workspace = true }
+meerkat-meta = { workspace = true }
 # The extension document chapters run against the store trait directly, so
 # the suite reaches it without turning on meerkat-meta's extension-state
 # feature.
-meta-extension-state = { path = "../meta-extension-state" }
+meta-extension-state = { workspace = true }
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde_json = "1"
 sha2 = "0.10"

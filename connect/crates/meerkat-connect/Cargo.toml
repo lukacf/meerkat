@@ -1,7 +1,6 @@
 [package]
-workspace = "../../native-candidate"
 name = "meerkat-connect"
-version.workspace = true
+version = "0.9.4"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -18,23 +17,23 @@ default = []
 console = ["dep:meerkat-mobkit", "dep:meerkat-mob", "dep:axum"]
 
 [dependencies]
-meerkat-authorization = { version = "=0.9.4" }
+meerkat-authorization = { workspace = true }
 axum = { version = "0.8", optional = true }
-meerkat-authorization-contracts = { version = "=0.9.4" }
-meerkat-mob = { version = "=0.9.4", optional = true }
-meerkat-mobkit = { package = "meerkat-meta", version = "=0.9.4", optional = true }
-meerkat = { version = "=0.9.4", features = ["local-authorization", "session-store", "mcp", "skills", "native-keyring"] }
-meerkat-core = { version = "=0.9.4" }
-meerkat-mcp = { version = "=0.9.4" }
-meerkat-runtime = { version = "=0.9.4" }
-meerkat-session = { version = "=0.9.4" }
-meerkat-store = { version = "=0.9.4", features = ["sqlite", "jsonl"] }
-meerkat-models = { version = "=0.9.4" }
-meerkat-llm-core = { version = "=0.9.4", default-features = false }
-meerkat-auth-core = { version = "=0.9.4" }
-meerkat-openai = { version = "=0.9.4", default-features = false }
-meerkat-anthropic = { version = "=0.9.4", default-features = false, features = ["oauth"] }
-meerkat-gemini = { version = "=0.9.4", default-features = false, features = ["oauth"] }
+meerkat-authorization-contracts = { workspace = true }
+meerkat-mob = { workspace = true, optional = true }
+meerkat-mobkit = { workspace = true, optional = true }
+meerkat = { workspace = true, default-features = true, features = ["local-authorization", "session-store", "mcp", "skills", "native-keyring"] }
+meerkat-core = { workspace = true }
+meerkat-mcp = { workspace = true }
+meerkat-runtime = { workspace = true, default-features = true }
+meerkat-session = { workspace = true, default-features = true }
+meerkat-store = { workspace = true, default-features = true, features = ["sqlite", "jsonl"] }
+meerkat-models = { workspace = true }
+meerkat-llm-core = { workspace = true }
+meerkat-auth-core = { workspace = true, default-features = true }
+meerkat-openai = { workspace = true }
+meerkat-anthropic = { workspace = true, features = ["oauth"] }
+meerkat-gemini = { workspace = true, features = ["oauth"] }
 clap = { version = "4.5", features = ["derive"] }
 futures-util = "0.3"
 serde.workspace = true
@@ -61,17 +60,17 @@ toolkit-mobkit = { path = "../toolkit-mobkit", features = ["native-host"] }
 
 [dev-dependencies]
 # Canonical definitions for mandatory mob comms in the fresh SDK fixture.
-meerkat-comms = { version = "=0.9.4", default-features = false }
+meerkat-comms = { workspace = true }
 # Native definitions for the fresh SDK host's expected surface, not a capture.
-meerkat-tools = { version = "=0.9.4", default-features = false }
+meerkat-tools = { workspace = true }
 # Exact read-only backend evidence in the SDK fixture, never a second Toolkit owner.
 rusqlite.workspace = true
 toolkit-store = { path = "../toolkit-store" }
-meerkat-workgraph = { version = "=0.9.4" }
+meerkat-workgraph = { workspace = true }
 # Native fault controls are available only to this crate's tests.
-meerkat = { version = "=0.9.4", features = ["test-support"] }
-meerkat-client = { version = "=0.9.4" }
-meerkat-mob = { version = "=0.9.4" }
+meerkat = { workspace = true, default-features = true, features = ["test-support"] }
+meerkat-client = { workspace = true, default-features = true }
+meerkat-mob = { workspace = true }
 axum = "0.8"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
@@ -79,8 +78,12 @@ hmac = "0.12"
 base64 = "0.22"
 tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring", "tls12"] }
 
-[lints]
-workspace = true
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+todo = "deny"
+unimplemented = "deny"
 
 [[test]]
 name = "mobkit_setup_member"

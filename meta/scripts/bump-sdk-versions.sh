@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Bump every published/install-facing version to match the Cargo workspace.
 # Usage: ./scripts/bump-sdk-versions.sh [VERSION]
-# If VERSION is omitted, reads from Cargo.toml workspace.package.version.
+# If VERSION is omitted, reads meerkat-meta's version (Meta's version line).
 
 set -euo pipefail
 
@@ -10,7 +10,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 if [ $# -ge 1 ]; then
     VERSION="$1"
 else
-    VERSION=$(cargo metadata --manifest-path "$ROOT/Cargo.toml" \
+    VERSION=$(cargo metadata --manifest-path "$ROOT/crates/meerkat-meta/Cargo.toml" \
         --no-deps --format-version 1 \
         | jq -r '.packages[] | select(.name == "meerkat-meta") | .version')
 fi

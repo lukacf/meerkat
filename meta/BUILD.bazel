@@ -1,8 +1,0 @@
-# Root package marker for the Bazel module. crate_universe + module extensions
-# reference //:Cargo.toml and //:Cargo.lock by label. (The meerkat generator's
-# root template is meerkat-specific; meta only needs these exports.)
-exports_files([
-    "Cargo.toml",
-    "Cargo.lock",
-    "MODULE.bazel",
-])

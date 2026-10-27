@@ -1,5 +1,1 @@
 .claude/worktrees
-# Imported products keep their own nested Cargo workspaces until the
-# one-workspace wire-up; no Bazel target builds them.
-meta
-connect

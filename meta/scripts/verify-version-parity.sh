@@ -13,9 +13,20 @@ green()  { printf '\033[0;32m%s\033[0m\n' "$*"; }
 
 # 1. Package version parity
 
-CARGO_VER=$("$CARGO" metadata --manifest-path "$ROOT/Cargo.toml" \
-    --no-deps --format-version 1 \
+# Meta's crates are members of the repository's one Cargo workspace and
+# carry their own version line (ci/products.json): every crate under meta/
+# must declare the same version, and meerkat-meta's is the line's.
+METADATA=$("$CARGO" metadata --manifest-path "$ROOT/crates/meerkat-meta/Cargo.toml" \
+    --no-deps --format-version 1)
+CARGO_VER=$(printf '%s' "$METADATA" \
     | jq -r '.packages[] | select(.name == "meerkat-meta") | .version')
+META_CRATE_VERSIONS=$(printf '%s' "$METADATA" \
+    | jq -r --arg root "$ROOT/" '.packages[] | select(.manifest_path | startswith($root)) | "\(.name) \(.version)"')
+if [ -n "$(printf '%s\n' "$META_CRATE_VERSIONS" | awk -v want="$CARGO_VER" '$2 != want')" ]; then
+    red "FAIL: Meta's crates disagree on the Meta version ($CARGO_VER):"
+    printf '%s\n' "$META_CRATE_VERSIONS"
+    FAIL=1
+fi
 
 PY_VER=$(python3 -c "
 import pathlib

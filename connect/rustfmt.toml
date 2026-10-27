@@ -1,0 +1,5 @@
+# Connect's sources were never formatted with rustfmt (368 files would
+# change). Until one mechanical formatting commit lands (an owner decision:
+# it conflicts with every open Connect branch), the repository's
+# `cargo fmt --all` leaves Connect's files as they are.
+disable_all_formatting = true

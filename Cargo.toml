@@ -6,6 +6,19 @@ members = [
     "tests/fixtures/mcp-test-server",
     "tests/fixtures/surface-build-fixtures",
     "tests/fixtures/machine-dsl-tests",
+    # Meerkat Meta: its own version line, set per crate (meta/CHANGELOG.md).
+    "meta/crates/*",
+    # Meerkat Connect: its own version line, unpublished crates.
+    "connect/crates/*",
+]
+# A bare `cargo build`/`cargo test` in the root builds Core only. Commands
+# that name `--workspace` cover every product.
+default-members = [
+    "crates/*",
+    "tests/integration",
+    "tests/fixtures/mcp-test-server",
+    "tests/fixtures/surface-build-fixtures",
+    "tests/fixtures/machine-dsl-tests",
 ]
 [workspace.package]
 version = "0.9.6"
@@ -143,6 +156,18 @@ meerkat-store = { version = "=0.9.6", path = "crates/meerkat-store", default-fea
 meerkat-store-conformance = { version = "=0.9.6", path = "crates/meerkat-store-conformance" }
 oai-rt-rs = { version = "=0.5.1", features = ["experimental-gpt-live"] }
 
+# Meerkat Meta crates (Meta's version line; a Meta release moves these).
+meta-extension-state = { version = "=0.9.5", path = "meta/crates/meta-extension-state" }
+meerkat-meta = { version = "=0.9.5", path = "meta/crates/meerkat-meta" }
+# Connect's code imports Meta as meerkat_mobkit.
+meerkat-mobkit = { package = "meerkat-meta", version = "=0.9.5", path = "meta/crates/meerkat-meta" }
+
+# Meerkat Connect crates (unpublished).
+toolkit-store = { path = "connect/crates/toolkit-store" }
+toolkit-package = { path = "connect/crates/toolkit-package" }
+toolkit-catalog = { path = "connect/crates/toolkit-catalog" }
+meerkat-toolkit = { path = "connect/crates/meerkat-toolkit" }
+
 [profile.dev]
 split-debuginfo = "off"
 
@@ -163,6 +188,35 @@ opt-level = 1
 [profile.test.package.meerkat-machine-schema]
 codegen-units = 16
 strip = "symbols"
+
+# Meta's gateways keep
+# the release profile Meta shipped with: its own workspace's [profile.release]
+# was opt-level 1, with opt-level 0 for the mega crates (and its candidate
+# legs appended opt-level 0 for meerkat-core, meerkat-runtime, meerkat-mob and
+# meerkat-live). One workspace has one [profile.release], which stays Core's,
+# so Meta's settings become this named profile; meta-release.yml builds the
+# gateways with `--profile release-meta` (output under target/<triple>/release-meta/).
+# Evidence for keeping it: Meta's 0.9.5 x86_64-apple-darwin leg built all three
+# gateways (Core's runtime and mob inside) in 43.7 min on macos-15, against
+# 81-106 min per Core binary at opt-level 3 on the same label.
+[profile.release-meta]
+inherits = "release"
+opt-level = 1
+
+[profile.release-meta.package.meerkat-machine-schema]
+opt-level = 0
+
+[profile.release-meta.package.meerkat-core]
+opt-level = 0
+
+[profile.release-meta.package.meerkat-runtime]
+opt-level = 0
+
+[profile.release-meta.package.meerkat-mob]
+opt-level = 0
+
+[profile.release-meta.package.meerkat-live]
+opt-level = 0
 
 [workspace.lints.rust]
 unsafe_code = "deny"

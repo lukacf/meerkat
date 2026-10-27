@@ -1,14 +1,14 @@
 [package]
 name = "meerkat-meta"
 description = "Companion orchestration platform for the Meerkat multi-agent runtime"
-version.workspace = true
+version = "0.9.5"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-repository.workspace = true
-homepage.workspace = true
-documentation.workspace = true
-keywords.workspace = true
+repository = "https://github.com/lukacf/meerkat"
+homepage = "https://docs.rkat.ai/meta/introduction"
+documentation = "https://docs.rkat.ai/meta/introduction"
+keywords = ["agent", "llm", "ai", "meerkat", "orchestration"]
 categories.workspace = true
 rust-version.workspace = true
 # Large recorded corpora used only by in-repo tests stay out of the published
@@ -34,11 +34,85 @@ exclude = [
 # it would silently break the forward rather than fail loudly.
 ignored = ["meerkat-openai"]
 
-[lints]
-workspace = true
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+# Lint groups
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+
+# Hard denies
+panic = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+mutex_integer = "deny"
+mutex_atomic = "deny"
+redundant_clone = "deny"
+implicit_clone = "deny"
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+print_stdout = "allow"
+print_stderr = "allow"
+
+# Pedantic allows (noisy or inapplicable)
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+missing_docs_in_private_items = "allow"
+return_self_not_must_use = "allow"
+manual_string_new = "allow"
+cast_sign_loss = "allow"
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_lossless = "allow"
+cast_possible_wrap = "allow"
+missing_fields_in_debug = "allow"
+unreadable_literal = "allow"
+float_cmp = "allow"
+single_match_else = "allow"
+similar_names = "allow"
+doc_markdown = "allow"
+match_bool = "allow"
+items_after_statements = "allow"
+too_many_lines = "allow"
+# Large async orchestration futures are expected here (meerkat allows this too);
+# boxing every one is noise. meerkat 0.7.4 nudged an rpc dispatch future over the limit.
+large_futures = "allow"
+wildcard_imports = "allow"
+struct_excessive_bools = "allow"
+fn_params_excessive_bools = "allow"
+needless_pass_by_value = "allow"
+needless_continue = "allow"
+trivially_copy_pass_by_ref = "allow"
+unnecessary_wraps = "allow"
+unused_self = "allow"
+used_underscore_binding = "allow"
+struct_field_names = "allow"
+doc_link_with_quotes = "allow"
+missing_const_for_fn = "allow"
+default_trait_access = "allow"
+let_underscore_untyped = "allow"
+allow_attributes_without_reason = "allow"
+ignore_without_reason = "allow"
+manual_let_else = "allow"
+unused_async = "allow"
+assigning_clones = "allow"
+format_push_string = "allow"
+match_same_arms = "allow"
+match_wildcard_for_single_variants = "allow"
+map_unwrap_or = "allow"
+case_sensitive_file_extension_comparisons = "allow"
+ref_option = "allow"
+# Cargo
+multiple_crate_versions = "allow"
+cargo_common_metadata = "allow"
 
 [dependencies]
-meta-extension-state = { version = "=0.9.5", path = "../meta-extension-state", optional = true }
+meta-extension-state = { workspace = true, optional = true }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 # YAML: pure Rust, no `unsafe`. A caret requirement: Cargo unifies it with
@@ -72,51 +146,51 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 futures = "0.3"
 fs2 = "0.4"
 object_store = { version = "0.13", features = ["fs"] }
-meerkat-core = { version = "=0.9.5" }
-meerkat-client = { version = "=0.9.5" }
+meerkat-core = { workspace = true }
+meerkat-client = { workspace = true, default-features = true }
 # The raw client wrappers carry the wrapped client's controller surface and
 # prepared (governed) dispatch, whose types meerkat-client does not re-export.
-meerkat-llm-core = { version = "=0.9.5" }
-meerkat-comms = { version = "=0.9.5" }
-meerkat-contracts = { version = "=0.9.5" }
-meerkat-mob = { version = "=0.9.5" }
-meerkat-mob-mcp = { version = "=0.9.5" }
-meerkat-mcp = { version = "=0.9.5" }
-meerkat-models = { version = "=0.9.5" }
+meerkat-llm-core = { workspace = true }
+meerkat-comms = { workspace = true, default-features = true }
+meerkat-contracts = { workspace = true, default-features = true }
+meerkat-mob = { workspace = true }
+meerkat-mob-mcp = { workspace = true }
+meerkat-mcp = { workspace = true }
+meerkat-models = { workspace = true }
 # Meerkat split session memory out of `memory-store` (which now only maps
 # to meerkat-store/memory); explicit `memory` enables need `memory-store-session`.
 # `local-authorization`: the realm-scoped MCP credential source the gateway's
 # member factories install and the realm owner's service-secret writes
 # (`GatewayRealmMcpInstallation`).
-meerkat = { version = "=0.9.5", features = ["comms", "skills", "mcp", "memory-store", "memory-store-session", "jsonl-store", "session-store", "sqlite-store", "live", "openai-realtime", "local-authorization"] }
-meerkat-openai = { version = "=0.9.5", optional = true }
+meerkat = { workspace = true, default-features = true, features = ["comms", "skills", "mcp", "memory-store", "memory-store-session", "jsonl-store", "session-store", "sqlite-store", "live", "openai-realtime", "local-authorization"] }
+meerkat-openai = { workspace = true, default-features = true, optional = true }
 # READ-ONLY host-side access to meerkat's OWN session semantic memory for the
 # Distiller's post-compaction harvest (§8.4: `MemoryStore::search` over the
 # discard range). This reads meerkat's store; the §12 bright line governs the
 # bundled agent-memory store, which stays plain B-tree SQLite.
-meerkat-memory = { version = "=0.9.5" }
+meerkat-memory = { workspace = true, default-features = true }
 # Live (realtime) member sessions: `live_wiring` hosts the projection sink,
 # the WS transport state, and the meta/live/* handlers on top of this crate.
-meerkat-live = { version = "=0.9.5" }
+meerkat-live = { workspace = true }
 # `local-authorization`: the native grant work configuration an embedder
 # installs through UnifiedRuntimeBuilder::native_grant_work_configuration
 # (D50 S1).
-meerkat-runtime = { version = "=0.9.5", features = ["sqlite-store", "live", "local-authorization"] }
+meerkat-runtime = { workspace = true, default-features = true, features = ["sqlite-store", "live", "local-authorization"] }
 # The local authorization publication the Console access facts join, so a
 # native consent eligibility observed from them is invalidated by their
 # changes (and the host-side grant owner for the native grant tests).
-meerkat-authorization = { version = "=0.9.5" }
-meerkat-session = { version = "=0.9.5", features = ["session-store"] }
+meerkat-authorization = { workspace = true }
+meerkat-session = { workspace = true, default-features = true, features = ["session-store"] }
 # Shared SQLite mechanics (storage-unification): named connection profiles,
 # the per-file migration ledger, per-operation maintenance fence guards
 # (every in-crate opener, M3), and the doctor's read-only ledger reads (M1).
-meerkat-sqlite = { version = "=0.9.5" }
+meerkat-sqlite = { workspace = true }
 # `memory` is the parked-delta backend for pre-registration incremental
 # writes in the continuity adapter (nothing parked is ever durable).
-meerkat-store = { version = "=0.9.5", features = ["sqlite", "memory"] }
+meerkat-store = { workspace = true, default-features = true, features = ["sqlite", "memory"] }
 # The skills catalog judges each SKILL.md with meerkat's own skill parser.
-meerkat-skills = { version = "=0.9.5" }
-meerkat-tools = { version = "=0.9.5" }
+meerkat-skills = { workspace = true }
+meerkat-tools = { workspace = true, default-features = true }
 tempfile = "3"
 async-trait = "0.1"
 rusqlite = { version = "0.37", features = ["bundled"] }
@@ -216,30 +290,30 @@ futures = "0.3"
 tower = { version = "0.5", features = ["util"] }
 jsonwebtoken = "9"
 async-trait = "0.1"
-meerkat-schedule = { version = "=0.9.5" }
+meerkat-schedule = { workspace = true }
 # `schema` feature (test-only) exposes `meerkat_mob::adaptive::layer_decision_schema()`
 # so a parity guard can assert the bundled adaptive layer-decision schema stays
 # Value-equal to meerkat's canonical one. Dev-dependency: not enabled in release
 # builds, so the production binary keeps the lean (no-schemars) meerkat-mob.
 # `test-support` (test-only) exposes the deterministic member-session rebind
 # the delivery-scope gates use to move a session under unchanged continuity.
-meerkat-mob = { version = "=0.9.5", features = ["schema", "test-support"] }
+meerkat-mob = { workspace = true, features = ["schema", "test-support"] }
 # `test-realtime-fixtures` (test-only) exposes meerkat's shared
 # ScriptedRealtimeSessionFactory so the live-open cross-provider regression
 # tests (tests/gateway_live.rs) can observe the exact channel identity handed
 # to the provider lane without a provider socket or credential.
-meerkat = { version = "=0.9.5", features = ["test-realtime-fixtures"] }
+meerkat = { workspace = true, default-features = true, features = ["test-realtime-fixtures"] }
 # `test-support` (test-only) exposes meerkat-core's per-session WholeBlob
 # decode counter, so decode assertions attribute decodes to the test's own
 # session instead of the process-wide count every parallel test moves.
-meerkat-core = { version = "=0.9.5", features = ["test-support"] }
+meerkat-core = { workspace = true, features = ["test-support"] }
 # The host-side contract types for the native grant configuration tests
 # (D50 S1).
-meerkat-authorization-contracts = { version = "=0.9.5" }
+meerkat-authorization-contracts = { workspace = true }
 # `test-support` (test-only) exposes meerkat-runtime's run-start hold read, so
 # the restart test can assert a restored member without its customizer tools
 # is held, and released once they publish.
-meerkat-runtime = { version = "=0.9.5", features = ["sqlite-store", "live", "test-support"] }
+meerkat-runtime = { workspace = true, default-features = true, features = ["sqlite-store", "live", "test-support"] }
 # The reference in-memory host store and its manual clock, for the host
 # store realm's tests.
-meerkat-store-conformance = { version = "=0.9.5" }
+meerkat-store-conformance = { workspace = true }

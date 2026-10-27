@@ -1,10 +1,10 @@
 [package]
-workspace = "../../native-candidate"
 name = "toolkit-catalog"
-version.workspace = true
+version = "0.9.4"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+publish = false
 
 [dependencies]
 meerkat-machine-dsl.workspace = true
@@ -16,5 +16,9 @@ serde.workspace = true
 [dev-dependencies]
 serde_json.workspace = true
 
-[lints]
-workspace = true
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+todo = "deny"
+unimplemented = "deny"

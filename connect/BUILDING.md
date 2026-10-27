@@ -29,9 +29,8 @@ original source and artifact identity. See
 ## Prerequisites
 
 Use Rust 1.97.0, the selected build toolchain, on a supported macOS or Linux host
-with its normal compiler and platform libraries. The manifests declare Rust 1.94
-and edition 2024; the complete dependency graph has not been separately qualified
-on that minimum. Python SDK tooling requires Python 3.11 or later. The TypeScript
+with its normal compiler and platform libraries. The manifests declare Rust 1.97
+(the build toolchain) and edition 2024. Python SDK tooling requires Python 3.11 or later. The TypeScript
 SDK requires Node 22 or later. Use the package locks for JavaScript dependencies.
 
 ## Build the current development source

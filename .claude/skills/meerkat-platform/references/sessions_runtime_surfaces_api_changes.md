@@ -296,7 +296,7 @@ installs all four, and the SDKs download `rkat-rpc` from the same assets.
   methods listed in `references/providers_and_auth_credentials.md`.
 
 ```bash
-cargo install rkat --locked              # Rust 1.94 or newer
+cargo install rkat --locked              # Rust 1.97 or newer
 cargo install meerkat-rpc --locked       # installs rkat-rpc; likewise meerkat-rest, meerkat-mcp-server
 CARGO_BUILD_JOBS=2 CARGO_PROFILE_RELEASE_OPT_LEVEL=1 cargo install rkat --locked \
   --config 'profile.release.package.meerkat-machine-schema.opt-level=0'   # small hosts

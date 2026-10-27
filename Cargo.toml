@@ -23,7 +23,7 @@ default-members = [
 [workspace.package]
 version = "0.9.6"
 edition = "2024"
-rust-version = "1.94.0"
+rust-version = "1.97.0"
 license = "MIT OR Apache-2.0"
 authors = ["Luka Crnkovic-Friis"]
 repository = "https://github.com/lukacf/meerkat"

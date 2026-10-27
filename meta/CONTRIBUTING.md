@@ -6,7 +6,7 @@ Thank you for considering contributing to Meta.
 
 ### Prerequisites
 
-- Rust 1.97.0 via rustup, as pinned by `rust-toolchain.toml`; the crate's declared MSRV is 1.94.0
+- Rust 1.97.0 via rustup, as pinned by `rust-toolchain.toml`; the crate's declared MSRV is also 1.97.0
 - Python 3.11+ for the release tooling and repository scripts that import `tomllib`; the Python SDK supports Python 3.10+
 - Node.js 18+ (for console and TypeScript SDK)
 

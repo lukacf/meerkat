@@ -69,13 +69,20 @@ def select_service_login_host(host, authenticated_context):
 
     The installation owner supplies authentication and native startup. This
     hook neither derives identity from headers nor starts a second gateway.
-    A replacement is refused until the original owner's cleanup has joined.
+    Reuse the same resolver for separate original browser sessions. Logout
+    fences and joins that session's host; shutdown joins all retained owners.
+    A resolver replacement is refused until the route's cleanup has joined.
     """
     global service_login_route
-    selected = ServiceLoginRoute(host, authenticated_context)
-    if service_login_route is not None and not service_login_route.host.retired:
-        raise ServiceLoginUnavailable()
-    service_login_route = selected  # Retain before native enrollment enters.
+    if service_login_route is None or service_login_route.retired:
+        selected = ServiceLoginRoute(host, authenticated_context)
+        service_login_route = selected
+    else:
+        selected = service_login_route
+        if authenticated_context is not selected.authenticated_context:
+            raise ServiceLoginUnavailable()
+        selected.add(host)
+    # The route retains this original host before native enrollment enters.
     host.start()
     return selected
 

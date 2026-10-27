@@ -184,9 +184,9 @@ def native(sdk):
     fixture.dispose()
 
 
-def make(sdk, native):
+def make(sdk, native, *, scope='original-signed-session'):
     current = {'value': True}
-    login = ConsoleConnectLogin('fixture-subject', 'original-signed-session',
+    login = ConsoleConnectLogin('fixture-subject', scope,
         int(time.time() * 1000) + 60000, ORIGIN, lambda: current['value'])
     targets = {name: sdk.mcp_auth.McpTarget(name, 'https://' + name + '.example.invalid/mcp', 'fixture-account')
                for name in ('slack', 'second')}
@@ -472,4 +472,159 @@ def test_expired_login_refuses_native_actions_even_if_resolver_is_stale(sdk, nat
             assert len(native.matching('start')) == 1 and not native.matching('status')
         finally:
             await host.close()
+    asyncio.run(exercise())
+
+
+def test_original_browser_sessions_route_callbacks_independently(sdk, native, monkeypatch):
+    from launchkit import server
+
+    async def exercise():
+        first, login_a, _ = make(sdk, native, scope='browser-a')
+        second, login_b, _ = make(sdk, native, scope='browser-b')
+        context = {'value': login_a, 'calls': 0}
+
+        def resolver(request):
+            context['calls'] += 1
+            return context['value']
+
+        monkeypatch.setattr(server, 'service_login_route', None)
+        route = server.select_service_login_host(first, resolver)
+        assert server.select_service_login_host(second, resolver) is route
+        try:
+            await asyncio.gather(first.begin(login_a, 'slack'), second.begin(login_b, 'slack'))
+            assert len(native.matching('enroll_console_login')) == 2
+            state_a = first._attempts['slack']['callback'].state
+            state_b = second._attempts['slack']['callback'].state
+            assert state_a != state_b
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app), base_url='http://testserver') as client:
+                async def post(state):
+                    before = context['calls']
+                    response = await client.post('/services/mcp/callback', content=body(state, code='secret'),
+                        headers={'Origin': ORIGIN, 'Content-Type': 'application/json'})
+                    assert context['calls'] == before + 1
+                    return response.status_code
+
+                assert await post(state_b) == 400  # State cannot select another login.
+                context['value'] = ConsoleConnectLogin(login_a.principal, login_a.login_scope_id,
+                    login_a.expires_at_ms, login_a.origin, login_a.is_current)
+                assert await post(state_a) == 403  # Equal labels do not identify the original object.
+                assert not native.matching('complete')
+                context['value'] = login_a
+                assert await post(state_a) == 202
+                context['value'] = login_b
+                assert await post(state_a) == 400
+                assert await post(state_b) == 202
+            assert (await first.wait(login_a, 'slack')).phase == 'authorized'
+            assert (await second.wait(login_b, 'slack')).phase == 'authorized'
+        finally:
+            await route.shutdown()
+        assert route.retired and first.retired and second.retired
+        assert len(native.matching('retire_console_login')) == 2
+    asyncio.run(exercise())
+
+
+def test_session_logout_joins_original_cleanup_without_fencing_sibling(sdk, native, monkeypatch):
+    from launchkit import server
+
+    async def exercise():
+        first, login_a, current_a = make(sdk, native, scope='browser-a')
+        second, login_b, _ = make(sdk, native, scope='browser-b')
+        resolver = lambda request: login_a
+        monkeypatch.setattr(server, 'service_login_route', None)
+        route = server.select_service_login_host(first, resolver)
+        server.select_service_login_host(second, resolver)
+        retirement = None
+        try:
+            await asyncio.gather(first.begin(login_a, 'slack'), second.begin(login_b, 'slack'))
+            native.gates['retire'].clear()
+            current_a['value'] = False
+            route.revoke(login_a)
+            with pytest.raises(ServiceLoginUnavailable):
+                await first.observe(login_a, 'slack')
+            retirement = asyncio.create_task(route.retire(login_a))
+            await until(lambda: len(native.matching('retire_console_login')) == 1)
+            retirement.cancel()
+            await asyncio.sleep(.01)
+            assert not retirement.done() and not first.retired
+            assert (await second.observe(login_b, 'slack')).phase == 'authorized'
+            assert not second.retired
+            native.gates['retire'].set()
+            with pytest.raises(asyncio.CancelledError):
+                await retirement
+            assert first.retired and not second.retired
+            await route.retire(login_a)  # Joins the same completed cleanup.
+            assert len(native.matching('retire_console_login')) == 1
+            assert not route.retired
+        finally:
+            native.gates['retire'].set()
+            if retirement is not None:
+                await asyncio.gather(retirement, return_exceptions=True)
+            await route.shutdown()
+        assert len(native.matching('retire_console_login')) == 2
+    asyncio.run(exercise())
+
+
+def test_route_refuses_duplicate_native_scope_before_second_enrollment(sdk, native, monkeypatch):
+    from launchkit import server
+
+    async def exercise():
+        host, login, _ = make(sdk, native)
+        duplicate, _, _ = make(sdk, native)
+        resolver = lambda request: login
+        monkeypatch.setattr(server, 'service_login_route', None)
+        route = server.select_service_login_host(host, resolver)
+        try:
+            with pytest.raises(ServiceLoginUnavailable):
+                server.select_service_login_host(duplicate, resolver)
+            await host.begin(login, 'slack')
+            await route.retire(login)
+            with pytest.raises(ServiceLoginUnavailable):
+                server.select_service_login_host(duplicate, resolver)
+            assert duplicate._loop is None
+            assert len(native.matching('enroll_console_login')) == 1
+        finally:
+            await route.shutdown()
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize('bad_cancel', [False, True])
+def test_route_shutdown_fences_and_joins_every_owner_after_cancellation(sdk, native, monkeypatch, bad_cancel):
+    from launchkit import server
+
+    async def exercise():
+        first, login_a, _ = make(sdk, native, scope='browser-a')
+        second, login_b, _ = make(sdk, native, scope='browser-b')
+        third, _, _ = make(sdk, native, scope='browser-c')
+        resolver = lambda request: login_a
+        monkeypatch.setattr(server, 'service_login_route', None)
+        route = server.select_service_login_host(first, resolver)
+        server.select_service_login_host(second, resolver)
+        await asyncio.gather(first.begin(login_a, 'slack'), second.begin(login_b, 'slack'))
+        native.bad_cancel = bad_cancel
+        native.gates['retire'].clear()
+        shutdown = asyncio.create_task(route.shutdown())
+        try:
+            await until(lambda: len(native.matching('retire_console_login')) == 2)
+            shutdown.cancel()
+            await asyncio.sleep(.01)
+            assert not shutdown.done()
+            for host, login in ((first, login_a), (second, login_b)):
+                with pytest.raises(ServiceLoginUnavailable):
+                    await host.observe(login, 'slack')
+            with pytest.raises(ServiceLoginUnavailable):
+                server.select_service_login_host(third, resolver)
+        finally:
+            native.gates['retire'].set()
+            result = await asyncio.gather(shutdown, return_exceptions=True)
+        assert isinstance(result[0], ServiceLoginUnavailable if bad_cancel else asyncio.CancelledError)
+        assert route.retired is (not bad_cancel)
+        assert first.retired is (not bad_cancel) and second.retired is (not bad_cancel)
+        assert len(native.matching('cancel')) == len(native.matching('release')) == 2
+        if bad_cancel:
+            with pytest.raises(ServiceLoginUnavailable):
+                await route.shutdown()
+        else:
+            await route.shutdown()
+        assert len(native.matching('retire_console_login')) == 2
+        assert third._loop is None
     asyncio.run(exercise())

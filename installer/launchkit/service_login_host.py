@@ -281,12 +281,61 @@ class ForgeServiceLoginHost:
 
 
 class ServiceLoginRoute:
-    """Trusted request-to-context join; no header/JSON fallback identity."""
+    """Route original sessions through one trusted request-to-context join.
+
+    The installation owner supplies every host and the same synchronous
+    resolver. Session labels and callback state never select a login owner.
+    Retired owners remain retained for this route's lifetime, preventing a
+    second enrollment of the same original native login scope.
+    """
     def __init__(self, host, authenticated_context):
-        if (type(host) is not ForgeServiceLoginHost or not callable(authenticated_context)
+        if (not callable(authenticated_context)
                 or inspect.iscoroutinefunction(authenticated_context)):
             raise ServiceLoginUnavailable()
-        self.host, self.authenticated_context = host, authenticated_context
+        self.authenticated_context = authenticated_context
+        self._loop = asyncio.get_running_loop()
+        self._hosts = {}
+        self._closed = False
+        self._shutdown_task = None
+        self.add(host)
+
+    @property
+    def retired(self):
+        return (self._closed and self._shutdown_task is not None
+                and self._shutdown_task.done() and not self._shutdown_task.cancelled()
+                and self._shutdown_task.exception() is None
+                and all(host.retired for host in self._hosts.values()))
+
+    def add(self, host):
+        """Retain before start; only the trusted launcher can register owners."""
+        if (self._closed or self._loop is not asyncio.get_running_loop()
+                or type(host) is not ForgeServiceLoginHost
+                or host._loop is not None or host._closed):
+            raise ServiceLoginUnavailable()
+        binding = host._native_login
+        for existing in self._hosts.values():
+            other = existing._native_login
+            if (host._context is existing._context or
+                    (binding.issuer, binding.subject, binding.login_scope_id) ==
+                    (other.issuer, other.subject, other.login_scope_id)):
+                raise ServiceLoginUnavailable()
+        self._hosts[id(host._context)] = host
+
+    def _host(self, context):
+        if self._loop is not asyncio.get_running_loop():
+            raise ServiceLoginUnavailable()
+        host = self._hosts.get(id(context))
+        if host is None or context is not host._context:
+            raise ServiceLoginUnavailable()
+        return host
+
+    def revoke(self, context):
+        """Fence only this original session at actual logout or expiry."""
+        self._host(context).revoke()
+
+    async def retire(self, context):
+        """Join the original session's cleanup without replacing its owner."""
+        await self._host(context).close()
 
     async def post(self, request):
         from starlette.responses import Response
@@ -294,14 +343,17 @@ class ServiceLoginRoute:
 
         response = callback_unavailable()
         try:
+            if self._closed:
+                raise ServiceLoginUnavailable()
             context = self.authenticated_context(request)
             if inspect.isawaitable(context):
                 if inspect.iscoroutine(context):
                     context.close()
                 raise ServiceLoginUnavailable()
-            self.host._admit(context)
+            host = self._host(context)
+            host._admit(context)
             origins = request.headers.getlist("origin")
-            if origins != [self.host._origin]:
+            if origins != [host._origin]:
                 raise ServiceLoginUnavailable()
         except Exception:
             response.status_code = 403
@@ -319,11 +371,35 @@ class ServiceLoginRoute:
         except Exception:
             response.status_code = 400
             return response
-        status = self.host.receive(context, origin=origins[0], body=bytes(body))
+        status = host.receive(context, origin=origins[0], body=bytes(body))
         return Response("Callback received." if status == 202 else "The callback could not be confirmed.",
                         status_code=status, media_type="text/plain",
                         headers={k: v for k, v in response.headers.items()
                                  if k not in ("content-length", "content-type")})
 
     async def shutdown(self):
-        await self.host.close()
+        if self._loop is not asyncio.get_running_loop():
+            raise ServiceLoginUnavailable()
+        self._closed = True
+        # Fence every session before waiting on any one native retirement.
+        for host in self._hosts.values():
+            host.revoke()
+        if self._shutdown_task is None:
+            self._shutdown_task = _retain(asyncio.create_task(self._shutdown()))
+        interrupted = False
+        while not self._shutdown_task.done():
+            try:
+                await asyncio.shield(self._shutdown_task)
+            except asyncio.CancelledError:
+                interrupted = True
+            except Exception:
+                break
+        self._shutdown_task.result()
+        if interrupted:
+            raise asyncio.CancelledError("Service login cleanup joined.")
+
+    async def _shutdown(self):
+        results = await asyncio.gather(*(host.close() for host in self._hosts.values()),
+                                       return_exceptions=True)
+        if any(isinstance(result, BaseException) for result in results):
+            raise ServiceLoginUnavailable()

@@ -222,7 +222,7 @@ jobs:
         run: make -C meta verify-version-parity
 
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        run: ./scripts/repo-cargo fmt --all -- --check
 
   # The published floor (plan-v2 section 3.4): the packaged Meta crates,
   # unpacked into a scratch workspace whose [patch.crates-io] covers only
@@ -382,7 +382,16 @@ jobs:
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
         run: |
           set -euo pipefail
-          cargo build -p meerkat-meta --bin meta_gateway --bin rpc_gateway --bin meta_repair \
+          # The repository wrapper everywhere but the Bullseye release
+          # container, whose Git 2.30 predates the wrapper's
+          # `rev-parse --path-format=absolute` (Core's release.yml does the
+          # same): there the job owns an isolated target directory and runs
+          # the rustup-proxied Cargo of rust-toolchain.toml.
+          cargo_cmd=(./scripts/repo-cargo)
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            cargo_cmd=(cargo)
+          fi
+          "${cargo_cmd[@]}" build -p meerkat-meta --bin meta_gateway --bin rpc_gateway --bin meta_repair \
             --features openai-live --locked --profile release-meta --target "${{ matrix.target }}"
 
       - name: Check Linux binary portability
@@ -782,7 +791,7 @@ jobs:
           ref: ${{ needs.resolve_release.outputs.sha }}
       - uses: ./.github/actions/setup-rust-ci
       - name: Package the Meta crates
-        run: cargo package -p meta-extension-state -p meerkat-meta --locked --no-verify
+        run: ./scripts/repo-cargo package -p meta-extension-state -p meerkat-meta --locked --no-verify
       - name: Record the crate checksums
         id: crates
         env:
@@ -835,7 +844,7 @@ jobs:
       - name: Bind the crates to the floor-checked bytes
         run: |
           set -euo pipefail
-          cargo package -p meta-extension-state -p meerkat-meta --locked --no-verify
+          ./scripts/repo-cargo package -p meta-extension-state -p meerkat-meta --locked --no-verify
           for pair in "meta-extension-state:${VERIFIED_EXTENSION_SHA256}" "meerkat-meta:${VERIFIED_META_SHA256}"; do
             crate="${pair%%:*}"; verified="${pair##*:}"
             [[ "${verified}" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::no verified checksum for ${crate}" >&2; exit 1; }

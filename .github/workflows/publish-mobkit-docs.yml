@@ -1,17 +1,19 @@
 name: Publish MobKit docs
 
-# docs.rkat.ai mirrors MobKit main. Documentation carries no version tag: a
-# doc fix is published the moment it lands on lukacf/meerkat-meta main.
+# docs.rkat.ai mirrors MobKit's documentation on main. MobKit (Meta) lives
+# under meta/ in this repository, so the source is main itself: the mirror
+# (docs/mobkit/** and docs/docs.json) is rendered from meta/docs at the main
+# head. Documentation carries no version tag: a doc fix is published the
+# moment it lands on main.
 #
 # Triggers:
-#   - repository_dispatch `meta-docs-updated {sha, ref}`: sent by Meta's
-#     "Publish docs" workflow on every push to main that touches docs/.
-#     Releases before the Meta rename send `mobkit-docs-updated` with the
-#     same payload; both are accepted.
-#   - workflow_dispatch: mirror MobKit main now (optionally a specific main
-#     commit via `source_sha`), for example after a failed publication.
-#   - schedule: nightly catch-up so a lost dispatch cannot leave the mirror
-#     stale for long.
+#   - push to main that changes meta/docs/** or the mirror script;
+#   - workflow_dispatch: mirror the main head now, for example after a failed
+#     publication.
+# No nightly catch-up: a push in the same repository cannot be lost the way a
+# cross-repository dispatch could, and the nightly lag check
+# (scripts/check-mobkit-docs-lag.py) fails while a docs-changing main commit
+# is not mirrored.
 #
 # Landing the regenerated snapshot on main. The "Protect MAIN" ruleset
 # requires the CI gate status check, and bot-authored pull requests used to
@@ -34,16 +36,13 @@ name: Publish MobKit docs
 #     creation, so the CI gate's budget is met.
 
 on:
-  repository_dispatch:
-    types: [mobkit-docs-updated, meta-docs-updated]
+  push:
+    branches:
+      - main
+    paths:
+      - "meta/docs/**"
+      - "scripts/sync-mobkit-docs.py"
   workflow_dispatch:
-    inputs:
-      source_sha:
-        description: "MobKit main commit to mirror (default: current main head)"
-        required: false
-        type: string
-  schedule:
-    - cron: "17 4 * * *"
 
 permissions:
   actions: write
@@ -59,9 +58,6 @@ jobs:
   publish:
     name: Mirror MobKit main
     runs-on: ubuntu-24.04
-    env:
-      REQUESTED_SHA: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.sha || github.event.inputs.source_sha || '' }}
-      REQUESTED_REF: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.ref || 'main' }}
     steps:
       - name: Checkout docs.rkat.ai source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -69,48 +65,25 @@ jobs:
           ref: main
           fetch-depth: 0
 
-      - name: Checkout MobKit main
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          repository: lukacf/meerkat-meta
-          ref: main
-          path: _mobkit
-          fetch-depth: 0
-
-      - name: Resolve and verify the source commit
+      - name: Resolve the source commit
         id: source
         run: |
           set -euo pipefail
-          if [[ "$REQUESTED_REF" != "main" ]]; then
-            echo "::error::Only MobKit main is mirrored; refusing ref $REQUESTED_REF" >&2
+          # The checkout is main's head: the pushed commit, or a later one
+          # when pushes raced. The newest main is the one to mirror.
+          source_sha=$(git rev-parse HEAD)
+          if [[ "$(git rev-parse origin/main)" != "$source_sha" ]]; then
+            echo "::error::The checkout is not main's head; refusing to mirror it" >&2
             exit 1
           fi
-          main_head=$(git -C _mobkit rev-parse origin/main)
-          source_sha="${REQUESTED_SHA:-$main_head}"
-          if [[ ! "$source_sha" =~ ^[0-9a-f]{40}$ ]]; then
-            resolved=$(git -C _mobkit rev-parse --verify "${source_sha}^{commit}" 2>/dev/null || true)
-            if [[ -z "$resolved" ]]; then
-              echo "::error::Cannot resolve MobKit commit $source_sha" >&2
-              exit 1
-            fi
-            source_sha="$resolved"
-          fi
-          # A dispatch payload is caller-supplied. Only commits reachable from
-          # MobKit main may be published; anything else is refused here, not
-          # rendered.
-          if ! git -C _mobkit merge-base --is-ancestor "$source_sha" origin/main; then
-            echo "::error::MobKit commit $source_sha is not on main; refusing to mirror it" >&2
-            exit 1
-          fi
-          git -C _mobkit checkout --quiet --detach "$source_sha"
           echo "sha=${source_sha}" >> "${GITHUB_OUTPUT}"
           echo "short=${source_sha:0:12}" >> "${GITHUB_OUTPUT}"
-          echo "Mirroring MobKit main at ${source_sha}" >> "${GITHUB_STEP_SUMMARY}"
+          echo "Mirroring MobKit docs from main at ${source_sha}" >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Generate MobKit documentation from main
         run: |
           set -euo pipefail
-          python3 scripts/sync-mobkit-docs.py _mobkit \
+          python3 scripts/sync-mobkit-docs.py meta \
             --source-ref main \
             --require-clean
 

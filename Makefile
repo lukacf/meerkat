@@ -680,10 +680,11 @@ docs-check:
 	@$(PYTHON) scripts/test_check_mobkit_docs_lag.py
 	@$(PYTHON) scripts/test_usage_accounting_docs.py
 
-MOBKIT_REPO ?= ../meerkat-mobkit
+# MobKit's docs source: meta/ in this repository (a standalone meerkat-meta
+# checkout still works). The mirror tracks main; no release tag is involved.
+MOBKIT_REPO ?= meta
 MOBKIT_REF ?= main
 
-# The MobKit docs mirror tracks MobKit main; no release tag is involved.
 docs-sync-mobkit:
 	@echo "$(GREEN)Syncing MobKit docs from $(MOBKIT_REPO) ($(MOBKIT_REF))...$(NC)"
 	@$(PYTHON) scripts/sync-mobkit-docs.py "$(MOBKIT_REPO)" --source-ref "$(MOBKIT_REF)" --require-clean
@@ -1162,7 +1163,7 @@ help:
 	@echo "  $(GREEN)check$(NC)         - Quick compilation check"
 	@echo "  $(GREEN)doc$(NC)           - Generate documentation"
 	@echo "  $(GREEN)docs-check$(NC)    - Validate Mintlify docs navigation and links"
-	@echo "  $(GREEN)docs-sync-mobkit$(NC) - Refresh docs.rkat.ai from a clean MobKit main checkout"
+	@echo "  $(GREEN)docs-sync-mobkit$(NC) - Refresh docs.rkat.ai's MobKit mirror from a clean meta/docs"
 	@echo "  $(GREEN)coverage$(NC)      - Generate test coverage report"
 	@echo "  $(GREEN)clean$(NC)         - Remove build artifacts"
 	@echo "  $(GREEN)install-hooks$(NC) - Install git hooks"

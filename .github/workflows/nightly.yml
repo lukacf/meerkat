@@ -33,9 +33,9 @@ name: Nightly
 #   wasm-contract     - wasm-pack browser contract test in headless Chrome
 #   release-packaging - per-crate `cargo package` dry-run (release hygiene)
 #   audit             - daily cargo-deny advisory sweep
-#   mobkit-docs-lag   - docs/mobkit mirror vs MobKit main (docs-touching commits);
-#                       fails when more than one release was published after
-#                       the mirrored one (publication has stalled silently)
+#   mobkit-docs-lag   - docs/mobkit mirror vs main: fails while a main commit
+#                       that changed meta/docs after the mirrored one is not
+#                       mirrored (publication has stalled silently)
 
 # Hosted-runner slots. The account runs at most 40 hosted jobs at once,
 # shared with every pull request and main push, and nightly once held 22 of
@@ -935,28 +935,20 @@ jobs:
     if: ${{ !cancelled() && !inputs.graph_only }}
     runs-on: ubuntu-24.04
     steps:
+      # The lag is read from this repository's own history (MobKit's docs
+      # are meta/docs here), so the checkout needs all of it: a shallow
+      # checkout cannot place the mirrored commit and fails as "lag unknown"
+      # rather than report zero lag.
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
 
-      - name: Compare the mirrored MobKit commit with MobKit main
-        env:
-          # The workflow token can read another public repository's compare
-          # endpoint even with `contents: read` here. If lukacf/meerkat-meta
-          # stops being public, or the token loses that read, the API call
-          # fails and the job must fail as "lag unknown" rather than report
-          # zero lag.
-          GH_TOKEN: ${{ github.token }}
+      - name: Compare the mirrored commit with the main commits that changed meta/docs
         run: |
           set -euo pipefail
-          mirrored=$(python3 -c 'import json; print(json.load(open("docs/mobkit/_source.json"))["source_commit"])')
-          compare="${RUNNER_TEMP}/mobkit-compare.json"
-          if ! gh api "repos/lukacf/meerkat-meta/compare/${mirrored}...main" > "${compare}"; then
-            echo "::error::Could not compare the mirrored MobKit commit with main using the workflow token; the MobKit docs mirror lag is unknown, not zero." >&2
-            exit 1
-          fi
           python3 scripts/check-mobkit-docs-lag.py \
             --manifest docs/mobkit/_source.json \
-            --compare "${compare}" \
             --max-lag 0
 
   # A red nightly on main opens one tracking issue, or comments on it while

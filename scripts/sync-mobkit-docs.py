@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
 """Publish MobKit's canonical docs into the docs.rkat.ai source tree.
 
-MobKit authors its public documentation in the meerkat-meta repository. The
-Mintlify project for docs.rkat.ai deploys from this repository, so this script
-creates the namespaced snapshot consumed by the MobKit product navigation.
+MobKit (Meta) authors its public documentation in meta/docs of this
+repository. The Mintlify project for docs.rkat.ai deploys from this
+repository's docs/, so this script creates the namespaced snapshot consumed by
+the MobKit product navigation (docs/mobkit/** and docs/docs.json).
 
-The mirror tracks MobKit main. Documentation carries no version tag: every
-push to MobKit main that touches docs regenerates this snapshot (see
+The mirror tracks main. Documentation carries no version tag: every push to
+main that changes meta/docs regenerates this snapshot (see
 .github/workflows/publish-mobkit-docs.yml), and releases do not publish docs.
-The generated manifest records the exact source commit and the MobKit
-workspace version at that commit as information, not as an identity.
+The generated manifest records the exact source commit, the docs path and the
+MobKit version at that commit (meta/crates/meerkat-meta/Cargo.toml) as
+information, not as an identity. A standalone meerkat-meta checkout (the
+repository Meta lived in before the monorepo) still renders, with that
+repository's links and its workspace version.
 
 Usage:
-    python3 scripts/sync-mobkit-docs.py /path/to/meerkat-meta
-    python3 scripts/sync-mobkit-docs.py /path/to/meerkat-meta --check
+    python3 scripts/sync-mobkit-docs.py meta
+    python3 scripts/sync-mobkit-docs.py meta --check
 """
 
 from __future__ import annotations
@@ -35,7 +39,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DESTINATION = ROOT / "docs" / "mobkit"
 SITE_CONFIG = ROOT / "docs" / "docs.json"
-SOURCE_REPOSITORY = "https://github.com/lukacf/meerkat-meta"
+# The repository the in-tree source (meta/) belongs to, and the one a
+# standalone checkout (a workspace Cargo.toml at its root) belongs to.
+SOURCE_REPOSITORY = "https://github.com/lukacf/meerkat"
+STANDALONE_REPOSITORY = "https://github.com/lukacf/meerkat-meta"
+META_CRATE_MANIFEST = Path("crates") / "meerkat-meta" / "Cargo.toml"
 ASSET_PATHS = ("images", "logo.png")
 ROOT_LINK_RE = re.compile(r'(?P<prefix>\]\(|(?:href|src)=["\'])/(?P<path>[^/])')
 REQUIRED_PAGE_ICONS = {
@@ -66,7 +74,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "source",
         type=Path,
-        help="path to a meerkat-meta checkout",
+        help="MobKit's source: meta (in this repository) or a standalone meerkat-meta checkout",
     )
     parser.add_argument(
         "--check",
@@ -296,15 +304,15 @@ def version_stamp(
     """Return the one-line provenance stamp every mirrored page carries.
 
     docs.rkat.ai serves this snapshot until the next publication succeeds. The
-    stamp names the exact MobKit commit the page was rendered from and the
-    MobKit workspace version at that commit, so a reader can tell how current
-    the page is and which version it was written against. The commit is the
-    identity; the version is information.
+    stamp names the exact commit the page was rendered from and the MobKit
+    version at that commit, so a reader can tell how current the page is and
+    which version it was written against. The commit is the identity; the
+    version is information.
     """
     commit = f"[{source_commit[:12]}]({source_repository}/commit/{source_commit})"
     return (
         f"*Mirrored from MobKit {source_ref} at {commit} on {source_date}; "
-        f"MobKit workspace version {source_version} at that commit.*"
+        f"MobKit version {source_version} at that commit.*"
     )
 
 
@@ -329,6 +337,43 @@ def tree_digest(root: Path) -> str:
         digest.update(path.read_bytes())
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def package_version(cargo_toml: Path) -> str:
+    in_package = False
+    for raw_line in cargo_toml.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if line.startswith("[") and line.endswith("]"):
+            in_package = line == "[package]"
+            continue
+        if in_package:
+            match = re.fullmatch(r'version\s*=\s*"([^"]+)"', line)
+            if match:
+                return match.group(1)
+    raise SystemExit(f"package version not found: {cargo_toml}")
+
+
+def source_identity(source: Path) -> tuple[str, str, str]:
+    """Return the repository, MobKit version and docs path of a source.
+
+    The in-tree source (meta/ in this repository) has no workspace manifest of
+    its own: Meta's crates carry explicit versions, and meerkat-meta's is
+    MobKit's. A standalone meerkat-meta checkout keeps its workspace version.
+    The docs path is relative to the source's repository root (meta/docs, or
+    docs for a standalone checkout), so the lag check knows which commits the
+    mirror must follow.
+    """
+    prefix = git_output(source, "rev-parse", "--show-prefix")
+    docs_path = f"{prefix}docs"
+    standalone_manifest = source / "Cargo.toml"
+    if standalone_manifest.is_file():
+        return STANDALONE_REPOSITORY, workspace_version(standalone_manifest), docs_path
+    crate_manifest = source / META_CRATE_MANIFEST
+    if crate_manifest.is_file():
+        return SOURCE_REPOSITORY, package_version(crate_manifest), docs_path
+    raise SystemExit(
+        f"{source} is neither meta/ ({META_CRATE_MANIFEST} missing) nor a standalone checkout (no Cargo.toml)"
+    )
 
 
 def workspace_version(cargo_toml: Path) -> str:
@@ -362,7 +407,7 @@ def build_snapshot(
     if require_clean and source_dirty:
         raise SystemExit("MobKit documentation source has uncommitted changes")
 
-    source_version = workspace_version(source / "Cargo.toml")
+    source_repository, source_version, source_docs_path = source_identity(source)
     if source_ref is None:
         branch = git_output(source, "rev-parse", "--abbrev-ref", "HEAD")
         source_ref = "main" if branch == "HEAD" else branch
@@ -376,7 +421,7 @@ def build_snapshot(
 
     source_commit = git_output(source, "rev-parse", "HEAD")
     source_date = git_output(source, "show", "-s", "--format=%cs", "HEAD")
-    stamp = version_stamp(source_version, source_ref, source_commit, source_date)
+    stamp = version_stamp(source_version, source_ref, source_commit, source_date, source_repository)
     corrections = released_anchor_corrections(source_docs)
 
     destination.mkdir(parents=True, exist_ok=True)
@@ -405,7 +450,8 @@ def build_snapshot(
 
     manifest = {
         "generated": True,
-        "source_repository": SOURCE_REPOSITORY,
+        "source_repository": source_repository,
+        "source_path": source_docs_path,
         "source_branch": source_ref,
         "source_ref": source_ref,
         "source_commit": source_commit,

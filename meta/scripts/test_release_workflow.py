@@ -802,38 +802,20 @@ class RegistryPublicationShellTests(unittest.TestCase):
 class DocsPublicationWorkflowTests(unittest.TestCase):
     """Documentation mirrors main; releases no longer publish docs."""
 
-    PUBLISH_DOCS_WORKFLOW = RELEASE_WORKFLOW.with_name("publish-docs.yml")
-
     def test_release_workflow_no_longer_dispatches_documentation(self):
         workflow = RELEASE_WORKFLOW.read_text()
         self.assertNotIn("publish_docs:", workflow)
         self.assertNotIn("meta-release-published", workflow)
         self.assertNotIn("repos/lukacf/meerkat/dispatches", workflow)
 
-    def test_docs_dispatch_fires_on_every_docs_push_to_main(self):
-        workflow = self.PUBLISH_DOCS_WORKFLOW.read_text()
-        self.assertIn("branches:\n      - main", workflow)
-        self.assertIn('- "docs/**"', workflow)
-        self.assertIn("workflow_dispatch:", workflow)
-        self.assertIn("secrets.DOCS_PUBLISH_TOKEN", workflow)
-        self.assertIn('event_type: "meta-docs-updated"', workflow)
-        self.assertIn("sha: $sha", workflow)
-        self.assertIn('ref: "main"', workflow)
-        self.assertIn("SOURCE_SHA: ${{ github.sha }}", workflow)
-        self.assertIn("repos/lukacf/meerkat/dispatches", workflow)
-        self.assertNotIn("releases/latest", workflow)
-        self.assertNotIn("RELEASE_TAG", workflow)
-
-    def test_docs_dispatch_workflow_parses_when_yaml_is_available(self):
-        try:
-            import yaml
-        except ImportError:  # pragma: no cover
-            self.skipTest("PyYAML is not installed")
-        parsed = yaml.safe_load(self.PUBLISH_DOCS_WORKFLOW.read_text())
-        self.assertEqual(parsed[True]["push"]["branches"], ["main"])
-        self.assertEqual(parsed[True]["push"]["paths"], ["docs/**"])
-        self.assertEqual(parsed["permissions"], {"contents": "read"})
-        self.assertEqual(list(parsed["jobs"]), ["dispatch"])
+    def test_docs_are_mirrored_from_the_tree_without_a_dispatch(self):
+        # Meta lives under meta/ in the Meerkat repository: the root workflow
+        # publish-mobkit-docs.yml mirrors meta/docs on every push to main that
+        # changes it, so Meta dispatches nothing.
+        self.assertFalse(RELEASE_WORKFLOW.with_name("publish-docs.yml").exists())
+        mirror = (ROOT.parent / ".github/workflows/publish-mobkit-docs.yml").read_text()
+        self.assertIn('- "meta/docs/**"', mirror)
+        self.assertNotIn("repository_dispatch", mirror)
 
 
 class ReleaseProtocolConditionsTests(unittest.TestCase):
@@ -1995,7 +1977,7 @@ class ReleaseCacheReuseTests(unittest.TestCase):
         # The scan sees the jobs it must (and the allowlist is no wider).
         for expected in (("release.yml", "publish_registries"), ("release.yml", "publish_sdk_packages"),
                          ("release.yml", "collect_candidate"), ("release.yml", "publish_github_release"),
-                         ("publish-docs.yml", "dispatch"), ("meta-e2e-live.yml", "e2e-live")):
+                         ("meta-e2e-live.yml", "e2e-live")):
             self.assertIn(expected, holders_seen)
         self.assertLessEqual(self.CACHE_HOLDER_ALLOWLIST, holders_seen)
         e2e = (ROOT.parent / ".github/workflows/meta-e2e-live.yml").read_text()

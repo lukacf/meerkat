@@ -43,12 +43,14 @@ than relying on a duplicated version snapshot.
 
 There should be no vendored `meerkat-comms` patch in this repo. Durable image forwarding belongs upstream in Meerkat; do not restore old vendoring.
 
-Docs: Mintlify sources live in `docs/` (`docs/docs.json`). The `Publish docs`
-workflow (`.github/workflows/publish-docs.yml`) asks the Meerkat docs site to
-mirror them on every push to `main` that touches `docs/`; releases do not
-publish documentation. The mirror is served under `https://docs.rkat.ai/mobkit/`
-(the site path keeps the predecessor name), and the Meerkat repository's
-`docs/mobkit/_source.json` records the mirrored Meta commit.
+Docs: Mintlify sources live in `docs/` (`docs/docs.json`), that is `meta/docs` in
+the Meerkat repository. The repository root's `Publish MobKit docs` workflow
+(`.github/workflows/publish-mobkit-docs.yml`) mirrors them on every push to
+`main` that touches `meta/docs/`; releases do not publish documentation. The
+mirror is served under `https://docs.rkat.ai/mobkit/` (the site path keeps the
+predecessor name), the root's `docs/mobkit/_source.json` records the mirrored
+commit, and the nightly lag check fails while a `meta/docs` change on `main` is
+not mirrored.
 
 ## 0.9 Rename And Upgrade Notes
 

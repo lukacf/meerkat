@@ -107,10 +107,11 @@ paths.extend(
 )
 for path in sorted(set(paths)):
     rel = path.relative_to(root).as_posix()
-    # MobKit is an independently released product. Its generated documentation
-    # is pinned to the public MobKit release recorded in docs/mobkit/_source.json
-    # and validated by docs-check, so Meerkat release stamping must not rewrite
-    # MobKit package or protocol versions.
+    # MobKit (Meta, under meta/) is released on its own cycle. docs/mobkit is
+    # generated from meta/docs at the main commit recorded in
+    # docs/mobkit/_source.json (scripts/sync-mobkit-docs.py) and validated by
+    # docs-check, so Meerkat release stamping must not rewrite MobKit package
+    # or protocol versions.
     if rel.startswith("docs/mobkit/"):
         continue
     # docs/internal holds unpublished working notes, audits and archives that

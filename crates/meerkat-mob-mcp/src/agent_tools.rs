@@ -7130,7 +7130,7 @@ mod tests {
             .await
             .expect("replacement implicit mob handle");
         let replacement_incarnation = replacement.incarnation();
-        assert!(replacement_incarnation != first_incarnation);
+        assert_ne!(replacement_incarnation, first_incarnation);
         apply_authority_effects(
             &authority,
             replacing
@@ -7143,8 +7143,9 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(authority.can_manage_mob(mob_id.as_str(), replacement_incarnation));
         assert!(!authority.can_manage_mob(mob_id.as_str(), first_incarnation));
-        assert!(
-            authority.mob_incarnations().get(mob_id.as_str()) == Some(&replacement_incarnation)
+        assert_eq!(
+            authority.mob_incarnations().get(mob_id.as_str()),
+            Some(&replacement_incarnation)
         );
     }
 
@@ -7226,7 +7227,10 @@ mod tests {
                     },
                 ] => {
                     assert!(authority_context.can_manage_mob(mob_id, incarnation));
-                    assert!(authority_context.mob_incarnations().get(mob_id) == Some(&incarnation));
+                    assert_eq!(
+                        authority_context.mob_incarnations().get(mob_id),
+                        Some(&incarnation)
+                    );
                 }
                 other => panic!("unexpected delegate session effects: {other:?}"),
             }

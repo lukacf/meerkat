@@ -101,7 +101,7 @@ async fn owned_actor_cleanup_rolls_back_without_deadlocking_a_raw_unregister_sag
 
     // A raw unregister of the same session: its saga takes the live
     // lifecycle lease, then its surface cleanup waits for B.
-    machine.test_set_unregister_caller_wait_grace(Duration::from_secs(60));
+    machine.test_set_unregister_caller_wait_grace(Duration::from_mins(1));
     let saga_holds_lease = machine.test_signal_next_unregister_saga_live_lease();
     let unregister = tokio::spawn({
         let machine = std::sync::Arc::clone(&machine);

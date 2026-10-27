@@ -305,7 +305,7 @@ mod tests {
             .accept_input_with_completion(&id, Input::Prompt(PromptInput::new("go", None)))
             .await
             .expect("accept the prompt");
-        tokio::time::timeout(Duration::from_secs(60), client.entered.acquire())
+        tokio::time::timeout(Duration::from_mins(1), client.entered.acquire())
             .await
             .expect("the run reaches its model call after the tool round")
             .expect("model gate")
@@ -335,7 +335,7 @@ mod tests {
         );
 
         client.release.add_permits(1);
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        let deadline = tokio::time::Instant::now() + Duration::from_mins(1);
         while host.tail_run(&id).await.as_ref() == Some(&run) {
             assert!(
                 tokio::time::Instant::now() < deadline,
@@ -444,7 +444,7 @@ mod tests {
         // turn's.
         restarted_client.release.add_permits(2);
         let answered = tokio::time::timeout(
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             completion.expect("the queued turn has a completion").wait(),
         )
         .await

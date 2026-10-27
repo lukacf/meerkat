@@ -75,18 +75,18 @@ pub const MCP_OAUTH_STAGE_BOUND: Duration = Duration::from_secs(20);
 
 /// Default bound of a start's network stages together (resource and
 /// authorization-server discovery, account preflight, client registration).
-pub const MCP_OAUTH_START_BOUND: Duration = Duration::from_secs(60);
+pub const MCP_OAUTH_START_BOUND: Duration = Duration::from_mins(1);
 
 /// Default bound of a completion's network stages together (issuer metadata,
 /// token exchange, account evidence). It never extends past the attempt's own
 /// validity: a result after that would be refused anyway.
-pub const MCP_OAUTH_COMPLETION_BOUND: Duration = Duration::from_secs(60);
+pub const MCP_OAUTH_COMPLETION_BOUND: Duration = Duration::from_mins(1);
 
 /// Default time a completion observes its credential commit before the flow
 /// owner decides which side of the attempt's consume the commit is on. Longer
 /// than a refresh holds the credential (two stages), so a login queued behind
 /// a stalled refresh lands once that refresh has failed.
-pub const MCP_OAUTH_COMMIT_OBSERVATION_BOUND: Duration = Duration::from_secs(60);
+pub const MCP_OAUTH_COMMIT_OBSERVATION_BOUND: Duration = Duration::from_mins(1);
 
 /// One network stage of an MCP OAuth start or completion, as named by
 /// [`McpOAuthError::NetworkTimedOut`].
@@ -137,7 +137,7 @@ impl std::fmt::Display for McpOAuthNetworkStage {
 /// `Duration::MAX` to mean "no bound") saturates to a deadline about 30 years
 /// out instead of panicking, as `tokio::time::timeout` does.
 fn deadline_after(bound: Duration) -> tokio::time::Instant {
-    const FAR_FUTURE: Duration = Duration::from_secs(86_400 * 365 * 30);
+    const FAR_FUTURE: Duration = Duration::from_hours(262800);
     let now = tokio::time::Instant::now();
     now.checked_add(bound).unwrap_or_else(|| now + FAR_FUTURE)
 }

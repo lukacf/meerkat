@@ -226,7 +226,7 @@ async fn wait_for_applied(
 /// Let the clock run far past any plausible poll interval and let every
 /// woken task run; a timer-driven owner would complete a pass here.
 async fn idle_for_an_hour() {
-    tokio::time::advance(Duration::from_secs(3600)).await;
+    tokio::time::advance(Duration::from_hours(1)).await;
     for _ in 0..64 {
         tokio::task::yield_now().await;
     }

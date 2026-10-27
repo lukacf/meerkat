@@ -79,7 +79,7 @@ fn sample_metadata() -> RuntimeTurnMetadata {
             origin: BindingOrigin::Configured,
         })),
         keep_alive: Some(KeepAliveDirective::Enable(KeepAlivePolicy {
-            ttl: Duration::from_secs(60),
+            ttl: Duration::from_mins(1),
             policy: KeepAliveMode::Pinned,
         })),
         render_metadata: Some(RenderMetadata {
@@ -486,7 +486,7 @@ fn merge_scalar_conflict_refuses_keep_alive() {
     };
     let right = RuntimeTurnMetadata {
         keep_alive: Some(KeepAliveDirective::Enable(KeepAlivePolicy {
-            ttl: Duration::from_secs(60),
+            ttl: Duration::from_mins(1),
             policy: KeepAliveMode::PolicyDriven,
         })),
         ..Default::default()

@@ -2200,8 +2200,7 @@ impl CompletionRegistry {
                 waiter_count: senders.len(),
             })
             .collect();
-        waiting_inputs
-            .sort_by(|left, right| left.input_id.to_string().cmp(&right.input_id.to_string()));
+        waiting_inputs.sort_by_key(|left| left.input_id.to_string());
 
         CompletionRegistrySnapshot {
             input_count: waiting_inputs.len(),

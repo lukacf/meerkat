@@ -2002,7 +2002,7 @@ async fn run_schedule_host_worker(
     timing: ScheduleHostTiming,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<(), ScheduleHostWorkerExit> {
-    let mut health = ScheduleHostIncidentTracker::new(std::time::Duration::from_secs(60));
+    let mut health = ScheduleHostIncidentTracker::new(std::time::Duration::from_mins(1));
 
     let mut backoff = TickBackoff::new(
         timing.base_interval,
@@ -2110,7 +2110,7 @@ async fn supervise_schedule_host(
     mut shutdown_rx: oneshot::Receiver<()>,
     worker_shutdown: ScheduleHostWorkerShutdown,
 ) {
-    let mut health = ScheduleHostIncidentTracker::new(std::time::Duration::from_secs(60));
+    let mut health = ScheduleHostIncidentTracker::new(std::time::Duration::from_mins(1));
     let mut restart_backoff = RestartBackoff::new(timing.base_interval, timing.backoff_cap);
 
     loop {
@@ -2198,7 +2198,7 @@ const SCHEDULE_HOST_LEASE_SECONDS: i64 = 60;
 /// the wait, so nothing reclaims the occurrence and its misfire policy plays
 /// no part. At the bound the occurrence ends delivery_failed with
 /// runtime_completion_authority_unavailable.
-const ADMITTED_OUTCOME_REREAD_BOUND: Duration = Duration::from_secs(300);
+const ADMITTED_OUTCOME_REREAD_BOUND: Duration = Duration::from_mins(5);
 
 /// Bound on one read of that outcome: a quarter of
 /// [`SCHEDULE_HOST_LEASE_SECONDS`]. The first read runs inside the delivery,
@@ -2293,7 +2293,7 @@ pub fn spawn_schedule_host(
         (
             Duration::from_millis(250),
             Duration::from_secs(30),
-            Duration::from_secs(60),
+            Duration::from_mins(1),
         )
     };
     let timing = ScheduleHostTiming {
@@ -3725,7 +3725,7 @@ mod tests {
     /// rate limit. The latest detail is retained for the next heartbeat.
     #[test]
     fn incident_tracker_rate_limits_by_stable_class() {
-        let heartbeat = std::time::Duration::from_secs(60);
+        let heartbeat = std::time::Duration::from_mins(1);
         let mut tracker = ScheduleHostIncidentTracker::new(heartbeat);
         let start = meerkat_core::time_compat::Instant::now();
 
@@ -3803,7 +3803,7 @@ mod tests {
     /// detail is bounded before entering the tracker.
     #[test]
     fn row_fault_incident_is_bounded_and_attributable() {
-        let heartbeat = std::time::Duration::from_secs(60);
+        let heartbeat = std::time::Duration::from_mins(1);
         let mut tracker = ScheduleHostIncidentTracker::new(heartbeat);
         let start = meerkat_core::time_compat::Instant::now();
         let mut report = meerkat_schedule::ScheduleTickReport::default();
@@ -3839,7 +3839,7 @@ mod tests {
     /// producing one ERROR per page.
     #[test]
     fn rotating_row_fault_pages_do_not_flood_incidents() {
-        let heartbeat = std::time::Duration::from_secs(60);
+        let heartbeat = std::time::Duration::from_mins(1);
         let mut tracker = ScheduleHostIncidentTracker::new(heartbeat);
         let start = meerkat_core::time_compat::Instant::now();
 
@@ -3874,8 +3874,8 @@ mod tests {
 
         // Each failing tick doubles: 500ms, 1s, 2s, ...
         assert_eq!(backoff.observe(&failure), Duration::from_millis(500));
-        assert_eq!(backoff.observe(&failure), Duration::from_millis(1000));
-        assert_eq!(backoff.observe(&failure), Duration::from_millis(2000));
+        assert_eq!(backoff.observe(&failure), Duration::from_secs(1));
+        assert_eq!(backoff.observe(&failure), Duration::from_secs(2));
         // ... until the cap holds.
         for _ in 0..16 {
             assert!(backoff.observe(&failure) <= cap);
@@ -3917,7 +3917,7 @@ mod tests {
         }
         // Past the grace run, idle ticks escalate.
         assert_eq!(backoff.observe(&idle), Duration::from_millis(500));
-        assert_eq!(backoff.observe(&idle), Duration::from_millis(1000));
+        assert_eq!(backoff.observe(&idle), Duration::from_secs(1));
 
         // Progress resets the interval AND re-arms the grace run.
         assert_eq!(backoff.observe(&progressing), base);

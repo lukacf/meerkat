@@ -29,7 +29,7 @@ use std::time::Duration as StdDuration;
 use tokio::sync::Semaphore;
 
 /// Bound on one step of a row: it only turns a hang into a failure.
-pub(crate) const DEADLINE: StdDuration = StdDuration::from_secs(60);
+pub(crate) const DEADLINE: StdDuration = StdDuration::from_mins(1);
 /// How long an operation run across the held run is given to answer before
 /// the run is released: one that waits for the run's turn boundary is still
 /// waiting then.

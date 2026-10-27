@@ -106,7 +106,7 @@ impl TurnGate {
     pub async fn wait_entered(&self, count: usize) {
         let mut entered = self.entered.subscribe();
         let reached = tokio::time::timeout(
-            std::time::Duration::from_secs(120),
+            std::time::Duration::from_mins(2),
             entered.wait_for(|entered| *entered >= count),
         )
         .await;
@@ -572,7 +572,7 @@ pub async fn wait_for_pass(
     predicate: impl FnMut(&meerkat::RuntimeDeliveryPass) -> bool,
 ) -> meerkat::RuntimeDeliveryPass {
     let reached = tokio::time::timeout(
-        std::time::Duration::from_secs(60),
+        std::time::Duration::from_mins(1),
         passes.wait_for(predicate),
     )
     .await

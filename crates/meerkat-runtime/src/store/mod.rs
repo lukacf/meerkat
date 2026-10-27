@@ -9296,7 +9296,7 @@ pub trait RuntimeSessionAuthorityOps: Send + Sync {
 /// the shared busy timeout of the production connection profiles
 /// (`meerkat_sqlite::SHARED_BUSY_TIMEOUT`). A transaction that cannot take its
 /// lock within it fails with `SQLITE_BUSY` instead of waiting longer.
-pub const COMMIT_BUSY_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+pub const COMMIT_BUSY_WINDOW: std::time::Duration = std::time::Duration::from_mins(1);
 
 /// The default [`RuntimeStore::commit_outcome_deadline`]: one lock-acquiring
 /// transaction per boundary commit, plus one busy window of margin for the

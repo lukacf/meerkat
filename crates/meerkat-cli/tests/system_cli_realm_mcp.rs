@@ -432,7 +432,7 @@ impl Roots {
 }
 
 async fn output_of(command: &mut Command, step: &str) -> std::process::Output {
-    timeout(Duration::from_secs(180), command.output())
+    timeout(Duration::from_mins(3), command.output())
         .await
         .unwrap_or_else(|_| panic!("{step} did not finish in time"))
         .unwrap_or_else(|error| panic!("{step} did not start: {error}"))

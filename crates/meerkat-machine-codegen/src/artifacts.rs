@@ -9848,7 +9848,7 @@ impl<'a> CompositionTlaCompiler<'a> {
                         tla_string(instance_id),
                         tla_string(&effect.variant),
                         self.payload_record_expr(&payload_fields),
-                        &effect_id_expr,
+                        effect_id_expr,
                         tla_string(&transition.name)
                     ),
                     payload_fields,

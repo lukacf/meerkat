@@ -78,7 +78,7 @@ const DEFERRED_TURN_EVENT_CHANNEL_CAPACITY: usize = 1024;
 /// during the period but is idle at the check, with this input still queued,
 /// counts as parked: an idle session is not working the input.
 #[cfg(all(feature = "runtime-adapter", not(test)))]
-const RETRIED_INPUT_PROGRESS_BOUND: Duration = Duration::from_secs(120);
+const RETRIED_INPUT_PROGRESS_BOUND: Duration = Duration::from_mins(2);
 
 #[cfg(all(feature = "runtime-adapter", test))]
 const RETRIED_INPUT_PROGRESS_BOUND: Duration = Duration::from_secs(2);
@@ -678,11 +678,11 @@ async fn authorized_machine_prepare_lifecycle_transition(
 /// session create + preflight; the send holds the bridge single-flight lock
 /// for its whole duration (relaxation is phase 6). The ADJ-4 single resend
 /// gives an effective 120s ceiling.
-pub(crate) const MATERIALIZE_BRIDGE_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const MATERIALIZE_BRIDGE_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// DEC-R4: the `ReleaseMember` bridge budget (remote quiesce + drain +
 /// commit-first archive; the BindHost 60s precedent).
-pub(crate) const HOST_RELEASE_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const HOST_RELEASE_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// DEC-P6E-8: per-attempt `HardCancelMember` bridge budget. The receiver
 /// withholds ACK until the exact expected run is unbound/terminal, while a
@@ -694,7 +694,7 @@ pub(crate) const HARD_CANCEL_BRIDGE_TIMEOUT: Duration = Duration::from_secs(5);
 /// budget bounds one transport attempt, never the stop: on timeout the
 /// controller resends the same `operation_id`, which the host joins to the
 /// in-flight stop, so the caller always receives the one typed receipt.
-pub(crate) const STOP_MEMBER_RUN_BRIDGE_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const STOP_MEMBER_RUN_BRIDGE_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// Exact tracked-input cancellation waits for the member host to durably
 /// fence and, when necessary, quiesce a racing admission. Its transport
@@ -16708,7 +16708,7 @@ impl MultiBackendProvisioner {
         // of seconds; in real deployments it propagates in milliseconds.
         let value = match self
             .supervisor_bridge
-            .send_bridge_command(peer, &command, Duration::from_secs(60))
+            .send_bridge_command(peer, &command, Duration::from_mins(1))
             .await
         {
             Ok(value) => value,
@@ -17243,7 +17243,7 @@ impl MultiBackendProvisioner {
             address,
             bootstrap_token,
             direct_member_incarnation,
-            Duration::from_secs(60),
+            Duration::from_mins(1),
             true,
         )
         .await

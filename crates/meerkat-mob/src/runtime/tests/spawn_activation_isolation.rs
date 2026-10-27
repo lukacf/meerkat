@@ -194,7 +194,7 @@ async fn parked_spawn_activation_does_not_stall_the_loop_or_other_members() {
         .expect("spawn task joins");
     receipt.expect("the parked activation eventually completes the spawn");
     assert!(
-        spawn_started.elapsed() >= Duration::from_millis(1_000),
+        spawn_started.elapsed() >= Duration::from_secs(1),
         "the activation was never actually parked ({:?}); the test proves nothing",
         spawn_started.elapsed()
     );

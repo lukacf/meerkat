@@ -43,7 +43,7 @@ use support::{
     wait_for_flow_run_terminal, wait_until,
 };
 
-const RUN_WAIT: Duration = Duration::from_secs(60);
+const RUN_WAIT: Duration = Duration::from_mins(1);
 
 fn identity(name: &str) -> AgentIdentity {
     AgentIdentity::from(name)

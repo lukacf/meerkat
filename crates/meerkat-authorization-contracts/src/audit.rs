@@ -535,7 +535,7 @@ mod tests {
         );
         let decoded: AuthorizationAuditObservation =
             serde_json::from_value(encoded.clone()).unwrap();
-        assert!(decoded == refused);
+        assert_eq!(decoded, refused);
         let mut unknown = encoded.clone();
         unknown["observation"]["read"]["basis"] = serde_json::json!("future_basis");
         assert!(serde_json::from_value::<AuthorizationAuditObservation>(unknown).is_err());
@@ -561,7 +561,7 @@ mod tests {
         let encoded = serde_json::to_value(&prepared).unwrap();
         let decoded: AuthorizationAuditObservation =
             serde_json::from_value(encoded.clone()).unwrap();
-        assert!(decoded == prepared);
+        assert_eq!(decoded, prepared);
         let mut old = encoded;
         old["observation"]["policy"]
             .as_object_mut()

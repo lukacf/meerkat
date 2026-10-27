@@ -537,7 +537,7 @@ async fn eight_adopted_identities_converge_together_while_status_commits_hold_th
 async fn identities_whose_retirement_outruns_its_budget_converge_once_the_load_ends() {
     const IDENTITIES: usize = 8;
     const HOLD_FOR: Duration = Duration::from_secs(15);
-    const BOUND: Duration = Duration::from_secs(60);
+    const BOUND: Duration = Duration::from_mins(1);
     let mob = sqlite_mob("retirement-outruns-budget").await;
     let members: Vec<AgentIdentity> = (1..=IDENTITIES)
         .map(|index| AgentIdentity::from(format!("worker-{index}")))

@@ -941,7 +941,7 @@ impl SessionStore for MemoryStore {
         });
 
         // Sort by updated_at descending
-        metas.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        metas.sort_by_key(|meta| std::cmp::Reverse(meta.updated_at));
 
         // Apply pagination
         let offset = filter.offset.unwrap_or(0);

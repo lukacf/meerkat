@@ -1476,7 +1476,7 @@ mod scenario_22_runtime_host_comms {
                     keep_alive: Some(
                         meerkat_core::lifecycle::run_primitive::KeepAliveDirective::Enable(
                             meerkat_core::lifecycle::run_primitive::KeepAlivePolicy {
-                                ttl: std::time::Duration::from_secs(60),
+                                ttl: std::time::Duration::from_mins(1),
                                 policy:
                                     meerkat_core::lifecycle::run_primitive::KeepAliveMode::PolicyDriven,
                             },
@@ -1529,7 +1529,7 @@ mod scenario_22_runtime_host_comms {
 
         // --- Wait for runtime-backed comms admission ---
         let comms_inject_time = std::time::Instant::now();
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(60);
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_mins(1);
         loop {
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
             let t = turn_count.load(Ordering::Relaxed);

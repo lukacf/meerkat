@@ -17,7 +17,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::AtomicUsize;
 
 /// Bound on one step of the row: it only turns a hang into a failure.
-const DEADLINE: Duration = Duration::from_secs(60);
+const DEADLINE: Duration = Duration::from_mins(1);
 /// The realm both incarnations open.
 const REALM: &str = "resumed-run-after-kill";
 /// The model id the session runs.

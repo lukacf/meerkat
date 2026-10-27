@@ -1065,7 +1065,7 @@ impl Fixture {
             .pin_controller_client_for_actor(&actor)
             .await
             .expect("actual immutable selected controller client");
-        assert!(pin.selection() == &selection());
+        assert_eq!(pin.selection(), &selection());
         // Publication only tries the machine's controller custody (the session
         // map, each session's mutation gate and driver lock) and answers the
         // typed Busy refusal instead of waiting. The spawn returns before the

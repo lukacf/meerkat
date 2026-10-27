@@ -2247,7 +2247,7 @@ mod tests {
         .expect("valid deadline chain");
 
         assert_eq!(chain.contributors().len(), 4);
-        assert_eq!(chain.effective_timeout(), Some(Duration::from_secs(120)));
+        assert_eq!(chain.effective_timeout(), Some(Duration::from_mins(2)));
         assert_eq!(
             chain.winner().map(ToolDeadlineContributor::owner),
             Some(ToolDeadlineOwner::MetaPublicCallback)
@@ -2306,11 +2306,11 @@ mod tests {
         let chain = ToolDeadlineChain::new(vec![
             ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::CoreToolDispatch,
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             ),
             ToolDeadlineContributor::finite(
                 ToolDeadlineOwner::GatewayWire,
-                Duration::from_secs(900),
+                Duration::from_mins(15),
             ),
         ])
         .expect("chain");
@@ -2319,7 +2319,7 @@ mod tests {
             .expect("default plan");
         assert_eq!(
             default_plan.effective_timeout(),
-            Some(Duration::from_secs(600))
+            Some(Duration::from_mins(10))
         );
         let owned_plan = ToolExecutionContract::default()
             .with_tool_owned_deadline()
@@ -2327,7 +2327,7 @@ mod tests {
             .expect("tool-owned plan");
         assert_eq!(
             owned_plan.effective_timeout(),
-            Some(Duration::from_secs(900)),
+            Some(Duration::from_mins(15)),
             "only the core default is lifted; other owners still bound the call"
         );
         assert_eq!(
@@ -2343,7 +2343,7 @@ mod tests {
         // core default, so a tool that owns its lifetime bound still obeys it.
         let chain = ToolDeadlineChain::new(vec![ToolDeadlineContributor::per_tool_override(
             ToolDeadlineOwner::CoreToolDispatch,
-            Duration::from_secs(300),
+            Duration::from_mins(5),
         )])
         .expect("chain");
         let owned_plan = ToolExecutionContract::default()
@@ -2352,7 +2352,7 @@ mod tests {
             .expect("tool-owned plan");
         assert_eq!(
             owned_plan.effective_timeout(),
-            Some(Duration::from_secs(300)),
+            Some(Duration::from_mins(5)),
             "an explicit per-tool override bounds a tool-owned call"
         );
         assert!(
@@ -2365,7 +2365,7 @@ mod tests {
         // Only the default is lifted: with no override the call is unbounded.
         let default_chain = ToolDeadlineChain::new(vec![ToolDeadlineContributor::finite(
             ToolDeadlineOwner::CoreToolDispatch,
-            Duration::from_secs(600),
+            Duration::from_mins(10),
         )])
         .expect("chain");
         let owned_default = ToolExecutionContract::default()
@@ -2378,7 +2378,7 @@ mod tests {
         let ordinary = ToolExecutionContract::default()
             .resolve_default(chain)
             .expect("default plan");
-        assert_eq!(ordinary.effective_timeout(), Some(Duration::from_secs(300)));
+        assert_eq!(ordinary.effective_timeout(), Some(Duration::from_mins(5)));
     }
 
     #[test]
@@ -2397,7 +2397,7 @@ mod tests {
     #[test]
     fn execution_contract_rejects_incoherent_mode_policies() {
         let streaming =
-            StreamingToolExecutionPolicy::new(Duration::from_secs(5), Duration::from_secs(60))
+            StreamingToolExecutionPolicy::new(Duration::from_secs(5), Duration::from_mins(1))
                 .expect("valid streaming policy");
         let detached = DetachedToolExecutionPolicy::new(
             RunnerIdentity::new("example.security_scan", "v1").expect("valid runner"),
@@ -2502,7 +2502,7 @@ mod tests {
             ToolDeadlineChain::new(vec![finite(ToolDeadlineOwner::CoreToolDispatch, 600)])
                 .expect("valid upstream deadline");
         let streaming =
-            StreamingToolExecutionPolicy::new(Duration::from_secs(5), Duration::from_secs(60))
+            StreamingToolExecutionPolicy::new(Duration::from_secs(5), Duration::from_mins(1))
                 .expect("valid streaming policy");
         let streaming_contract = ToolExecutionContract::new(
             BTreeSet::from([ToolExecutionMode::Streaming]),

@@ -103,7 +103,7 @@ pub async fn __test_mint_tool_delegate(
     let resolution = crate::ToolExecutionResolutionContext::new(
         crate::ToolDeadlineChain::new(vec![crate::ToolDeadlineContributor::finite(
             crate::ToolDeadlineOwner::CoreToolDispatch,
-            std::time::Duration::from_secs(60),
+            std::time::Duration::from_mins(1),
         )])
         .map_err(|error| ToolError::execution_failed(error.to_string()))?,
     );

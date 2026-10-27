@@ -40,7 +40,7 @@ const MODEL: &str = "realm-mcp-model";
 const SERVER: &str = "guarded";
 const TOOL: &str = "echo";
 const REDIRECT_URI: &str = "http://127.0.0.1:1/mcp/oauth/callback";
-const CALL_DEADLINE: Duration = Duration::from_secs(180);
+const CALL_DEADLINE: Duration = Duration::from_mins(3);
 
 /// Cargo and nextest advertise the crate's own binary to its integration
 /// tests through the runtime environment.

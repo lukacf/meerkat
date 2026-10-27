@@ -197,7 +197,7 @@ const ROLLBACK_AUTONOMOUS_STOP_DEADLINE: Duration = Duration::from_secs(10);
 ///   which then settles the retirement as `Stuck` (owned, re-drivable).
 ///
 /// It matches the patience the handle-level lifecycle retry used to grant.
-const MEMBER_LIFECYCLE_HANG_GUARD: Duration = Duration::from_secs(600);
+const MEMBER_LIFECYCLE_HANG_GUARD: Duration = Duration::from_mins(10);
 /// A status projection is observational and must never hold the single mob
 /// actor behind a slow or wedged session-runtime read. Unknown progress is a
 /// truthful result; delaying lifecycle commands is not.
@@ -315,7 +315,7 @@ const IDENTITY_RECONCILE_LEASE_TTL_MS: u64 = crate::identity::IDENTITY_LEASE_MAX
 /// backoff deadline below. SQLite has no authoritative cross-process identity
 /// notification yet, so retain one deliberately slow PAGE rather than opening
 /// a connection and decoding every intent once per second forever.
-const IDENTITY_RECONCILE_SAFETY_PAGE_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const IDENTITY_RECONCILE_SAFETY_PAGE_INTERVAL: Duration = Duration::from_mins(5);
 /// Hard per-wake work bound for the cross-process safety net. Large fleets are
 /// visited over successive keyset pages; no timer wake materializes all
 /// identities.
@@ -333,7 +333,7 @@ const IDENTITY_RECONCILE_LEASE_RECHECK: Duration = Duration::from_secs(1);
 /// per identity, forever (2026-07-29 incident: a fleet of identities against
 /// a closed callback transport burned a core with zero durable progress).
 const IDENTITY_RECONCILE_BACKOFF_BASE: Duration = Duration::from_millis(250);
-const IDENTITY_RECONCILE_BACKOFF_CAP: Duration = Duration::from_secs(60);
+const IDENTITY_RECONCILE_BACKOFF_CAP: Duration = Duration::from_mins(1);
 /// A valid row can predate the actor's narrow production support. Refuse it
 /// visibly without claiming a lease or mutating any observed realization.
 fn identity_reconciliation_slice_intent_rejection(
@@ -5399,7 +5399,7 @@ fn foreign_runtime_observation<'a>(
 /// send (ADJ-3/ADJ-4 precedent: same 60s materialize budget, exactly one
 /// resend of the same payload on TIMEOUT only — a delivered rejection
 /// leaves the obligation for the event-driven retry lanes).
-const ROUTE_INSTALL_BRIDGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const ROUTE_INSTALL_BRIDGE_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(1);
 pub(super) const EXACT_EVENT_RECONCILE_PAGE_SIZE: usize = 64;
 const EXACT_EVENT_RECONCILE_READ_ATTEMPTS: usize = 2;
 
@@ -5530,7 +5530,7 @@ pub(super) async fn reconcile_exact_mob_event_after_cursor(
 /// Host revoke may synchronously quiesce and archive every materialized
 /// member on the target daemon. It is deliberately wider than an ordinary
 /// bridge command while remaining bounded for retry convergence.
-const HOST_REVOKE_BRIDGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+const HOST_REVOKE_BRIDGE_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(2);
 
 #[derive(Clone)]
 pub(super) enum WiringEndpoint {
@@ -10334,7 +10334,7 @@ impl MobActor {
         // seconds; in real deployments it propagates in milliseconds.
         let value = match self
             .supervisor_bridge
-            .send_bridge_command(peer, &command, std::time::Duration::from_secs(60))
+            .send_bridge_command(peer, &command, std::time::Duration::from_mins(1))
             .await
         {
             Ok(value) => value,
@@ -53738,7 +53738,7 @@ impl MobActor {
             let _install = self.supervisor_bridge.trust_recipient(&peer).await?;
             let value = self
                 .supervisor_bridge
-                .send_bridge_command(&peer, &command, std::time::Duration::from_secs(60))
+                .send_bridge_command(&peer, &command, std::time::Duration::from_mins(1))
                 .await?;
             if let Some(rejection) =
                 Self::bridge_rejection_reply(command.protocol_version(), &value)
@@ -53957,7 +53957,7 @@ impl MobActor {
         };
         let value = match self
             .supervisor_bridge
-            .send_bridge_command_classified(&peer, &command, std::time::Duration::from_secs(60))
+            .send_bridge_command_classified(&peer, &command, std::time::Duration::from_mins(1))
             .await
         {
             Ok(value) => value,

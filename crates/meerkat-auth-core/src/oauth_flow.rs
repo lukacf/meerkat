@@ -1776,7 +1776,7 @@ impl OAuthFlowRegistry {
 
 impl Default for OAuthFlowRegistry {
     fn default() -> Self {
-        Self::new(Duration::from_secs(10 * 60))
+        Self::new(Duration::from_mins(10))
     }
 }
 
@@ -2192,7 +2192,7 @@ mod tests {
 
     #[test]
     fn oauth_state_pkce_round_trip() {
-        let registry = OAuthFlowRegistry::new(Duration::from_secs(60));
+        let registry = OAuthFlowRegistry::new(Duration::from_mins(1));
         let state = registry
             .start(
                 target(),
@@ -2228,7 +2228,7 @@ mod tests {
 
     #[test]
     fn oauth_state_rejects_mismatch() {
-        let registry = OAuthFlowRegistry::new(Duration::from_secs(60));
+        let registry = OAuthFlowRegistry::new(Duration::from_mins(1));
         let state = registry
             .start(
                 target(),
@@ -2250,7 +2250,7 @@ mod tests {
 
     #[test]
     fn oauth_state_provider_mismatch_does_not_consume_state() {
-        let registry = OAuthFlowRegistry::new(Duration::from_secs(60));
+        let registry = OAuthFlowRegistry::new(Duration::from_mins(1));
         let state = registry
             .start(
                 target(),
@@ -2282,7 +2282,7 @@ mod tests {
 
     #[test]
     fn oauth_state_rejects_redirect_uri_mismatch() {
-        let registry = OAuthFlowRegistry::new(Duration::from_secs(60));
+        let registry = OAuthFlowRegistry::new(Duration::from_mins(1));
         let state = registry
             .start(
                 target(),
@@ -2304,7 +2304,7 @@ mod tests {
 
     #[test]
     fn oauth_state_redirect_uri_mismatch_does_not_consume_state() {
-        let registry = OAuthFlowRegistry::new(Duration::from_secs(60));
+        let registry = OAuthFlowRegistry::new(Duration::from_mins(1));
         let state = registry
             .start(
                 target(),
@@ -2336,7 +2336,7 @@ mod tests {
 
     #[test]
     fn oauth_state_target_mismatch_does_not_consume_state() {
-        let registry = OAuthFlowRegistry::new(Duration::from_secs(60));
+        let registry = OAuthFlowRegistry::new(Duration::from_mins(1));
         let state = registry
             .start(
                 target(),
@@ -2368,7 +2368,7 @@ mod tests {
 
     #[test]
     fn oauth_state_verify_does_not_consume_state() {
-        let registry = OAuthFlowRegistry::new(Duration::from_secs(60));
+        let registry = OAuthFlowRegistry::new(Duration::from_mins(1));
         let state = registry
             .start(
                 target(),
@@ -2400,7 +2400,7 @@ mod tests {
 
     #[test]
     fn oauth_state_random_tokens_are_urlsafe_and_unique() {
-        let registry = OAuthFlowRegistry::new(Duration::from_secs(60));
+        let registry = OAuthFlowRegistry::new(Duration::from_mins(1));
         let first = registry
             .start(
                 target(),
@@ -2428,7 +2428,7 @@ mod tests {
 
     #[test]
     fn oauth_state_expired_records_are_pruned() {
-        let registry = OAuthFlowRegistry::new(Duration::from_secs(60));
+        let registry = OAuthFlowRegistry::new(Duration::from_mins(1));
         registry.flows.lock().insert(
             "st-old".to_string(),
             OAuthFlowRecord {
@@ -2455,8 +2455,8 @@ mod tests {
 
     #[test]
     fn oauth_state_cannot_cross_login_lifecycle_authorities() {
-        let admitting_authority = OAuthFlowRegistry::new(Duration::from_secs(60));
-        let unrelated_authority = OAuthFlowRegistry::new(Duration::from_secs(60));
+        let admitting_authority = OAuthFlowRegistry::new(Duration::from_mins(1));
+        let unrelated_authority = OAuthFlowRegistry::new(Duration::from_mins(1));
         let state = admitting_authority
             .start(
                 target(),
@@ -2489,13 +2489,13 @@ mod tests {
 
     #[test]
     fn oauth_device_flow_is_retained_until_terminal_consume() {
-        let registry = OAuthFlowRegistry::new(Duration::from_secs(60));
+        let registry = OAuthFlowRegistry::new(Duration::from_mins(1));
         registry
             .admit_device_code(
                 target(),
                 OAuthProviderIdentity::GoogleCodeAssist,
                 "device-code",
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )
             .expect("device code admitted");
 
@@ -2529,13 +2529,13 @@ mod tests {
 
     #[test]
     fn oauth_device_poll_verify_keeps_terminal_consume_available() {
-        let registry = OAuthFlowRegistry::new(Duration::from_secs(60));
+        let registry = OAuthFlowRegistry::new(Duration::from_mins(1));
         registry
             .admit_device_code(
                 target(),
                 OAuthProviderIdentity::GoogleCodeAssist,
                 "device-code",
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )
             .expect("device code admitted");
         let poll = registry
@@ -2565,13 +2565,13 @@ mod tests {
 
     #[test]
     fn oauth_device_admission_does_not_replace_active_poll_lease() {
-        let registry = OAuthFlowRegistry::new(Duration::from_secs(60));
+        let registry = OAuthFlowRegistry::new(Duration::from_mins(1));
         registry
             .admit_device_code(
                 target(),
                 OAuthProviderIdentity::GoogleCodeAssist,
                 "device-code",
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )
             .expect("device code admitted");
         let poll = registry
@@ -2586,7 +2586,7 @@ mod tests {
             target(),
             OAuthProviderIdentity::GoogleCodeAssist,
             "device-code",
-            Duration::from_secs(600),
+            Duration::from_mins(10),
         );
 
         assert_eq!(duplicate, Err(OAuthFlowError::DeviceCodeAlreadyAdmitted));
@@ -2598,13 +2598,13 @@ mod tests {
 
     #[test]
     fn oauth_device_flow_rejects_provider_mismatch() {
-        let registry = OAuthFlowRegistry::new(Duration::from_secs(60));
+        let registry = OAuthFlowRegistry::new(Duration::from_mins(1));
         registry
             .admit_device_code(
                 target(),
                 OAuthProviderIdentity::GoogleCodeAssist,
                 "device-code",
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )
             .expect("device code admitted");
 
@@ -2628,13 +2628,13 @@ mod tests {
 
     #[test]
     fn oauth_device_flow_rejects_target_mismatch_without_consuming() {
-        let registry = OAuthFlowRegistry::new(Duration::from_secs(60));
+        let registry = OAuthFlowRegistry::new(Duration::from_mins(1));
         registry
             .admit_device_code(
                 target(),
                 OAuthProviderIdentity::GoogleCodeAssist,
                 "device-code",
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )
             .expect("device code admitted");
 
@@ -2658,7 +2658,7 @@ mod tests {
 
     #[test]
     fn oauth_device_flow_expired_records_are_pruned() {
-        let registry = OAuthFlowRegistry::new(Duration::from_secs(60));
+        let registry = OAuthFlowRegistry::new(Duration::from_mins(1));
         registry.device_flows.lock().insert(
             "device-code".to_string(),
             OAuthDeviceFlowState {
@@ -2689,7 +2689,7 @@ mod tests {
 
     #[test]
     fn oauth_device_flow_rejects_unrepresentable_expiry() {
-        let registry = OAuthFlowRegistry::new(Duration::from_secs(60));
+        let registry = OAuthFlowRegistry::new(Duration::from_mins(1));
         let err = registry
             .admit_device_code(
                 target(),
@@ -2712,13 +2712,13 @@ mod tests {
 
     #[test]
     fn oauth_device_terminal_consume_rejects_local_expiry_boundary() {
-        let registry = OAuthFlowRegistry::new(Duration::from_secs(60));
+        let registry = OAuthFlowRegistry::new(Duration::from_mins(1));
         registry
             .admit_device_code(
                 target(),
                 OAuthProviderIdentity::GoogleCodeAssist,
                 "device-code",
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )
             .expect("device code admitted");
         let poll = registry
@@ -2752,13 +2752,13 @@ mod tests {
 
     #[test]
     fn oauth_device_terminal_consume_rejects_intervening_prune_while_polling() {
-        let registry = OAuthFlowRegistry::new(Duration::from_secs(60));
+        let registry = OAuthFlowRegistry::new(Duration::from_mins(1));
         registry
             .admit_device_code(
                 target(),
                 OAuthProviderIdentity::GoogleCodeAssist,
                 "device-code",
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )
             .expect("device code admitted");
         let poll = registry
@@ -2800,13 +2800,13 @@ mod tests {
 
     #[test]
     fn oauth_device_poll_drop_releases_in_progress_lifecycle() {
-        let registry = OAuthFlowRegistry::new(Duration::from_secs(60));
+        let registry = OAuthFlowRegistry::new(Duration::from_mins(1));
         registry
             .admit_device_code(
                 target(),
                 OAuthProviderIdentity::GoogleCodeAssist,
                 "device-code",
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )
             .expect("device code admitted");
 
@@ -2839,13 +2839,13 @@ mod tests {
 
     #[test]
     fn oauth_device_poll_drop_prunes_expired_in_progress_record() {
-        let registry = OAuthFlowRegistry::new(Duration::from_secs(60));
+        let registry = OAuthFlowRegistry::new(Duration::from_mins(1));
         registry
             .admit_device_code(
                 target(),
                 OAuthProviderIdentity::GoogleCodeAssist,
                 "device-code",
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )
             .expect("device code admitted");
         let poll = registry
@@ -2912,13 +2912,13 @@ mod tests {
 
     #[test]
     fn oauth_device_lifecycle_consume_failure_keeps_flow_retryable() {
-        let registry = OAuthFlowRegistry::new(Duration::from_secs(60));
+        let registry = OAuthFlowRegistry::new(Duration::from_mins(1));
         registry
             .admit_device_code(
                 target(),
                 OAuthProviderIdentity::GoogleCodeAssist,
                 "device-code",
-                Duration::from_secs(600),
+                Duration::from_mins(10),
             )
             .expect("device code admitted");
         let poll = registry
@@ -3365,7 +3365,7 @@ mod start_admission_tests {
     /// the attempt: its failure admitted nothing.
     #[test]
     fn a_registry_start_that_fails_admitted_nothing() {
-        let registry = OAuthFlowRegistry::new(Duration::from_secs(60));
+        let registry = OAuthFlowRegistry::new(Duration::from_mins(1));
         let failure = registry
             .start_with_admission(
                 target(),

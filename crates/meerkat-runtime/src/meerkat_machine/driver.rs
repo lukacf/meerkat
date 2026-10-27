@@ -13421,19 +13421,15 @@ mod recovery_tests {
         driver
             .mark_interaction_terminal_outboxes_published(&input_id, &receipts)
             .await
-            .map_or_else(
-                |error| match error {
-                    // The seeded row never received a machine-owned terminal
-                    // seed, so post-publication archiving classifies it as
-                    // non-quiescent. The publication CAS itself has already
-                    // committed, which is the delivery step under test.
-                    RuntimeDriverError::Internal(ref reason)
-                        if reason.contains("terminal-obligation inputs were durably quiescent") => {
-                    }
-                    other => panic!("repaired batch must publish: {other}"),
-                },
-                |()| (),
-            );
+            .unwrap_or_else(|error| match error {
+                // The seeded row never received a machine-owned terminal
+                // seed, so post-publication archiving classifies it as
+                // non-quiescent. The publication CAS itself has already
+                // committed, which is the delivery step under test.
+                RuntimeDriverError::Internal(ref reason)
+                    if reason.contains("terminal-obligation inputs were durably quiescent") => {}
+                other => panic!("repaired batch must publish: {other}"),
+            });
         let durable_published = store
             .load_input_states_strict(&runtime_id)
             .await

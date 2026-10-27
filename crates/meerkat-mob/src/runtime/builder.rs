@@ -1182,7 +1182,7 @@ impl ControllingAcceptorConfig {
             }
             bounds.pairing_rate = meerkat_comms::PairingRateLimit {
                 max_attempts: pairing_rate,
-                window: std::time::Duration::from_secs(60),
+                window: std::time::Duration::from_mins(1),
             };
         }
         Ok(Some(Self {

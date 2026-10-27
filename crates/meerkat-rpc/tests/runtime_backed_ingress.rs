@@ -254,7 +254,7 @@ async fn runtime_skill_refs_reach_canonical_history_and_provider_bytes() {
         })))
     }
 
-    tokio::time::timeout(Duration::from_secs(60), async {
+    tokio::time::timeout(Duration::from_mins(1), async {
         let directory = tempfile::Builder::new()
             .prefix(".runtime-skills-")
             .tempdir_in(std::env::var_os("CARGO_MANIFEST_DIR").unwrap())

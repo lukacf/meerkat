@@ -192,16 +192,19 @@ mod tests {
         let later = StockSessionDestination::for_session(&operator("op"), &session, 9).unwrap();
         assert_eq!(first.target().context_generation, 1);
         assert_eq!(later.target().context_generation, 9);
-        assert!(first.target().logical_owner == later.target().logical_owner);
-        assert!(first.target().logical_runtime == later.target().logical_runtime);
-        assert!(first.target().context == later.target().context);
-        assert!(first.target().audience == later.target().audience);
+        assert_eq!(first.target().logical_owner, later.target().logical_owner);
+        assert_eq!(
+            first.target().logical_runtime,
+            later.target().logical_runtime
+        );
+        assert_eq!(first.target().context, later.target().context);
+        assert_eq!(first.target().audience, later.target().audience);
         assert_eq!(
             first.target().logical_runtime.as_str(),
             LogicalRuntimeId::for_session(&session).to_string()
         );
         let mcp = later.mcp_destination();
-        assert!(mcp.authority == operator("op"));
+        assert_eq!(mcp.authority, operator("op"));
         assert_eq!(&*mcp.namespace, "session");
         assert_eq!(&*mcp.id, session.to_string());
     }

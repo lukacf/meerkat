@@ -134,7 +134,7 @@ pub struct LlmRetrySchedule {
 /// while the config inherits. Disable via `stream_inactivity_timeout =
 /// "disabled"` in the `[retry]` config section or
 /// [`RetryPolicy::with_stream_inactivity_timeout`].
-pub const DEFAULT_STREAM_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(300);
+pub const DEFAULT_STREAM_INACTIVITY_TIMEOUT: Duration = Duration::from_mins(5);
 
 /// The shortest stream-inactivity window a model may declare for itself
 /// (`stream_inactivity_timeout_secs` on a self-hosted model; config
@@ -154,7 +154,7 @@ pub const DEFAULT_STREAM_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(300)
 /// the check for the windows it serves. An explicit `[retry]
 /// stream_inactivity_timeout` is not floored, only a zero one is refused, so
 /// a shorter explicit window carries the same race.
-pub const MIN_MODEL_STREAM_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(60);
+pub const MIN_MODEL_STREAM_INACTIVITY_TIMEOUT: Duration = Duration::from_mins(1);
 
 fn default_stream_inactivity_timeout() -> Option<Duration> {
     Some(DEFAULT_STREAM_INACTIVITY_TIMEOUT)
@@ -455,7 +455,7 @@ mod tests {
         let error = AgentError::Llm {
             provider: "test",
             reason: LlmFailureReason::RateLimited {
-                retry_after: Some(Duration::from_secs(60)),
+                retry_after: Some(Duration::from_mins(1)),
             },
             message: "rate limited".to_string(),
         };
@@ -562,11 +562,11 @@ mod tests {
 
     #[test]
     fn test_retry_policy_serialization_with_call_timeout() {
-        let policy = RetryPolicy::default().with_call_timeout(Some(Duration::from_secs(60)));
+        let policy = RetryPolicy::default().with_call_timeout(Some(Duration::from_mins(1)));
         let json = serde_json::to_string(&policy).unwrap();
         let parsed: RetryPolicy = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(parsed.call_timeout, Some(Duration::from_secs(60)));
+        assert_eq!(parsed.call_timeout, Some(Duration::from_mins(1)));
     }
 
     #[test]

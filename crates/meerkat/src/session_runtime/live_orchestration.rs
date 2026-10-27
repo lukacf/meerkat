@@ -80,7 +80,7 @@ pub const LIVE_PLAYBACK_TERMINAL_SETTLEMENT_BOUND: std::time::Duration =
 /// the closed channel. This is a failure bound, not a pacing timer: retries
 /// are driven by `PersistentSessionService::live_authority_advanced`.
 pub const LIVE_CLOSE_DEFERRED_SETTLEMENT_BOUND: std::time::Duration =
-    std::time::Duration::from_secs(600);
+    std::time::Duration::from_mins(10);
 
 #[cfg(feature = "openai-live")]
 use crate::session_runtime::live_summary;

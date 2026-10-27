@@ -1782,7 +1782,7 @@ const BRIDGE_REPLY_WAITER_CAPACITY: usize = 256;
 /// next registry write once this horizon has passed.
 #[cfg(not(target_arch = "wasm32"))]
 const BRIDGE_REPLY_TOMBSTONE_TTL: meerkat_core::time_compat::Duration =
-    meerkat_core::time_compat::Duration::from_secs(300);
+    meerkat_core::time_compat::Duration::from_mins(5);
 
 /// One-fact-one-owner disposition for an outstanding bridge-reply envelope
 /// id: the comms drain always finds a typed disposition — deliver
@@ -10857,7 +10857,7 @@ mod tests {
             .lock()
             .get_mut(&interaction_id.0)
             .unwrap()
-            .created_at = Instant::now().checked_sub(Duration::from_secs(60)).unwrap();
+            .created_at = Instant::now().checked_sub(Duration::from_mins(1)).unwrap();
 
         runtime.reap_expired_reservations();
         assert_eq!(
@@ -11029,7 +11029,7 @@ mod tests {
             .lock()
             .get_mut(&interaction_id.0)
             .unwrap()
-            .created_at = Instant::now().checked_sub(Duration::from_secs(60)).unwrap();
+            .created_at = Instant::now().checked_sub(Duration::from_mins(1)).unwrap();
 
         runtime.reap_expired_reservations();
 
@@ -11180,7 +11180,7 @@ mod tests {
                 InteractionStreamLifecycleAuthority::LocalTransportOnly,
             );
             entry.created_at = Instant::now()
-                .checked_sub(meerkat_core::time_compat::Duration::from_secs(60))
+                .checked_sub(meerkat_core::time_compat::Duration::from_mins(1))
                 .unwrap();
             runtime.interaction_stream_registry.lock().insert(id, entry);
         }

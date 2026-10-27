@@ -3091,7 +3091,7 @@ async fn wait_for_remote_mob_smoke_drain(
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "lane:e2e-system"]
 async fn e2e_mob_host_partition_retains_route_install_obligations() {
-    const CONVERGE_WAIT: Duration = Duration::from_secs(60);
+    const CONVERGE_WAIT: Duration = Duration::from_mins(1);
     async fn wait_for<F, Fut>(what: &str, mut predicate: F)
     where
         F: FnMut() -> Fut,

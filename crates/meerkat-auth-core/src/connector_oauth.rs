@@ -15,7 +15,7 @@ use crate::auth_store::PersistedTokens;
 use crate::oauth_flow::OAuthProviderIdentity;
 
 /// The existing MCP login window, also used by connector browser-flow owners.
-pub const CONNECTOR_BROWSER_LOGIN_WINDOW: Duration = Duration::from_secs(300);
+pub const CONNECTOR_BROWSER_LOGIN_WINDOW: Duration = Duration::from_mins(5);
 
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

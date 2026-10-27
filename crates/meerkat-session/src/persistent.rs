@@ -51866,7 +51866,7 @@ mod tests {
             .await
             .expect("a free boundary is taken")
             .expect("the exact current actor");
-        assert!(lease.witness() == &actor);
+        assert_eq!(lease.witness(), &actor);
         drop(lease);
         let pin = tokio::time::timeout(
             std::time::Duration::from_secs(2),

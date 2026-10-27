@@ -758,7 +758,7 @@ mod tests {
                         approvals.clone(),
                         std::time::Duration::from_secs(30),
                     )
-                    .with_human_consent(route.clone(), std::time::Duration::from_secs(4 * 60 * 60)),
+                    .with_human_consent(route.clone(), std::time::Duration::from_hours(4)),
                 );
                 let context = ToolDispatchContext::default()
                     .with_work_authorization(Some(WorkAuthorizationContext::new(
@@ -795,7 +795,7 @@ mod tests {
                         meerkat_core::ToolDeadlineChain::new(vec![
                             meerkat_core::ToolDeadlineContributor::finite(
                                 meerkat_core::ToolDeadlineOwner::DirectCaller,
-                                std::time::Duration::from_secs(600),
+                                std::time::Duration::from_mins(10),
                             ),
                         ])
                         .expect("finite caller deadline"),

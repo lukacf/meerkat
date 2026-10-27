@@ -542,13 +542,13 @@ mod tests {
             runtime_epoch_id: runtime_epoch_id.clone(),
             input_id: input_id.clone(),
         });
-        assert!(
-            source
-                == ContextControlAuditSource::RuntimeInput {
-                    owner_session_id: owner_session_id.clone(),
-                    runtime_epoch_id: runtime_epoch_id.clone(),
-                    input_id: input_id.clone(),
-                }
+        assert_eq!(
+            source,
+            ContextControlAuditSource::RuntimeInput {
+                owner_session_id: owner_session_id.clone(),
+                runtime_epoch_id: runtime_epoch_id.clone(),
+                input_id: input_id.clone(),
+            }
         );
         let wire = serde_json::to_value(&source).unwrap();
         assert_eq!(
@@ -560,8 +560,9 @@ mod tests {
                 "input_id": serde_json::to_value(&input_id).unwrap(),
             })
         );
-        assert!(
-            serde_json::from_value::<ContextControlAuditSource>(wire.clone()).unwrap() == source
+        assert_eq!(
+            serde_json::from_value::<ContextControlAuditSource>(wire.clone()).unwrap(),
+            source
         );
         let mut unknown = wire;
         unknown["content"] = serde_json::json!("never stored");
@@ -595,7 +596,10 @@ mod tests {
                 "range": serde_json::to_value(range).unwrap(),
             })
         );
-        assert!(serde_json::from_value::<ContextControlAuditSource>(wire).unwrap() == transcript);
+        assert_eq!(
+            serde_json::from_value::<ContextControlAuditSource>(wire).unwrap(),
+            transcript
+        );
         let authority = PrincipalRef::in_domain(
             crate::PrincipalKind::ServiceAccount,
             "source-owner",
@@ -617,6 +621,9 @@ mod tests {
                 "id": "doc-7",
             })
         );
-        assert!(serde_json::from_value::<ContextControlAuditSource>(wire).unwrap() == external);
+        assert_eq!(
+            serde_json::from_value::<ContextControlAuditSource>(wire).unwrap(),
+            external
+        );
     }
 }

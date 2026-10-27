@@ -7,7 +7,7 @@ use std::time::Duration;
 
 fn oauth(handle: &Arc<RuntimeAuthLeaseHandle>) -> Arc<dyn OAuthFlowAuthority> {
     Arc::new(RuntimeOAuthFlowHandle::new_with_auth_lease(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         handle.clone(),
     ))
 }

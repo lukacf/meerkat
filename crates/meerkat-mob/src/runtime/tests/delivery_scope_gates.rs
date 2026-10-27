@@ -23,7 +23,7 @@ fn deadline() -> std::time::Instant {
 /// a hang guard, not a latency bound. A starved run can archive a member many
 /// times slower than the retirement budget, so two minutes; a destroy that
 /// never completes still fails the row.
-const DESTROY_GUARD: Duration = Duration::from_secs(120);
+const DESTROY_GUARD: Duration = Duration::from_mins(2);
 
 /// Destroy `handle`'s mob to its terminal report. A member's archive slower
 /// than the retirement budget its disposal waits for (2 s in tests, which a

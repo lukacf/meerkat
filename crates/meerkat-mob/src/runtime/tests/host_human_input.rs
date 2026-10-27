@@ -4181,7 +4181,7 @@ async fn requeue_shutdown_whose_admission_misses_the_deadline_still_keeps_the_qu
 /// waiting for any turn.
 const STOP_RETURNS_WITHIN: Duration = Duration::from_secs(10);
 /// A drain bound the rows whose run ends never reach.
-const UNREACHED_DRAIN_BOUND: Duration = Duration::from_secs(600);
+const UNREACHED_DRAIN_BOUND: Duration = Duration::from_mins(10);
 /// The drain bound of the rows whose run outlives the drain.
 const DRAIN_BOUND: Duration = Duration::from_millis(500);
 

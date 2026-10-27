@@ -382,7 +382,7 @@ mod tests {
         let resolution = crate::ToolExecutionResolutionContext::new(
             crate::ToolDeadlineChain::new(vec![crate::ToolDeadlineContributor::finite(
                 crate::ToolDeadlineOwner::CoreToolDispatch,
-                std::time::Duration::from_secs(600),
+                std::time::Duration::from_mins(10),
             )])
             .expect("deadline chain"),
         );
@@ -524,7 +524,7 @@ mod tests {
         let resolution = crate::ToolExecutionResolutionContext::new(
             crate::ToolDeadlineChain::new(vec![crate::ToolDeadlineContributor::finite(
                 crate::ToolDeadlineOwner::CoreToolDispatch,
-                std::time::Duration::from_secs(600),
+                std::time::Duration::from_mins(10),
             )])
             .expect("deadline chain"),
         );
@@ -578,7 +578,7 @@ mod tests {
         let resolution = crate::ToolExecutionResolutionContext::new(
             crate::ToolDeadlineChain::new(vec![crate::ToolDeadlineContributor::finite(
                 crate::ToolDeadlineOwner::CoreToolDispatch,
-                std::time::Duration::from_secs(600),
+                std::time::Duration::from_mins(10),
             )])
             .expect("deadline chain"),
         );
@@ -677,7 +677,7 @@ mod tests {
         let resolution = crate::ToolExecutionResolutionContext::new(
             crate::ToolDeadlineChain::new(vec![crate::ToolDeadlineContributor::finite(
                 crate::ToolDeadlineOwner::CoreToolDispatch,
-                std::time::Duration::from_secs(600),
+                std::time::Duration::from_mins(10),
             )])
             .expect("deadline chain"),
         );

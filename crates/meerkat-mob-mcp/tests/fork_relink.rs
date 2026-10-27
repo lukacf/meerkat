@@ -546,7 +546,7 @@ async fn drive_turn(handle: &meerkat_mob::MobHandle, member: &str, prompt: &str)
         )
         .await
         .unwrap_or_else(|error| panic!("start a turn for {member}: {error}"));
-    tokio::time::timeout(Duration::from_secs(60), work.wait_bounded(spec))
+    tokio::time::timeout(Duration::from_mins(1), work.wait_bounded(spec))
         .await
         .expect("the turn finished in time")
         .unwrap_or_else(|error| panic!("turn for {member} failed: {error:?}"));
@@ -627,7 +627,7 @@ async fn relink_rearms_max_run_from_the_original_start() {
     // reset at the re-link would add.
     let relink = async {
         tokio::time::timeout(
-            Duration::from_secs(120),
+            Duration::from_mins(2),
             meerkat_mob_mcp::fork_relink::relink_child(
                 fixture.state.session_service(),
                 &relink_delivery(&fixture),
@@ -1503,7 +1503,7 @@ async fn a_respawned_fork_child_carries_no_fork_job() {
             "fork_off_result",
             16 * 1024,
             meerkat_core::DurableForkSourceAdmission::Quiescent,
-            Some(Duration::from_secs(600)),
+            Some(Duration::from_mins(10)),
             Some(ForkJobBinding {
                 job_id: "job-before-respawn".to_string(),
                 owner_session_id: owner.clone(),

@@ -330,7 +330,7 @@ async fn missing_live_redrive_retires_the_predecessor_router_before_the_successo
     // The next turn redrives the missing live materialization on the same
     // registration.
     tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         handle
             .member(&identity)
             .await

@@ -53,10 +53,10 @@ use super::{
 
 /// How long one review attempt may take. It holds the dispatch and the tool
 /// batch, so it stays below the tool timeout.
-const REVIEW_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
+const REVIEW_DEADLINE: std::time::Duration = std::time::Duration::from_mins(2);
 
 /// How long one consent request stays decidable on the pipe.
-const CONSENT_VALIDITY: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+const CONSENT_VALIDITY: std::time::Duration = std::time::Duration::from_mins(15);
 
 /// Why the reviewed stock setup could not be composed; the realm is not
 /// served.

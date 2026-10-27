@@ -369,9 +369,7 @@ impl IngressClassificationContext {
                     MessageKind::Message { .. } | MessageKind::IncarnationFencedMessage { .. } => {
                         PeerIngressConvention::Message
                     }
-                    MessageKind::Request {
-                        intent, params: _, ..
-                    } => {
+                    MessageKind::Request { intent, .. } => {
                         if let Some(kind) = classification.lifecycle_kind {
                             let Some(peer) = lifecycle_peer.clone() else {
                                 tracing::warn!(
@@ -409,7 +407,7 @@ impl IngressClassificationContext {
                         in_reply_to: request_id?,
                         status: (*status).into(),
                     },
-                    MessageKind::Ack { in_reply_to: _, .. } => PeerIngressConvention::Ack {
+                    MessageKind::Ack { .. } => PeerIngressConvention::Ack {
                         in_reply_to: request_id?,
                     },
                 };

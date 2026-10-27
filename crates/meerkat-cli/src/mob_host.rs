@@ -1007,7 +1007,7 @@ pub(crate) async fn run_mob_host(args: MobHostArgs, scope: &RuntimeScope) -> any
     if let Some(per_minute) = composition.pairing_rate {
         bounds.pairing_rate = meerkat_comms::PairingRateLimit {
             max_attempts: per_minute,
-            window: Duration::from_secs(60),
+            window: Duration::from_mins(1),
         };
     }
     let pairing =

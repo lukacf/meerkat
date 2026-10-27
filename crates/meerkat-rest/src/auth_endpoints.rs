@@ -3837,7 +3837,7 @@ mod tests {
                 credential_identity(&managed_auth_binding()),
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
                 "device-code".to_string(),
-                std::time::Duration::from_secs(600),
+                std::time::Duration::from_mins(10),
             )
             .expect("device code admitted");
 
@@ -3885,7 +3885,7 @@ mod tests {
                 credential_identity(&managed_auth_binding()),
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
                 "device-code".to_string(),
-                std::time::Duration::from_secs(600),
+                std::time::Duration::from_mins(10),
             )
             .expect("device code admitted");
 
@@ -4070,14 +4070,14 @@ mod tests {
         let auth_binding = managed_auth_binding_in("rest-ready-device-consume");
         let key = TokenKey::from_auth_binding(&auth_binding);
         let registry = meerkat_providers::oauth_flow::OAuthFlowRegistry::new(
-            std::time::Duration::from_secs(600),
+            std::time::Duration::from_mins(10),
         );
         registry
             .admit_device_code(
                 credential_identity(&auth_binding),
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
                 "device-code".to_string(),
-                std::time::Duration::from_secs(600),
+                std::time::Duration::from_mins(10),
             )
             .expect("device code admitted");
         let poll_lease = registry
@@ -4181,7 +4181,7 @@ mod tests {
         let key = TokenKey::from_auth_binding(&auth_binding);
         let redirect_uri = "http://127.0.0.1/callback";
         let registry = Arc::new(meerkat_providers::oauth_flow::OAuthFlowRegistry::new(
-            std::time::Duration::from_secs(600),
+            std::time::Duration::from_mins(10),
         ));
         let state = registry
             .start(
@@ -4238,14 +4238,14 @@ mod tests {
         let auth_binding = managed_auth_binding_in("rest-raw-registry-device");
         let key = TokenKey::from_auth_binding(&auth_binding);
         let registry = meerkat_providers::oauth_flow::OAuthFlowRegistry::new(
-            std::time::Duration::from_secs(600),
+            std::time::Duration::from_mins(10),
         );
         registry
             .admit_device_code(
                 credential_identity(&auth_binding),
                 meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
                 "registry-only-device-code".to_string(),
-                std::time::Duration::from_secs(600),
+                std::time::Duration::from_mins(10),
             )
             .expect("raw registry admits device flow");
         let poll_lease = registry
@@ -4333,7 +4333,7 @@ mod tests {
         let raw_auth_lease = Arc::new(RuntimeAuthLeaseHandle::new());
         let auth_lease = generated_auth_lease_handle_for_test(Arc::clone(&raw_auth_lease));
         let authority = RuntimeOAuthFlowHandle::new_with_auth_lease(
-            std::time::Duration::from_secs(600),
+            std::time::Duration::from_mins(10),
             Arc::clone(&raw_auth_lease),
         );
         let auth_binding = managed_auth_binding_in("rest-stale-previous-rollback");
@@ -4407,7 +4407,7 @@ mod tests {
         let raw_auth_lease = Arc::new(RuntimeAuthLeaseHandle::new());
         let auth_lease = generated_auth_lease_handle_for_test(Arc::clone(&raw_auth_lease));
         let authority = RuntimeOAuthFlowHandle::new_with_auth_lease(
-            std::time::Duration::from_secs(600),
+            std::time::Duration::from_mins(10),
             Arc::clone(&raw_auth_lease),
         );
         let auth_binding = managed_auth_binding_in("rest-oauth-only-rollback");
@@ -4489,7 +4489,7 @@ mod tests {
         let raw_auth_lease = Arc::new(RuntimeAuthLeaseHandle::new());
         let auth_lease = generated_auth_lease_handle_for_test(Arc::clone(&raw_auth_lease));
         let authority = RuntimeOAuthFlowHandle::new_with_auth_lease(
-            std::time::Duration::from_secs(600),
+            std::time::Duration::from_mins(10),
             Arc::clone(&raw_auth_lease),
         );
         let auth_binding = managed_auth_binding_in("rest-real-device-consume");
@@ -4499,7 +4499,7 @@ mod tests {
             credential_identity(&auth_binding),
             meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
             "device-code".to_string(),
-            std::time::Duration::from_secs(600),
+            std::time::Duration::from_mins(10),
         )
         .expect("device flow admitted by runtime authority");
         let poll_lease = meerkat_providers::oauth_flow::OAuthFlowAuthority::begin_device_code_poll(
@@ -4539,7 +4539,7 @@ mod tests {
         let raw_auth_lease = Arc::new(RuntimeAuthLeaseHandle::new());
         let auth_lease = generated_auth_lease_handle_for_test(Arc::clone(&raw_auth_lease));
         let authority = Arc::new(RuntimeOAuthFlowHandle::new_with_auth_lease(
-            std::time::Duration::from_secs(600),
+            std::time::Duration::from_mins(10),
             Arc::clone(&raw_auth_lease),
         ));
         let auth_binding = managed_auth_binding_in("rest-real-browser-missing");
@@ -4605,7 +4605,7 @@ mod tests {
         let raw_auth_lease = Arc::new(RuntimeAuthLeaseHandle::new());
         let auth_lease = generated_auth_lease_handle_for_test(Arc::clone(&raw_auth_lease));
         let authority = Arc::new(RuntimeOAuthFlowHandle::new_with_auth_lease(
-            std::time::Duration::from_secs(600),
+            std::time::Duration::from_mins(10),
             Arc::clone(&raw_auth_lease),
         ));
         let auth_binding = managed_auth_binding_in("rest-terminal-consume");

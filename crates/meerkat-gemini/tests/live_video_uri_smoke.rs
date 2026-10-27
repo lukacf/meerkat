@@ -187,7 +187,7 @@ async fn wait_until_active(
     mut file: GeminiFile,
 ) -> Result<GeminiFile, Box<dyn Error>> {
     let http = reqwest::Client::new();
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_mins(2);
     while file.state.as_deref() != Some("ACTIVE") {
         if Instant::now() > deadline {
             return Err(format!("Gemini file did not become ACTIVE: {file:?}").into());

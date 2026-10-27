@@ -139,7 +139,7 @@ async fn live_daemon_capability_lifecycle_end_to_end() {
         &sender,
         &source_incarnation,
         "req-live-1",
-        Duration::from_secs(3600),
+        Duration::from_hours(1),
     ));
     let mut created = None;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);

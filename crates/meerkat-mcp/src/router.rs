@@ -7162,7 +7162,7 @@ pub(crate) mod tests {
     async fn removing_state_rejects_new_calls_and_drains_inflight() {
         let server_path = mcp_test_server::fixture_binary();
 
-        let mut router = generated_handle_owner_router_with_timeout(Duration::from_secs(60));
+        let mut router = generated_handle_owner_router_with_timeout(Duration::from_mins(1));
         router
             .add_server(test_server_config("test-server", &server_path))
             .await

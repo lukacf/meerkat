@@ -5749,7 +5749,7 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
         }
         eprintln!(
             "[scenario 71] turn 1 output text: {}",
-            &remember_capture.output_text
+            remember_capture.output_text
         );
 
         // ------ Turn 2: Codeword-only recall ------
@@ -5787,7 +5787,7 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
         }
         eprintln!(
             "[scenario 71] turn 2 output text: {}",
-            &turn2_capture.output_text
+            turn2_capture.output_text
         );
 
         // ------ Turns 3-4: Long answer + barge-in ------
@@ -5905,7 +5905,7 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
         }
         eprintln!(
             "[scenario 71] turn 5 output text: {}",
-            &turn5_capture.output_text
+            turn5_capture.output_text
         );
 
         // ------ Close channel ------

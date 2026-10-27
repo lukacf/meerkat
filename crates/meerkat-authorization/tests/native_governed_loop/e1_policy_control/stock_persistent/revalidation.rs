@@ -411,7 +411,7 @@ async fn exercise_revalidated_stock_persistent(server: &Server, cleanup: &Cleanu
             .pin_controller_client_for_actor(&actor_lease)
             .await
             .unwrap();
-        assert!(still_pinned.selection() == pin.selection());
+        assert_eq!(still_pinned.selection(), pin.selection());
         assert!(
             Arc::ptr_eq(still_pinned.client(), pin.client()),
             "same actual controller client"
@@ -589,7 +589,7 @@ async fn exercise_revalidated_stock_persistent(server: &Server, cleanup: &Cleanu
             .pin_controller_client_for_actor(&actor_lease)
             .await
             .unwrap();
-        assert!(still_pinned.selection() == pin.selection());
+        assert_eq!(still_pinned.selection(), pin.selection());
         assert!(Arc::ptr_eq(still_pinned.client(), pin.client()));
     }
 
@@ -628,8 +628,11 @@ async fn exercise_revalidated_stock_persistent(server: &Server, cleanup: &Cleanu
         assert_eq!(record.observation.run_id.as_ref(), Some(&run_id));
         assert_eq!(record.contributors.len(), 1);
         assert_eq!(record.contributors[0].input_id, input_id);
-        assert!(record.contributors[0].requester == principal("requester"));
-        assert!(record.contributors[0].logical_executor == principal("executor"));
+        assert_eq!(record.contributors[0].requester, principal("requester"));
+        assert_eq!(
+            record.contributors[0].logical_executor,
+            principal("executor")
+        );
         assert!(record.contributors[0].represented_subject.is_none());
         assert!(
             matches!(&record.observation.execution_scope, OperationExecutionScope::RuntimeInput {
@@ -731,7 +734,7 @@ async fn stock_persistent_revalidates_requester_before_admission_and_preserves_a
     let mut server = Server::start().await;
     let cleanup = CleanupSlot::new(None);
     let outcome = std::panic::AssertUnwindSafe(tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         exercise_revalidated_stock_persistent(&server, &cleanup),
     ))
     .catch_unwind()

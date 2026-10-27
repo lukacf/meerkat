@@ -7170,7 +7170,7 @@ mod tests {
                 router.runtime.approval_service(),
                 Duration::from_secs(30),
             )
-            .with_human_consent(route.clone(), Duration::from_secs(4 * 60 * 60)),
+            .with_human_consent(route.clone(), Duration::from_hours(4)),
         );
         let context = meerkat_core::ToolDispatchContext::default()
             .with_work_authorization(Some(meerkat_core::WorkAuthorizationContext::new(
@@ -7193,7 +7193,7 @@ mod tests {
                 meerkat_core::ToolDeadlineChain::new(vec![
                     meerkat_core::ToolDeadlineContributor::finite(
                         meerkat_core::ToolDeadlineOwner::DirectCaller,
-                        Duration::from_secs(600),
+                        Duration::from_mins(10),
                     ),
                 ])
                 .expect("finite caller deadline"),
@@ -10987,10 +10987,10 @@ mod tests {
             },
         );
 
-        assert!(
+        assert_eq!(
             sink.emit_session_stream_event(&StreamRef::mint(), 1, &session_id, &envelope)
-                .await
-                == StreamEmitStatus::Delivered
+                .await,
+            StreamEmitStatus::Delivered
         );
         assert!(
             sink.emit_session_stream_event(&StreamRef::mint(), 2, &session_id, &envelope)
@@ -15311,7 +15311,7 @@ mod tests {
         );
 
         // The first server stops; a new one opens the same stores.
-        tokio::time::timeout(Duration::from_secs(60), runtime.try_shutdown())
+        tokio::time::timeout(Duration::from_mins(1), runtime.try_shutdown())
             .await
             .expect("the first server shuts down in bounded time")
             .expect("the first server shuts down");
@@ -15630,7 +15630,7 @@ mod tests {
             .as_str()
             .unwrap()
             .to_string();
-        tokio::time::timeout(Duration::from_secs(60), runtime.try_shutdown())
+        tokio::time::timeout(Duration::from_mins(1), runtime.try_shutdown())
             .await
             .expect("the first server shuts down in bounded time")
             .expect("the first server shuts down");
@@ -20309,7 +20309,7 @@ provider_params = { provider_tag = { provider = "anthropic", cache_control = "di
         use super::*;
 
         #[cfg(feature = "mob")]
-        const STATUS_WAIT: Duration = Duration::from_secs(60);
+        const STATUS_WAIT: Duration = Duration::from_mins(1);
 
         /// A router over in-memory stores. With `realm`, construction arms
         /// the runtime's delivery owner, so committed continuations drain;

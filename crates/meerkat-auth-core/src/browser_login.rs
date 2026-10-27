@@ -552,7 +552,7 @@ mod tests {
     impl AuthMachineOwnedTestFlowAuthority {
         fn new() -> Self {
             Self {
-                inner: crate::oauth_flow::OAuthFlowRegistry::new(StdDuration::from_secs(60)),
+                inner: crate::oauth_flow::OAuthFlowRegistry::new(StdDuration::from_mins(1)),
             }
         }
     }

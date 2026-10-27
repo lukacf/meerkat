@@ -283,7 +283,7 @@ fn resolve(
             meerkat_core::ToolDeadlineChain::new(vec![
                 meerkat_core::ToolDeadlineContributor::finite(
                     meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
-                    Duration::from_secs(600),
+                    Duration::from_mins(10),
                 ),
             ])
             .unwrap(),
@@ -327,7 +327,7 @@ fn ordinary_binding(raw_operation: &str) -> PreparedAuthorizationBinding {
             meerkat_core::ToolDeadlineChain::new(vec![
                 meerkat_core::ToolDeadlineContributor::finite(
                     meerkat_core::ToolDeadlineOwner::CoreToolDispatch,
-                    Duration::from_secs(600),
+                    Duration::from_mins(10),
                 ),
             ])
             .unwrap(),

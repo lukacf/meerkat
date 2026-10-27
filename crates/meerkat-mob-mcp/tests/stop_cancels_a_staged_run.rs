@@ -149,7 +149,7 @@ async fn stop_cancels_a_run_staged_before_the_agent_claimed_its_turn() {
     .expect("dispatch watch open");
     release.send(()).expect("release the staged run");
 
-    let report = tokio::time::timeout(Duration::from_secs(60), stopping)
+    let report = tokio::time::timeout(Duration::from_mins(1), stopping)
         .await
         .expect("the stop completes")
         .expect("join")

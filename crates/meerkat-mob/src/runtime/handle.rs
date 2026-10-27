@@ -126,10 +126,10 @@ fn fork_session_error(
     }
 }
 
-const DEFAULT_KICKOFF_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
+const DEFAULT_KICKOFF_WAIT_TIMEOUT: Duration = Duration::from_mins(10);
 /// Pause between wait polls of a member that is not yet terminal.
 const MEMBER_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
-const DEFAULT_READY_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
+const DEFAULT_READY_WAIT_TIMEOUT: Duration = Duration::from_mins(1);
 pub(super) const HOST_STATUS_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const REACHABILITY_STALE_AFTER: Duration = Duration::from_secs(15);
 /// How many times the bounded terminal projection attempts each of its
@@ -9718,8 +9718,8 @@ impl MobHandle {
     ) -> BTreeSet<mob_dsl::AgentRuntimeId> {
         machine_state
             .member_session_bindings
-            .iter()
-            .filter_map(|(identity, _)| machine_state.identity_to_runtime.get(identity))
+            .keys()
+            .filter_map(|identity| machine_state.identity_to_runtime.get(identity))
             .filter(|runtime_id| machine_state.live_runtime_ids.contains(*runtime_id))
             .cloned()
             .collect()
@@ -21046,7 +21046,7 @@ mod tests {
 
     #[test]
     fn default_ready_wait_timeout_is_bounded_for_agent_tool_callers() {
-        assert_eq!(DEFAULT_READY_WAIT_TIMEOUT, Duration::from_secs(60));
+        assert_eq!(DEFAULT_READY_WAIT_TIMEOUT, Duration::from_mins(1));
     }
 
     #[test]

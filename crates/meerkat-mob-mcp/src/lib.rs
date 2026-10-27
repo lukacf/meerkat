@@ -8205,7 +8205,7 @@ impl CoreCommsRuntime for LocalCommsRuntime {
                 by_source.get(&source_kind).cloned()
             })
             .collect::<Vec<_>>();
-        peers.sort_by(|left, right| left.peer_id.as_str().cmp(&right.peer_id.as_str()));
+        peers.sort_by_key(|left| left.peer_id.as_str());
         Ok(peers)
     }
 
@@ -11669,7 +11669,7 @@ mod tests {
                     by_source.get(&source_kind).cloned()
                 })
                 .collect::<Vec<_>>();
-            peers.sort_by(|left, right| left.peer_id.as_str().cmp(&right.peer_id.as_str()));
+            peers.sort_by_key(|left| left.peer_id.as_str());
             Ok(peers)
         }
 
@@ -15519,7 +15519,7 @@ mod tests {
                     scope:
                         meerkat_mob::forked_participant::ForkedParticipantOperationScope::InvokeAndObserve,
                     reuse,
-                    ttl: Duration::from_secs(600),
+                    ttl: Duration::from_mins(10),
                 },
                 chrono::Utc::now(),
             )

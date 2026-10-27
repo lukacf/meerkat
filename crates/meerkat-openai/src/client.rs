@@ -5546,7 +5546,7 @@ mod tests {
                 .as_str()
                 .is_some_and(|value| value.contains("Never reply in text"))
         );
-        assert!(body.get("stream").and_then(Value::as_bool) == Some(false));
+        assert_eq!(body.get("stream").and_then(Value::as_bool), Some(false));
 
         handle.abort();
         Ok(())

@@ -53,7 +53,7 @@ const NEXT_PROMPT: &str = "what happened?";
 const ANSWER: &str = "noted";
 /// Bound on the gateway reaching its tool; a gateway that exits first fails
 /// the row at once.
-const CHILD_BOUND: Duration = Duration::from_secs(120);
+const CHILD_BOUND: Duration = Duration::from_mins(2);
 /// Present in a row's root when every incarnation opens a WholeBlob (JSONL)
 /// realm instead of a HeadCanonical (SQLite) one.
 const WHOLE_BLOB_MARKER: &str = "whole-blob";
@@ -285,7 +285,7 @@ async fn tool_started(root: &Path, gateway: &mut std::process::Child, phase: &st
 /// Block (no polling) until a child writes a line into `fifo`.
 async fn read_fifo(fifo: PathBuf) -> Option<String> {
     tokio::time::timeout(
-        Duration::from_secs(120),
+        Duration::from_mins(2),
         tokio::task::spawn_blocking(move || std::fs::read_to_string(fifo)),
     )
     .await

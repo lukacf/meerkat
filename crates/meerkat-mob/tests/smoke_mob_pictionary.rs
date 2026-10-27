@@ -97,7 +97,7 @@ async fn generate_image_once(
         .header("Content-Type", "application/json")
         .header(ACCEPT_ENCODING, "identity")
         .json(&body)
-        .timeout(Duration::from_secs(120))
+        .timeout(Duration::from_mins(2))
         .send()
         .await
         .map_err(|error| sanitize_gemini_key_error(api_key, error))?;
@@ -315,7 +315,7 @@ async fn spawn_and_wait(handle: &MobHandle) -> Result<(), Box<dyn std::error::Er
     // latency is not the same contract as "members are bound and ready to
     // orchestrate the round".
     handle
-        .wait_for_ready(Some(Duration::from_secs(60)))
+        .wait_for_ready(Some(Duration::from_mins(1)))
         .await
         .map_err(|e| format!("ready wait: {e}"))?;
     Ok(())
@@ -1191,7 +1191,7 @@ async fn standalone_pictionary_multimodal_correctness_stress() {
     let (handle, service, _tmp) = setup_mob().await.expect("mob setup failed");
     spawn_and_wait(&handle).await.expect("member spawn failed");
     assert!(
-        wait_for_comms_mesh_ready(&handle, service.as_ref(), Duration::from_secs(60)).await,
+        wait_for_comms_mesh_ready(&handle, service.as_ref(), Duration::from_mins(1)).await,
         "public comms mesh did not converge after wait_for_ready()",
     );
     assert!(
@@ -1277,7 +1277,7 @@ async fn standalone_pictionary_multimodal_correctness_stress() {
                 media_type: &mime,
                 data: &img_data,
             },
-            Duration::from_secs(180),
+            Duration::from_mins(3),
         )
         .await
         .unwrap_or_else(|e| panic!("artist image delivery failed: {e}"));
@@ -1404,7 +1404,7 @@ async fn standalone_pictionary_multimodal_correctness_stress() {
             service.as_ref(),
             label,
             secret_word,
-            Duration::from_secs(300),
+            Duration::from_mins(5),
         )
         .await;
 

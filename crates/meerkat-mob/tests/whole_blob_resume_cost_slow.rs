@@ -243,7 +243,7 @@ fn persistent_service(
 }
 
 async fn wait_all_active(handle: &MobHandle, expected: usize, what: &str) {
-    let deadline = Instant::now() + Duration::from_secs(300);
+    let deadline = Instant::now() + Duration::from_mins(5);
     loop {
         let members = handle.list_members().await;
         let active = members

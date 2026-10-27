@@ -1596,26 +1596,27 @@ async fn actual_attachment_case(cancel: bool, public: bool) {
         };
         // A provider assertion may poison its test-only lock. Preserve the
         // original failure and still retain these safe mechanical observations.
-        let choices = script
-            .as_ref()
-            .unwrap()
-            .choices
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let choice_observations = choices
-            .iter()
-            .map(|choice| {
-                serde_json::json!({
-                    "call_id": choice.call_id, "controller_operation_id": choice.controller,
-                    "endpoint_calls_before": choice.endpoint_calls_before,
-                    "prior_feedback": choice.prior_feedback.map(|kind| match kind {
-                        PublicReadFailure::ReprepareRequired => "operation_refused",
-                        PublicReadFailure::AuthorizationUnavailable => "authorization_unavailable",
-                    }),
+        let choice_observations = {
+            let choices = script
+                .as_ref()
+                .unwrap()
+                .choices
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            choices
+                .iter()
+                .map(|choice| {
+                    serde_json::json!({
+                        "call_id": choice.call_id, "controller_operation_id": choice.controller,
+                        "endpoint_calls_before": choice.endpoint_calls_before,
+                        "prior_feedback": choice.prior_feedback.map(|kind| match kind {
+                            PublicReadFailure::ReprepareRequired => "operation_refused",
+                            PublicReadFailure::AuthorizationUnavailable => "authorization_unavailable",
+                        }),
+                    })
                 })
-            })
-            .collect::<Vec<_>>();
-        drop(choices);
+                .collect::<Vec<_>>()
+        };
         eprintln!(
             "{}",
             serde_json::json!({

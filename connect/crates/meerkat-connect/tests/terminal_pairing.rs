@@ -193,7 +193,7 @@ async fn dropping_a_pending_secret_future_restores_exact_flags_and_flushes_parti
         result = &mut pending => panic!("secret unexpectedly completed: {result:?}"),
         () = hidden(&pty.observer) => (),
     }
-    send(&pty.master, CODE[..3].as_bytes());
+    send(&pty.master, &CODE.as_bytes()[..3]);
     drop(pending);
     pty.restored();
     assert!(echoed(&pty.master).is_empty());
@@ -732,7 +732,7 @@ async fn cancelling_code_entry_keeps_the_acknowledged_host_request_visible() {
         shown(&observed, "Type 'request'").await;
         send(&pty.master, b"request\n");
         hidden(&pty.observer).await;
-        send(&pty.master, CODE[..3].as_bytes());
+        send(&pty.master, &CODE.as_bytes()[..3]);
         cancel.send(()).unwrap();
     };
     let paired = pair_paired_host(&origin, &mut pty.input, &mut output, async {

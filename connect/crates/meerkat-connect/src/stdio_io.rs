@@ -25,7 +25,7 @@ impl Pipe {
         )
         .map_err(io::Error::from)?;
         let file = File::from(duplicate);
-        Ok(Self(AsyncFd::new(file)?))
+        Ok(Self(crate::owned_fd::register(file)?))
     }
 }
 impl AsyncRead for Pipe {

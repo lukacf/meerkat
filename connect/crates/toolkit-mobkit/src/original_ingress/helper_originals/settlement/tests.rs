@@ -133,6 +133,10 @@ async fn unresolved_source_times_out_without_withdrawal_or_deadline_restart() {
     owner.check_admitted_helper(&admitted).unwrap();
 }
 
+#[allow(
+    clippy::await_holding_lock,
+    reason = "the test holds the synchronous mutex through the deadline on purpose"
+)]
 #[tokio::test]
 async fn acknowledged_source_contention_retries_until_release_or_the_same_deadline() {
     let (_directory, owner, _original, pending, admitted) = pending().await;

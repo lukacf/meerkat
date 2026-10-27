@@ -49,8 +49,7 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot, watch};
 
-#[path = "../../../../tests/support/native_model_peer.rs"]
-mod native_model_peer;
+use crate::test_model_peer as native_model_peer;
 use native_model_peer::ModelPeer;
 
 const MODEL: &str = "claude-sonnet-4-5";

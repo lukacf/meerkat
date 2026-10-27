@@ -441,10 +441,9 @@ impl ConsoleSetup {
         }
         let result = async {
             let record = prompt.record();
-            let allowed = record.allowed_decisions.iter().filter_map(|decision| match decision {
-                meerkat_core::ApprovalDecision::Approve => Some("approve"),
-                meerkat_core::ApprovalDecision::Deny => Some("deny"),
-                _ => None,
+            let allowed = record.allowed_decisions.iter().map(|decision| match decision {
+                meerkat_core::ApprovalDecision::Approve => "approve",
+                meerkat_core::ApprovalDecision::Deny => "deny",
             }).collect::<Vec<_>>();
             let projection = json!({"kind":"approval","approval_id":record.approval_id,
                 "summary":record.proposed_action.summary,"body":record.proposed_action.body,

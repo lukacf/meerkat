@@ -1333,9 +1333,10 @@ async fn stock_console_prepares_for_one_admitted_member_without_effect_authority
     assert!(serialized.contains(FIRST) && serialized.contains(FOLLOWUP));
     assert!(serialized.contains(PREPARED) && serialized.contains(FOLLOWUP_ANSWER));
     assert!(!serialized.contains(OTHER_PROMPT));
-    let observed = probe.observed.lock().unwrap();
-    assert!(observed["forged-send"].is_error);
-    drop(observed);
+    {
+        let observed = probe.observed.lock().unwrap();
+        assert!(observed["forged-send"].is_error);
+    }
     // The stock query reads its current projection and schedules backfill
     // asynchronously. Read that same admitted route until it projects native
     // history; never inject frames or force a private refresh path.

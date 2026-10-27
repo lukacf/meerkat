@@ -70,7 +70,6 @@ async fn enrollment_preserves_the_exact_native_request_and_both_decisions() {
             match decision {
                 ApprovalDecision::Approve => ApprovalStatus::Approved,
                 ApprovalDecision::Deny => ApprovalStatus::Denied,
-                _ => unreachable!(),
             }
         );
         presenters.resume(enrollment);
@@ -239,7 +238,11 @@ async fn account_enrollment_uses_the_same_native_review_and_refuses_missing_disp
             approvals.bind_session(&session)?;
             retained = Some(approvals.clone());
             crate::installed_service_review::compose_installed_service_review(
-                Arc::new(meerkat::McpRouterAdapter::new(meerkat::McpRouter::new())),
+                Arc::new(meerkat::McpRouterAdapter::new(
+                    meerkat::McpRouter::new_with_stdio_profile(
+                        meerkat::McpStdioLaunchProfile::trusted_host(),
+                    ),
+                )),
                 facade,
                 realm.clone(),
                 session.clone(),
@@ -350,7 +353,9 @@ async fn native_terminal_composer_enrolls_fresh_accounts_for_each_same_session_c
     )
     .unwrap();
     let session = SessionId::new();
-    let adapter = Arc::new(meerkat::McpRouterAdapter::new(meerkat::McpRouter::new()));
+    let adapter = Arc::new(meerkat::McpRouterAdapter::new(
+        meerkat::McpRouter::new_with_stdio_profile(meerkat::McpStdioLaunchProfile::trusted_host()),
+    ));
     let first = composer
         .compose(&adapter, &session, Some(&selected))
         .unwrap();
@@ -420,7 +425,9 @@ async fn native_terminal_composer_keeps_other_members_and_refuses_selected_alias
         presenters,
     )
     .unwrap();
-    let adapter = Arc::new(meerkat::McpRouterAdapter::new(meerkat::McpRouter::new()));
+    let adapter = Arc::new(meerkat::McpRouterAdapter::new(
+        meerkat::McpRouter::new_with_stdio_profile(meerkat::McpStdioLaunchProfile::trusted_host()),
+    ));
     let raw: Arc<dyn AgentToolDispatcher> = adapter.clone();
     let session = SessionId::new();
     let other = MobMemberBinding {

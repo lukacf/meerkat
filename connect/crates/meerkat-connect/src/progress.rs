@@ -271,7 +271,7 @@ mod tests {
             )
             .unwrap();
         progress.pause_for_prompt(&mut output).unwrap();
-        write!(output, "Approval prompt\n").unwrap();
+        writeln!(output, "Approval prompt").unwrap();
         assert_eq!(
             String::from_utf8(output.clone()).unwrap(),
             "Connect (in progress): Hello[ESC][31m\nApproval prompt\n"

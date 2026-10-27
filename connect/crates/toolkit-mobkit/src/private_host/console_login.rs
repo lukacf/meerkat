@@ -104,6 +104,11 @@ fn now_ms() -> Result<u64, ConsoleLoginRefusal> {
         .ok_or(ConsoleLoginRefusal::Unavailable)
 }
 
+#[cfg(test)]
+type RetirementFuture = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<ConsoleLoginRetirement, HostLifetimeError>> + Send>,
+>;
+
 impl ConsoleLogins {
     /// Mechanical owner fixture only. It supplies no native Human or grant.
     #[cfg(test)]
@@ -128,18 +133,7 @@ impl ConsoleLogins {
     }
 
     #[cfg(test)]
-    pub(crate) fn fixture_retire(
-        &self,
-        id: u64,
-    ) -> Result<
-        std::pin::Pin<
-            Box<
-                dyn std::future::Future<Output = Result<ConsoleLoginRetirement, HostLifetimeError>>
-                    + Send,
-            >,
-        >,
-        HostLifetimeError,
-    > {
+    pub(crate) fn fixture_retire(&self, id: u64) -> Result<RetirementFuture, HostLifetimeError> {
         Ok(Box::pin(self.retire(id)?.drain()))
     }
     pub(super) fn new(

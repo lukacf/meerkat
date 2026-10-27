@@ -19,7 +19,6 @@ use nix::{
     },
     unistd::read,
 };
-use tokio::io::unix::AsyncFd;
 #[cfg(test)]
 use tokio::sync::mpsc;
 
@@ -589,7 +588,7 @@ async fn read_ordinary_bytes(
     ended: &mut bool,
     until_end: bool,
 ) -> io::Result<()> {
-    let input = AsyncFd::new(fd.try_clone()?)?;
+    let input = crate::owned_fd::register(fd.try_clone()?)?;
     loop {
         let mut byte = [0u8; 1];
         let mut ready = input.readable().await?;
@@ -639,7 +638,7 @@ fn discard_ready_input(fd: &OwnedFd, ended: &mut bool) -> io::Result<()> {
 }
 
 async fn read_password_line(fd: &OwnedFd, limit: usize) -> io::Result<Option<String>> {
-    let input = AsyncFd::new(fd.try_clone()?)?;
+    let input = crate::owned_fd::register(fd.try_clone()?)?;
     let mut bytes = Vec::new();
     loop {
         let mut byte = [0u8; 1];
@@ -679,7 +678,7 @@ async fn read_password_line(fd: &OwnedFd, limit: usize) -> io::Result<Option<Str
 }
 
 async fn read_line(fd: &OwnedFd, limit: usize) -> io::Result<Option<String>> {
-    let input = AsyncFd::new(fd.try_clone()?)?;
+    let input = crate::owned_fd::register(fd.try_clone()?)?;
     let mut bytes = Vec::new();
     loop {
         // One byte avoids userspace prefetch across visible/secret phases.
@@ -860,6 +859,27 @@ impl ServiceSecret {
     pub(crate) fn expose(&self) -> &str {
         &self.0
     }
+}
+
+/// Whether a failed attempt has the exact committed input witness needed to
+/// offer a new request. This never turns failed output into a successful result.
+pub fn failed_turn_allows_new_input(
+    outcome: &CompletionOutcome,
+    input_terminal: Option<&meerkat_runtime::input_state::InputTerminalOutcome>,
+    exit_requested: bool,
+) -> bool {
+    !exit_requested
+        && matches!(
+            outcome,
+            CompletionOutcome::Abandoned { .. } | CompletionOutcome::AbandonedWithError { .. }
+        )
+        && matches!(
+            input_terminal,
+            Some(
+                meerkat_runtime::input_state::InputTerminalOutcome::Consumed
+                    | meerkat_runtime::input_state::InputTerminalOutcome::Abandoned { .. }
+            )
+        )
 }
 
 #[cfg(test)]
@@ -1204,8 +1224,7 @@ mod tests {
             std::future::pending(),
         )
         .await
-        .err()
-        .expect("native probe failure");
+        .expect_err("native probe failure");
         let ConnectError::Native { source, .. } = error else {
             panic!("native failure must remain typed")
         };
@@ -1287,25 +1306,4 @@ mod tests {
         assert!(committed_text(&outcome).is_err());
         assert!(committed_text(&CompletionOutcome::Cancelled).is_err());
     }
-}
-
-/// Whether a failed attempt has the exact committed input witness needed to
-/// offer a new request. This never turns failed output into a successful result.
-pub fn failed_turn_allows_new_input(
-    outcome: &CompletionOutcome,
-    input_terminal: Option<&meerkat_runtime::input_state::InputTerminalOutcome>,
-    exit_requested: bool,
-) -> bool {
-    !exit_requested
-        && matches!(
-            outcome,
-            CompletionOutcome::Abandoned { .. } | CompletionOutcome::AbandonedWithError { .. }
-        )
-        && matches!(
-            input_terminal,
-            Some(
-                meerkat_runtime::input_state::InputTerminalOutcome::Consumed
-                    | meerkat_runtime::input_state::InputTerminalOutcome::Abandoned { .. }
-            )
-        )
 }

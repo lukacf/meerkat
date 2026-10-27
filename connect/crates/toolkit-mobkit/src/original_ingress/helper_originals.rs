@@ -2698,14 +2698,15 @@ mod tests {
             store.get(&charged.key).await.unwrap().as_ref(),
             Some(&charged)
         );
-        let held = owner.originals.lock().unwrap();
-        let helper = held
-            .iter()
-            .filter_map(OriginalRecord::bound)
-            .find(|entry| Arc::ptr_eq(&entry.retained, &source.original))
-            .unwrap();
-        assert!(helper.source_custody.is_none());
-        drop(held);
+        {
+            let held = owner.originals.lock().unwrap();
+            let helper = held
+                .iter()
+                .filter_map(OriginalRecord::bound)
+                .find(|entry| Arc::ptr_eq(&entry.retained, &source.original))
+                .unwrap();
+            assert!(helper.source_custody.is_none());
+        }
 
         // A current row with a valid checksum but different immutable helper
         // facts must still be refused. Custody-only tolerance is not rebinding.
@@ -2939,14 +2940,15 @@ mod tests {
             source.authentication != parent.association.candidate().original_authentication,
             "helper authentication remains distinct from its parent's authentication"
         );
-        let held = owner.originals.lock().unwrap();
-        let helper = held
-            .iter()
-            .filter_map(OriginalRecord::bound)
-            .find(|entry| Arc::ptr_eq(&entry.retained, &source.original))
-            .unwrap();
-        assert!(helper.source_custody.is_none());
-        drop(held);
+        {
+            let held = owner.originals.lock().unwrap();
+            let helper = held
+                .iter()
+                .filter_map(OriginalRecord::bound)
+                .find(|entry| Arc::ptr_eq(&entry.retained, &source.original))
+                .unwrap();
+            assert!(helper.source_custody.is_none());
+        }
         let facts = owner
             .helper_publication_source(&store, &service, &admitted, &source)
             .await

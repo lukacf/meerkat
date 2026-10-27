@@ -96,12 +96,13 @@ async fn native_unspawned_initial_cancellation_returns_unused_preparation() {
             );
             let next = case.route(&next_session);
             case.add(next, ExternalToolDeltaPhase::Applied).await;
-            let requests = case.probe.requests.lock().unwrap();
-            assert_eq!(requests.len(), 3);
-            assert_eq!(requests[1].owner.session_id, session);
-            assert_eq!(requests[2].owner.session_id, next_session);
-            assert_ne!(requests[0].key, requests[2].key);
-            drop(requests);
+            {
+                let requests = case.probe.requests.lock().unwrap();
+                assert_eq!(requests.len(), 3);
+                assert_eq!(requests[1].owner.session_id, session);
+                assert_eq!(requests[2].owner.session_id, next_session);
+                assert_ne!(requests[0].key, requests[2].key);
+            }
             assert_eq!(case.native_pids().len(), 1);
             assert!(
                 case.protocol.pids().is_empty(),
@@ -298,11 +299,12 @@ async fn initial_cancel_with_changed_resources(spawned: bool) {
         fs::write(&resource, &original).unwrap();
         let next = case.route(&next_session);
         case.add(next, ExternalToolDeltaPhase::Applied).await;
-        let requests = case.probe.requests.lock().unwrap();
-        assert_eq!(requests.len(), 3);
-        assert_eq!(requests[2].owner.session_id, next_session);
-        assert_ne!(requests[0].key, requests[2].key);
-        drop(requests);
+        {
+            let requests = case.probe.requests.lock().unwrap();
+            assert_eq!(requests.len(), 3);
+            assert_eq!(requests[2].owner.session_id, next_session);
+            assert_ne!(requests[0].key, requests[2].key);
+        }
         assert_eq!(case.native_pids().len(), usize::from(spawned) + 1);
         assert_eq!(case.protocol.pids().len(), usize::from(spawned),
             "only a previously spawned initial child needs the existing successor offer");

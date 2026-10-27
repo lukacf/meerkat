@@ -146,7 +146,6 @@ pub fn model_request(
             profile: None,
             origin: meerkat_core::BindingOrigin::Configured,
         }),
-        ..Default::default()
     })
 }
 

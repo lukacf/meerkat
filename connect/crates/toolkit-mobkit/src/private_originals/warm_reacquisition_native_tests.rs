@@ -75,7 +75,9 @@ done"#;
         match std::fs::read_to_string(&self.called) {
             Ok(rows) => rows
                 .lines()
-                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                .inspect(|line| {
+                    serde_json::from_str::<serde_json::Value>(line).unwrap();
+                })
                 .count(),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
             Err(error) => panic!("owned endpoint observation failed: {error}"),
@@ -1273,15 +1275,16 @@ async fn warm_case(setup_refusal: bool) {
                     1,
                     "independent C/Y survives X-only revoke"
                 );
-                let state = script.state.lock().unwrap();
-                assert_eq!(state.results.len(), 4);
-                assert!(state.results[1].is_error);
-                assert!(
-                    !state.results[0].is_error
-                        && !state.results[2].is_error
-                        && !state.results[3].is_error
-                );
-                drop(state);
+                {
+                    let state = script.state.lock().unwrap();
+                    assert_eq!(state.results.len(), 4);
+                    assert!(state.results[1].is_error);
+                    assert!(
+                        !state.results[0].is_error
+                            && !state.results[2].is_error
+                            && !state.results[3].is_error
+                    );
+                }
                 let before = history
                     .load_input_states_strict(&LogicalRuntimeId::for_session(&fixture.session))
                     .await

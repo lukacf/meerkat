@@ -218,22 +218,22 @@ fn console_ready_close_does_not_start_the_native_account_ceremony() {
 
 #[derive(Clone, Copy)]
 enum SignInCancelPoint {
-    BeforeCompletion,
-    EnteredCompletion,
-    AfterCompletion,
+    Before,
+    Entered,
+    After,
 }
 
 #[tokio::test]
 async fn provider_sign_in_cancel_before_completion_entry_retires_only_the_started_attempt() {
-    provider_sign_in_cancel_fixture(SignInCancelPoint::BeforeCompletion).await;
+    provider_sign_in_cancel_fixture(SignInCancelPoint::Before).await;
 }
 #[tokio::test]
 async fn provider_sign_in_cancel_joins_an_entered_completion_before_prompt_closure() {
-    provider_sign_in_cancel_fixture(SignInCancelPoint::EnteredCompletion).await;
+    provider_sign_in_cancel_fixture(SignInCancelPoint::Entered).await;
 }
 #[tokio::test]
 async fn provider_sign_in_cancel_preserves_the_joined_completion_and_account() {
-    provider_sign_in_cancel_fixture(SignInCancelPoint::AfterCompletion).await;
+    provider_sign_in_cancel_fixture(SignInCancelPoint::After).await;
 }
 
 // These source controls use the existing fixture's facade, Control and native
@@ -324,7 +324,7 @@ async fn provider_sign_in_cancel_fixture(point: SignInCancelPoint) {
     let owner_close = exchange.as_mut().unwrap().take_owner_close().unwrap();
     let mut callback = None;
     let mut cancellation = None;
-    if matches!(point, SignInCancelPoint::BeforeCompletion) {
+    if matches!(point, SignInCancelPoint::Before) {
         cancellation = Some(crate::installed_service_review::account_request::console::cancel_retained_sign_in_authorized(
             31, &mut exchange, &mut callback, br#"{"review_id":31}"#, || Ok(())));
     }
@@ -341,7 +341,7 @@ async fn provider_sign_in_cancel_fixture(point: SignInCancelPoint) {
         );
         tokio::pin!(completing);
         let mut early = None;
-        if matches!(point, SignInCancelPoint::EnteredCompletion) {
+        if matches!(point, SignInCancelPoint::Entered) {
             // Only the observer borrows the completion. A timeout cannot drop
             // it, and all diagnostics are checked after release and full join.
             entered_observed = Some(
@@ -368,7 +368,7 @@ async fn provider_sign_in_cancel_fixture(point: SignInCancelPoint) {
             None => completing.await,
         }
     };
-    if matches!(point, SignInCancelPoint::AfterCompletion) {
+    if matches!(point, SignInCancelPoint::After) {
         cancellation = Some(crate::installed_service_review::account_request::console::cancel_retained_sign_in_authorized(
             31, &mut exchange, &mut callback, br#"{"review_id":31}"#, || Ok(())));
     }
@@ -414,7 +414,7 @@ async fn provider_sign_in_cancel_fixture(point: SignInCancelPoint) {
     assert!(finished.unwrap());
     let (completion, stopped) = joined.unwrap();
     match point {
-        SignInCancelPoint::BeforeCompletion => {
+        SignInCancelPoint::Before => {
             assert!(stopped && completion.is_none());
             assert!(
                 !requests
@@ -427,7 +427,7 @@ async fn provider_sign_in_cancel_fixture(point: SignInCancelPoint) {
             );
             assert_eq!(disposition, Some(false));
         }
-        SignInCancelPoint::EnteredCompletion => {
+        SignInCancelPoint::Entered => {
             assert!(matches!(entered_observed, Some(Ok(true))));
             assert_eq!(stayed_pending, Some(true));
             assert!(stopped);
@@ -440,7 +440,7 @@ async fn provider_sign_in_cancel_fixture(point: SignInCancelPoint) {
             );
             assert_eq!(disposition, Some(false));
         }
-        SignInCancelPoint::AfterCompletion => {
+        SignInCancelPoint::After => {
             assert!(!stopped);
             let completed = completion.unwrap();
             assert!(completed.result.is_ok() && !completed.cleanup_unconfirmed);

@@ -734,10 +734,9 @@ where
                 let shown = async {
                     refresh().await?;
                     let record = prompt.record();
-                    let allowed = record.allowed_decisions.iter().filter_map(|decision| match decision {
-                        ApprovalDecision::Approve => Some("approve"),
-                        ApprovalDecision::Deny => Some("deny"),
-                        _ => None,
+                    let allowed = record.allowed_decisions.iter().map(|decision| match decision {
+                        ApprovalDecision::Approve => "approve",
+                        ApprovalDecision::Deny => "deny",
                     }).collect::<Vec<_>>();
                     let projection = json!({"kind":"approval","approval_id":record.approval_id,
                         "summary":record.proposed_action.summary,"body":record.proposed_action.body,

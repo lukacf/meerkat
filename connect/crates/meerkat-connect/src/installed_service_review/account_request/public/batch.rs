@@ -36,7 +36,7 @@ impl Member {
     }
 }
 
-pub(super) struct InstalledPublicBatchRequest {
+pub(crate) struct InstalledPublicBatchRequest {
     members: Vec<Member>,
     expires_in_ms: Option<u64>,
     policy: ServiceToolPolicySelection,

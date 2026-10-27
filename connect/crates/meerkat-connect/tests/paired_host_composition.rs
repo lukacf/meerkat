@@ -1592,8 +1592,10 @@ mod real_model_judgment {
             outside_ceiling: false,
             complete: true,
         };
-        let mut config = Config::default();
-        config.max_tokens = Some(4096);
+        let mut config = Config {
+            max_tokens: Some(4096),
+            ..Default::default()
+        };
         config.retry.max_retries = 0;
         config.model_fallback.enabled = Some(false);
         config.provider_tools.openai.web_search = false;

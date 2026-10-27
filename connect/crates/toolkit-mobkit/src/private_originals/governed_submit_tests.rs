@@ -85,7 +85,7 @@ pub(in crate::private_originals) mod first_input_tests;
 mod observed;
 
 #[derive(Clone, Copy)]
-pub(in crate::private_originals) enum DeliveryMode {
+pub(crate) enum DeliveryMode {
     Normal,
     HoldAccepted,
     LoseAcceptedAnswer,

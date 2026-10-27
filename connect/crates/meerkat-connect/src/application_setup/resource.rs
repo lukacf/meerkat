@@ -111,7 +111,7 @@ impl SetupResourceSelection {
         owner: crate::resources::LocalRoundOwner,
     ) -> Result<
         Arc<crate::resources::LocalRoundAttempts>,
-        (crate::resources::LocalRoundOwner, String),
+        Box<(crate::resources::LocalRoundOwner, String)>,
     > {
         // This method is called through exclusive access to the fresh compiler
         // before it is shared with native registration or any binding provider.
@@ -130,7 +130,7 @@ impl SetupResourceSelection {
             Ok(())
         })();
         if let Err(error) = checked {
-            return Err((owner, error));
+            return Err(Box::new((owner, error)));
         }
         let attempts = Arc::new(crate::resources::LocalRoundAttempts::new(
             owner,
@@ -141,7 +141,7 @@ impl SetupResourceSelection {
             let owner = unpublished
                 .take_closed_owner()
                 .expect("unpublished local owner is retained");
-            return Err((owner, "local round is already retained".into()));
+            return Err(Box::new((owner, "local round is already retained".into())));
         }
         Ok(attempts)
     }

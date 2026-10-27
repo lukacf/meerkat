@@ -3064,36 +3064,37 @@ async fn actual_cli_failed_uncertain_submission_allows_only_explicit_exact_statu
     assert_eq!(preparation_output_count(&cli.state), 1);
     host.finish().await;
     provider.finish().await;
-    let requests = host.requests.lock().unwrap();
-    let digest = prepared()["change"]["change_digest"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    assert_eq!(requests[4].method, "POST");
-    assert_eq!(
-        requests[4].body,
-        json!({"change_digest":digest,"change":prepared()["change"]})
-    );
-    assert_eq!(requests[5].method, "GET");
-    assert_eq!(
-        requests[5].path,
-        format!("/console/extensions/frontend/change-requests/{digest}")
-    );
-    assert!(requests[5].body.is_null());
-    for request in requests
-        .iter()
-        .filter(|request| request.path.starts_with("/console/extensions/"))
     {
+        let requests = host.requests.lock().unwrap();
+        let digest = prepared()["change"]["change_digest"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(requests[4].method, "POST");
         assert_eq!(
-            request.headers["cookie"],
-            format!("hc_console_device={DEVICE}")
+            requests[4].body,
+            json!({"change_digest":digest,"change":prepared()["change"]})
         );
-        if request.method == "POST" {
-            assert_eq!(request.headers["origin"], host.origin);
+        assert_eq!(requests[5].method, "GET");
+        assert_eq!(
+            requests[5].path,
+            format!("/console/extensions/frontend/change-requests/{digest}")
+        );
+        assert!(requests[5].body.is_null());
+        for request in requests
+            .iter()
+            .filter(|request| request.path.starts_with("/console/extensions/"))
+        {
+            assert_eq!(
+                request.headers["cookie"],
+                format!("hc_console_device={DEVICE}")
+            );
+            if request.method == "POST" {
+                assert_eq!(request.headers["origin"], host.origin);
+            }
+            assert!(!request.headers.contains_key("x-paired-host-dev-token"));
         }
-        assert!(!request.headers.contains_key("x-paired-host-dev-token"));
     }
-    drop(requests);
     for request in provider.requests.lock().unwrap().iter() {
         assert!(!request.body.to_string().contains(&host.origin));
     }
@@ -4133,26 +4134,27 @@ async fn actual_cli_device_login_paces_polls_persists_native_account_then_reache
     assert!(cli.finish().await.success());
     host.finish().await;
     device.finish().await;
-    let calls = device.calls.lock().unwrap();
-    assert_eq!(
-        calls
-            .iter()
-            .map(|(path, _)| path.as_str())
-            .collect::<Vec<_>>(),
-        vec![
-            "/copilot/device/code",
-            "/copilot/token",
-            "/copilot/token",
-            "/copilot/token",
-        ]
-    );
-    for (index, minimum) in [(1, 1), (2, 1), (3, 6)] {
-        assert!(
-            calls[index].1.duration_since(calls[index - 1].1) >= Duration::from_secs(minimum),
-            "native interval and cumulative SlowDown must delay each next poll"
+    {
+        let calls = device.calls.lock().unwrap();
+        assert_eq!(
+            calls
+                .iter()
+                .map(|(path, _)| path.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "/copilot/device/code",
+                "/copilot/token",
+                "/copilot/token",
+                "/copilot/token",
+            ]
         );
+        for (index, minimum) in [(1, 1), (2, 1), (3, 6)] {
+            assert!(
+                calls[index].1.duration_since(calls[index - 1].1) >= Duration::from_secs(minimum),
+                "native interval and cumulative SlowDown must delay each next poll"
+            );
+        }
     }
-    drop(calls);
     assert_eq!(
         cli.transcript
             .matches("Open this private device sign-in page:")
@@ -4965,43 +4967,45 @@ async fn actual_cli_combined_roles_preserve_inspection_choice_and_exact_approval
         1
     );
     cli.assert_reviewed_setup(&config);
-    let host_requests = host.requests.lock().unwrap();
-    assert_eq!(host_requests.len(), 7);
-    assert_eq!(
-        host_requests
-            .iter()
-            .map(|r| r.method.as_str())
-            .collect::<Vec<_>>(),
-        ["POST", "POST", "GET", "GET", "POST", "POST", "GET"]
-    );
-    assert_eq!(
-        host_requests[4].body,
-        json!({"new_extension":combined_role_proposal(&role_inspection())})
-    );
-    assert_eq!(
-        host_requests[5].body,
-        json!({"change_digest":role_prepared()["change"]["change_digest"],"change":role_prepared()["change"]})
-    );
-    for request in host_requests.iter().skip(2) {
+    {
+        let host_requests = host.requests.lock().unwrap();
+        assert_eq!(host_requests.len(), 7);
         assert_eq!(
-            request.headers["cookie"],
-            format!("hc_console_device={DEVICE}")
+            host_requests
+                .iter()
+                .map(|r| r.method.as_str())
+                .collect::<Vec<_>>(),
+            ["POST", "POST", "GET", "GET", "POST", "POST", "GET"]
         );
-        assert!(!request.headers.contains_key("authorization"));
-        assert!(!request.headers.contains_key("x-paired-host-dev-token"));
-        if request.method == "POST" {
-            assert_eq!(request.headers["origin"], host.origin);
+        assert_eq!(
+            host_requests[4].body,
+            json!({"new_extension":combined_role_proposal(&role_inspection())})
+        );
+        assert_eq!(
+            host_requests[5].body,
+            json!({"change_digest":role_prepared()["change"]["change_digest"],"change":role_prepared()["change"]})
+        );
+        for request in host_requests.iter().skip(2) {
+            assert_eq!(
+                request.headers["cookie"],
+                format!("hc_console_device={DEVICE}")
+            );
+            assert!(!request.headers.contains_key("authorization"));
+            assert!(!request.headers.contains_key("x-paired-host-dev-token"));
+            if request.method == "POST" {
+                assert_eq!(request.headers["origin"], host.origin);
+            }
         }
     }
-    drop(host_requests);
-    let requests = provider.requests.lock().unwrap();
-    assert_eq!(requests.len(), 8, "no implicit extra turn or model replay");
-    for request in requests.iter() {
-        for private in [&host.origin, &review_path, &approval] {
-            assert!(!request.body.to_string().contains(private));
+    {
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 8, "no implicit extra turn or model replay");
+        for request in requests.iter() {
+            for private in [&host.origin, &review_path, &approval] {
+                assert!(!request.body.to_string().contains(private));
+            }
         }
     }
-    drop(requests);
 
     // Open only the joined child's existing store, without starting a runtime.
     let session_id = meerkat_core::SessionId::parse(
@@ -6142,14 +6146,15 @@ async fn actual_cli_forge_sign_in_reports_unsupported_without_paired_host_or_rep
     {
         assert!(!cli.transcript.contains(value));
     }
-    let requests = provider.requests.lock().unwrap();
-    assert_eq!(requests.len(), 3);
-    for request in requests.iter() {
-        for value in &private {
-            assert!(!request.body.to_string().contains(value));
+    {
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        for request in requests.iter() {
+            for value in &private {
+                assert!(!request.body.to_string().contains(value));
+            }
         }
     }
-    drop(requests);
     let session_id = meerkat_core::SessionId::parse(
         cli.transcript
             .split("Setup session: ")
@@ -6609,21 +6614,22 @@ async fn actual_cli_forge_configuration_recovers_after_process_restart_without_r
     assert_eq!(preparation_output_count(&second.state), 2);
     second.assert_reviewed_setup(&second.initial_config);
     assert_eq!(second.transcript.matches("Type 'approve ").count(), 2);
-    let calls = provider.requests.lock().unwrap();
-    assert_eq!(calls.len(), 9);
-    let prepared = tool_result(&calls[4].body, "reading-prepare");
-    let recovered = tool_result(&calls[8].body, "recovered-status");
-    assert_eq!(prepared["proposal"], recovered["observation"]["proposal"]);
-    for call in calls.iter() {
-        for secret in canaries.iter().map(String::as_str).chain([
-            forge_reading_owner::PASSWORD,
-            owner.origin.as_str(),
-            approval.as_str(),
-        ]) {
-            assert!(!call.body.to_string().contains(secret));
+    {
+        let calls = provider.requests.lock().unwrap();
+        assert_eq!(calls.len(), 9);
+        let prepared = tool_result(&calls[4].body, "reading-prepare");
+        let recovered = tool_result(&calls[8].body, "recovered-status");
+        assert_eq!(prepared["proposal"], recovered["observation"]["proposal"]);
+        for call in calls.iter() {
+            for secret in canaries.iter().map(String::as_str).chain([
+                forge_reading_owner::PASSWORD,
+                owner.origin.as_str(),
+                approval.as_str(),
+            ]) {
+                assert!(!call.body.to_string().contains(secret));
+            }
         }
     }
-    drop(calls);
     let root = second._root.as_ref().unwrap().path();
     let storage = meerkat_connect::RealmOptions {
         context_root: root.join("outside-checkout"),

@@ -364,6 +364,10 @@ impl Drop for InheritedDescriptors {
     }
 }
 
+/// The private host's byte streams, boxed over the native stream types.
+pub(crate) type HostReader = Box<dyn AsyncRead + Unpin + Send>;
+pub(crate) type HostWriter = Box<dyn AsyncWrite + Unpin + Send>;
+
 impl InheritedHostPipes {
     pub fn adopt(commands: RawFd, responses: RawFd) -> Result<Self, PrivateHostError> {
         // This function owns every distinct non-stdio input from entry, even
@@ -393,15 +397,7 @@ impl InheritedHostPipes {
         })
     }
 
-    fn into_async(
-        self,
-    ) -> Result<
-        (
-            Box<dyn AsyncRead + Unpin + Send>,
-            Box<dyn AsyncWrite + Unpin + Send>,
-        ),
-        PrivateHostError,
-    > {
+    fn into_async(self) -> Result<(HostReader, HostWriter), PrivateHostError> {
         // Tokio's pipe types reject sockets. Use the native stream type after
         // endpoint validation; there is no unchecked pipe conversion.
         let commands: Box<dyn AsyncRead + Unpin + Send> =

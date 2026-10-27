@@ -211,7 +211,7 @@ async fn application_v4_composes_generic_schema_and_only_one_frontend_presenter(
 
 #[tokio::test]
 async fn application_v4_selection_reuses_private_bridge_and_joins_retired_prompt() {
-    use meerkat_core::{AgentToolDispatcher, ToolCallView};
+    use meerkat_core::ToolCallView;
     let root = tempfile::tempdir().unwrap();
     let binding: Initialize = serde_json::from_value(application_binding(root.path())).unwrap();
     let selection = binding.forge.unwrap();

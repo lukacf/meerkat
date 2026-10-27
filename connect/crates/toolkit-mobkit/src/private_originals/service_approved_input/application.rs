@@ -440,20 +440,20 @@ pub(in crate::private_originals) struct ApplicationServiceDecision {
     evidence: ApplicationServiceEvidence,
     parent: Option<crate::installed_host::operator_setup::ReviewedServiceMcpParent>,
 }
+/// An application service decision taken apart for issuance.
+type ApplicationServiceParts = (
+    PrivateServiceMcpAccessDecision,
+    ServiceMcpSelection,
+    Vec<meerkat_authorization_contracts::grant::GrantLineageRef>,
+    Weak<NativeHostLifetime>,
+    ApplicationServiceEvidence,
+);
+
 impl ApplicationServiceDecision {
     pub(in crate::private_originals) fn into_parts(
         self,
         source: &PrivateOriginals,
-    ) -> Result<
-        (
-            PrivateServiceMcpAccessDecision,
-            ServiceMcpSelection,
-            Vec<meerkat_authorization_contracts::grant::GrantLineageRef>,
-            Weak<NativeHostLifetime>,
-            ApplicationServiceEvidence,
-        ),
-        ServiceOperationError,
-    > {
+    ) -> Result<ApplicationServiceParts, ServiceOperationError> {
         if !std::ptr::eq(self.source.as_ref(), source)
             || source
                 .host_lifetime

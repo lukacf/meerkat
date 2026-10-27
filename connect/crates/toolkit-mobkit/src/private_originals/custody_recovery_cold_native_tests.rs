@@ -15,8 +15,10 @@ type ColdFixture = FirstFixture<meerkat::PersistentSessionService<FactoryAgentBu
 
 // Own the same actual close future across the test body's cancellation. The
 // completed result carries no fixture Arc, so old-owner death remains testable.
+type CloseFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>>>>;
+
 pub(crate) struct RetainedDurableClose {
-    future: Option<std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>>>>>,
+    future: Option<CloseFuture>,
     completed: Option<Result<(), String>>,
 }
 impl RetainedDurableClose {

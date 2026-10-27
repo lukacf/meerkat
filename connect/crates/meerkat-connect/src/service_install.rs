@@ -2312,7 +2312,11 @@ mod checked_route_tests {
 
     fn installs() -> Arc<CheckedInstalls> {
         CheckedInstalls::with_checked_route(
-            Arc::new(meerkat::McpRouterAdapter::new(meerkat::McpRouter::new())),
+            Arc::new(meerkat::McpRouterAdapter::new(
+                meerkat::McpRouter::new_with_stdio_profile(
+                    meerkat::McpStdioLaunchProfile::trusted_host(),
+                ),
+            )),
             SessionId::new(),
         )
         .unwrap()

@@ -1937,7 +1937,7 @@ pub(crate) async fn local_round_registration_fixture(
         .unwrap();
     let attempts = match phase.retain_local_round_owner(local_owner) {
         Ok(attempts) => attempts,
-        Err((_owner, error)) => panic!("ordinary local preparation must match: {error}"),
+        Err(failed) => panic!("ordinary local preparation must match: {}", failed.1),
     };
     phase.retain_owner(owner_selection(&phase, None)).unwrap();
     let (phase, machine, owner) = registration_fixture_from_phase(root, phase).await;

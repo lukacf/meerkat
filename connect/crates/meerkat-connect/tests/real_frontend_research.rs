@@ -179,8 +179,10 @@ async fn real_agent_researches_public_frontend_evidence_with_native_search() -> 
         witnessed_official_search: false,
         outside_scope: false,
     };
-    let mut config = Config::default();
-    config.max_tokens = Some(4096);
+    let mut config = Config {
+        max_tokens: Some(4096),
+        ..Default::default()
+    };
     config.retry.max_retries = 0;
     config.model_fallback.enabled = Some(false);
     let resolved = meerkat::resolve_create_session_model(&config, Default::default())

@@ -47,8 +47,11 @@ pub(crate) struct StagedSetup {
     pub reviewed_checked_mcp: StockGrantOutcome,
     // Observe only the actual finished bundle before the existing consumer moves it.
     #[cfg(test)]
-    materialization_observer: Option<Box<dyn FnOnce(&meerkat::PersistenceBundle) + Send + Sync>>,
+    materialization_observer: Option<MaterializationObserver>,
 }
+
+#[cfg(test)]
+type MaterializationObserver = Box<dyn FnOnce(&meerkat::PersistenceBundle) + Send + Sync>;
 
 /// Non-authority input retained from this invocation's actual reviewed setup.
 /// No native stage, grant selection, ticket, actor or prepared client survives

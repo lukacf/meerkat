@@ -50,9 +50,11 @@ use meerkat_core::{
 use meerkat_mob::{
     MemberDestinationSelection, MemberRuntimeBuildIdentity, MemberRuntimeRegistrationHook, MobError,
 };
+#[cfg(test)]
+use meerkat_runtime::meerkat_machine::ScopedInvocation;
 use meerkat_runtime::{
     input_authority::{NativeAdmissionError, NativeIngressContext},
-    meerkat_machine::{RetainedInvocationOwner, ScopedInvocation, ScopedMandateOwner},
+    meerkat_machine::{RetainedInvocationOwner, ScopedMandateOwner},
 };
 use meerkat_toolkit::host_lifetime::{
     NativeHostLifetime,

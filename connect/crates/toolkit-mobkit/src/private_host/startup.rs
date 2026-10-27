@@ -142,8 +142,8 @@ impl PrivateHostStartup {
         self,
     ) -> Result<
         (
-            BufReader<Box<dyn AsyncRead + Unpin + Send>>,
-            Box<dyn AsyncWrite + Unpin + Send>,
+            BufReader<super::HostReader>,
+            super::HostWriter,
             u64,
             HostBootstrapSelection,
         ),

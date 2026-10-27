@@ -694,11 +694,11 @@ async fn shared_terminal_ceremony_preserves_initial_and_existing_login_custody()
                         tokio::select! {
                             result = running.as_mut() => { completed = Some(result); human.await },
                             observed = human.as_mut() => {
-                                if observed.is_err() { return observed; }
+                                observed?;
                                 // Ordinary expiry and output-error finish on
                                 // their own; observer failure requests cleanup.
                                 completed = Some(running.as_mut().await);
-                                observed
+                                Ok(())
                             },
                         }
                     })

@@ -850,7 +850,8 @@ pub async fn run(
     // resource references. Reopening an installed descriptor cannot replace it.
     let attempts = match compilation.retain_local_round_owner(local_owner) {
         Ok(attempts) => attempts,
-        Err((mut owner, error)) => {
+        Err(failed) => {
+            let (mut owner, error) = *failed;
             return Err(local_round::preparation_failed(error, &mut owner).await);
         }
     };

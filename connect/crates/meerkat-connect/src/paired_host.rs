@@ -3460,167 +3460,6 @@ fn validate_source_repo(repo: &str) -> Result<(), PairedHostError> {
     Ok(())
 }
 
-#[cfg(test)]
-mod presenter_transport_tests {
-    use super::*;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    #[tokio::test]
-    async fn presenter_credential_is_route_limited_and_never_adopts_cookies() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let origin = format!("http://{}", listener.local_addr().unwrap());
-        let mut client = PairedHostClient::for_presenter(&origin, "private-test-only").unwrap();
-        let server = tokio::spawn(async move {
-            let mut requests = Vec::new();
-            for _ in 0..2 {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                let mut request = Vec::new();
-                while !request.ends_with(b"\r\n\r\n") {
-                    assert!(request.len() < 8192);
-                    request.push(socket.read_u8().await.unwrap());
-                }
-                requests.push(String::from_utf8(request).unwrap());
-                let body = r#"{"error":"forbidden","code":"console_owner_required"}"#;
-                let reply = format!(
-                    "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nSet-Cookie: hc_console_device=unselected; Path=/; HttpOnly\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                socket.write_all(reply.as_bytes()).await.unwrap();
-                socket.shutdown().await.unwrap();
-            }
-            requests
-        });
-        assert_eq!(
-            client.request_pairing("no enrollment").await.unwrap_err(),
-            PairedHostError::PresenterOperationUnavailable
-        );
-        assert_eq!(
-            client
-                .confirm_pairing(PairingCode::new("123456".into()).unwrap())
-                .await
-                .unwrap_err(),
-            PairedHostError::PresenterOperationUnavailable
-        );
-        for _ in 0..2 {
-            assert!(matches!(
-                client.frontend_inventory().await,
-                Err(PairedHostError::Refused {
-                    operation: PairedHostOperation::FrontendInventory,
-                    reason: PairedHostRefusal::ConsoleOwnerRequired
-                })
-            ));
-        }
-        let requests = tokio::time::timeout(Duration::from_secs(5), server)
-            .await
-            .unwrap()
-            .unwrap();
-        for request in requests {
-            assert!(request.starts_with("GET /console/extensions/frontend/inventory HTTP/1.1\r\n"));
-            let request = request.to_ascii_lowercase();
-            assert!(
-                request.contains("\r\nx-paired-host-presenter-credential: private-test-only\r\n")
-            );
-            assert!(request.contains(&format!("\r\norigin: {origin}\r\n")));
-            assert!(!request.contains("\r\ncookie:") && !request.contains("\r\nauthorization:"));
-        }
-        for operation in [
-            PairedHostOperation::FrontendInventory,
-            PairedHostOperation::FrontendSourceTags,
-            PairedHostOperation::FrontendSourceInspect,
-            PairedHostOperation::PrepareCandidate,
-            PairedHostOperation::FrontendChangeStatus,
-        ] {
-            let request = client
-                .authorize(operation, client.http.get(&origin))
-                .unwrap()
-                .build()
-                .unwrap();
-            assert!(request.headers()["x-paired-host-presenter-credential"].is_sensitive());
-        }
-        for operation in [
-            PairedHostOperation::RequestPairing,
-            PairedHostOperation::ConfirmPairing,
-            PairedHostOperation::ConfirmTerminalPairing,
-            PairedHostOperation::SubmitFrontendChange,
-            PairedHostOperation::CreateExtensionSecretIntent,
-            PairedHostOperation::ExtensionSecretIntentStatus,
-            PairedHostOperation::CancelExtensionSecretIntent,
-        ] {
-            assert!(matches!(
-                client.authorize(operation, client.http.post(&origin)),
-                Err(PairedHostError::PresenterOperationUnavailable)
-            ));
-        }
-        assert!(client.take_confirmed_device().is_none());
-        assert!(!format!("{client:?}").contains("private-test-only"));
-    }
-
-    #[tokio::test]
-    async fn presenter_prepare_redirect_never_forwards_the_credential() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let destination = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let origin = format!("http://{}", listener.local_addr().unwrap());
-        let redirect = format!(
-            "http://{}/private-destination",
-            destination.local_addr().unwrap()
-        );
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = Vec::new();
-            while !request.ends_with(b"\r\n\r\n") {
-                assert!(request.len() < 8192);
-                request.push(socket.read_u8().await.unwrap());
-            }
-            assert!(
-                String::from_utf8_lossy(&request)
-                    .to_ascii_lowercase()
-                    .contains("\r\ncontent-length: 2\r\n")
-            );
-            let mut body = [0; 2];
-            socket.read_exact(&mut body).await.unwrap();
-            assert_eq!(&body, b"{}");
-            let reply = format!(
-                "HTTP/1.1 307 Temporary Redirect\r\nLocation: {redirect}\r\nSet-Cookie: hc_console_device=unselected; Path=/; HttpOnly\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-            );
-            socket.write_all(reply.as_bytes()).await.unwrap();
-            socket.shutdown().await.unwrap();
-            String::from_utf8(request).unwrap()
-        });
-        let client = PairedHostClient::for_presenter(&origin, "private-test-only").unwrap();
-        let error = client
-            .post(
-                PairedHostOperation::PrepareCandidate,
-                &serde_json::json!({}),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(
-            error,
-            PairedHostError::Unconfirmed {
-                operation: PairedHostOperation::PrepareCandidate,
-                reason: UnconfirmedReason::Redirect,
-            }
-        );
-        let request = tokio::time::timeout(Duration::from_secs(5), server)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(request.starts_with("POST /console/extensions/frontend/prepare HTTP/1.1\r\n"));
-        assert!(
-            request
-                .to_ascii_lowercase()
-                .contains("\r\nx-paired-host-presenter-credential: private-test-only\r\n")
-        );
-        assert!(
-            tokio::time::timeout(Duration::from_millis(80), destination.accept())
-                .await
-                .is_err()
-        );
-        assert!(!error.to_string().contains("private-test-only"));
-        assert!(!error.to_string().contains("private-destination"));
-    }
-}
-
 fn valid_source_tag(tag: &str) -> bool {
     !tag.is_empty()
         && tag.len() <= 100
@@ -4335,4 +4174,165 @@ fn host_refusal(operation: PairedHostOperation, status: u16, bytes: &[u8]) -> Pa
         _ => return unconfirmed(operation, UnconfirmedReason::UnexpectedResponse),
     };
     PairedHostError::Refused { operation, reason }
+}
+
+#[cfg(test)]
+mod presenter_transport_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn presenter_credential_is_route_limited_and_never_adopts_cookies() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let mut client = PairedHostClient::for_presenter(&origin, "private-test-only").unwrap();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    assert!(request.len() < 8192);
+                    request.push(socket.read_u8().await.unwrap());
+                }
+                requests.push(String::from_utf8(request).unwrap());
+                let body = r#"{"error":"forbidden","code":"console_owner_required"}"#;
+                let reply = format!(
+                    "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nSet-Cookie: hc_console_device=unselected; Path=/; HttpOnly\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(reply.as_bytes()).await.unwrap();
+                socket.shutdown().await.unwrap();
+            }
+            requests
+        });
+        assert_eq!(
+            client.request_pairing("no enrollment").await.unwrap_err(),
+            PairedHostError::PresenterOperationUnavailable
+        );
+        assert_eq!(
+            client
+                .confirm_pairing(PairingCode::new("123456".into()).unwrap())
+                .await
+                .unwrap_err(),
+            PairedHostError::PresenterOperationUnavailable
+        );
+        for _ in 0..2 {
+            assert!(matches!(
+                client.frontend_inventory().await,
+                Err(PairedHostError::Refused {
+                    operation: PairedHostOperation::FrontendInventory,
+                    reason: PairedHostRefusal::ConsoleOwnerRequired
+                })
+            ));
+        }
+        let requests = tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
+        for request in requests {
+            assert!(request.starts_with("GET /console/extensions/frontend/inventory HTTP/1.1\r\n"));
+            let request = request.to_ascii_lowercase();
+            assert!(
+                request.contains("\r\nx-paired-host-presenter-credential: private-test-only\r\n")
+            );
+            assert!(request.contains(&format!("\r\norigin: {origin}\r\n")));
+            assert!(!request.contains("\r\ncookie:") && !request.contains("\r\nauthorization:"));
+        }
+        for operation in [
+            PairedHostOperation::FrontendInventory,
+            PairedHostOperation::FrontendSourceTags,
+            PairedHostOperation::FrontendSourceInspect,
+            PairedHostOperation::PrepareCandidate,
+            PairedHostOperation::FrontendChangeStatus,
+        ] {
+            let request = client
+                .authorize(operation, client.http.get(&origin))
+                .unwrap()
+                .build()
+                .unwrap();
+            assert!(request.headers()["x-paired-host-presenter-credential"].is_sensitive());
+        }
+        for operation in [
+            PairedHostOperation::RequestPairing,
+            PairedHostOperation::ConfirmPairing,
+            PairedHostOperation::ConfirmTerminalPairing,
+            PairedHostOperation::SubmitFrontendChange,
+            PairedHostOperation::CreateExtensionSecretIntent,
+            PairedHostOperation::ExtensionSecretIntentStatus,
+            PairedHostOperation::CancelExtensionSecretIntent,
+        ] {
+            assert!(matches!(
+                client.authorize(operation, client.http.post(&origin)),
+                Err(PairedHostError::PresenterOperationUnavailable)
+            ));
+        }
+        assert!(client.take_confirmed_device().is_none());
+        assert!(!format!("{client:?}").contains("private-test-only"));
+    }
+
+    #[tokio::test]
+    async fn presenter_prepare_redirect_never_forwards_the_credential() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let destination = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let redirect = format!(
+            "http://{}/private-destination",
+            destination.local_addr().unwrap()
+        );
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                assert!(request.len() < 8192);
+                request.push(socket.read_u8().await.unwrap());
+            }
+            assert!(
+                String::from_utf8_lossy(&request)
+                    .to_ascii_lowercase()
+                    .contains("\r\ncontent-length: 2\r\n")
+            );
+            let mut body = [0; 2];
+            socket.read_exact(&mut body).await.unwrap();
+            assert_eq!(&body, b"{}");
+            let reply = format!(
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: {redirect}\r\nSet-Cookie: hc_console_device=unselected; Path=/; HttpOnly\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            socket.write_all(reply.as_bytes()).await.unwrap();
+            socket.shutdown().await.unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        let client = PairedHostClient::for_presenter(&origin, "private-test-only").unwrap();
+        let error = client
+            .post(
+                PairedHostOperation::PrepareCandidate,
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error,
+            PairedHostError::Unconfirmed {
+                operation: PairedHostOperation::PrepareCandidate,
+                reason: UnconfirmedReason::Redirect,
+            }
+        );
+        let request = tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(request.starts_with("POST /console/extensions/frontend/prepare HTTP/1.1\r\n"));
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("\r\nx-paired-host-presenter-credential: private-test-only\r\n")
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), destination.accept())
+                .await
+                .is_err()
+        );
+        assert!(!error.to_string().contains("private-test-only"));
+        assert!(!error.to_string().contains("private-destination"));
+    }
 }

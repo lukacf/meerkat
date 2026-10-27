@@ -433,15 +433,14 @@ impl Write for ApproveHelper {
         Ok(bytes.len())
     }
     fn flush(&mut self) -> io::Result<()> {
-        if !self.sent {
-            if let Some((_, suffix)) = std::str::from_utf8(&self.bytes)
+        if !self.sent
+            && let Some((_, suffix)) = std::str::from_utf8(&self.bytes)
                 .unwrap()
                 .split_once("Type 'approve ")
-            {
-                let (id, _) = suffix.split_once('\'').unwrap();
-                self.input.try_send(Ok(format!("approve {id}"))).unwrap();
-                self.sent = true;
-            }
+        {
+            let (id, _) = suffix.split_once('\'').unwrap();
+            self.input.try_send(Ok(format!("approve {id}"))).unwrap();
+            self.sent = true;
         }
         Ok(())
     }

@@ -18,6 +18,9 @@ pub(super) struct DurableHelperFixture {
 #[path = "custody_recovery_helper_cold_tests.rs"]
 mod custody_recovery_helper_cold_tests;
 
+/// Wraps the fixture's model client (a provider fault, a warm provider).
+type ClientDecorator = Arc<dyn Fn(Arc<dyn LlmClient>) -> Arc<dyn LlmClient> + Send + Sync>;
+
 impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
     pub(super) async fn for_approved_acquisition(
         script: Arc<acquisition_denial::Script>,
@@ -63,7 +66,7 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
     pub(super) async fn for_warm_helper_report_with_provider(
         script: Arc<acquisition_denial::Script>,
         report: Arc<helper_report::Report>,
-        decorate: Arc<dyn Fn(Arc<dyn LlmClient>) -> Arc<dyn LlmClient> + Send + Sync>,
+        decorate: ClientDecorator,
     ) -> (Self, Arc<dyn meerkat_runtime::RuntimeStore>) {
         Self::for_acquisition_mode(
             script,
@@ -110,7 +113,7 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
         warm_report: Option<
             crate::installed_host::controller_first_input_fixture::WarmHelperProfile,
         >,
-        warm_provider: Option<Arc<dyn Fn(Arc<dyn LlmClient>) -> Arc<dyn LlmClient> + Send + Sync>>,
+        warm_provider: Option<ClientDecorator>,
     ) -> (Self, Arc<dyn meerkat_runtime::RuntimeStore>) {
         let (fixture, store, _) = Self::acquisition_mode_with_persistence(
             script,
@@ -165,7 +168,7 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
         warm_report: Option<
             crate::installed_host::controller_first_input_fixture::WarmHelperProfile,
         >,
-        warm_provider: Option<Arc<dyn Fn(Arc<dyn LlmClient>) -> Arc<dyn LlmClient> + Send + Sync>>,
+        warm_provider: Option<ClientDecorator>,
         durable: bool,
         retained: Option<DurableHelperFixture>,
         source_store: Option<
@@ -229,7 +232,7 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
         warm_report: Option<
             crate::installed_host::controller_first_input_fixture::WarmHelperProfile,
         >,
-        warm_provider: Option<Arc<dyn Fn(Arc<dyn LlmClient>) -> Arc<dyn LlmClient> + Send + Sync>>,
+        warm_provider: Option<ClientDecorator>,
         opened: &mut Option<UnifiedRuntime>,
         owners: &mut Option<(Arc<tempfile::TempDir>, Arc<NativeHostLifetime>)>,
         durable: bool,

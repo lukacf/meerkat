@@ -566,37 +566,39 @@ pub(super) async fn run() {
             .unwrap(),
         secrets_before
     );
-    let requests = provider.requests.lock().unwrap();
-    let last = &requests.last().unwrap().body;
-    let calls = last["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|m| m["role"] == "assistant")
-        .flat_map(|m| m["tool_calls"].as_array().into_iter().flatten())
-        .collect::<Vec<_>>();
-    for name in [
-        "toolkit_prepare_services",
-        "setup_prepare",
-        "setup_check",
-        "setup_install",
-        "setup_reconcile",
-        "toolkit_connect_service_account",
-        toolkit_package::READ_RECIPE,
-    ] {
+    {
+        let requests = provider.requests.lock().unwrap();
+        let last = &requests.last().unwrap().body;
+        let calls = last["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["role"] == "assistant")
+            .flat_map(|m| m["tool_calls"].as_array().into_iter().flatten())
+            .collect::<Vec<_>>();
+        for name in [
+            "toolkit_prepare_services",
+            "setup_prepare",
+            "setup_check",
+            "setup_install",
+            "setup_reconcile",
+            "toolkit_connect_service_account",
+            toolkit_package::READ_RECIPE,
+        ] {
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|c| c["function"]["name"] == name)
+                    .count(),
+                1,
+                "exactly one {name}"
+            );
+        }
         assert_eq!(
-            calls
-                .iter()
-                .filter(|c| c["function"]["name"] == name)
-                .count(),
-            1,
-            "exactly one {name}"
+            tool_result(last, PROFILE_CALL),
+            json!({"state":"denied","phase":"client_profile","grant_issued":false})
         );
     }
-    assert_eq!(
-        tool_result(last, PROFILE_CALL),
-        json!({"state":"denied","phase":"client_profile","grant_issued":false})
-    );
     let session_id = meerkat_core::SessionId::parse(
         cli.transcript
             .split("Setup session: ")
@@ -607,7 +609,6 @@ pub(super) async fn run() {
             .unwrap(),
     )
     .unwrap();
-    drop(requests);
     let (_, persistence) = timeout(
         BOUND,
         meerkat::storage_provider::open_realm_persistence_with_layout(

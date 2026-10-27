@@ -70,9 +70,9 @@ impl InstalledAcquisition {
                 self.references.as_ref(),
             )
             .await
-            .inspect_err(|error| {
+            .inspect_err(|_error| {
                 #[cfg(test)]
-                crate::aa1_setup_failure("advance.load", error);
+                crate::aa1_setup_failure("advance.load", _error);
             })?;
         if snapshot.state().terminal_revision != 0 {
             return Ok(SetupWorkerObservation::AcquisitionTerminal);
@@ -105,9 +105,9 @@ impl InstalledAcquisition {
                 context,
             )
             .await
-            .inspect_err(|error| {
+            .inspect_err(|_error| {
                 #[cfg(test)]
-                crate::aa1_setup_failure("advance.prepare_work", error);
+                crate::aa1_setup_failure("advance.prepare_work", _error);
             })?;
         if preparation.input_reference().content_digest
             != ContentDigest::of_bytes(content.as_bytes())
@@ -135,9 +135,9 @@ impl InstalledAcquisition {
                 &self.work_step,
             )
             .await
-            .inspect_err(|error| {
+            .inspect_err(|_error| {
                 #[cfg(test)]
-                crate::aa1_setup_failure("advance.work_step", error);
+                crate::aa1_setup_failure("advance.work_step", _error);
             })?;
         let observed = match step {
             NativeWorkStep::Completed(observed) => observed,
@@ -218,9 +218,9 @@ impl InstalledAcquisition {
                 self.references.as_ref(),
             )
             .await
-            .inspect_err(|error| {
+            .inspect_err(|_error| {
                 #[cfg(test)]
-                crate::aa1_setup_failure("advance.load", error);
+                crate::aa1_setup_failure("advance.load", _error);
             })?;
         if snapshot.state().terminal_revision != 0
             || current.now_ms >= snapshot.request().host().limits.deadline_ms
@@ -241,9 +241,9 @@ impl InstalledAcquisition {
                 &self.work_backend,
             )
             .await
-            .inspect_err(|error| {
+            .inspect_err(|_error| {
                 #[cfg(test)]
-                crate::aa1_setup_failure("advance.load_publication", error);
+                crate::aa1_setup_failure("advance.load_publication", _error);
             })?;
         if published.child().association() != held.original().association()
             || &published.child().association().candidate().target != prepared.target()
@@ -340,9 +340,9 @@ impl NativeSetupWorkOwner for SameHostSetupWorkOwner<'_> {
         self.acquisition
             .observe_private_work(preparation)
             .await
-            .inspect_err(|error| {
+            .inspect_err(|_error| {
                 #[cfg(test)]
-                crate::aa1_setup_failure("observe.private_work", error);
+                crate::aa1_setup_failure("observe.private_work", _error);
             })
     }
 
@@ -556,9 +556,9 @@ impl NativeSetupWorkOwner for SameHostSetupWorkOwner<'_> {
                         },
                     )
                     .await
-                    .inspect_err(|error| {
+                    .inspect_err(|_error| {
                         #[cfg(test)]
-                        crate::aa1_setup_failure("complete.publish_helper", error);
+                        crate::aa1_setup_failure("complete.publish_helper", _error);
                     })?
             }
             Err(error) => return Err(error),

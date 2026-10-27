@@ -1225,14 +1225,15 @@ mod tests {
                 .map(|index| digest(index).as_str().to_owned())
                 .collect()
         );
-        let calls = host.calls.lock().unwrap();
-        assert_eq!(
-            &calls[2..4],
-            first_attempt.as_slice(),
-            "even earlier admitted rows are freshly reread"
-        );
-        assert_eq!(calls.len(), 13);
-        drop(calls);
+        {
+            let calls = host.calls.lock().unwrap();
+            assert_eq!(
+                &calls[2..4],
+                first_attempt.as_slice(),
+                "even earlier admitted rows are freshly reread"
+            );
+            assert_eq!(calls.len(), 13);
+        }
         host.finish().await;
     }
 

@@ -371,11 +371,12 @@ async fn exact_approval_create_is_settled_before_private_completion_drain_and_re
     assert_eq!(host.count(), 3);
     let audit = std::fs::read_to_string(setup.approvals.store_path()).unwrap();
     assert_private(&audit);
-    let requests = host.requests.lock().unwrap();
-    assert_eq!(requests[2].body, request());
-    assert_eq!(requests[2].method, "POST");
-    assert_eq!(requests[2].path, INTENTS);
-    drop(requests);
+    {
+        let requests = host.requests.lock().unwrap();
+        assert_eq!(requests[2].body, request());
+        assert_eq!(requests[2].method, "POST");
+        assert_eq!(requests[2].path, INTENTS);
+    }
     host.finish().await;
 }
 

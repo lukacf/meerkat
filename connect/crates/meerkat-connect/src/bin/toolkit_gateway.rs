@@ -262,19 +262,19 @@ fn main() -> std::process::ExitCode {
     }
 }
 
+/// The gateway's parsed arguments: its two descriptors, the control listen
+/// address, the native owner startup and the optional ready descriptor.
 #[cfg(unix)]
-fn parse_args(
-    args: &[String],
-) -> Result<
-    (
-        i32,
-        i32,
-        Option<meerkat_mobkit::runtime::cross_mob_control::ControlListenAddr>,
-        toolkit_mobkit::installed_host::NativeOwnerStartup,
-        Option<i32>,
-    ),
-    &'static str,
-> {
+type GatewayArgs = (
+    i32,
+    i32,
+    Option<meerkat_mobkit::runtime::cross_mob_control::ControlListenAddr>,
+    toolkit_mobkit::installed_host::NativeOwnerStartup,
+    Option<i32>,
+);
+
+#[cfg(unix)]
+fn parse_args(args: &[String]) -> Result<GatewayArgs, &'static str> {
     use meerkat_mobkit::runtime::cross_mob_control::ControlListenAddr;
     let mut read_fd = None;
     let mut write_fd = None;

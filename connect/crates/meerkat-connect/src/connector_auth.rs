@@ -33,7 +33,8 @@ impl ConnectorAuth {
     }
 
     pub(crate) fn router(&self) -> meerkat::McpRouter {
-        meerkat::McpRouter::new().with_call_context_provider(self.context_provider.clone())
+        meerkat::McpRouter::new_with_stdio_profile(meerkat::McpStdioLaunchProfile::trusted_host())
+            .with_call_context_provider(self.context_provider.clone())
     }
 }
 

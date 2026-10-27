@@ -532,7 +532,9 @@ fn provision_selected_source(
         // definitions in the artifact without granting operation authority.
         use meerkat_core::AgentToolDispatcher;
         let catalog = meerkat_tools::CatalogControlDispatcher::new(
-            Arc::new(meerkat::McpRouter::new()),
+            Arc::new(meerkat::McpRouter::new_with_stdio_profile(
+                meerkat::McpStdioLaunchProfile::trusted_host(),
+            )),
             Arc::new(meerkat_tools::CatalogControlVisibilityProvider::new()),
         );
         surface.extend(catalog.tools().iter().map(|tool| tool.identity()));

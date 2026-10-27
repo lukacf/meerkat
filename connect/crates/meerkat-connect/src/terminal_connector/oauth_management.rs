@@ -157,7 +157,6 @@ fn phase(status: &meerkat::ConnectorAuthStatus) -> &'static str {
         meerkat::ConnectorAuthPhase::Authorized => "authorized",
         meerkat::ConnectorAuthPhase::AuthorizationRequired => "authorization_required",
         meerkat::ConnectorAuthPhase::ReauthRequired => "reauth_required",
-        _ => "other_native_phase",
     }
 }
 

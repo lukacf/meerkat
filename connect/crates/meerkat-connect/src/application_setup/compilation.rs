@@ -285,7 +285,7 @@ impl ApplicationSetupCompilation {
         owner: crate::resources::LocalRoundOwner,
     ) -> Result<
         Arc<crate::resources::LocalRoundAttempts>,
-        (crate::resources::LocalRoundOwner, String),
+        Box<(crate::resources::LocalRoundOwner, String)>,
     > {
         self.resource.retain_local_round(owner)
     }

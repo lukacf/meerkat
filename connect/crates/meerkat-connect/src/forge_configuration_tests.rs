@@ -452,11 +452,12 @@ async fn forge_recovery_menu_user_exit_preserves_locator_without_host_or_approva
             *front.binding.state.lock().unwrap(),
             State::Retired
         ));
-        let state = front.binding.configuration.lock().unwrap();
-        assert!(state.recovered.is_none() && state.references.is_empty());
-        assert!(state.prepared.is_empty() && state.armed.is_none());
-        assert!(state.spent_calls.is_empty() && state.submitted.is_empty() && !state.busy);
-        drop(state);
+        {
+            let state = front.binding.configuration.lock().unwrap();
+            assert!(state.recovered.is_none() && state.references.is_empty());
+            assert!(state.prepared.is_empty() && state.armed.is_none());
+            assert!(state.spent_calls.is_empty() && state.submitted.is_empty() && !state.busy);
+        }
         assert_eq!(std::fs::read(&locator).unwrap(), original_locator);
         assert_eq!(std::fs::read_dir(previous.path()).unwrap().count(), 1);
         assert_eq!(std::fs::read_dir(current.path()).unwrap().count(), 0);

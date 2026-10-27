@@ -56,7 +56,9 @@ fn fixture() -> Fixture {
 fn adapter() -> Arc<McpRouterAdapter> {
     // Empty native router only. These controls start no MCP server, model,
     // provider request or native actor, and do not establish native admission.
-    Arc::new(McpRouterAdapter::new(meerkat::McpRouter::new()))
+    Arc::new(McpRouterAdapter::new(
+        meerkat::McpRouter::new_with_stdio_profile(meerkat::McpStdioLaunchProfile::trusted_host()),
+    ))
 }
 
 #[cfg(all(unix, feature = "console"))]
@@ -172,10 +174,11 @@ async fn unrelated_and_non_member_constructions_keep_the_exact_adapter() {
 async fn selected_member_under_a_different_role_refuses_without_binding() {
     let fixture = fixture();
     let adapter = adapter();
-    for member in [MobMemberBinding {
-        role: "different-role".into(),
-        ..fixture.selected.clone()
-    }] {
+    {
+        let member = MobMemberBinding {
+            role: "different-role".into(),
+            ..fixture.selected.clone()
+        };
         assert!(
             fixture
                 .composer

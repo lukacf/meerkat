@@ -466,6 +466,7 @@ async fn run(cli: Cli) -> Result<(), ConnectError> {
                             if matches!(action, Ok(true)) { continue; }
                             // The native registration is already consumed.
                             // Never use ConnectSession::close on this owner.
+                            #[allow(clippy::manual_try_fold, reason = "combine_cleanup keeps every error; try_fold would stop at the first")]
                             let cleanup = failed_cleanups.into_iter().fold(Ok(()), |prior, error| combine_cleanup(prior, Err(error)));
                             break match action {
                                 Ok(_) => cleanup,

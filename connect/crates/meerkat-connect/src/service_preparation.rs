@@ -314,7 +314,7 @@ impl LazySetup {
             true,
             false,
             false,
-            McpRouter::new(),
+            McpRouter::new_with_stdio_profile(meerkat::McpStdioLaunchProfile::trusted_host()),
             None,
             None,
             Some(forge),
@@ -337,7 +337,7 @@ impl LazySetup {
             include_forge,
             false,
             false,
-            McpRouter::new(),
+            McpRouter::new_with_stdio_profile(meerkat::McpStdioLaunchProfile::trusted_host()),
         );
         drop(presenter);
         setup
@@ -354,7 +354,7 @@ impl LazySetup {
             false,
             true,
             false,
-            McpRouter::new(),
+            McpRouter::new_with_stdio_profile(meerkat::McpStdioLaunchProfile::trusted_host()),
         );
         drop(presenter);
         setup
@@ -366,7 +366,9 @@ impl LazySetup {
     /// authentication, usable attachment and full service availability remain
     /// separate; the private-pipe service mode is still unavailable.
     pub(crate) fn private_services() -> (Self, ServicePreparationPresenter) {
-        Self::private_services_with_router(McpRouter::new())
+        Self::private_services_with_router(McpRouter::new_with_stdio_profile(
+            meerkat::McpStdioLaunchProfile::trusted_host(),
+        ))
     }
 
     /// Retain the caller's fresh native router, configured before session
@@ -401,7 +403,7 @@ impl LazySetup {
             true,
             false,
             false,
-            McpRouter::new(),
+            McpRouter::new_with_stdio_profile(meerkat::McpStdioLaunchProfile::trusted_host()),
         )
     }
 
@@ -441,7 +443,7 @@ impl LazySetup {
             false,
             false,
             true,
-            McpRouter::new(),
+            McpRouter::new_with_stdio_profile(meerkat::McpStdioLaunchProfile::trusted_host()),
             Some(installs),
             None,
             None,

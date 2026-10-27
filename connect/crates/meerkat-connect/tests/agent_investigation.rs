@@ -359,8 +359,10 @@ async fn real_agent_catalog_investigation() -> Result {
     evidence.record(json!({"kind":"resolved_native_policy","allowed":ALLOWED,
         "explicit_denial_checks":DENIED,"unrestricted":policy.is_unrestricted()}))?;
 
-    let mut config = Config::default();
-    config.max_tokens = Some(4096);
+    let mut config = Config {
+        max_tokens: Some(4096),
+        ..Default::default()
+    };
     config.retry.max_retries = 0;
     config.model_fallback.enabled = Some(false);
     // Native factory derives DisableAll for provider-native tools from the

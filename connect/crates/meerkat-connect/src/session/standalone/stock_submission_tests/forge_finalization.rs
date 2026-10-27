@@ -16,7 +16,7 @@ use axum::{
     response::IntoResponse,
 };
 use meerkat_core::service::{SessionHistoryQuery, SessionServiceHistoryExt};
-use meerkat_core::{AgentToolDispatcher, ToolCallView, ToolDispatchContext};
+use meerkat_core::{ToolCallView, ToolDispatchContext};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -611,7 +611,7 @@ async fn generic_submit_survives_native_service_finalization_in_same_conversatio
         }
         old.setup.retire();
         let Opened {continuation,client,model_peer,_directory:directory,mcp_calls,stock,store,setup,approvals,
-            connectors,approval_presenter,refused_close,session:_,..}=old;
+            connectors,approval_presenter,refused_close,..}=old;
         drop((stock,store,setup,approvals,connectors,approval_presenter,refused_close));
         retained_directory=Some(directory);
         retained_model_peer=model_peer;
@@ -748,7 +748,13 @@ async fn generic_submit_survives_native_service_finalization_in_same_conversatio
         Some(closed) => match closed.finish_host_cleanup().await {
             Ok(()) => Ok(()),
             Err((held, error)) => {
-                failed_closed = Some(held);
+                #[allow(
+                    unused_assignments,
+                    reason = "keeps the setup whose cleanup failed alive until the test ends"
+                )]
+                {
+                    failed_closed = Some(held);
+                }
                 Err(error)
             }
         },

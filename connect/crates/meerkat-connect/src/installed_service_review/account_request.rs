@@ -123,7 +123,7 @@ enum AccountState {
 }
 
 #[derive(Serialize)]
-struct AccountReply {
+pub(crate) struct AccountReply {
     state: AccountState,
     login_completed: bool,
     access_reviewed: bool,
@@ -286,7 +286,7 @@ impl InstalledRequest {
 
 /// An in-call rendezvous with the original awaited dispatcher. A response is
 /// only a current check point, never a reusable permit or native entry ticket.
-pub(super) struct CurrentRequest(mpsc::Sender<oneshot::Sender<bool>>);
+pub(crate) struct CurrentRequest(mpsc::Sender<oneshot::Sender<bool>>);
 impl CurrentRequest {
     pub(super) async fn check(&self) -> bool {
         let (send, receive) = oneshot::channel();
@@ -322,7 +322,7 @@ impl ReviewControl {
 }
 
 #[derive(Clone)]
-pub(super) struct ReviewCancellation {
+pub(crate) struct ReviewCancellation {
     cancelled: tokio::sync::watch::Receiver<bool>,
     created: tokio::sync::watch::Sender<Option<ApprovalId>>,
 }

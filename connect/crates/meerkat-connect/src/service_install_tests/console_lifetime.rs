@@ -192,19 +192,20 @@ async fn actual_dispatch_loss_and_unknown_drain_login_without_clearing_uncertain
                 reply["result"]["observation"]["uncertain"],
                 outcome != "committed"
             );
-            let state = f.approvals.shared.state().unwrap();
-            let attempt = state.attempt.as_ref().unwrap();
-            assert!(attempt.service_entry.is_none());
-            assert_eq!(
-                attempt.custody,
-                if outcome == "committed" {
-                    Custody::Settled(LiveBridgeEffectOutcome::Committed)
-                } else {
-                    Custody::SpentUncertain
-                }
-            );
-            assert!(attempt.readback.is_some());
-            drop(state);
+            {
+                let state = f.approvals.shared.state().unwrap();
+                let attempt = state.attempt.as_ref().unwrap();
+                assert!(attempt.service_entry.is_none());
+                assert_eq!(
+                    attempt.custody,
+                    if outcome == "committed" {
+                        Custody::Settled(LiveBridgeEffectOutcome::Committed)
+                    } else {
+                        Custody::SpentUncertain
+                    }
+                );
+                assert!(attempt.readback.is_some());
+            }
             assert_eq!(
                 f.approvals.shared.service.get(&approval).unwrap().status,
                 ApprovalStatus::Approved

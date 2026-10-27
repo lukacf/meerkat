@@ -196,7 +196,7 @@ pub(crate) fn channel(artifact_parent: PathBuf) -> (LocalSetupApprovals, LocalSe
     )
 }
 
-pub(super) struct Enrollment {
+pub(crate) struct Enrollment {
     console: Option<Arc<OnceLock<super::console_setup::ConsoleSetup>>>,
     pub(super) presenter: Option<ApprovalPresenter>,
     pub(super) accounts: Option<InstalledAccountRequests>,
@@ -222,7 +222,7 @@ type NextPrompt = BoxFuture<'static, (Enrollment, Option<SetupEvent>)>;
 /// Waiting on exact existing receivers needs no task, reader, identity map or
 /// lifecycle registry. Dropping the set drops those presenters, which retires
 /// unanswered attempts through their existing LocalApprovals owner.
-pub(super) struct SetupPresenters {
+pub(crate) struct SetupPresenters {
     incoming: Option<mpsc::Receiver<Enrollment>>,
     waiting: FuturesUnordered<NextPrompt>,
 }

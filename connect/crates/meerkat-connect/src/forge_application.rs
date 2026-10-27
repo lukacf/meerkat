@@ -242,8 +242,10 @@ mod tests {
             r#"{"application_result":{"custom_state":"configured"}}"#,
             r#"{"status":"unknown"}"#,
         ] {
-            let mut state = ConfigurationState::default();
-            state.uncertain = Some(Some(reference.change_id.clone()));
+            let mut state = ConfigurationState {
+                uncertain: Some(Some(reference.change_id.clone())),
+                ..Default::default()
+            };
             state.submitted.insert(reference.change_id.clone());
             let before = state.uncertain.clone();
             let raw = RawValue::from_string(raw.into()).unwrap();
@@ -316,9 +318,10 @@ mod tests {
         same_origin: bool,
         body: Vec<u8>,
     }
+    type ScriptedReplies = Arc<Mutex<std::collections::VecDeque<(u16, Option<String>)>>>;
     struct OutcomePeer {
         origin: String,
-        replies: Arc<Mutex<std::collections::VecDeque<(u16, Option<String>)>>>,
+        replies: ScriptedReplies,
         requests: Arc<Mutex<Vec<OutcomeRequest>>>,
         stop: oneshot::Sender<()>,
         task: tokio::task::JoinHandle<()>,
@@ -409,8 +412,7 @@ mod tests {
         async fn finish(self) -> Vec<OutcomeRequest> {
             let _ = self.stop.send(());
             self.task.await.unwrap();
-            let requests = self.requests.lock().unwrap().clone();
-            requests
+            self.requests.lock().unwrap().clone()
         }
     }
     fn outcome_front(
@@ -763,11 +765,13 @@ mod tests {
         let outcome: SubmissionOutcome = parse(known_outcome()).unwrap();
         let raw = RawValue::from_string(OUTCOME_OBSERVATION.into()).unwrap();
         for variant in 0..7 {
-            let mut state = ConfigurationState::default();
-            state.busy = true;
-            state.uncertain = Some(Some("custom:delta-7".into()));
+            let mut state = ConfigurationState {
+                busy: true,
+                uncertain: Some(Some("custom:delta-7".into())),
+                inventory: Some(json!({"revision":1})),
+                ..Default::default()
+            };
             state.submitted.insert("custom:delta-7".into());
-            state.inventory = Some(json!({"revision":1}));
             match variant {
                 0 => state.busy = false,
                 1 => state.uncertain = Some(Some("another-change".into())),

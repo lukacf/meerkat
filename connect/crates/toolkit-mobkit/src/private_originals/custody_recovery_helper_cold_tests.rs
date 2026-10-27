@@ -399,8 +399,14 @@ async fn exercise(case: Case) {
             Ok(((fixture, next_history, retained), next_script)) => {
                 active = Some(Arc::new(fixture));
                 close = Some(active.as_ref().unwrap().retained_close_for_test());
-                history = Some(next_history);
-                carrier = Some(retained);
+                #[allow(
+                    unused_assignments,
+                    reason = "keeps the reopened history and carrier alive until the test ends"
+                )]
+                {
+                    history = Some(next_history);
+                    carrier = Some(retained);
+                }
                 next_script.release_first_response();
                 script = Some(next_script);
             }

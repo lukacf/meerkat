@@ -498,10 +498,12 @@ async fn service_v3_viewer_expiry_closes_before_original_init_settles() {
 #[tokio::test]
 async fn service_composition_keeps_frontends_absent_and_unchecked_install_refused() {
     let (default, _default_worker) = LazySetup::private_services();
-    let router = meerkat::McpRouter::new();
+    let router =
+        meerkat::McpRouter::new_with_stdio_profile(meerkat::McpStdioLaunchProfile::trusted_host());
     let original_slot = router.external_surface_handle_slot().unwrap();
     // Native unbound handles observe construction identity, not authority.
-    let replacement_router = meerkat::McpRouter::new();
+    let replacement_router =
+        meerkat::McpRouter::new_with_stdio_profile(meerkat::McpStdioLaunchProfile::trusted_host());
     let replacement_slot = replacement_router.external_surface_handle_slot().unwrap();
     let replacement = replacement_slot.read().unwrap().clone();
     assert!(!Arc::ptr_eq(&original_slot.read().unwrap(), &replacement));

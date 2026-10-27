@@ -36,6 +36,9 @@ pub(super) fn child_id(
         .map_err(|_| HostLifetimeError::InvalidSelection)
 }
 
+/// A selected target and the grant lineage it is issued under.
+type TargetLineage = (Option<GrantTarget>, Vec<GrantLineageRef>);
+
 pub(super) fn issue_targets(
     owner: &ToolkitOriginalOwner,
     application: &PrincipalRef,
@@ -44,7 +47,7 @@ pub(super) fn issue_targets(
     origin: &HelperSetupOrigin,
     find_id: &EvidenceId,
     selected: &[CompiledAgentSetupTarget],
-) -> Result<Vec<(Option<GrantTarget>, Vec<GrantLineageRef>)>, HostLifetimeError> {
+) -> Result<Vec<TargetLineage>, HostLifetimeError> {
     targets::validate_compiled(selected)?;
     selected
         .iter()

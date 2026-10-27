@@ -50,23 +50,35 @@ fn repeated_preparations_are_independent_and_visible_rows_never_union_or_replay_
     let b = tool("b");
     assert!(
         selected
-            .visible_observation(id.clone(), &[a.clone()])
+            .visible_observation(id.clone(), std::slice::from_ref(&a))
             .is_err()
     );
     selected
-        .prepared_observation(id.clone(), &member("worker"), &surface(&[a.clone()]))
+        .prepared_observation(
+            id.clone(),
+            &member("worker"),
+            &surface(std::slice::from_ref(&a)),
+        )
         .unwrap();
     selected
-        .prepared_observation(id.clone(), &member("worker"), &surface(&[a.clone()]))
+        .prepared_observation(
+            id.clone(),
+            &member("worker"),
+            &surface(std::slice::from_ref(&a)),
+        )
         .unwrap();
     selected
-        .prepared_observation(id.clone(), &member("worker"), &surface(&[b.clone()]))
+        .prepared_observation(
+            id.clone(),
+            &member("worker"),
+            &surface(std::slice::from_ref(&b)),
+        )
         .unwrap();
     selected
-        .visible_observation(id.clone(), &[a.clone()])
+        .visible_observation(id.clone(), std::slice::from_ref(&a))
         .unwrap();
     selected
-        .visible_observation(id.clone(), &[b.clone()])
+        .visible_observation(id.clone(), std::slice::from_ref(&b))
         .unwrap();
     assert!(
         selected
@@ -75,25 +87,29 @@ fn repeated_preparations_are_independent_and_visible_rows_never_union_or_replay_
     );
     assert!(
         selected
-            .visible_observation(identity("another-member"), &[a.clone()])
+            .visible_observation(identity("another-member"), std::slice::from_ref(&a))
             .is_err()
     );
     let mut other_session = id.clone();
     other_session["session_document"] = json!("another-session");
     assert!(
         selected
-            .visible_observation(other_session, &[a.clone()])
+            .visible_observation(other_session, std::slice::from_ref(&a))
             .is_err()
     );
     let restarted = owner(&path);
     assert!(
         restarted
-            .visible_observation(id.clone(), &[a.clone()])
+            .visible_observation(id.clone(), std::slice::from_ref(&a))
             .is_err(),
         "disk observations cannot certify a new process's construction"
     );
     restarted
-        .prepared_observation(id.clone(), &member("worker"), &surface(&[a.clone()]))
+        .prepared_observation(
+            id.clone(),
+            &member("worker"),
+            &surface(std::slice::from_ref(&a)),
+        )
         .unwrap();
     restarted.visible_observation(id, &[a]).unwrap();
     assert_eq!(
@@ -136,7 +152,7 @@ fn helper_requires_exact_report_and_full_identity_conflicts_remain_refusals() {
         .prepared_observation(
             identity("helper"),
             &member("helper"),
-            &surface(&[report.clone()]),
+            &surface(std::slice::from_ref(&report)),
         )
         .unwrap();
     selected

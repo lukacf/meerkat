@@ -792,11 +792,14 @@ pub enum ForgePrompt {
     #[doc(hidden)]
     Operation(configuration::ForgeOperation),
 }
+/// A captured selection and the acknowledgement its sender waits for.
+type CapturedReply = (Result<Captured, ForgeError>, oneshot::Sender<()>);
+
 #[doc(hidden)]
 pub struct ForgeSelection {
     binding: Arc<Binding>,
     token: Arc<()>,
-    response: Option<oneshot::Sender<(Result<Captured, ForgeError>, oneshot::Sender<()>)>>,
+    response: Option<oneshot::Sender<CapturedReply>>,
     prior: Option<Captured>,
 }
 impl ForgeSelection {

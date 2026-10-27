@@ -30,6 +30,8 @@ pub mod forge;
 mod frontend_catalog;
 pub mod host_selection;
 pub mod installed_service_review;
+mod owned_fd;
+// The scripted model peer the lib's tests share with the integration tests.
 pub mod paired_host;
 pub mod paired_host_device;
 mod paired_host_stdio;
@@ -50,6 +52,9 @@ pub mod setup;
 pub mod stdio;
 pub mod terminal;
 pub mod terminal_connector;
+#[cfg(test)]
+#[path = "../tests/support/native_model_peer.rs"]
+mod test_model_peer;
 
 pub use paired_host_tool::{
     PAIRED_HOST_PREPARATION_INSTRUCTIONS, PAIRED_HOST_PREPARATION_TOOLS, PairedHostPreparationTools,

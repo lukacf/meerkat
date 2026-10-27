@@ -542,7 +542,6 @@ async fn reviewed_original_runs_enrolled_acquisition_and_one_controller_only_hel
     ))
     .catch_unwind()
     .await;
-    drop(checkpoint);
     let cleanup = fixture.shutdown().await;
     assert!(cleanup.is_ok(), "{cleanup:?}");
     match result {

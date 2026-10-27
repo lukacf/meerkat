@@ -95,7 +95,7 @@ impl ServiceMcpSelection {
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct StoredServiceMcpSelection {
+pub(in crate::private_originals) struct StoredServiceMcpSelection {
     pub(super) server: String,
     // Explicit null is native NoConnector. An absent whole selection is legacy.
     pub(super) connector: Option<McpConnectorBinding>,

@@ -23,7 +23,7 @@ name: CI
 #   governance-gates - the typed governance gates (rmat-audit, seam-inventory,
 #                     runtime authority, machine-authority docs) when machine
 #                     authority or a dogma document changed
-#   tlc-audits      - (x3) the hand-written TLC audit shards on a
+#   tlc-audits      - (x4) the hand-written TLC audit shards on a
 #                     machine-authority change
 #   clippy (xN)     - one lane per shard of directly changed packages:
 #                     clippy --no-deps --all-features over every target; in a
@@ -926,8 +926,9 @@ jobs:
   # in `ratchets` only proves the artifacts match the DSL). Each shard of
   # the canonical TLC lane needs only a JDK and the TLC jar
   # (setup-tlc-ci; the audit parts never run xtask), runs in parallel, and
-  # fits the PR budget: three shards of 396-506 s of audits on a hosted
-  # runner, where two ran 592 and 812 s on run 38859112297.
+  # fits the PR budget: four shards of about 644-695 s of audits on a
+  # hosted runner, where three ran 758-976 s on run 40434437174 (and up to
+  # 1046 s on the slowest of the 40 pull-request runs before it).
   # The `machine-verify --all` sweep stays on nightly, the release gate and
   # the release-tag graph.
   tlc-audits:
@@ -942,7 +943,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [audits-a, audits-b, audits-c]
+        part: [audits-a, audits-b, audits-c, audits-d]
     env:
       # A 4-vCPU runner: four TLC workers, and a heap that leaves room for
       # the runner.

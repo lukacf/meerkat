@@ -576,16 +576,18 @@ all_out="$(lane_part_output)" || failed_parts+=" all"
 a_out="$(lane_part_output --part audits-a)" || failed_parts+=" audits-a"
 b_out="$(lane_part_output --part audits-b)" || failed_parts+=" audits-b"
 c_out="$(lane_part_output --part audits-c)" || failed_parts+=" audits-c"
+d_out="$(lane_part_output --part audits-d)" || failed_parts+=" audits-d"
 mv_out="$(lane_part_output --part machine-verify)" || failed_parts+=" machine-verify"
 if [ -z "$failed_parts" ] \
   && [ -n "$(printf '%s\n' "$a_out" | audit_lines)" ] \
   && [ -n "$(printf '%s\n' "$b_out" | audit_lines)" ] \
   && [ -n "$(printf '%s\n' "$c_out" | audit_lines)" ] \
+  && [ -n "$(printf '%s\n' "$d_out" | audit_lines)" ] \
   && [ -z "$(printf '%s\n' "$mv_out" | audit_lines)" ] \
   && printf '%s\n' "$mv_out" | grep -Fq 'running bounded adaptive_mob_bundle layer_terminal_feedback TLC witness' \
-  && ! printf '%s\n' "$a_out" "$b_out" "$c_out" | grep -Fq 'running bounded adaptive_mob_bundle' \
-  && [ -z "$( (printf '%s\n' "$a_out" | audit_lines; printf '%s\n' "$b_out" | audit_lines; printf '%s\n' "$c_out" | audit_lines) | sort | uniq -d)" ] \
-  && [ "$( (printf '%s\n' "$a_out"; printf '%s\n' "$b_out"; printf '%s\n' "$c_out") | audit_lines)" = "$(printf '%s\n' "$all_out" | audit_lines)" ]; then
+  && ! printf '%s\n' "$a_out" "$b_out" "$c_out" "$d_out" | grep -Fq 'running bounded adaptive_mob_bundle' \
+  && [ -z "$( (printf '%s\n' "$a_out" | audit_lines; printf '%s\n' "$b_out" | audit_lines; printf '%s\n' "$c_out" | audit_lines; printf '%s\n' "$d_out" | audit_lines) | sort | uniq -d)" ] \
+  && [ "$( (printf '%s\n' "$a_out"; printf '%s\n' "$b_out"; printf '%s\n' "$c_out"; printf '%s\n' "$d_out") | audit_lines)" = "$(printf '%s\n' "$all_out" | audit_lines)" ]; then
   ok "TLC lane parts: each hand audit runs in exactly one shard, machine-verify runs none, and the shards cover the whole lane"
 else
   bad "TLC lane parts drop, duplicate, or misplace a hand audit, or the machine-verify part runs one${failed_parts:+ (failed parts:${failed_parts})}"
@@ -595,6 +597,7 @@ else
       audits-a) show_tail audits-a "$a_out" ;;
       audits-b) show_tail audits-b "$b_out" ;;
       audits-c) show_tail audits-c "$c_out" ;;
+      audits-d) show_tail audits-d "$d_out" ;;
       machine-verify) show_tail machine-verify "$mv_out" ;;
     esac
   done

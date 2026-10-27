@@ -1,12 +1,67 @@
 # Forge native service host composition
 
-This application library binds Forge's compiled GHE programs to Connect's real
-`CollectionProgram` and `CommittedCollectionResult` interfaces. It has not been
-compiled or installed. The final application executable is still pending the
-protected entrypoint, closed mapping and close-on-retirement APIs from Connect.
-Do not launch Connect's ordinary `--stdio` mode or an acceptance example in its
-place. The intended application executable name is `forge-service-host`; no
-installed path, artifact identity or launcher command is assigned here.
+This application binds Forge's compiled GHE programs to Connect's real
+`CollectionProgram` and `CommittedCollectionResult` interfaces. The Linux
+`forge-service-host` executable and catalog are implemented as source, but have
+not been compiled or installed. They use Connect's reviewed protected entry,
+closed mapping and original retirement owner. No installed path or artifact
+identity is assigned here. Connect's ordinary `--stdio` and acceptance examples
+do not replace this application entry.
+
+## Protected entry contract
+
+The source-defined command is:
+
+```text
+forge-service-host --connect-protected-service --parent-fd N --mapping-fd M
+```
+
+This is not a released command. The root launcher transfers original protocol
+stdin at FD 0 and stdout at FD 1. FD 2 is reserved. N and M are distinct open
+descriptors >= 3, written in canonical decimal. The exact option order is
+required; unknown, duplicate, missing, non-UTF-8 or extra arguments refuse.
+The private startup boundary verifies all four raw descriptors are open,
+adds close-on-exec and transfers each into `OwnedFd` exactly once. It never
+duplicates descriptors, initializes standard I/O wrappers, reopens a path or
+creates replacement pipes. The boundary is main's first application action;
+a process-wide guard prevents a second acquisition even after failure. Unsafe
+code is limited to this private binary module; the library still forbids it.
+
+Immediately afterward `ProtectedServiceInputs::adopt` verifies the actual
+objects, parent, sealed mapping, identity and installation. Only then does main
+create a Tokio runtime, start the catalog and join the retained owner. Errors
+exit nonzero without reflecting private arguments or native error bodies.
+Non-Linux entry refuses without fallback. Root still owns pre-exec and helper
+isolation, controlled loader environment, namespaces, original reservation,
+process/descendant custody and joined I/O. Descriptor privacy is not isolation.
+
+The exact compiled mapping selection is:
+
+| Field | Value |
+| --- | --- |
+| `application.application_id` | `meerkat-forge` |
+| `source_selection` | `forge.ghe-collections.v1` |
+| `catalog_id` | `forge.ghe-collections.v1` |
+| collection `family` | `official-github` |
+| collection `profile` | `enterprise-selected-reads` |
+| collection `agent` | `forge-ingestion` |
+
+These are behavior selectors, not authenticated principals or installed
+receipts. Source/requirement IDs and original resources remain separate. The
+catalog rejects a mismatched selection/profile/agent, an unknown program, extra
+or duplicate operations, or program limits exceeding the original source's
+shared limits. It performs no callback I/O or native admission. Actual native
+commissioning, endpoint/account checks and original caller authority remain
+required. Other service families need their own compiled adapters.
+
+Two application integration gates remain explicit: the public Python SDK must
+adopt root-launched original pipes without spawning a replacement or taking
+root process custody; historical parser data must be exported/retained alongside
+the matching SDK-validated final collection report. This executable currently
+retains parser data in memory until original owner close. It does not persist or
+export those data. Its exit status describes owner closure only, not durable
+ingestion. The source must not be presented as complete ingestion or installed
+acceptance while these gates remain open.
 
 ## Current source
 
@@ -54,8 +109,6 @@ fields. It runs the existing pure constructor checks and requires an exact
 resource round trip. Unknown or ignored fields, executable commands and native
 readiness flags are refused. This decodes selection intent only; the native
 owner still supplies the actual target, original caller and final report.
-The protected entry source contract is now
-available for integration, but this library has no executable entry yet.
 Repository metadata and revision-bearing historical check support remain separate inventory
 requirements.
 
@@ -77,16 +130,22 @@ No data-export protocol or successful ingestion claim is added here.
 
 ## Dependency and verification limits
 
-The manifest pins Connect `193dcc298c7811b37eab0c396cbf73ebca1f3073` and uses the
+The manifest pins Connect `4ab7bbed23b7cb7f94064085502ae2421dbed040` and uses the
 same Core development patch graph as that commit's native workspace. It stays
 separate from the pure serde-only GHE crate and the released Forge runtime.
 There is no lockfile or native build result yet. Formatting parses the source;
 it does not typecheck the APIs, resolve the native graph or execute controls.
 
-Ten native-crate controls cover invalid target selectors, configuration
+Fourteen native-crate controls cover invalid target selectors, configuration
 and account declaration refusal, operation ceilings, the compiled catalog and
 closed resource decoder, factory composition without a configuration, separate
-attempt configuration retention, and repeated `begin`. They remain unrun.
+attempt configuration retention, repeated `begin`, compiled catalog selectors
+and ceilings, and closed descriptor argument parsing. They remain unrun.
+Linux ownership controls must also prove exact descriptor numbers, no duplicate
+FD 0/1 owners, CLOEXEC before helpers, closed/aliased/wrong-mode object refusal,
+and joined original pipe closure. Parser controls do not establish any of these
+kernel or lifecycle facts. The original process-entry unsafe boundary still
+needs actual Linux qualification on the existing lane.
 The original owner must also exercise real factory target rejection in both
 `accepts_target` and `start`, distinct starts with different installed descriptors,
 and refusal of changed targets within an existing cursor, as well as real

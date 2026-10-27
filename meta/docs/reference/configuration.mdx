@@ -921,6 +921,14 @@ refuses the fork instead.
 | `reactivate_inherited` | Committed with one re-activation row per inherited key; the child needs no activation from the host. | Committed with the re-activation rows, and the child's first turn runs. |
 | `refuse` | Refused before anything is committed. | Refused before anything is committed. |
 
+The Console's side chat fork (`meta/fork_member`) is a host-driven fork whose
+host is the Console. Under `require_explicit_activation` it activates in the
+side chat, as the host, each inherited key whose head the source activated
+itself, with that head's revision and body, superseding the copied row; any
+other inherited key stays inactive, the side chat refuses its first turn
+naming it, and the fork's result lists it (see
+[`meta/fork_member`](/api/rpc)).
+
 A source with no activation rows in the copied prefix forks the same way
 under every policy. The default is the least-privilege choice: no durable
 fork's child runs an instruction that nobody activated for that child.
@@ -994,9 +1002,10 @@ own:
 
 A refused fork commits nothing: no child session, no member and no
 transcript. Meerkat classifies the refusal as `FORK_INSTRUCTION_REFUSED`
-(`-32037` on Meerkat's own JSON-RPC, HTTP 422, CLI exit 57). No method of this
-gateway forks a member, so the gateway itself never answers `-32037`: you meet
-the refusal as the agent's `fork_off` tool error, a council exit reason, or
+(`-32037` on Meerkat's own JSON-RPC, HTTP 422, CLI exit 57). The Console's
+side chat fork (`meta/fork_member`) answers it as `-32037`; no other method of
+this gateway forks a member, so elsewhere you meet the refusal as the agent's
+`fork_off` tool error, a council exit reason, or
 `MobError::ForkInstructionRefused { source_member_id, refusal }` from the Rust
 API. Its structured data:
 

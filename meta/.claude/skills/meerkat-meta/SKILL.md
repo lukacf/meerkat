@@ -239,6 +239,8 @@ Current HTTP routes to remember:
 
 Console projection is contract-boundary code. Prefer changing `console_aggregator`, `http_console`, `console/src/lib/adapters.ts`, or `packages/console-core` rather than leaking raw runtime text into React components.
 
+Side chats (`crates/meerkat-meta/src/side_chat.rs`, `console/src/lib/side-chat.ts`): the Console's `meta/fork_member` durably forks an agent's transcript into a new mob-plane member the human continues in, beside the agent. The child takes the source's role, profile and model overrides, runtime mode and inherited labels; it is never wired (a role the definition wires is refused, typed `-32055`, and the definition-wiring reconcile skips side chats), is kept until retired (explicit `DelegateIdleRetireOverride::Disabled`), and is projected under its source as `side_chat_of` on the experience's sidebar rows only where the roster's typed `fork_source` agrees with its `side_chat_of` marker label (the label itself is stripped from every projection).
+
 Identity binding facts the console contract keeps:
 
 - The identity routes on `/console/rpc` (`meta/status_identity`, `meta/inspect_identity`, `meta/retire`, `meta/respawn`, `meta/reset`, `meta/delete_identity`) and the stdio identity methods refuse a generated runtime id that is no longer its identity's binding, such as the predecessor's `rt:<identity>:<n>` after a reset. The refusal is `-32000` with `error.data.kind = "stale_identity_runtime_binding"`, naming the registered runtime id and session. A runtime id of an identity the identity runtime does not know keeps `-32602`. A runtime id whose identity's binding cannot be read is refused, never passed or called stale. Key on `error.data.kind = "identity_history_unavailable"` (retryable) rather than the code: the console's identity lookup and the runtime id checks answer `-32052`, and a console route's own status read or its check of an id a live member carries can answer `-32000`. One refusal carries no data: the stdio identity methods answer `-32602` (`invalid identity: identity <id> was not resolved: ...`) when Core's member history cannot be read to resolve the target at all.
@@ -487,9 +489,11 @@ Avoid manual runtime ID extraction for ordinary identity-scoped work. Do not ass
     (`MobHandle::activate_member_instruction`). A fork that starts its own
     turn is refused before commit with `fork_instruction_refused` (data
     `fork_instruction_refusal` with `cause.kind` `policy_refuses` and the
-    `keys`). No gateway method forks a member, so it never arrives as an RPC
-    error: agents get it as a `fork_off` tool error, Rust hosts as
-    `MobError::ForkInstructionRefused`.
+    `keys`). Only the Console's side chat fork (`meta/fork_member`) answers
+    it as an RPC error (`-32037`); agents get it as a `fork_off` tool error,
+    Rust hosts as `MobError::ForkInstructionRefused`. The side chat fork, as
+    the host, activates each inherited key the source had in effect with the
+    same revision and body; any other key stays inactive and is named.
   - `reactivate_inherited`: the fork writes the child's own activation of
     every inherited key, in every namespace, with the revision and body the
     source had in effect at the fork boundary. The child runs them without

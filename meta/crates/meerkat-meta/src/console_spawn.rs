@@ -281,10 +281,15 @@ pub(crate) fn spawned_by_from_comms_name(comms_name: &str) -> Option<String> {
 /// ABAC inheritance hangs off `spawned_by`: an unverified claim could mint
 /// inherited visibility — or hide a member behind a denied parent — so
 /// only the spawn registry may assert these keys.
+///
+/// The side chat marker goes too: the console projects a side chat's
+/// source only where Meerkat's roster agrees
+/// ([`crate::side_chat::verified_side_chat_source`]), never from a label.
 pub(crate) fn sanitize_unverified_lineage_labels(labels: &mut BTreeMap<String, String>) {
     labels.remove(SPAWNED_BY_LABEL);
     labels.remove(SPAWNED_BY_SESSION_LABEL);
     labels.remove(VIA_TOOL_LABEL);
+    labels.remove(crate::side_chat::SIDE_CHAT_OF_LABEL);
 }
 
 /// One argument record from a spawn-tool call: top-level args or one entry
@@ -556,7 +561,8 @@ pub(crate) fn merge_registered_labels(
     for (key, value) in registered {
         if key == SPAWNED_BY_LABEL || key == SPAWNED_BY_SESSION_LABEL || key == VIA_TOOL_LABEL {
             labels.insert(key.clone(), value.clone());
-        } else {
+        } else if key != crate::side_chat::SIDE_CHAT_OF_LABEL {
+            // A spawn's own labels never name a side chat's source.
             labels.entry(key.clone()).or_insert_with(|| value.clone());
         }
     }

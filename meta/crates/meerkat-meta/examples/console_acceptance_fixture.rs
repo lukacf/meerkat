@@ -286,6 +286,8 @@ image_generation = {live_images}
                     "read-only" => Some("gating.decide"),
                     "denied" => Some("gating.*"),
                     "hide-origin" => Some("agent.view"),
+                    // A viewer who may not spawn members: no side chat fork.
+                    "no-spawn" => Some("agent.spawn"),
                     _ => return (axum::http::StatusCode::BAD_REQUEST, Json(json!({"error":"unknown access mode"}))),
                 };
                 let mut rules = vec![meerkat_meta::AccessRule {

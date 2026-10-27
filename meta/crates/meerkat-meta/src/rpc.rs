@@ -2006,6 +2006,7 @@ pub(crate) const CANDIDATE_LAUNCH_REFUSED_METHODS: &[&str] = &[
     "meta/ensure_member",
     "meta/spawn_helper",
     "meta/fork_helper",
+    "meta/fork_member",
     "meta/attach_existing_session",
     "meta/send",
     "meta/send_message",

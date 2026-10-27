@@ -240,6 +240,14 @@ struct ConsoleSnapshotReadModelState {
     /// fixups. The snapshot hot path extends `members` with these instead
     /// of walking delegate handles per-request.
     delegate_member_groups: Vec<Vec<ConsoleMember>>,
+    /// Whether a walked roster row carries the side chat marker, so the
+    /// walk reads the primary roster's fork facts only when a side chat may
+    /// be among its rows.
+    side_chat_marked: bool,
+    /// The primary mob's verified side chats: each side chat's public alias
+    /// with its source's console identity
+    /// ([`crate::side_chat::verified_side_chats`]).
+    side_chat_sources: BTreeMap<String, String>,
 }
 
 /// One read of the identity runtime for every identity it knows: the
@@ -2697,6 +2705,10 @@ mod console_human_governed_bind_tests;
 mod console_experience_binding_tests;
 
 #[cfg(test)]
+#[path = "console_side_chat_tests.rs"]
+mod console_side_chat_tests;
+
+#[cfg(test)]
 async fn console_send_identity_first(
     aggregator: &MetaConsoleAggregator,
     identity_runtime: Arc<crate::identity_first::IdentityRuntime>,
@@ -3671,6 +3683,7 @@ fn is_console_mutating_rpc_method(method: &str) -> bool {
             | "meta/run_flow"
             | "meta/spawn_helper"
             | "meta/fork_helper"
+            | "meta/fork_member"
             | "meta/attach_existing_session"
             | "meta/reconcile_edges"
             | "meta/cross_mob/wire_local"
@@ -4197,10 +4210,12 @@ fn console_rpc_access_requirements(
         "meta/reset" | "meta/reset_all" => one(ACTION_AGENT_RESET, target),
         // A fork's source member, and the session `meta/attach_existing_session`
         // (or `meta/ensure_member` with `resume_session_id`) attaches, are
-        // judged in their handlers.
+        // judged in their handlers. The spawn check targets the new member:
+        // `meta/fork_member`'s side chat is its `agent_identity`.
         "meta/ensure_member"
         | "meta/spawn_helper"
         | "meta/fork_helper"
+        | "meta/fork_member"
         | "meta/attach_existing_session"
         | "meta/cancel_flow"
         | "meta/collect_completed" => one(ACTION_AGENT_SPAWN, target),
@@ -8835,6 +8850,11 @@ async fn handle_console_runtime_rpc_with_visibility(
                     "meta/cross_mob/wire_local",
                     "meta/cross_mob/unwire_local",
                 ]);
+                // A side chat is a durable fork, which needs persistent
+                // sessions: a runtime known to persist none never offers it.
+                if crate::side_chat::runtime_may_fork_durably(runtime) {
+                    methods.push("meta/fork_member");
+                }
             }
             if metadata_table.is_some() {
                 methods.extend_from_slice(&["meta/mob_labels/get", "meta/run_labels/get"]);
@@ -12676,6 +12696,56 @@ async fn handle_console_runtime_rpc_with_visibility(
             }
         })
         .await,
+        "meta/fork_member" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
+            // A console side chat: the source's durable transcript forked
+            // into a new unwired member the human continues in, kept until it
+            // is retired (`crate::side_chat`).
+            let params = match crate::side_chat::parse_fork_member_params(&request.params) {
+                Ok(params) => params,
+                Err(message) => return invalid_params(response_id, message),
+            };
+            let source =
+                crate::member_comms_id::runtime_alias_str(&params.source_member_id).into_owned();
+            if let Some(error) = fork_source_access_violation(access_view, &source) {
+                return response_value(response_id, None, Some(error));
+            }
+            match Box::pin(crate::side_chat::fork_side_chat(
+                runtime,
+                identity_runtime.as_ref(),
+                &params.source_member_id,
+                &params.agent_identity,
+                params.display_name.as_deref(),
+            ))
+            .await
+            {
+                Ok(fork) => response_value(
+                    response_id,
+                    Some(crate::side_chat::fork_member_result(&fork)),
+                    None,
+                ),
+                Err(error) => {
+                    // A side chat seated with peer edges is never kept: it
+                    // would be a second member of the society.
+                    if let crate::side_chat::SideChatError::WiredAtSeat { member_id, .. } = &error
+                        && let Err(retire_error) =
+                            retire_console_member(&runtime.handle(), member_id).await
+                    {
+                        tracing::error!(
+                            target: "meta::console",
+                            member_id = %member_id,
+                            error = %retire_error,
+                            "a side chat seated with peer edges could not be retired"
+                        );
+                    }
+                    response_value(
+                        response_id,
+                        None,
+                        Some(crate::side_chat::fork_member_error(&error)),
+                    )
+                }
+            }
+        })
+        .await,
         "meta/attach_existing_session" => meerkat_runtime::stack_relief::box_in_own_frame(move || async move {
             let Some(role) = request.params.get("role").and_then(Value::as_str) else {
                 return invalid_params(response_id, "role required");
@@ -13431,7 +13501,8 @@ async fn build_live_snapshot(
             agents,
             members,
             true,
-        ),
+        )
+        .with_side_chats(read_model_state.side_chat_sources),
         pending,
     )
 }
@@ -13572,6 +13643,12 @@ async fn walk_console_snapshot_read_model(
     )
     .await;
     state.primary_members = primary_members;
+    // Side chats live in the primary mob. Their source comes from Meerkat's
+    // durable roster (the typed fork source), never from a label, so a side
+    // chat nests under its source across restarts.
+    if state.side_chat_marked {
+        state.side_chat_sources = crate::side_chat::verified_side_chats(&handle).await;
+    }
 
     let Some(mcp_state) = runtime.agent_mob_mcp_state() else {
         return state;
@@ -13656,6 +13733,9 @@ async fn collect_console_session_index_for_handle(
         // from the comms-safe roster id, meerkat 0.7).
         let identity =
             crate::member_comms_id::runtime_alias_str(entry.agent_identity.as_str()).into_owned();
+        state.side_chat_marked |= entry
+            .labels
+            .contains_key(crate::side_chat::SIDE_CHAT_OF_LABEL);
         let Some(session_id) = handle
             .resolve_bridge_session_id_observation(&entry.agent_identity)
             .await
@@ -13691,6 +13771,9 @@ fn apply_console_visibility_policy(
     snapshot
         .loaded_modules
         .retain(|module_id| !hidden.contains(module_id));
+    snapshot
+        .side_chats
+        .retain(|side_chat, source| !hidden.contains(side_chat) && !hidden.contains(source));
 }
 
 async fn reset_all_live_console_agents(

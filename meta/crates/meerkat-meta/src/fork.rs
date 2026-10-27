@@ -214,6 +214,229 @@ fn validate_fork_spec(spec: &SpawnMemberSpec) -> Result<(), ForkMemberError> {
     Ok(())
 }
 
+/// How long a durable fork child is kept once it is seated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ForkChildRetention {
+    /// Opt the child into idle retirement on the runtime default, like a
+    /// `fork_off` tool child: a host fork that nothing closes still ends
+    /// instead of holding a bounded session until the ceiling.
+    IdleRetireOnRuntimeDefault,
+    /// Keep the child until something retires it explicitly. A console side
+    /// chat (`meta/fork_member`) lives until the human closes it; the runtime
+    /// may still unload it while it is idle, which keeps the member.
+    UntilRetired,
+}
+
+impl ForkChildRetention {
+    fn idle_retire_override(self) -> crate::mob_handle_runtime::DelegateIdleRetireOverride {
+        match self {
+            Self::IdleRetireOnRuntimeDefault => {
+                crate::mob_handle_runtime::DelegateIdleRetireOverride::RuntimeDefault
+            }
+            Self::UntilRetired => crate::mob_handle_runtime::DelegateIdleRetireOverride::Disabled,
+        }
+    }
+}
+
+/// The roster identity a fork source alias names, under the member-id alias
+/// rule, and the source's lifecycle target when the identity authority owns
+/// it.
+///
+/// A source the identity authority owns resolves to its durable roster row
+/// (the lifecycle target checks that a generated alias is the current
+/// incarnation; the tracked fork checks it again under the lock). A plain
+/// alias keeps its own roster spelling. Without an identity runtime a
+/// generated alias has no authority to pin its generation and is refused.
+async fn resolve_fork_source(
+    identity_runtime: Option<&std::sync::Arc<crate::identity_first::IdentityRuntime>>,
+    source_alias: &str,
+) -> Result<
+    (
+        Option<crate::identity_first::runtime::MemberAliasLifecycleTarget>,
+        meerkat_mob::ids::AgentIdentity,
+    ),
+    ForkMemberError,
+> {
+    // `meta/fork_helper` carries a fourth arm here -
+    // `Ok(None) if is_reserved_generated_alias(&source)` -> refuse. With
+    // an identity runtime that arm is UNREACHABLE:
+    // `IdentityRuntime::member_alias_lifecycle_target`
+    // (identity_first/runtime.rs, the `None if
+    // crate::member_comms_id::is_reserved_generated_alias(&alias)` arm)
+    // already returns `Err(IdentityRuntimeError::Internal("generated
+    // member alias requires identity authority: ..."))` for precisely
+    // that case, so a generated source alias can never reach an
+    // `Ok(None)` here. It becomes `SourceAuthority` through the `map_err`
+    // below.
+    //
+    // `Ok(None)` therefore means exactly one thing: the alias is a plain
+    // raw member. `None` from the `match` means no identity runtime was
+    // supplied or installed; there the source mapping below refuses a
+    // generated alias, as that fourth arm does. A plain alias runs the
+    // fork unlocked in both cases, exactly as `meta/fork_helper` does.
+    let source_target = match identity_runtime {
+        Some(identity_runtime) => identity_runtime
+            .member_alias_lifecycle_target(source_alias)
+            .await
+            .map_err(|error| ForkMemberError::SourceAuthority(error.to_string()))?,
+        None => None,
+    };
+    let source_identity = if source_target.is_some() {
+        crate::member_comms_id::roster_member_id_for_supplied_id(source_alias)
+    } else if crate::member_comms_id::is_reserved_generated_alias(source_alias) {
+        return Err(ForkMemberError::SourceAuthority(format!(
+            "generated member alias requires identity authority: {source_alias}"
+        )));
+    } else {
+        crate::member_comms_id::mob_member_id(source_alias)
+    };
+    Ok((source_target, source_identity))
+}
+
+/// The roster identity of a fork source alias, resolved as a fork resolves
+/// it (see [`resolve_fork_source`]) without taking its lifecycle lock: a
+/// read for a caller that prepares the child spec from the source's roster
+/// entry before it forks.
+pub(crate) async fn fork_source_roster_identity(
+    identity_runtime: Option<&std::sync::Arc<crate::identity_first::IdentityRuntime>>,
+    source_member_alias: &str,
+) -> Result<meerkat_mob::ids::AgentIdentity, ForkMemberError> {
+    let source_alias = crate::member_comms_id::runtime_alias_str(source_member_alias).into_owned();
+    if source_alias.trim().is_empty() {
+        return Err(ForkMemberError::InvalidRequest(
+            "fork source member alias must not be empty".to_string(),
+        ));
+    }
+    resolve_fork_source(identity_runtime, source_alias.as_str())
+        .await
+        .map(|(_, source_identity)| source_identity)
+}
+
+/// Fork `source_member_alias`'s durable transcript into a new member of
+/// `mob_runtime`'s mob: the body of
+/// [`UnifiedRuntime::fork_member_with_identity_runtime`], over the mob
+/// runtime a console route holds, with the child's retention chosen by the
+/// caller.
+///
+/// `on_seat_failure` receives the shared error hook's
+/// [`ErrorEvent::SpawnFailure`] when meerkat seats no member; the typed
+/// error still returns to the caller (see the retry note on
+/// [`UnifiedRuntime::fork_member`]).
+pub(crate) async fn fork_member_on_runtime(
+    mob_runtime: &crate::mob_handle_runtime::MobRuntime,
+    identity_runtime: Option<&std::sync::Arc<crate::identity_first::IdentityRuntime>>,
+    source_member_alias: &str,
+    spec: SpawnMemberSpec,
+    message_count: Option<usize>,
+    retention: ForkChildRetention,
+    on_seat_failure: Option<&(dyn Fn(ErrorEvent) + Send + Sync)>,
+) -> Result<ForkMemberOutcome, ForkMemberError> {
+    validate_fork_spec(&spec)?;
+    let source_alias = crate::member_comms_id::runtime_alias_str(source_member_alias).into_owned();
+    if source_alias.trim().is_empty() {
+        return Err(ForkMemberError::InvalidRequest(
+            "fork source member alias must not be empty".to_string(),
+        ));
+    }
+    let requested_child_alias = spec.identity.as_str().to_string();
+    let profile = spec.role_name.to_string();
+    // The fork is foreground work: it holds the public owner (`handle`)
+    // until it ends, so the identity runtime it reserves through is the
+    // plain one.
+    let handle = mob_runtime.handle();
+    let identity_runtime_owned = identity_runtime.cloned();
+
+    // Pre-flight the CHILD alias before either branch, exactly as
+    // `meta/fork_helper` does. Inside the tracked branch the
+    // reservation's `Err(String)` is rewrapped as an identity `Internal`
+    // error, so without this the SAME bad child alias would surface as
+    // `InvalidRequest` on a host with no identity runtime and as
+    // `SourceAuthority` on one with it - a typed shape that depends on
+    // host configuration rather than on what the caller got wrong.
+    // This is a preflight, not the authority boundary: the reservation
+    // revalidates under its guard, so a genuine race still ends as
+    // `SourceAuthority`.
+    crate::member_comms_id::validate_raw_member_target(
+        identity_runtime,
+        requested_child_alias.as_str(),
+    )
+    .await
+    .map_err(ForkMemberError::InvalidRequest)?;
+
+    // Pin the SOURCE alias to a current identity first.
+    let (source_target, source_identity) =
+        resolve_fork_source(identity_runtime, source_alias.as_str()).await?;
+    let (member_alias, fork) = if let Some(source_target) = source_target {
+        // The tracked wrapper acquires the source alias's lifecycle lock
+        // before the operation body runs, so a stale or mid-lifecycle
+        // source cannot be read out from under the durable fork.
+        crate::identity_first::IdentityRuntime::run_member_alias_targets_operation_tracked(
+            vec![source_target],
+            move || {
+                reserve_and_fork(
+                    identity_runtime_owned,
+                    handle,
+                    source_identity,
+                    spec,
+                    requested_child_alias,
+                    message_count,
+                )
+            },
+        )
+        .await
+        .map_err(|error| ForkMemberError::SourceAuthority(error.to_string()))?
+    } else {
+        reserve_and_fork(
+            identity_runtime_owned,
+            handle,
+            source_identity,
+            spec,
+            requested_child_alias,
+            message_count,
+        )
+        .await
+        .map_err(ForkMemberError::InvalidRequest)?
+    };
+
+    match fork {
+        Ok(result) => {
+            // The child is seated in the primary mob, where idle retirement
+            // is opt-in. The retention says which: a fork that retires like
+            // a `fork_off` tool child is opted in on the runtime default, and
+            // a child kept until it is retired gets an explicit disabled
+            // override, so no label it inherited from its source opts it in.
+            if let Some(overrides) = mob_runtime.implicit_delegate_retirement_overrides() {
+                overrides
+                    .set(
+                        mob_runtime.handle().mob_id().to_string(),
+                        result.agent_identity.to_string(),
+                        retention.idle_retire_override(),
+                    )
+                    .await;
+            }
+            Ok(ForkMemberOutcome {
+                source_member_alias: source_alias,
+                member_alias,
+                result,
+            })
+        }
+        Err(error) => {
+            // Mirrors `UnifiedRuntime::spawn`: a fork that does not seat a
+            // member is a seat failure on the shared error hook. The typed
+            // error - including a committed-but-unprovisioned fork's
+            // recoverable session id - still returns to the caller.
+            if let Some(on_seat_failure) = on_seat_failure {
+                on_seat_failure(ErrorEvent::SpawnFailure {
+                    member_id: member_alias,
+                    profile,
+                    error: format!("{error}"),
+                });
+            }
+            Err(ForkMemberError::Mob(error))
+        }
+    }
+}
+
 impl UnifiedRuntime {
     /// Fork `source_member_alias`'s durable transcript into a new member.
     ///
@@ -224,7 +447,8 @@ impl UnifiedRuntime {
     /// This is the REAL fork. `meta/fork_helper` is the unrelated
     /// prompt-context helper: it injects rendered context text into a fresh
     /// one-shot member and retires it. Nothing here retires the child - a
-    /// forked member is an ordinary seated member.
+    /// forked member is an ordinary seated member, opted into idle
+    /// retirement on the runtime default like a `fork_off` tool child.
     ///
     /// See the module docs for the exact upstream guarantees, the running-
     /// source rejection, and the cache boundary.
@@ -278,146 +502,17 @@ impl UnifiedRuntime {
         message_count: Option<usize>,
     ) -> Result<ForkMemberOutcome, ForkMemberError> {
         let identity_runtime = identity_runtime.or_else(|| self.identity_runtime_ref());
-        validate_fork_spec(&spec)?;
-        let source_alias =
-            crate::member_comms_id::runtime_alias_str(source_member_alias).into_owned();
-        if source_alias.trim().is_empty() {
-            return Err(ForkMemberError::InvalidRequest(
-                "fork source member alias must not be empty".to_string(),
-            ));
-        }
-        let requested_child_alias = spec.identity.as_str().to_string();
-        let profile = spec.role_name.to_string();
-        // The fork is foreground work: it holds the public owner (`handle`)
-        // until it ends, so the identity runtime it reserves through is the
-        // plain one.
-        let handle = self.mob_handle();
-        let identity_runtime_owned = identity_runtime.cloned();
-
-        // Pre-flight the CHILD alias before either branch, exactly as
-        // `meta/fork_helper` does. Inside the tracked branch the
-        // reservation's `Err(String)` is rewrapped as an identity `Internal`
-        // error, so without this the SAME bad child alias would surface as
-        // `InvalidRequest` on a host with no identity runtime and as
-        // `SourceAuthority` on one with it - a typed shape that depends on
-        // host configuration rather than on what the caller got wrong.
-        // This is a preflight, not the authority boundary: the reservation
-        // revalidates under its guard, so a genuine race still ends as
-        // `SourceAuthority`.
-        crate::member_comms_id::validate_raw_member_target(
+        let on_seat_failure = |event: ErrorEvent| self.fire_error(event);
+        fork_member_on_runtime(
+            self.mob_runtime(),
             identity_runtime,
-            requested_child_alias.as_str(),
+            source_member_alias,
+            spec,
+            message_count,
+            ForkChildRetention::IdleRetireOnRuntimeDefault,
+            Some(&on_seat_failure),
         )
         .await
-        .map_err(ForkMemberError::InvalidRequest)?;
-
-        // Pin the SOURCE alias to a current identity first.
-        //
-        // `meta/fork_helper` carries a fourth arm here -
-        // `Ok(None) if is_reserved_generated_alias(&source)` -> refuse. With
-        // an identity runtime that arm is UNREACHABLE:
-        // `IdentityRuntime::member_alias_lifecycle_target`
-        // (identity_first/runtime.rs, the `None if
-        // crate::member_comms_id::is_reserved_generated_alias(&alias)` arm)
-        // already returns `Err(IdentityRuntimeError::Internal("generated
-        // member alias requires identity authority: ..."))` for precisely
-        // that case, so a generated source alias can never reach an
-        // `Ok(None)` here. It becomes `SourceAuthority` through the `map_err`
-        // below.
-        //
-        // `Ok(None)` therefore means exactly one thing: the alias is a plain
-        // raw member. `None` from the `match` means no identity runtime was
-        // supplied or installed; there the source mapping below refuses a
-        // generated alias, as that fourth arm does. A plain alias runs the
-        // fork unlocked in both cases, exactly as `meta/fork_helper` does.
-        let source_target = match identity_runtime {
-            Some(identity_runtime) => identity_runtime
-                .member_alias_lifecycle_target(&source_alias)
-                .await
-                .map_err(|error| ForkMemberError::SourceAuthority(error.to_string()))?,
-            None => None,
-        };
-
-        // Member-id alias rule for the source: one the identity authority owns
-        // (checked current, and again under the lock below) names its durable
-        // roster row; with no identity runtime a generated alias has no
-        // authority to pin its generation and is refused.
-        let source_identity = if source_target.is_some() {
-            crate::member_comms_id::roster_member_id_for_supplied_id(source_alias.as_str())
-        } else if crate::member_comms_id::is_reserved_generated_alias(&source_alias) {
-            return Err(ForkMemberError::SourceAuthority(format!(
-                "generated member alias requires identity authority: {source_alias}"
-            )));
-        } else {
-            crate::member_comms_id::mob_member_id(source_alias.as_str())
-        };
-        let (member_alias, fork) = if let Some(source_target) = source_target {
-            // The tracked wrapper acquires the source alias's lifecycle lock
-            // before the operation body runs, so a stale or mid-lifecycle
-            // source cannot be read out from under the durable fork.
-            crate::identity_first::IdentityRuntime::run_member_alias_targets_operation_tracked(
-                vec![source_target],
-                move || {
-                    reserve_and_fork(
-                        identity_runtime_owned,
-                        handle,
-                        source_identity,
-                        spec,
-                        requested_child_alias,
-                        message_count,
-                    )
-                },
-            )
-            .await
-            .map_err(|error| ForkMemberError::SourceAuthority(error.to_string()))?
-        } else {
-            reserve_and_fork(
-                identity_runtime_owned,
-                handle,
-                source_identity,
-                spec,
-                requested_child_alias,
-                message_count,
-            )
-            .await
-            .map_err(ForkMemberError::InvalidRequest)?
-        };
-
-        match fork {
-            Ok(result) => {
-                // The child is seated in the primary mob, where idle
-                // retirement is opt-in. Opt it in on the runtime default so an
-                // RPC or console fork retires like a `fork_off` tool child
-                // instead of holding a bounded session until the ceiling.
-                if let Some(overrides) = self.mob_runtime().implicit_delegate_retirement_overrides()
-                {
-                    overrides
-                        .set(
-                            self.mob_handle().mob_id().to_string(),
-                            result.agent_identity.to_string(),
-                            crate::mob_handle_runtime::DelegateIdleRetireOverride::RuntimeDefault,
-                        )
-                        .await;
-                }
-                Ok(ForkMemberOutcome {
-                    source_member_alias: source_alias,
-                    member_alias,
-                    result,
-                })
-            }
-            Err(error) => {
-                // Mirrors `UnifiedRuntime::spawn`: a fork that does not seat a
-                // member is a seat failure on the shared error hook. The typed
-                // error - including a committed-but-unprovisioned fork's
-                // recoverable session id - still returns to the caller.
-                self.fire_error(ErrorEvent::SpawnFailure {
-                    member_id: member_alias,
-                    profile,
-                    error: format!("{error}"),
-                });
-                Err(ForkMemberError::Mob(error))
-            }
-        }
     }
 }
 

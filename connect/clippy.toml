@@ -3,3 +3,7 @@
 # repository root's, whose disallowed process-launch methods belong to Core's
 # launch confinement (crates/meerkat/tests/host_launch_sites.rs). Connect sets
 # no disallowed methods of its own.
+
+# Connect's internal plumbing passes its owners, evidence and bounds as
+# explicit arguments (up to 17); argument structs would only rename them.
+too-many-arguments-threshold = 17

@@ -1,0 +1,26 @@
+{
+  "repository": "https://github.com/github/github-mcp-server",
+  "version": "v2.0.3",
+  "commit": "b98d115bbb080e9555466a96656ec4df605aea21",
+  "files": [
+    {
+      "path": "pkg/github/pullrequests.go",
+      "git_blob": "70fdfa197a8f0e9f526cbdd67d70e42ae3848a93",
+      "sha256": "60a4357e4df461f656250439e4f7e1bb0848c0bc2655cd73576710e15d4c8af7",
+      "bytes": 97153
+    },
+    {
+      "path": "pkg/github/minimal_types.go",
+      "git_blob": "b005223cd3e60a50ff3a5050a405cf30a3018015",
+      "sha256": "49464a349d6216fa6ac3307835f4ea2ab22cf8071566bf4c031724f30769cb34",
+      "bytes": 79247
+    },
+    {
+      "path": "pkg/github/consolidated_pull_request_types.go",
+      "git_blob": "6d6abaed632877104c657497245b72296bc0f331",
+      "sha256": "ed38d4c176acdcd946577bdc69c57994070a3b5fc661d399dbc92457411d78a5",
+      "bytes": 22284
+    }
+  ],
+  "verification": "All file bytes match the pinned commit tree Git blob IDs. No upstream executable or authenticated provider request was run."
+}

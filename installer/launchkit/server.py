@@ -58,10 +58,30 @@ from .checker_setup import CheckerSetupService
 from .toolkit_saved_requests import ToolkitSavedRequests, ToolkitSavedRequestsError, MAX_MANIFEST_BYTES
 from .service_callback import MCP_CALLBACK_PATH, callback_landing, callback_unavailable
 from .service_login_host import ServiceLoginRoute, ServiceLoginUnavailable
+from .provider_setup_route import ProviderSetupRoute, unavailable as provider_setup_unavailable
+from .provider_setup_host import ProviderSetupUnavailable
 
 # Only the trusted workspace launcher can supply its actual authenticated
 # request/session join and same-native-host login owner. HTTP never selects it.
 service_login_route = None
+provider_setup_route = None
+
+
+def select_provider_setup_session(owner, authenticated_context):
+    """Trusted launcher only, after registering this owner's revoke/close.
+
+    Register a dormant native session for each original browser login on the
+    serving loop. Reuse the same resolver object across logins. This hook does
+    not launch Connect or activate a guide; browser input cannot call it.
+    """
+    global provider_setup_route
+    if provider_setup_route is None or provider_setup_route.retired:
+        provider_setup_route = ProviderSetupRoute(owner, authenticated_context)
+    else:
+        if provider_setup_route.authenticated_context is not authenticated_context:
+            raise ProviderSetupUnavailable()
+        provider_setup_route.add(owner)
+    return provider_setup_route
 
 
 def select_service_login_host(host, authenticated_context):
@@ -344,6 +364,8 @@ async def lifespan(app):
             def workers(service):
                 return lambda: list((getattr(service, "processes", None) or {}).values())
             failures = await stop_owners((
+                *((Owner("native provider setup", provider_setup_route),)
+                  if provider_setup_route is not None else ()),
                 *((Owner("protected service login", service_login_route),)
                   if service_login_route is not None else ()),
                 Owner("guide operations", guide_operations),
@@ -370,6 +392,20 @@ async def lifespan(app):
 app = FastAPI(title="Meta Forge", docs_url=None, redoc_url=None, lifespan=lifespan)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "[::1]", "testserver"])
 design_lock = asyncio.Lock()
+
+
+@app.get('/api/provider-setup')
+async def native_provider_setup_status(request: Request):
+    selected = provider_setup_route
+    return await selected.handle(request) if selected is not None else provider_setup_unavailable()
+
+
+@app.post('/api/provider-setup/{action}')
+async def native_provider_setup_action(action: str, request: Request):
+    if action not in ('begin', 'answer', 'cancel'):
+        return provider_setup_unavailable(404)
+    selected = provider_setup_route
+    return await selected.handle(request, action) if selected is not None else provider_setup_unavailable()
 
 
 @app.get(MCP_CALLBACK_PATH)
@@ -425,6 +461,11 @@ async def request_validation_error(request: Request, error: RequestValidationErr
 
 @app.middleware("http")
 async def local_requests(request: Request, call_next):
+    if request.url.path == '/api/provider-setup' or request.url.path.startswith('/api/provider-setup/'):
+        # This protected route authenticates the original host context and its
+        # exact origin before consuming a bounded private body. A public host
+        # origin need not equal the internal workspace socket's URL.
+        return await call_next(request)
     origin = request.headers.get("origin")
     allowed = {f"{request.url.scheme}://{request.url.netloc}", "http://127.0.0.1:5173", "http://localhost:5173"}
     if request.url.path.startswith("/api/") and origin and origin not in allowed:
@@ -2009,7 +2050,7 @@ class ProviderSettingsBody(BaseModel):
 
 @app.get('/api/provider-settings')
 async def read_provider_settings():
-    return provider_public_status()
+    return {**provider_public_status(), 'native_provider_setup': provider_setup_route is not None}
 
 
 @app.get('/api/checker-setup')
@@ -2028,6 +2069,8 @@ async def prepare_checker_setup(request: Request):
 
 @app.put('/api/provider-settings')
 async def save_provider_settings(value: ProviderSettingsBody):
+    if provider_setup_route is not None:
+        raise HTTPException(409, 'Use the native model and sign-in chooser for this host.')
     if architect.start_lock.locked():
         raise HTTPException(409, 'Wait for setup team startup before changing its credentials.')
     async with architect.start_lock:

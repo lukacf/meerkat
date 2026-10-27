@@ -58,6 +58,9 @@ class ForgeProviderSetupSession:
         self._state = "not_started"
         self._interaction = self._prompt_id = self._prompt = self._selection = None
         self._notice = None
+        self._notices = []
+        self._terminal = None
+        self._cancelling = None
 
     def __repr__(self):
         return "ForgeProviderSetupSession(<host-private>)"
@@ -66,7 +69,7 @@ class ForgeProviderSetupSession:
     def retired(self):
         return self._closed and (self._opening is None or self._opening.done()) and (
             self._client is None or self._joined) and (self._reader is None or self._reader.done()) and all(
-                task.done() for task in self._answers)
+                task.done() for task in self._answers) and (self._cancelling is None or self._cancelling.done())
 
     def _current(self, context):
         try:
@@ -87,6 +90,8 @@ class ForgeProviderSetupSession:
 
     async def begin(self, context):
         self._admit(context)
+        if self._cancelling is not None:
+            return self.snapshot(context)
         if self._loop is None:
             self._loop = asyncio.get_running_loop()
         if self._opening is None:
@@ -112,7 +117,7 @@ class ForgeProviderSetupSession:
             self._client = await asyncio.to_thread(ProviderSetupClient,
                 str(self._executable.path), self._binding, environment=self._environment)
             if self._current(self._login):
-                self._state = "waiting"
+                self._state = "closing" if self._cancelling is not None else "waiting"
                 self._reader = _retain(asyncio.create_task(self._read()))
             else:
                 self.revoke()
@@ -159,18 +164,26 @@ class ForgeProviderSetupSession:
                 if kind == "initialized":
                     self._interaction = event["interaction_id"]
                 elif kind == "prompt":
-                    self._prompt_id, self._prompt = event["prompt_id"], deepcopy(event["prompt"])
-                    self._notice = None
-                    self._state = "prompt"
+                    if self._cancelling is None:
+                        self._prompt_id, self._prompt = event["prompt_id"], deepcopy(event["prompt"])
+                        self._notice = None
+                        self._state = "prompt"
                 elif kind in ("answered", "prompt_closed"):
                     if event.get("prompt_id") == self._prompt_id:
                         self._prompt_id = self._prompt = None
-                    self._state = "waiting"
+                    self._state = "closing" if self._cancelling is not None else "waiting"
                 elif kind == "notice":
                     self._notice = deepcopy(event.get("notice"))
+                    # Preserve native notices across subsequent prompts. Refuse
+                    # an unbounded presenter instead of silently losing history.
+                    if len(self._notices) >= 256:
+                        raise ProviderSetupUnavailable()
+                    self._notices.append(deepcopy(self._notice))
                 elif kind == "cancelling":
                     self._state = "closing"
                 elif kind in ("selected", "cancelled", "failed"):
+                    self._terminal = {key: deepcopy(event[key]) for key in
+                        ("kind", "reason", "native_effects", "join_scope") if key in event}
                     selected = ProviderSelection.decode(event["selection"]) if kind == "selected" else None
                     self._prompt_id = self._prompt = self._notice = None
                     self._state = "joining"
@@ -193,6 +206,10 @@ class ForgeProviderSetupSession:
             value.update(prompt_id=self._prompt_id, prompt=deepcopy(self._prompt))
         if self._notice is not None:
             value["notice"] = deepcopy(self._notice)
+        if self._notices:
+            value["notices"] = deepcopy(self._notices)
+        if self._terminal is not None:
+            value["terminal"] = deepcopy(self._terminal)
         if self._selection is not None:
             value["selection"] = {"provider": self._selection.provider, "model": self._selection.model,
                 "credential": self._selection.credential, "live_entitlement": "unobserved"}
@@ -200,7 +217,7 @@ class ForgeProviderSetupSession:
 
     async def answer(self, context, prompt_id, answer):
         self._admit(context)
-        if (self._client is None or self._state != "prompt" or type(prompt_id) is not str
+        if (self._cancelling is not None or self._client is None or self._state != "prompt" or type(prompt_id) is not str
                 or prompt_id != self._prompt_id or type(answer) is not dict):
             raise ProviderSetupUnavailable()
         # Preserve the offered identity, reserve once, and never retry a secret
@@ -221,6 +238,35 @@ class ForgeProviderSetupSession:
         self._admit(context)
         return self.snapshot(context)
 
+    async def cancel(self, context):
+        """Cancel this interaction; keep its joined result readable by this login.
+
+        Logout still uses revoke/close and fences all observations immediately.
+        A cancelled HTTP observer cannot replace the retained cancellation task.
+        """
+        self._admit(context)
+        if self._state in ("selected", "cancelled", "failed") and self._joined:
+            return self.snapshot(context)
+        if self._loop is None:
+            self._loop = asyncio.get_running_loop()
+        if self._cancelling is None:
+            self._state = "closing"
+            self._prompt_id = self._prompt = None
+            self._cancelling = _retain(asyncio.create_task(self._cancel()))
+        await asyncio.shield(self._cancelling)
+        return self.snapshot(context)
+
+    async def _cancel(self):
+        if self._opening is not None:
+            await asyncio.gather(asyncio.shield(self._opening), return_exceptions=True)
+        if self._client is not None:
+            await asyncio.shield(self._join())
+        if self._reader is not None:
+            await asyncio.gather(asyncio.shield(self._reader), return_exceptions=True)
+        if self._current(self._login) and self._client is None:
+            self._state = "cancelled"
+            self._joined = True  # No child was entered.
+
     async def _send_answer(self, prompt_id, answer):
         try:
             self._admit(self._login)
@@ -240,6 +286,8 @@ class ForgeProviderSetupSession:
         """Fence synchronously on the owning loop, then retain cleanup."""
         self._closed = True
         self._prompt_id = self._prompt = self._notice = self._selection = None
+        self._notices = []
+        self._terminal = None
         if self._loop is not None and self._closing is None:
             self._closing = _retain(asyncio.create_task(self._close()))
 
@@ -252,6 +300,8 @@ class ForgeProviderSetupSession:
             await asyncio.gather(asyncio.shield(self._reader), return_exceptions=True)
         if self._answers:
             await asyncio.gather(*(asyncio.shield(task) for task in tuple(self._answers)), return_exceptions=True)
+        if self._cancelling is not None:
+            await asyncio.gather(asyncio.shield(self._cancelling), return_exceptions=True)
 
     async def close(self):
         self.revoke()

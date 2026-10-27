@@ -3,6 +3,7 @@ import { request } from "./state.mjs";
 import { startingContextDetails } from "./forge-starting-context.mjs";
 import { guideStartupObservation, guideStartupDetail } from "./guide-startup.mjs";
 import "./provider-setup.css";
+import { NativeProviderSetup } from "./native-provider-setup.jsx";
 
 const LABELS = { openai: "OpenAI", anthropic: "Anthropic", gemini: "Google Gemini" };
 const MODELS = { openai: "gpt-6.1-sol", anthropic: "claude-sonnet-4-6", gemini: "gemini-3.1-pro-preview" };
@@ -320,6 +321,8 @@ export function ProviderSetup({ onRuntime, onClose, firstRun = false, idea = "",
     : checkStart ? "check"
     : firstRunStep === "check" || firstRunStep === "active" || firstRunStep === "stopping" || firstRunStep === "work" ? "check"
       : !effective || apiKey.trim() || firstRunStep === "saving" ? "save" : "start";
+  if (settings?.native_provider_setup === true) return <NativeProviderSetup
+    onClose={onClose} firstRun={firstRun} idea={idea} startingContext={startingContext} />;
   const providerFields = settings && <>
     <div className="setup-provider-picker">
       <div className="setup-provider-field-heading"><label htmlFor="setup-guide-provider">Provider</label>

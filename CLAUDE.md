@@ -432,11 +432,13 @@ and its CI must be green before a release tag (`require_ci_green`):
   (`scripts/machine-posters-changed`, a separate classifier so poster-only
   changes never start the machine lanes) changed.
 - `governance-gates`: the typed governance gates (`make rmat-audit
-  seam-inventory runtime-authority-bypass machine-authority-docs-gate`) in a
-  job of their own, on the agent gate's governance paths: a machine-authority
-  change or a dogma document (`governance_gates` in the plan,
-  `GOVERNANCE_DOC_PATTERNS` in `scripts/ci-cargo-lanes.mjs`); the `CI gate`
-  requires them on such a change.
+  seam-inventory runtime-authority-bypass`; `rmat-audit` runs its three
+  audits concurrently once xtask is built) in a job of their own, and
+  `governance-docs-gate` (`make machine-authority-docs-gate`, which compiles
+  a test of its own) beside it, on the agent gate's governance paths: a
+  machine-authority change or a dogma document (`governance_gates` in the
+  plan, `GOVERNANCE_DOC_PATTERNS` in `scripts/ci-cargo-lanes.mjs`); the `CI
+  gate` requires both on such a change.
 - `tlc-audits`: on a machine-authority change, the four hand-written TLC
   audit shards of the canonical TLC lane
   (`machine_verify_all_tlc_test.sh --part audits-a|audits-b|audits-c|audits-d`) in parallel,

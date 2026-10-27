@@ -21,8 +21,10 @@ name: CI
 #                     changed; machine/protocol drift when machine authority
 #                     changed
 #   governance-gates - the typed governance gates (rmat-audit, seam-inventory,
-#                     runtime authority, machine-authority docs) when machine
-#                     authority or a dogma document changed
+#                     runtime authority) when machine authority or a dogma
+#                     document changed
+#   governance-docs-gate - the machine-authority docs gate, on the same
+#                     changes, in parallel with governance-gates
 #   tlc-audits      - (x4) the hand-written TLC audit shards on a
 #                     machine-authority change
 #   clippy (xN)     - one lane per shard of directly changed packages:
@@ -881,7 +883,7 @@ jobs:
   # typed governance gates: in one job the four gates ran 664-1048 s on
   # hosted runners (runs 40399556131, 40402047748, 40411814108 and
   # 40413996978), and the docs gate's own run is the part the others do not
-  # share. Both jobs take xtask's build from sccache.
+  # share. Both jobs take their compiled dependencies from sccache.
   governance-docs-gate:
     name: Typed governance gates (machine-authority docs)
     needs: changes

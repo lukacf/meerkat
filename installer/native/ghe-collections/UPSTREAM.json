@@ -118,5 +118,24 @@
       "bytes": 2670
     }
   ],
-  "verification": "All file bytes match the pinned commit tree Git blob IDs. No upstream executable or authenticated provider request was run."
+  "verification": "All file bytes match the pinned commit tree Git blob IDs. No upstream executable or authenticated provider request was run.",
+  "native_projection": {
+    "repository": "https://github.com/lukacf/meerkat",
+    "commit": "fdfb7b8905a4769934caa945a49e19ede066fe8a",
+    "files": [
+      {
+        "path": "crates/meerkat-mcp/src/protocol.rs",
+        "git_blob": "a22101cbf42f1ceece273af8770458b915f7c1bf",
+        "sha256": "32d26d6db5ca6f584365117ab751ba91bd89a6df98360718535166e0a5a34e6c",
+        "bytes": 15893
+      },
+      {
+        "path": "crates/meerkat-core/src/types.rs",
+        "git_blob": "3236d43528f91b3bea7cc38172bd2a709db9507b",
+        "sha256": "2e2b79dfdd88c067dd0b218139c188f2d8ca9539c7e811dc57ced0af55161d1f",
+        "bytes": 186878
+      }
+    ],
+    "behavior": "Core removes JSON text equal to structuredContent and retains differing text plus Structured. Map ContentBlock variants directly; text_content() concatenates representations. Source-inspected only, no native build or installed result claimed."
+  }
 }

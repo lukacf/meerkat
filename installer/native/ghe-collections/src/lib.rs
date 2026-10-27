@@ -10,6 +10,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
+mod projection;
+pub use projection::{GithubPayload, PayloadOrigin, ProjectedBlock, projected_github_payload};
 mod pull_requests;
 pub use pull_requests::{
     PullRequestBranch, PullRequestBranchRepository, PullRequestListLimits, PullRequestQuery,

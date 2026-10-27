@@ -89,6 +89,25 @@ absent, and fork metadata never changes the selected repository. Full pages
 require a followup, including an empty page at an exact multiple of 100.
 It uses no date cutoff, head/base filter or field projection.
 
+`projected_github_payload` selects the original JSON payload from native content
+blocks. The pinned Core MCP projection removes text equal to structured JSON,
+so PR reads and commit reads can arrive as a single `Structured` block. Issue
+and Actions reads have method-tagged structured wrappers that differ from their
+text. List results can also differ through zero-value serialization. The decoder
+keeps that companion separately and uses the exact text bytes without merging
+fields or concatenating JSON documents. It refuses tool errors, malformed or
+extra blocks, missing wrapped text, mismatched wrapper methods and results over
+32 MiB across both blocks. It does not assert that a companion's descriptive
+fields equal the text or turn omitted text fields into known values.
+
+The native adapter must map actual `ContentBlock` variants directly and pass the
+pending call from the matching committed result. `ToolResult::text_content()`
+can concatenate two JSON documents and must not feed these programs. A decoder
+refusal must end the native cursor; it must not retry the pending observation.
+The native collection budget still counts the entire original result, including
+its companion and envelope. This helper is not the native adapter or proof of
+native settlement, installed credentials or source coverage.
+
 ## Pinned upstream behavior
 
 Contract: GitHub MCP server v2.0.3, source

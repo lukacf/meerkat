@@ -127,7 +127,8 @@ jobs:
   # Refuses rather than waits: the tagged commit's exact-main CI (ci.yml on
   # main) must already be green. In the monorepo that run's plan is
   # product-scoped; a commit whose diff from the last green main left Meta
-  # alone still carries Meta's rows from the run that planned them.
+  # alone still carries Meta's rows from the run that planned them. Meta CI
+  # (meta-ci.yml) must be green at the commit too, with Meta's lanes run.
   require_ci_green:
     name: Require green exact-main CI
     needs: [resolve_release, build_binaries]
@@ -184,6 +185,48 @@ jobs:
             core.info(`Release commit ${ref} has green exact-main CI: ${success.html_url}`);
             core.setOutput("run_id", String(success.id));
             core.setOutput("run_attempt", String(success.run_attempt));
+
+            // Meta's own suites (console, browser, SDK, flow editor and,
+            // on pull requests, its Rust tests) run in meta-ci.yml, whose
+            // "Meta gate" passes trivially when a push left Meta alone. The
+            // release needs a green Meta CI run at this commit that ran
+            // Meta's lanes: the push that reached Meta, or a dispatch on main.
+            const metaRuns = [];
+            for (const event of ["push", "workflow_dispatch"]) {
+              const { data: listing } = await github.rest.actions.listWorkflowRuns({
+                owner,
+                repo,
+                workflow_id: "meta-ci.yml",
+                branch: "main",
+                event,
+                head_sha: ref,
+                per_page: 100,
+              });
+              metaRuns.push(...listing.workflow_runs.filter((run) => run.head_sha === ref && run.head_branch === "main"));
+            }
+            let metaEvidence = null;
+            for (const run of metaRuns.filter((candidate) => candidate.status === "completed" && candidate.conclusion === "success")) {
+              const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRunAttempt, {
+                owner,
+                repo,
+                run_id: run.id,
+                attempt_number: run.run_attempt,
+                per_page: 100,
+              });
+              const lanes = jobs.filter((job) => !["changes", "Meta gate"].includes(job.name));
+              if (lanes.some((job) => job.conclusion === "success")) {
+                metaEvidence = run;
+                break;
+              }
+            }
+            if (!metaEvidence) {
+              core.setFailed(
+                `Release commit ${ref} has no green Meta CI run that ran Meta's lanes ` +
+                  `(${metaRuns.length} run(s) found). Dispatch meta-ci.yml on main at this commit.`
+              );
+              return;
+            }
+            core.info(`Release commit ${ref} has green Meta CI with Meta's lanes: ${metaEvidence.html_url}`);
 
   release_validate:
     name: Validate Meta release state

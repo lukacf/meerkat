@@ -1,0 +1,112 @@
+use crate::AdapterError;
+use forge_ghe_collections::*;
+use serde_json::Value;
+use std::{collections::BTreeSet, sync::Mutex};
+
+#[derive(Debug)]
+pub enum HistoricalCollection {
+    Statuses(HistoricalStatuses),
+    Threads(ReportedReviewThreads),
+    Changes(ReportedPullRequestChanges),
+    Discussion(ReportedDiscussionPages),
+    Commits(ReportedCommitHistory),
+    Runs(ReportedWorkflowRuns),
+    Jobs(ReportedWorkflowRunJobs),
+    Issues(ReportedIssues),
+    IssueComments(ReportedIssueComments),
+    PullRequests(ReportedPullRequests),
+}
+
+/// Data copied from an actual committed result. Serialized native evidence is
+/// audit data only; it cannot be resubmitted as a native receipt or caller.
+pub struct HistoricalObservation {
+    pub(crate) native: Value,
+    pub(crate) payload: String,
+    pub(crate) structured_companion: Option<String>,
+}
+impl HistoricalObservation {
+    pub fn native_audit(&self) -> &Value {
+        &self.native
+    }
+    pub fn payload(&self) -> &str {
+        &self.payload
+    }
+    pub fn structured_companion(&self) -> Option<&str> {
+        self.structured_companion.as_deref()
+    }
+}
+
+/// A completed parser result with its original native call evidence. The native
+/// engine still rechecks the selection AFTER this callback. This is historical
+/// data, not a finished source report, ingestion receipt or readiness assertion.
+pub struct ParsedHistory {
+    pub(crate) source_id: String,
+    pub(crate) requirement_id: String,
+    pub(crate) resource: Value,
+    pub(crate) context: Value,
+    pub(crate) collection: HistoricalCollection,
+    pub(crate) observations: Vec<HistoricalObservation>,
+    pub(crate) bytes: usize,
+}
+impl ParsedHistory {
+    pub fn source_id(&self) -> &str {
+        &self.source_id
+    }
+    pub fn requirement_id(&self) -> &str {
+        &self.requirement_id
+    }
+    pub fn resource(&self) -> &Value {
+        &self.resource
+    }
+    pub fn native_context(&self) -> &Value {
+        &self.context
+    }
+    pub fn collection(&self) -> &HistoricalCollection {
+        &self.collection
+    }
+    pub fn observations(&self) -> &[HistoricalObservation] {
+        &self.observations
+    }
+}
+
+#[derive(Default)]
+struct Retained {
+    rows: Vec<ParsedHistory>,
+    keys: BTreeSet<String>,
+    bytes: usize,
+}
+/// Owned by one application composition. No global sink, persistence, network,
+/// publication or credential store. Original keys remain after reading rows.
+#[derive(Default)]
+pub struct HistoricalStore(Mutex<Retained>);
+impl HistoricalStore {
+    pub(crate) fn retain(&self, history: ParsedHistory) -> Result<(), AdapterError> {
+        let key = serde_json::json!([history.source_id, history.requirement_id, history.context])
+            .to_string();
+        let mut store = self
+            .0
+            .lock()
+            .map_err(|_| AdapterError::HistoryUnavailable)?;
+        let bytes = store
+            .bytes
+            .checked_add(history.bytes)
+            .ok_or(AdapterError::HistoryFull)?;
+        if store.keys.len() >= 256 || bytes > 32 * 1024 * 1024 || store.keys.contains(&key) {
+            return Err(AdapterError::HistoryFull);
+        }
+        store.keys.insert(key);
+        store.bytes = bytes;
+        store.rows.push(history);
+        Ok(())
+    }
+    /// A caller must separately consume the original final native source report
+    /// and lifetime disposition. Taking data never upgrades those native facts.
+    pub fn take_historical(&self) -> Result<Vec<ParsedHistory>, AdapterError> {
+        let mut store = self
+            .0
+            .lock()
+            .map_err(|_| AdapterError::HistoryUnavailable)?;
+        store.bytes = 0;
+        Ok(std::mem::take(&mut store.rows))
+    }
+}

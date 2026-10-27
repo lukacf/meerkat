@@ -39,9 +39,9 @@ currently be presented as native-qualified. Issue hierarchy, repository metadata
 and revision-bearing historical check support also remain separate inventory
 requirements.
 
-`HistoricalStore` retains completed parser output together with each original
-payload, structured companion and serialized native audit observation. The
-store bounds retained result/audit bytes to 32 MiB and retains up to 256 original
+`HistoricalStore` retains completed parser output together with each exact call,
+original payload, structured companion and serialized native audit observation.
+The store bounds retained call/result/audit bytes to 32 MiB and retains up to 256 original
 context keys, including after rows are taken. It never silently overwrites an
 observation. These are historical data: Connect still rechecks the selection
 after the completion callback and can refuse the overall source. Taking rows

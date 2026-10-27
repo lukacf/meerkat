@@ -283,6 +283,8 @@ impl CollectionCursor for Cursor {
             .bytes()
             .len()
             .checked_add(payload.structured_companion.map_or(0, str::len))
+            .and_then(|n| n.checked_add(result.operation().len()))
+            .and_then(|n| n.checked_add(result.arguments().to_string().len()))
             .and_then(|n| n.checked_add(audit.to_string().len()));
         let Some(bytes) = added.and_then(|n| self.bytes.checked_add(n)) else {
             return CollectionStep::Refuse;
@@ -299,6 +301,8 @@ impl CollectionCursor for Cursor {
             return CollectionStep::Refuse;
         };
         self.observations.push(HistoricalObservation {
+            operation: result.operation().into(),
+            arguments: result.arguments().clone(),
             native: audit,
             payload: text.into(),
             structured_companion: payload.structured_companion.map(str::to_owned),

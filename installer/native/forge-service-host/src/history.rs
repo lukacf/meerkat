@@ -20,11 +20,19 @@ pub enum HistoricalCollection {
 /// Data copied from an actual committed result. Serialized native evidence is
 /// audit data only; it cannot be resubmitted as a native receipt or caller.
 pub struct HistoricalObservation {
+    pub(crate) operation: String,
+    pub(crate) arguments: Value,
     pub(crate) native: Value,
     pub(crate) payload: String,
     pub(crate) structured_companion: Option<String>,
 }
 impl HistoricalObservation {
+    pub fn operation(&self) -> &str {
+        &self.operation
+    }
+    pub fn arguments(&self) -> &Value {
+        &self.arguments
+    }
     pub fn native_audit(&self) -> &Value {
         &self.native
     }

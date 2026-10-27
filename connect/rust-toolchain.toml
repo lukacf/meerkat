@@ -1,0 +1,6 @@
+# Meerkat Connect builds with Rust 1.97.0 (BUILDING.md). Without this file a
+# build inside connect/ would take the repository root's toolchain.
+[toolchain]
+channel = "1.97.0"
+profile = "minimal"
+components = ["clippy", "rustfmt"]

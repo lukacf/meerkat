@@ -1,0 +1,5 @@
+# Meerkat Connect's Clippy configuration. Clippy reads the clippy.toml
+# nearest to a crate, so without this file Connect's crates would take the
+# repository root's, whose disallowed process-launch methods belong to Core's
+# launch confinement (crates/meerkat/tests/host_launch_sites.rs). Connect sets
+# no disallowed methods of its own.

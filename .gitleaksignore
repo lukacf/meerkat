@@ -1,0 +1,12 @@
+# Imported from meta/.gitleaksignore: gitleaks reads this file only at the
+# repository root, so Meta's path-based entries carry the meta/ prefix here.
+# Public SSH envelope markers used by the validator; no key body is embedded.
+meta/installer/launchkit/gcp_access.py:private-key:102
+# Inert SSH key envelope specimens with explicit CANARY bodies.
+meta/installer/tests/test_gcp_access.py:private-key:21
+meta/installer/tests/test_gcp_provisioning.py:private-key:705
+# Public SDK source-file SHA256 in the generated scheduling reference.
+meta/installer/launchkit/native_schedule_reference.json:facebook-page-access-token:1
+# Fixed synthetic identities for private-control and visualization unit tests.
+meta/installer/tests/test_visualization_intent_api.py:generic-api-key:13
+meta/installer/tests/test_visualizer.py:generic-api-key:1408

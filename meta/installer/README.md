@@ -903,7 +903,7 @@ not infer identities or create an operator. The browser presents the retained
 review; it does not choose the policy
 or start another host. See the [frontend integration contract](FRONTEND_INTEGRATION.md)
 for the source boundary. Current source checks are reported in
-[Forge CI](https://github.com/lukacf/meerkat-meta/actions/workflows/forge.yml);
+[Forge CI](https://github.com/lukacf/meerkat/actions/workflows/meta-installer.yml);
 installed execution remains a separate outcome.
 
 Forge already has application composition and lifetime hooks in
@@ -1927,7 +1927,7 @@ npm --prefix installer/web run check
 npm --prefix installer/web run build
 ```
 
-Current source results are in [Forge CI](https://github.com/lukacf/meerkat-meta/actions/workflows/forge.yml).
+Current source results are in [Forge CI](https://github.com/lukacf/meerkat/actions/workflows/meta-installer.yml).
 Use the [first-job walkthrough](GETTING_STARTED.md#5-complete-one-useful-job) to
 check useful installed work separately from source tests.
 Registry metadata is evidence about configuration, not a certification of a

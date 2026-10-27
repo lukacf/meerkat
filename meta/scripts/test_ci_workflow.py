@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Focused contracts for Meta's CI workflows: the monorepo's
-.github/workflows/meta-ci.yml (pull requests, pushes, dispatch) and
-meta-e2e-live.yml, and the workflows still kept under meta/.github."""
+.github/workflows/meta-ci.yml (pull requests, pushes, dispatch), its
+meta-installer.yml and meta-e2e-live.yml, and the workflows still kept under
+meta/.github."""
 
 import importlib.util
 import json
@@ -20,8 +21,10 @@ ROOT = Path(__file__).resolve().parents[1]
 MONOREPO = ROOT.parent
 WORKFLOWS = MONOREPO / ".github/workflows"
 CI_WORKFLOW = WORKFLOWS / "meta-ci.yml"
+INSTALLER_WORKFLOW = WORKFLOWS / "meta-installer.yml"
+INSTALLER_RELEASE_WORKFLOW = WORKFLOWS / "meta-installer-release.yml"
 E2E_LIVE_WORKFLOW = WORKFLOWS / "meta-e2e-live.yml"
-META_WORKFLOWS = (CI_WORKFLOW, E2E_LIVE_WORKFLOW)
+META_WORKFLOWS = (CI_WORKFLOW, INSTALLER_WORKFLOW, E2E_LIVE_WORKFLOW)
 # The root CI, whose toolchain, compile environment, cache settings and
 # action pins meta-ci.yml shares.
 ROOT_CI_WORKFLOW = WORKFLOWS / "ci.yml"
@@ -355,6 +358,7 @@ class CiWorkflowTests(unittest.TestCase):
                     self.assertRegex(line, r"^make (test-python|e2e-live) CARGO=\.\./scripts/repo-cargo$")
         self.assertEqual(sum(line.startswith("make ") for line in commands), 2)
         self.assertEqual(len(commands), 7, commands)
+        self.assertNotIn("repo-cargo", INSTALLER_WORKFLOW.read_text())
 
     def test_every_external_action_is_pinned_and_takes_the_root_pins(self):
         """The repository's Actions policy refuses an action that is not
@@ -1092,6 +1096,63 @@ class CiWorkflowTests(unittest.TestCase):
                            ("is absent", None)):
             with self.subTest(base=case):
                 self.assertEqual(self.run_classify_step(base), every)
+
+
+class InstallerWorkflowTests(unittest.TestCase):
+    """meta-installer.yml, Meta's installer suite at the monorepo's root."""
+
+    def test_it_runs_for_meta_installer_inputs_and_dispatch_only(self):
+        workflow = load(INSTALLER_WORKFLOW)
+        on = triggers(workflow)
+        self.assertEqual(sorted(on), ["pull_request", "workflow_dispatch"])
+        paths = on["pull_request"]["paths"]
+        self.assertIn(".github/workflows/meta-installer.yml", paths)
+        self.assertEqual([path for path in paths if not path.startswith(ci_changes.MONOREPO_ROOT)],
+                         [".github/workflows/meta-installer.yml"])
+        self.assertEqual(workflow["defaults"]["run"]["working-directory"], "meta")
+        self.assertEqual(workflow["permissions"], {"contents": "read"})
+
+    def test_it_keeps_the_jobs_and_artifacts_the_installer_release_binds(self):
+        """scripts/installer-release.py binds the frontend and backend jobs of a
+        green dispatched run and their installer-toolchain-* artifacts; the
+        backend job checks every shard's plan."""
+        spec = importlib.util.spec_from_file_location("installer_release", ROOT / "scripts/installer-release.py")
+        release = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(release)
+        workflow = load(INSTALLER_WORKFLOW)
+        self.assertLessEqual(set(release.EVIDENCE_JOBS), set(workflow["jobs"]))
+        self.assertEqual(workflow["jobs"]["backend"]["needs"], ["backend-shard", "agent-team-live"])
+        source = INSTALLER_WORKFLOW.read_text()
+        self.assertEqual(source.count("name: installer-toolchain-${{ github.job }}-"), 3)
+        self.assertEqual(release.INSTALLER_CI, ".github/workflows/meta-installer.yml")
+        # Artifact paths are the workspace's, not meta/'s: each names meta/
+        # or the runner's temp directory.
+        for name, job in workflow["jobs"].items():
+            for step in steps_of(job):
+                if uses_of(step) in ("actions/upload-artifact", "actions/download-artifact"):
+                    with self.subTest(job=name, step=step.get("name")):
+                        for path in str(step["with"]["path"]).splitlines():
+                            self.assertRegex(path, r"^(meta/|\$\{\{ runner\.temp \}\})")
+
+    def test_the_root_installer_workflows_use_neutral_names_and_workspace_paths(self):
+        """Both installer workflows run from the repository root: their file,
+        job, artifact and step names never name the installer's product, and
+        every path an action resolves from the workspace (artifacts,
+        attestations) names meta/ or the runner's temp directory."""
+        for path in (INSTALLER_WORKFLOW, INSTALLER_RELEASE_WORKFLOW):
+            with self.subTest(workflow=path.name):
+                self.assertNotIn("forge", path.read_text().lower())
+                workflow = load(path)
+                self.assertEqual(workflow["defaults"]["run"]["working-directory"], "meta")
+                for name, job in workflow["jobs"].items():
+                    for step in steps_of(job):
+                        action = uses_of(step)
+                        key = {"actions/upload-artifact": "path", "actions/download-artifact": "path",
+                               "actions/attest-build-provenance": "subject-path"}.get(action)
+                        if key is None:
+                            continue
+                        for value in str(step["with"][key]).splitlines():
+                            self.assertRegex(value, r"^(meta/|\$\{\{ runner\.temp \}\})", f"{name}: {step.get('name')}")
 
 
 if __name__ == "__main__":

@@ -1966,12 +1966,13 @@ class ReleaseCacheReuseTests(unittest.TestCase):
         attestations, contents, actions or any other scope) may restore one,
         except the allowlisted jobs above. Publication verifies with
         --no-verify only what the secret-free verification job built. The
-        scan reads the workflows under meta/.github and Meta's live workflow
-        at the monorepo's root; meta-ci.yml, whose compile jobs hold the
-        workload identity of the root CI's sccache bucket, is
-        test_ci_workflow.py's."""
+        scan reads the workflows under meta/.github and Meta's live and
+        installer workflows at the monorepo's root; meta-ci.yml, whose
+        compile jobs hold the workload identity of the root CI's sccache
+        bucket, is test_ci_workflow.py's."""
         holders_seen = set()
-        relocated = [ROOT.parent / ".github/workflows/meta-e2e-live.yml"]
+        relocated = [ROOT.parent / ".github/workflows" / name
+                     for name in ("meta-e2e-live.yml", "meta-installer.yml", "meta-installer-release.yml")]
         for workflow in sorted((ROOT / ".github/workflows").glob("*.yml")) + relocated:
             source = workflow.read_text()
             code_lines = [line for line in source.splitlines() if not line.strip().startswith("#")]

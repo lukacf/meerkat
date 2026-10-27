@@ -1,34 +1,41 @@
 #!/usr/bin/env python3
-"""Meta Forge release protocol: attested packages in their own release.
+"""Meta's installer release protocol: attested packages in their own release.
 
-Forge ships beside Meta, not inside Meta's release: a forge-v<version> tag
-(the version in installer/pyproject.toml), its own attested candidate
-manifest, and its own GitHub release, published as a prerelease that is never
-the repository's latest. Meta's release.yml and release-candidate.py are not
-involved. This script loads release-candidate.py read-only for its strict
-JSON, GitHub API, artifact, attestation and release helpers, and rebinds the
-copy it loaded to this protocol's workflow, .github/workflows/forge-release.yml.
+The installer ships beside Meta, not inside Meta's release: a
+meta-installer-v<version> tag (the version in installer/pyproject.toml), its
+own attested candidate manifest, and its own GitHub release in the monorepo,
+published as a prerelease that is never the repository's latest (Core's
+release stays the latest). Meta's meta-release.yml and release-candidate.py
+are not involved. This script loads release-candidate.py read-only for its
+strict JSON, GitHub API, artifact, attestation and release helpers, and
+rebinds the copy it loaded to this protocol's workflow,
+.github/workflows/meta-installer-release.yml.
 
 Modes (workflow_dispatch only):
   candidate: build each target's package from the pinned inputs, verify it,
-    attest it, and bind the set in an attested forge-candidate-manifest.json.
+    attest it, and bind the set in an attested installer-candidate-manifest.json.
     Any branch can build one as a dry run. Only a main candidate whose exact
     main CI run is green can be published: publication verifies every run and
     attestation against main.
   publish: release an accepted candidate under its operator-pushed
-    forge-v<version> tag. It adds the exact attested bytes to a draft, reads
-    them back, then publishes the draft as a prerelease that is not latest.
+    meta-installer-v<version> tag. It adds the exact attested bytes to a
+    draft, reads them back, then publishes the draft as a prerelease that is
+    not latest.
 
-A candidate does not rerun Forge's own suite. It binds a green dispatched
-forge.yml run (backend and frontend) that tested exactly the Forge inputs at
-its commit: the
-trees of installer, console, packages/console-core, packages/console-components
-and sdk/python, forge.yml itself, the lockfiles, installer requirements and
-vendored wheels, the gateway source whose shutdown horizon a Forge test pins,
-and a toolchain that fits forge.yml's declared versions. A
-pull request run never counts: it tests GitHub's merge of its head into the
-base (refs/pull/N/merge), not its head commit. If no dispatched run did, it
-refuses until forge.yml is dispatched for that commit.
+A candidate does not rerun the installer's own suite. It binds a green
+dispatched run of the installer workflow (.github/workflows/meta-installer.yml,
+jobs backend and frontend) that tested exactly the installer inputs at its
+commit: the trees of meta/installer, meta/console, meta/packages/console-core,
+meta/packages/console-components and meta/sdk/python, the workflow itself, the
+lockfiles, installer requirements and vendored wheels, the gateway source whose
+shutdown horizon an installer test pins, and a toolchain that fits the
+workflow's declared versions. A pull request run never counts: it tests
+GitHub's merge of its head into the base (refs/pull/N/merge), not its head
+commit. If no dispatched run did, it refuses until the installer workflow is
+dispatched for that commit.
+
+Paths: git reads at a commit name repository paths (Meta's tree under meta/);
+checkout reads (ROOT) name paths under Meta's own directory.
 
 Inputs (installer/release/forge-release-inputs.json, schema 1): per target,
 every file the packager reads, each pinned by size and SHA-256 and taken
@@ -72,16 +79,16 @@ assert SPEC is not None and SPEC.loader is not None
 rc = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(rc)
 
-WORKFLOW = ".github/workflows/forge-release.yml"
+WORKFLOW = ".github/workflows/meta-installer-release.yml"
 # release-candidate.py checks runs and attestations against its WORKFLOW.
-# This process's copy of it checks Forge's workflow instead; Meta's release
-# runs never load this script, so their copy keeps release.yml.
+# This process's copy of it checks the installer's release workflow instead;
+# Meta's release runs never load this script, so their copy keeps
+# meta-release.yml. Both name the monorepo, lukacf/meerkat.
 rc.WORKFLOW = WORKFLOW
-# Meta's own releases moved to the monorepo (release-candidate.py names it);
-# this release still binds the standalone repository: its CI evidence
-# (forge.yml), evidence paths and release URLs are that repository's until
-# the installer release is ported.
-rc.REPOSITORY = "lukacf/meerkat-meta"
+# Meta's directory in the repository. Git reads at a commit (inputs, the
+# version, the evidence tuple) name repository paths; checkout reads (ROOT)
+# name paths under Meta's directory.
+META_DIR = "meta/"
 
 require, ProtocolError = rc.require, rc.ProtocolError
 MAIN = rc.MAIN
@@ -91,10 +98,10 @@ PYPROJECT = "installer/pyproject.toml"
 TARGETS = ("linux-x86_64", "macos-arm64")
 # Each Forge target's Meta native release asset triple.
 GATEWAY_TRIPLES = {"linux-x86_64": "x86_64-unknown-linux-gnu", "macos-arm64": "aarch64-apple-darwin"}
-TAG_PREFIX = "forge-v"
-MANIFEST = "forge-candidate-manifest.json"
-MANIFEST_PROVENANCE = "forge-manifest-provenance.jsonl"
-SELECTION = "forge-candidate-selection.json"
+TAG_PREFIX = "meta-installer-v"
+MANIFEST = "installer-candidate-manifest.json"
+MANIFEST_PROVENANCE = "installer-manifest-provenance.jsonl"
+SELECTION = "installer-candidate-selection.json"
 PRODUCT_SELECTION_FORMAT = "forge-meta-toolkit-runtime-selection-v1"
 SELECTED_ARTIFACTS = ("assembly", "meta_wheel", "toolkit_wheel", "dependency_requirements", "model_catalog")
 VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?")
@@ -106,22 +113,27 @@ MAX_INPUT_FILES = 512
 MAX_PACKAGE_FILES = 8192 + 1
 MAX_PACKAGE_TOTAL = 4 * 1024**3 + 64 * 1024**2
 ALLOWED_URLS = (
+    # The monorepo's releases (Meta's meta-v and Connect's connect-v tags),
+    # and the standalone repositories' releases made before it.
+    "https://github.com/lukacf/meerkat/releases/download/",
     "https://github.com/lukacf/meerkat-meta/releases/download/",
     "https://github.com/lukacf/meerkat-connect/releases/download/",
     "https://files.pythonhosted.org/packages/",
 )
 DOWNLOAD_ATTEMPTS = 3
-# A release reuses the green Forge run (forge.yml, backend and frontend) that
-# tested exactly the Forge inputs at the release commit: these trees, files,
-# lockfiles and vendored wheels, and the toolchain forge.yml declares.
-FORGE_CI = ".github/workflows/forge.yml"
-EVIDENCE_TREES = ("console", "installer", "packages/console-components", "packages/console-core", "sdk/python")
+# A release reuses the green run of the installer workflow (backend and
+# frontend) that tested exactly the installer inputs at the release commit:
+# these trees, files, lockfiles and vendored wheels, and the toolchain the
+# workflow declares.
+INSTALLER_CI = ".github/workflows/meta-installer.yml"
+EVIDENCE_TREES = tuple(META_DIR + path for path in (
+    "console", "installer", "packages/console-components", "packages/console-core", "sdk/python"))
 # installer/tests/test_gateway_shutdown_horizon.py reads the shutdown horizon
 # the gateway source advertises, so the bound run must have tested it too.
-EVIDENCE_FILES = (FORGE_CI, "console/package-lock.json", "installer/web/package-lock.json",
-                  "crates/meerkat-meta/src/rpc_gateway.rs")
+EVIDENCE_FILES = (INSTALLER_CI, *(META_DIR + path for path in (
+    "console/package-lock.json", "installer/web/package-lock.json", "crates/meerkat-meta/src/rpc_gateway.rs")))
 EVIDENCE_JOBS = ("backend", "frontend")
-TOOLCHAIN_FILE = "forge-toolchain.json"
+TOOLCHAIN_FILE = "installer-toolchain.json"
 MAX_EVIDENCE_RUNS = 30
 # GitHub's workflow run and artifact listings are eventually consistent: for
 # minutes at a time a listing can omit a run or an artifact that exists, and a
@@ -139,11 +151,11 @@ TRANSIENT_API = re.compile(r"gh api failed: .*(?:\bHTTP 5[0-9][0-9]\b|error conn
 
 
 def package_name(version, target):
-    return f"meta-forge-{version}-{target}.zip"
+    return f"meta-installer-{version}-{target}.zip"
 
 
 def provenance_name(version, target):
-    return f"meta-forge-{version}-{target}-provenance.jsonl"
+    return f"meta-installer-{version}-{target}-provenance.jsonl"
 
 
 def package_members(version, target):
@@ -152,15 +164,15 @@ def package_members(version, target):
 
 
 def package_artifact_name(target, attempt):
-    return f"forge-package-{target}-{attempt}"
+    return f"installer-package-{target}-{attempt}"
 
 
 def manifest_artifact_name(attempt):
-    return f"forge-candidate-manifest-{attempt}"
+    return f"installer-candidate-manifest-{attempt}"
 
 
 def toolchain_artifact_name(job, attempt):
-    return f"forge-toolchain-{job}-{attempt}"
+    return f"installer-toolchain-{job}-{attempt}"
 
 
 def write_outputs(values):
@@ -189,7 +201,7 @@ def safe_url(value):
 
 
 def forge_version(revision="HEAD"):
-    value = tomllib.loads(rc.git("show", f"{revision}:{PYPROJECT}"))["project"]["version"]
+    value = tomllib.loads(rc.git("show", f"{revision}:{META_DIR}{PYPROJECT}"))["project"]["version"]
     require(isinstance(value, str) and VERSION.fullmatch(value), "invalid Forge version in installer/pyproject.toml")
     return value
 
@@ -258,11 +270,18 @@ def validate_target(target, entry):
                 f"{target} ordinary gateway must be a separate pinned input outside the product root")
         pin, meta = files[ordinary], selection.get("meta")
         version = meta.get("version") if isinstance(meta, dict) else None
+        asset = f"meta-rpc-gateway-{version}-{GATEWAY_TRIPLES[target]}.tar.gz" if isinstance(version, str) else ""
         require(isinstance(version, str) and VERSION.fullmatch(version) and "member" in pin
-                and pin["url"] == ("https://github.com/lukacf/meerkat-meta/releases/download/"
-                                   f"v{version}/meta-rpc-gateway-{version}-{GATEWAY_TRIPLES[target]}.tar.gz")
-                and pin["member"] == "rpc_gateway",
+                and pin["url"] in meta_release_urls(version, asset) and pin["member"] == "rpc_gateway",
                 f"{target} ordinary gateway must be the Meta {version} rpc_gateway release asset for {target}")
+
+
+def meta_release_urls(version, asset):
+    """Where Meta's release of `version` publishes `asset`: the monorepo
+    (meta-v tags) and, for releases made before it, the standalone
+    repository (v tags)."""
+    return (f"https://github.com/lukacf/meerkat/releases/download/meta-v{version}/{asset}",
+            f"https://github.com/lukacf/meerkat-meta/releases/download/v{version}/{asset}")
 
 
 def validate_inputs(value):
@@ -282,7 +301,7 @@ def validate_inputs(value):
 
 
 def load_inputs(revision="HEAD"):
-    return validate_inputs(rc.parse_json(rc.git("show", f"{revision}:{INPUTS}")))
+    return validate_inputs(rc.parse_json(rc.git("show", f"{revision}:{META_DIR}{INPUTS}")))
 
 
 def target_inputs(target):
@@ -310,7 +329,7 @@ def validate_forge_ci(value):
     rc.integer(value["run_id"], "Forge run ID")
     rc.integer(value["run_attempt"], "Forge run attempt")
     rc.digest(value["head_sha"], "Forge run SHA", 40)
-    require(value["event"] == "workflow_dispatch", "Forge evidence must be a dispatched forge.yml run")
+    require(value["event"] == "workflow_dispatch", "Forge evidence must be a dispatched installer workflow run")
     rc.exact_keys(value["tuple"], "trees files", "Forge inputs tuple")
     trees, files = value["tuple"]["trees"], value["tuple"]["files"]
     require(isinstance(trees, dict) and set(trees) == set(EVIDENCE_TREES)
@@ -321,7 +340,7 @@ def validate_forge_ci(value):
     rc.exact_keys(toolchain, "declared " + " ".join(EVIDENCE_JOBS), "Forge toolchain")
     for name, versions in toolchain.items():
         rc.exact_keys(versions, "python node", f"{name} toolchain")
-    require(toolchain_fits(toolchain["declared"], toolchain), "the Forge run's toolchain differs from forge.yml")
+    require(toolchain_fits(toolchain["declared"], toolchain), "the Forge run's toolchain differs from the installer workflow")
     return value
 
 
@@ -503,10 +522,10 @@ def evidence_tuple(objects, commit):
         found = objects.lookup(commit, path)
         require(found is not None and found[0] == "blob", f"{path} is not a file at {commit}")
         files[path] = found[1]
-    for name, (kind, sha) in objects.entries(trees["installer"]).items():
+    for name, (kind, sha) in objects.entries(trees[META_DIR + "installer"]).items():
         if kind == "blob" and re.fullmatch(r"requirements[A-Za-z0-9_.-]*\.txt", name):
-            files[f"installer/{name}"] = sha
-    pending = [("installer/vendor", objects.lookup(commit, "installer/vendor"))]
+            files[f"{META_DIR}installer/{name}"] = sha
+    pending = [(f"{META_DIR}installer/vendor", objects.lookup(commit, f"{META_DIR}installer/vendor"))]
     while pending:
         path, found = pending.pop()
         if found is None or found[0] != "tree":
@@ -526,10 +545,11 @@ def tuple_differences(wanted, observed):
 
 
 def declared_toolchain(objects, files):
-    text = objects.blob_text(files[FORGE_CI])
+    text = objects.blob_text(files[INSTALLER_CI])
     pythons = set(re.findall(r"python-version:\s*['\"]?([0-9][0-9.]*)['\"]?", text))
     nodes = set(re.findall(r"node-version:\s*['\"]?([0-9][0-9.]*)['\"]?", text))
-    require(len(pythons) == 1 and len(nodes) == 1, "forge.yml must declare exactly one Python and one Node version")
+    require(len(pythons) == 1 and len(nodes) == 1,
+            "the installer workflow must declare exactly one Python and one Node version")
     return {"python": pythons.pop(), "node": nodes.pop()}
 
 
@@ -581,7 +601,8 @@ def forge_ci_evidence(sha, work, objects=None):
     wanted = evidence_tuple(objects, sha)
     declared = declared_toolchain(objects, wanted["files"])
     endpoint = rc.repo_endpoint(
-        f"actions/workflows/forge.yml/runs?event=workflow_dispatch&status=success&per_page={MAX_EVIDENCE_RUNS}")
+        f"actions/workflows/{PurePosixPath(INSTALLER_CI).name}/runs?event=workflow_dispatch&status=success"
+        f"&per_page={MAX_EVIDENCE_RUNS}")
     listing = itertools.count(1)
 
     def read():
@@ -590,7 +611,7 @@ def forge_ci_evidence(sha, work, objects=None):
         folder = work / f"forge-evidence-{next(listing)}"
         folder.mkdir()
         runs = [run for run in rc.api(endpoint)["workflow_runs"] if run.get("event") == "workflow_dispatch"
-                and run.get("path") == FORGE_CI and run.get("status") == "completed"
+                and run.get("path") == INSTALLER_CI and run.get("status") == "completed"
                 and run.get("conclusion") == "success" and run["repository"]["full_name"] == rc.repository()]
         nearest = None
         for run in sorted(runs, key=lambda run: (run["head_sha"] != sha, -run["id"])):
@@ -610,7 +631,7 @@ def forge_ci_evidence(sha, work, objects=None):
         raise Miss(f"none of {len(runs)} listed green dispatched run(s) tested these Forge inputs",
                    f"no green dispatched Forge run (backend and frontend) tested the Forge inputs at "
                    f"{sha}{detail}. "
-                   "Dispatch forge.yml for this commit, then rerun the candidate")
+                   f"Dispatch {PurePosixPath(INSTALLER_CI).name} for this commit, then rerun the candidate")
 
     return reread("Forge evidence", endpoint, read)
 
@@ -623,7 +644,7 @@ def recheck_forge_ci(manifest):
             "the bound Forge run no longer tested this candidate's Forge inputs")
     run = rc.api(rc.repo_endpoint(f"actions/runs/{record['run_id']}"))
     require(run["id"] == record["run_id"] and run["run_attempt"] == record["run_attempt"]
-            and run["head_sha"] == record["head_sha"] and run["path"] == FORGE_CI
+            and run["head_sha"] == record["head_sha"] and run["path"] == INSTALLER_CI
             and run["event"] == "workflow_dispatch"
             and run["status"] == "completed" and run["conclusion"] == "success"
             and run_jobs_green(record["run_id"], record["run_attempt"]), "the bound Forge run is no longer green")
@@ -639,7 +660,7 @@ def download(url, destination, limit):
     """Fetch one pinned public file; the caller checks its bytes."""
     for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
         try:
-            request = urllib.request.Request(safe_url(url), headers={"User-Agent": "meta-forge-release"})
+            request = urllib.request.Request(safe_url(url), headers={"User-Agent": "meta-installer-release"})
             with urllib.request.urlopen(request, timeout=120) as response, destination.open("xb") as handle:
                 received = 0
                 while block := response.read(1024 * 1024):
@@ -881,7 +902,7 @@ def collect(args):
         "schema_version": 1, "kind": "forge-candidate-manifest", "repository": rc.repository(),
         "source_sha": sha, "version": version, "tag": tag, "run_id": run_id, "run_attempt": attempt,
         "workflow": {"path": WORKFLOW, "sha": sha, "ref": ref}, "ci": ci, "forge_ci": forge_ci,
-        "inputs_sha256": rc.hash_bytes(rc.run(["git", "show", f"{sha}:{INPUTS}"])),
+        "inputs_sha256": rc.hash_bytes(rc.run(["git", "show", f"{sha}:{META_DIR}{INPUTS}"])),
         "packages": packages,
     })
     args.output_dir.mkdir()
@@ -906,9 +927,9 @@ def selection(args):
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as handle:
             if manifest["workflow"]["ref"] == MAIN:
-                handle.write("## Forge candidate selection\n\n")
+                handle.write("## Installer candidate selection\n\n")
             else:
-                handle.write(f"## Forge dry run from {manifest['workflow']['ref']}: not publishable\n\n")
+                handle.write(f"## Installer dry run from {manifest['workflow']['ref']}: not publishable\n\n")
             handle.write(f"```json\n{encoded}```\n\n")
             handle.write("Publication authorizes these exact attested bytes, not a rebuild.\n")
 
@@ -916,22 +937,23 @@ def selection(args):
 def release_notes(manifest):
     targets = ", ".join(package["target"] for package in manifest["packages"])
     return (
-        f"Meta Forge {manifest['version']} developer alpha ({targets}), built from {manifest['source_sha']}. "
+        f"Meta installer {manifest['version']} developer alpha ({targets}), built from {manifest['source_sha']}. "
         "Unpack a package into a new folder and run `bash start.sh` there. "
         "Each package has a .sha256 file and a GitHub build attestation: "
         f"`gh attestation verify <package> --repo {rc.repository()} "
         f"--signer-workflow {rc.repository()}/{WORKFLOW} --source-ref {MAIN} "
         f"--source-digest {manifest['source_sha']}`. "
         f"{MANIFEST} binds the packages; {SELECTION} records the accepted candidate. "
-        "This prerelease is separate from Meta's own releases."
+        "This prerelease is separate from Core's and Meta's own releases."
     )
 
 
 def meta_latest():
-    """The repository's latest release, which must stay one of Meta's."""
+    """The repository's latest release, which must stay Core's (a v tag): in
+    the monorepo, Meta's and the installer's releases are never latest."""
     tag = rc.api(rc.repo_endpoint("releases/latest")).get("tag_name")
     require(isinstance(tag, str) and re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?", tag),
-            f"the repository's latest release is not a Meta release: {tag!r}")
+            f"the repository's latest release is not a Core release: {tag!r}")
     return tag
 
 
@@ -988,7 +1010,7 @@ def publish(_args):
             require(rc.release_inventory(release) == inventory, "release changed before write")
         else:
             rc.run(["gh", "release", "create", tag, "--repo", rc.repository(), "--verify-tag", "--draft",
-                    "--prerelease", "--latest=false", "--title", f"Meta Forge {version}",
+                    "--prerelease", "--latest=false", "--title", f"Meta installer {version}",
                     "--notes", release_notes(manifest)])
             release = rc.newly_created_release_for_tag(tag)
             require(release is not None and release["draft"] is True, "new draft release missing")
@@ -1044,7 +1066,7 @@ def main(argv=None):
         handlers[args.command](args)
     except (ProtocolError, rc.assets.ReleaseAssetError, OSError, ValueError, KeyError, TypeError,
             tarfile.TarError, zipfile.BadZipFile) as error:
-        print(f"forge release error: {error}", file=sys.stderr)
+        print(f"installer release error: {error}", file=sys.stderr)
         return 1
     return 0
 

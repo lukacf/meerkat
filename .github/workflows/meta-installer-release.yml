@@ -1,20 +1,21 @@
-name: Forge Release
-# Meta Forge ships in its own release, beside Meta's: a forge-v<version> tag
-# (the version in installer/pyproject.toml), its own attested candidate
-# manifest, and its own GitHub release, published as a prerelease that is
-# never the repository's latest. Meta's release.yml and release-candidate.py
-# are not involved; scripts/forge-release.py reuses release-candidate.py's
-# helpers read-only and checks every run and attestation against this file.
+name: Meta installer release
+# Meta's installer ships in its own release, beside Core's and Meta's: a
+# meta-installer-v<version> tag (the version in meta/installer/pyproject.toml),
+# its own attested candidate manifest, and its own GitHub release, published as
+# a prerelease that is never the repository's latest. Meta's meta-release.yml
+# and release-candidate.py are not involved; meta/scripts/installer-release.py
+# reuses release-candidate.py's helpers read-only and checks every run and
+# attestation against this file. Steps run in meta/.
 #
-# candidate: build each target's package from the pinned public inputs in
-#   installer/release/forge-release-inputs.json, verify and attest it, and
-#   bind the set in an attested forge-candidate-manifest.json. Any branch can
-#   build one as a dry run. Only a main candidate whose exact-main CI run is
-#   green can be published: publication verifies every attestation against
-#   main.
+# candidate: build each target's package from the pinned public inputs under
+#   meta/installer/release/, verify and attest it, and bind the set in an
+#   attested installer-candidate-manifest.json. Any branch can build one as a
+#   dry run. Only a main candidate whose exact-main CI run is green can be
+#   published: publication verifies every attestation against main.
 # publish: release an accepted candidate (the selection a candidate run
-#   prints) under its forge-v<version> tag, which an operator pushes to the
-#   candidate's commit first. No build. installer/RELEASING.md has the steps.
+#   prints) under its meta-installer-v<version> tag, which an operator pushes
+#   to the candidate's commit first. No build. meta/installer/RELEASING.md has
+#   the steps.
 #
 # No job reads a secret: downloads are public, and every write uses the run's
 # own token under the job's permissions.
@@ -47,12 +48,16 @@ permissions:
 
 concurrency:
   # Candidates are independent; publications are serialized.
-  group: forge-release-${{ inputs.release_mode == 'publish' && 'publish' || github.run_id }}
+  group: meta-installer-release-${{ inputs.release_mode == 'publish' && 'publish' || github.run_id }}
   cancel-in-progress: false
+
+defaults:
+  run:
+    working-directory: meta
 
 jobs:
   resolve:
-    name: Resolve Forge release
+    name: Resolve the installer release
     runs-on: ubuntu-24.04
     outputs:
       mode: ${{ steps.resolve.outputs.mode }}
@@ -74,10 +79,10 @@ jobs:
           RELEASE_MODE: ${{ inputs.release_mode }}
           SOURCE_SHA: ${{ inputs.source_sha }}
           ARTIFACT_SELECTION: ${{ inputs.artifact_selection }}
-        run: python3 scripts/forge-release.py resolve
+        run: python3 scripts/installer-release.py resolve
 
   build_package:
-    name: Build Forge package (${{ matrix.target }})
+    name: Build the installer package (${{ matrix.target }})
     # No CI gate here: the builds overlap the exact-main CI run, and
     # require_ci_green runs before collection.
     needs: [resolve]
@@ -98,8 +103,8 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
     env:
-      FORGE_TARGET: ${{ matrix.target }}
-      FORGE_VERSION: ${{ needs.resolve.outputs.version }}
+      INSTALLER_TARGET: ${{ matrix.target }}
+      INSTALLER_VERSION: ${{ needs.resolve.outputs.version }}
     steps:
       - name: Checkout the candidate source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -107,8 +112,8 @@ jobs:
           ref: ${{ needs.resolve.outputs.sha }}
           persist-credentials: false
 
-      # The toolchain forge.yml declares, which collect requires of the
-      # Forge run it binds.
+      # The toolchain meta-installer.yml declares, which collect requires of
+      # the installer run it binds.
       - name: Install Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
@@ -127,42 +132,42 @@ jobs:
           umask 077
           npm --prefix console ci --ignore-scripts
 
-      - name: Build the Forge interface
+      - name: Build the installer interface
         run: |
           npm --prefix installer/web ci --ignore-scripts
           npm --prefix installer/web run build
 
       - name: Fetch the pinned product inputs
-        run: python3 scripts/forge-release.py fetch-inputs --target "$FORGE_TARGET" --output-dir "$RUNNER_TEMP/forge-inputs"
+        run: python3 scripts/installer-release.py fetch-inputs --target "$INSTALLER_TARGET" --output-dir "$RUNNER_TEMP/installer-inputs"
 
       - name: Package
         run: |
-          python3 scripts/forge-release.py package --target "$FORGE_TARGET" \
-            --inputs-dir "$RUNNER_TEMP/forge-inputs" --output "dist/meta-forge-${FORGE_VERSION}-${FORGE_TARGET}.zip"
+          python3 scripts/installer-release.py package --target "$INSTALLER_TARGET" \
+            --inputs-dir "$RUNNER_TEMP/installer-inputs" --output "dist/meta-installer-${INSTALLER_VERSION}-${INSTALLER_TARGET}.zip"
 
       # Unpacks the package and runs the packager's own verifier on it (no
       # model or native process), then writes the .sha256 file.
       - name: Verify the package
         run: |
-          python3 scripts/forge-release.py check-package --target "$FORGE_TARGET" --version "$FORGE_VERSION" \
-            "dist/meta-forge-${FORGE_VERSION}-${FORGE_TARGET}.zip"
+          python3 scripts/installer-release.py check-package --target "$INSTALLER_TARGET" --version "$INSTALLER_VERSION" \
+            "dist/meta-installer-${INSTALLER_VERSION}-${INSTALLER_TARGET}.zip"
 
       - name: Attest the package
         id: provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
         with:
-          subject-path: dist/meta-forge-*.zip
+          subject-path: meta/dist/meta-installer-*.zip
 
       - name: Retain the package provenance bundle
         env:
           BUNDLE_PATH: ${{ steps.provenance.outputs.bundle-path }}
-        run: cp "$BUNDLE_PATH" "dist/meta-forge-${FORGE_VERSION}-${FORGE_TARGET}-provenance.jsonl"
+        run: cp "$BUNDLE_PATH" "dist/meta-installer-${INSTALLER_VERSION}-${INSTALLER_TARGET}-provenance.jsonl"
 
       - name: Upload the package
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: forge-package-${{ matrix.target }}-${{ github.run_attempt }}
-          path: dist/*
+          name: installer-package-${{ matrix.target }}-${{ github.run_attempt }}
+          path: meta/dist/*
           if-no-files-found: error
           overwrite: false
           # A branch dry run can never be published; keep it briefly.
@@ -199,15 +204,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_SHA: ${{ needs.resolve.outputs.sha }}
-        run: python3 scripts/forge-release.py ci-green
+        run: python3 scripts/installer-release.py ci-green
 
   collect:
-    name: Bind the Forge candidate
-    # Besides the packages, it binds a green dispatched forge.yml run
-    # (backend and frontend) that tested exactly the Forge inputs at this
-    # commit, so the release does not rerun Forge's suite. Pull request runs
-    # test a merge commit and never count. With none, it refuses until
-    # forge.yml is dispatched for this commit.
+    name: Bind the installer candidate
+    # Besides the packages, it binds a green dispatched meta-installer.yml run
+    # (backend and frontend) that tested exactly the installer inputs at this
+    # commit, so the release does not rerun the installer's suite. Pull
+    # request runs test a merge commit and never count. With none, it refuses
+    # until meta-installer.yml is dispatched for this commit.
     needs: [resolve, build_package, require_ci_green]
     if: >-
       !cancelled() &&
@@ -239,25 +244,25 @@ jobs:
         env:
           CI_RUN_ID: ${{ needs.require_ci_green.outputs.run_id }}
           CI_RUN_ATTEMPT: ${{ needs.require_ci_green.outputs.run_attempt }}
-        run: python3 scripts/forge-release.py collect --output-dir candidate
+        run: python3 scripts/installer-release.py collect --output-dir candidate
 
       - name: Attest the candidate manifest
         id: provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
         with:
-          subject-path: candidate/forge-candidate-manifest.json
+          subject-path: meta/candidate/installer-candidate-manifest.json
 
       - name: Retain the manifest provenance bundle
         env:
           BUNDLE_PATH: ${{ steps.provenance.outputs.bundle-path }}
-        run: cp "$BUNDLE_PATH" candidate/forge-manifest-provenance.jsonl
+        run: cp "$BUNDLE_PATH" candidate/installer-manifest-provenance.jsonl
 
       - name: Upload the candidate manifest
         id: manifest
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: forge-candidate-manifest-${{ github.run_attempt }}
-          path: candidate/*
+          name: installer-candidate-manifest-${{ github.run_attempt }}
+          path: meta/candidate/*
           if-no-files-found: error
           overwrite: false
           retention-days: ${{ needs.resolve.outputs.publishable == 'true' && 90 || 7 }}
@@ -267,11 +272,11 @@ jobs:
           ARTIFACT_ID: ${{ steps.manifest.outputs.artifact-id }}
           ARTIFACT_DIGEST: ${{ steps.manifest.outputs.artifact-digest }}
         run: |
-          python3 scripts/forge-release.py selection --manifest-file candidate/forge-candidate-manifest.json \
+          python3 scripts/installer-release.py selection --manifest-file candidate/installer-candidate-manifest.json \
             --artifact-id "$ARTIFACT_ID" --artifact-digest "$ARTIFACT_DIGEST"
 
   publish:
-    name: Publish an accepted Forge candidate
+    name: Publish an accepted installer candidate
     needs: [resolve]
     if: >-
       !cancelled() &&
@@ -293,4 +298,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_MODE: ${{ needs.resolve.outputs.mode }}
           ARTIFACT_SELECTION: ${{ inputs.artifact_selection }}
-        run: python3 scripts/forge-release.py publish
+        run: python3 scripts/installer-release.py publish

@@ -270,10 +270,11 @@ RUST_JOB_FILES = frozenset({"scripts/repo-cargo"})
 # The monorepo (--monorepo): Meta's tree is the directory below.
 MONOREPO_ROOT = "meta/"
 # Meta's workflows at the monorepo's root, each named for the workflow it
-# replaced under meta/.github/workflows and classified as that one was. (The
-# installer's workflow stays under meta/.github, inert, for now.)
+# replaced under meta/.github/workflows and classified as that one was.
 MONOREPO_WORKFLOWS = {
     ".github/workflows/meta-ci.yml": ".github/workflows/ci.yml",
+    ".github/workflows/meta-installer.yml": ".github/workflows/forge.yml",
+    ".github/workflows/meta-installer-release.yml": ".github/workflows/forge-release.yml",
     ".github/workflows/meta-e2e-live.yml": ".github/workflows/e2e-live.yml",
 }
 # Root files every meta-ci.yml job that builds Rust runs: the root cargo

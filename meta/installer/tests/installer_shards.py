@@ -1,25 +1,25 @@
 """Split the Forge backend suite into CI shards balanced on expected time.
 
-Every forge.yml shard computes the same plan. Each installer test file is one
-run, and each file checkout_sdk_startup_tests.txt lists is one more run with
-this checkout's Meta SDK. Heaviest first, each run goes to the shard with the
+Every shard of the installer workflow computes the same plan. Each installer
+test file is one run, and each file checkout_sdk_startup_tests.txt lists is
+one more run with this checkout's Meta SDK. Heaviest first, each run goes to the shard with the
 least expected time so far (ties go to the lower shard, equal runs in name
 order, a file's own run before its rerun), so the shards together run every
 collected test file exactly once and rerun every listed file exactly once. A
 run weighs the seconds a hosted run recorded for its file in
-forge_shard_seconds.json, or, without a record, the file's collected item
+installer_shard_seconds.json, or, without a record, the file's collected item
 count at the recorded median seconds per item. Records only steer the
 balance; a stale record never drops or repeats a run. A collection error, or
 a collected file no plan can place, fails every shard: no shard runs a suite
 that silently lost a file. Because each shard plans on its own, the backend
 job then checks the shards' run lists together (verify).
 
-Usage: forge_shards.py SHARD COUNT FILES_OUT STARTUP_OUT writes the test
+Usage: installer_shards.py SHARD COUNT FILES_OUT STARTUP_OUT writes the test
 files this shard runs to FILES_OUT and the listed files it reruns with this
-checkout's Meta SDK to STARTUP_OUT. forge_shards.py verify COUNT PLANS fails
+checkout's Meta SDK to STARTUP_OUT. installer_shards.py verify COUNT PLANS fails
 unless the COUNT shards' run lists, one folder each under PLANS, ran every
 installer test file once and reran every listed file once.
-forge_shards.py record JUNIT... rewrites forge_shard_seconds.json from a
+installer_shards.py record JUNIT... rewrites installer_shard_seconds.json from a
 complete run's junit files.
 """
 from __future__ import annotations
@@ -34,7 +34,7 @@ import sys
 TESTS = Path(__file__).resolve().parent
 INSTALLER = TESTS.parent
 STARTUP_LIST = TESTS / "checkout_sdk_startup_tests.txt"
-SECONDS = TESTS / "forge_shard_seconds.json"
+SECONDS = TESTS / "installer_shard_seconds.json"
 COLLECTED = re.compile(r"tests/(test_[A-Za-z0-9_]+\.py): ([0-9]+)")
 COLLECTED_FILE = re.compile(r"\S+\.py: [0-9]+")
 
@@ -122,7 +122,7 @@ def verify(shards, plans, expected_files=None, expected_reruns=None):
     problems = [] if len(folders) == shards else [f"{len(folders)} shard plans instead of {shards}"]
     ran, reran = Counter(), Counter()
     for folder in folders:
-        for runs, name in ((ran, "forge-shard-files.txt"), (reran, "forge-shard-startup.txt")):
+        for runs, name in ((ran, "installer-shard-files.txt"), (reran, "installer-shard-startup.txt")):
             if not (folder / name).is_file():
                 problems.append(f"{folder.name} has no {name}")
                 continue

@@ -13,7 +13,7 @@ same verified gateways, which install.sh reuses without a new download.
 The provider key is a placeholder and no agent turn is sent, so no provider
 request is made.
 
-Usage: python installer/tests/forge_live_agent_team.py <new empty work folder>
+Usage: python installer/tests/installer_live_agent_team.py <new empty work folder>
 Logs are written into the work folder. Any failed check exits non-zero.
 """
 import json

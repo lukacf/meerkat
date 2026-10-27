@@ -205,8 +205,10 @@ CROSS_AREA_READS = {
     (".github/", "docs/"): set(),
     (".github/", "skippable"): set(),
     (".github/", "packages/"): set(),
-    # forge.yml's path filters name the crate sources Forge's tests read (a
-    # test below checks them); Forge's jobs are not lanes here.
+    # The release workflows name crate sources; they are not lanes here. (The
+    # installer workflow's path filters, which name the crate sources the
+    # installer's tests read, are the monorepo's meta-installer.yml now, and
+    # a test below checks them.)
     (".github/", "crates/"): set(),
     # make test-python reads sdk/python; the release targets and local
     # hooks are not CI lanes.
@@ -497,7 +499,7 @@ def embedded_files(root: Path) -> set[tuple[str, str]]:
     return pairs
 
 
-FORGE_WORKFLOW = ".github/workflows/forge.yml"
+INSTALLER_WORKFLOW = ".github/workflows/meta-installer.yml"
 # Installer files that name another area's files without reading this
 # repository's copies: the web lockfile's examples/* workspace metadata, and
 # the .gitignore every generated application package carries (compiler.py
@@ -506,9 +508,20 @@ FORGE_NAMED_NOT_READ = ("examples/", ".gitignore")
 
 
 def forge_pull_request_paths(root: Path) -> list[str]:
-    workflow = yaml.safe_load((root / FORGE_WORKFLOW).read_text())
+    """The installer workflow's pull_request path filters, which sit at the
+    monorepo's root (`root`'s parent), under Meta's names: each filter below
+    meta/ without that prefix, and none of the others, which name no Meta
+    file."""
+    workflow = yaml.safe_load((root.parent / INSTALLER_WORKFLOW).read_text())
     # YAML 1.1 reads the bare key `on` as True.
-    return workflow.get("on", workflow.get(True))["pull_request"]["paths"]
+    patterns = workflow.get("on", workflow.get(True))["pull_request"]["paths"]
+    named = []
+    for pattern in patterns:
+        negative = "!" if pattern.startswith("!") else ""
+        body = pattern[len(negative):]
+        if body.startswith(ci_changes.MONOREPO_ROOT):
+            named.append(negative + body[len(ci_changes.MONOREPO_ROOT):])
+    return named
 
 
 def path_filter_matches(patterns: list[str], path: str) -> bool:
@@ -893,11 +906,12 @@ class CiChangesTests(unittest.TestCase):
         self.assertIn(("crates/*/Cargo.toml", "examples/"), reads)
 
     def test_forge_pull_requests_start_for_every_file_forges_tests_read(self):
-        """Forge's tests run only in its own workflow. A pull request that
-        changes a file they read outside installer/ must start that workflow,
-        so forge.yml's pull_request paths name each such file or a directory
-        above it."""
+        """The installer's tests run only in its own workflow. A pull request
+        that changes a file they read outside installer/ must start that
+        workflow, so meta-installer.yml's pull_request paths name each such
+        file or a directory above it."""
         patterns = forge_pull_request_paths(ROOT)
+        self.assertIn("installer/**", patterns)
         uncovered = set()
         for (reader, _), found in cross_area_reads(ROOT).items():
             if not reader.startswith("installer/"):
@@ -907,7 +921,7 @@ class CiChangesTests(unittest.TestCase):
                 for name in tracked_files(ROOT, target):
                     if not named_not_read(name) and not path_filter_matches(patterns, name):
                         uncovered.add(f"{source} -> {name}")
-        self.assertEqual(sorted(uncovered), [], "name these files in forge.yml's pull_request paths")
+        self.assertEqual(sorted(uncovered), [], "name these files (under meta/) in meta-installer.yml's pull_request paths")
 
     def test_forge_path_filters_match_as_github_reads_them(self):
         patterns = ["installer/**", "docs/*.md", "!installer/web/dist/**", "README.md"]
@@ -1070,6 +1084,8 @@ class MonorepoTests(unittest.TestCase):
             (".cargo/config.toml", ".cargo/config.toml"),
             # Meta's workflows, under the names of the ones they replaced.
             (".github/workflows/meta-ci.yml", ".github/workflows/ci.yml"),
+            (".github/workflows/meta-installer.yml", ".github/workflows/forge.yml"),
+            (".github/workflows/meta-installer-release.yml", ".github/workflows/forge-release.yml"),
             (".github/workflows/meta-e2e-live.yml", ".github/workflows/e2e-live.yml"),
             # The root files every Rust job runs, marked.
             ("scripts/repo-cargo", "//scripts/repo-cargo"),
@@ -1105,6 +1121,7 @@ class MonorepoTests(unittest.TestCase):
         self.assertEqual([path for path in (ROOT / ".cargo").rglob("*") if path.is_file()], [])
         # The moved workflows reach what their old copies reached.
         self.assertEqual(ci_changes.path_lanes(".github/workflows/ci.yml"), ci_changes.EVERY_LANE)
+        self.assertEqual(ci_changes.path_lanes(".github/workflows/forge.yml"), ci_changes.EVERY_LANE)
         self.assertEqual(ci_changes.path_lanes(".github/workflows/e2e-live.yml"), frozenset())
 
     def test_monorepo_runs_reach_meta_only_through_its_paths(self):

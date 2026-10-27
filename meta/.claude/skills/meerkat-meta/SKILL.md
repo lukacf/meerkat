@@ -658,7 +658,7 @@ python -m pip index versions meerkat-meta
 
 Registry versions are immutable. If a version already published from the wrong commit, roll forward to the next patch version.
 
-Meta Forge (`installer/`) releases on its own `forge-v<version>` tags through `.github/workflows/forge-release.yml`, beside Meta's releases. A candidate builds each target's package from the public inputs pinned in `installer/release/forge-release-inputs.json` and binds them, with a green dispatched `forge.yml` run that tested the same Forge inputs, in an attested candidate manifest; publication releases those bytes as a prerelease that never becomes the latest release. `installer/RELEASING.md` has the steps.
+Meta Forge (`installer/`) releases on its own `meta-installer-v<version>` tags in the monorepo through the root workflow `.github/workflows/meta-installer-release.yml` (`meta/scripts/installer-release.py`), beside Core's and Meta's releases. A candidate builds each target's package from the public inputs pinned in `installer/release/forge-release-inputs.json` and binds them, with a green dispatched run of the root workflow `.github/workflows/meta-installer.yml` that tested the same Forge inputs, in an attested candidate manifest; publication releases those bytes as a prerelease that never becomes the latest release. `installer/RELEASING.md` has the steps.
 
 ## Tests To Remember
 

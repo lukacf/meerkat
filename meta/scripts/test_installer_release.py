@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline contracts for the Forge release workflow and scripts/forge-release.py.
+"""Offline contracts for Meta's installer release workflow and scripts/installer-release.py.
 
 The workflow is read as text and its job conditions are evaluated, as
 test_release_workflow.py does for release.yml. The script runs against git
@@ -31,14 +31,12 @@ import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-# Meta lives under meta/ in the monorepo; its CI workflows run from the
-# repository root (.github/workflows/meta-*.yml). The installer release
-# itself (forge-release.yml, forge-release.py) and the installer's CI
-# (forge.yml) stay under meta/.github and still bind the standalone
-# repository's layout until they are ported.
+# Meta lives under meta/ in the monorepo; its workflows run from the
+# repository root (.github/workflows/meta-*.yml), the installer's release
+# included.
 REPO_ROOT = ROOT.parent
-WORKFLOW = ROOT / ".github/workflows/forge-release.yml"
-FORGE_CI = ROOT / ".github/workflows/forge.yml"
+WORKFLOW = REPO_ROOT / ".github/workflows/meta-installer-release.yml"
+FORGE_CI = REPO_ROOT / ".github/workflows/meta-installer.yml"
 META_CI = REPO_ROOT / ".github/workflows/meta-ci.yml"
 META_RELEASE = REPO_ROOT / ".github/workflows/meta-release.yml"
 
@@ -51,21 +49,21 @@ def load(name, path):
     return module
 
 
-forge = load("forge_release", ROOT / "scripts/forge-release.py")
+forge = load("installer_release", ROOT / "scripts/installer-release.py")
 # The Guide's one exact selected release; the module has no package imports.
 guide_sdk = load("forge_guide_sdk", ROOT / "installer/launchkit/guide_sdk.py")
 release_tests = load("release_workflow_tests", ROOT / "scripts/test_release_workflow.py")
-REPO = "lukacf/meerkat-meta"
+REPO = "lukacf/meerkat"
 SHA = "a" * 40
 OTHER = "b" * 40
 VERSION = "0.2.0"
-TAG = "forge-v0.2.0"
+TAG = "meta-installer-v0.2.0"
 RUN, ATTEMPT, CI_RUN, FORGE_RUN = 501, 1, 77, 610
 JOBS = ("resolve", "build_package", "require_ci_green", "collect", "publish")
-# forge.yml's pull_request paths that a release does not bind: the repository's
-# root README and license files. No Forge test or package build reads them; the
-# installer ships and tests its own copies under installer/.
-FORGE_PATHS_NOT_BOUND = ("README.md", "LICENSE-MIT", "LICENSE-APACHE")
+# The installer workflow's pull_request paths that a release does not bind:
+# Meta's README and license files. No installer test or package build reads
+# them; the installer ships and tests its own copies under installer/.
+FORGE_PATHS_NOT_BOUND = ("meta/README.md", "meta/LICENSE-MIT", "meta/LICENSE-APACHE")
 
 
 def text(path=WORKFLOW):
@@ -253,12 +251,18 @@ def git(directory, *args):
                           capture_output=True, text=True).stdout.strip()
 
 
+def meta_root(directory):
+    """Meta's directory in a fixture repository, as in the monorepo."""
+    return directory / forge.META_DIR
+
+
 def git_fixture(directory, value=None, version=VERSION):
-    """A repository whose HEAD holds the Forge version and inputs files."""
-    (directory / "installer/release/inputs/linux-x86_64").mkdir(parents=True)
-    (directory / "installer/pyproject.toml").write_text(f'[project]\nname = "meta-forge"\nversion = "{version}"\n')
-    (directory / forge.INPUTS).write_text(json.dumps(inputs() if value is None else value, indent=2))
-    (directory / "installer/release/inputs/linux-x86_64/assembly.json").write_bytes(PRODUCT["product/assembly.json"])
+    """A repository whose HEAD holds the Forge version and inputs files under meta/."""
+    meta = meta_root(directory)
+    (meta / "installer/release/inputs/linux-x86_64").mkdir(parents=True)
+    (meta / "installer/pyproject.toml").write_text(f'[project]\nname = "meta-forge"\nversion = "{version}"\n')
+    (meta / forge.INPUTS).write_text(json.dumps(inputs() if value is None else value, indent=2))
+    (meta / "installer/release/inputs/linux-x86_64/assembly.json").write_bytes(PRODUCT["product/assembly.json"])
     git(directory, "init", "-q")
     git(directory, "add", "-A")
     git(directory, "commit", "-q", "-m", "fixture")
@@ -358,34 +362,34 @@ class WorkflowShapeTests(unittest.TestCase):
         self.assertIn("umask 077", job_block("build_package"))
 
     def test_every_script_command_parses(self):
-        values = {"$FORGE_TARGET": "linux-x86_64", "$FORGE_VERSION": VERSION, "${FORGE_VERSION}": VERSION,
-                  "${FORGE_TARGET}": "linux-x86_64", "$RUNNER_TEMP": "/runner", "$ARTIFACT_ID": "9",
+        values = {"$INSTALLER_TARGET": "linux-x86_64", "$INSTALLER_VERSION": VERSION, "${INSTALLER_VERSION}": VERSION,
+                  "${INSTALLER_TARGET}": "linux-x86_64", "$RUNNER_TEMP": "/runner", "$ARTIFACT_ID": "9",
                   "$ARTIFACT_DIGEST": "e" * 64}
         commands = []
         for job in JOBS:
             for script in run_blocks(job_block(job)):
                 joined = script.replace("\\\n", " ")
-                commands += [line for line in joined.splitlines() if "scripts/forge-release.py" in line]
+                commands += [line for line in joined.splitlines() if "scripts/installer-release.py" in line]
         self.assertEqual(len(commands), 8)
         for command in commands:
             for name, value in values.items():
                 command = command.replace(name, value)
             argv = shlex.split(command)
-            self.assertEqual(argv[:2], ["python3", "scripts/forge-release.py"])
+            self.assertEqual(argv[:2], ["python3", "scripts/installer-release.py"])
             forge.parse_args(argv[2:])
 
     def test_artifact_attestation_and_bundle_names_match_the_script(self):
         build, collect = job_block("build_package"), job_block("collect")
-        self.assertIn("name: forge-package-${{ matrix.target }}-${{ github.run_attempt }}", build)
-        self.assertEqual(forge.package_artifact_name("linux-x86_64", 3), "forge-package-linux-x86_64-3")
-        self.assertIn("subject-path: dist/meta-forge-*.zip", build)
-        self.assertEqual(forge.package_name(VERSION, "linux-x86_64"), "meta-forge-0.2.0-linux-x86_64.zip")
-        self.assertIn('"dist/meta-forge-${FORGE_VERSION}-${FORGE_TARGET}-provenance.jsonl"', build)
+        self.assertIn("name: installer-package-${{ matrix.target }}-${{ github.run_attempt }}", build)
+        self.assertEqual(forge.package_artifact_name("linux-x86_64", 3), "installer-package-linux-x86_64-3")
+        self.assertIn("subject-path: meta/dist/meta-installer-*.zip", build)
+        self.assertEqual(forge.package_name(VERSION, "linux-x86_64"), "meta-installer-0.2.0-linux-x86_64.zip")
+        self.assertIn('"dist/meta-installer-${INSTALLER_VERSION}-${INSTALLER_TARGET}-provenance.jsonl"', build)
         self.assertEqual(forge.provenance_name(VERSION, "linux-x86_64"),
-                         "meta-forge-0.2.0-linux-x86_64-provenance.jsonl")
-        self.assertIn("name: forge-candidate-manifest-${{ github.run_attempt }}", collect)
-        self.assertEqual(forge.manifest_artifact_name(3), "forge-candidate-manifest-3")
-        self.assertIn(f"subject-path: candidate/{forge.MANIFEST}", collect)
+                         "meta-installer-0.2.0-linux-x86_64-provenance.jsonl")
+        self.assertIn("name: installer-candidate-manifest-${{ github.run_attempt }}", collect)
+        self.assertEqual(forge.manifest_artifact_name(3), "installer-candidate-manifest-3")
+        self.assertIn(f"subject-path: meta/candidate/{forge.MANIFEST}", collect)
         self.assertIn(f"candidate/{forge.MANIFEST_PROVENANCE}", collect)
         self.assertIn("        id: manifest\n", collect)
         self.assertIn("ARTIFACT_ID: ${{ steps.manifest.outputs.artifact-id }}", collect)
@@ -406,13 +410,13 @@ class WorkflowShapeTests(unittest.TestCase):
     def test_forge_ci_can_be_dispatched_and_records_each_jobs_toolchain(self):
         source = text(FORGE_CI)
         self.assertIn("\n  workflow_dispatch:\n", source.split("\npermissions:", 1)[0])
-        self.assertIn("group: forge-${{ github.event.pull_request.number || github.run_id }}", source)
+        self.assertIn("group: meta-installer-${{ github.event.pull_request.number || github.run_id }}", source)
         for job in forge.EVIDENCE_JOBS:
             block = job_block(job, FORGE_CI)
-            self.assertIn("name: forge-toolchain-${{ github.job }}-${{ github.run_attempt }}", block)
+            self.assertIn("name: installer-toolchain-${{ github.job }}-${{ github.run_attempt }}", block)
             self.assertIn(f"> {forge.TOOLCHAIN_FILE}", block)
-            self.assertIn(f"path: {forge.TOOLCHAIN_FILE}", block)
-        self.assertEqual(forge.toolchain_artifact_name("backend", 2), "forge-toolchain-backend-2")
+            self.assertIn(f"path: meta/{forge.TOOLCHAIN_FILE}", block)
+        self.assertEqual(forge.toolchain_artifact_name("backend", 2), "installer-toolchain-backend-2")
 
     def test_every_forge_ci_artifact_name_carries_the_run_attempt(self):
         """Artifact names are unique within a run, so a rerun attempt that
@@ -421,14 +425,14 @@ class WorkflowShapeTests(unittest.TestCase):
         names = {job: re.findall(r"^ {10}name: (.+)$", job_block(job, FORGE_CI), re.M)
                  for job in ("frontend", "backend-shard", "backend")}
         self.assertEqual(names, {
-            "frontend": ["forge-toolchain-${{ github.job }}-${{ github.run_attempt }}"],
-            "backend-shard": ["forge-shard-plan-${{ matrix.shard }}-${{ github.run_attempt }}",
-                              "forge-toolchain-${{ github.job }}-${{ matrix.shard }}-${{ github.run_attempt }}",
-                              "forge-pytest-${{ matrix.shard }}-${{ github.run_attempt }}"],
-            "backend": ["forge-toolchain-${{ github.job }}-${{ github.run_attempt }}"]})
+            "frontend": ["installer-toolchain-${{ github.job }}-${{ github.run_attempt }}"],
+            "backend-shard": ["installer-shard-plan-${{ matrix.shard }}-${{ github.run_attempt }}",
+                              "installer-toolchain-${{ github.job }}-${{ matrix.shard }}-${{ github.run_attempt }}",
+                              "installer-pytest-${{ matrix.shard }}-${{ github.run_attempt }}"],
+            "backend": ["installer-toolchain-${{ github.job }}-${{ github.run_attempt }}"]})
         shard = job_block("backend-shard", FORGE_CI)
         self.assertIn("      - name: Retain test results\n        if: always()\n", shard)
-        self.assertIn("          path: forge-pytest.xml\n", shard)
+        self.assertIn("          path: meta/installer-pytest.xml\n", shard)
         self.assertNotIn("overwrite:", text(FORGE_CI))
 
     def test_the_backend_job_runs_only_after_every_shard_passed_and_binds_their_toolchain(self):
@@ -445,53 +449,53 @@ class WorkflowShapeTests(unittest.TestCase):
         legs = [int(leg) for leg in re.search(r"(?m)^        shard: \[([0-9, ]+)\]$", shard).group(1).split(", ")]
         self.assertEqual(legs, list(range(len(legs))))
         self.assertIn("\n      fail-fast: false\n", shard)
-        self.assertIn(f"        run: python installer/tests/forge_shards.py ${{{{ matrix.shard }}}} {len(legs)} "
-                      "forge-shard-files.txt forge-shard-startup.txt\n", shard)
-        self.assertIn("        run: python -m pytest -vv --tb=short --durations=20 --junitxml=forge-pytest.xml "
-                      "$(cat forge-shard-files.txt)\n", shard)
+        self.assertIn(f"        run: python installer/tests/installer_shards.py ${{{{ matrix.shard }}}} {len(legs)} "
+                      "installer-shard-files.txt installer-shard-startup.txt\n", shard)
+        self.assertIn("        run: python -m pytest -vv --tb=short --durations=20 --junitxml=installer-pytest.xml "
+                      "$(cat installer-shard-files.txt)\n", shard)
         startup = shard.split("      - name: Application startup checks with this checkout's Meta SDK\n", 1)[1]
         startup = startup.split("\n      - ", 1)[0]
         self.assertIn("          PYTHONPATH: sdk/python:installer\n", startup)
         self.assertIn("        if: ${{ !cancelled() }}\n", startup)
-        self.assertIn("python -m pytest -q --tb=short $(cat forge-shard-startup.txt)", startup)
+        self.assertIn("python -m pytest -q --tb=short $(cat installer-shard-startup.txt)", startup)
         self.assertIn("      - name: Isolated controller subprocess checks\n        if: matrix.shard == 0\n", shard)
         self.assertNotIn("--maxfail", source)
         # Each shard retains its run lists; backend fails unless together they
         # ran every test file once and reran every listed file once.
-        self.assertIn("          name: forge-shard-plan-${{ matrix.shard }}-${{ github.run_attempt }}\n"
-                      "          path: |\n            forge-shard-files.txt\n            forge-shard-startup.txt\n"
+        self.assertIn("          name: installer-shard-plan-${{ matrix.shard }}-${{ github.run_attempt }}\n"
+                      "          path: |\n            meta/installer-shard-files.txt\n            meta/installer-shard-startup.txt\n"
                       "          if-no-files-found: error\n", shard)
         steps = [line.strip() for line in backend.splitlines() if line.startswith("      - ")]
-        self.assertEqual(steps[:4], ["- uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4",
+        self.assertEqual(steps[:4], ["- uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6",
             "- name: Collect the shards' plans", "- name: Check that the shards ran every test file once",
             "- name: Collect the shards' toolchains"])
-        self.assertIn("          pattern: forge-shard-plan-*-${{ github.run_attempt }}\n          path: plans\n", backend)
-        self.assertIn(f"        run: python3 installer/tests/forge_shards.py verify {len(legs)} plans\n", backend)
-        self.assertIn("          pattern: forge-toolchain-backend-shard-*-${{ github.run_attempt }}\n"
-                      "          path: shards\n", backend)
-        record = backend.split("          python3 - > forge-toolchain.json <<'PY'\n", 1)[1].split("          PY\n", 1)[0]
+        self.assertIn("          pattern: installer-shard-plan-*-${{ github.run_attempt }}\n          path: meta/plans\n", backend)
+        self.assertIn(f"        run: python3 installer/tests/installer_shards.py verify {len(legs)} plans\n", backend)
+        self.assertIn("          pattern: installer-toolchain-backend-shard-*-${{ github.run_attempt }}\n"
+                      "          path: meta/shards\n", backend)
+        record = backend.split("          python3 - > installer-toolchain.json <<'PY'\n", 1)[1].split("          PY\n", 1)[0]
         script = "".join(line.removeprefix("          ") + "\n" for line in record.splitlines())
         self.assertIn(f"if len(records) != {len(legs)} or len(values) != 1:", script)
         folder = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, folder)
         value = {"python": "Python 3.12.13", "node": "v22.22.2"}
         for index in range(len(legs)):
-            leg = folder / "shards" / f"forge-toolchain-backend-shard-{index}-1"
+            leg = folder / "shards" / f"installer-toolchain-backend-shard-{index}-1"
             leg.mkdir(parents=True)
-            (leg / "forge-toolchain.json").write_text(json.dumps(value) + "\n")
+            (leg / "installer-toolchain.json").write_text(json.dumps(value) + "\n")
         recorded = subprocess.run([sys.executable, "-c", script], cwd=folder, capture_output=True, text=True,
                                   check=True).stdout
         self.assertEqual(json.loads(recorded), value)
-        (folder / "shards" / "forge-toolchain-backend-shard-3-1" / "forge-toolchain.json").write_text(
+        (folder / "shards" / "installer-toolchain-backend-shard-3-1" / "installer-toolchain.json").write_text(
             json.dumps({**value, "python": "Python 3.12.12"}) + "\n")
         self.assertNotEqual(subprocess.run([sys.executable, "-c", script], cwd=folder, capture_output=True,
                                            text=True).returncode, 0)
-        (folder / "shards" / "forge-toolchain-backend-shard-3-1" / "forge-toolchain.json").unlink()
+        (folder / "shards" / "installer-toolchain-backend-shard-3-1" / "installer-toolchain.json").unlink()
         self.assertNotEqual(subprocess.run([sys.executable, "-c", script], cwd=folder, capture_output=True,
                                            text=True).returncode, 0)
 
     def test_the_shard_plan_runs_every_file_and_every_rerun_exactly_once_and_balances_them(self):
-        shards = load("forge_shards", ROOT / "installer/tests/forge_shards.py")
+        shards = load("installer_shards", ROOT / "installer/tests/installer_shards.py")
         files = shards.test_files()
         self.assertGreater(len(files), 100)
         weighted = {name: float((index * 37) % 101) for index, name in enumerate(files)}
@@ -506,7 +510,7 @@ class WorkflowShapeTests(unittest.TestCase):
         self.assertEqual(shards.plan(weighted, 12, reruns), plan)
 
     def test_weights_use_recorded_seconds_and_fall_back_to_items_at_the_median_rate(self):
-        shards = load("forge_shards", ROOT / "installer/tests/forge_shards.py")
+        shards = load("installer_shards", ROOT / "installer/tests/installer_shards.py")
         counts = {"test_a.py": 10, "test_b.py": 4, "test_c.py": 6, "test_new.py": 3, "test_empty.py": 0}
         recorded = {"test_a.py": 20.0, "test_b.py": 40.0, "test_c.py": 6.0, "test_gone.py": 99.0}
         # Median recorded rate: 2 s per item, from 2, 10 and 1 s per item.
@@ -537,18 +541,18 @@ class WorkflowShapeTests(unittest.TestCase):
         self.assertTrue(all(re.fullmatch(r"test_[A-Za-z0-9_]+\.py", name) for name in committed))
 
     def test_the_gate_check_fails_unless_the_shards_ran_every_file_once_and_reran_every_listed_file_once(self):
-        shards = load("forge_shards", ROOT / "installer/tests/forge_shards.py")
+        shards = load("installer_shards", ROOT / "installer/tests/installer_shards.py")
         files = shards.test_files()
         output = "".join(f"tests/{name}: {index % 7 + 1}\n" for index, name in enumerate(files))
         plans = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, plans)
         for shard in range(12):
-            folder = plans / f"forge-shard-plan-{shard}-1"
+            folder = plans / f"installer-shard-plan-{shard}-1"
             folder.mkdir()
             with mock.patch.object(shards.subprocess, "run",
                                    return_value=subprocess.CompletedProcess([], 0, output, "")):
-                shards.main([str(shard), "12", str(folder / "forge-shard-files.txt"),
-                             str(folder / "forge-shard-startup.txt")])
+                shards.main([str(shard), "12", str(folder / "installer-shard-files.txt"),
+                             str(folder / "installer-shard-startup.txt")])
         with contextlib.redirect_stdout(io.StringIO()) as printed:
             shards.main(["verify", "12", str(plans)])
         self.assertIn(f"12 shards ran {len(shards.tracked_test_files())} test files once", printed.getvalue())
@@ -565,28 +569,28 @@ class WorkflowShapeTests(unittest.TestCase):
 
         def edit(name, shard, transform):
             def change(copy):
-                path = copy / f"forge-shard-plan-{shard}-1" / name
+                path = copy / f"installer-shard-plan-{shard}-1" / name
                 path.write_text(transform(path.read_text()))
             return change
 
         first = lambda text: text.splitlines(keepends=True)[0]
-        dropped = refused(edit("forge-shard-files.txt", 3, lambda text: "".join(text.splitlines(keepends=True)[1:])))
+        dropped = refused(edit("installer-shard-files.txt", 3, lambda text: "".join(text.splitlines(keepends=True)[1:])))
         self.assertIn("ran nowhere", dropped)
-        self.assertIn(first((plans / "forge-shard-plan-3-1/forge-shard-files.txt").read_text()).strip()
+        self.assertIn(first((plans / "installer-shard-plan-3-1/installer-shard-files.txt").read_text()).strip()
                       .removeprefix("installer/tests/"), dropped)
-        twice = (plans / "forge-shard-plan-4-1/forge-shard-files.txt").read_text()
-        self.assertIn("ran more than once", refused(edit("forge-shard-files.txt", 5, lambda text: text + first(twice))))
-        self.assertIn("reran nowhere", refused(edit("forge-shard-startup.txt", next(
-            shard for shard in range(12) if (plans / f"forge-shard-plan-{shard}-1/forge-shard-startup.txt").read_text()),
+        twice = (plans / "installer-shard-plan-4-1/installer-shard-files.txt").read_text()
+        self.assertIn("ran more than once", refused(edit("installer-shard-files.txt", 5, lambda text: text + first(twice))))
+        self.assertIn("reran nowhere", refused(edit("installer-shard-startup.txt", next(
+            shard for shard in range(12) if (plans / f"installer-shard-plan-{shard}-1/installer-shard-startup.txt").read_text()),
             lambda text: "".join(text.splitlines(keepends=True)[1:]))))
-        self.assertIn("11 shard plans instead of 12", refused(lambda copy: shutil.rmtree(copy / "forge-shard-plan-7-1")))
+        self.assertIn("11 shard plans instead of 12", refused(lambda copy: shutil.rmtree(copy / "installer-shard-plan-7-1")))
         # A test file at any depth counts: one in a subdirectory ran nowhere.
         with self.assertRaises(SystemExit) as hidden:
             shards.verify(12, plans, files + ["test_nested/test_hidden.py"])
         self.assertIn("ran nowhere: test_nested/test_hidden.py", str(hidden.exception))
 
     def test_a_collected_file_no_shard_can_place_fails_every_shard(self):
-        shards = load("forge_shards", ROOT / "installer/tests/forge_shards.py")
+        shards = load("installer_shards", ROOT / "installer/tests/installer_shards.py")
         folder = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, folder)
         files = shards.test_files()
@@ -597,7 +601,7 @@ class WorkflowShapeTests(unittest.TestCase):
         self.assertFalse((folder / "files.txt").exists())
 
     def test_a_failed_collection_runs_no_shard(self):
-        shards = load("forge_shards", ROOT / "installer/tests/forge_shards.py")
+        shards = load("installer_shards", ROOT / "installer/tests/installer_shards.py")
         folder = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, folder)
         failed = subprocess.CompletedProcess([], 2, "ERROR tests/test_broken.py\n", "")
@@ -611,7 +615,7 @@ class WorkflowShapeTests(unittest.TestCase):
             shards.main(["0", "12", str(folder / "files.txt"), str(folder / "startup.txt")])
 
     def test_the_shards_rerun_every_listed_startup_file_once_with_the_checkout_sdk(self):
-        shards = load("forge_shards", ROOT / "installer/tests/forge_shards.py")
+        shards = load("installer_shards", ROOT / "installer/tests/installer_shards.py")
         files = shards.test_files()
         output = "".join(f"tests/{name}: {index % 7 + 1}\n" for index, name in enumerate(files))
         folder = Path(tempfile.mkdtemp())
@@ -679,7 +683,7 @@ class WorkflowShapeTests(unittest.TestCase):
             steps = {step.get("name"): step for step in forge_ci["jobs"][job]["steps"]}
             self.assertEqual(steps["Record the toolchain"]["run"],
                              "printf '{\"python\": \"%s\", \"node\": \"%s\"}\\n' \"$(python3 --version 2>&1)\" "
-                             "\"$(node --version)\" > forge-toolchain.json\n")
+                             "\"$(node --version)\" > installer-toolchain.json\n")
 
     @unittest.skipUnless(importlib.util.find_spec("yaml"), "PyYAML is not installed")
     def test_forge_pull_request_paths_and_the_release_binding_agree(self):
@@ -691,7 +695,10 @@ class WorkflowShapeTests(unittest.TestCase):
         import yaml
 
         workflow = yaml.safe_load(text(FORGE_CI))
+        # Repository paths on both sides: the root workflow names Meta's paths
+        # under meta/ and itself by its root path, as the release's evidence does.
         paths = workflow.get("on", workflow.get(True))["pull_request"]["paths"]
+        self.assertIn(forge.INSTALLER_CI, paths)
         trees = {path[:-3] for path in paths if path.endswith("/**")}
         unbound = [path for path in paths if not (path.endswith("/**") and path[:-3] in forge.EVIDENCE_TREES)
                    and path not in forge.EVIDENCE_FILES and path not in FORGE_PATHS_NOT_BOUND]
@@ -884,6 +891,27 @@ class InputsTests(unittest.TestCase):
                      separate)
         self.refused(lambda entry, _: with_ordinary(entry, name="product/rpc_gateway"), separate)
 
+    def test_an_ordinary_gateway_from_the_monorepo_release_is_accepted(self):
+        """Meta releases from the monorepo under meta-v tags; releases made
+        before it stay in the standalone repository under v tags. Either
+        names the selected version's asset; another repository or tag form
+        does not."""
+        asset = "meta-rpc-gateway-0.9.4-x86_64-unknown-linux-gnu.tar.gz"
+
+        def pointed(url):
+            def mutate(entry, _):
+                with_ordinary(entry)["files"]["ordinary/rpc_gateway"]["url"] = url
+            return mutate
+
+        value = inputs()
+        pointed(f"https://github.com/lukacf/meerkat/releases/download/meta-v0.9.4/{asset}")(
+            value["targets"]["linux-x86_64"], value)
+        forge.validate_inputs(value)
+        message = "ordinary gateway must be the Meta 0.9.4 rpc_gateway release asset for linux-x86_64"
+        self.refused(pointed(f"https://github.com/lukacf/meerkat/releases/download/v0.9.4/{asset}"), message)
+        self.refused(pointed(f"https://github.com/lukacf/meerkat-meta/releases/download/meta-v0.9.4/{asset}"), message)
+        self.refused(pointed(f"https://github.com/lukacf/meerkat-connect/releases/download/v0.9.4/{asset}"), message)
+
 
 class ResolveTests(unittest.TestCase):
     def resolve(self, directory, head, **env):
@@ -951,7 +979,7 @@ class FetchTests(unittest.TestCase):
             destination.write_bytes(data)
 
         output = directory / "inputs"
-        with working_directory(directory), mock.patch.object(forge, "ROOT", directory), \
+        with working_directory(directory), mock.patch.object(forge, "ROOT", meta_root(directory)), \
                 mock.patch.object(forge, "download", download), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(forge.main(["fetch-inputs", "--target", target, "--output-dir", str(output)]), 0)
         return output
@@ -992,7 +1020,7 @@ class FetchTests(unittest.TestCase):
                 git_fixture(directory)
                 served = self.served()
                 served[url] = data
-                with working_directory(directory), mock.patch.object(forge, "ROOT", directory), \
+                with working_directory(directory), mock.patch.object(forge, "ROOT", meta_root(directory)), \
                         mock.patch.object(forge, "download", lambda u, d, _l, s=served: d.write_bytes(s[u])), \
                         self.assertRaises((forge.ProtocolError, tarfile.TarError)):
                     forge.fetch_inputs(forge.parse_args(["fetch-inputs", "--target", "linux-x86_64",
@@ -1090,7 +1118,7 @@ class CheckPackageTests(unittest.TestCase):
                     self.check(archive, native=native)
                 self.assertFalse(archive.with_name(name + ".sha256").exists())
         with fixture_directory() as directory:
-            archive = package_zip(directory / "meta-forge-0.2.0-macos-arm64.zip")
+            archive = package_zip(directory / "meta-installer-0.2.0-macos-arm64.zip")
             with self.assertRaisesRegex(forge.ProtocolError, "unexpected package name"):
                 self.check(archive)
             archive = package_zip(directory / name)
@@ -1146,13 +1174,13 @@ class ManifestTests(unittest.TestCase):
             "main without CI": (lambda v: v.__setitem__("ci", None), "green CI"),
             "branch with CI": (lambda v: v["workflow"].__setitem__("ref", "refs/heads/x"), "green CI"),
             "package name": (lambda v: v["packages"][0].__setitem__("name", "forge.zip"), "name/target"),
-            "artifact name": (lambda v: v["packages"][0]["artifact"].__setitem__("name", "forge-package-linux-x86_64-9"),
+            "artifact name": (lambda v: v["packages"][0]["artifact"].__setitem__("name", "installer-package-linux-x86_64-9"),
                               "artifact name"),
             "duplicate target": (lambda v: v["packages"].append(copy.deepcopy(v["packages"][0])), "unique"),
             "oversize": (lambda v: v["packages"][0].__setitem__("size", 2 * 1024**3), "release asset limit"),
-            "tuple": (lambda v: v["forge_ci"]["tuple"]["trees"].pop("sdk/python"), "incomplete"),
+            "tuple": (lambda v: v["forge_ci"]["tuple"]["trees"].pop(M + "sdk/python"), "incomplete"),
             "pull request evidence": (lambda v: v["forge_ci"].__setitem__("event", "pull_request"),
-                                      "dispatched forge.yml run"),
+                                      "dispatched installer workflow run"),
             "toolchain": (lambda v: v["forge_ci"]["toolchain"]["backend"].__setitem__("python", "Python 3.11.9"),
                           "toolchain differs"),
             "unknown key": (lambda v: v.__setitem__("extra", 1), "fields"),
@@ -1163,7 +1191,7 @@ class ManifestTests(unittest.TestCase):
 
     def test_selection_refusals(self):
         for change, message in ((lambda v: v.__setitem__("kind", "accepted-candidate"), "forge-accepted-candidate"),
-                                (lambda v: v.__setitem__("repository", "lukacf/meerkat"), "repository"),
+                                (lambda v: v.__setitem__("repository", "lukacf/meerkat-meta"), "repository"),
                                 (lambda v: v["manifest_artifact"].__setitem__("id", 0), "positive"),
                                 (lambda v: v.__setitem__("tier", "core"), "fields")):
             value = selection_value()
@@ -1172,21 +1200,22 @@ class ManifestTests(unittest.TestCase):
                 forge.validate_selection(value)
 
 
+M = forge.META_DIR
 BASE_TREE = {
-    ".github/workflows/forge.yml": "python-version: '3.12'\nnode-version: '22'\n",
+    forge.INSTALLER_CI: "python-version: '3.12'\nnode-version: '22'\n",
     ".github/workflows/ci.yml": "ci",
-    "console/package-lock.json": "console lock",
-    "console/src/app.ts": "console",
-    "crates/meerkat-meta/src/lib.rs": "rust",
-    "crates/meerkat-meta/src/rpc_gateway.rs": "gateway",
-    "installer/launchkit/server.py": "server",
-    "installer/requirements-guide-sdk.txt": "guide requirements",
-    "installer/requirements-standalone.txt": "standalone requirements",
-    "installer/vendor/guide/meerkat_meta-0.9.2-py3-none-any.whl": "guide wheel",
-    "installer/web/package-lock.json": "web lock",
-    "packages/console-components/index.ts": "components",
-    "packages/console-core/index.ts": "core",
-    "sdk/python/meerkat_meta/__init__.py": "sdk",
+    M + "console/package-lock.json": "console lock",
+    M + "console/src/app.ts": "console",
+    M + "crates/meerkat-meta/src/lib.rs": "rust",
+    M + "crates/meerkat-meta/src/rpc_gateway.rs": "gateway",
+    M + "installer/launchkit/server.py": "server",
+    M + "installer/requirements-guide-sdk.txt": "guide requirements",
+    M + "installer/requirements-standalone.txt": "standalone requirements",
+    M + "installer/vendor/guide/meerkat_meta-0.9.2-py3-none-any.whl": "guide wheel",
+    M + "installer/web/package-lock.json": "web lock",
+    M + "packages/console-components/index.ts": "components",
+    M + "packages/console-core/index.ts": "core",
+    M + "sdk/python/meerkat_meta/__init__.py": "sdk",
 }
 
 
@@ -1226,7 +1255,7 @@ class FakeGitHub:
         self.commits[sha] = self.tree(root)
 
     def forge_run(self, run_id, head, *, jobs=None, toolchain=None, attempt=1, event="workflow_dispatch"):
-        self.runs.append({"id": run_id, "run_attempt": attempt, "head_sha": head, "path": forge.FORGE_CI,
+        self.runs.append({"id": run_id, "run_attempt": attempt, "head_sha": head, "path": forge.INSTALLER_CI,
                           "status": "completed", "conclusion": "success", "event": event,
                           "repository": {"full_name": REPO, "id": 1}, "head_repository": {"full_name": REPO, "id": 1}})
         self.jobs[(run_id, attempt)] = [{"name": name, "conclusion": conclusion}
@@ -1256,7 +1285,7 @@ class FakeGitHub:
             return {"tree": copy.deepcopy(self.trees[match.group(1)]), "truncated": False}
         if match := re.fullmatch(r"git/blobs/([0-9a-f]{40})", path):
             return {"encoding": "base64", "content": base64.b64encode(self.blobs[match.group(1)].encode()).decode()}
-        if path.startswith("actions/workflows/forge.yml/runs?"):
+        if path.startswith("actions/workflows/meta-installer.yml/runs?"):
             self.listings.append(path)
             listed = [run for run in self.runs if not self.hidden.get(run["id"])]
             self.hidden = {run_id: count - 1 for run_id, count in self.hidden.items() if count > 1}
@@ -1294,13 +1323,13 @@ class EvidenceTests(unittest.TestCase):
             return forge.forge_ci_evidence(SHA, directory)
 
     def test_a_run_of_identical_forge_inputs_is_reused(self):
-        changed = {**BASE_TREE, "crates/meerkat-meta/src/lib.rs": "other rust", ".github/workflows/ci.yml": "x"}
+        changed = {**BASE_TREE, M + "crates/meerkat-meta/src/lib.rs": "other rust", ".github/workflows/ci.yml": "x"}
         record = self.evidence(self.github(run_files=changed))
         self.assertEqual((record["run_id"], record["head_sha"]), (FORGE_RUN, OTHER))
         self.assertEqual(set(record["tuple"]["trees"]), set(forge.EVIDENCE_TREES))
         self.assertEqual(set(record["tuple"]["files"]), {
-            *forge.EVIDENCE_FILES, "installer/requirements-guide-sdk.txt", "installer/requirements-standalone.txt",
-            "installer/vendor/guide/meerkat_meta-0.9.2-py3-none-any.whl"})
+            *forge.EVIDENCE_FILES, M + "installer/requirements-guide-sdk.txt", M + "installer/requirements-standalone.txt",
+            M + "installer/vendor/guide/meerkat_meta-0.9.2-py3-none-any.whl"})
         self.assertEqual(record["toolchain"]["declared"], {"python": "3.12", "node": "22"})
         with environment():
             forge.validate_forge_ci(record)
@@ -1312,17 +1341,17 @@ class EvidenceTests(unittest.TestCase):
 
     def test_each_changed_tuple_member_refuses_reuse(self):
         members = {
-            "trees:installer": ("installer/launchkit/server.py", "changed server"),
-            "trees:console": ("console/src/app.ts", "changed console"),
-            "trees:packages/console-core": ("packages/console-core/index.ts", "changed core"),
-            "trees:packages/console-components": ("packages/console-components/index.ts", "changed components"),
-            "trees:sdk/python": ("sdk/python/meerkat_meta/__init__.py", "changed sdk"),
-            f"files:{forge.FORGE_CI}": (forge.FORGE_CI, BASE_TREE[forge.FORGE_CI] + "# changed\n"),
-            "files:console/package-lock.json": ("console/package-lock.json", "changed console lock"),
-            "files:installer/web/package-lock.json": ("installer/web/package-lock.json", "changed web lock"),
-            "files:installer/requirements-standalone.txt": ("installer/requirements-standalone.txt", "changed"),
-            "files:installer/vendor/guide/meerkat_meta-0.9.2-py3-none-any.whl": (
-                "installer/vendor/guide/meerkat_meta-0.9.2-py3-none-any.whl", "changed wheel"),
+            f"trees:{M}installer": (M + "installer/launchkit/server.py", "changed server"),
+            f"trees:{M}console": (M + "console/src/app.ts", "changed console"),
+            f"trees:{M}packages/console-core": (M + "packages/console-core/index.ts", "changed core"),
+            f"trees:{M}packages/console-components": (M + "packages/console-components/index.ts", "changed components"),
+            f"trees:{M}sdk/python": (M + "sdk/python/meerkat_meta/__init__.py", "changed sdk"),
+            f"files:{forge.INSTALLER_CI}": (forge.INSTALLER_CI, BASE_TREE[forge.INSTALLER_CI] + "# changed\n"),
+            f"files:{M}console/package-lock.json": (M + "console/package-lock.json", "changed console lock"),
+            f"files:{M}installer/web/package-lock.json": (M + "installer/web/package-lock.json", "changed web lock"),
+            f"files:{M}installer/requirements-standalone.txt": (M + "installer/requirements-standalone.txt", "changed"),
+            f"files:{M}installer/vendor/guide/meerkat_meta-0.9.2-py3-none-any.whl": (
+                M + "installer/vendor/guide/meerkat_meta-0.9.2-py3-none-any.whl", "changed wheel"),
         }
         for member, (path, content) in members.items():
             with self.subTest(member):
@@ -1330,21 +1359,21 @@ class EvidenceTests(unittest.TestCase):
                 with self.assertRaises(forge.ProtocolError) as refusal:
                     self.evidence(github)
                 self.assertIn(member, str(refusal.exception))
-                self.assertIn("Dispatch forge.yml", str(refusal.exception))
+                self.assertIn("Dispatch meta-installer.yml", str(refusal.exception))
 
     def test_a_run_that_tested_another_gateway_source_is_not_reused(self):
         """installer/tests/test_gateway_shutdown_horizon.py pins the shutdown
         horizon the gateway source advertises, so the bound run must have
         tested the candidate's own copy of that source."""
-        path = "crates/meerkat-meta/src/rpc_gateway.rs"
+        path = M + "crates/meerkat-meta/src/rpc_gateway.rs"
         github = self.github(run_files={**BASE_TREE, path: "another horizon"})
         with self.assertRaises(forge.ProtocolError) as refusal:
             self.evidence(github)
         self.assertIn(f"files:{path}", str(refusal.exception))
-        self.assertIn("Dispatch forge.yml", str(refusal.exception))
+        self.assertIn("Dispatch meta-installer.yml", str(refusal.exception))
 
     def test_a_new_requirements_file_or_wheel_refuses_reuse(self):
-        for path in ("installer/requirements-extra.txt", "installer/vendor/guide/extra-1.0-py3-none-any.whl"):
+        for path in (M + "installer/requirements-extra.txt", M + "installer/vendor/guide/extra-1.0-py3-none-any.whl"):
             with self.subTest(path), self.assertRaisesRegex(forge.ProtocolError, re.escape(f"files:{path}")):
                 self.evidence(self.github(release_files={**BASE_TREE, path: "new"}))
 
@@ -1388,7 +1417,7 @@ class EvidenceTests(unittest.TestCase):
         github.extra[f"actions/runs/{FORGE_RUN}"] = github.runs[0]
         with github.installed():
             forge.recheck_forge_ci(manifest)
-        github.commit(SHA, {**BASE_TREE, "sdk/python/meerkat_meta/__init__.py": "changed"})
+        github.commit(SHA, {**BASE_TREE, M + "sdk/python/meerkat_meta/__init__.py": "changed"})
         with github.installed(), self.assertRaisesRegex(forge.ProtocolError, "no longer tested"):
             forge.recheck_forge_ci(manifest)
         github.commit(SHA, BASE_TREE)
@@ -1462,7 +1491,7 @@ class CollectTests(unittest.TestCase):
                              (head, TAG, {"run_id": CI_RUN, "run_attempt": 1}))
             self.assertEqual(manifest["forge_ci"]["head_sha"], head)
             self.assertEqual(manifest["packages"][0]["sha256"], sha256(b"package bytes"))
-            self.assertEqual(manifest["inputs_sha256"], sha256((directory / forge.INPUTS).read_bytes()))
+            self.assertEqual(manifest["inputs_sha256"], sha256((meta_root(directory) / forge.INPUTS).read_bytes()))
             self.assertEqual(runs, [((CI_RUN, 1, head), {"ci": True})])
             (args, kwargs), = provenance
             self.assertEqual((args[0].name, args[1].name, args[2:], kwargs),
@@ -1712,7 +1741,7 @@ class RereadTests(unittest.TestCase):
         github = FakeGitHub()
         github.commit(SHA, BASE_TREE)
         github.commit(OTHER, BASE_TREE)
-        github.commit(THIRD, {**BASE_TREE, "console/src/app.ts": "older console"})
+        github.commit(THIRD, {**BASE_TREE, M + "console/src/app.ts": "older console"})
         github.forge_run(FORGE_RUN, OTHER)
         github.forge_run(FORGE_RUN - 1, THIRD)
         return github
@@ -1737,8 +1766,8 @@ class RereadTests(unittest.TestCase):
         github.hidden = {FORGE_RUN: 1000}
         result, sleeps, log = self.evidence(github)
         self.assertEqual(str(result), "no green dispatched Forge run (backend and frontend) tested the Forge inputs at "
-                                      f"{SHA}; the newest green run {FORGE_RUN - 1} differs in trees:console. "
-                                      "Dispatch forge.yml for this commit, then rerun the candidate "
+                                      f"{SHA}; the newest green run {FORGE_RUN - 1} differs in trees:{M}console. "
+                                      "Dispatch meta-installer.yml for this commit, then rerun the candidate "
                                       "(after 40 reads over 585 s)")
         self.assertEqual((len(github.listings), sleeps, len(log)), (40, [15] * 39, 40))
 
@@ -1772,7 +1801,7 @@ class RereadTests(unittest.TestCase):
     def test_a_package_never_listed_refuses_after_the_budget_with_the_text_of_one_read(self):
         result, reads, sleeps, log = self.artifacts([package_artifact("macos-arm64", 12)])
         self.assertEqual(str(result),
-                         "missing package artifact forge-package-linux-x86_64-1 (after 40 reads over 585 s)")
+                         "missing package artifact installer-package-linux-x86_64-1 (after 40 reads over 585 s)")
         self.assertEqual((len(reads), sleeps, len(log)), (40, [15] * 39, 40))
 
     def test_duplicate_artifact_names_refuse_at_once(self):
@@ -1863,7 +1892,7 @@ class PublishTests(unittest.TestCase):
             "foreign draft asset": ({"existing": {"id": 5, "draft": True, "inventory": {"other.zip": {}},
                                                   "bytes": {"other.zip": b"x"}}}, "unrecognized assets"),
             "latest moved": ({"latest_after": "v0.9.4"}, "latest release changed from v0.9.3"),
-            "latest became Forge": ({"latest_after": TAG}, "not a Meta release"),
+            "latest became the installer": ({"latest_after": TAG}, "not a Core release"),
         }
         for label, (options, message) in cases.items():
             with self.subTest(label), fixture_directory() as directory, \
@@ -1876,7 +1905,8 @@ class PublishTests(unittest.TestCase):
                       f"--source-digest {SHA}`", notes)
         guide = (ROOT / "installer/RELEASING.md").read_text()
         self.assertIn("  --source-ref refs/heads/main\n", guide)
-        self.assertIn("`git push origin forge-v<version>`", guide)
+        self.assertIn("`git push origin meta-installer-v<version>`", guide)
+        self.assertIn("--signer-workflow lukacf/meerkat/.github/workflows/meta-installer-release.yml", guide)
 
     def test_a_draft_holding_another_candidates_receipt_is_refused(self):
         existing = {"id": 5, "draft": True, "inventory": {forge.SELECTION: {}},
@@ -1887,8 +1917,8 @@ class PublishTests(unittest.TestCase):
 
 class RebindingTests(unittest.TestCase):
     def test_only_this_scripts_copy_of_release_candidate_checks_forge_release(self):
-        self.assertEqual(forge.rc.WORKFLOW, ".github/workflows/forge-release.yml")
-        self.assertEqual(forge.rc.REPOSITORY, "lukacf/meerkat-meta")
+        self.assertEqual(forge.rc.WORKFLOW, ".github/workflows/meta-installer-release.yml")
+        self.assertEqual(forge.rc.REPOSITORY, "lukacf/meerkat")
         meta = load(f"release_candidate_{uuid.uuid4().hex}", ROOT / "scripts/release-candidate.py")
         self.assertEqual(meta.WORKFLOW, ".github/workflows/meta-release.yml")
         self.assertEqual(meta.REPOSITORY, "lukacf/meerkat")

@@ -14788,19 +14788,27 @@ async fn live_member_access_attributes(
                 .to_string(),
         );
     }
-    // A side chat names its source as this roster records its fork.
-    let side_chats = crate::side_chat::side_chat_lineages(
-        &entries
-            .iter()
-            .map(|entry| crate::side_chat::SideChatRosterRow {
-                alias: crate::member_comms_id::runtime_alias_str(entry.agent_identity.as_str())
-                    .into_owned(),
-                labels: &entry.labels,
-                spawned_by: entry.spawned_by.as_ref(),
-                fork_source: entry.fork_source.as_ref(),
-            })
-            .collect::<Vec<_>>(),
-    );
+    // A side chat names its source as this roster records its fork; the
+    // fork facts are read only when a row carries the side chat marker.
+    let side_chats =
+        if crate::side_chat::any_side_chat_marker(entries.iter().map(|entry| &entry.labels)) {
+            crate::side_chat::side_chat_lineages(
+                &entries
+                    .iter()
+                    .map(|entry| crate::side_chat::SideChatRosterRow {
+                        alias: crate::member_comms_id::runtime_alias_str(
+                            entry.agent_identity.as_str(),
+                        )
+                        .into_owned(),
+                        labels: &entry.labels,
+                        spawned_by: entry.spawned_by.as_ref(),
+                        fork_source: entry.fork_source.as_ref(),
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            BTreeMap::new()
+        };
     entries
         .into_iter()
         .map(|entry| {

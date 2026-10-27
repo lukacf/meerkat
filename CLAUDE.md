@@ -412,6 +412,31 @@ and its CI must be green before a release tag (`require_ci_green`):
   whose merged branch head's message, carries the trailer `CI-Plan: workspace`
   is planned as the whole workspace (without looking for evidence): the
   explicit way to give a release's parent that evidence.
+- Products (`ci/products.json`, read through `scripts/ci-products.mjs`):
+  Core owns the root, Meta `meta/` and Connect `connect/`, and every
+  workspace package belongs to the product whose root holds its manifest.
+  No row the plan lists mixes products (Cargo unifies features across the
+  packages of one invocation, so a product's feature requests would change
+  what a Core row compiles; a test target name used by two products fails
+  the plan). A change inside a product's root selects that product's
+  packages only: a Rust path no package owns, or the product's own Clippy,
+  rustfmt, toolchain or Cargo configuration, selects all of that product's
+  packages, never the workspace. Core's whole-workspace push lanes (the
+  `main-unit` sweep beyond the changed rows, the feature suites, the guard
+  lanes, `wasm-check`, `sdk-host`, `example-web`, `wasm-timers`) run only
+  when the plan reaches Core (`core_changed`; `core_paths_changed` for the
+  lanes keyed by Core paths). A change whose reverse-dependency closure
+  reaches a product through no changed package of it adds one Clippy row
+  per such product, `downstream <product>` (all targets, all features);
+  when the change invalidates meerkat-mob's build those rows go to the push
+  with the chain heads. `published-floor` builds each product whose own
+  packages (or the root manifest, lock, toolchain or the floor script)
+  changed against the crates.io releases of its dependencies
+  (`scripts/published_crates_standalone.py floor --product <name>`):
+  advisory on pull requests and main pushes, required on the product's own
+  `release/<product>-*` branch and in its release workflow.
+  `connect-checks` runs Connect's packaging, docs and Console panel checks
+  on every change under `connect/`.
 - `fmt-governance` (always): fmt, docs-check, semver self-test, version
   parity, lock consistency, generated BUILD freshness
   (`node scripts/generate-bazel-rust-builds.mjs --check`),
@@ -543,11 +568,13 @@ and its CI must be green before a release tag (`require_ci_green`):
   an input or the stack), and credits only whole-workspace rows.
 - `closure-check` (push only): `cargo check --all-features` (lib and bin
   targets) over the reverse-dependency closure of the changed packages.
-- `rustdoc` (push only): `cargo doc --workspace --no-deps --keep-going`
-  with `RUSTDOCFLAGS=-Dwarnings`, in two parallel legs (default features
-  and `--all-features`), so a broken or private intra-doc link anywhere in
-  the workspace fails the push. It documents the whole workspace, so an
-  error that only `cargo doc -p <crate>` shows is outside it.
+- `rustdoc` (push only): `cargo doc --no-deps --keep-going` with
+  `RUSTDOCFLAGS=-Dwarnings`, in two parallel legs (default features and
+  `--all-features`), over Core's members (`--workspace` excluding the
+  products' packages) when the plan reaches Core, else over the changed
+  products' packages (`rustdoc_flags` in the plan), so a broken or private
+  intra-doc link fails the push. It documents those packages together, so
+  an error that only `cargo doc -p <crate>` shows is outside it.
 - `governed-jsonl` and `mcp-confinement-positive` (push; a pull request
   runs a lane when it touches the lane's inputs, `GUARD_LANE_INPUTS` in
   `scripts/ci-cargo-lanes.mjs` (the files that define its selected cases,
@@ -578,8 +605,9 @@ and its CI must be green before a release tag (`require_ci_green`):
   `make test-minimal` and `make test-feature-matrix-lib`. Feature names are
   read from `BUILD.bazel` and the Makefile and validated against cargo
   metadata, so a renamed feature fails the plan.
-- `wasm-check` (`make wasm-check`: wasm32 check and clippy of the web
-  runtime and the crates it links): every Rust-relevant push, and pull
+- `wasm-check` (`make wasm-check`: wasm32 Clippy of the web runtime and the
+  crates it links, which type-checks them too, so no separate `cargo check`
+  runs): every Rust-relevant push that reaches Core, and pull
   requests that change the web runtime or a workspace crate it compiles
   (its dependency closure in the cargo graph, the provider crates
   included), plan the whole workspace, or change the CLI web template.

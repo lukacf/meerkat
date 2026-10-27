@@ -79,7 +79,7 @@ rust_library(
     deps = [
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
-        "@meerkat_live_crates//:bytes-1.11.1",
+        "@meerkat_live_crates//:bytes-1.12.1",
         "@meerkat_live_crates//:opus-0.3.1",
         "@meerkat_live_crates//:rubato-2.0.0",
         "@meerkat_live_crates//:webrtc-0.14.0",
@@ -129,7 +129,7 @@ rust_library(
     deps = [
         "//crates/meerkat:meerkat_contracts_agent_factory_build",
         "//crates/meerkat:meerkat_core_agent_factory_build",
-        "@meerkat_live_crates//:bytes-1.11.1",
+        "@meerkat_live_crates//:bytes-1.12.1",
         "@meerkat_live_crates//:opus-0.3.1",
         "@meerkat_live_crates//:rubato-2.0.0",
         "@meerkat_live_crates//:webrtc-0.14.0",
@@ -196,7 +196,7 @@ rust_test(
         "//crates/meerkat-contracts:meerkat_contracts",
         "//crates/meerkat-core:meerkat_core",
         "//crates/meerkat-machine-schema:meerkat_machine_schema",
-        "@meerkat_live_crates//:bytes-1.11.1",
+        "@meerkat_live_crates//:bytes-1.12.1",
         "@meerkat_live_crates//:opus-0.3.1",
         "@meerkat_live_crates//:rubato-2.0.0",
         "@meerkat_live_crates//:webrtc-0.14.0",

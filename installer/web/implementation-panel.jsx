@@ -301,6 +301,7 @@ export function ImplementationPanel({ state, plan, designBusy, pendingManual, Ic
     ? "setup-action" : "setup-action primary";
   const decisionBlocked = (state.readiness?.decision_blockers?.length || 0) > 0;
   const serviceHold = state.service_preparation;
+  const serviceUnavailable = serviceHold?.status === "unavailable";
   const packageReason = packagePreparationReason(state, plan);
   const retainedContinuation = !statusUnconfirmed && retainsCandidateFramework(receipt, state);
   const candidateRefreshBlocked = retainedContinuation && !candidateRuntimeRefreshReady(receipt, state);
@@ -486,7 +487,9 @@ export function ImplementationPanel({ state, plan, designBusy, pendingManual, Ic
     </div>
     <h2>{overview.title || `Bring ${plan.project.name} to life`}</h2>
     <p role={overview.attention ? "status" : undefined}>{!statusUnconfirmed && packageReason && !running && !retainedContinuation ? "Your design can be accepted and refined while package preparation is pending." : overview.message}</p>
-    <p className="implementation-next">{serviceHold && !running ? "Review the required services below. Building can continue after these operations are checked."
+    <p className="implementation-next">{serviceHold && !running ? (serviceUnavailable
+      ? "This host cannot set up or verify the required services yet. Your plan remains saved."
+      : "Review the required service information below before building.")
       : !statusUnconfirmed && packageReason && !running && !retainedContinuation ? "Review the limitation with your guide before starting a new build." : overview.next}</p>
     {packageReason && <div className="implementation-warning" role="status">
       <strong>New package preparation is pending</strong><p>{packageReason}</p>
@@ -545,7 +548,7 @@ export function ImplementationPanel({ state, plan, designBusy, pendingManual, Ic
       ? "Send your manual changes back to the guide before building."
       : "The guide is revising your proposal. Building will be available when this revision is saved."}</p>}
     {serviceHold && !running && <div className="implementation-warning" role="status">
-      <strong>Check required services before building</strong>
+      <strong>{serviceUnavailable ? "Service setup is unavailable on this host" : "Required services need verification"}</strong>
       <p>{serviceHold.detail}</p>
       <RequiredServiceChecks operations={serviceHold.required_operations || []} />
     </div>}

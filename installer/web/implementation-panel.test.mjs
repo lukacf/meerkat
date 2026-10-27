@@ -197,7 +197,7 @@ test("proposed defaults and open implementation work remain explicitly buildable
 
 for (const existingBuild of [false, true]) test(`required service checks block ${existingBuild ? "Resume" : "first Build"} and preserve the draft`, async () => {
   await pendingBuilderFeedback(false, document => {
-    assert.match(document.body.textContent, /Check required services before building/);
+    assert.match(document.body.textContent, /Service setup is unavailable on this host/);
     assert.match(document.body.textContent, /Native service preparation is unavailable/);
     assert.match(document.body.textContent, /Slack.*Receive and reply/);
     assert.match(document.body.textContent, /Choose the resource this service should use/);
@@ -216,6 +216,10 @@ test("planned source operations stay distinct from verified access and do not en
     assert.match(warning.textContent, /Repository B/);
     assert.match(warning.textContent, /Slack questions.*required operations still need selection/);
     assert.equal(warning.querySelector("details").open, false);
+    for (const resource of ["Two repositories", "Repository A", "Repository B", "My channel"]) {
+      const paragraph = [...warning.querySelectorAll("p")].find(item => item.textContent === resource);
+      assert.ok(paragraph?.closest("details"), `Exact resource remains inside its disclosure: ${resource}`);
+    }
     assert.equal(warning.querySelectorAll("button").length, 0);
   }, { blocked: true, servicePreparation: { status: "unavailable", detail: "Protected setup is unavailable.",
     required_operations: [

@@ -50,6 +50,42 @@
       "git_blob": "8aef83dbc5f6e856f55c0e1065c803912c06824c",
       "sha256": "2c6a32da66dc511737e29471a0a8bb277e20af42831aec1371c9c0a28d3c67d3",
       "bytes": 10051
+    },
+    {
+      "path": "pkg/github/actions.go",
+      "git_blob": "dc71ab5261be3864c4a3d4e464ef0448b3466751",
+      "sha256": "e6c67424d9a4cea4170c49bbcc42923e1a43c05b711ab540d7be01d19013fd3d",
+      "bytes": 41232
+    },
+    {
+      "path": "pkg/github/actions_types.go",
+      "git_blob": "ffdd689b00abdab3550e939756cff71948081c41",
+      "sha256": "2905f2ce3df4cc5d46353678752f3fbe967c5bd57188df3abb517bcb6600ae61",
+      "bytes": 22929
+    },
+    {
+      "path": "pkg/github/workflow_enums.go",
+      "git_blob": "ec68a1474764f226e910d262c2fe9308e1bb5b66",
+      "sha256": "fe6974e8907962e02c9fd55daf36ef7ca5c77040faada4d62991570511ea557e",
+      "bytes": 1101
+    },
+    {
+      "path": "pkg/github/__toolsnaps__/actions_list.snap",
+      "git_blob": "28b7a789fcc71ae29069b62a8ed0bd86940a23e9",
+      "sha256": "366ac64d75c7235274a3c902705f89718a1b19aa15f32cdcfce13863c64f1501",
+      "bytes": 29262
+    },
+    {
+      "path": "pkg/github/__toolsnaps__/actions_get.snap",
+      "git_blob": "8e87fadf6b720dd8eb9bc4d692c8821881b93e12",
+      "sha256": "64562b61a7bb5b4f6e16ffd169aa391527a2eb4d2d6bc48de699e8c3a2834c50",
+      "bytes": 25112
+    },
+    {
+      "path": "pkg/github/actions_minimal_test.go",
+      "git_blob": "a2d547b33fa537655cf5ad6c943724bd8a96fe88",
+      "sha256": "358ef5259d4df0792def421836c79ecdb6dd81a43a8eba4b2fec8430c9cae77c",
+      "bytes": 10464
     }
   ],
   "verification": "All file bytes match the pinned commit tree Git blob IDs. No upstream executable or authenticated provider request was run."

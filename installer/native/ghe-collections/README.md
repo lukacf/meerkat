@@ -59,6 +59,16 @@ and any changed call, filter, revision or time bound. Dates and messages remain
 provider data; no timestamp ordering or early date cutoff is assumed. The anchor
 is retained separately, including when no commits fall within the queried window.
 
+`WorkflowRuns` enumerates repository workflow runs with stable explicit counts,
+unique run IDs and exact repository/run URLs. `WorkflowRunJobs` retains a selected
+run ID, head SHA and attempt, reads that run before and after job paging, and
+requests jobs from all attempts. Each job must belong to that run and head, with
+an explicit attempt no later than the selected attempt. Failed jobs and steps,
+earlier attempts, and changing run status remain historical data. Both programs
+bound calls and cumulative result bytes, reject changed counts or incomplete
+pages, and return no partial collection after refusal. Job collection reserves
+both run reads within its call budget.
+
 ## Pinned upstream behavior
 
 Contract: GitHub MCP server v2.0.3, source
@@ -68,6 +78,7 @@ Contract: GitHub MCP server v2.0.3, source
 - [Result types](https://github.com/github/github-mcp-server/blob/b98d115bbb080e9555466a96656ec4df605aea21/pkg/github/minimal_types.go)
 - [Ordinary comment implementation](https://github.com/github/github-mcp-server/blob/b98d115bbb080e9555466a96656ec4df605aea21/pkg/github/issues.go)
 - [Repository history implementation](https://github.com/github/github-mcp-server/blob/b98d115bbb080e9555466a96656ec4df605aea21/pkg/github/repositories.go)
+- [Workflow run and job implementation](https://github.com/github/github-mcp-server/blob/b98d115bbb080e9555466a96656ec4df605aea21/pkg/github/actions.go)
 
 `get_status` fetches the PR head and requests combined statuses without pagination
 options. When `total_count` differs from the returned row count, this program
@@ -106,8 +117,22 @@ independently prove ancestry or date-filter semantics, current default-branch
 identity, complete diffs or historical CI coverage. Empty/malformed anchor
 results refuse; provider errors must be handled by the native adapter first.
 
+The Actions programs consume the pinned successful textual JSON payload. Job
+pages have the shape `{"jobs":{"total_count":N,"jobs":[...]}}`; the MCP
+`structuredContent` projection has a different wrapper and must not be silently
+substituted. The native adapter owns explicit envelope selection and tool-error
+handling. Missing run/job revision or attempt fields refuse.
+
+The pinned workflow-run list exposes no creation-date or head-SHA filter. This
+program therefore enumerates the unfiltered repository list within its finite
+budget; an oversized repository refuses instead of claiming seven-day or older
+outstanding-run coverage from partial pages. Matching initial/final run reads
+detect observed head/attempt changes but do not prove an atomic job snapshot.
+Reported states never establish current CI readiness or execution success. Job
+URLs remain data; exact typed run/head/attempt fields establish correlation.
+
 Remaining work includes the native bridge/adapter and the other required GHE
-collection programs: workflow runs/jobs and issues. Repository metadata and
+collection programs: issues and repository PR discovery. Repository metadata and
 historical non-PR commit checks still need a supported source.
 These programs do not close those requirements or the overall shared ingestion
 outcome.

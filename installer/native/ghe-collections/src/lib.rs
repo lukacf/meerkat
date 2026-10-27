@@ -10,6 +10,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
+mod actions;
+pub use actions::{
+    ActionsReadLimits, ReportedWorkflowRunJobs, ReportedWorkflowRuns, WorkflowJob, WorkflowRun,
+    WorkflowRunJobs, WorkflowRuns, WorkflowStep,
+};
 mod history;
 pub use history::{
     HistoryAnchor, HistoryReadLimits, HistoryWindow, ReportedCommitHistory, RepositoryCommit,
@@ -50,6 +55,7 @@ pub enum Refusal {
     CollectionChanged,
     IncompleteCollection,
     IncompleteThread,
+    RunAttemptChanged,
 }
 
 #[derive(Debug, Clone)]

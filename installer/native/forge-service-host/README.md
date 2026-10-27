@@ -193,7 +193,7 @@ No data-export protocol or successful ingestion claim is added here.
 
 ## Dependency and verification limits
 
-The manifest pins Connect `2eef4a3684a45cd6c51dcbec4515400ad6a86d3f` and uses the
+The manifest pins Connect `a3e7634c41fd24c7b9996275a0ff04319d8f3040` and uses the
 same Core development patch graph as that commit's native workspace. It stays
 separate from the pure serde-only GHE crate and the released Forge runtime.
 This revision includes the reviewed protected entry, bounded diagnostics and
@@ -204,9 +204,11 @@ qualify the native adapter. The existing native validation lane remains the
 owner of compilation and platform-specific acceptance.
 The application selects Connect's default library feature set. The first
 portable consumer check failed in Connect because unconditional setup code
-referenced implementation types gated behind its `console` feature. Connect's
-owner is correcting those feature boundaries; the corrected dependency source
-and compiler validation remain pending.
+referenced implementation types gated behind its `console` feature. The pinned
+successor contains the reviewed shared-reader and helper-API boundary correction,
+as well as the native test import correction. Forge retains its default library
+feature selection. The existing owner still must compile and validate this exact
+candidate; source review does not establish a successful build or runtime result.
 The owner's private candidate has a reviewed lockfile; this source crate has no
 committed lockfile or successful native build result. Formatting and manifest
 parsing do not typecheck the APIs or execute controls.

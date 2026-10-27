@@ -294,7 +294,7 @@ crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
 # feature union for `meerkat-live`. Resolve that union in a separate generated
 # repository so crate_universe never writes its synthetic direct-dependency
 # package into Cargo's authoritative workspace lockfile.
-crate.spec(package = "bytes", repositories = ["meerkat_live_crates"], version = "=1.11.1")
+crate.spec(package = "bytes", repositories = ["meerkat_live_crates"], version = "=1.12.1")
 crate.spec(package = "opus", repositories = ["meerkat_live_crates"], version = "=0.3.1")
 crate.spec(package = "rubato", repositories = ["meerkat_live_crates"], version = "=2.0.0")
 crate.spec(package = "webrtc", repositories = ["meerkat_live_crates"], version = "=0.14.0")

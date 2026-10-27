@@ -2215,8 +2215,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bindgen_version="0.2.126"
-          bindgen_sha256="064948d58e2d6c0a745216477a639ba696216d6309aaa902939d1b865b1d869d"
+          bindgen_version="0.2.129"
+          bindgen_sha256="82d12bb940e2d4e72e0d5605387fc1b8ca179044e012b620f0ce4e7440e8320e"
           binaryen_version="version_117"
           binaryen_sha256="3dc677006555b355ea2da5e82602065a161d5e83eaefd3f759afa00b96e83212"
           locked="$(awk '$0 == "name = \"wasm-bindgen\"" { getline; gsub(/"/, "", $3); print $3; exit }' Cargo.lock)"

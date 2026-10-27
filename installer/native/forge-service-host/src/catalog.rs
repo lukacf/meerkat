@@ -73,6 +73,152 @@ pub(crate) enum Engine {
 }
 
 impl ProgramSpec {
+    /// Decode only the compiled catalog's exact resource schema. This supplies
+    /// intent, never an installed connection, authenticated target or receipt.
+    /// Protected composition must still bind the actual installed configuration.
+    pub fn from_resource(
+        program_id: &str,
+        resource: &Value,
+    ) -> Result<(GheRepository, Self, ProgramLimits), crate::AdapterError> {
+        use crate::AdapterError::InvalidSelection as bad;
+        fn fields(value: &Value, keys: &[&str]) -> Result<(), crate::AdapterError> {
+            let object = value.as_object().ok_or(bad)?;
+            if object.len() != keys.len() || keys.iter().any(|key| !object.contains_key(*key)) {
+                return Err(bad);
+            }
+            Ok(())
+        }
+        fn text(value: &Value) -> Result<String, crate::AdapterError> {
+            value.as_str().map(str::to_owned).ok_or(bad)
+        }
+        fn optional_text(value: &Value) -> Result<Option<String>, crate::AdapterError> {
+            if value.is_null() {
+                Ok(None)
+            } else {
+                text(value).map(Some)
+            }
+        }
+        fn number(value: &Value) -> Result<u64, crate::AdapterError> {
+            value.as_u64().ok_or(bad)
+        }
+        fields(
+            resource,
+            &[
+                "program",
+                "host",
+                "owner",
+                "repository",
+                "selector",
+                "limits",
+            ],
+        )?;
+        if resource["program"].as_str() != Some(program_id) {
+            return Err(bad);
+        }
+        fields(&resource["limits"], &["calls", "result_bytes"])?;
+        let limits = ProgramLimits {
+            calls: u16::try_from(number(&resource["limits"]["calls"])?).map_err(|_| bad)?,
+            result_bytes: usize::try_from(number(&resource["limits"]["result_bytes"])?)
+                .map_err(|_| bad)?,
+        };
+        let repo = GheRepository {
+            host: text(&resource["host"])?,
+            owner: text(&resource["owner"])?,
+            repository: text(&resource["repository"])?,
+        };
+        let s = &resource["selector"];
+        let spec = match program_id {
+            "ghe.pr_statuses.v1" | "ghe.pr_changes.v1" => {
+                fields(s, &["number", "head"])?;
+                let number = number(&s["number"])?;
+                let head = optional_text(&s["head"])?;
+                if program_id == "ghe.pr_statuses.v1" {
+                    Self::PullRequestStatuses { number, head }
+                } else {
+                    Self::PullRequestChanges { number, head }
+                }
+            }
+            "ghe.pr_threads.v1"
+            | "ghe.pr_comments.v1"
+            | "ghe.pr_reviews.v1"
+            | "ghe.issue_comments.v1"
+            | "ghe.issue_hierarchy.v1" => {
+                fields(s, &["number"])?;
+                let number = number(&s["number"])?;
+                match program_id {
+                    "ghe.pr_threads.v1" => Self::PullRequestThreads { number },
+                    "ghe.pr_comments.v1" => Self::PullRequestDiscussion {
+                        number,
+                        kind: DiscussionKind::Comments,
+                    },
+                    "ghe.pr_reviews.v1" => Self::PullRequestDiscussion {
+                        number,
+                        kind: DiscussionKind::Reviews,
+                    },
+                    "ghe.issue_comments.v1" => Self::IssueComments { number },
+                    _ => Self::IssueHierarchy { number },
+                }
+            }
+            "ghe.history.v1" => {
+                fields(s, &["head", "since", "until"])?;
+                Self::History {
+                    head: optional_text(&s["head"])?,
+                    since: text(&s["since"])?,
+                    until: text(&s["until"])?,
+                }
+            }
+            "ghe.workflow_runs.v1" => {
+                fields(s, &[])?;
+                Self::WorkflowRuns
+            }
+            "ghe.workflow_jobs.v1" => {
+                fields(s, &["run_id", "attempt", "head"])?;
+                Self::WorkflowRunJobs {
+                    run_id: number(&s["run_id"])?,
+                    attempt: number(&s["attempt"])?,
+                    head: text(&s["head"])?,
+                }
+            }
+            "ghe.issues.v1" => {
+                let query = match s["query"].as_str() {
+                    Some("all") => {
+                        fields(s, &["query"])?;
+                        IssueQuery::All
+                    }
+                    Some("open") => {
+                        fields(s, &["query"])?;
+                        IssueQuery::Open
+                    }
+                    Some("updated_since") => {
+                        fields(s, &["query", "since"])?;
+                        IssueQuery::UpdatedSince(text(&s["since"])?)
+                    }
+                    _ => return Err(bad),
+                };
+                Self::Issues { query }
+            }
+            "ghe.pull_requests.v1" => {
+                fields(s, &["query"])?;
+                Self::PullRequests {
+                    query: match s["query"].as_str() {
+                        Some("all") => PullRequestQuery::All,
+                        Some("open") => PullRequestQuery::Open,
+                        Some("closed") => PullRequestQuery::Closed,
+                        _ => return Err(bad),
+                    },
+                }
+            }
+            _ => return Err(bad),
+        };
+        // Existing constructors validate host, identities, time bounds, counts,
+        // revisions and budgets. Exact equality also rejects ignored fields.
+        spec.build(&repo, limits).map_err(|_| bad)?;
+        if spec.resource(&repo, limits) != *resource {
+            return Err(bad);
+        }
+        Ok((repo, spec, limits))
+    }
+
     pub fn id(&self) -> &'static str {
         match self {
             Self::PullRequestStatuses { .. } => "ghe.pr_statuses.v1",

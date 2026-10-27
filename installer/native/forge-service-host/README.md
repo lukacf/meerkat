@@ -40,6 +40,14 @@ are supplied. A missing handle refuses; it never falls back to a normal duplicat
 call. The final body passes through the same parser checks and historical audit
 retention. Neither a parser result nor serialized history can provide a handle.
 This source integration is uncompiled and has no native acceptance result.
+`ProgramSpec::from_resource` accepts only these registered program IDs and the
+exact resource shape emitted by the catalog, including selector and budget
+fields. It runs the existing pure constructor checks and requires an exact
+resource round trip. Unknown or ignored fields, executable commands and native
+readiness flags are refused. This decodes selection intent only; protected
+composition must still supply the actual installed configuration, original
+caller and native final report. The protected entry source contract is now
+available for integration, but this library has no executable entry yet.
 Repository metadata and revision-bearing historical check support remain separate inventory
 requirements.
 
@@ -62,9 +70,9 @@ separate from the pure serde-only GHE crate and the released Forge runtime.
 There is no lockfile or native build result yet. Formatting parses the source;
 it does not typecheck the APIs, resolve the native graph or execute controls.
 
-Seven new native-crate controls cover invalid target selectors, configuration
+Eight native-crate controls cover invalid target selectors, configuration
 and account declaration refusal, operation ceilings, the compiled catalog and
-repeated `begin`. They remain unrun. The original owner must also exercise real
+closed resource decoder, and repeated `begin`. They remain unrun. The original owner must also exercise real
 committed-result delivery, target/context changes, parser errors and storage
 limits through the actual native engine. Tests must not fabricate
 `CommittedCollectionResult` or replace native authority with fixture structs.

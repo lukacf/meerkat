@@ -621,7 +621,44 @@ mod tests {
             assert!(spec.operations().iter().any(|op| op == call.operation()));
             assert_eq!(call.arguments(), second.next().unwrap().arguments());
             assert_eq!(spec.resource(&repo(), limits())["program"], spec.id());
+            let resource = spec.resource(&repo(), limits());
+            let (decoded_repo, decoded_spec, decoded_limits) =
+                ProgramSpec::from_resource(spec.id(), &resource).unwrap();
+            assert_eq!(
+                decoded_spec.resource(&decoded_repo, decoded_limits),
+                resource
+            );
         }
+    }
+    #[test]
+    fn protected_resource_selection_is_closed_and_cannot_supply_native_authority() {
+        let spec = ProgramSpec::IssueHierarchy { number: 17 };
+        let good = spec.resource(&repo(), limits());
+        assert!(ProgramSpec::from_resource("unregistered.program", &good).is_err());
+        for (field, value) in [
+            ("ready", json!(true)),
+            ("host", json!("github.com")),
+            (
+                "selector",
+                json!({"number":17,"command":"arbitrary helper"}),
+            ),
+            ("selector", json!({"number":0})),
+            ("selector", json!({"number":"17"})),
+            ("limits", json!({"calls":true,"result_bytes":1024})),
+            ("limits", json!({"calls":65536,"result_bytes":1024})),
+            (
+                "limits",
+                json!({"calls":4,"result_bytes":1024,"grant":true}),
+            ),
+            ("program", json!("ghe.issue_comments.v1")),
+        ] {
+            let mut changed = good.clone();
+            changed[field] = value;
+            assert!(ProgramSpec::from_resource(spec.id(), &changed).is_err());
+        }
+        let mut missing = good;
+        missing.as_object_mut().unwrap().remove("host");
+        assert!(ProgramSpec::from_resource(spec.id(), &missing).is_err());
     }
     #[test]
     fn repeated_begin_cannot_reissue_the_original_call() {

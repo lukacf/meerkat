@@ -221,7 +221,7 @@ impl SessionStore for EphemeralSessionStore {
             .map(SessionMeta::from)
             .collect();
 
-        metas.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        metas.sort_by_key(|meta| std::cmp::Reverse(meta.updated_at));
 
         if let Some(created_after) = filter.created_after {
             metas.retain(|m| m.created_at >= created_after);

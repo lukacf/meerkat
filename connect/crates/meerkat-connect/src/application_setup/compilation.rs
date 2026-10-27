@@ -324,6 +324,7 @@ impl ApplicationSetupCompilation {
         Ok(selected)
     }
     /// Existing preparation paths already have their final helper selection.
+    #[cfg(test)]
     pub(crate) fn retain_owner(
         &self,
         selected: meerkat_toolkit::host_lifetime::policy::PreparedLocalPolicy,
@@ -335,6 +336,7 @@ impl ApplicationSetupCompilation {
     /// observation and native issuance/recovery. Member destinations, helper
     /// identity and every existing operation selection remain unchanged. The
     /// helper-access entry below admits only the separately requested additions.
+    #[cfg(test)]
     pub(crate) fn retain_authorities(
         &self,
         selected: meerkat_toolkit::host_lifetime::policy::PreparedLocalPolicy,
@@ -346,6 +348,7 @@ impl ApplicationSetupCompilation {
     /// The preparation issuer may insert only the explicitly requested bundled
     /// server target. All early base/target selections remain byte-identical;
     /// the compiler does not derive or authorize any native grant itself.
+    #[cfg(test)]
     pub(crate) fn retain_authorities_with_helper_mcp(
         &self,
         selected: meerkat_toolkit::host_lifetime::policy::PreparedLocalPolicy,

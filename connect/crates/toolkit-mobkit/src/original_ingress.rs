@@ -1702,6 +1702,7 @@ impl ToolkitOriginalOwner {
     /// persistence/reconciliation can publish Cancelled with its actual stored
     /// row evidence. The native disposition callback projects that exact row
     /// under this source owner without store I/O.
+    #[cfg(test)]
     pub(crate) async fn record_operation_cancelled<V, VFut, F, Fut>(
         &self,
         realm: &meerkat_core::RealmId,

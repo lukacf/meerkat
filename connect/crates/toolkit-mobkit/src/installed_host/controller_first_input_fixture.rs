@@ -20,10 +20,6 @@ pub(crate) struct Host {
     pub acquisition_helper: Option<acquisition::InstalledSetupSelection>,
 }
 
-pub(crate) async fn open(facts: &ControllerModelFacts, select_controller: bool) -> Host {
-    open_with_probe(facts, select_controller, false).await
-}
-
 pub(crate) async fn open_with_probe(
     facts: &ControllerModelFacts,
     select_controller: bool,
@@ -1154,55 +1150,6 @@ pub(crate) fn bind_acquisition(
     )
 }
 
-/// Same installed owner, selected only by the workflow worker control. No
-/// helper dispatch is exercised; the actual recovery worker consumes close.
-pub(crate) fn bind_workflow_recovery(
-    store: &Arc<toolkit_store::SqliteStore>,
-    source_scope: &toolkit_store::StoreScope,
-    originals: &Arc<crate::private_originals::PrivateOriginals>,
-    lifetime: &Arc<NativeHostLifetime>,
-    source_path: &std::path::Path,
-) -> Arc<acquisition::InstalledAcquisition> {
-    let timeout = acquisition::InstalledSetupLimits::default().admission_timeout_ms;
-    let tools =
-        acquisition::InstalledAcquisitionTools::new(std::time::Duration::from_millis(timeout))
-            .unwrap();
-    bind_acquisition_parts(
-        store,
-        source_scope,
-        originals,
-        lifetime,
-        source_path,
-        tools,
-        None,
-    )
-}
-
-/// Lifecycle-only continuation port. Native source/G ownership is real; the
-/// supplied delivery owner is explicitly a protocol fixture, not native input.
-pub(crate) fn bind_workflow_lifecycle_recovery(
-    store: &Arc<toolkit_store::SqliteStore>,
-    source_scope: &toolkit_store::StoreScope,
-    originals: &Arc<crate::private_originals::PrivateOriginals>,
-    lifetime: &Arc<NativeHostLifetime>,
-    source_path: &std::path::Path,
-    continuation: Arc<dyn acquisition::InstalledOriginalTaskOwner>,
-) -> Arc<acquisition::InstalledAcquisition> {
-    let timeout = acquisition::InstalledSetupLimits::default().admission_timeout_ms;
-    let tools =
-        acquisition::InstalledAcquisitionTools::new(std::time::Duration::from_millis(timeout))
-            .unwrap();
-    bind_acquisition_parts(
-        store,
-        source_scope,
-        originals,
-        lifetime,
-        source_path,
-        tools,
-        Some(continuation),
-    )
-}
-
 fn bind_acquisition_parts(
     store: &Arc<toolkit_store::SqliteStore>,
     source_scope: &toolkit_store::StoreScope,
@@ -1456,16 +1403,6 @@ pub(crate) async fn open_for_configured_helper_report(
         true,
     )
     .await
-}
-
-/// Warm public fixture selects real helper catalog and configured targets
-/// before native owners open. It grants no public business service access.
-pub(crate) async fn open_for_warm_helper_report(
-    facts: &ControllerModelFacts,
-    acquisition: Arc<dyn meerkat_core::AgentToolDispatcher>,
-    report: Arc<dyn meerkat_core::AgentToolDispatcher>,
-) -> Host {
-    open_for_warm_helper_profile(facts, acquisition, report, WarmHelperProfile::Standard).await
 }
 
 pub(crate) async fn open_for_warm_helper_profile(

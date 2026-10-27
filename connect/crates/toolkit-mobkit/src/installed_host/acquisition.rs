@@ -252,6 +252,7 @@ impl InstalledAcquisition {
 
     /// Historical installed helper selection for the existing native binder.
     /// It confers no input custody, controller child or operation permission.
+    #[cfg(test)]
     pub(crate) fn helper(&self) -> (&InstalledSetupSelection, &CompiledNativeMember) {
         self.helpers.get(None).expect("validated default helper")
     }
@@ -301,44 +302,6 @@ impl InstalledAcquisition {
 
     pub(crate) fn result_tool(self: &Arc<Self>) -> Arc<dyn AgentToolDispatcher> {
         self.tools.result_tool()
-    }
-
-    /// Freeze immutable input through the selected ports and the same SQLite
-    /// instance that owns source rows. No helper WorkGraph admission or native
-    /// runtime materialization occurs during this step.
-    pub(crate) async fn prepare(
-        &self,
-        operation: &Id,
-        call_id: &str,
-        context: &ToolDispatchContext,
-    ) -> Result<NativeWorkPreparation, SetupError> {
-        let admission = self
-            .host
-            .admit_invocation(call_id, context)
-            .await
-            .map_err(host_admission_error)?;
-        let authorization = context.work_authorization().ok_or(SetupError::Denied)?;
-        let current = admission.context.borrowed(authorization);
-        let store = SetupStore::new_conditional(self.store.as_ref(), self.scope.clone())?;
-        let snapshot = store
-            .load(
-                operation,
-                &admission.evidence,
-                &current,
-                self.references.as_ref(),
-            )
-            .await?;
-        self.prepare_bound_work(
-            &store,
-            &snapshot,
-            SetupAccess {
-                evidence: &admission.evidence,
-                context: &current,
-                references: self.references.as_ref(),
-            },
-            context,
-        )
-        .await
     }
 
     /// The existing continuation owner checks the native receipt and current

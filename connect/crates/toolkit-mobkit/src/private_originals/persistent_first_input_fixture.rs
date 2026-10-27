@@ -39,14 +39,6 @@ impl FirstFixture<meerkat::PersistentSessionService<FactoryAgentBuilder>> {
         (fixture, store)
     }
 
-    pub(crate) async fn for_live_attachment_with_model(
-        decorate: impl FnOnce(Arc<dyn LlmClient>) -> Arc<dyn LlmClient> + Send + 'static,
-    ) -> (Self, Arc<dyn meerkat_runtime::RuntimeStore>) {
-        let (fixture, store, _, _) =
-            Self::construct_persistent(false, None, Some(Box::new(decorate)), false, None).await;
-        (fixture, store)
-    }
-
     pub(crate) async fn for_live_attachment_with_model_and_human_policy(
         decorate: impl FnOnce(Arc<dyn LlmClient>) -> Arc<dyn LlmClient> + Send + 'static,
     ) -> (Self, Arc<dyn meerkat_runtime::RuntimeStore>) {

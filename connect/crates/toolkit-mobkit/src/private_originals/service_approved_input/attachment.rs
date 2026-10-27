@@ -795,17 +795,6 @@ impl PrivateOriginals {
         Ok(Some(contexts))
     }
 
-    #[cfg(test)]
-    pub(super) async fn recheck_service_attachment(
-        &self,
-        reference: &PrivateOriginalRef,
-        task: &ApprovedTaskLink,
-    ) -> Result<Option<ServiceInputContext>, PrivateOriginalError> {
-        task.singleton_grant()?;
-        self.recheck_service_attachment_member(reference, &task.attachments()[0])
-            .await
-    }
-
     pub(super) async fn retire_service_attachment(
         &self,
         reference: &PrivateOriginalRef,

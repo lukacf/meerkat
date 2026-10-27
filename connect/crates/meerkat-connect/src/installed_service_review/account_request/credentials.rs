@@ -18,6 +18,10 @@ use outcome::CredentialReply;
 #[serde(deny_unknown_fields)]
 struct CredentialProposal {
     job_id: String,
+    #[allow(
+        dead_code,
+        reason = "wire field: deserialized to require its declared kind"
+    )]
     authentication: Authentication,
     operations: Vec<String>,
     agent: String,

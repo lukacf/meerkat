@@ -138,6 +138,7 @@ impl PrivateOriginals {
     /// must resolve the same authenticated human and fresh native access after
     /// this future returns, before serializing any of the projection.
     /// This crate-private port neither authenticates a human nor issues access.
+    #[cfg(test)]
     pub(crate) async fn service_task_status_projection(
         &self,
         human: &PrincipalRef,
@@ -149,6 +150,7 @@ impl PrivateOriginals {
             .await
     }
 
+    #[cfg(test)]
     async fn service_task_status_projection_from(
         &self,
         store: &dyn ToolkitStore,

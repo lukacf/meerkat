@@ -257,6 +257,7 @@ fn native_finalization_review(
     })
 }
 
+#[cfg(test)]
 fn finalization_message(
     server: &str,
     realm: &str,
@@ -283,16 +284,6 @@ fn finalization_message_ref(
             persisted_grant_message_ref(server, realm, agent, *generation, grant.as_ref())
         }
     }
-}
-
-fn persisted_grant_message(
-    server: &str,
-    realm: &str,
-    agent: &str,
-    generation: u64,
-    grant: Result<meerkat::governed_realm::stock::issuance::StockGrantOutcome, StockGrantError>,
-) -> Result<String, ConnectError> {
-    persisted_grant_message_ref(server, realm, agent, generation, grant.as_ref())
 }
 
 fn persisted_grant_message_ref(
@@ -581,7 +572,13 @@ impl FinalizationTarget {
 /// manufacture the connector finalizer's enum or an observed provider account.
 #[derive(Debug)]
 enum FinalizationOutcome {
-    BeforeAdministrationRefused(ConnectError),
+    BeforeAdministrationRefused(
+        #[allow(
+            dead_code,
+            reason = "kept for FinalizedInstallation's Debug output and tests"
+        )]
+        ConnectError,
+    ),
     BeforeAdministrationStopped,
     Connector(ReviewedConnectorFinalization),
     PublicPersistenceError(meerkat_core::mcp_config::McpRealmPersistError),
@@ -756,6 +753,7 @@ impl FinalizedInstallation {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn belongs_to(
         &self,
         realm: &meerkat_core::RealmLocator,
@@ -1132,6 +1130,7 @@ impl TerminalConnectors {
     pub(crate) fn router(&self) -> meerkat::McpRouter {
         self.control.router()
     }
+    #[cfg(test)]
     pub(crate) fn dispatcher(
         &self,
         installs: Arc<CheckedInstalls>,

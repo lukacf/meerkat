@@ -339,17 +339,6 @@ impl PrivateOriginals {
             .await
     }
 
-    pub(super) async fn submit_ready_service_original(
-        self: &Arc<Self>,
-        submission: PrivateOriginalSubmit,
-        grant: PrivateServiceGrantRef,
-        context: super::service_approved_input::attachment::ServiceInputContext,
-    ) -> Result<PrivateOriginalSubmission, PrivateOriginalError> {
-        let context = context.into_content(&submission.original, &grant)?;
-        self.submit_selected_original(submission, Some(grant), None, vec![context])
-            .await
-    }
-
     pub(super) async fn submit_ready_service_set(
         self: &Arc<Self>,
         submission: PrivateOriginalSubmit,
@@ -951,6 +940,7 @@ impl OriginalBinder {
                     // in this source's canonical row after source promotion succeeds.
                     service_grant: self.grant.clone(),
                     service_batch: self.batch.clone(),
+                    #[cfg(test)]
                     first_candidate: pending.is_first_candidate(),
                     handoff,
                     native_admission: Mutex::new(None),
@@ -1012,6 +1002,7 @@ pub(super) struct PendingOriginalAdmission {
     pub(super) handoff: Arc<custody_recovery::CustodyHandoff>,
     service_grant: Option<PrivateServiceGrantRef>,
     service_batch: Option<service_approved_input::ApprovedTaskLink>,
+    #[cfg(test)]
     first_candidate: bool,
     pub(super) native_admission: Mutex<Option<GovernedAdmission>>,
     pub(super) pending: Mutex<SourcePublication>,

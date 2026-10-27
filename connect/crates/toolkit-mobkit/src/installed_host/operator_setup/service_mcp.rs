@@ -55,21 +55,6 @@ impl ReviewedServiceMcpParent {
         self.into_parts_with_errors(source, false)
     }
 
-    pub(crate) fn into_parts_current(
-        self,
-        source: &Arc<ToolkitOriginalOwner>,
-    ) -> Result<
-        (
-            PrivateServiceMcpAccessDecision,
-            ServiceMcpSelection,
-            Vec<GrantLineageRef>,
-            std::sync::Weak<NativeHostLifetime>,
-        ),
-        crate::private_originals::PrivateOriginalError,
-    > {
-        self.into_parts_with_errors(source, true)
-    }
-
     pub(crate) fn into_parts_operation(
         self,
         source: &Arc<ToolkitOriginalOwner>,

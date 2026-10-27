@@ -141,6 +141,7 @@ fn setup_selection_digest(
 impl OperatorSetup {
     /// Freeze the complete set before native issuance. No member can change
     /// its request after the real shared approval has been returned.
+    #[cfg(test)]
     pub(crate) fn prepare_service_mcp_parent_batch_review(
         &self,
         members: Vec<ServiceMcpParentReview>,

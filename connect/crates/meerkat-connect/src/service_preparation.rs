@@ -365,6 +365,7 @@ impl LazySetup {
     /// Checked installation uses the existing native decision owner. Account
     /// authentication, usable attachment and full service availability remain
     /// separate; the private-pipe service mode is still unavailable.
+    #[cfg(test)]
     pub(crate) fn private_services() -> (Self, ServicePreparationPresenter) {
         Self::private_services_with_router(McpRouter::new_with_stdio_profile(
             meerkat::McpStdioLaunchProfile::trusted_host(),

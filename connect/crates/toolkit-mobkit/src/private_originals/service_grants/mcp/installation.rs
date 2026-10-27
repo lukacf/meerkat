@@ -79,6 +79,7 @@ impl PrivateOriginals {
         ))
     }
 
+    #[cfg(test)]
     pub(crate) async fn read_service_installation(
         self: &Arc<Self>,
         reference: &PrivateOriginalRef,

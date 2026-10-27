@@ -133,6 +133,7 @@ impl SelectedPolicyBinding {
     pub(crate) fn owner(&self) -> &PrincipalRef {
         &self.facts.scope.owner
     }
+    #[cfg(test)]
     pub(crate) fn bind(
         &self,
         lifetime: Arc<NativeHostLifetime>,

@@ -226,6 +226,7 @@ impl InstalledAcquisition {
         )
     }
 
+    #[cfg(test)]
     pub(in crate::installed_host) fn from_defaults_with_tools(
         store: Arc<SqliteStore>,
         source_scope: StoreScope,

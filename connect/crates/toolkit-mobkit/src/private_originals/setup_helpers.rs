@@ -38,9 +38,6 @@ impl PreparedHelperController {
     pub(crate) fn controller(&self) -> &ControllerModelClient {
         &self.controller
     }
-    pub(crate) fn admitted(&self) -> &Arc<AdmittedHelperWork> {
-        &self.admitted
-    }
     pub(crate) fn target(&self) -> &NativeWorkTarget {
         &self.target
     }
@@ -1167,6 +1164,7 @@ impl GovernedInputBinder for SubmitHelperBinder {
                     admitted: self.admitted.clone(),
                     session: context.session_id.clone(),
                     input: input.clone(),
+                    #[cfg(test)]
                     first_candidate: pending.is_first_candidate(),
                     publication: Mutex::new(HelperPublication {
                         native_admission: None,
@@ -1221,6 +1219,7 @@ pub(super) struct PendingHelperAdmission {
     pub(super) admitted: Arc<AdmittedHelperWork>,
     pub(super) session: SessionId,
     pub(super) input: Input,
+    #[cfg(test)]
     first_candidate: bool,
     pub(super) publication: Mutex<HelperPublication>,
 }
@@ -1234,7 +1233,15 @@ pub(super) struct HelperPublication {
 /// Actual handoff custody. Even a missing typed pointer retains the native Box
 /// as unavailable evidence; it cannot be dropped as proof of nonadmission.
 struct UnresolvedHelperAdmission {
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "held as custody; only tests read it")
+    )]
     pending: Option<Arc<PendingHelperAdmission>>,
+    #[allow(
+        dead_code,
+        reason = "held as custody until the helper drops; never read"
+    )]
     settlement: Box<dyn GovernedSettlement>,
 }
 

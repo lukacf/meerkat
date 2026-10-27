@@ -872,6 +872,7 @@ impl PrivateOriginals {
     /// Prepare a first-attempt CAS from this exact current row. The caller
     /// must retain the foreground write and recheck before Candidate staging.
     /// This method does not persist, enroll or publish source custody.
+    #[cfg(test)]
     pub(crate) fn prepare_custody_enrollment(
         &self,
         stored: &StoredRecord,
@@ -1294,6 +1295,7 @@ impl PrivateOriginals {
     /// Retain cancellation in the existing source row. The source owner's
     /// native disposition callback observes this publication. This primitive
     /// does not stop a run and remains internal to the fenced host entry.
+    #[cfg(test)]
     pub(crate) async fn record_operation_cancelled(
         &self,
         reference: &PrivateOriginalRef,

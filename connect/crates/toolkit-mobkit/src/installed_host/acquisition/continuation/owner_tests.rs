@@ -82,16 +82,6 @@ impl ContextProbe {
             .clone()
             .expect("native plan resolver captured the staged context")
     }
-    /// The owning test has joined the prior turn and retained its actual
-    /// context before explicitly requesting a probe for one additional input.
-    pub(crate) fn arm_next_input(&self) {
-        self.captured
-            .lock()
-            .unwrap()
-            .take()
-            .expect("prior input was captured");
-        self.next_input.store(true, Ordering::SeqCst);
-    }
 }
 #[async_trait]
 impl AgentToolDispatcher for ContextProbe {

@@ -154,6 +154,7 @@ impl AdmittedHelperWork {
     pub(crate) fn operation(&self) -> &HelperOperation {
         &self.facts.operation
     }
+    #[cfg(test)]
     pub(crate) fn origin(&self) -> &HelperSetupOrigin {
         &self.facts.origin
     }

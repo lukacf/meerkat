@@ -38,6 +38,7 @@ impl PrivateOriginals {
     /// Prepare an exact live-only control from approved B and its canonical
     /// task, source and grant owners. The caller must still use native actor
     /// registration and B/R custody; this method attaches or persists nothing.
+    #[cfg(test)]
     pub(crate) async fn prepare_service_mcp_control(
         self: &Arc<Self>,
         store: &Arc<SqliteStore>,
@@ -51,6 +52,7 @@ impl PrivateOriginals {
 
     /// Production recovery captures currentness before package readback as well
     /// as canonical task reads. A changed owner never refreshes this old stamp.
+    #[cfg(test)]
     pub(crate) async fn prepare_service_mcp_installation(
         self: &Arc<Self>,
         store: &Arc<SqliteStore>,

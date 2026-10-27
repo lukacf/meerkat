@@ -21,6 +21,7 @@ pub(crate) struct SetupResultSource {
 }
 
 impl PrivateOriginals {
+    #[cfg(test)]
     pub(crate) async fn setup_result_source(
         &self,
         context: &ToolDispatchContext,

@@ -64,7 +64,16 @@ enum Ceremony {
         ConnectorLoginStart,
         LoginSelection,
     ),
-    Completed(Arc<CompletedLogin>),
+    Completed(
+        #[cfg_attr(
+            not(test),
+            allow(
+                dead_code,
+                reason = "the finished ceremony keeps its login; only tests read it"
+            )
+        )]
+        Arc<CompletedLogin>,
+    ),
 }
 
 /// Historical native login evidence for the host that owns this control.
@@ -139,6 +148,7 @@ impl Control {
     /// Borrow the exact completed ceremony. The selected host must still join
     /// its installation/operation owner and current native credential/grant
     /// state before requesting access or finalizing a connection.
+    #[cfg(test)]
     pub(crate) fn completed(&self) -> Option<&CompletedLogin> {
         match &self.ceremony {
             Some(Ceremony::Completed(completed)) => Some(completed),

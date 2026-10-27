@@ -738,23 +738,6 @@ impl InstalledAcquisition {
         // No await or I/O after the same owner's synchronous guarded transfer.
         disclosed.ok_or(SetupError::NativeExecutionUnavailable)?
     }
-
-    /// Internal restart/closeout entry. It cannot drive helper admission:
-    /// access is absent and the selected owner always refuses completion.
-    pub(crate) async fn reconcile_work(
-        &self,
-        operation: &Id,
-    ) -> Result<NativeWorkStep<()>, SetupError> {
-        let store = SetupStore::new_conditional(self.store.as_ref(), self.scope.clone())?;
-        store
-            .step_native_work_admission_for_operation(
-                operation,
-                &PrivateRecoveryOwner(self),
-                None,
-                &self.work_step,
-            )
-            .await
-    }
 }
 
 #[async_trait]
@@ -814,25 +797,6 @@ fn recovery_error(error: SetupError) -> SetupWorkAdmissionError {
             SetupWorkAdmissionError::Denied
         }
         _ => SetupWorkAdmissionError::NativeExecutionUnavailable,
-    }
-}
-struct PrivateRecoveryOwner<'a>(&'a InstalledAcquisition);
-#[async_trait]
-impl NativeSetupWorkOwner for PrivateRecoveryOwner<'_> {
-    type Retained = ();
-    async fn observe(
-        &self,
-        preparation: &NativeWorkPreparation,
-    ) -> Result<Option<NativeWorkObservation<()>>, SetupError> {
-        self.0.observe_private_work(preparation).await
-    }
-    async fn complete(
-        &self,
-        _: &NativeWorkPreparation,
-        _: &EffectLease,
-        _: Option<NativeWorkObservation<()>>,
-    ) -> Result<NativeWorkCompletion<()>, SetupError> {
-        Err(SetupError::Denied)
     }
 }
 

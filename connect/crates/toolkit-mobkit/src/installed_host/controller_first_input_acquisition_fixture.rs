@@ -130,16 +130,3 @@ impl ApprovedAcquisitionPorts {
         owner
     }
 }
-
-pub(crate) fn bind_approved_acquisition(
-    host: &Host,
-    tools: acquisition::InstalledAcquisitionTools,
-) -> (
-    Arc<acquisition::InstalledAcquisition>,
-    Arc<acquisition::InstalledNativeContinuation>,
-    meerkat_workgraph::WorkGraphService,
-) {
-    let ports = prepare_approved_acquisition(host);
-    let owner = ports.bind(tools, host.acquisition_helper.clone().unwrap());
-    (owner, ports.continuation, ports.workgraph)
-}

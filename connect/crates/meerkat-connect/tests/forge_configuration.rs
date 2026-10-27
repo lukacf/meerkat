@@ -34,6 +34,10 @@ use tokio::{
     time::{sleep, timeout},
 };
 
+#[allow(
+    dead_code,
+    reason = "shared fixture; its native owner serves cli_paired_host"
+)]
 #[path = "fixtures/forge-reading/runner.rs"]
 mod owner;
 const BOUND: Duration = Duration::from_secs(15);

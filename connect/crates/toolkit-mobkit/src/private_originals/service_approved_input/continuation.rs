@@ -174,6 +174,7 @@ impl PrivateOriginals {
             .await
     }
 
+    #[cfg(test)]
     pub(super) async fn reject_failed_service_attachment(
         &self,
         reference: &PrivateOriginalRef,
@@ -183,6 +184,7 @@ impl PrivateOriginals {
             .await
     }
 
+    #[cfg(test)]
     pub(super) async fn reject_failed_service_attachment_with_observation(
         &self,
         reference: &PrivateOriginalRef,

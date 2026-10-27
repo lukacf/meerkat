@@ -772,9 +772,6 @@ impl<S> FirstFixture<S> {
             Err("native ticket did not complete the original answer".into())
         }
     }
-    pub(crate) fn hold_next_response(&self) -> super::PreparedResponseHold {
-        self.provider.hold_next_response()
-    }
     pub(crate) fn model_requests(&self) -> usize {
         self.provider.0.load(Ordering::SeqCst)
     }

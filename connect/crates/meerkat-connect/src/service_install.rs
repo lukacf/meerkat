@@ -899,6 +899,7 @@ impl CheckedInstalls {
 
     /// Host-only access to evidence from one already selected job. The caller
     /// must still join native account facts and obtain actual access authority.
+    #[cfg(test)]
     pub(crate) fn installed_selection(
         &self,
         realm: &RealmLocator,

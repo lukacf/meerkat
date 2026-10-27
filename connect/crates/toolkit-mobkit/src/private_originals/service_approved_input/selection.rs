@@ -227,6 +227,7 @@ impl ApprovedTaskLink {
         Self::Single(Box::new(ApprovedTaskMember { header, grant }))
     }
 
+    #[cfg(test)]
     pub(in crate::private_originals) fn singleton_grant(
         &self,
     ) -> Result<&PrivateServiceGrantRef, PrivateOriginalError> {

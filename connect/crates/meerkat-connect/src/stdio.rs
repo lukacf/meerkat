@@ -49,17 +49,6 @@ impl Exchange {
     ) -> Option<oneshot::Receiver<(SignInDisposition, oneshot::Sender<()>)>> {
         self.owner_close.take()
     }
-
-    /// The Console transport removes this same informational prompt before
-    /// acknowledging closure. No native decision or account result is created.
-    pub(crate) async fn closed_by_owner(
-        &mut self,
-    ) -> Result<(SignInDisposition, oneshot::Sender<()>), oneshot::error::RecvError> {
-        match self.owner_close.as_mut() {
-            Some(close) => close.await,
-            None => std::future::pending().await,
-        }
-    }
 }
 
 // This handle closes an informational native-auth prompt. It cannot answer a

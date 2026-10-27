@@ -29,7 +29,7 @@ use super::{ConnectSession, SessionOptions, SessionStartup};
 use crate::{
     ConnectError,
     approval::{
-        ApprovalPresenter, LocalApprovals, present_approval, present_controller_setup_approval,
+        ApprovalPresenter, LocalApprovals, present_controller_setup_approval,
         present_supplied_setup_approval,
     },
     service_preparation::NativeSetup,
@@ -41,10 +41,6 @@ pub(crate) struct StagedSetup {
     pub session: Session,
     pub server: McpServerConfig,
     pub artifacts: PathBuf,
-    // Retain both separately settled pre-stage results. Neither is included in
-    // StagedIssuanceEffect and is not rolled back by aborting the stage.
-    pub reviewed_mcp: StockGrantOutcome,
-    pub reviewed_checked_mcp: StockGrantOutcome,
     // Observe only the actual finished bundle before the existing consumer moves it.
     #[cfg(test)]
     materialization_observer: Option<MaterializationObserver>,
@@ -603,7 +599,7 @@ impl SessionStartup {
             &format!("{outcome:#?}"),
         );
         let shown = report_grant(output, "Setup helper access", outcome.as_ref());
-        let reviewed_mcp = combine(
+        combine(
             outcome.map_err(|e| ConnectError::native("Issue reviewed setup access", e)),
             combine(notice, combine(retained, shown)),
         )?;
@@ -640,7 +636,7 @@ impl SessionStartup {
             "Checked installation route access",
             outcome.as_ref(),
         );
-        let reviewed_checked_mcp = combine(
+        combine(
             outcome
                 .map_err(|e| ConnectError::native("Issue reviewed checked installation access", e)),
             combine(notice, combine(retained, shown)),
@@ -648,8 +644,10 @@ impl SessionStartup {
         if stopped_result(stopped)? {
             return Ok(None);
         }
-        // Both pre-stage commands are now fully settled. No ordinary runtime or
-        // administrative bundle is retained when acquiring stage custody.
+        // Both pre-stage commands are now fully settled. Neither grant is part
+        // of StagedIssuanceEffect, so aborting the stage does not roll it back.
+        // No ordinary runtime or administrative bundle is retained when
+        // acquiring stage custody.
         let mut startup = SessionStartup::open(storage.clone()).await?;
         let (stage, stopped, notice) = join_entered(
             stage_stock_realm_persistence_as(
@@ -686,8 +684,6 @@ impl SessionStartup {
             session,
             server,
             artifacts: prepared.artifact_directory,
-            reviewed_mcp,
-            reviewed_checked_mcp,
             #[cfg(test)]
             materialization_observer: None,
         });
@@ -1325,7 +1321,6 @@ impl ConnectSession {
 enum SetupReviewPresentation {
     SuppliedHelper,
     Controller(Option<String>),
-    Full,
 }
 
 async fn review<I: Future<Output = io::Result<()>>, W: Write>(
@@ -1358,8 +1353,6 @@ async fn review<I: Future<Output = io::Result<()>>, W: Write>(
                     SetupReviewPresentation::Controller(summary) =>
                         present_controller_setup_approval(prompt, &expected_body, summary.as_deref(),
                             input, output, interrupt.as_mut()).await?,
-                    SetupReviewPresentation::Full =>
-                        present_approval(prompt, input, output, interrupt.as_mut()).await?,
                 };
                 if !continued { return Ok(false); }
             }

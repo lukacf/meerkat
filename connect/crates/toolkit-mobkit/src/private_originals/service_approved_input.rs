@@ -1184,6 +1184,7 @@ impl InstalledServiceTask {
         })
     }
 
+    #[cfg(test)]
     async fn retain_approved(
         self,
         grant: PrivateServiceGrantRef,
@@ -1193,6 +1194,7 @@ impl InstalledServiceTask {
         self.retain_approved_typed(grant, evidence, presented).await
     }
 
+    #[cfg(test)]
     async fn retain_approved_typed<E: From<PrivateOriginalError>>(
         self,
         grant: PrivateServiceGrantRef,

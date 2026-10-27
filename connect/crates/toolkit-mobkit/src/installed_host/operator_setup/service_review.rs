@@ -3,6 +3,7 @@ use super::*;
 use crate::private_originals::PrivateSourceEvidence;
 
 impl OperatorSetup {
+    #[cfg(test)]
     pub(crate) async fn retained_service_review(
         &self,
         route: &Id,

@@ -412,6 +412,7 @@ impl OperatorSetup {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn with_helper_selection(
         mut self,
         helper: Option<crate::installed_host::acquisition::InstalledSetupSelection>,

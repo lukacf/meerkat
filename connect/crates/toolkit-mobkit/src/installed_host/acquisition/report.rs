@@ -118,6 +118,7 @@ impl ConfiguredHelperReportCapability {
 
     /// Select only this bundle operation. Preserve every unrelated selection,
     /// including the optional catalog base, and reject an occupied target.
+    #[cfg(test)]
     pub(crate) fn project(
         &self,
         basis: &WorkAuthorityBasis,
@@ -126,6 +127,7 @@ impl ConfiguredHelperReportCapability {
         self.project_with_account(basis, lineage, None)
     }
 
+    #[cfg(test)]
     pub(crate) fn project_with_account(
         &self,
         basis: &WorkAuthorityBasis,

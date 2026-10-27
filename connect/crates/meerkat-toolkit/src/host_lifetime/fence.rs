@@ -3,7 +3,7 @@
 
 use super::control::HostLifetimeError;
 use std::fs::{File, OpenOptions};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Clone)]
 pub(crate) struct LocalFence {
@@ -80,21 +80,4 @@ fn same_identity(_: &std::fs::Metadata, _: &std::fs::Metadata) -> bool {
     // The current Python/native adapter composes POSIX flock on inherited
     // local process authority. Other physical profiles need their own adapter.
     false
-}
-
-pub(crate) fn canonical_database(path: &Path) -> Result<PathBuf, HostLifetimeError> {
-    let path = path
-        .canonicalize()
-        .map_err(|_| HostLifetimeError::Unavailable)?;
-    let metadata = std::fs::metadata(&path).map_err(|_| HostLifetimeError::Unavailable)?;
-    if !metadata.is_file() || !same_identity(&metadata, &metadata) {
-        return Err(HostLifetimeError::InvalidSelection);
-    }
-    Ok(path)
-}
-
-pub(crate) fn inbox_fence_path(database: &Path) -> PathBuf {
-    let mut path = database.as_os_str().to_owned();
-    path.push(".request-use.lock");
-    PathBuf::from(path)
 }

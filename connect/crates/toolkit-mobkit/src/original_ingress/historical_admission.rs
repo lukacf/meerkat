@@ -137,32 +137,6 @@ impl ToolkitOriginalOwner {
         )
     }
 
-    /// Only the canonical, explicitly selected planning P restoration calls
-    /// this after native has verified its exact historical input. Keep its
-    /// ControllerOnly class; neither a task leaf nor a revoke issuer is added.
-    /// The caller resolves its controller before native B/M/D and checks that
-    /// observation atomically inside the callback. This method never resolves
-    /// grants or waits for their owner while native custody is held.
-    pub(crate) fn promote_historical_controller_only(
-        &self,
-        association: &InputAuthorityAssociation,
-        custody: AuthenticatedOriginal,
-        sources: &[OriginalCancellationSource],
-        admitted: &AdmittedOriginal<'_>,
-    ) -> Result<Arc<RetainedToolkitOriginal>, OriginalWriterError> {
-        let claims = association.candidate();
-        if !controller_only_basis(&claims.authority_basis) || !claims.contributing_work.is_empty() {
-            return Err(OriginalWriterError::UnsupportedMandate);
-        }
-        self.promote_historical_source(
-            association,
-            custody,
-            sources,
-            admitted,
-            OriginalGrantBinding::ControllerOnly,
-        )
-    }
-
     /// The native callback owns the current registration, attachment and actor.
     /// Facts are synchronous and request-free; route data alone is not custody.
     pub(super) fn admitted_controller_route(
@@ -484,31 +458,5 @@ impl ToolkitOriginalOwner {
 
     pub(crate) fn lock_originals_for_test(&self) -> impl Drop + '_ {
         self.originals.lock().unwrap()
-    }
-}
-
-#[cfg(test)]
-impl ToolkitOriginalOwner {
-    pub(crate) fn forget_controller_custody_for_test(
-        &self,
-        association: &InputAuthorityAssociation,
-    ) {
-        let _publication = self.publication.begin_owner_change().unwrap();
-        let mut originals = self.originals.lock().unwrap();
-        let index = originals
-            .iter()
-            .position(|entry| {
-                entry
-                    .bound()
-                    .is_some_and(|held| held.association() == association)
-            })
-            .unwrap();
-        let held = originals[index].bound().unwrap();
-        assert!(matches!(
-            held.grant_binding,
-            OriginalGrantBinding::ControllerOnly
-        ));
-        assert!(held.source_custody != Some(SourceCustody::Candidate));
-        originals.remove(index);
     }
 }

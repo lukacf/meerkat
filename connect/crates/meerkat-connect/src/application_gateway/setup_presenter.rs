@@ -118,6 +118,7 @@ impl LocalSetupApprovals {
     }
     /// Transfer the same account owner and sole presenter from native adapter
     /// construction. No effect future or native preparation receipt is sent.
+    #[cfg(test)]
     pub(crate) fn create_installed(
         &self,
         build: impl FnOnce(Arc<LocalApprovals>) -> Result<InstalledServiceReview, ConnectError>,

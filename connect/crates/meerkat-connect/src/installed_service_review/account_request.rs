@@ -192,9 +192,6 @@ impl InstalledAccountRequest {
 }
 
 impl InstalledAccountRequests {
-    pub(crate) fn new(review: InstalledServiceReview) -> (Arc<dyn AgentToolDispatcher>, Self) {
-        Self::with_tasks(review, None)
-    }
     pub(crate) fn with_tasks(
         review: InstalledServiceReview,
         tasks: Option<toolkit_mobkit::installed_host::acquisition::InstalledServiceTaskSource>,
@@ -245,10 +242,6 @@ impl InstalledAccountRequests {
                 reviewed: Vec::new(),
             },
         )
-    }
-
-    pub(crate) async fn next(&mut self) -> Option<InstalledAccountRequest> {
-        self.requests.recv().await
     }
 
     pub(crate) async fn next_request(&mut self) -> Option<InstalledRequest> {

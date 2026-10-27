@@ -86,6 +86,30 @@
       "git_blob": "a2d547b33fa537655cf5ad6c943724bd8a96fe88",
       "sha256": "358ef5259d4df0792def421836c79ecdb6dd81a43a8eba4b2fec8430c9cae77c",
       "bytes": 10464
+    },
+    {
+      "path": "pkg/github/__toolsnaps__/list_issues.snap",
+      "git_blob": "420577b1978775a547d93f0c3babb54d46204692",
+      "sha256": "e89db4668ef6c20901d7d91cac8485b4c1f8f2eb4afc6f244f79ae79032cf403",
+      "bytes": 3447
+    },
+    {
+      "path": "pkg/github/__toolsnaps__/issue_read.snap",
+      "git_blob": "4a4356bfe512ef59bf39210d61fbaa5aa1767854",
+      "sha256": "a8e48cd54d911d8b9b975450bffb03fc995498a291f5c1ed82332780d74f6f9b",
+      "bytes": 23080
+    },
+    {
+      "path": "pkg/github/consolidated_issue_types.go",
+      "git_blob": "ccd84e017325b61208be76073d448052f2845537",
+      "sha256": "0429aef2d743fb6a13912d4e6db15ba2c5eb7165757a6347170ef2d361c402f3",
+      "bytes": 24194
+    },
+    {
+      "path": "pkg/github/issues_test.go",
+      "git_blob": "79eeb22100a1e56d66ede6071779f17cba9ff26f",
+      "sha256": "cc608e7fa3f0e4f4d58c27d7626d0ec5a669167ba10f5ec5addacab956d863ca",
+      "bytes": 260110
     }
   ],
   "verification": "All file bytes match the pinned commit tree Git blob IDs. No upstream executable or authenticated provider request was run."

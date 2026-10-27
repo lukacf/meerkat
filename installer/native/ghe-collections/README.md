@@ -69,6 +69,19 @@ bound calls and cumulative result bytes, reject changed counts or incomplete
 pages, and return no partial collection after refusal. Job collection reserves
 both run reads within its call budget.
 
+`RepositoryIssues` supports all issues, open issues without an age restriction,
+or issues updated since an explicit UTC timestamp. It fixes the query across
+opaque cursor pages and checks stable totals, unique issue numbers and terminal
+page counts. It never uses returned dates to stop paging. Recent updates and
+older open issues are separate native-selected queries; this library does not
+silently widen one into the other or merge their observations into a snapshot.
+
+`IssueComments` reads an exact issue, collects comment pages, and reads that issue
+again before returning. It checks issue/comment URLs and IDs, explicit comment
+counts and observed final state/count/update changes. Missing counts remain
+unknown. Full pages require a short followup, including an empty page for exact
+multiples of 100 comments. The budget reserves both issue-detail reads.
+
 ## Pinned upstream behavior
 
 Contract: GitHub MCP server v2.0.3, source
@@ -131,8 +144,24 @@ detect observed head/attempt changes but do not prove an atomic job snapshot.
 Reported states never establish current CI readiness or execution success. Job
 URLs remain data; exact typed run/head/attempt fields establish correlation.
 
+The pinned issue list omits repository URLs and database IDs from each row.
+Its repository association therefore depends on the exact native committed
+call, not independently on returned identity fields. Issue detail reads require
+the exact repository/issue URL and reject pull-request URLs. The list's `since`
+is a provider-side lower bound, with no upper bound or independently proven date
+semantics. No field projection, label or custom-field filter is introduced.
+
+Issue labels and custom fields can be capped in the upstream GraphQL fragment.
+Hierarchy enrichment is best-effort, and closing-PR references are capped at
+five. Retained metadata does not establish complete relationships, labels or
+custom fields; missing keys remain missing. None of these references schedules
+another read. Issue comments use the same
+filtered-after-pagination implementation as ordinary PR comments, so a short
+page does not independently prove complete unfiltered coverage. Matching detail
+reads cannot rule out intervening edits. These remain reported page sets.
+
 Remaining work includes the native bridge/adapter and the other required GHE
-collection programs: issues and repository PR discovery. Repository metadata and
+collection programs: repository PR discovery. Repository metadata and
 historical non-PR commit checks still need a supported source.
 These programs do not close those requirements or the overall shared ingestion
 outcome.

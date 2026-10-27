@@ -10,6 +10,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
+mod issues;
+pub use issues::{
+    IssueComments, IssueQuery, IssueReadLimits, IssueRecord, ReportedIssueComments, ReportedIssues,
+    RepositoryIssues,
+};
 mod actions;
 pub use actions::{
     ActionsReadLimits, ReportedWorkflowRunJobs, ReportedWorkflowRuns, WorkflowJob, WorkflowRun,

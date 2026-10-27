@@ -41,7 +41,7 @@ impl HistoryWindow {
 
 // Canonical whole-second UTC only. Gregorian validation prevents impossible
 // dates from becoming silently normalized query bounds; offsets are not guessed.
-fn utc_seconds(value: &str) -> Option<u64> {
+pub(super) fn utc_seconds(value: &str) -> Option<u64> {
     let b = value.as_bytes();
     if b.len() != 20
         || b[4] != b'-'

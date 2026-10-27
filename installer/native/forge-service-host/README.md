@@ -74,6 +74,11 @@ The private path is:
 <original state_root>/forge-ghe-history-v1/<sha256(native instance ID as UTF-8)>.json
 ```
 
+The native instance ID is the original authenticated `HELLO` invocation from
+Connect's protected parent handshake. The root SDK binding must use that exact
+invocation, not the workspace ID or the provider-setup interaction's instance.
+Reusing a workspace/state root therefore does not reuse an archive filename.
+
 Schema `forge.ghe.historical-data.v1` includes `evidence_kind` equal to
 `historical_data_only`, the full `native_instance_id`, and `rows`. Each row keeps
 `source_id`, `requirement_id`, exact `resource`, original native `context`, the

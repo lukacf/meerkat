@@ -363,7 +363,7 @@ struct JobsPage {
 
 /// Count-matching reported run pages, not an atomic repository snapshot or a
 /// current CI verdict. All state values, including failures, remain data.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct ReportedWorkflowRuns {
     pub reported_total: u64,
     pub pages_read: u16,
@@ -373,7 +373,7 @@ pub struct ReportedWorkflowRuns {
 /// All reported job attempts through the selected attempt, with matching run
 /// identity/head/attempt before and after paging. State changes are preserved;
 /// those two reads do not prove an atomic snapshot or execution success.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct ReportedWorkflowRunJobs {
     pub initial_run: WorkflowRun,
     pub final_run: WorkflowRun,
@@ -381,7 +381,7 @@ pub struct ReportedWorkflowRunJobs {
     pub jobs: Vec<WorkflowJob>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 pub struct WorkflowRun {
     pub id: u64,
     pub workflow_id: u64,
@@ -418,7 +418,7 @@ impl WorkflowRun {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 pub struct WorkflowJob {
     pub id: u64,
     pub run_id: u64,
@@ -436,7 +436,7 @@ pub struct WorkflowJob {
     pub details: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 pub struct WorkflowStep {
     pub name: String,
     pub status: String,

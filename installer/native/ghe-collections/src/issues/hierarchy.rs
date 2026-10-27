@@ -1,7 +1,7 @@
 //! Bounded direct hierarchy reads; returned links never expand the read scope.
 use super::*;
 
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Deserialize, PartialEq, Eq, serde::Serialize)]
 pub struct IssueParentReference {
     pub number: u64,
     pub repository: String,
@@ -312,7 +312,7 @@ impl IssueHierarchy {
 /// Missing enrichment, filtered references and incomplete children refuse.
 /// This is not an atomic snapshot, transitive closure or permission to follow
 /// returned links. Closing-PR references remain capped optional IssueRecord data.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct ReportedIssueHierarchy {
     pub initial_issue: IssueRecord,
     pub final_issue: IssueRecord,

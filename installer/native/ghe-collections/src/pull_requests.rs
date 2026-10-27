@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const PAGE_SIZE: usize = 100;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum PullRequestQuery {
     All,
     Open,
@@ -150,7 +150,7 @@ impl RepositoryPullRequests {
 
 /// No total is supplied by the pinned list source. Completion here describes a
 /// short page, not an independently proven exhaustive or still-current set.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct ReportedPullRequests {
     pub repository_url: String,
     pub query: PullRequestQuery,
@@ -158,7 +158,7 @@ pub struct ReportedPullRequests {
     pub terminal_page_rows: usize,
     pub pull_requests: Vec<PullRequestSummary>,
 }
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 pub struct PullRequestSummary {
     pub number: u64,
     pub title: String,
@@ -172,7 +172,7 @@ pub struct PullRequestSummary {
     #[serde(flatten)]
     pub details: BTreeMap<String, Value>,
 }
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 pub struct PullRequestBranch {
     #[serde(rename = "ref")]
     pub reference: String,
@@ -181,7 +181,7 @@ pub struct PullRequestBranch {
     /// selected repository; head repository metadata is never a routing input.
     pub repo: Option<PullRequestBranchRepository>,
 }
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 pub struct PullRequestBranchRepository {
     pub full_name: String,
     pub description: Option<String>,

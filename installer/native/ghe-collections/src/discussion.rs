@@ -258,7 +258,7 @@ struct DiscussionPullRequest {
     comments: Option<u64>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub enum DiscussionRows {
     Comments(Vec<PullRequestComment>),
     Reviews(Vec<PullRequestReview>),
@@ -277,7 +277,7 @@ impl DiscussionRows {
 /// can filter rows before returning, so this is not complete source coverage
 /// without native evidence of the actual installed invocation's filtering mode.
 /// It is also not an atomic snapshot or the current effective review decision.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct ReportedDiscussionPages {
     pub initial_comment_count: Option<u64>,
     pub pages_read: u16,
@@ -285,7 +285,7 @@ pub struct ReportedDiscussionPages {
     pub rows: DiscussionRows,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 pub struct PullRequestComment {
     pub id: u64,
     pub html_url: String,
@@ -297,7 +297,7 @@ pub struct PullRequestComment {
     pub updated_at: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 pub struct PullRequestReview {
     pub id: u64,
     pub html_url: String,
@@ -309,7 +309,7 @@ pub struct PullRequestReview {
     pub author_association: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 pub struct DiscussionUser {
     pub login: String,
     pub id: Option<u64>,
@@ -318,7 +318,7 @@ pub struct DiscussionUser {
     pub details: Option<Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 pub struct CommentReactions {
     pub total_count: u64,
     #[serde(rename = "+1")]

@@ -32,11 +32,13 @@ fn main() -> std::process::ExitCode {
     else {
         return std::process::ExitCode::FAILURE;
     };
-    let closed = runtime.block_on(async { inputs.start(catalog)?.join().await });
-    // Keep parser data until this original owner's close. Export/correlation
-    // with the external SDK's final report remains a separate integration gate.
+    let closed = runtime.block_on(async { inputs.start(catalog.clone())?.join().await });
+    // Outside native callbacks and after original close, retain completed parser
+    // rows even if the native final selection recheck or close returned failure.
+    // Root must separately match the SDK-validated report before consumption.
+    let archived = catalog.archive_after_close();
     drop(history);
-    if closed.is_ok() {
+    if closed.is_ok() && archived.is_ok() {
         std::process::ExitCode::SUCCESS
     } else {
         std::process::ExitCode::FAILURE

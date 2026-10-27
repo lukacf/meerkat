@@ -306,7 +306,7 @@ struct Repository {
     full_name: String,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Deserialize, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StatusState {
     Error,
@@ -317,7 +317,7 @@ pub enum StatusState {
 
 /// Provider content only. Failure/error statuses are valid observed data, not
 /// failed collection calls. These values never authorize another operation.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 pub struct RepositoryStatus {
     pub state: StatusState,
     pub context: String,
@@ -328,7 +328,7 @@ pub struct RepositoryStatus {
 }
 
 /// Historical provider data, deliberately not a receipt or readiness flag.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 pub struct HistoricalStatuses {
     pub state: StatusState,
     pub sha: String,

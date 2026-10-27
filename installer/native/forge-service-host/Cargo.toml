@@ -12,9 +12,11 @@ publish = false
 
 [dependencies]
 forge-ghe-collections = { path = "../ghe-collections" }
+forge-history-archive = { path = "../history-archive" }
 meerkat-connect = { git = "https://github.com/lukacf/meerkat-connect.git", rev = "4ab7bbed23b7cb7f94064085502ae2421dbed040" }
 meerkat-core = "=0.9.5"
 serde_json = "=1.0.151"
+serde = { version = "=1.0.229", features = ["derive"] }
 
 [lints.rust]
 unsafe_code = "deny"

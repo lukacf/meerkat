@@ -56,12 +56,52 @@ required. Other service families need their own compiled adapters.
 
 Two application integration gates remain explicit: the public Python SDK must
 adopt root-launched original pipes without spawning a replacement or taking
-root process custody; historical parser data must be exported/retained alongside
-the matching SDK-validated final collection report. This executable currently
-retains parser data in memory until original owner close. It does not persist or
-export those data. Its exit status describes owner closure only, not durable
-ingestion. The source must not be presented as complete ingestion or installed
-acceptance while these gates remain open.
+root process custody; the original host must consume the retained historical
+archive alongside the matching SDK-validated final collection report. Archive
+writing is implemented below, but the native entry and host consumer have not
+been qualified together. Exit status alone is not durable ingestion.
+
+## Retain historical data after original close
+
+The catalog retains the original validated `CatalogSelection::state_root` once,
+without callback I/O, and refuses a different root. After the same native owner
+joins, main archives completed parser rows even when the final native selection
+recheck or close failed. It does not wait for a fabricated success report.
+
+The private path is:
+
+```text
+<original state_root>/forge-ghe-history-v1/<sha256(native instance ID as UTF-8)>.json
+```
+
+Schema `forge.ghe.historical-data.v1` includes `evidence_kind` equal to
+`historical_data_only`, the full `native_instance_id`, and `rows`. Each row keeps
+`source_id`, `requirement_id`, exact `resource`, original native `context`, the
+structured typed `collection`, and `observations`. Observations retain each
+operation, arguments, serialized native audit, exact payload string and optional
+structured companion. Provider failures, missing fields and capped metadata
+remain data. No native handle or Ready object is serialized or reconstructed.
+Every row must have the same actual native instance. Empty history writes no
+archive. The in-memory store clears rows only after a successful durable write;
+its original replay keys remain.
+
+The independent `forge-history-archive` writer bounds encoding to 256 MiB, uses
+exclusive pending files and a non-overwriting final link, and syncs file and
+directory metadata. Files are `0400` in a `0700` directory. A failed write keeps
+any pending bytes already created and makes the child exit nonzero; it does not erase an actual
+native close acknowledgement or imply that close remains running. Root must
+retain both native lifecycle facts and the separate retention failure.
+
+Root must wait for actual child exit before collecting the final archive. Match
+the full instance, application/login/viewer/origin/realm/session/job/server/agent
+context, original source and requirement IDs, exact resources and actual call
+observations against the matching original SDK-validated report. Retain failure
+and partial reports too. Neither the file, its locator/hash, a request ID nor an
+exit code grants source authority or proves ingestion/admission. Pending files
+are never a final archive. Core/Meta still owns governed observation admission.
+The root's lifetime filesystem isolation must cover this archival phase as well
+as native helpers; this code does not create that isolation or modify provider
+credential roots.
 
 ## Current source
 
@@ -162,6 +202,8 @@ changed target/configuration, budget exhaustion and a consumed handle must not
 dispatch a replacement or leave a retryable cursor. These controls are pending
 on the existing native qualification lane; no native objects are fabricated here.
 
-The pure program crate's retained 105 controls and 11 additional hierarchy
-controls remain independent evidence for its parser behavior. They do not prove this adapter, parent authentication,
+The pure program crate's retained 105 controls, 11 additional hierarchy controls
+and three serialization controls remain independent evidence for parser/data
+behavior. Five archive filesystem controls and strict clippy pass independently
+on the Mac. They do not prove this adapter, parent authentication,
 original pipe ownership, final retirement/cleanup or installed GHE ingestion.

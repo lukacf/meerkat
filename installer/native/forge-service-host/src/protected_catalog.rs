@@ -6,7 +6,11 @@ use meerkat_connect::{
     },
     service_collection::RequiredCollectionOperation,
 };
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    path::PathBuf,
+    sync::{Arc, OnceLock},
+};
 
 // These select compiled application behavior. They are never authentication,
 // account evidence, an installed receipt or a replacement for the root mapping.
@@ -19,10 +23,23 @@ pub const SOURCE_AGENT: &str = "forge-ingestion";
 
 pub struct ForgeGheCatalog {
     history: Arc<HistoricalStore>,
+    state_root: OnceLock<PathBuf>,
 }
 impl ForgeGheCatalog {
     pub fn new(history: Arc<HistoricalStore>) -> Self {
-        Self { history }
+        Self {
+            history,
+            state_root: OnceLock::new(),
+        }
+    }
+
+    /// Application entry calls this after joining the original native owner,
+    /// including failed runs. It cannot turn parser rows into a final report.
+    pub fn archive_after_close(
+        &self,
+    ) -> Result<Option<forge_history_archive::SavedArchive>, crate::AdapterError> {
+        self.history
+            .archive_after_close(self.state_root.get().map(PathBuf::as_path))
     }
 }
 
@@ -54,7 +71,10 @@ impl ProtectedCollectionCatalog for ForgeGheCatalog {
             selection.application_id(),
             selection.source_selection(),
             selection.catalog_id(),
-        )
+        ) && self
+            .state_root
+            .get_or_init(|| selection.state_root().to_path_buf())
+            == selection.state_root()
     }
 
     fn requirement(

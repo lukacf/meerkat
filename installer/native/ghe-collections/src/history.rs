@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 
 const PAGE_SIZE: usize = 100;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct HistoryWindow {
     since: String,
     until: String,
@@ -103,7 +103,7 @@ impl HistoryReadLimits {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum HistoryAnchor {
     /// First result of an unfiltered one-row default-branch list read. The
     /// branch may move afterward; all subsequent calls use the returned SHA.
@@ -321,7 +321,7 @@ fn check_commit(repository_url: &str, commit: &RepositoryCommit) -> Result<(), R
 /// Observed source pages rooted at the retained commit and queried window.
 /// This is not a claim that the default branch still points there, an ancestry
 /// proof, file/patch coverage, native readiness or credential usability.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct ReportedCommitHistory {
     pub anchor_kind: HistoryAnchor,
     pub anchor: RepositoryCommit,
@@ -331,7 +331,7 @@ pub struct ReportedCommitHistory {
     pub commits: Vec<RepositoryCommit>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 pub struct RepositoryCommit {
     pub sha: String,
     pub html_url: String,
@@ -340,7 +340,7 @@ pub struct RepositoryCommit {
     pub committer: Option<DiscussionUser>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 pub struct RepositoryCommitInfo {
     pub message: String,
     pub author: Option<CommitAuthor>,

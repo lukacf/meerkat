@@ -308,7 +308,7 @@ struct CountedPullRequest {
 
 /// Count-matching provider pages with matching initial/final PR reads. This is
 /// not an atomic snapshot, full diff, native receipt or readiness assertion.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct ReportedPullRequestChanges {
     pub observed_pr_head: String,
     pub reported_file_count: u64,
@@ -318,7 +318,7 @@ pub struct ReportedPullRequestChanges {
     pub commits: Vec<PullRequestCommit>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 pub struct PullRequestFile {
     pub filename: String,
     pub status: Option<String>,
@@ -329,7 +329,7 @@ pub struct PullRequestFile {
     pub previous_filename: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 pub struct PullRequestCommit {
     pub sha: String,
     pub html_url: Option<String>,
@@ -337,7 +337,7 @@ pub struct PullRequestCommit {
     pub author: Option<CommitAuthor>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 pub struct CommitAuthor {
     pub name: Option<String>,
     pub email: Option<String>,

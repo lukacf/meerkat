@@ -208,14 +208,14 @@ fn opaque(value: &str) -> bool {
 
 /// A completed set of provider-reported pages, not an unfiltered conversation
 /// or atomic revision snapshot. Lockdown filtering can rewrite nested counts.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct ReportedReviewThreads {
     pub reported_total: u64,
     pub pages_read: u16,
     pub threads: Vec<ReviewThread>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 pub struct ReviewThread {
     pub id: String,
     pub is_resolved: bool,
@@ -225,7 +225,7 @@ pub struct ReviewThread {
     pub total_count: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 pub struct ReviewComment {
     pub body: Option<String>,
     pub path: String,

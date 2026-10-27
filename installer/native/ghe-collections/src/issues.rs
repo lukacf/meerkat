@@ -12,7 +12,7 @@ pub use hierarchy::{IssueHierarchy, IssueParentReference, ReportedIssueHierarchy
 
 const PAGE_SIZE: usize = 100;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum IssueQuery {
     All,
     Open,
@@ -378,7 +378,7 @@ struct PageInfo {
 
 /// Discovery results are bound to a query, not independently to a repository
 /// returned by each row. The pinned GraphQL list omits html_url/database ID.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct ReportedIssues {
     pub repository_url: String,
     pub query: IssueQuery,
@@ -388,7 +388,7 @@ pub struct ReportedIssues {
 }
 /// A short-page observation between matching identity/state/count/update reads.
 /// Native unfiltered-mode qualification remains required for full coverage.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct ReportedIssueComments {
     pub initial_issue: IssueRecord,
     pub final_issue: IssueRecord,
@@ -397,7 +397,7 @@ pub struct ReportedIssueComments {
     pub comments: Vec<PullRequestComment>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 pub struct IssueRecord {
     pub number: u64,
     pub title: String,

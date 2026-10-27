@@ -202,11 +202,11 @@ accept repeated reads with distinct native observations while rejecting replay.
 The original SDK regression and SDK boundary suites pass; those results do not
 qualify the native adapter. The existing native validation lane remains the
 owner of compilation and platform-specific acceptance.
-The dependency explicitly enables Connect's `console` feature, matching its
-native host build profile. Connect's defaults are empty; the first portable
-consumer check failed because setup implementation types were excluded without
-this feature. The declaration correction awaits the existing owner's compiler
-validation. Enabling a compile-time feature does not start a console server.
+The application selects Connect's default library feature set. The first
+portable consumer check failed in Connect because unconditional setup code
+referenced implementation types gated behind its `console` feature. Connect's
+owner is correcting those feature boundaries; the corrected dependency source
+and compiler validation remain pending.
 The owner's private candidate has a reviewed lockfile; this source crate has no
 committed lockfile or successful native build result. Formatting and manifest
 parsing do not typecheck the APIs or execute controls.

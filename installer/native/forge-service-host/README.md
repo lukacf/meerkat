@@ -202,11 +202,14 @@ accept repeated reads with distinct native observations while rejecting replay.
 The original SDK regression and SDK boundary suites pass; those results do not
 qualify the native adapter. The existing native validation lane remains the
 owner of compilation and platform-specific acceptance.
-The successor to the SDK revision changes only the native diagnostic test-module
-path. It addresses the original macOS typecheck's E0583; the failed check is
-retained, and the corrected native validation result remains pending.
-There is no lockfile or native build result yet. Formatting parses the source;
-it does not typecheck the APIs, resolve the native graph or execute controls.
+The dependency explicitly enables Connect's `console` feature, matching its
+native host build profile. Connect's defaults are empty; the first portable
+consumer check failed because setup implementation types were excluded without
+this feature. The declaration correction awaits the existing owner's compiler
+validation. Enabling a compile-time feature does not start a console server.
+The owner's private candidate has a reviewed lockfile; this source crate has no
+committed lockfile or successful native build result. Formatting and manifest
+parsing do not typecheck the APIs or execute controls.
 
 Fourteen native-crate controls cover invalid target selectors, configuration
 and account declaration refusal, operation ceilings, the compiled catalog and

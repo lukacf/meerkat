@@ -35,6 +35,46 @@ Non-Linux entry refuses without fallback. Root still owns pre-exec and helper
 isolation, controlled loader environment, namespaces, original reservation,
 process/descendant custody and joined I/O. Descriptor privacy is not isolation.
 
+### Root startup handoff
+
+The command above is the final native ELF entry. A Python root launcher must
+complete its bootstrap and held-stage handoff before reaching it. The original
+child keeps the same PID through all three phases; each phase accepts a different
+descriptor inventory:
+
+| Phase | Original descriptors in addition to 0/1 and reserved 2 | Handoff |
+| --- | --- | --- |
+| Fixed root bootstrap | Interpreter, stage source, gate, readiness, native ELF, parent channel and sealed mapping | Validate the original interpreter and bounded stage-source bytes, then close both startup-only descriptors before entering the stage. |
+| Held stage | Gate, readiness, native ELF, parent channel and sealed mapping | Verify the original objects, signal held readiness, then await the original release gate. Close gate/readiness and execute the original ELF with its descriptor marked close-on-exec. |
+| Native entry | Parent channel and sealed mapping | Acquire original 0/1 and these two descriptors once, then call `ProtectedServiceInputs::adopt` before starting the runtime. |
+
+Invoking Python through its interpreter FD alone leaves that FD inherited and
+does not satisfy the held stage's exact inventory. The fixed bootstrap must
+enter the selected stage in the same process, without reopening its pathname or
+spawning a replacement child. Invoke the selected interpreter for the fixed
+loader with `-I -S -B`, cwd `/`, a fixed environment and the exact declared
+inherited FD set.
+The root owner must also retain and recheck the selected interpreter's actual
+venv resolution, stdlib/zip paths, extension modules and dynamic dependencies.
+An ELF hash or an application virtual environment does not establish that root
+runtime selection.
+
+Before scheduling a spawn worker, the host must register the pending launch on
+the original verified login and retain the original `Popen` inside that worker.
+While the child is held, attach it once and register the original SDK/history
+owners before adoption can start. Release requires current login admission,
+the prepared original reservation, input/runtime rechecks and actual backing
+exclusion. The stage's held-ready byte is not native `HELLO`, `ACTIVATE` or
+`DISPOSED`. After native activation, bind the SDK to the original authenticated
+`HELLO` invocation as described below. Keep backing exclusion until original
+process, SDK I/O, history and resource cleanup have settled.
+
+The King bootstrap component at `04755a3edb0d673b11425ee0b10158f285598a05`
+implements the same-process startup-FD closure, with 12 distinct local Linux
+fixture controls. Its installed root-runtime selection and pre-spawn ownership
+composition remain unfinished. Those component controls do not qualify this
+Forge executable, actual backing isolation or installed ingestion.
+
 The exact compiled mapping selection is:
 
 | Field | Value |
@@ -109,9 +149,10 @@ as native helpers; this code does not create that isolation or modify provider
 credential roots.
 
 `launchkit.service_collection_history.match_history` now supplies the Forge
-consumer's data-matching step. After the original SDK process join, the root
-owner reads the original bounded archive and passes those bytes (or `None` if
-absent), the original `ServiceSetupBinding`, a tuple of retained SDK
+consumer's data-matching step. After the root owner observes the original
+child's actual exit and the original SDK I/O joins, it reads the original
+bounded archive and passes those bytes (or `None` if absent), the original
+`ServiceSetupBinding`, a tuple of retained SDK
 `event.report` objects, and the original `ServiceSetupClose`. It compares the
 full binding/context, source/requirement/resource, operation, canonical argument
 digest and serialized native audit. It refuses duplicate rows, missing verified

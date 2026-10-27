@@ -2775,6 +2775,57 @@ for (const path of [
   }
 }
 
+// Core's whole-workspace lanes select Core's members only, each product's
+// lanes that product's packages: a bare `--workspace` row would compile
+// Core's crates with the products' feature requests, and a product's test
+// binary counts only in a row with its own product's selection.
+{
+  const plan = planFor(["crates/meerkat-mob-mcp/src/lib.rs"], ["--event", "push"]);
+  const baseline = checkHookCoverage(plan);
+  assert.deepEqual([baseline.missing, baseline.errors], [[], []], "the planned rows cover the hook and the products");
+  assert.ok(baseline.product_binaries > 0, "the push's scope reaches the products' test binaries");
+  for (const product of PRODUCTS.filter((entry) => entry.name !== CORE)) {
+    const rows = plan.closure_test_rows.filter((row) => row.product === product.name);
+    assert.ok(rows.length > 0, `${product.name}'s test binaries run in rows of their own`);
+    for (const row of rows) {
+      assert.equal(row.package_flags, selectionFlags(product.name), `${row.name} selects exactly ${product.name}'s packages`);
+    }
+  }
+  const mutate = (change) => {
+    const copy = JSON.parse(JSON.stringify(plan));
+    change(copy);
+    return checkHookCoverage(copy);
+  };
+  const coreRow = (copy) => copy.closure_test_rows.find((row) => row.product === CORE && row.lane === "tests");
+  const bare = mutate((copy) => {
+    coreRow(copy).package_flags = "--workspace";
+  });
+  assert.ok(
+    bare.errors.some((error) => error.includes("must exclude exactly the other products' packages")),
+    "a bare --workspace row is refused",
+  );
+  const partial = mutate((copy) => {
+    coreRow(copy).package_flags = selectionFlags(CORE).split(" --exclude ").slice(0, -1).join(" --exclude ");
+  });
+  assert.ok(
+    partial.errors.some((error) => error.includes("must exclude exactly the other products' packages")),
+    "a Core row that leaves one product package in is refused",
+  );
+  const metaRow = (copy) => copy.closure_test_rows.find((row) => row.product === "meta");
+  const metaKey = (() => {
+    const [binary] = metaRow(plan).binaries;
+    const [name, test] = binary.split("::");
+    return `${name}::test::${test}`;
+  })();
+  const borrowed = mutate((copy) => {
+    metaRow(copy).package_flags = selectionFlags(CORE);
+  });
+  assert.ok(
+    borrowed.missing.includes(metaKey) || borrowed.errors.some((error) => error.includes(metaRow(plan).name)),
+    "a product's binary does not count in a row with Core's selection",
+  );
+}
+
 // The coverage checker on mutated plans: each mutation is a way a row change
 // could narrow what CI runs, and each must be reported. The plan has the lib
 // row (a runner named for it), so the lib mutations have a row to change.

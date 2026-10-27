@@ -48,8 +48,9 @@ make test
 # Run fast tests through BuildBuddy/Bazel
 MEERKAT_BUILDBUDDY=1 make test
 
-# Run all tests including doc-tests (SLOW due to doc-test compilation)
-./scripts/repo-cargo test --workspace
+# Run all tests including doc-tests (SLOW due to doc-test compilation);
+# without a package flag Cargo builds the default members, Core's crates
+./scripts/repo-cargo test
 
 # Run deterministic end-to-end lane
 make e2e-fast
@@ -110,10 +111,21 @@ This is a large workspace (50 members). Careless builds waste minutes. Follow th
 # Running tests for one crate
 ./scripts/repo-cargo nextest run -p meerkat-mob
 
-# Only use workspace-wide commands for final verification
-./scripts/repo-cargo clippy --workspace -- -D warnings
-./scripts/repo-cargo nextest run --workspace --status-level none --final-status-level fail
+# Only use workspace-wide commands for final verification (make lint, make
+# test-unit and the other whole-workspace targets select Core's members)
+./scripts/repo-cargo clippy $(node scripts/core-workspace-args.mjs) -- -D warnings
+./scripts/repo-cargo nextest run $(node scripts/core-workspace-args.mjs) --status-level none --final-status-level fail
 ```
+
+**The workspace also holds Meerkat Meta (`meta/`) and Meerkat Connect
+(`connect/`).** Cargo unifies features across the packages of one invocation,
+so a bare `--workspace` would compile Core's crates with the features the
+products request of them. Core's whole-workspace commands select Core's
+members only: `node scripts/core-workspace-args.mjs` prints `--workspace` and
+an `--exclude` for every product package (derived from `ci/products.json`;
+`--product NAME` prints a product's own `-p` list), and a command without a
+package flag builds the default members, which are exactly Core's (the CI
+planner refuses a drift).
 
 **Do not launch overlapping unisolated Cargo commands in one checkout.** Use
 the repository wrapper and a distinct `RUST_LANE_ID` for concurrent same-tree
@@ -540,13 +552,17 @@ and its CI must be green before a release tag (`require_ci_green`):
   changed non-Rust input (`scripts/ci-non-rust-readers.json`, kept complete
   by `scripts/ci-non-rust-readers-guard.mjs` in `make ci-lanes-selftest`,
   which also fails a reader whose named test its features compile out).
-  Rows (`closure_test_rows` in `scripts/ci-cargo-lanes.mjs`) select the whole
-  workspace and name only their targets, so they compile the hook's own
-  units: every `tests/*.rs` target the hook builds (by name, `ci-integration`
-  profile, the fast selection), `e2e-fast`, and HeadCanonical with the
-  hook's own package-scoped command, all on the hook's 8 MiB test-thread
-  stack (the workspace floor of `.cargo/config.toml`). The lib tests get no
-  row: one
+  Core's rows (`closure_test_rows` in `scripts/ci-cargo-lanes.mjs`) select
+  Core's whole workspace (`--workspace` and an `--exclude` for every other
+  product's package, the hook's own selection) and name only their targets,
+  so they compile the hook's own units: every `tests/*.rs` target the hook
+  builds (by name, `ci-integration` profile, the fast selection),
+  `e2e-fast`, and HeadCanonical with the hook's own package-scoped command,
+  all on the hook's 8 MiB test-thread stack (the workspace floor of
+  `.cargo/config.toml`). A product's test binaries in scope run in rows of
+  its own that select exactly its packages (`-p` each: the product's own
+  workspace resolution), on its test stack. The lib tests get no
+  row: one Core
   `--workspace --lib` row (filtered to the scope's packages) is planned only
   with `--lib-row-runner LABEL`, for a runner that builds it in time (a
   hosted 4-vCPU runner needs about 64 min), and the plan otherwise records
@@ -568,9 +584,12 @@ and its CI must be green before a release tag (`require_ci_green`):
   reads the hook's lanes from `scripts/pre-push-unit.sh`, binds every line
   of the executing step that names a row input, the exported test-thread
   stack, the selection, nextest or the binary check (so none can reassign
-  an input or the stack), and credits only whole-workspace rows.
+  an input or the stack), and credits a hook binary only to a row with
+  Core's selection and a product's test binary only to a row with that
+  product's selection; a bare `--workspace` row is refused.
 - `closure-check` (push only): `cargo check --all-features` (lib and bin
-  targets) over the reverse-dependency closure of the changed packages.
+  targets) over the reverse-dependency closure of the changed packages, one
+  invocation per product's part of it.
 - `rustdoc` (push only): `cargo doc --no-deps --keep-going` with
   `RUSTDOCFLAGS=-Dwarnings`, in two parallel legs (default features and
   `--all-features`), over Core's members (`--workspace` excluding the

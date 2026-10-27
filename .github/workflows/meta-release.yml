@@ -213,8 +213,9 @@ jobs:
                 attempt_number: run.run_attempt,
                 per_page: 100,
               });
-              const lanes = jobs.filter((job) => !["changes", "Meta gate"].includes(job.name));
-              if (lanes.some((job) => job.conclusion === "success")) {
+              // meta-checks runs exactly when the run reached Meta (changes'
+              // meta output); warm-cache and the gate run either way.
+              if (jobs.some((job) => job.name === "meta-checks" && job.conclusion === "success")) {
                 metaEvidence = run;
                 break;
               }

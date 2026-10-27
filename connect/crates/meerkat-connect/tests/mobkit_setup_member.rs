@@ -43,7 +43,7 @@ use meerkat_core::{
 };
 use meerkat_mobkit::{
     AccessControlConfig, AccessController, AccessRule, AuthPolicy, AuthProvider, BigQueryNaming,
-    ConsolePolicy, DiscoverySpec, MobKitConfig, RuntimeDecisionInputs, RuntimeDecisionState,
+    ConsolePolicy, DiscoverySpec, MetaConfig, RuntimeDecisionInputs, RuntimeDecisionState,
     RuntimeOpsPolicy, SessionHook, TrustedOidcRuntimeConfig, UnifiedRuntime, UnifiedRuntimeBuilder,
     build_runtime_decision_state,
     identity_first::{
@@ -915,7 +915,7 @@ fn decisions() -> RuntimeDecisionState {
             dataset: "console_preparation".into(),
             table: "rows".into(),
         },
-        trusted_mobkit_toml: String::new(),
+        trusted_meta_toml: String::new(),
         auth: AuthPolicy {
             default_provider: AuthProvider::GoogleOAuth,
             email_allowlist: vec![OPERATOR.into(), OUTSIDER.into()],
@@ -1173,6 +1173,7 @@ deny=["send_message","reply_to_peer","send_request","send_response"]
         enabled: true,
         admins: vec!["fixture-admin@example.test".into()],
         groups: BTreeMap::new(),
+        approvers: BTreeMap::new(),
         rules: vec![AccessRule {
             id: "selected-host-operator".into(),
             subjects: vec![OPERATOR.into()],
@@ -1191,7 +1192,7 @@ deny=["send_message","reply_to_peer","send_request","send_response"]
         .roster_provider(Arc::new(MutableRosterProvider::new(roster)))
         .agent_customizer(Arc::new(customizer))
         .access_controller(access)
-        .module_config(MobKitConfig {
+        .module_config(MetaConfig {
             modules: vec![],
             discovery: DiscoverySpec {
                 namespace: "connect-fixture".into(),

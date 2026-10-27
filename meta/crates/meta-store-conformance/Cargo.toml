@@ -108,6 +108,9 @@ case_sensitive_file_extension_comparisons = "allow"
 ref_option = "allow"
 # Cargo
 multiple_crate_versions = "allow"
+# Clippy's Cargo lints read every workspace member's manifest, so in the
+# combined workspace Core's `test-support` features reach Meta's lint run.
+redundant_feature_names = "allow"
 cargo_common_metadata = "allow"
 
 [dependencies]

@@ -2145,11 +2145,13 @@ impl Cli {
         {
             let manifest =
                 fs::read(fixture.join("libexec/meerkat-connect/resources.json")).unwrap();
-            assert_eq!(
-                format!("{:x}", Sha256::digest(&manifest)),
-                option_env!("MEERKAT_CONNECT_RESOURCES_SHA256")
-                    .expect("test and binary must be built with the resource pin")
-            );
+            #[allow(
+                clippy::option_env_unwrap,
+                reason = "only this path needs the resource pin; a test build without it never reaches it"
+            )]
+            let pin = option_env!("MEERKAT_CONNECT_RESOURCES_SHA256")
+                .expect("test and binary must be built with the resource pin");
+            assert_eq!(format!("{:x}", Sha256::digest(&manifest)), pin);
             if !supplied && !reuse_prefix {
                 let mut budget = (0usize, 0u64);
                 copy_fixture_tree(

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { loadProducts, productRootPrefixes } from "./ci-products.mjs";
 import {
   crateName,
   isFastTest,
@@ -11,6 +12,10 @@ import {
 } from "./rust-test-selector.mjs";
 
 const metadata = readMetadata();
+// The Bazel graph builds Core only: no Bazel target builds a product's crates
+// (ci/products.json), so their tests need no Bazel twin.
+const productRoots = productRootPrefixes(loadProducts());
+const isProductPackage = (pkg) => productRoots.some((prefix) => `${packageDir(pkg)}/`.startsWith(prefix));
 const rootBuild = readFileSync(resolve(root, "BUILD.bazel"), "utf8");
 const missing = [];
 const expected = [];
@@ -26,7 +31,7 @@ function rootSuiteIncludes(label) {
   return rootBuild.includes(JSON.stringify(label));
 }
 
-for (const pkg of workspacePackages(metadata)) {
+for (const pkg of workspacePackages(metadata).filter((candidate) => !isProductPackage(candidate))) {
   for (const target of pkg.targets) {
     if (target.kind.includes("lib") && !target.kind.includes("proc-macro")) {
       const targetName = `${crateName(target.name)}_unit_test`;

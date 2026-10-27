@@ -8,3 +8,6 @@
 .native-provider-code { display: block; font-size: 1.65rem; letter-spacing: .1em; margin: 1rem 0; }
 .native-provider p, .native-provider code { overflow-wrap: anywhere; }
 .native-provider :focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
+.native-provider-model-summary { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: .4rem 1rem; }
+.native-provider-model-summary dt { font-weight: 650; }
+.native-provider-model-summary dd { margin: 0; overflow-wrap: anywhere; }

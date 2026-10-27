@@ -122,6 +122,15 @@ class ProviderSetupRoute:
             # Authenticate again after the asynchronous body read. Request
             # lifetime does not extend the retained original login deadline.
             owner._admit(context)
+            # Legacy requests apply only to the initial attempt. Once the user
+            # explicitly starts another, stale answers/cancels cannot affect it.
+            if action == "restart" and "attempt" not in value:
+                return unavailable(400)
+            attempt = value.pop("attempt", 0)
+            if type(attempt) is not int or attempt != owner._attempt:
+                return unavailable(409)
+            if action == "restart" and value == {}:
+                return response(await owner.restart(context, attempt))
             if action == "begin" and value == {}:
                 return response(await owner.begin(context))
             if action == "cancel" and value == {}:

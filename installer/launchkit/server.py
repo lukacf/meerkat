@@ -402,7 +402,7 @@ async def native_provider_setup_status(request: Request):
 
 @app.post('/api/provider-setup/{action}')
 async def native_provider_setup_action(action: str, request: Request):
-    if action not in ('begin', 'answer', 'cancel'):
+    if action not in ('begin', 'answer', 'cancel', 'restart'):
         return provider_setup_unavailable(404)
     selected = provider_setup_route
     return await selected.handle(request, action) if selected is not None else provider_setup_unavailable()

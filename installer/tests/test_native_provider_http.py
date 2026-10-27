@@ -139,6 +139,13 @@ async def test_native_failure_reason_and_notices_survive_actual_pipe_join(constr
         assert result['terminal']=={'kind':'failed','reason':'native_refusal_or_unavailable','native_effects':'reobserve','join_scope':'provider_interaction'}
         assert result['notices'][0]['native']=='retained'
         assert owner._client._process.returncode==1
+        await until(lambda:owner.snapshot(login)['restart_available'])
+        first=owner._client
+        await owner.restart(login,0)
+        assert owner._client is not first
+        assert owner._previous_attempts[0][0] is first
+        assert owner._previous_attempts[0][1]['kind']=='failed'
+        assert owner._previous_attempts[0][2] is True
     finally: await owner.close()
 
 
@@ -173,6 +180,8 @@ sys.exit(1)
             closed = (await client.get('/api/provider-setup')).json()
             assert closed['status'] == 'failed' and closed['joined'] is True
             assert owner._client._process is child and child.returncode == 1
+            assert closed['restart_available'] is False
+            with pytest.raises(ProviderSetupUnavailable):await owner.restart(login,0)
     finally:
         (tmp_path/'fail_transport').touch()
         (tmp_path/'hold_exit').unlink(missing_ok=True)
@@ -186,6 +195,29 @@ async def test_retired_surface_refuses_and_native_mode_refuses_legacy_save(route
     assert result.status_code==409 and 'secret-canary' not in result.text
     await selected.shutdown()
     assert (await client.get('/api/provider-setup')).status_code==403
+
+
+async def test_http_restart_rejects_stale_answers_and_cancels_even_with_reused_prompt_id(route, tmp_path):
+    client,_,owner,context,_=route
+    login=context[0]
+    await client.post('/api/provider-setup/begin',json={'attempt':0})
+    await until(lambda:owner.snapshot(login)['status']=='prompt')
+    await client.post('/api/provider-setup/cancel',json={'attempt':0})
+    await until(lambda:owner.snapshot(login)['restart_available'])
+    assert (await client.post('/api/provider-setup/restart',json={})).status_code==400
+    assert (await client.post('/api/provider-setup/restart',json={'attempt':0})).status_code==200
+    await until(lambda:owner.snapshot(login)['status']=='prompt')
+    (tmp_path/'commands').unlink()
+    for action,body in [('begin',{}),('cancel',{}),('cancel',{'attempt':0}),
+                        ('restart',{'attempt':0}),('restart',{'attempt':True}),
+                        ('answer',{'attempt':0,'prompt_id':'native-prompt',
+                                   'answer':{'kind':'choice','choice_id':'native-choice'}})]:
+        assert (await client.post('/api/provider-setup/'+action,json=body)).status_code==409
+    assert not (tmp_path/'commands').exists()
+    body={'attempt':1,'prompt_id':'native-prompt','answer':{'kind':'choice','choice_id':'native-choice'}}
+    assert (await client.post('/api/provider-setup/answer',json=body)).status_code==200
+    await until(lambda:owner.snapshot(login)['status']=='selected')
+    assert len(owner._previous_attempts)==1
 
 
 async def test_uncomposed_native_surface_has_no_fallback(monkeypatch):

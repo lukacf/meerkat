@@ -188,3 +188,29 @@ async def test_answer_failure_after_cancelled_observer_still_retires_original_ow
         with pytest.raises(ProviderSetupUnavailable) as failure:owner.snapshot(login)
         assert 'private-answer-canary' not in str(failure.value)
     finally:release.set();await owner.close()
+
+
+async def test_explicit_restart_waits_for_join_and_preserves_original_scope(construction,tmp_path):
+    (tmp_path/'hold_exit').touch()
+    owner,login=await opened(construction)
+    first=owner._client
+    cancelling=asyncio.create_task(owner.cancel(login))
+    try:
+        await until(lambda:owner._state in ('closing','joining'))
+        with pytest.raises(ProviderSetupUnavailable):await owner.restart(login,0)
+        assert owner._client is first and first._process.poll() is None
+        (tmp_path/'hold_exit').unlink();await cancelling
+        await until(lambda:owner.snapshot(login)['restart_available'])
+        assert owner.snapshot(login)['attempt']==0
+        with pytest.raises(ProviderSetupUnavailable):await owner.restart(replace(login),0)
+        await owner.restart(login,0)
+        await until(lambda:owner.snapshot(login)['status']=='prompt')
+        assert owner.snapshot(login)['attempt']==1 and owner._client is not first
+        assert first._process.returncode==0 and owner._previous_attempts[0][0] is first
+        assert owner._binding==construction[1] and owner._login is login
+        with pytest.raises(ProviderSetupUnavailable):await owner.restart(login,0)
+        with pytest.raises(ProviderSetupUnavailable):await owner.restart(login,1)
+        assert len(owner._previous_attempts)==1
+    finally:
+        (tmp_path/'hold_exit').unlink(missing_ok=True)
+        await cancelling;await owner.close()

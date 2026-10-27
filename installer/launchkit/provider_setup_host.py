@@ -61,6 +61,8 @@ class ForgeProviderSetupSession:
         self._notices = []
         self._terminal = None
         self._cancelling = None
+        self._attempt = 0
+        self._previous_attempts = []
 
     def __repr__(self):
         return "ForgeProviderSetupSession(<host-private>)"
@@ -201,7 +203,8 @@ class ForgeProviderSetupSession:
 
     def snapshot(self, context):
         self._admit(context)
-        value = {"status": self._state, "joined": self._joined, "live_entitlement": "unobserved"}
+        value = {"status": self._state, "joined": self._joined, "live_entitlement": "unobserved",
+                 "attempt": self._attempt, "restart_available": self._restart_available()}
         if self._prompt is not None:
             value.update(prompt_id=self._prompt_id, prompt=deepcopy(self._prompt))
         if self._notice is not None:
@@ -214,6 +217,40 @@ class ForgeProviderSetupSession:
             value["selection"] = {"provider": self._selection.provider, "model": self._selection.model,
                 "credential": self._selection.credential, "live_entitlement": "unobserved"}
         return value
+
+    def _restart_available(self):
+        # A transport failure without a native terminal observation remains
+        # uncertain even after process reap. Never replace that attempt.
+        # Bound retained joined owners to 32 attempts in this original login.
+        tasks = [self._opening, self._reader, self._joining, self._cancelling, *self._answers]
+        return (not self._closed and self._joined and self._state in ("cancelled", "failed")
+                and self._terminal is not None
+                and self._terminal.get("kind") in ("cancelled", "failed")
+                and self._attempt < 31
+                and all(task is None or task.done() and not task.cancelled()
+                        and task.exception() is None for task in tasks))
+
+    async def restart(self, context, attempt):
+        """Explicit fresh inspection after the original terminal attempt joined.
+
+        The counter correlates browser intent only. The original login, exact
+        executable, realm and credential owners still admit every operation.
+        Retain prior child owners and failures; no uncertain outcome is erased.
+        """
+        self._admit(context)
+        if type(attempt) is not int or attempt != self._attempt or not self._restart_available():
+            raise ProviderSetupUnavailable()
+        self._previous_attempts.append((self._client, self._terminal, self._cleanup_failed))
+        self._attempt += 1
+        self._opening = self._reader = self._joining = self._cancelling = None
+        self._client = None
+        self._answers = set()
+        self._joined = self._cleanup_failed = False
+        self._state = "not_started"
+        self._interaction = self._prompt_id = self._prompt = self._selection = None
+        self._notice = self._terminal = None
+        self._notices = []
+        return await self.begin(context)
 
     async def answer(self, context, prompt_id, answer):
         self._admit(context)

@@ -2670,7 +2670,7 @@ export function GuidedSetup({
                   <p>{plan.project.description || state.summary}</p>
                   <div className="setup-package-tags">
                     <span>{identities(plan).length} agents</span>
-                    <span>{plan.connections.length} {plan.connections.length === 1 ? "connection" : "connections"}</span>
+                    {plan.connections.length > 0 && <span>{plan.connections.length} {plan.connections.length === 1 ? "planned connection" : "planned connections"}</span>}
                     <span>
                       {plan.target === "gcp"
                         ? "Google Cloud"

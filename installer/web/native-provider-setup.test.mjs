@@ -99,6 +99,10 @@ test("target review, offered sign-in, device code, notices and native refusal st
     return state;
   }, async ({ click, document, button }) => {
     assert.match(document.querySelector("pre").textContent, /native-route/);
+    assert.equal(document.querySelector("details").open, false);
+    assert.equal(document.querySelector("details summary").textContent, "Exact configuration");
+    assert.match(document.querySelector(".native-provider-model-summary").textContent, /exact-native-model/);
+    assert.ok(button("Confirm model setup").compareDocumentPosition(document.querySelector("details")) & 4);
     await click("Confirm model setup"); assert.equal(button("Enter API key"), undefined);
     await click("Sign in");
     assert.match(document.body.textContent, /EXACT-CODE/);
@@ -108,9 +112,42 @@ test("target review, offered sign-in, device code, notices and native refusal st
       terminal: { kind: "failed", reason: "native_refusal_or_unavailable", native_effects: "reobserve" } };
     await click("Check setup");
     assert.match(document.body.textContent, /native_refusal_or_unavailable/);
+    assert.doesNotMatch(document.querySelector('[role="alert"]').textContent, /native_refusal_or_unavailable/);
     assert.match(document.body.textContent, /native-observation/);
     assert.equal(document.querySelector("a"), null);
   });
+});
+
+test("explicit retry preserves draft and observes a lost response without submitting it again", async () => {
+  let state = { attempt: 0, status: "cancelled", joined: true, restart_available: true };
+  await mounted(call => {
+    if (call.url.endsWith("/restart")) {
+      assert.deepEqual(call.body, { attempt: 0 });
+      state = { ...choices, attempt: 1, restart_available: false };
+      return new Error("lost restart response");
+    }
+    if (call.url.endsWith("/answer")) { assert.equal(call.body.attempt, 1); return { ...action, attempt: 1 }; }
+    return state;
+  }, async ({ click, input, document, calls, button }) => {
+    assert.match(document.body.textContent, /My unsent idea/);
+    await click("Start a new setup");
+    assert.equal(button("Start a new setup"), undefined);
+    await click("Check setup");
+    await input("select", "offered");
+    assert.equal(button("Continue").disabled, false);
+    await click("Continue");
+    assert.equal(calls.filter(call => call.url.endsWith("/restart")).length, 1);
+    assert.equal(calls.filter(call => call.url.endsWith("/answer")).length, 1);
+    assert.match(document.body.textContent, /My unsent idea/);
+  });
+});
+
+test("joined failure without a confirmed terminal outcome cannot offer a new attempt", async () => {
+  await mounted(() => ({ attempt: 0, status: "failed", joined: true, restart_available: false }),
+    async ({ button, document }) => {
+      assert.equal(button("Start a new setup"), undefined);
+      assert.match(document.body.textContent, /contact the Forge host operator/);
+    });
 });
 
 for (const kind of ["key", "browser_manual"]) test(`${kind} clears secrets and prevents replay after a lost response`, async () => {
@@ -173,7 +210,7 @@ test("provider failure keeps polling until the original child has joined", async
     return { status: "failed", joined: ++reads > 1, live_entitlement: "unobserved" };
   }, async ({ calls, button, tick, document }) => {
     assert.ok(button("Cancel setup"));
-    assert.match(document.body.textContent, /Native cleanup is not confirmed yet/);
+    assert.match(document.body.textContent, /Setup has not finished closing/);
     await act(async () => poll()); await tick();
     assert.equal(reads, 2, "failure is not evidence that native cleanup finished");
     assert.equal(button("Cancel setup"), undefined);

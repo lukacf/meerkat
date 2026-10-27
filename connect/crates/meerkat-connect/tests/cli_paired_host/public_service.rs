@@ -154,7 +154,7 @@ fn tool_scope_projection(base_changed: bool, visible_changed: bool, revision: u6
     let status = ToolConfigChangeStatus::boundary_applied(base_changed, visible_changed, revision);
     let body = format!("Tool configuration changed at turn boundary: {}", status.status_text());
     let payload = ToolConfigChangedPayload::new(
-        ToolConfigChangeOperation::Reload, "tool_scope", status, false,
+        ToolConfigChangeOperation::Reload, "tool_scope", status,
     ).with_domain(Some(ToolConfigChangeDomain::ToolScope));
     SystemNoticeMessage::with_block(SystemNoticeKind::ToolScope, Some(body),
         SystemNoticeBlock::ToolConfig { payload }).model_projection_text()
@@ -189,7 +189,7 @@ fn deferred_catalog_projection(groups: &[Vec<&str>; 3]) -> String {
     let status = ToolConfigChangeStatus::deferred_catalog_delta(
         groups[0].len(), groups[1].len(), groups[2].len());
     let payload = ToolConfigChangedPayload::new(
-        ToolConfigChangeOperation::Reload, "deferred_catalog", status, false,
+        ToolConfigChangeOperation::Reload, "deferred_catalog", status,
     ).with_domain(Some(ToolConfigChangeDomain::DeferredCatalog));
     SystemNoticeMessage::with_block(SystemNoticeKind::ToolScope,
         Some(format!("Deferred catalog changed at turn boundary: {}", clauses.join("; "))),

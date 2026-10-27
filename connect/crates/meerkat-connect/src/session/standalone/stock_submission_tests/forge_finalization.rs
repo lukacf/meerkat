@@ -269,6 +269,7 @@ async fn drive(phase:&'static str, session:&ConnectSession, admission:&AcceptOut
                             CompletionOutcome::AbandonedWithError {..}=>"AbandonedWithError",
                             CompletionOutcome::CompletedWithFinalizationFailure {..}=>"CompletedWithFinalizationFailure",
                             CompletionOutcome::RuntimeTerminated {..}=>"RuntimeTerminated",
+                            CompletionOutcome::OutcomeUnknown {..}=>"OutcomeUnknown",
                         };
                         let terminal_kind=match &terminal {
                             None=>"None",
@@ -287,7 +288,8 @@ async fn drive(phase:&'static str, session:&ConnectSession, admission:&AcceptOut
                             | CompletionOutcome::CompletedWithoutResult
                             | CompletionOutcome::CallbackPending {..}
                             | CompletionOutcome::CallbackBatchPending {..}
-                            | CompletionOutcome::Cancelled=>("Absent","Absent","Absent","Absent","Absent","Absent"),
+                            | CompletionOutcome::Cancelled
+                            | CompletionOutcome::OutcomeUnknown {..}=>("Absent","Absent","Absent","Absent","Absent","Absent"),
                         };
                         return Err(invalid(&format!("The actual {phase} input did not complete: completion={completion_kind}; terminal={terminal_kind}; error_kind={error_kind}; error_terminal={error_terminal}; error_outcome={error_outcome}; error_reason={error_reason}; provider_kind={provider_kind}; provider_retryability={provider_retryability}")));
                     };

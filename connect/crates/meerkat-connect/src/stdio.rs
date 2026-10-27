@@ -1504,6 +1504,7 @@ fn completion(outcome: &CompletionOutcome) -> &'static str {
             "completed_with_finalization_failure"
         }
         CompletionOutcome::RuntimeTerminated { .. } => "runtime_terminated",
+        CompletionOutcome::OutcomeUnknown { .. } => "outcome_unknown",
     }
 }
 async fn send(

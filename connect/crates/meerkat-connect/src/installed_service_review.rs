@@ -729,6 +729,8 @@ mod tests {
         );
     }
 
+    // The installation reader exists only in the console build (resources.rs).
+    #[cfg(all(unix, feature = "console"))]
     #[test]
     fn application_account_body_preserves_checked_software_and_native_account() {
         use crate::resources::installation_readback::checked_application_body_for_test as read;

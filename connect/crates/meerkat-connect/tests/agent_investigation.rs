@@ -126,7 +126,7 @@ impl Evidence {
                 ..
             } => json!({"id":id,"name":name,"is_error":is_error,"duration_ms":duration_ms}),
             AgentEvent::ToolConfigChanged { payload } => json!({
-                "operation":payload.operation,"persisted":payload.persisted,
+                "operation":payload.operation,"settled":payload.settled(),
                 "applied_at_turn":payload.applied_at_turn,"domain":payload.domain,
                 "deferred_catalog_delta":payload.deferred_catalog_delta}),
             AgentEvent::RunStarted {
@@ -183,6 +183,7 @@ fn completion_kind(outcome: &CompletionOutcome) -> &'static str {
         CompletionOutcome::AbandonedWithError { .. } => "abandoned_with_error",
         CompletionOutcome::CompletedWithFinalizationFailure { .. } => "finalization_failed",
         CompletionOutcome::RuntimeTerminated { .. } => "runtime_terminated",
+        CompletionOutcome::OutcomeUnknown { .. } => "outcome_unknown",
     }
 }
 

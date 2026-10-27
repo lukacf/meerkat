@@ -1295,6 +1295,7 @@ fn exact_terminal_witness_controls_next_input_and_retirement_not_last_completion
             tool_use_id: "one".into(),
             tool_name: "tool".into(),
             args: json!({}),
+            dedupe_key: None,
         },
         CompletionOutcome::CallbackBatchPending {
             pending_tool_calls: vec![],

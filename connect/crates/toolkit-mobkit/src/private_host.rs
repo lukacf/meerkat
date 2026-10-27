@@ -1483,7 +1483,7 @@ mod tests {
                         owner_input_id: "input".into(), recipient_input_ids: vec!["input".into()],
                         outcome: meerkat_runtime::completion::CompletionOutcome::CallbackPending {
                             tool_use_id: "call".into(), tool_name: "read".into(),
-                            args,
+                            args, dedupe_key: None,
                         },
                     },
                 }),

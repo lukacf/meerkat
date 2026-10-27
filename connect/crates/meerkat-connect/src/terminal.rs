@@ -828,6 +828,11 @@ pub fn committed_text(outcome: &CompletionOutcome) -> Result<&str, &'static str>
         CompletionOutcome::RuntimeTerminated { .. } => {
             Err("The native runtime ended before the setup turn completed.")
         }
+        // A recovered receipt whose run's effect on this input is unknown:
+        // not completed, and never resubmitted (it may have acted).
+        CompletionOutcome::OutcomeUnknown { .. } => {
+            Err("The native setup turn's outcome is unknown. It was not resubmitted.")
+        }
     }
 }
 

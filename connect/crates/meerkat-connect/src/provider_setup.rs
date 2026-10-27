@@ -1317,6 +1317,7 @@ fn credential_save_error(
         E::CredentialAccess { refusal, .. } => E::CredentialAccess {
             refusal, detail: "details withheld".into(),
         },
+        E::RollbackFailed(_) => E::RollbackFailed("details withheld".into()),
     };
     ConnectError::provider_setup("Store native API-key credential", error)
 }

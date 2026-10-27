@@ -44,6 +44,7 @@ fn completion_diagnostics(outcome: &Result<CompletionOutcome, CompletionWaitErro
                     "completed_with_finalization_failure"
                 }
                 CompletionOutcome::RuntimeTerminated { .. } => "runtime_terminated",
+                CompletionOutcome::OutcomeUnknown { .. } => "outcome_unknown",
             };
             // Project only native closed classifiers. Error detail, reason,
             // callback arguments and provider diagnostics remain private.
@@ -57,6 +58,13 @@ fn completion_diagnostics(outcome: &Result<CompletionOutcome, CompletionWaitErro
                 CompletionWaitError::ChannelClosed => "channel_closed",
                 CompletionWaitError::AttachmentReplaced => "attachment_replaced",
                 CompletionWaitError::AuthorityUnavailable(_) => "authority_unavailable",
+                CompletionWaitError::DisclosureRefused { .. } => "disclosure_refused",
+                CompletionWaitError::BoundaryRolledBack { .. } => "boundary_rolled_back",
+                CompletionWaitError::DurableOutcomeUnknown { .. } => "durable_outcome_unknown",
+                CompletionWaitError::RequeuedAcrossStop { .. } => "requeued_across_stop",
+                CompletionWaitError::ConsumedWithInterruptedRun { .. } => "consumed_with_interrupted_run",
+                // The error is non-exhaustive.
+                _ => "other",
             };
             json!({"completion_wait_error":wait_error})
         }

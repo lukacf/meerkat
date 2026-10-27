@@ -129,6 +129,9 @@ impl PrivateOriginals {
             IdentityRuntimeError::WakeHeld { .. } => "WakeHeld",
             IdentityRuntimeError::PeerWiringTimedOut { .. } => "PeerWiringTimedOut",
             IdentityRuntimeError::PeerTopologySuperseded { .. } => "PeerTopologySuperseded",
+            IdentityRuntimeError::IdentityNameHeldByRawMember { .. } => "IdentityNameHeldByRawMember",
+            IdentityRuntimeError::KeyedSendRefused { .. } => "KeyedSendRefused",
+            IdentityRuntimeError::SessionNotHeldByIdentity { .. } => "SessionNotHeldByIdentity",
             IdentityRuntimeError::Internal(..) => "Internal",
         }
     }

@@ -542,6 +542,7 @@ fn public_persistence_details(error: &meerkat_core::mcp_config::McpRealmPersistE
         Persist::Access(_) => json!({"kind":"Access"}),
         Persist::NotAdmitted(_) => json!({"kind":"NotAdmitted"}),
         Persist::OutcomeUnknown(_) => json!({"kind":"OutcomeUnknown"}),
+        Persist::Cwd(_) => json!({"kind":"Cwd"}),
         Persist::Config(error) => json!({"kind":"Config", "config":match error {
             Config::GenerationConflict { expected, current } => json!({"kind":"GenerationConflict","expected":expected,"current":current}),
             Config::LockTimeout => json!({"kind":"LockTimeout"}),

@@ -1420,6 +1420,7 @@ mod tests {
                 tool_use_id: "fixture".into(),
                 tool_name: "fixture".into(),
                 args: serde_json::json!({}),
+                dedupe_key: None,
             },
             CompletionOutcome::CallbackBatchPending {
                 pending_tool_calls: Vec::new(),

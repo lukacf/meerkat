@@ -375,7 +375,7 @@ async fn present_setup_prompt(
                             "The selected service owner is unavailable".into(),
                         )
                     })?,
-                    request,
+                    *request,
                     &mut enrollment.presenter,
                     closed,
                 )
@@ -422,7 +422,7 @@ async fn present_setup_prompt(
                                 "The selected account owner is unavailable".into(),
                             )
                         })?,
-                        request,
+                        *request,
                         &mut enrollment.presenter,
                         closed,
                     )
@@ -438,7 +438,7 @@ async fn present_setup_prompt(
                         )
                     })?
                     .present(
-                        request,
+                        *request,
                         &mut enrollment.presenter,
                         &mut terminal.input,
                         &mut terminal.output,
@@ -455,13 +455,19 @@ async fn present_setup_prompt(
     };
     let result = if prompt.console_task().is_some() {
         match enrollment.console() {
-            Some(panel) => panel.present_software(prompt, closed).await,
+            Some(panel) => panel.present_software(*prompt, closed).await,
             None => Ok(ApprovalPromptOutcome::Refused(ConnectError::InvalidInput(
                 "This Console task has no configured Console presenter".into(),
             ))),
         }
     } else {
-        present_approval_outcome(prompt, &mut terminal.input, &mut terminal.output, interrupt).await
+        present_approval_outcome(
+            *prompt,
+            &mut terminal.input,
+            &mut terminal.output,
+            interrupt,
+        )
+        .await
     };
     finish_software_presentation(setup, enrollment, result)
 }

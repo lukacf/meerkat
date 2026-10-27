@@ -59,7 +59,11 @@ impl LoginSelection {
 }
 
 enum Ceremony {
-    Started(ConnectorOAuthTarget, ConnectorLoginStart, LoginSelection),
+    Started(
+        Box<ConnectorOAuthTarget>,
+        ConnectorLoginStart,
+        LoginSelection,
+    ),
     Completed(Arc<CompletedLogin>),
 }
 
@@ -191,7 +195,7 @@ impl Control {
         }
         // A new admitted attempt replaces the completed ceremony. A refused
         // start leaves already-known completed authentication intact.
-        self.ceremony = Some(Ceremony::Started(target, started, selection));
+        self.ceremony = Some(Ceremony::Started(Box::new(target), started, selection));
         Ok(Reply::Started(reply))
     }
 
@@ -269,7 +273,7 @@ impl Control {
                     LoginSelection::Existing(_) => Err("reconnect_has_no_installation"),
                 };
                 let completed = Arc::new(CompletedLogin {
-                    target: admitted_target,
+                    target: *admitted_target,
                     native: completed,
                     selection: admitted_selection,
                     installation,

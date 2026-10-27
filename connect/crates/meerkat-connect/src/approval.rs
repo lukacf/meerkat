@@ -167,7 +167,7 @@ enum AttemptInput {
         name: String,
         arguments: String,
     },
-    AccessReview(ApprovalRequest),
+    AccessReview(Box<ApprovalRequest>),
 }
 
 struct ServiceReview {
@@ -602,7 +602,7 @@ impl LocalApprovals {
                 .map_err(|error| ConnectError::native("retain native access review", error))?;
             state.attempt = Some(Attempt {
                 approval_id: record.approval_id.clone(),
-                input: AttemptInput::AccessReview(request),
+                input: AttemptInput::AccessReview(Box::new(request)),
                 review_work: None,
                 review_scope: None,
                 dispatch_error: None,
@@ -673,7 +673,7 @@ impl LocalApprovals {
             ApprovalDecision::Deny => ApprovalStatus::Denied,
         };
         if Instant::now() >= attempt.deadline
-            || &retained != request
+            || retained != **request
             || native.status != expected_status
             || native.decision.as_ref().is_none_or(|record| {
                 record.decision != decision || record.actor != self.shared.actor

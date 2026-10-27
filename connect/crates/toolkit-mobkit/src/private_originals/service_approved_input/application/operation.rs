@@ -402,7 +402,7 @@ impl PreparedApplicationServiceInstruction {
                     shared
                         .observation
                         .send_modify(|observed| observed.parent_issued = true);
-                    parent
+                    *parent
                 }
                 ServiceMcpParentOutcome::Denied => return Err(PrivateOriginalError::Denied.into()),
                 ServiceMcpParentOutcome::Unavailable

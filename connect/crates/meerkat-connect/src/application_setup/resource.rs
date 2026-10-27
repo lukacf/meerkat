@@ -24,9 +24,9 @@ enum ResourceProjection {
         source: MobMemberBinding,
         profile: ApplicationSetupProfile,
         tools: ApplicationSetupTools,
-        resources: PreparedApplicationResources,
+        resources: Box<PreparedApplicationResources>,
     },
-    Completed(PreparedApplicationSetup),
+    Completed(Box<PreparedApplicationSetup>),
 }
 
 pub(crate) struct SetupResourceSelection {
@@ -70,7 +70,7 @@ impl SetupResourceSelection {
                 source,
                 profile: input.helper_profile,
                 tools: input.helper_tools,
-                resources,
+                resources: Box::new(resources),
             },
             registration_slots: Mutex::new(BTreeMap::new()),
             #[cfg(all(unix, feature = "console"))]
@@ -94,7 +94,7 @@ impl SetupResourceSelection {
             helper: setup.helper.member.clone(),
             members: owner.native_host.members.clone(),
             server: setup.server.clone(),
-            projection: ResourceProjection::Completed(setup.clone()),
+            projection: ResourceProjection::Completed(Box::new(setup.clone())),
             registration_slots: Mutex::new(BTreeMap::new()),
             #[cfg(all(unix, feature = "console"))]
             local_round: OnceLock::new(),

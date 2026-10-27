@@ -23,7 +23,7 @@ fn legacy() -> ApprovedTaskMember {
 
 fn batch(count: usize) -> ApprovedTaskLink {
     let old = legacy();
-    ApprovedTaskLink::Batch(ApprovedTaskBatch {
+    ApprovedTaskLink::Batch(Box::new(ApprovedTaskBatch {
         kind: BatchVersion::PublicServicesV1,
         setup: None,
         header: old.header,
@@ -43,7 +43,7 @@ fn batch(count: usize) -> ApprovedTaskLink {
             decision: Id::new("unissued-catalog").unwrap(),
             decision_sha256: "f".repeat(64),
         },
-    })
+    }))
 }
 
 fn batch_value(count: usize) -> Value {

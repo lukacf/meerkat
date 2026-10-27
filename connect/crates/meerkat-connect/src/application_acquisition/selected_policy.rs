@@ -365,7 +365,7 @@ impl ApplicationServicePolicy for PolicyFacts {
                 .proposal(proposal, proposal.candidate_canonical_json.as_bytes())?;
             return Ok(ApplicationServicePolicyDecision::PermitWithToolPolicy {
                 reservation: Box::new(self.scope.reserve("service_and_member_tool_policy")),
-                approval: ServiceToolPolicyApproval::until_superseded(proposal)?,
+                approval: Box::new(ServiceToolPolicyApproval::until_superseded(proposal)?),
             });
         }
         Ok(ApplicationServicePolicyDecision::Permit(Box::new(

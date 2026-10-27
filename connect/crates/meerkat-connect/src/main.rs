@@ -739,7 +739,7 @@ where
 #[derive(Debug)]
 enum TurnAdmission {
     Running {
-        admission: AcceptOutcome,
+        admission: Box<AcceptOutcome>,
         completion: CompletionHandle,
     },
     Interrupted(Result<CompletionObservation, CompletionWaitError>),
@@ -832,7 +832,7 @@ where
         return Ok(TurnAdmission::Interrupted(completed));
     }
     Ok(TurnAdmission::Running {
-        admission,
+        admission: Box::new(admission),
         completion,
     })
 }

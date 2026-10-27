@@ -510,9 +510,9 @@ impl OperatorSetup {
                 progress.parent_effect();
                 self.check_standing_lineage(&record, lineage)?;
                 current()?;
-                Ok(ServiceMcpParentOutcome::Approved(
+                Ok(ServiceMcpParentOutcome::Approved(Box::new(
                     self.service_parent_result(record.decision.clone(), selection, lineage.clone()),
-                ))
+                )))
             }
         }
     }

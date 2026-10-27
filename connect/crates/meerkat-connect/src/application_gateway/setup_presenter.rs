@@ -210,11 +210,11 @@ impl Enrollment {
 }
 
 pub(super) enum SetupEvent {
-    Approval(ApprovalPrompt),
-    Account(InstalledAccountRequest),
+    Approval(Box<ApprovalPrompt>),
+    Account(Box<InstalledAccountRequest>),
     Public(InstalledPublicRequest),
     Credentials(
-        crate::installed_service_review::account_request::credentials::InstalledCredentialRequest,
+        Box<crate::installed_service_review::account_request::credentials::InstalledCredentialRequest>,
     ),
 }
 type NextPrompt = BoxFuture<'static, (Enrollment, Option<SetupEvent>)>;
@@ -242,14 +242,14 @@ impl SetupPresenters {
         self.waiting.push(Box::pin(async move {
             let event = if let Some(accounts) = enrollment.accounts.as_mut() {
                 tokio::select! { biased;
-                    prompt = enrollment.presenter.as_mut().expect("enrolled presenter").next() => prompt.map(SetupEvent::Approval),
+                    prompt = enrollment.presenter.as_mut().expect("enrolled presenter").next() => prompt.map(|prompt| SetupEvent::Approval(Box::new(prompt))),
                     request = accounts.next_request() => request.map(|request| match request {
                         InstalledRequest::Account(request) => SetupEvent::Account(request),
                         InstalledRequest::Public(request) => SetupEvent::Public(request),
                         InstalledRequest::Credentials(request) => SetupEvent::Credentials(request),
                     }),
                 }
-            } else { enrollment.presenter.as_mut().expect("enrolled presenter").next().await.map(SetupEvent::Approval) };
+            } else { enrollment.presenter.as_mut().expect("enrolled presenter").next().await.map(|prompt| SetupEvent::Approval(Box::new(prompt))) };
             (enrollment, event)
         }));
     }

@@ -59,7 +59,7 @@ pub enum ApplicationServicePolicyDecision {
     Permit(Box<dyn ApplicationServicePolicyReservation>),
     PermitWithToolPolicy {
         reservation: Box<dyn ApplicationServicePolicyReservation>,
-        approval: ServiceToolPolicyApproval,
+        approval: Box<ServiceToolPolicyApproval>,
     },
 }
 
@@ -209,7 +209,7 @@ impl InstalledApplicationServicePolicy {
 
 pub enum ApplicationServicePreparation {
     RequiresHuman,
-    Prepared(PreparedApplicationServiceInstruction),
+    Prepared(Box<PreparedApplicationServiceInstruction>),
 }
 
 pub struct PreparedApplicationServiceInstruction {
@@ -778,7 +778,7 @@ impl InstalledServiceTask {
             evidence,
             parent: None,
         };
-        Ok(ApplicationServicePreparation::Prepared(
+        Ok(ApplicationServicePreparation::Prepared(Box::new(
             PreparedApplicationServiceInstruction {
                 task: self,
                 approved,
@@ -786,9 +786,9 @@ impl InstalledServiceTask {
                 parent_provisioning,
                 administrator: None,
                 tool_policy,
-                tool_policy_approval,
+                tool_policy_approval: tool_policy_approval.map(|approval| *approval),
             },
-        ))
+        )))
     }
 }
 

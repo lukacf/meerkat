@@ -227,7 +227,7 @@ struct HelperSourceRecord {
 enum HelperSourceState {
     ControllerPending,
     Bound {
-        binding: HelperNativeBinding,
+        binding: Box<HelperNativeBinding>,
         association: InputAuthorityAssociation,
     },
 }
@@ -975,7 +975,7 @@ impl ToolkitOriginalOwner {
                 if association.candidate().original_work != admitted.original_work()? {
                     return Err(OriginalWriterError::Conflict);
                 }
-                Ok(Some(binding))
+                Ok(Some(*binding))
             }
         }
     }
@@ -1071,7 +1071,7 @@ impl ToolkitOriginalOwner {
             return Err(OriginalWriterError::Conflict);
         }
         let state = HelperSourceState::Bound {
-            binding: binding.clone(),
+            binding: Box::new(binding.clone()),
             association: association.clone(),
         };
         let saved = match &record.state {

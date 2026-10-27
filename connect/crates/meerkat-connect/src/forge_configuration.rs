@@ -419,7 +419,7 @@ impl ForgeFrontend {
     }
     fn captured(&self) -> Result<Captured, ForgeError> {
         match &*self.binding.state.lock().map_err(|_| invalid())? {
-            State::Captured { _captured } => Ok(_captured.clone()),
+            State::Captured { _captured } => Ok((**_captured).clone()),
             _ => Err(ForgeError::SessionRequired),
         }
     }

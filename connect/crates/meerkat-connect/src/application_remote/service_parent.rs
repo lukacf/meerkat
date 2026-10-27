@@ -244,7 +244,7 @@ pub(super) async fn drive(
                         }
                         match proposal.proposal_sha256() {
                             Ok(proposal_sha256) => {
-                                let candidate = ServiceParentAdministrationRequest { exchange_id, proposal_sha256, proposal };
+                                let candidate = ServiceParentAdministrationRequest { exchange_id, proposal_sha256, proposal: *proposal };
                                 // Check the complete existing reply before publishing an
                                 // exchange. Oversize/unsupported values refuse this request,
                                 // not the shared private channel or another retained owner.

@@ -124,8 +124,8 @@ struct SetupBatchWire {
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum VersionedBatchWire {
-    Legacy(BatchWire),
-    Setup(SetupBatchWire),
+    Legacy(Box<BatchWire>),
+    Setup(Box<SetupBatchWire>),
 }
 impl Serialize for ApprovedTaskBatch {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -187,7 +187,7 @@ impl<'de> Deserialize<'de> for ApprovedTaskBatch {
                 setup: Some(value.setup),
             },
         };
-        ApprovedTaskLink::Batch(selected.clone())
+        ApprovedTaskLink::Batch(Box::new(selected.clone()))
             .validate()
             .map_err(|_| serde::de::Error::custom("invalid public-service set"))?;
         Ok(selected)
@@ -197,8 +197,8 @@ impl<'de> Deserialize<'de> for ApprovedTaskBatch {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub(in crate::private_originals) enum ApprovedTaskLink {
-    Batch(ApprovedTaskBatch),
-    Single(ApprovedTaskMember),
+    Batch(Box<ApprovedTaskBatch>),
+    Single(Box<ApprovedTaskMember>),
 }
 
 impl std::ops::Deref for ApprovedTaskLink {
@@ -224,7 +224,7 @@ impl ApprovedTaskLink {
         header: ApprovedTaskHeader,
         grant: PrivateServiceGrantRef,
     ) -> Self {
-        Self::Single(ApprovedTaskMember { header, grant })
+        Self::Single(Box::new(ApprovedTaskMember { header, grant }))
     }
 
     pub(in crate::private_originals) fn singleton_grant(
@@ -283,7 +283,7 @@ impl ApprovedTaskLink {
     /// no source, approval, association or native authority of its own.
     pub(in crate::private_originals) fn attachments(&self) -> Vec<ApprovedTaskMember> {
         match self {
-            Self::Single(value) => vec![value.clone()],
+            Self::Single(value) => vec![(**value).clone()],
             Self::Batch(value) => value
                 .members
                 .iter()

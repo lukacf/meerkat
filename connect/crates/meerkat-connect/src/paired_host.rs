@@ -725,7 +725,7 @@ fn present_source_reason<'de, D: serde::Deserializer<'de>>(
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(tag = "outcome", content = "result", rename_all = "snake_case")]
 pub enum FrontendNewExtensionPreparation {
-    Candidate(FrontendNewExtensionCandidateReceipt),
+    Candidate(Box<FrontendNewExtensionCandidateReceipt>),
     Rejected(FrontendRequestRejection),
 }
 
@@ -1053,7 +1053,7 @@ pub enum FrontendInventoryRejectionKind {
 /// Neither variant authorizes installation, approval, activation or task resume.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FrontendPreparation {
-    Candidate(FrontendCandidateReceipt),
+    Candidate(Box<FrontendCandidateReceipt>),
     Rejected(FrontendRequestRejection),
 }
 
@@ -1338,7 +1338,7 @@ pub struct ExtensionSecretIntentCreated {
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(tag = "outcome", content = "result", rename_all = "snake_case")]
 pub enum ExtensionSecretIntentCreation {
-    Created(ExtensionSecretIntentCreated),
+    Created(Box<ExtensionSecretIntentCreated>),
     Rejected(ExtensionSecretIntentRejection),
 }
 
@@ -1542,7 +1542,7 @@ pub struct FrontendSubmissionReceipt {
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(tag = "outcome", content = "result", rename_all = "snake_case")]
 pub enum FrontendSubmission {
-    Recorded(FrontendSubmissionReceipt),
+    Recorded(Box<FrontendSubmissionReceipt>),
     Rejected(FrontendChangeRejection),
 }
 
@@ -1593,7 +1593,7 @@ pub struct FrontendNewExtensionSubmissionReceipt {
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(tag = "outcome", content = "result", rename_all = "snake_case")]
 pub enum FrontendNewExtensionSubmission {
-    Recorded(FrontendNewExtensionSubmissionReceipt),
+    Recorded(Box<FrontendNewExtensionSubmissionReceipt>),
     Rejected(FrontendChangeRejection),
 }
 
@@ -2855,7 +2855,7 @@ impl PairedHostClient {
                 }
                 change.client_binding = Some(self.change_binding.clone());
             }
-            return Ok(FrontendPreparation::Candidate(receipt));
+            return Ok(FrontendPreparation::Candidate(Box::new(receipt)));
         }
         if matches!(status, 400 | 413 | 500) {
             #[derive(Deserialize)]
@@ -2941,7 +2941,9 @@ impl PairedHostClient {
                 }
                 change.client_binding = Some(self.change_binding.clone());
             }
-            return Ok(FrontendNewExtensionPreparation::Candidate(receipt));
+            return Ok(FrontendNewExtensionPreparation::Candidate(Box::new(
+                receipt,
+            )));
         }
         if matches!(status, 400 | 413 | 500) {
             return prepare_rejection(status, &bytes)
@@ -2985,14 +2987,16 @@ impl PairedHostClient {
                     UnconfirmedReason::UnexpectedResponse,
                 ));
             }
-            return Ok(FrontendSubmission::Recorded(FrontendSubmissionReceipt {
-                http_status: status,
-                request_id: record.request_id,
-                state: record.state,
-                submitted_at: record.submitted_at,
-                change: record.change,
-                submitted_by: record.submitted_by,
-            }));
+            return Ok(FrontendSubmission::Recorded(Box::new(
+                FrontendSubmissionReceipt {
+                    http_status: status,
+                    request_id: record.request_id,
+                    state: record.state,
+                    submitted_at: record.submitted_at,
+                    change: record.change,
+                    submitted_by: record.submitted_by,
+                },
+            )));
         }
         if matches!(status, 400 | 409 | 413) {
             return change_rejection(operation, status, &bytes).map(FrontendSubmission::Rejected);
@@ -3037,7 +3041,7 @@ impl PairedHostClient {
                     UnconfirmedReason::UnexpectedResponse,
                 ));
             }
-            return Ok(FrontendNewExtensionSubmission::Recorded(
+            return Ok(FrontendNewExtensionSubmission::Recorded(Box::new(
                 FrontendNewExtensionSubmissionReceipt {
                     http_status: status,
                     request_id: record.request_id,
@@ -3047,7 +3051,7 @@ impl PairedHostClient {
                     submitted_by: record.submitted_by,
                     attempt: record.attempt,
                 },
-            ));
+            )));
         }
         if matches!(status, 400 | 409 | 413) {
             return change_rejection(operation, status, &bytes)
@@ -3212,12 +3216,12 @@ impl PairedHostClient {
                 UnconfirmedReason::UnexpectedResponse,
             ));
         }
-        Ok(ExtensionSecretIntentCreation::Created(
+        Ok(ExtensionSecretIntentCreation::Created(Box::new(
             ExtensionSecretIntentCreated {
                 request: request.clone(),
                 intent,
             },
-        ))
+        )))
     }
 
     /// Explicit host readback. NotFound is an observation, not proof of no effect

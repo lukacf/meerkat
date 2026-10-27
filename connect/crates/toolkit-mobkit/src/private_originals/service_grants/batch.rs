@@ -176,7 +176,7 @@ impl PrivateOriginals {
                                 helper,
                             },
                             Some(setup),
-                        ) if helper == &setup.helper
+                        ) if helper.as_ref() == &setup.helper
                             && decision.lifetime.expires_at_ms == Some(setup.expires_at_ms) => {}
                         _ => return Err(PrivateOriginalError::Conflict),
                     }

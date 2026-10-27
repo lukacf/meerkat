@@ -312,7 +312,7 @@ async fn service_v3_owner_notice_closure_is_acknowledged_before_init_result() {
         d.owner_closed(observed);
         close.await.unwrap();
         assert!(d.pending.is_none());
-        d.work(Work::Opened(Err("native_auth_required")));
+        d.work(Work::Opened(Box::new(Err("native_auth_required"))));
         let rows = drain(&mut rx);
         let closed = rows
             .iter()
@@ -401,7 +401,7 @@ async fn service_v3_retirement_keeps_original_init_until_entered_work_joins() {
             .any(|row| row["params"]["kind"] == "prompt_closed")
     );
     assert!(!rows.iter().any(|row| row["id"] == "h:retire"));
-    d.work(Work::Opened(Err("binding_retired")));
+    d.work(Work::Opened(Box::new(Err("binding_retired"))));
     d.settle();
     let rows = drain(&mut rx);
     assert_eq!(
@@ -457,7 +457,7 @@ async fn service_v3_viewer_expiry_closes_before_original_init_settles() {
                 .all(|row| !row.to_string().contains("private-expiry-code"))
         );
         assert!(d.scope.is_none());
-        d.work(Work::Opened(Err("binding_retired")));
+        d.work(Work::Opened(Box::new(Err("binding_retired"))));
         d.settle();
         let rows = drain(&mut rx);
         assert_eq!(

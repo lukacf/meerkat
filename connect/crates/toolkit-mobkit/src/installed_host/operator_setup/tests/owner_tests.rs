@@ -316,7 +316,7 @@ async fn close_during_committed_access_store_wait_prevents_native_child_write() 
         realm: setup.native.realm.to_string(),
         owner: setup.lifetime.selected_policy().deployment.to_string(),
     };
-    let pending = adapter.apply_mcp_service_access_decision(approved);
+    let pending = adapter.apply_mcp_service_access_decision(*approved);
     tokio::pin!(pending);
     tokio::select! {
         _ = store.entered.notified() => {},
@@ -415,7 +415,7 @@ async fn captured_answer_loss_during_child_admission_prevents_native_child_write
     let eligible = Arc::new(AtomicBool::new(true));
     let current = eligible.clone();
     let pending = adapter.apply_mcp_service_access_decision_current(
-        approved,
+        *approved,
         Arc::new(move || current.load(Ordering::SeqCst)),
     );
     tokio::pin!(pending);

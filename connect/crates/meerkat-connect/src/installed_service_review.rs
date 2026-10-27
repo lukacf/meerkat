@@ -160,8 +160,8 @@ impl<T> ReviewedInstalledAccount<T> {
 }
 
 pub enum InstalledAccountReview<T> {
-    Approved(ReviewedInstalledAccount<T>),
-    Denied(ApprovalRecord),
+    Approved(Box<ReviewedInstalledAccount<T>>),
+    Denied(Box<ApprovalRecord>),
 }
 
 /// Native result of the one entered ceremony, returned to the host's private
@@ -447,7 +447,7 @@ impl InstalledServiceReview {
         self.approvals.check_session(&self.session)?;
         login.check_current().map_err(refused)?;
         if decision.status == ApprovalStatus::Denied {
-            return Ok(InstalledAccountReview::Denied(decision));
+            return Ok(InstalledAccountReview::Denied(Box::new(decision)));
         }
         if decision.status != ApprovalStatus::Approved {
             return Err(refused("The native access review has no matching decision"));
@@ -501,15 +501,17 @@ impl InstalledServiceReview {
         if let Some(cancellation) = &cancellation {
             cancellation.check()?;
         }
-        Ok(InstalledAccountReview::Approved(ReviewedInstalledAccount {
-            selection: proposal.selection,
-            decision,
-            target,
-            account: current,
-            installation,
-            software,
-            fresh_instruction_retained,
-        }))
+        Ok(InstalledAccountReview::Approved(Box::new(
+            ReviewedInstalledAccount {
+                selection: proposal.selection,
+                decision,
+                target,
+                account: current,
+                installation,
+                software,
+                fresh_instruction_retained,
+            },
+        )))
     }
 
     async fn observe_account(

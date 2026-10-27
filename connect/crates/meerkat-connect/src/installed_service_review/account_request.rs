@@ -253,17 +253,17 @@ impl InstalledAccountRequests {
 
     pub(crate) async fn next_request(&mut self) -> Option<InstalledRequest> {
         tokio::select! { biased;
-            request = self.requests.recv() => request.map(InstalledRequest::Account),
+            request = self.requests.recv() => request.map(|request| InstalledRequest::Account(Box::new(request))),
             request = self.public_requests.recv() => request.map(InstalledRequest::Public),
-            request = self.credential_requests.recv() => request.map(InstalledRequest::Credentials),
+            request = self.credential_requests.recv() => request.map(|request| InstalledRequest::Credentials(Box::new(request))),
         }
     }
 }
 
 pub(crate) enum InstalledRequest {
-    Account(InstalledAccountRequest),
+    Account(Box<InstalledAccountRequest>),
     Public(public::InstalledPublicRequest),
-    Credentials(credentials::InstalledCredentialRequest),
+    Credentials(Box<credentials::InstalledCredentialRequest>),
 }
 impl InstalledRequest {
     pub(crate) fn console_task(

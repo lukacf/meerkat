@@ -409,12 +409,12 @@ impl ReviewedInstallation {
 /// One protected terminal action waiting for the existing setup-close boundary.
 /// Access-only work carries no installation job or installation outcome.
 pub enum ReviewedAction {
-    Installation(ReviewedInstallation),
-    Access(access::ReviewedAccess),
+    Installation(Box<ReviewedInstallation>),
+    Access(Box<access::ReviewedAccess>),
 }
 impl From<ReviewedInstallation> for ReviewedAction {
     fn from(value: ReviewedInstallation) -> Self {
-        Self::Installation(value)
+        Self::Installation(Box::new(value))
     }
 }
 impl ReviewedAction {
@@ -442,7 +442,7 @@ impl ReviewedAction {
                 }
                 let mut result = reviewed.finalize(interrupt.as_mut()).await;
                 let notice = result.take_continuation_notice();
-                (ActionOutcome::Access(result), notice)
+                (ActionOutcome::Access(Box::new(result)), notice)
             }
         };
         Ok(Some(FinalizedAction {
@@ -460,7 +460,7 @@ pub struct FinalizedAction {
 }
 enum ActionOutcome {
     Installation(Arc<FinalizedInstallation>),
-    Access(access::FinalizedAccess),
+    Access(Box<access::FinalizedAccess>),
 }
 impl FinalizedAction {
     /// Finish only the CLI invocation. Historical results grant no retry or
@@ -597,7 +597,7 @@ enum FinalizationOutcome {
         generation: u64,
         reused: bool,
     },
-    Secret(secrets::Outcome),
+    Secret(Box<secrets::Outcome>),
 }
 
 fn uncertain_grant(
@@ -1032,9 +1032,9 @@ struct RequestTool {
 }
 
 pub enum ConnectorRequest {
-    Account(AccountRequest),
-    Plain(plain::PlainRequest),
-    Secret(secrets::SecretRequest),
+    Account(Box<AccountRequest>),
+    Plain(Box<plain::PlainRequest>),
+    Secret(Box<secrets::SecretRequest>),
     CredentialManagement(secrets::management::Request),
     AccountManagement(oauth_management::Request),
     AccessManagement(access::Request),
@@ -1162,7 +1162,7 @@ impl TerminalConnectors {
     /// Existing installation-only callers never discard a pending access action.
     pub fn take_reviewed(&mut self) -> Option<ReviewedInstallation> {
         match self.reviewed.take() {
-            Some(ReviewedAction::Installation(value)) => Some(value),
+            Some(ReviewedAction::Installation(value)) => Some(*value),
             other => {
                 self.reviewed = other;
                 None
@@ -1190,18 +1190,18 @@ impl TerminalConnectors {
                 installed::present(self, request, approvals, interrupt).await
             }
             ConnectorRequest::Account(request) => {
-                self.present_account(request, approvals, presenter, input, output, interrupt)
+                self.present_account(*request, approvals, presenter, input, output, interrupt)
                     .await
             }
             ConnectorRequest::Plain(request) => {
                 plain::present(
-                    self, request, approvals, presenter, input, output, interrupt,
+                    self, *request, approvals, presenter, input, output, interrupt,
                 )
                 .await
             }
             ConnectorRequest::Secret(request) => {
                 secrets::present(
-                    self, request, approvals, presenter, input, output, interrupt,
+                    self, *request, approvals, presenter, input, output, interrupt,
                 )
                 .await
             }
@@ -1596,7 +1596,7 @@ impl TerminalConnectors {
                 expected_generation,
                 client_profile_binding: profiles::binding(request.client_profile.as_ref()),
                 request: request.grant,
-                decision,
+                decision: *decision,
             })
             .into(),
         );
@@ -1675,7 +1675,7 @@ pub(crate) fn review_request(
 }
 
 enum ReviewOutcome {
-    Decided(ApprovalRecord),
+    Decided(Box<ApprovalRecord>),
     CallerGone,
     Stopped,
 }
@@ -1699,7 +1699,7 @@ async fn review<W: Write>(
                 signal.map_err(|error| ConnectError::native("listen for cancellation", error))?;
                 return Ok(ReviewOutcome::Stopped);
             },
-            result=decision.as_mut()=>return result.map(ReviewOutcome::Decided),
+            result=decision.as_mut()=>return result.map(|record| ReviewOutcome::Decided(Box::new(record))),
             prompt=presenter.next()=> {
                 let prompt=prompt.ok_or_else(||unavailable("The access presenter ended"))?;
                 let mut caller_gone = false;
@@ -1720,7 +1720,7 @@ async fn review<W: Write>(
                 };
                 if let Some(result) = completed {
                     input.check_cleanup().map_err(|error| ConnectError::native("restore credential review input", error))?;
-                    return result.map(ReviewOutcome::Decided);
+                    return result.map(|record| ReviewOutcome::Decided(Box::new(record)));
                 }
                 if !shown.expect("presentation completed without the review")? {
                     return Ok(if caller_gone { ReviewOutcome::CallerGone } else { ReviewOutcome::Stopped });
@@ -1843,14 +1843,14 @@ impl AgentToolDispatcher for RequestTool {
         selection.check_target(&target).map_err(|_| refused())?;
         let (response, receive) = oneshot::channel();
         self.requests
-            .try_send(ConnectorRequest::Account(AccountRequest {
+            .try_send(ConnectorRequest::Account(Box::new(AccountRequest {
                 installed,
                 document,
                 target,
                 selection,
                 grant,
                 response,
-            }))
+            })))
             .map_err(|_| refused())?;
         let response=receive.await.map_err(|_|ToolError::execution_failed("Protected connector review ended without a completed handoff. No service readiness is established."))?;
         Ok(ToolResult::new(call.id.into(), response.to_string(), false).into())

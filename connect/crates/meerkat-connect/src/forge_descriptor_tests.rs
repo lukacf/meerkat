@@ -60,10 +60,10 @@ fn capture(front: &ForgeFrontend, client: ForgeClient, value: &Value) {
             .unwrap()
     );
     *front.binding.state.lock().unwrap() = State::Captured {
-        _captured: Captured {
+        _captured: Box::new(Captured {
             client,
             support: ForgeSupport::Declared { host: host() },
-        },
+        }),
     };
 }
 fn generic_schema(front: &ForgeFrontend) {
@@ -185,12 +185,12 @@ fn deferred_cli_keeps_legacy_reading_locators_status_only_under_current_declarat
     assert!(static_application.reference(&legacy).is_err());
     let (front, presenter) = ForgeFrontend::with_recipe(recipe);
     *front.binding.state.lock().unwrap() = State::Captured {
-        _captured: Captured {
+        _captured: Box::new(Captured {
             client: authenticated(&legacy.origin),
             support: ForgeSupport::Declared {
                 host: legacy.host.clone(),
             },
-        },
+        }),
     };
     let prepared = Arc::new(Prepared {
         reference: legacy.clone(),

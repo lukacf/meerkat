@@ -101,7 +101,7 @@ impl RemoteSelection {
 
 #[derive(Clone)]
 pub(crate) enum PublicServiceSelection {
-    Installed(InstalledConnectorSelection),
+    Installed(Box<InstalledConnectorSelection>),
     Remote {
         selected: RemoteSelection,
         owner: Arc<CheckedInstalls>,
@@ -110,7 +110,7 @@ pub(crate) enum PublicServiceSelection {
 
 impl From<InstalledConnectorSelection> for PublicServiceSelection {
     fn from(value: InstalledConnectorSelection) -> Self {
-        Self::Installed(value)
+        Self::Installed(Box::new(value))
     }
 }
 

@@ -390,12 +390,12 @@ pub(super) async fn present<F: Future<Output = io::Result<()>> + Send, W: Write>
                 config,
                 generation,
                 change,
-                decision,
+                decision: *decision,
             };
             if request.response.send(json!({"state":"pending","phase":"service_access_management",
                 "reason":"reviewed_access_waiting_for_setup_close","native_action_entered":false,
                 "instruction":"Finish this turn. The host must close setup and finish cleanup before this fresh native access action. This review is not a grant or a replay of an earlier action."})).is_ok() {
-                owner.reviewed = Some(ReviewedAction::Access(reviewed));
+                owner.reviewed = Some(ReviewedAction::Access(Box::new(reviewed)));
             }
             Ok(true)
         }
@@ -717,7 +717,7 @@ mod tests {
                 Some(secrets::Stop::Cancelled),
             );
             let action = FinalizedAction {
-                outcome: ActionOutcome::Access(result),
+                outcome: ActionOutcome::Access(Box::new(result)),
                 continuation: None,
             };
             assert_eq!(
@@ -791,7 +791,7 @@ mod tests {
                 None,
             );
             let action = FinalizedAction {
-                outcome: ActionOutcome::Access(result),
+                outcome: ActionOutcome::Access(Box::new(result)),
                 continuation: None,
             };
             let result = FinalizedAction::finish_invocation(&[action], Ok(()));
@@ -2068,7 +2068,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let selected = storage(root.path(), "access-stop");
         save(&selected, &[config("mail")]).await;
-        let pending = ReviewedAction::Access(reviewed(&selected, change("mail", "reader")).await);
+        let pending = ReviewedAction::Access(Box::new(
+            reviewed(&selected, change("mail", "reader")).await,
+        ));
         let interrupt = std::future::ready(Ok(()));
         tokio::pin!(interrupt);
         assert!(
@@ -2091,7 +2093,7 @@ mod tests {
         assert!(notice.belongs_to(&selected.locator, &session));
         assert!(!notice.belongs_to(&selected.locator, &SessionId::new()));
         let mut action = FinalizedAction {
-            outcome: ActionOutcome::Access(access),
+            outcome: ActionOutcome::Access(Box::new(access)),
             continuation: Some(notice),
         };
         assert!(action.installation().is_none());

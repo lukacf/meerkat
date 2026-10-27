@@ -427,7 +427,7 @@ struct ActiveSend {
     cancel_requests: Vec<String>,
 }
 enum Work {
-    Opened(Result<Opened, &'static str>),
+    Opened(Box<Result<Opened, &'static str>>),
     History(String, Result<Value, ConnectError>),
     Sent(String, TurnCompletion, Option<Result<bool, ()>>),
     Presenter(bool),
@@ -445,7 +445,7 @@ enum ConnectorCommand {
     Start(
         meerkat::ConnectorOAuthTarget,
         String,
-        crate::connector_install::InstallationLogin,
+        Box<crate::connector_install::InstallationLogin>,
     ),
     Complete(String, String, Option<String>),
     Cancel,
@@ -763,7 +763,7 @@ impl Driver {
                 } else {
                     match command {
                         ConnectorCommand::Start(target, redirect, selection) => (
-                            control.start(target, redirect, selection).await,
+                            control.start(target, redirect, *selection).await,
                             None,
                             false,
                         ),
@@ -867,8 +867,10 @@ impl Driver {
                 let retired = self.stop.subscribe();
                 let bridge = self.bridge.clone();
                 self.tasks.push(
-                    async move { Work::Opened(before_entry(retired, open(binding, bridge)).await) }
-                        .boxed(),
+                    async move {
+                        Work::Opened(Box::new(before_entry(retired, open(binding, bridge)).await))
+                    }
+                    .boxed(),
                 );
             }
             "connect/connector/login/start" => {
@@ -954,7 +956,7 @@ impl Driver {
                 };
                 self.connector_work(
                     id,
-                    ConnectorCommand::Start(target, params.redirect_uri, selection),
+                    ConnectorCommand::Start(target, params.redirect_uri, Box::new(selection)),
                 );
             }
             "connect/connector/login/complete" => {
@@ -1392,7 +1394,7 @@ impl Driver {
             Work::Opened(result_open) => {
                 self.opening = false;
                 let id = self.initialize_id.clone().unwrap();
-                match result_open {
+                match *result_open {
                     Ok(opened) => {
                         if !self.retired
                             || self

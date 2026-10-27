@@ -298,7 +298,7 @@ async fn unsupported_policy_review_frame_is_local_and_next_parent_reply_survives
         Ok(Reply::ServiceParentAdministrationRequest {
             exchange_id: large.exchange_id,
             proposal_sha256: large.proposal_sha256,
-            proposal: large.proposal,
+            proposal: Box::new(large.proposal),
         }),
     );
     assert!(matches!(
@@ -328,7 +328,7 @@ async fn unsupported_policy_review_frame_is_local_and_next_parent_reply_survives
             Ok(Reply::ServiceParentAdministrationRequest {
                 exchange_id: request.exchange_id,
                 proposal_sha256: request.proposal_sha256,
-                proposal: request.proposal,
+                proposal: Box::new(request.proposal),
             }),
         );
         assert!(matches!(

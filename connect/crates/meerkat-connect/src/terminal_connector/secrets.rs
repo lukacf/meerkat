@@ -117,12 +117,12 @@ pub(super) async fn dispatch(
     let (response, receive) = oneshot::channel();
     owner
         .requests
-        .try_send(ConnectorRequest::Secret(SecretRequest {
+        .try_send(ConnectorRequest::Secret(Box::new(SecretRequest {
             selection,
             config,
             grant,
             response,
-        }))
+        })))
         .map_err(|_| refused())?;
     let result = receive.await.map_err(|_| ToolError::execution_failed(
         "Protected service-credential review ended without a completed handoff. No readiness is established."))?;
@@ -356,7 +356,7 @@ pub(super) async fn present<F: Future<Output = io::Result<()>> + Send, W: Write>
             own_servers,
             expected_generation,
             request: request.grant,
-            decision,
+            decision: *decision,
             values,
         })
         .into(),
@@ -582,7 +582,7 @@ impl ReviewedSecretInstallation {
             &self.installed.session,
         );
         let outcome = match self.finalize_effect_after_close(interrupt.as_mut()).await {
-            Ok(outcome) => FinalizationOutcome::Secret(outcome),
+            Ok(outcome) => FinalizationOutcome::Secret(Box::new(outcome)),
             Err(error) => FinalizationOutcome::BeforeAdministrationRefused(error),
         };
         FinalizedInstallation::new(target, outcome)
@@ -818,7 +818,7 @@ mod tests {
                     job_id: "reviewed-job".into(),
                     session: SessionId::new(),
                 },
-                FinalizationOutcome::Secret(outcome),
+                FinalizationOutcome::Secret(Box::new(outcome)),
             );
             let action = FinalizedAction {
                 outcome: ActionOutcome::Installation(Arc::new(installation)),
@@ -1926,7 +1926,7 @@ mod tests {
                     job_id: "reviewed-job".into(),
                     session: SessionId::new(),
                 },
-                FinalizationOutcome::Secret(outcome),
+                FinalizationOutcome::Secret(Box::new(outcome)),
             );
             let notice = observed.notice();
             assert_eq!(

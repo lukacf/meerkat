@@ -24,7 +24,7 @@ impl ServiceParentAdministrationRequest {
             Ok(Reply::ServiceParentAdministrationRequest {
                 exchange_id: self.exchange_id,
                 proposal_sha256: self.proposal_sha256.clone(),
-                proposal: self.proposal.clone(),
+                proposal: Box::new(self.proposal.clone()),
             }),
         );
         if private_reply_fits(&reply) {
@@ -43,7 +43,7 @@ pub enum ServiceParentCommand {
         operation: ApplicationServiceOperation,
     },
     Reserve {
-        proposal: ServiceParentAuthorizationProposal,
+        proposal: Box<ServiceParentAuthorizationProposal>,
         observer: ServiceParentOperationObserver,
         response: ServiceParentResponse<ServiceParentAuthorization>,
     },
@@ -157,7 +157,7 @@ impl ApplicationServiceParentAuthorizer for ServiceParentEndpoint {
         self.sender
             .send(RemoteControllerCommand::ServiceParent(
                 ServiceParentCommand::Reserve {
-                    proposal: request.proposal().clone(),
+                    proposal: Box::new(request.proposal().clone()),
                     observer: request.observer(),
                     response,
                 },

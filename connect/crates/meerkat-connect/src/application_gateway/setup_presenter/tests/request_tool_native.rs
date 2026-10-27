@@ -585,7 +585,7 @@ fn schedule(mode: Schedule) -> Pin<Box<dyn Future<Output = ()>>> {
         let (mut enrollment, event) = presenters.next().await.expect("first actual RequestTool enrollment");
         let SetupEvent::Account(request) = event else { panic!("the native request must reach the account presenter"); };
         assert!(enrollment.presenter.is_some());
-        let presenting = enrollment.accounts.as_mut().unwrap().present(request,
+        let presenting = enrollment.accounts.as_mut().unwrap().present(*request,
             &mut enrollment.presenter, &mut terminal, &mut output, pending_interrupt());
         let observe = async {
             match mode {
@@ -620,7 +620,7 @@ fn schedule(mode: Schedule) -> Pin<Box<dyn Future<Output = ()>>> {
         let SetupEvent::Account(request) = event else { panic!("second request must reach the actual account owner"); };
         assert_eq!(composer.calls.load(Ordering::SeqCst), 1, "no replacement owner or session");
         assert_eq!(sibling.calls.load(Ordering::SeqCst), 1);
-        let presenting = enrollment.accounts.as_mut().unwrap().present(request,
+        let presenting = enrollment.accounts.as_mut().unwrap().present(*request,
             &mut enrollment.presenter, &mut terminal, &mut output, pending_interrupt());
         let deny = async {
             let ordinal = usize::from(matches!(mode, Schedule::ReviewEligibilityExpired));

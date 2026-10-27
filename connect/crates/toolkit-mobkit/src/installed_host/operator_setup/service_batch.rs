@@ -53,7 +53,7 @@ enum BatchReviewBody {
     PublicServicesWithSetupV2 {
         members: Vec<BatchMemberBody>,
         catalog: Value,
-        setup: crate::private_originals::ServiceSetupSelection,
+        setup: Box<crate::private_originals::ServiceSetupSelection>,
         access_request: Value,
     },
 }
@@ -227,7 +227,7 @@ impl OperatorSetup {
                     .ok_or(HostLifetimeError::InvalidSelection)?;
                 if member.setup_capability.as_ref() != Some(&setup.configured.capability)
                     || setup.configured.capability.route != route || setup.configured.session_id != catalog.session
-                    || &setup.helper != helper || catalog.lifetime.expires_at_ms != Some(setup.expires_at_ms)
+                    || &setup.helper != helper.as_ref() || catalog.lifetime.expires_at_ms != Some(setup.expires_at_ms)
                     || selected_helper.logical_owner != helper.logical_executor
                     || selected_helper.audience != helper.audience || member.audience != helper.audience {
                     return Err(HostLifetimeError::InvalidSelection);
@@ -278,7 +278,7 @@ impl OperatorSetup {
             Some(setup) => BatchReviewBody::PublicServicesWithSetupV2 {
                 members: selected,
                 catalog: catalog_body,
-                setup,
+                setup: Box::new(setup),
                 access_request,
             },
             None => BatchReviewBody::PublicServicesV1 {
@@ -378,7 +378,7 @@ pub(super) fn member_body(record: &OperatorDecision) -> Result<Option<Value>, Ho
             (set_sha256, &catalog, None)
         }
     };
-    if setup_selection_digest(&members, &catalog, setup.as_ref())? != *set_sha256 {
+    if setup_selection_digest(&members, &catalog, setup.as_deref())? != *set_sha256 {
         return Err(HostLifetimeError::InvalidSelection);
     }
     let selected_body = selected.clone();

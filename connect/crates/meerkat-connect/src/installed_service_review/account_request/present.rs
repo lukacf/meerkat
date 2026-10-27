@@ -453,7 +453,7 @@ impl InstalledAccountRequests {
         let reply = match reviewed {
             InstalledAccountReview::Approved(reviewed) => {
                 let retained = reviewed.fresh_instruction_retained();
-                self.reviewed.push((request.original, reviewed));
+                self.reviewed.push((request.original, *reviewed));
                 let mut reply = AccountReply::new(AccountState::Reviewed, login_completed, true);
                 reply.fresh_instruction_retained = retained;
                 reply.grant_issued = retained;

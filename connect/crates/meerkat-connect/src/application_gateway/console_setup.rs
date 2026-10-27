@@ -537,7 +537,9 @@ impl ConsoleSetup {
     ) -> Result<bool, ConnectError> {
         self.present_request(
             accounts,
-            crate::installed_service_review::account_request::InstalledRequest::Account(request),
+            crate::installed_service_review::account_request::InstalledRequest::Account(Box::new(
+                request,
+            )),
             presenter,
             closed,
         )
@@ -570,7 +572,7 @@ impl ConsoleSetup {
         self.present_request(
             accounts,
             crate::installed_service_review::account_request::InstalledRequest::Credentials(
-                request,
+                Box::new(request),
             ),
             presenter,
             closed,
@@ -642,11 +644,11 @@ impl ConsoleSetup {
             let administration = || active.administration_check();
             let driver: BoxFuture<'_, Result<bool, ConnectError>> = match request {
                 crate::installed_service_review::account_request::InstalledRequest::Account(request) =>
-                    Box::pin(accounts.present_console(request, presenter, bridge, callbacks,
+                    Box::pin(accounts.present_console(*request, presenter, bridge, callbacks,
                         self.0.selection.callback(), &refresh, &decision, closed.wait_closed())),
                 crate::installed_service_review::account_request::InstalledRequest::Credentials(request) => Box::pin(async {
                     let _unused_callbacks = callbacks;
-                    accounts.present_credentials_console(request, presenter, bridge,
+                    accounts.present_credentials_console(*request, presenter, bridge,
                         values.take().ok_or_else(unavailable)?, &refresh, &decision, &administration,
                         closed.wait_closed()).await
                 }),
@@ -724,7 +726,7 @@ pub async fn serve_console_setup(
                     panel
                         .present(
                             enrollment.accounts.as_mut().ok_or_else(unavailable)?,
-                            request,
+                            *request,
                             &mut enrollment.presenter,
                             &closed,
                         )
@@ -742,7 +744,7 @@ pub async fn serve_console_setup(
                     panel
                         .present_credentials(
                             enrollment.accounts.as_mut().ok_or_else(unavailable)?,
-                            request,
+                            *request,
                             &mut enrollment.presenter,
                             &closed,
                         )
@@ -769,7 +771,7 @@ pub async fn serve_console_setup(
                 continue;
             }
             super::setup_presenter::SetupEvent::Approval(prompt) => match enrollment.console() {
-                Some(panel) => panel.present_software(prompt, &closed).await,
+                Some(panel) => panel.present_software(*prompt, &closed).await,
                 None => Ok(ApprovalPromptOutcome::Refused(unavailable())),
             },
         };

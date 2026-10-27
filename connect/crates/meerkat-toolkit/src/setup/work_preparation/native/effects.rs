@@ -59,7 +59,7 @@ pub trait NativeSetupWorkOwner: Send + Sync {
 pub enum NativeWorkStep<R> {
     /// Historical native admission and prepared helper publication are recorded.
     /// This is neither current authority nor proof that the worker input ran.
-    Completed(NativeWorkObservation<R>),
+    Completed(Box<NativeWorkObservation<R>>),
     Pending,
     RetrySafe,
     DispatchBudgetExhausted,
@@ -214,7 +214,7 @@ impl SetupStore<'_> {
             {
                 return Err(SetupError::InvalidRecord);
             }
-            return Ok(NativeWorkStep::Completed(actual));
+            return Ok(NativeWorkStep::Completed(Box::new(actual)));
         }
         // A real admission cannot precede this acquisition's first committed
         // Dispatch claim. Do not fabricate an attempt to adopt foreign work.
@@ -360,7 +360,7 @@ impl SetupStore<'_> {
                 },
             )
             .await?;
-            Ok(NativeWorkStep::Completed(completion.observation))
+            Ok(NativeWorkStep::Completed(Box::new(completion.observation)))
         } else {
             self.mark_work_evidence(
                 &claimed,

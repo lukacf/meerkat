@@ -198,7 +198,7 @@ enum Reply {
     ServiceParentAdministrationRequest {
         exchange_id: u64,
         proposal_sha256: String,
-        proposal: crate::private_originals::ServiceParentAuthorizationProposal,
+        proposal: Box<crate::private_originals::ServiceParentAuthorizationProposal>,
     },
     ServiceParentAdministrationSubmitted {
         exchange_id: u64,
@@ -1574,7 +1574,7 @@ async fn serve<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin + Send + 'static>(
                                                 Reply::ServiceParentAdministrationRequest {
                                                     exchange_id: request.exchange_id,
                                                     proposal_sha256: request.proposal_sha256,
-                                                    proposal: request.proposal,
+                                                    proposal: Box::new(request.proposal),
                                                 }
                                             }),
                                     )
@@ -1915,7 +1915,7 @@ mod tests {
             observation: PrivateServiceInputObservation::Admitted {
                 session_id: "session".into(),
                 input_id: "input".into(),
-                receipt: Some(PrivateServiceInputReceipt {
+                receipt: Some(Box::new(PrivateServiceInputReceipt {
                     source: PrivateReceiptWitness::LiveRuntime,
                     report: PrivateServiceInputReport::Finalized {
                         input_id: "input".into(),
@@ -1927,14 +1927,16 @@ mod tests {
                         run_id: Some("run".into()),
                         owner_input_id: "input".into(),
                         recipient_input_ids: vec!["input".into()],
-                        outcome: meerkat_runtime::completion::CompletionOutcome::CallbackPending {
-                            tool_use_id: "call".into(),
-                            tool_name: "read".into(),
-                            args,
-                            dedupe_key: None,
-                        },
+                        outcome: Box::new(
+                            meerkat_runtime::completion::CompletionOutcome::CallbackPending {
+                                tool_use_id: "call".into(),
+                                tool_name: "read".into(),
+                                args,
+                                dedupe_key: None,
+                            },
+                        ),
                     },
-                }),
+                })),
             },
         }
     }

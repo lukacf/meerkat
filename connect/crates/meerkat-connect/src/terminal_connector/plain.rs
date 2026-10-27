@@ -44,7 +44,7 @@ pub struct ReviewedPlainInstallation {
 /// Immutable source custody survives setup disposal without retaining a dispatcher.
 enum ReviewedPublicSource {
     Installed {
-        installed: InstalledSelection,
+        installed: Box<InstalledSelection>,
         document: Arc<Value>,
         inputs: Option<SelectedServiceInputs>,
     },
@@ -54,7 +54,7 @@ impl ReviewedPublicSource {
     fn from_selection(value: &PublicServiceSelection) -> Self {
         match value {
             PublicServiceSelection::Installed(value) => Self::Installed {
-                installed: value.installed.clone(),
+                installed: Box::new(value.installed.clone()),
                 document: value.configuration.clone(),
                 inputs: value.selected_inputs().cloned(),
             },
@@ -190,12 +190,12 @@ pub(super) async fn dispatch(
     let (response, receive) = oneshot::channel();
     owner
         .requests
-        .try_send(ConnectorRequest::Plain(PlainRequest {
+        .try_send(ConnectorRequest::Plain(Box::new(PlainRequest {
             selection,
             config,
             grant,
             response,
-        }))
+        })))
         .map_err(|_| refused())?;
     let result = receive.await.map_err(|_| ToolError::execution_failed(
         "Protected public-service review ended without a completed handoff. No readiness is established.",
@@ -327,7 +327,7 @@ pub(super) async fn present<F: Future<Output = io::Result<()>> + Send, W: Write>
             own_servers,
             expected_generation,
             request: request.grant,
-            decision,
+            decision: *decision,
         })
         .into(),
     );
@@ -926,12 +926,12 @@ mod selected_tests {
             let mut output = seen.clone();
             let (response, receive) = oneshot::channel();
             let (stop, stopped) = oneshot::channel();
-            let request = ConnectorRequest::Plain(PlainRequest {
+            let request = ConnectorRequest::Plain(Box::new(PlainRequest {
                 selection: selected.clone().into(),
                 config: config.clone(),
                 grant,
                 response,
-            });
+            }));
             let (timed_out, presented, reply, human) = joined_inherited_review(
                 owner.present(
                     request,

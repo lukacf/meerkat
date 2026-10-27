@@ -21,7 +21,7 @@ pub enum PrivateServiceInputObservation {
         session_id: String,
         input_id: String,
         /// None means this exact native read returned no receipt, not no effect.
-        receipt: Option<PrivateServiceInputReceipt>,
+        receipt: Option<Box<PrivateServiceInputReceipt>>,
     },
 }
 
@@ -66,7 +66,7 @@ pub enum PrivateServiceInputReport {
         run_id: Option<String>,
         owner_input_id: String,
         recipient_input_ids: Vec<String>,
-        outcome: CompletionOutcome,
+        outcome: Box<CompletionOutcome>,
     },
     TerminalWithoutReceipt {
         input_id: String,
@@ -136,7 +136,7 @@ fn project_receipt(
                     .iter()
                     .map(ToString::to_string)
                     .collect(),
-                outcome: receipt.outcome().clone(),
+                outcome: Box::new(receipt.outcome().clone()),
             }
         }
         _ => return Err(PrivateOriginalError::Unavailable),
@@ -235,7 +235,7 @@ impl PrivateOriginals {
             .await?;
         let receipt = read
             .map_err(|_| PrivateOriginalError::Unavailable)?
-            .map(|receipt| project_receipt(&selected.input, receipt))
+            .map(|receipt| project_receipt(&selected.input, receipt).map(Box::new))
             .transpose()?;
         Ok(PrivateServiceInputObservation::Admitted {
             session_id: selected.session.to_string(),

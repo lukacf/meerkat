@@ -58,8 +58,8 @@ struct PublicReply {
 /// Custody of this actual native invocation, separate from account sign-in.
 /// The selected task and login cannot be decoded from model arguments.
 pub(crate) enum InstalledPublicRequest {
-    Single(InstalledPublicSingleRequest),
-    Batch(batch::InstalledPublicBatchRequest),
+    Single(Box<InstalledPublicSingleRequest>),
+    Batch(Box<batch::InstalledPublicBatchRequest>),
 }
 pub(crate) struct InstalledPublicSingleRequest {
     selected: PublicServiceSelection,
@@ -282,7 +282,7 @@ pub(super) async fn dispatch(
         .public_requests
         .as_ref()
         .ok_or_else(unavailable)?
-        .try_send(InstalledPublicRequest::Single(
+        .try_send(InstalledPublicRequest::Single(Box::new(
             InstalledPublicSingleRequest {
                 selected,
                 config,
@@ -292,7 +292,7 @@ pub(super) async fn dispatch(
                 current: CurrentRequest(checks),
                 response,
             },
-        ))
+        )))
         .map_err(|_| unavailable())?;
     tokio::pin!(receive);
     let response = loop {
@@ -349,13 +349,13 @@ impl InstalledAccountRequests {
         match request {
             InstalledPublicRequest::Single(request) => {
                 self.present_public_single_console(
-                    request, presenter, bridge, refresh, decision, closed,
+                    *request, presenter, bridge, refresh, decision, closed,
                 )
                 .await
             }
             InstalledPublicRequest::Batch(request) => {
                 self.present_public_batch_console(
-                    request, presenter, bridge, refresh, decision, closed,
+                    *request, presenter, bridge, refresh, decision, closed,
                 )
                 .await
             }

@@ -11,7 +11,7 @@ use meerkat_toolkit::authority::RoleLifetime;
 pub(crate) enum CatalogDecisionKind {
     PublicServiceCatalogV1,
     PublicServiceCatalogWithSetupV2 {
-        helper: crate::private_originals::configured_setup::service::ServiceSetupHelper,
+        helper: Box<crate::private_originals::configured_setup::service::ServiceSetupHelper>,
     },
 }
 

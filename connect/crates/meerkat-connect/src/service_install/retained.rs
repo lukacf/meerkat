@@ -18,7 +18,7 @@ enum Retained {
         locator: Value,
         family: String,
         profile: String,
-        verified: Option<VerifiedRetained>,
+        verified: Option<Box<VerifiedRetained>>,
     },
     Cursor(Value),
 }
@@ -494,7 +494,7 @@ impl CheckedInstalls {
         }
         let result = verified.selection(self);
         let bytes = verified.bytes;
-        *slot = Some(verified);
+        *slot = Some(Box::new(verified));
         entry.bytes += bytes;
         state.returning.bytes += bytes;
         Ok(result)

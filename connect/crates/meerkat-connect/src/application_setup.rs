@@ -104,7 +104,7 @@ impl ApplicationSetupTools {
 #[serde(tag = "format", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ApplicationSetupDefinition {
     Toml { text: String },
-    Native { definition: MobDefinition },
+    Native { definition: Box<MobDefinition> },
 }
 
 impl ApplicationSetupDefinition {
@@ -113,7 +113,7 @@ impl ApplicationSetupDefinition {
             Self::Toml { text } => {
                 MobDefinition::from_toml(text).map_err(|error| error.to_string())
             }
-            Self::Native { definition } => Ok(definition.clone()),
+            Self::Native { definition } => Ok((**definition).clone()),
         }
     }
 }

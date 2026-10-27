@@ -129,7 +129,7 @@ impl InstalledServiceTask {
             kind: match &self.setup {
                 None => CatalogDecisionKind::PublicServiceCatalogV1,
                 Some(setup) => CatalogDecisionKind::PublicServiceCatalogWithSetupV2 {
-                    helper: setup.helper.clone(),
+                    helper: Box::new(setup.helper.clone()),
                 },
             },
             route: self.parent.route.clone(),
@@ -312,7 +312,7 @@ impl PreparedPublicServiceBatch {
             let observed = self
                 .task
                 .source
-                .apply_mcp_service_access_decision_current(approved, current.clone())
+                .apply_mcp_service_access_decision_current(*approved, current.clone())
                 .await?;
             if observed.state != PrivateServiceGrantState::GrantIssued {
                 return Err(PrivateOriginalError::Unavailable);
@@ -347,7 +347,7 @@ impl PreparedPublicServiceBatch {
             })
             .await
             .map_err(application::policy_error)?;
-        let link = ApprovedTaskLink::Batch(selection::ApprovedTaskBatch {
+        let link = ApprovedTaskLink::Batch(Box::new(selection::ApprovedTaskBatch {
             kind: if self.task.setup.is_some() {
                 selection::BatchVersion::PublicServicesWithSetupV2
             } else {
@@ -358,7 +358,7 @@ impl PreparedPublicServiceBatch {
             members,
             catalog: catalog.grant,
             setup: self.task.setup.clone(),
-        });
+        }));
         self.task
             .retain_approved_selection(
                 link,

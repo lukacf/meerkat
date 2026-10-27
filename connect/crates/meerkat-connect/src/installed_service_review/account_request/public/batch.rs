@@ -163,15 +163,17 @@ pub(super) async fn dispatch(
         .public_requests
         .as_ref()
         .ok_or_else(unavailable)?
-        .try_send(InstalledPublicRequest::Batch(InstalledPublicBatchRequest {
-            members,
-            expires_in_ms: proposal.expires_in_ms,
-            policy: proposal.tool_policy,
-            task: Some(task),
-            entry,
-            current: CurrentRequest(checks),
-            response,
-        }))
+        .try_send(InstalledPublicRequest::Batch(Box::new(
+            InstalledPublicBatchRequest {
+                members,
+                expires_in_ms: proposal.expires_in_ms,
+                policy: proposal.tool_policy,
+                task: Some(task),
+                entry,
+                current: CurrentRequest(checks),
+                response,
+            },
+        )))
         .map_err(|_| unavailable())?;
     tokio::pin!(receive);
     let response = loop {

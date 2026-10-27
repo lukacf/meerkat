@@ -520,7 +520,7 @@ struct Captured {
 enum State {
     Fresh { native_setup_claimed: bool },
     Pending(Arc<()>),
-    Captured { _captured: Captured },
+    Captured { _captured: Box<Captured> },
     Retired,
 }
 struct Binding {
@@ -766,7 +766,7 @@ impl ForgeFrontend {
             }
             *state = match selected {
                 Ok(captured) => State::Captured {
-                    _captured: captured,
+                    _captured: Box::new(captured),
                 },
                 Err(_) => State::Retired,
             };

@@ -366,7 +366,7 @@ pub(super) async fn connector(
 }
 
 enum PreparedAction {
-    Configured(PreparedApplicationServiceInstruction),
+    Configured(Box<PreparedApplicationServiceInstruction>),
     #[cfg(all(unix, feature = "console"))]
     Owned(OwnedOperation),
 }

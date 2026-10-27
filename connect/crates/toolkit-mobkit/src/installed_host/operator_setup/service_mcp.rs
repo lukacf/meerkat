@@ -135,7 +135,7 @@ impl ReviewedServiceMcpParent {
     }
 }
 pub enum ServiceMcpParentOutcome {
-    Approved(ReviewedServiceMcpParent),
+    Approved(Box<ReviewedServiceMcpParent>),
     Denied,
     Unavailable,
     PendingReconciliation,
@@ -327,13 +327,13 @@ impl OperatorSetup {
                     purpose: OperatorParentPurpose::Operations,
                     lineage,
                 } if route == decision.route => {
-                    ServiceMcpParentOutcome::Approved(ReviewedServiceMcpParent {
+                    ServiceMcpParentOutcome::Approved(Box::new(ReviewedServiceMcpParent {
                         decision,
                         selection,
                         lineage,
                         source: Arc::downgrade(&self.source),
                         lifetime: Arc::downgrade(&self.lifetime),
-                    })
+                    }))
                 }
                 OperatorParentOutcome::Selected { .. }
                 | OperatorParentOutcome::SetupRequestSelected { .. } => {

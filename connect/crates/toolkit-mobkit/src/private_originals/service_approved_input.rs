@@ -492,7 +492,7 @@ impl PreparedServiceInstruction {
         let observation = self
             .task
             .source
-            .apply_mcp_service_access_decision_current(approved, presented.clone())
+            .apply_mcp_service_access_decision_current(*approved, presented.clone())
             .await?;
         if observation.state != PrivateServiceGrantState::GrantIssued {
             return Err(PrivateOriginalError::Unavailable);
@@ -1682,7 +1682,7 @@ impl PrivateOriginals {
         }
         self.reserve_service_continuation(stored).await?;
         Ok(ServiceInputStep::Continue {
-            record,
+            record: Box::new(record),
             reference,
             observed,
         })
@@ -1891,7 +1891,7 @@ impl PrivateOriginals {
 enum ServiceInputStep {
     Done,
     Continue {
-        record: SourceRecord,
+        record: Box<SourceRecord>,
         reference: PrivateOriginalRef,
         observed: Option<PrivateOriginalSubmission>,
     },

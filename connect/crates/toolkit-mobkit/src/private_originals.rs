@@ -397,7 +397,7 @@ impl ReviewedBatchInstallation {
 
 /// Distinct retained authorization paths for the same package verifier.
 pub enum ServiceInstallationReadbackSource {
-    SettledReview(meerkat_core::approval::ApprovalRecord),
+    SettledReview(Box<meerkat_core::approval::ApprovalRecord>),
     ReviewedBatchMember(ReviewedBatchInstallation),
     ApplicationPolicy(ApplicationInstallationReadback),
 }

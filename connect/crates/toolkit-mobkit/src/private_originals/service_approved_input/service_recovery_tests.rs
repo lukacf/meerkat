@@ -74,7 +74,7 @@ async fn issue_before_publication<S>(
     assert_eq!(
         fixture
             .source
-            .apply_mcp_service_access_decision_current(parent, Arc::new(|| true))
+            .apply_mcp_service_access_decision_current(*parent, Arc::new(|| true))
             .await
             .unwrap()
             .state,
@@ -376,7 +376,7 @@ async fn operator_recovery_preserves_new_publication_and_other_approval_child() 
         assert!(
             fixture
                 .source
-                .apply_mcp_service_access_decision_current(approved, Arc::new(|| true))
+                .apply_mcp_service_access_decision_current(*approved, Arc::new(|| true))
                 .await
                 .is_err(),
             "deterministic child belongs to first parent"

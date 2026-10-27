@@ -757,7 +757,7 @@ fn prepare_gateway_acquisition_selected(
     let original_definition = match &prepared.definition_source {
         ApplicationSetupDefinition::Toml { text } => meerkat_mob::MobDefinition::from_toml(text)
             .map_err(|_| HostLifetimeError::InvalidSelection)?,
-        ApplicationSetupDefinition::Native { definition } => definition.clone(),
+        ApplicationSetupDefinition::Native { definition } => (**definition).clone(),
     };
     let expected_definition = update
         .map(|row| row.update.definition().clone())

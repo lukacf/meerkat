@@ -28,7 +28,7 @@ impl OperatorSetup {
         if record.batch_member.is_none() {
             return Ok(
                 crate::private_originals::ServiceInstallationReadbackSource::SettledReview(
-                    record.approval,
+                    Box::new(record.approval),
                 ),
             );
         }

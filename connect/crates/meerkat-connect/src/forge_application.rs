@@ -425,10 +425,10 @@ mod tests {
     ) {
         let (front, presenter) = ForgeFrontend::for_application(host(), fields()).unwrap();
         *front.binding.state.lock().unwrap() = State::Captured {
-            _captured: Captured {
+            _captured: Box::new(Captured {
                 client: peer.client(),
                 support: ForgeSupport::Declared { host: host() },
-            },
+            }),
         };
         let directory = tempfile::Builder::new()
             .permissions(std::fs::Permissions::from_mode(0o700))

@@ -1965,7 +1965,7 @@ mod tests {
         );
         let adapter = service_adapter(&setup).await;
         let observed = adapter
-            .apply_mcp_service_access_decision(approved.clone())
+            .apply_mcp_service_access_decision((*approved).clone())
             .await
             .unwrap();
         assert_eq!(observed.state, PrivateServiceGrantState::GrantIssued);
@@ -2000,7 +2000,7 @@ mod tests {
         let bytes = fs::read(directory.join("grants.jsonl")).unwrap();
         assert_eq!(
             adapter
-                .apply_mcp_service_access_decision(approved.clone())
+                .apply_mcp_service_access_decision((*approved).clone())
                 .await
                 .unwrap()
                 .state,
@@ -2016,7 +2016,7 @@ mod tests {
         other.finish().await.unwrap();
         setup.finish().await.unwrap();
         assert!(matches!(
-            adapter.apply_mcp_service_access_decision(approved).await,
+            adapter.apply_mcp_service_access_decision(*approved).await,
             Err(PrivateOriginalError::Denied | PrivateOriginalError::Unavailable)
         ));
         assert_eq!(fs::read(directory.join("grants.jsonl")).unwrap(), bytes);
@@ -2151,7 +2151,7 @@ mod tests {
         };
         let adapter = service_adapter(&setup).await;
         let observed = adapter
-            .apply_mcp_service_access_decision(approved)
+            .apply_mcp_service_access_decision(*approved)
             .await
             .unwrap();
         assert_eq!(observed.state, PrivateServiceGrantState::GrantIssued);

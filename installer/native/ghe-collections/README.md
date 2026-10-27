@@ -32,6 +32,14 @@ Explicit call and cumulative-result-byte bounds include the initial PR read.
 Results are provider-reported page sets, not an atomic revision snapshot or
 proof of an unfiltered conversation.
 
+`PullRequestChanges` reads the exact PR, its file and commit pages, and a final
+PR result. It requires explicit totals, exact page sizes against the remaining
+counts, unique file/commit identities and the observed head in the commit set.
+It refuses a changed final PR head or count. `at_head` also preserves a revision
+already selected in the native requirement. The call budget reserves the final
+read, and the byte budget includes every result. Filenames, patches, author
+fields and messages remain data; the program never opens paths or follows them.
+
 ## Pinned upstream behavior
 
 Contract: GitHub MCP server v2.0.3, source
@@ -58,9 +66,18 @@ alone cannot prove it, and Python/browser labels cannot establish that setting.
 Review-summary pagination has a related limitation: `get_reviews` can filter
 rows after REST pagination, so a short array alone is not proof of the final page.
 
+The file and commit methods discard response pagination headers. This program
+uses the explicit initial PR totals to detect incomplete or capped responses.
+The source also omits zero totals and converts absent upstream totals to zero;
+missing totals therefore refuse rather than establish an empty collection.
+File pages carry no revision, and matching initial/final PR reads cannot rule
+out intervening changes. The result remains a reported page set, not an atomic
+snapshot of that head. Patches are optional and may be absent or incomplete;
+listing every file does not establish a complete diff.
+
 Remaining work includes the native bridge/adapter and the other required GHE
-collection programs: ordinary PR comments and review summaries, files and
-commits, bounded repository history, workflow runs/jobs, and issues. Repository
+collection programs: ordinary PR comments and review summaries, bounded
+repository history, workflow runs/jobs, and issues. Repository
 metadata and historical non-PR commit checks still need a supported source.
 These programs do not close those requirements or the overall shared ingestion
 outcome.

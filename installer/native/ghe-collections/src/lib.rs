@@ -10,6 +10,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
+mod changes;
+pub use changes::{
+    ChangesReadLimits, CommitAuthor, PullRequestChanges, PullRequestCommit, PullRequestFile,
+    ReportedPullRequestChanges,
+};
 mod review_threads;
 pub use review_threads::{
     PullRequestReviewThreads, ReportedReviewThreads, ReviewComment, ReviewReadLimits, ReviewThread,

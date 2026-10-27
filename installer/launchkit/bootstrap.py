@@ -50,7 +50,7 @@ class SelectedGuideRuntime:
 
         selected = guide_sdk.SELECTED_VERSION
         if (type(self.gateway) is not ExactFile
-                or self.version != selected or self.core_version != selected
+                or self.version != selected or self.core_version != guide_sdk.declared_core_version()
                 or any(type(value) is not str or not re.fullmatch("[0-9a-f]{40}", value)
                     for value in (self.meta_source, self.core_source))):
             raise GatewayInstallError(f"The guide requires its exact selected Meta {selected} runtime.")

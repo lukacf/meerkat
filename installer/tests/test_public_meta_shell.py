@@ -153,7 +153,7 @@ async def test_shell_route_runs_a_meta_package_on_the_meta_sdk(shell, monkeypatc
     # Meta refuses every console request when app auth is required without a
     # signing key; a shell package's loopback console is explicitly open.
     assert config["console_require_app_auth"] is False and config["auth_config"] is None
-    assert os.environ.get("META_IDENTITY_RESTORE_CONCURRENCY") == "1"
+    assert "META_IDENTITY_RESTORE_CONCURRENCY" not in os.environ
     assert "MOBKIT_IDENTITY_RESTORE_CONCURRENCY" not in os.environ
     assert json.loads(capsys.readouterr().out.strip().splitlines()[-1])["definition_revision"] == 1
 

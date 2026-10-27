@@ -4,7 +4,7 @@ description: "TypeScript SDK for Meta with type-safe contracts, parity tests, an
 icon: "js"
 ---
 
-*Mirrored from MobKit main at [cb88d10df2f9](https://github.com/lukacf/meerkat-meta/commit/cb88d10df2f92fa153872e94ecd35db690de6820) on 2026-10-26; MobKit workspace version 0.9.5 at that commit.*
+*Mirrored from MobKit main at [7ef230d068e9](https://github.com/lukacf/meerkat/commit/7ef230d068e9c5d95cf5e2a3f4d29a728c8b9fa9) on 2026-10-27; MobKit version 0.9.5 at that commit.*
 
 The TypeScript SDK (`@rkat/meta-sdk`) provides type-safe access to the Meta JSON-RPC gateway from Node.js.
 
@@ -533,6 +533,8 @@ The builder forwards `consoleConfig(path)` as `runtime_options.console_config_pa
 The gateway binds `127.0.0.1` on an ephemeral port by default. `httpListen("0.0.0.0:8080")`, `allowRemote()` and `httpPublicBaseUrl(url)` are the exposure knobs (`runtime_options.http_listen`, `allow_remote`, `http_public_base_url`): a non-loopback bind is refused at init unless `auth(...)` enforces console auth or `allowRemote()` acknowledges the exposure, and the advertised base is read back as `runtime.rustHttpPublicBaseUrl` while `runtime.rustHttpBaseUrl` stays the same-host form the SDK itself dials. See [Deployment](/mobkit/guides/deployment).
 
 `meerkatConfig(path)` forwards a Meerkat host `config.toml` as `runtime_options.meerkat_config_path`, the only door for the `[self_hosted]` and `[realm]` tables Meerkat keeps out of `mob.toml` (a host-config `[models]` table reaches the factory too, but a profile's `model` must be catalogued, provider-annotated or defined under `mob.toml`'s own `[models.<id>]` to pass the init model check); a missing, malformed or non-validating file refuses init rather than building agents from the default config, and a top-level `[self_hosted]` or `[realm]` table inside `mob.toml` is refused at init with a message naming this option. The Python twin is `.meerkat_config(path)`. See [Self-hosted models and the Meerkat host config](/mobkit/reference/configuration#self-hosted-models-and-the-meerkat-host-config).
+
+`providerCredentialsRoot(path)` forwards a provider credentials directory as `runtime_options.provider_credentials_root`: every agent the gateway builds resolves and persists provider logins and tokens there instead of the process default `<config dir>/meerkat/credentials`, which every process of the OS user shares. The path is absolute: the gateway opens it once at init, creating it when missing, and a relative path or a root it cannot open refuses init rather than falling back to the default. Give each user their own root, and pass the same root on every reopen of that user's state; a host moving off a per-process `XDG_CONFIG_HOME=<C>` passes `<C>/meerkat/credentials` to keep existing logins. See [Provider credentials](/mobkit/reference/configuration#provider-credentials).
 
 ## Storage durability declarations
 

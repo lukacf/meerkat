@@ -4,7 +4,7 @@ description: "Use Meta as a Rust library: bootstrap runtimes, route module calls
 icon: "code"
 ---
 
-*Mirrored from MobKit main at [cb88d10df2f9](https://github.com/lukacf/meerkat-meta/commit/cb88d10df2f92fa153872e94ecd35db690de6820) on 2026-10-26; MobKit workspace version 0.9.5 at that commit.*
+*Mirrored from MobKit main at [7ef230d068e9](https://github.com/lukacf/meerkat/commit/7ef230d068e9c5d95cf5e2a3f4d29a728c8b9fa9) on 2026-10-27; MobKit version 0.9.5 at that commit.*
 
 The Rust crate `meerkat-meta` is the primary interface for Meta. All other interfaces (JSON-RPC, SDKs, console) are built on top of it.
 
@@ -427,6 +427,61 @@ key's `key_state` with `read_member_instruction_activations` first for the
 detached member forks) is refused with `MobError::ForkInstructionRefused`
 instead. See [Fork instruction policy](/mobkit/reference/configuration#fork-instruction-policy)
 for what a fork copies and what `ReactivateInherited` trusts.
+
+### Provider credential store
+
+By default every agent factory keeps provider credentials (persisted API keys
+and the OAuth tokens a login saved) in Meerkat's process default store,
+`<config dir>/meerkat/credentials`, which every runtime and process of the OS
+user shares (see [Provider credentials](/mobkit/reference/configuration#provider-credentials)).
+A host serving several users opens a store per user and hands it to the
+builder:
+
+```rust
+use meerkat::TokenStoreBackend;
+use meerkat_meta::UnifiedRuntime;
+
+let credentials = TokenStoreBackend::File {
+    root: user_root.join("credentials"),
+}
+.open_with_refresh_authority()?;
+
+let runtime = UnifiedRuntime::builder()
+    .definition_path("config/mob.toml")
+    .persistent_state(user_root.join("state"))
+    .provider_auth_persistence(credentials)
+    .build()
+    .await?;
+```
+
+The builder attaches a clone of the store to every agent factory it owns, for
+persistent, scratch and temp-dir launches, before anything clones the
+factory: the members and the agents they create, live sessions and the agent
+memory engines all resolve and persist provider credentials there, with one
+refresh authority. Pass the same root again whenever you reopen that user's
+state. A builder given an already-built `mob_spec(...)` refuses the store
+with `UnifiedRuntimeBuilderError::ConflictingConfiguration`, and the public
+`MobBootstrapSpec` constructors take none: a host that builds its own spec
+attaches the store to its own agent factory with
+`AgentFactory::with_provider_auth_persistence`, passes a session service built
+on that factory to `MobBootstrapSpec::new`, and gives memory engines it
+assembles itself the same store with
+`memory_wiring::attach_memory_engines_with_provider_auth`.
+
+A host deploy's `rkat mob run` process cannot carry the store, so a runtime
+built with it refuses `meta/mobpacks/deploy` with `execute: true` on its RPC
+and its Flow Editor (`-32004`, `data.kind =
+"provider_credentials_not_carried"`). A host that attached the store to its
+own spec's factory records it with
+`runtime.set_explicit_provider_credentials(true)` before it builds routers.
+
+A host composing the stdio gateway answers
+`GatewayHostComposition::provider_auth_persistence`. The gateway asks once per
+launch, before any agent factory is built, and attaches the store to its
+member factory before `compose_member_factory` is offered it, so the
+construction's host auth service and realm MCP installation use it too.
+`Ok(None)` (the default) keeps the process default, `Err` refuses init, and
+`runtime_options.provider_credentials_root` is refused under a native host.
 
 ### Session hooks and mob operator authority
 

@@ -4,7 +4,7 @@ description: "HTTP endpoints for console access, experience metadata, module ins
 icon: "globe"
 ---
 
-*Mirrored from MobKit main at [cb88d10df2f9](https://github.com/lukacf/meerkat-meta/commit/cb88d10df2f92fa153872e94ecd35db690de6820) on 2026-10-26; MobKit workspace version 0.9.5 at that commit.*
+*Mirrored from MobKit main at [7ef230d068e9](https://github.com/lukacf/meerkat/commit/7ef230d068e9c5d95cf5e2a3f4d29a728c8b9fa9) on 2026-10-27; MobKit version 0.9.5 at that commit.*
 
 Meta serves a REST API over HTTP using Axum. The API provides console access, runtime inspection, timeline replay, JSON-RPC ingress, legacy console send compatibility, multipart upload/send, and blob retrieval.
 
@@ -202,7 +202,11 @@ REST twin of [`meta/console/recover_send`](/mobkit/api/rpc):
 the body is `{identity, origin, idempotency_key}` and the caller is the
 request's authenticated principal. It runs the same gate as `/console/send`
 (read-only and `agent.send` refusals). A send the caller does not own, or
-never made, answers HTTP **404** with `{"error":"send_not_found"}`.
+never made, answers HTTP **404** with `{"error":"send_not_found"}`. A
+candidate launch (`runtime_options.mob_composition.authority =
+"candidate"`) settles no send and answers HTTP **409** with
+`{"error":"candidate_launch"}`, as `/console/send` does: recover the send on
+the authoritative launch.
 
 ### `POST /console/rpc`
 

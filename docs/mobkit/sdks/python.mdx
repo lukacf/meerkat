@@ -4,7 +4,7 @@ description: "Meta Python SDK — typed builder API, async runtime, and streamin
 icon: "python"
 ---
 
-*Mirrored from MobKit main at [cb88d10df2f9](https://github.com/lukacf/meerkat-meta/commit/cb88d10df2f92fa153872e94ecd35db690de6820) on 2026-10-26; MobKit workspace version 0.9.5 at that commit.*
+*Mirrored from MobKit main at [7ef230d068e9](https://github.com/lukacf/meerkat/commit/7ef230d068e9c5d95cf5e2a3f4d29a728c8b9fa9) on 2026-10-27; MobKit version 0.9.5 at that commit.*
 
 The Meta Python SDK provides a typed host API for launching and operating
 Meerkat mobs through the SDK-facing gateway. Apps own policy. Meerkat and
@@ -600,6 +600,7 @@ rt = await (
 | `.mob(path)` | Path to mob TOML config |
 | `.mob_inline(toml_str)` | Inline mob TOML string (no temp file) |
 | `.meerkat_config(path)` | Meerkat host `config.toml` forwarded as `runtime_options.meerkat_config_path`, the only door for the `[self_hosted]` and `[realm]` tables Meerkat keeps out of `mob.toml` (a host-config `[models]` table reaches the factory too, but a profile's `model` must be catalogued, provider-annotated or defined under `mob.toml`'s own `[models.<id>]` to pass the init model check); a missing, malformed or non-validating file refuses init rather than building agents from the default config, and a top-level `[self_hosted]` or `[realm]` table inside `mob.toml` is refused at init with a message naming this option. TypeScript twin `meerkatConfig(path)`. See [Self-hosted models and the Meerkat host config](/mobkit/reference/configuration#self-hosted-models-and-the-meerkat-host-config) |
+| `.provider_credentials_root(path)` | Provider credentials directory forwarded as `runtime_options.provider_credentials_root`: every agent the gateway builds resolves and persists provider logins and tokens there instead of the process default `<config dir>/meerkat/credentials`, which every process of the OS user shares. Absolute: the gateway opens it once at init, creating it when missing, and a relative path or a root it cannot open refuses init, never falling back to the default. Give each user their own root, and pass the same root on every reopen of that user's state; a host moving off a per-process `XDG_CONFIG_HOME=<C>` passes `<C>/meerkat/credentials` to keep existing logins. See [Provider credentials](/mobkit/reference/configuration#provider-credentials) |
 | `.persistent_state(path)` | Enable persistent state at path |
 | `.roster(provider)` | Identity-first roster provider |
 | `.topology_provider(provider)` | Identity-first topology provider |

@@ -409,12 +409,20 @@ printf '  %s\n' "${relevant[@]}"
 
 if [[ "${global}" -eq 1 ]]; then
   echo "Global Rust build/test configuration changed; running workspace Cargo gate."
+  # Core's members only: `--workspace` and an `--exclude` for every package
+  # of the other products (scripts/core-workspace-args.mjs); `fast` builds the
+  # default members, which are Core's.
+  core_selection="$(CARGO="$CARGO" node scripts/core-workspace-args.mjs)" || {
+    echo "cargo-agent-gate: cannot derive Core's package selection" >&2
+    exit 1
+  }
+  mapfile -t core_workspace <<<"${core_selection}"
   if [[ "${dry_run}" -eq 1 ]]; then
     if [[ "${run_tests}" -eq 1 ]]; then
       echo "DRY-RUN $CARGO fast --no-run"
     fi
     if [[ "${run_clippy}" -eq 1 ]]; then
-      echo "DRY-RUN $CARGO clippy --workspace --all-targets --all-features -- -D warnings"
+      echo "DRY-RUN $CARGO clippy ${core_workspace[*]} --all-targets --all-features -- -D warnings"
     fi
     exit 0
   fi
@@ -422,7 +430,7 @@ if [[ "${global}" -eq 1 ]]; then
     "$CARGO" fast --no-run
   fi
   if [[ "${run_clippy}" -eq 1 ]]; then
-    "$CARGO" clippy --workspace --all-targets --all-features -- -D warnings
+    "$CARGO" clippy "${core_workspace[@]}" --all-targets --all-features -- -D warnings
   fi
   exit 0
 fi

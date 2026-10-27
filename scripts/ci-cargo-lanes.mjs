@@ -181,17 +181,21 @@
 // (closure_test_rows, the closure-tests job) for the test scope: the
 // reverse-dependency closure of the changed packages, every member when a
 // global input changed. A pull request runs none of them (deferred_to_push).
-// Every row but HeadCanonical
-// selects the whole workspace (`--workspace`) and names only its targets, so
-// Cargo resolves every crate's features exactly as the hook's single
-// workspace build does and builds only those targets' graphs: the row
-// compiles the hook's own units (cargo's unit graph: identical for
-// `--workspace --test ...` and `--workspace --lib`; a package-scoped row
-// compiled 31-39 dependency units with fewer features, and so does
-// `--workspace --exclude`). The rows are
-//   lib        one `--workspace --lib` row: it builds every member's lib
-//              test (nothing narrower keeps the resolution) and runs the
-//              scope's through a package() filter. Only with
+// Every Core row but HeadCanonical
+// selects Core's whole workspace (`--workspace` and an `--exclude` for every
+// other product's package: the hook's own selection, from
+// scripts/core-workspace-args.mjs) and names only its targets, so Cargo
+// resolves every crate's features exactly as the hook's single build does
+// and builds only those targets' graphs: the row compiles the hook's own
+// units (cargo's unit graph: identical for `--workspace --test ...` and
+// `--workspace --lib`; a package-scoped row compiled 31-39 dependency units
+// with fewer features). A product's test binaries are out of the hook: their
+// rows select exactly that product's packages (`-p` each), the product's own
+// workspace resolution, and the coverage check credits them only there. The
+// rows are
+//   lib        one Core `--workspace --lib` row: it builds every Core
+//              member's lib test (nothing narrower keeps the resolution) and
+//              runs the scope's through a package() filter. Only with
 //              --lib-row-runner, on that runner: a hosted 4-vCPU runner
 //              needs about 64 min to build it (nightly's workspace unit
 //              lane: 4940 s, 1071 s of it running the tests). Without one
@@ -268,12 +272,12 @@ import {
   HOOK_SCRIPT,
   checkHookCoverage,
   hookModel,
+  laneSelections,
   parseFilter,
   profileFilter,
-  workspaceFeatures,
 } from "./ci-hook-coverage.mjs";
 import { loadNonRustReaders, readerPackagesFor, readerSelectionsFor, WHOLE_CHECKOUT } from "./ci-non-rust-readers.mjs";
-import { CORE, PRODUCTS_PATH, loadProducts, productOfPath, productRootPrefixes } from "./ci-products.mjs";
+import { CORE, PRODUCTS_PATH, defaultMembersProblem, loadProducts, productOfPath, productRootPrefixes } from "./ci-products.mjs";
 import {
   REUSE_CLASSIFIER,
   RELEASE_PROJECTION_MODE,
@@ -344,10 +348,11 @@ export const CLOSURE_TESTS_PER_ROW = 12;
 // is planned.
 export const CANARY_TEST_GROUP = "downstream-cargo-canary";
 // Test binaries no hosted runner can judge, keyed package::test-target: their
-// assertion is calibrated on real hardware. The pre-push hook (a developer's
-// machine) runs them; the plan gives them no closure-tests row and names them,
-// with the reason, in `hosted_runner_excluded`, which the hook coverage check
-// accepts in place of a row.
+// assertion is calibrated on real hardware, so they run outside CI (the
+// owning product's local lanes and release protocol). The plan gives them no
+// closure-tests row and names them, with the reason, in
+// `hosted_runner_excluded`, which the hook coverage check accepts in place
+// of a row.
 export const HOSTED_RUNNER_EXCLUDED_BINARIES = [
   {
     binary: "meerkat-meta::idle_cpu_gate",
@@ -1792,32 +1797,42 @@ function countCanaryTests(source, prefix) {
   return (source.match(pattern) ?? []).length;
 }
 
-// The hook-parity rows for the test scope (see the header). Every row but
-// HeadCanonical selects the whole workspace (`--workspace`) and names only
-// its own targets: Cargo then resolves features exactly as the hook's single
-// workspace build does, and builds only those targets' graphs, so a row's
-// compilation units are the hook's own. Measured with cargo's unit graph on
-// b45c8e60: `--workspace --test ...` rows 472/472 and 380/380 units identical
-// to the hook's, `--workspace --lib` 572/572; package-scoped rows differed in
-// 31-39 units (dependency features), and so does `--workspace --exclude`.
-function hookParityRows({ scope, byName, unified, model, maxTestRows, nextestText, hook, libRowRunner, productOf = () => "core", productStack = () => null, excluded = new Set() }) {
+// The hook-parity rows for the test scope (see the header). Every Core row
+// but HeadCanonical selects Core's whole workspace (`--workspace` and an
+// `--exclude` for every other product's package, the hook's own selection)
+// and names only its own targets: Cargo then resolves features exactly as
+// the hook's single build does, and builds only those targets' graphs, so a
+// row's compilation units are the hook's own. Measured with cargo's unit
+// graph on b45c8e60 (Core alone): `--workspace --test ...` rows 472/472 and
+// 380/380 units identical to the hook's, `--workspace --lib` 572/572;
+// package-scoped rows differed in 31-39 units (dependency features). A
+// product's rows select exactly that product's packages (`-p` each), its own
+// workspace's resolution. `laneFeatures` holds each member's features under
+// its own product's selection; `selections` the selections' flags.
+function hookParityRows({ scope, byName, laneFeatures, selections, model, maxTestRows, nextestText, hook, libRowRunner, productOf = () => "core", productStack = () => null, excluded = new Set() }) {
   const rows = [];
+  const flagsOf = (product) => {
+    const selection = selections.selections.get(product);
+    if (!selection) throw new Error(`no lane selection for product ${product}`);
+    return selection.flags;
+  };
   const testTargets = (name) =>
     byName.get(name).targets.filter((target) => target.kind.length === 1 && target.kind[0] === "test");
   const hookBuilt = (name, target) =>
-    target.test !== false && (target["required-features"] ?? []).every((feature) => unified.get(name).has(feature));
+    target.test !== false && (target["required-features"] ?? []).every((feature) => laneFeatures.get(name)?.has(feature));
   const hasLib = (name) =>
     byName.get(name).targets.some((target) => target.test !== false && target.kind.some((kind) => LIB_TARGET_KINDS.has(kind)));
 
   // Lib tests: one row, on the runner that can build it in time (none
-  // given: the plan leaves the kind(lib) lane to the unit lanes). `--workspace --lib` builds
-  // every member's lib test; no stable selection builds fewer under the
-  // same resolution, so the scope narrows what runs, not what builds. The
-  // filter keeps the hook's own kind(lib) (proc-macro crates' tests are not
-  // in it) and the scope's packages.
-  const libPackages = libRowRunner ? scope.filter(hasLib) : [];
+  // given: the plan leaves the kind(lib) lane to the unit lanes). Core's
+  // `--workspace --lib` builds every Core member's lib test; no stable
+  // selection builds fewer under the same resolution, so the scope narrows
+  // what runs, not what builds. The filter keeps the hook's own kind(lib)
+  // (proc-macro crates' tests are not in it) and the scope's packages. The
+  // products' lib tests run in the main unit lane's product rows.
+  const libPackages = libRowRunner ? scope.filter((name) => productOf(name) === "core" && hasLib(name)) : [];
   if (libPackages.length > 0) {
-    const everyLib = [...byName.keys()].filter(hasLib);
+    const everyLib = [...byName.keys()].filter((name) => productOf(name) === "core" && hasLib(name));
     const filter = libPackages.length === everyLib.length
       ? "kind(lib)"
       : `kind(lib) & (${libPackages.map((name) => `package(${name})`).join(" | ")})`;
@@ -1827,7 +1842,7 @@ function hookParityRows({ scope, byName, unified, model, maxTestRows, nextestTex
       product: "core",
       runner: libRowRunner,
       packages: libPackages,
-      package_flags: "--workspace",
+      package_flags: flagsOf("core"),
       test_flags: "--lib",
       profile: CLOSURE_LIB_PROFILE,
       filter,
@@ -1940,7 +1955,7 @@ function hookParityRows({ scope, byName, unified, model, maxTestRows, nextestTex
       lane: "tests",
       product: bin.product,
       packages,
-      package_flags: "--workspace",
+      package_flags: flagsOf(bin.product),
       test_flags: tests.map((test) => `--test ${test}`).join(" "),
       profile: CLOSURE_TEST_PROFILE,
       binaries,
@@ -1964,7 +1979,7 @@ function hookParityRows({ scope, byName, unified, model, maxTestRows, nextestTex
         lane: "tests",
         product: productOf(canaryRows.owner),
         packages,
-        package_flags: "--workspace",
+        package_flags: flagsOf(productOf(canaryRows.owner)),
         test_flags: `--test ${canaryRows.test}`,
         profile: CLOSURE_TEST_PROFILE,
         binaries,
@@ -2010,7 +2025,7 @@ function hookParityRows({ scope, byName, unified, model, maxTestRows, nextestTex
       lane: "e2e-fast",
       product: productOf(e2eOwners[0]),
       packages: [e2eOwners[0]],
-      package_flags: "--workspace",
+      package_flags: flagsOf(productOf(e2eOwners[0])),
       test_flags: `--test ${hook.e2eFast.binary}`,
       profile: CLOSURE_LIB_PROFILE,
       filter: `binary(${hook.e2eFast.binary})`,
@@ -2077,6 +2092,19 @@ function plan(args) {
   const products = loadProducts();
   const productOf = new Map(packages.map((pkg) => [pkg.name, productOfPath(packageDir(pkg), products)]));
   const productPackages = (product) => allNames.filter((name) => productOf.get(name) === product);
+  // The lane selections (scripts/ci-hook-coverage.mjs laneSelections): Core's
+  // whole-workspace rows select `--workspace` with an `--exclude` for every
+  // other product's package, each product's rows `-p` each of its packages,
+  // and each member is compiled with the features of its own product's
+  // selection. A bare cargo command and the workspace aliases build the
+  // default members, so they must be exactly Core's.
+  const selections = laneSelections(metadata, { products });
+  const defaultsProblem = defaultMembersProblem(metadata, selections.byProduct);
+  if (defaultsProblem) throw new Error(defaultsProblem);
+  const laneFeatures = new Map();
+  for (const selection of selections.selections.values()) {
+    for (const [name, features] of selection.features) laneFeatures.set(name, features);
+  }
   // Names grouped by product, Core first, then the registry's order.
   const byProduct = (names) =>
     products
@@ -2709,7 +2737,13 @@ function plan(args) {
     .filter((suite) => !result.integration_suites.includes(suite))
     .map((suite) => suite.name);
 
-  result.closure_flags = result.closure.map((name) => `-p ${name}`).join(" ");
+  // The closure check compiles each product's part of the closure in an
+  // invocation of its own (` ; ` separates them, Core's first): one cargo
+  // invocation unifies features across its packages, and a product's feature
+  // requests must not change what Core's crates compile.
+  result.closure_flags = byProduct(result.closure)
+    .map(([, names]) => names.map((name) => `-p ${name}`).join(" "))
+    .join(" ; ");
   result.closure_beyond_packages = result.closure.filter((name) => !result.packages.includes(name));
   // The compile-only checks of the closure, and the two exact-profile lanes
   // (governed JSONL compiles meerkat-rpc's lib test, the confinement lane
@@ -2759,9 +2793,8 @@ function plan(args) {
   // What the rustdoc lane documents: Core's members (every workspace member
   // but the products') when the plan reaches Core, the changed products'
   // packages otherwise. Products keep their own rustdoc rules.
-  const productNamesInWorkspace = allNames.filter((name) => productOf.get(name) !== CORE);
   result.rustdoc_flags = result.core_changed
-    ? ["--workspace", ...productNamesInWorkspace.map((name) => `--exclude ${name}`)].join(" ")
+    ? selections.selections.get(CORE).flags
     : result.packages.map((name) => `-p ${name}`).join(" ");
   result.governed_jsonl = guardRuns("governed_jsonl");
   result.mcp_confinement_positive = guardRuns("mcp_confinement_positive");
@@ -2803,7 +2836,7 @@ function plan(args) {
     deferToPush,
     deferred,
     compiledInDocs,
-    unified: workspaceFeatures(metadata, packages),
+    unified: laneFeatures,
     canary: canaryGroup(nextestText),
   });
   // A product's published-floor check runs when its own packages changed
@@ -2843,7 +2876,8 @@ function plan(args) {
     ? hookParityRows({
       scope: result.test_scope,
       byName,
-      unified: workspaceFeatures(metadata, packages),
+      laneFeatures,
+      selections,
       model,
       maxTestRows: args.closureTestRows,
       nextestText,
@@ -2855,7 +2889,7 @@ function plan(args) {
     })
     : [];
   // A pull-request plan is checked against the rows its push runs.
-  const coverage = checkHookCoverage({ ...result, closure_test_rows: rows }, { metadata, nextestText, hookText });
+  const coverage = checkHookCoverage({ ...result, closure_test_rows: rows }, { metadata, nextestText, hookText, products });
   result.closure_test_rows = deferToPush ? [] : rows;
   deferred.closure_test_rows = rows.length - result.closure_test_rows.length;
   result.deferred_to_push = deferToPush ? deferred : null;
@@ -2863,6 +2897,7 @@ function plan(args) {
     scope_packages: coverage.scope_packages,
     hook_binaries: coverage.hook_binaries,
     hook_retained: coverage.hook_retained,
+    product_binaries: coverage.product_binaries,
     by_lane: coverage.by_lane,
     missing: coverage.missing,
     errors: coverage.errors,

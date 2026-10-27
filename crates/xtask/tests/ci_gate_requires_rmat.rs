@@ -636,9 +636,11 @@ fn cargo_diagnostic_workflow_preserves_the_full_gate_set() {
     // Unit and integration execution jobs consume portable Nextest archives
     // built once per compatible Cargo profile. The archive contract self-test
     // pins the complete build scopes and fail-closed partitions; clippy covers
-    // the whole workspace with all features (test-target lints run nightly).
+    // Core's members (the other products' packages excluded) with all
+    // features (test-target lints run nightly).
     for lane in [
-        "clippy --workspace --all-features",
+        "core_selection=\"$(node scripts/core-workspace-args.mjs)\"",
+        "clippy \"${core_workspace[@]}\" --all-features",
         "uses: ./.github/actions/build-nextest-archive",
         "uses: ./.github/actions/run-nextest-archive",
         "family: unit",

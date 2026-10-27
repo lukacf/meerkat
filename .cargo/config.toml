@@ -27,10 +27,16 @@ xtask = "run -p xtask --features machine-authority --"
 
 # Fast test suite (unit + integration-fast, skips doctests). Dedicated e2e
 # lane binaries stay behind their explicit aliases below.
+#
+# The workspace aliases name no package selection: Cargo then builds the
+# workspace's default members, which are Core's (Cargo.toml default-members;
+# the CI planner and scripts/core-workspace-args.mjs refuse a workspace whose
+# default members are not exactly Core's members). `--workspace` would add the
+# other products' packages and their feature requests on Core's crates; their
+# own lanes test them.
 fast = [
   "nextest",
   "run",
-  "--workspace",
   "--profile",
   "fast",
   "--show-progress",
@@ -43,7 +49,6 @@ fast = [
 rct = [
   "nextest",
   "run",
-  "--workspace",
   "--profile",
   "fast",
   "--show-progress",
@@ -55,7 +60,7 @@ rct = [
 ]
 
 # Unit tests only (no integration tests, skips doctests)
-unit = "nextest run --workspace --lib --show-progress none --status-level none --final-status-level fail"
+unit = "nextest run --lib --show-progress none --status-level none --final-status-level fail"
 
 # Integration-fast tests only (ignored tests are not run). Exclude the
 # dedicated e2e lane wrapper binaries; they have their own CI jobs and are not
@@ -63,7 +68,6 @@ unit = "nextest run --workspace --lib --show-progress none --status-level none -
 int = [
   "nextest",
   "run",
-  "--workspace",
   "--tests",
   "--profile",
   "fast",

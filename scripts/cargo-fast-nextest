@@ -4,8 +4,16 @@ set -euo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_cargo="${script_dir}/repo-cargo"
 
+# Core's members only: `--workspace` and an `--exclude` for every package of
+# the other products (scripts/core-workspace-args.mjs).
+core_selection="$(CARGO="${repo_cargo}" node "${script_dir}/core-workspace-args.mjs")" || {
+  echo "cargo-fast-nextest: cannot derive Core's package selection" >&2
+  exit 1
+}
+mapfile -t core_workspace <<<"${core_selection}"
+
 exec "${repo_cargo}" nextest run \
-  --workspace \
+  "${core_workspace[@]}" \
   --profile fast \
   --show-progress none \
   --status-level none \

@@ -9,6 +9,13 @@ XTASK_TREE_KEY := $(shell printf '%s' "$(CURDIR)" | shasum | cut -c1-12)
 XTASK_TARGET_DIR ?= /tmp/meerkat-xtask-target-$(XTASK_TREE_KEY)
 XTASK_BIN := $(XTASK_TARGET_DIR)/debug/xtask
 CARGO ?= ./scripts/repo-cargo
+# Core's whole-workspace lanes select Core's members only: `--workspace` and an
+# `--exclude` for every package of the other products (Meta, Connect), derived
+# on each use by scripts/core-workspace-args.mjs from ci/products.json and cargo
+# metadata. Cargo unifies features across the packages of one invocation, so a
+# bare `--workspace` would compile Core's crates with the products' features.
+# Each product's own lanes select its packages (`--product NAME`).
+CORE_WORKSPACE = $(shell node scripts/core-workspace-args.mjs)
 # Python >= 3.11 for the repo's scripts and SDK tooling (tomllib,
 # hashlib.file_digest). scripts/require-python prefers python3.13..3.11 over a
 # PATH python3 (macOS can put Apple's 3.9 first). If none qualifies, any target
@@ -44,7 +51,7 @@ build:
 # Build release version
 release:
 	@echo "$(GREEN)Building release version...$(NC)"
-	$(CARGO) build --workspace --release
+	$(CARGO) build $(CORE_WORKSPACE) --release
 
 # Fast test suite (unit + integration-fast, skips doctests and ignored)
 test:
@@ -661,7 +668,7 @@ audit-generated-headers:
 # Generate documentation
 doc:
 	@echo "$(GREEN)Generating documentation...$(NC)"
-	$(CARGO) doc --workspace --no-deps --all-features
+	$(CARGO) doc $(CORE_WORKSPACE) --no-deps --all-features
 
 docs-check:
 	@echo "$(GREEN)Checking Mintlify docs...$(NC)"
@@ -684,12 +691,12 @@ docs-sync-mobkit:
 # Open documentation in browser
 doc-open:
 	@echo "$(GREEN)Opening documentation...$(NC)"
-	$(CARGO) doc --workspace --no-deps --all-features --open
+	$(CARGO) doc $(CORE_WORKSPACE) --no-deps --all-features --open
 
 # Test coverage using cargo-tarpaulin
 coverage:
 	@echo "$(GREEN)Generating test coverage...$(NC)"
-	$(CARGO) tarpaulin --workspace --all-features --timeout 120 --out Html
+	$(CARGO) tarpaulin $(CORE_WORKSPACE) --all-features --timeout 120 --out Html
 
 # Clean build artifacts
 clean:
@@ -734,7 +741,7 @@ outdated:
 # Run benchmarks (if you have benches/)
 bench:
 	@echo "$(GREEN)Running benchmarks...$(NC)"
-	$(CARGO) bench --workspace
+	$(CARGO) bench $(CORE_WORKSPACE)
 
 # ── Version parity & release targets ────────────────────────────────────────
 

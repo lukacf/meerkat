@@ -17,6 +17,7 @@ import {
   checkHookCoverage,
   hookModel,
   featureClosure,
+  laneSelections,
   parseFilter,
   profileFilter,
   workspaceFeatures,
@@ -47,6 +48,11 @@ import { readMetadata, workspacePackages } from "./rust-test-selector.mjs";
 import { CORE, loadProducts } from "./ci-products.mjs";
 
 const PRODUCTS = loadProducts();
+// The lane selections the plan's rows must use: Core's (`--workspace` and an
+// `--exclude` for every other product's package) and each product's (`-p`
+// each of its packages).
+const SELECTIONS = laneSelections(readMetadata(), { products: PRODUCTS });
+const selectionFlags = (product) => SELECTIONS.selections.get(product).flags;
 import { durationsOf, rowOf } from "./ci-row-durations.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -418,10 +424,13 @@ function assertHookParity(plan, label) {
     for (const feature of row.package_flags.match(/--features (\S+)/)?.[1]?.split(",") ?? []) {
       assert.match(feature, /^[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+$/, `${label}: ${row.name} names each feature's package`);
     }
-    // Every row but HeadCanonical selects the whole workspace, so Cargo
-    // resolves features exactly as the hook's workspace build does.
+    // Every Core row but HeadCanonical selects Core's whole workspace (the
+    // hook's own selection), so Cargo resolves features exactly as the
+    // hook's build does; a product's row selects exactly that product's
+    // packages. No row selects the bare workspace (it would mix products).
+    assert.notEqual(row.package_flags.trim(), "--workspace", `${label}: ${row.name} mixes the products`);
     if (row.lane !== "headcanonical") {
-      assert.equal(row.package_flags, "--workspace", `${label}: ${row.name} selects the whole workspace`);
+      assert.equal(row.package_flags, selectionFlags(row.product), `${label}: ${row.name} selects its product's lane selection`);
     }
     if (row.lane === "lib") {
       assert.equal(row.test_flags, "--lib", `${label}: ${row.name} runs lib tests`);
@@ -642,7 +651,7 @@ function assertArchivedLanes(plan, label) {
   assert.deepEqual(canaryRows.map((row) => row.partition), ["count:1/3", "count:2/3", "count:3/3"], "one count partition per canary");
   for (const row of canaryRows) {
     assert.deepEqual(row.binaries, [`meerkat::${canaryTest}`]);
-    assert.equal(row.package_flags, "--workspace", "a canary row is a whole-workspace row");
+    assert.equal(row.package_flags, selectionFlags(CORE), "a canary row is a row over Core's whole workspace");
     assert.equal(row.no_tests, "fail", "an empty canary partition fails");
   }
   assert.ok(
@@ -2567,9 +2576,9 @@ for (const path of [
 }
 
 // Hook parity: workspace-unified features. meerkat-mcp's form_elicitation
-// and lifecycle_contract require test-support, which only the workspace's
-// feature unification enables (a package-scoped build has none), so their
-// row must carry it. Without a lib-row runner the lib tests of the scope run
+// and lifecycle_contract require test-support, which only the feature
+// unification of Core's whole workspace enables (a package-scoped build has
+// none), so their row must carry it. Without a lib-row runner the lib tests of the scope run
 // in the push-to-main unit lanes (and nightly under the workspace feature
 // set); with one, in the push's lib row.
 {
@@ -2578,7 +2587,7 @@ for (const path of [
   const row = plan.closure_test_rows.find((candidate) => candidate.binaries.includes("meerkat-mcp::form_elicitation"));
   assert.ok(row, "a row runs meerkat-mcp's form_elicitation");
   assert.ok(row.binaries.includes("meerkat-mcp::lifecycle_contract"), "and lifecycle_contract");
-  assert.equal(row.package_flags, "--workspace", "under the workspace's resolution, which enables test-support");
+  assert.equal(row.package_flags, selectionFlags(CORE), "under Core's whole-workspace resolution, which enables test-support");
   assert.equal(
     checkHookCoverage(plan).map["meerkat-mob::lib::meerkat_mob"],
     "unit lanes (main, nightly): workspace unit lane",
@@ -2614,7 +2623,7 @@ for (const path of [
     no_tests: "fail",
   });
   assert.deepEqual(pick("e2e-fast"), {
-    packages: "--workspace",
+    packages: selectionFlags(CORE),
     tests: "--test e2e_fast_lane",
     profile: "ci-unit",
     filter: "binary(e2e_fast_lane)",

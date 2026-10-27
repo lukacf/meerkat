@@ -82,15 +82,22 @@ EOF
 
 chmod +x "$FAKE_CARGO" "$FAKE_NEXTEST"
 # The workspace's mcp-test-server dev-dependents (meerkat, meerkat-mcp,
-# meerkat-rpc, meerkat-integration-tests) and two packages without one.
+# meerkat-rpc, meerkat-integration-tests), two Core packages without one, and
+# one package of another product (under ci/products.json's meta root), which
+# the families over Core's whole workspace exclude
+# (scripts/core-workspace-args.mjs).
 cat >"$FAKE_METADATA" <<'EOF'
-{"packages": [
-  {"name": "meerkat", "dependencies": [{"name": "mcp-test-server", "kind": "dev"}]},
-  {"name": "meerkat-mcp", "dependencies": [{"name": "mcp-test-server", "kind": "dev"}]},
-  {"name": "meerkat-rpc", "dependencies": [{"name": "mcp-test-server", "kind": "dev"}]},
-  {"name": "meerkat-integration-tests", "dependencies": [{"name": "mcp-test-server", "kind": "dev"}]},
-  {"name": "meerkat-mob", "dependencies": []},
-  {"name": "mcp-test-server", "dependencies": []}
+{"workspace_root": "/ws",
+ "workspace_members": ["meerkat", "meerkat-mcp", "meerkat-rpc", "meerkat-integration-tests", "meerkat-mob", "mcp-test-server", "meerkat-meta"],
+ "workspace_default_members": ["meerkat", "meerkat-mcp", "meerkat-rpc", "meerkat-integration-tests", "meerkat-mob", "mcp-test-server"],
+ "packages": [
+  {"id": "meerkat", "name": "meerkat", "manifest_path": "/ws/crates/meerkat/Cargo.toml", "dependencies": [{"name": "mcp-test-server", "kind": "dev"}]},
+  {"id": "meerkat-mcp", "name": "meerkat-mcp", "manifest_path": "/ws/crates/meerkat-mcp/Cargo.toml", "dependencies": [{"name": "mcp-test-server", "kind": "dev"}]},
+  {"id": "meerkat-rpc", "name": "meerkat-rpc", "manifest_path": "/ws/crates/meerkat-rpc/Cargo.toml", "dependencies": [{"name": "mcp-test-server", "kind": "dev"}]},
+  {"id": "meerkat-integration-tests", "name": "meerkat-integration-tests", "manifest_path": "/ws/tests/integration/Cargo.toml", "dependencies": [{"name": "mcp-test-server", "kind": "dev"}]},
+  {"id": "meerkat-mob", "name": "meerkat-mob", "manifest_path": "/ws/crates/meerkat-mob/Cargo.toml", "dependencies": []},
+  {"id": "mcp-test-server", "name": "mcp-test-server", "manifest_path": "/ws/tests/fixtures/mcp-test-server/Cargo.toml", "dependencies": []},
+  {"id": "meerkat-meta", "name": "meerkat-meta", "manifest_path": "/ws/meta/crates/meerkat-meta/Cargo.toml", "dependencies": []}
 ]}
 EOF
 printf '#!/bin/sh\nexit 0\n' >"$FAKE_FIXTURE_BINARY"
@@ -126,16 +133,18 @@ assert_line_contains() {
   fi
 }
 
-assert_line_contains 'cargo <nextest> <archive> <--workspace> <--lib>'
+assert_line_contains 'cargo <nextest> <archive> <--workspace> <--exclude> <meerkat-meta> <--lib>'
 assert_line_contains 'cargo <nextest> <archive> <-p> <meerkat-integration-tests> <--tests> <--profile> <fast>'
 assert_line_contains '<-p> <meerkat-mob> <-p> <meerkat-mob-adaptive>'
-assert_line_contains '<--workspace> <--exclude> <meerkat-integration-tests> <--exclude> <meerkat-mob>'
+assert_line_contains '<--workspace> <--exclude> <meerkat-meta> <--exclude> <meerkat-integration-tests> <--exclude> <meerkat-mob>'
 
-# Per family, in order: the fixture check, then the fixture build when a
-# selected package dev-depends on mcp-test-server (so the binary rides in the
-# archive), then the archive. unit-mob and int-mob select no such package.
+# Per family, in order: Core's package selection for the families over
+# Core's whole workspace (unit, int-everything-else), the fixture check, then
+# the fixture build when a selected package dev-depends on mcp-test-server (so
+# the binary rides in the archive), then the archive. unit-mob and int-mob
+# select no such package.
 cargo_sequence="$(sed -n 's/^cargo <\([^>]*\)>.*/\1/p' "$LOG" | tr '\n' ' ')"
-expected_cargo_sequence='metadata build nextest metadata nextest metadata build nextest metadata nextest metadata build nextest '
+expected_cargo_sequence='metadata metadata build nextest metadata nextest metadata build nextest metadata nextest metadata metadata build nextest '
 [[ "$cargo_sequence" == "$expected_cargo_sequence" ]] || {
   echo "archive builds did not check and build the mcp-test-server fixture before archiving" >&2
   echo "  expected cargo calls: ${expected_cargo_sequence}" >&2
@@ -143,12 +152,13 @@ expected_cargo_sequence='metadata build nextest metadata nextest metadata build 
   exit 1
 }
 # A fixture check that cannot read the package graph stops the archive build;
-# it must never be taken for "no package needs the fixture".
+# it must never be taken for "no package needs the fixture". (int-heavy: its
+# fixture check is the build's first package-graph read.)
 for metadata_mode in fail invalid; do
   metadata_archive="${TEST_ROOT}/metadata-${metadata_mode}.tar.zst"
   if COMMAND_LOG="${TEST_ROOT}/metadata-${metadata_mode}.log" \
     FAKE_CARGO_METADATA="$metadata_mode" \
-    "$ROOT/scripts/ci-nextest-archive.sh" build unit "$metadata_archive" \
+    "$ROOT/scripts/ci-nextest-archive.sh" build int-heavy "$metadata_archive" \
     >"${TEST_ROOT}/metadata-${metadata_mode}.out" 2>&1; then
     echo "archive build ignored a failed mcp-test-server fixture check (cargo metadata: ${metadata_mode})" >&2
     cat "${TEST_ROOT}/metadata-${metadata_mode}.out" >&2
@@ -158,6 +168,26 @@ for metadata_mode in fail invalid; do
     [[ -e "$metadata_archive" ]]; then
     echo "archive build did not stop at the failed fixture check (cargo metadata: ${metadata_mode})" >&2
     cat "${TEST_ROOT}/metadata-${metadata_mode}.out" >&2
+    exit 1
+  fi
+done
+
+# Neither may Core's package selection: an unreadable package graph stops a
+# build over Core's whole workspace instead of selecting every product.
+for metadata_mode in fail invalid; do
+  selection_archive="${TEST_ROOT}/selection-${metadata_mode}.tar.zst"
+  if COMMAND_LOG="${TEST_ROOT}/selection-${metadata_mode}.log" \
+    FAKE_CARGO_METADATA="$metadata_mode" \
+    "$ROOT/scripts/ci-nextest-archive.sh" build unit "$selection_archive" \
+    >"${TEST_ROOT}/selection-${metadata_mode}.out" 2>&1; then
+    echo "archive build ignored an unreadable package graph for Core's selection (cargo metadata: ${metadata_mode})" >&2
+    cat "${TEST_ROOT}/selection-${metadata_mode}.out" >&2
+    exit 1
+  fi
+  if ! grep -Fq "cannot derive Core's package selection" "${TEST_ROOT}/selection-${metadata_mode}.out" ||
+    [[ -e "$selection_archive" ]]; then
+    echo "archive build did not stop at Core's package selection (cargo metadata: ${metadata_mode})" >&2
+    cat "${TEST_ROOT}/selection-${metadata_mode}.out" >&2
     exit 1
   fi
 done
@@ -575,12 +605,28 @@ else_job="$(sed -n '/^  int-else:$/,/^  int-rest:$/p' "$WORKFLOW")"
   exit 1
 }
 
-# Prints every line of a tracked or untracked (not ignored) *.rs file that
-# contains the literal $1. Git, not ripgrep: Git is on every machine that runs
-# this hook, and a user ripgrep config cannot change the result.
+# The archived lanes run Core's tests only (every family over Core's whole
+# workspace excludes the other products' packages), so the scans below read
+# Core's tree: each product root of ci/products.json is left out.
+product_roots="$(cd "$ROOT" && node --input-type=module -e '
+import { loadProducts, productRootPrefixes } from "./scripts/ci-products.mjs";
+for (const prefix of productRootPrefixes(loadProducts())) console.log(prefix.replace(/\/$/, ""));
+')" || {
+  echo "error: cannot read the product roots of ci/products.json" >&2
+  exit 1
+}
+product_root_pathspecs=()
+while IFS= read -r product_root; do
+  [[ -n "$product_root" ]] && product_root_pathspecs+=(":(exclude)${product_root}")
+done <<<"$product_roots"
+
+# Prints every line of a tracked or untracked (not ignored) *.rs file of
+# Core's tree that contains the literal $1. Git, not ripgrep: Git is on every
+# machine that runs this hook, and a user ripgrep config cannot change the
+# result.
 rust_source_lines() {
   local matches status=0
-  matches="$(git -C "$ROOT" grep --untracked -n -F -e "$1" -- '*.rs')" || status=$?
+  matches="$(git -C "$ROOT" grep --untracked -n -F -e "$1" -- '*.rs' "${product_root_pathspecs[@]}")" || status=$?
   case "$status" in
     0) printf '%s\n' "$matches" ;;
     1) ;;

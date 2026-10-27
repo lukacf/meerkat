@@ -37,6 +37,21 @@ source "${root}/scripts/build-backend-env"
 
 cargo_bin="${CARGO:-${root}/scripts/repo-cargo}"
 
+# Core's whole-workspace lanes select Core's members only: `--workspace` and an
+# `--exclude` for every package of the other products, derived by
+# scripts/core-workspace-args.mjs (ci/products.json and cargo metadata).
+# Cargo unifies features across the packages of one invocation, so a bare
+# `--workspace` would compile Core's crates with the products' features.
+core_workspace=()
+load_core_workspace() {
+  local selection
+  selection="$(CARGO="${cargo_bin}" node "${root}/scripts/core-workspace-args.mjs")" || {
+    echo "run-build-backend-lane: cannot derive Core's package selection" >&2
+    exit 1
+  }
+  mapfile -t core_workspace <<<"${selection}"
+}
+
 # The workspace-wide verified floor of .cargo/config.toml, the stack the
 # pre-push hook's lanes run on.
 use_standard_rust_test_stack() {
@@ -186,19 +201,22 @@ case "${lane}" in
     if meerkat_buildbuddy_enabled; then
       exec "${root}/scripts/buildbuddy-dev" build
     fi
-    exec "${cargo_bin}" build --workspace
+    load_core_workspace
+    exec "${cargo_bin}" build "${core_workspace[@]}"
     ;;
   check)
     if meerkat_buildbuddy_enabled; then
       exec "${root}/scripts/buildbuddy-dev" check
     fi
-    exec "${cargo_bin}" check --workspace --all-targets --all-features
+    load_core_workspace
+    exec "${cargo_bin}" check "${core_workspace[@]}" --all-targets --all-features
     ;;
   lint)
     if meerkat_buildbuddy_enabled; then
       exec "${root}/scripts/buildbuddy-dev" clippy
     fi
-    exec "${cargo_bin}" clippy --workspace --all-targets --all-features -- -D warnings
+    load_core_workspace
+    exec "${cargo_bin}" clippy "${core_workspace[@]}" --all-targets --all-features -- -D warnings
     ;;
   test)
     if meerkat_buildbuddy_enabled; then
@@ -208,11 +226,11 @@ case "${lane}" in
     export_mcp_test_server_fixture
     # Cargo's worktree+parent config-merge concatenates list-form aliases
     # (the workspace's `fast`/`int`/`rct` aliases live as TOML arrays at
-    # both the worktree and the main checkout's `.cargo/config.toml`),
-    # which duplicates `--workspace` and trips clap's "cannot be used
-    # multiple times" guard. Expand the alias inline until the upstream
-    # aliases are normalized to string form on `main`.
-    "${cargo_bin}" nextest run --workspace --profile fast --show-progress none --status-level none --final-status-level fail
+    # both the worktree and the main checkout's `.cargo/config.toml`), which
+    # duplicated their arguments and tripped clap's "cannot be used multiple
+    # times" guard. Expand the alias inline, with Core's selection.
+    load_core_workspace
+    "${cargo_bin}" nextest run "${core_workspace[@]}" --profile fast --show-progress none --status-level none --final-status-level fail
     run_head_canonical_kill_window
     exec "${cargo_bin}" test -p meerkat-session --features session-store projection_continuity -- --quiet
     ;;
@@ -222,7 +240,8 @@ case "${lane}" in
     fi
     use_gpt_live_test_stack
     export_mcp_test_server_fixture
-    exec "${cargo_bin}" nextest run --workspace --profile fast --show-progress none --status-level none --final-status-level fail --all-features
+    load_core_workspace
+    exec "${cargo_bin}" nextest run "${core_workspace[@]}" --profile fast --show-progress none --status-level none --final-status-level fail --all-features
     ;;
   test-unit)
     if meerkat_buildbuddy_enabled; then
@@ -230,7 +249,8 @@ case "${lane}" in
     fi
     use_standard_rust_test_stack
     export_mcp_test_server_fixture
-    exec "${cargo_bin}" nextest run --workspace --lib --show-progress none --status-level none --final-status-level fail
+    load_core_workspace
+    exec "${cargo_bin}" nextest run "${core_workspace[@]}" --lib --show-progress none --status-level none --final-status-level fail
     ;;
   test-int)
     if meerkat_buildbuddy_enabled; then
@@ -238,7 +258,8 @@ case "${lane}" in
     fi
     use_standard_rust_test_stack
     export_mcp_test_server_fixture
-    "${cargo_bin}" nextest run --workspace --tests --profile fast --show-progress none --status-level none --final-status-level fail
+    load_core_workspace
+    "${cargo_bin}" nextest run "${core_workspace[@]}" --tests --profile fast --show-progress none --status-level none --final-status-level fail
     run_head_canonical_kill_window
     ;;
   e2e-fast)

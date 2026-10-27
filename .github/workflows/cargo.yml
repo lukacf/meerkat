@@ -311,8 +311,16 @@ jobs:
         with:
           shared-key: ci-clippy
 
+      # Core's members only: `--workspace` and an `--exclude` for every
+      # package of the other products (scripts/core-workspace-args.mjs), so
+      # Core's crates are linted with Core's own feature resolution.
       - name: Clippy (lib/bin targets; --all-targets runs nightly)
-        run: ./scripts/repo-cargo clippy --workspace --all-features -- -D warnings
+        shell: bash
+        run: |
+          set -euo pipefail
+          core_selection="$(node scripts/core-workspace-args.mjs)"
+          mapfile -t core_workspace <<<"${core_selection}"
+          ./scripts/repo-cargo clippy "${core_workspace[@]}" --all-features -- -D warnings
 
   unit-archive:
     name: Build unit-test archive

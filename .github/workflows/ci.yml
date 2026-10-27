@@ -2192,8 +2192,14 @@ jobs:
           if [[ "${CLOSURE_CHECK_TARGETS}" == "all" ]]; then
             targets+=(--all-targets)
           fi
-          # shellcheck disable=SC2086
-          ./scripts/repo-cargo check ${CLOSURE} "${targets[@]}" --all-features
+          # One invocation per product's part of the closure (` ; ` between
+          # them): Cargo unifies features across the packages of one
+          # invocation, and the products' requests must not reach Core's.
+          IFS=';' read -r -a groups <<<"${CLOSURE}"
+          for group in "${groups[@]}"; do
+            # shellcheck disable=SC2086
+            ./scripts/repo-cargo check ${group} "${targets[@]}" --all-features
+          done
 
       - name: Upload sccache server log
         if: ${{ always() }}

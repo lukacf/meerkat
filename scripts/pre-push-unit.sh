@@ -328,8 +328,23 @@ write_cargo_metadata() {
   "$CARGO" metadata --format-version 1 >"$workspace_cargo_metadata"
 }
 
+# Core's members only: `--workspace` and an `--exclude` for every package of
+# the other products (scripts/core-workspace-args.mjs, from ci/products.json
+# and cargo metadata). Cargo unifies features across the packages of one
+# invocation, so `--workspace` alone would build Core's tests with the
+# products' feature requests; the products' tests run in their own CI lanes.
+core_workspace=()
+load_core_workspace() {
+  local selection
+  selection="$(CARGO="$CARGO" node "$ROOT/scripts/core-workspace-args.mjs")" || {
+    echo "cannot derive Core's package selection (scripts/core-workspace-args.mjs)" >&2
+    return 1
+  }
+  mapfile -t core_workspace <<<"$selection"
+}
+
 build_workspace_inventory() {
-  "$CARGO" nextest list --workspace \
+  "$CARGO" nextest list "${core_workspace[@]}" \
     --list-type binaries-only --message-format json \
     -E 'kind(lib) or kind(test)' >"$workspace_binaries_metadata"
 }
@@ -342,6 +357,7 @@ build_headcanonical_inventory() {
 }
 
 write_cargo_metadata
+load_core_workspace
 # meerkat-mcp's form-elicitation integration tests spawn the exact
 # mcp-test-server binary named here (Bazel sets it from runfiles).
 MEERKAT_MCP_TEST_SERVER="$("$ROOT/scripts/mcp-test-server-fixture")"

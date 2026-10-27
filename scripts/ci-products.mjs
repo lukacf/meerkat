@@ -86,3 +86,61 @@ export function productOfPath(path, products) {
 export function productRootPrefixes(products) {
   return products.filter((product) => product.name !== CORE).map((product) => `${product.root}/`);
 }
+
+// The workspace's member packages by product: each member belongs to the
+// product whose root holds its manifest (cargo metadata, Core first).
+export function workspaceMembersByProduct(metadata, products) {
+  const members = new Set(metadata.workspace_members ?? []);
+  const workspaceRoot = String(metadata.workspace_root ?? "");
+  const byProduct = new Map(products.map((product) => [product.name, []]));
+  for (const pkg of metadata.packages ?? []) {
+    if (!members.has(pkg.id)) continue;
+    const manifestDir = String(pkg.manifest_path).replaceAll("\\", "/").replace(/\/Cargo\.toml$/, "");
+    const base = workspaceRoot.replaceAll("\\", "/").replace(/\/$/, "");
+    if (manifestDir !== base && !manifestDir.startsWith(`${base}/`)) {
+      throw new Error(`workspace member ${pkg.name} lies outside the workspace root ${base}`);
+    }
+    const relativeDir = manifestDir === base ? "" : manifestDir.slice(base.length + 1);
+    byProduct.get(productOfPath(relativeDir, products)).push(pkg.name);
+  }
+  for (const names of byProduct.values()) names.sort();
+  return byProduct;
+}
+
+// The cargo package selection of Core's whole-workspace lanes: `--workspace`
+// and an `--exclude` for every package of the other products. Cargo unifies
+// features across the packages of one invocation, so `--workspace` alone
+// would compile Core's crates with the features the products request of
+// them, and Core's lanes would no longer build what Core's own tests ran
+// against.
+export function coreWorkspaceArgs(byProduct) {
+  const excluded = [...byProduct]
+    .filter(([name]) => name !== CORE)
+    .flatMap(([, names]) => names)
+    .sort();
+  return ["--workspace", ...excluded.flatMap((name) => ["--exclude", name])];
+}
+
+// The cargo package selection of one product's own lanes: `-p` for each of
+// its packages, so they resolve together as they did in the product's own
+// workspace and no Core member's features join in.
+export function productPackageArgs(byProduct, product) {
+  const names = byProduct.get(product) ?? [];
+  if (names.length === 0) throw new Error(`product ${product} has no workspace member`);
+  return names.flatMap((name) => ["-p", name]);
+}
+
+// The workspace's default members must be exactly Core's members: a bare
+// cargo command, and the .cargo/config.toml aliases (which cannot run a
+// script to derive the selection), build them. Returns a description of the
+// difference, or null when they agree.
+export function defaultMembersProblem(metadata, byProduct) {
+  const names = new Map((metadata.packages ?? []).map((pkg) => [pkg.id, pkg.name]));
+  const defaults = (metadata.workspace_default_members ?? []).map((id) => names.get(id) ?? id).sort();
+  const core = [...(byProduct.get(CORE) ?? [])].sort();
+  const missing = core.filter((name) => !defaults.includes(name));
+  const extra = defaults.filter((name) => !core.includes(name));
+  if (missing.length === 0 && extra.length === 0) return null;
+  return `the workspace's default-members must be exactly Core's members (Cargo.toml [workspace] default-members): ` +
+    `missing ${missing.join(", ") || "none"}; not Core's ${extra.join(", ") || "none"}`;
+}

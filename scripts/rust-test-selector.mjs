@@ -114,6 +114,52 @@ export function readMetadata() {
   }
 }
 
+// The features each selected workspace member is compiled with by one cargo
+// invocation over `selectionArgs` (`--workspace --exclude NAME ...` or
+// `-p NAME ...`): Cargo resolves features per invocation, across the
+// selected members and their dependencies (dev-dependencies included, as a
+// test build has them), so the same member can get different features under
+// two selections. Read from `cargo tree`'s roots, which are the selected
+// members themselves (on the combined workspace, `cargo tree --workspace`'s
+// roots matched cargo metadata's resolve for all 62 members). Cached per
+// metadata fingerprint and selection.
+export function readSelectionFeatures(selectionArgs) {
+  const args = [...selectionArgs];
+  const cacheRoot = resolve(
+    process.env.XDG_CACHE_HOME || resolve(process.env.HOME || root, ".cache"),
+    "meerkat",
+    "rust-selector-features",
+  );
+  const key = createHash("sha256").update(metadataFingerprint()).update("\0").update(args.join("\0")).digest("hex");
+  const cachePath = resolve(cacheRoot, `${key}.json`);
+  try {
+    const cached = JSON.parse(readFileSync(cachePath, "utf8"));
+    return new Map(cached.map(([name, features]) => [name, new Set(features)]));
+  } catch {
+    // Compute below.
+  }
+  const output = execFileSync(
+    "./scripts/repo-cargo",
+    ["tree", ...args, "-e", "normal,build,dev", "--prefix", "depth", "--format", "{p}|{f}"],
+    { cwd: root, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] },
+  );
+  const features = new Map();
+  for (const line of output.split("\n")) {
+    if (!line.startsWith("0")) continue;
+    const bar = line.lastIndexOf("|");
+    if (bar < 0) throw new Error(`cargo tree printed a root without features: ${line}`);
+    const name = line.slice(1).split(" ", 1)[0];
+    const list = line.slice(bar + 1).replace(/ \(\*\)$/, "");
+    features.set(name, new Set(list.split(",").filter(Boolean)));
+  }
+  if (features.size === 0) throw new Error(`cargo tree ${args.join(" ")} printed no root`);
+  mkdirSync(cacheRoot, { recursive: true });
+  const tmpPath = resolve(cacheRoot, `${key}.${process.pid}.tmp`);
+  writeFileSync(tmpPath, JSON.stringify([...features].map(([name, set]) => [name, [...set].sort()])));
+  renameSync(tmpPath, cachePath);
+  return features;
+}
+
 export function workspacePackages(metadata) {
   const workspaceMembers = new Set(metadata.workspace_members);
   return metadata.packages.filter(

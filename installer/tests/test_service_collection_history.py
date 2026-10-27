@@ -2,6 +2,7 @@
 from dataclasses import replace
 import hashlib
 import importlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -178,3 +179,72 @@ def test_nonfinite_json_unsupported_argument_numbers_and_oversize_are_refused(sa
     monkeypatch.setattr("launchkit.service_collection_history.MAX_ARCHIVE_BYTES", 16)
     with pytest.raises(HistoryMismatch):
         match(sample)
+
+
+@pytest.mark.parametrize("mode", ["reobserve", "reobserve_partial"])
+def test_actual_sdk_wire_reports_reach_history_without_reconstruction(sdk, mode):
+    """Real SDK transport/parser to Forge; the peer and archive are synthetic.
+
+    Reuse the selected SDK's bounded wire peer and its original cleanup. This
+    does not create native observations or qualify the protected root launcher.
+    Archive bytes come from the peer's wire values, independently of the SDK's
+    parsed immutable report objects passed to the production matcher.
+    """
+    tests = Path(sdk.service_collection.__file__).resolve().parents[2] / "tests"
+    spec = importlib.util.spec_from_file_location("forge_history_wire", tests / "test_service_collection.py")
+    wire = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(wire)
+    resource = {"program": "ghe.pr_statuses.v1", "selector": {"number": 17}}
+    argument_hash = hashlib.sha256(b"{}").hexdigest()
+    replacements = {
+        "resource={'repository':'private-resource','nested':['selected']}": "resource=" + repr(resource),
+        "'arguments_sha256':'c'*64": "'arguments_sha256':" + repr(argument_hash),
+        "family='family',profile='default'": "family='official-github',profile='enterprise-selected-reads'",
+    }
+    for old, new in replacements.items():
+        assert wire.PEER.count(old) == 1, "Selected SDK wire fixture changed"
+        wire.PEER = wire.PEER.replace(old, new)
+    wire.PEER = wire.PEER.replace("'native-agent'", "'forge-ingestion'")
+    # Keep the original result, repeated-read identities and failure status.
+    # This additional peer file models only the native archive's JSON shape.
+    archive_writer = r'''
+ if mode=='reobserve':
+  context_names={'application':'application_id','instance':'instance_id','login_scope':'login_scope_id','viewer':'viewer_id','origin':'origin','realm':'realm','session':'session_id','job':'job_id','server':'server','agent':'agent'}
+  history={'source_id':r['source_id'],'requirement_id':row['required_operation_id'],'resource':resource,
+   'context':{key:native[name] for key,name in context_names.items()},
+   'collection':{'kind':'statuses','data':{'state':'failure','statuses':[]}},
+   'observations':[{'operation':c['raw_operation'],'arguments':{},'native':c['native'],
+    'payload':'original\nbody','structured_companion':None} for c in row['calls']]}
+  p.with_suffix('.archive').write_text(json.dumps({'schema':'forge.ghe.historical-data.v1',
+   'evidence_kind':'historical_data_only','native_instance_id':native['instance_id'],'rows':[history]}))
+ return r
+'''
+    assert wire.PEER.count(" return r\n") == 1, "Selected SDK wire fixture changed"
+    wire.PEER = wire.PEER.replace(" return r\n", archive_writer)
+    peer = wire.ServiceCollectionTransportTests()
+    peer.setUp()
+    try:
+        binding = replace(peer.binding, application_id="meerkat-forge")
+        client = peer.start(mode, binding=binding)
+        request = client.collect(job_id="native-job", source_id="opaque-a")
+        report = peer.completed(client, request).report
+        assert report is not None
+        close = client.close(3)
+        assert close.process_joined and close.exit_code == 0
+        path = peer.peer.with_suffix(".archive")
+        raw = path.read_bytes() if path.exists() else None
+        matched = match_history(raw, binding=binding, reports=(report,), close=close)
+        assert matched.reports[0] is report and matched.close is close
+        assert len(report.requirements[0].calls) == 2
+        if mode == "reobserve":
+            assert len(matched.rows[0]["observations"]) == 2
+            assert matched.rows[0]["collection"]["data"]["state"] == "failure"
+            assert matched.rows[0]["observations"][0]["payload"] == "original\nbody"
+        else:
+            assert report.status.value == "cancelled" and matched.rows == ()
+            assert matched.archive_sha256 is None
+            partial = report.requirements[0].calls[1].native
+            assert partial.input_id is not None and partial.run_id is None
+            assert not partial.native_terminal_committed
+    finally:
+        peer.tearDown()

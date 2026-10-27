@@ -77,6 +77,7 @@ import {
 } from "./wizard-state.mjs";
 import "./guided.css";
 import "./launch-design.css";
+import "./guide-journey.css";
 import "./first-experience.css";
 import "./first-turn.css";
 
@@ -257,11 +258,11 @@ export function SetupCurrentStatusAnchor({ progress, statusText, onNavigate, dis
 }
 
 /** Keep the saved question actionable without treating it as runtime progress. */
-export function SetupGuideQuestionHeading({ question, lifecycle = false, waiting = false }) {
+export function SetupGuideQuestionHeading({ question, lifecycle = false, waiting = false, current = false }) {
   const Heading = lifecycle ? "h2" : "h1";
   return <>
     {waiting ? <span className="setup-eyebrow">SAVED QUESTION</span>
-      : lifecycle && <span className="setup-eyebrow">DESIGN CONVERSATION</span>}
+      : (lifecycle || current) && <span className="setup-eyebrow">{lifecycle ? "DESIGN CONVERSATION" : "YOUR TURN"}</span>}
     <Heading>{question.title}</Heading>
     {waiting && <p>Your guide is responding. Choices are paused; you can keep writing below.</p>}
     {question.description && <p>{question.description}</p>}
@@ -2180,6 +2181,7 @@ export function GuidedSetup({
   const firstTurnWaiting = hasForgeOpeningContext(state, plan, { pending: !!manualNote }) && !loadingSetup &&
     !!(localSending || guideWaitBinding(state));
   const firstIdeaRunning = firstTurnWaiting && !!guideWaitBinding(state) && !guideStartupPresentation(state, timeline);
+  const journeyChat = !welcome && !opening && !firstTurnWaiting;
   const resumeSetup = welcome && !providerOpen && setupsRead === "ready"
     ? setups.find(setup => typeof setup?.id === "string" && setup.id.trim() && setup.id !== state.id) : null;
   const requirements = unresolvedRequirements(state, plan);
@@ -2300,7 +2302,7 @@ export function GuidedSetup({
   };
   return (
     <ForgeIllustrationMotionProvider><div
-      className={`setup-shell setup-mobile-${mobilePanel}${designConversationActive && !welcome && !firstTurnWaiting && !plan ? " setup-first-conversation" : ""}${welcome ? " setup-welcome" : ""}${firstTurnWaiting ? " setup-first-turn" : ""}${welcome && providerOpen ? " setup-welcome-provider" : ""}${composerFocused ? " setup-composer-focused" : ""}${draft ? " setup-has-draft" : ""}`}
+      className={`setup-shell setup-mobile-${mobilePanel}${journeyChat ? " setup-journey-active" : ""}${designConversationActive && !welcome && !firstTurnWaiting && !plan ? " setup-first-conversation" : ""}${welcome ? " setup-welcome" : ""}${firstTurnWaiting ? " setup-first-turn" : ""}${welcome && providerOpen ? " setup-welcome-provider" : ""}${composerFocused ? " setup-composer-focused" : ""}${draft ? " setup-has-draft" : ""}`}
       data-cc-theme="light"
     >
       <header className="setup-header" onKeyDown={(event) => {
@@ -2459,7 +2461,7 @@ export function GuidedSetup({
             <span>
               <i /> Your setup guide
             </span>
-            <SetupGuideStatusCaption lifecycle={!!primaryProgress} statusText={statusText} ready={ready} review={review} />
+            {!journeyChat && <SetupGuideStatusCaption lifecycle={!!primaryProgress} statusText={statusText} ready={ready} review={review} />}
             {(state.proposal || state.blueprint) && (
               <details className="setup-other-steps"><summary>Optional testing and tools</summary>
               <nav className="setup-stage-shortcuts" aria-label="Optional testing and tools">
@@ -2502,11 +2504,47 @@ export function GuidedSetup({
           </div>
           {timeline.authenticationRequired && !deploymentsOpen && <SignInRecovery key={state.id}
             className="setup-sign-in-anchor" onCheck={timeline.checkSignIn} />}
-          {!timeline.authenticationRequired && !busy && !error && !appError && !savedGuideFailure(state) &&
+          {!journeyChat && !timeline.authenticationRequired && !busy && !error && !appError && !savedGuideFailure(state) &&
             <SetupCurrentStatusAnchor progress={primaryProgress} statusText={statusText}
               disabled={blocked || loadingSetup || !active} onNavigate={navigateCurrentStatusAction} Icon={Icon}
               resume={guideResume} onResume={resumeGuide} />}
-          {narrow && <div className="setup-mobile-response">
+          {journeyChat && !timeline.authenticationRequired && <section className="setup-journey-now" aria-label="Current step">
+            <span className="setup-journey-label">NOW</span>
+            <div className="setup-journey-content">
+              <GuideWaitStatus state={loadingSetup ? null : state} snapshot={timeline}
+                submitting={localSending && busyAction !== "apply"} following={following} onFollow={() => revealResponse(true)} />
+              {(loadingSetup || busy && !guideWaitBinding(state) && !(localSending && busyAction !== "apply")) &&
+                <div className="setup-journey-summary"><strong>{loadingSetup ? "Opening saved conversation"
+                  : busyAction === "apply" ? "Saving your plan" : statusText}</strong></div>}
+              {!busy && !loadingSetup && !error && !appError && !savedGuideFailure(state) && primaryProgress &&
+                <SetupCurrentStatusAnchor progress={primaryProgress} statusText={statusText}
+                  disabled={blocked || loadingSetup || !active} onNavigate={navigateCurrentStatusAction} Icon={Icon}
+                  resume={guideResume} onResume={resumeGuide} />}
+              {!busy && !loadingSetup && (!primaryProgress || error || appError || savedGuideFailure(state)) && (
+                question && !error && !appError && !savedGuideFailure(state)
+                  ? <div className="setup-journey-question">
+                    <span>Your turn</span>
+                    {questionInView?.id === state.id && questionInView.version === state.version && questionInView.visible
+                      ? <strong>{question.title}</strong>
+                      : <button type="button" className="setup-question-return" onClick={revealCurrentQuestion}
+                        aria-label={`Show current question: ${question.title}`}>
+                        <strong>{question.title}</strong><span>Go to question</span><Icon name="arrow" size={14} />
+                      </button>}
+                  </div>
+                  : <div className="setup-journey-summary"><strong>{statusText}</strong>
+                    {savedGuideFailure(state) && <button type="button" onClick={() => revealResponse(true)}>Review saved request <Icon name="arrow" size={14} /></button>}
+                    {review && !error && !appError && !savedGuideFailure(state) &&
+                      <button type="button" onClick={() => revealResponse(true)}>Review proposal <Icon name="arrow" size={14} /></button>}
+                  </div>
+              )}
+              {!busy && !loadingSetup && primaryProgress && question && !(questionInView?.id === state.id && questionInView.version === state.version && questionInView.visible) &&
+                <button type="button" className="setup-question-return setup-journey-design-question" onClick={revealCurrentQuestion}
+                  aria-label={`Show current question: ${question.title}`}><span>Design question</span><strong>{question.title}</strong><Icon name="arrow" size={14} /></button>}
+              <GuideResponseNotice state={state} publicationKey={unseenResponse} busy={busy}
+                onReveal={(key) => revealResponse(true, key)} Icon={Icon} />
+            </div>
+          </section>}
+          {!journeyChat && narrow && <div className="setup-mobile-response">
             <GuideResponseNotice state={state} publicationKey={unseenResponse} busy={busy}
               onReveal={(key) => revealResponse(true, key)} Icon={Icon} />
           </div>}
@@ -2530,7 +2568,7 @@ export function GuidedSetup({
               }
             }}
           >
-            <div className="setup-conversation-start">LET'S MAKE IT YOURS</div>
+            {!journeyChat && <div className="setup-conversation-start">LET'S MAKE IT YOURS</div>}
             {state.id && <ForgeOrganizationContext update={state.organization_update} disabled={blocked}
               onAdopt={organization_fingerprint => respond("organization", { organization_fingerprint },
                 { preserveInput: true, expectedGuide: { id: state.id, version: state.version } })} />}
@@ -2554,7 +2592,7 @@ export function GuidedSetup({
               state={state}
               snapshot={timeline}
               pendingMessage={pendingMessage}
-              collapseCompleted={hasLifecycle && !question}
+              activityStatusExternal={journeyChat}
               signInNoticeExternal
               Icon={Icon}
             />
@@ -2638,7 +2676,7 @@ export function GuidedSetup({
                 data-guide-id={state.id} data-guide-version={state.version}>
                 <AgentMessage>
                   <div className="setup-bubble setup-question-bubble">
-                    {welcome ? <ForgeWelcomeIntro /> : <SetupGuideQuestionHeading question={question} lifecycle={!!primaryProgress} waiting={busy} />}
+                    {welcome ? <ForgeWelcomeIntro /> : <SetupGuideQuestionHeading question={question} lifecycle={!!primaryProgress} waiting={busy} current={journeyChat} />}
                     <div className="setup-interactive-answer">
                       {opening && !welcome && <SetupStartingPoints organization={state.organization} draft={draft} disabled={blocked}
                         onReturnToTyping={() => inputRef.current?.focus()} onChoose={(text) => {
@@ -2827,12 +2865,12 @@ export function GuidedSetup({
                 disabled={busy || loadingSetup || packageBusy || !!manualNote}
                 onClick={() => applyPlan(state, applyingPlan)}>Try saving this plan again</button>}
             </div>}
-            <GuideWaitStatus state={loadingSetup ? null : state} snapshot={timeline}
+            {!journeyChat && <GuideWaitStatus state={loadingSetup ? null : state} snapshot={timeline}
               submitting={localSending && busyAction !== "apply"} firstIdea={firstTurnWaiting}
-              following={following} onFollow={() => revealResponse(true)} />
-            {!narrow && <GuideResponseNotice state={state} publicationKey={unseenResponse} busy={busy}
+              following={following} onFollow={() => revealResponse(true)} />}
+            {!journeyChat && !narrow && <GuideResponseNotice state={state} publicationKey={unseenResponse} busy={busy}
               onReveal={(key) => revealResponse(true, key)} Icon={Icon} />}
-            {question && !firstTurnWaiting && !opening && !(questionInView?.id === state.id && questionInView.version === state.version && questionInView.visible) &&
+            {!journeyChat && question && !firstTurnWaiting && !opening && !(questionInView?.id === state.id && questionInView.version === state.version && questionInView.visible) &&
               <button type="button" className="setup-question-return"
               onClick={revealCurrentQuestion} aria-label={`Show current question: ${question.title}`}>
               <span>Current question</span>

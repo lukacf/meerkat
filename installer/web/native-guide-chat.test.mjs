@@ -17,7 +17,8 @@ const { createGuideFrameLog, ingestGuideTimeline, guideConversation, nextGuideTi
 const require = createRequire(import.meta.url);
 const { JSDOM } = createRequire(new URL("../../console/package.json", import.meta.url))("jsdom");
 const mountedBundle = await build({
-  entryPoints: [fileURLToPath(new URL("native-guide-chat.jsx", import.meta.url))],
+  stdin: { contents: 'export * from "./native-guide-chat.jsx"; export { ConversationTranscript } from "../../packages/console-components/src/conversation/conversation-transcript";',
+    resolveDir: fileURLToPath(new URL(".", import.meta.url)), loader: "jsx" },
   bundle: true, write: false, format: "esm", platform: "node", jsx: "automatic", logLevel: "silent",
   loader: { ".css": "empty" }, nodePaths: [fileURLToPath(new URL("node_modules", import.meta.url))],
   alias: { "@console-core": fileURLToPath(new URL("../../packages/console-core/src", import.meta.url)) },
@@ -26,7 +27,7 @@ const mountedBundle = await build({
       path: pathToFileURL(require.resolve(args.path)).href, external: true }));
   } }],
 });
-const { NativeGuideChat, useGuideTimeline } =
+const { NativeGuideChat, useGuideTimeline, ConversationTranscript } =
   await import(`data:text/javascript;base64,${Buffer.from(mountedBundle.outputFiles[0].text).toString("base64")}`);
 
 const frame = (id, kind, payload, offset = 0) => ({
@@ -408,7 +409,7 @@ test("mounted typed failed startup keeps its existing retry control and an unmou
   });
 });
 
-test('previous turns remain accessible but collapsed while the current reply stays visible', async () => {
+test('previous turns remain visible in chronological order through a terminal handoff', async () => {
   const { renderToStaticMarkup } = await import('react-dom/server');
   const saved = { id: 'history-guide', operation: { status: 'completed' }, messages: [
     { id: 'one', role: 'user', text: 'Original requirement', created_at: '2026-10-26T10:00:00Z' },
@@ -418,17 +419,62 @@ test('previous turns remain accessible but collapsed while the current reply sta
   ] };
   const before = structuredClone(saved);
   const html = renderToStaticMarkup(React.createElement(NativeGuideChat,
-    { state: saved, snapshot: { frames: [], bindings: [], available: true } }));
+    { state: saved, snapshot: { frames: [], bindings: [], available: true }, collapseCompleted: true }));
   const dom = new JSDOM(html), document = dom.window.document;
-  const history = document.querySelector('.setup-conversation-history');
-  assert.equal(history.open, false);
-  assert.match(history.textContent, /Original requirement/);
-  assert.match(history.textContent, /Original saved answer/);
+  assert.equal(document.querySelector('details'), null, 'Historical prose is never hidden in a disclosure.');
+  const turns = [...document.querySelectorAll('[data-guide-turn]')];
+  assert.equal(turns.length, 2);
+  assert.deepEqual(turns.map(turn => turn.querySelector('.cc-conversation-turn').getAttribute('aria-label')), ['Turn 1', 'Turn 2']);
+  assert.match(turns[0].textContent, /Original requirement.*Original saved answer/s);
+  assert.match(turns[1].textContent, /Current question.*Current saved answer/s);
+  assert.equal(turns[1].dataset.repeatedDay, 'true', 'The same calendar day does not need another heading.');
   const current = document.querySelector('[data-current-guide-transcript]');
   assert.match(current.textContent, /Current question/);
   assert.match(current.textContent, /Current saved answer/);
   assert.doesNotMatch(current.textContent, /Original requirement/);
   assert.deepEqual(saved, before);
+  dom.window.close();
+});
+
+test('shared transcript preserves default numbering and supports continued and empty-turn labels', async () => {
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const viewState = guideConversation({ state: { id: 'numbered', messages: [{ role: 'user', text: 'Keep my request.' }] } }).viewState;
+  for (const [offset, expected] of [[undefined, 1], [4, 5]]) {
+    const render = view => new JSDOM(renderToStaticMarkup(React.createElement(ConversationTranscript,
+      { viewState: view, turnIndexOffset: offset, onToggleDiffFile() {} })));
+    const populated = render(viewState);
+    assert.equal(populated.window.document.querySelector('.cc-conversation-turn').getAttribute('aria-label'), `Turn ${expected}`);
+    assert.match(populated.window.document.body.textContent, /Keep my request/);
+    populated.window.close();
+    const empty = render({ ...viewState, groups: [], turnDiff: { fileCount: 0, plus: 0, minus: 0, files: [] } });
+    assert.equal(empty.window.document.querySelector('.cc-conversation-turn').getAttribute('aria-label'), `Turn ${expected}`);
+    empty.window.close();
+  }
+});
+
+test('technical work stays collapsed with its own turn while both saved answers stay readable', async () => {
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const saved = { id: 'technical-history', operation: { status: 'completed' }, messages: [
+    { id: 'one', role: 'user', text: 'Original request', created_at: '1970-01-01T00:00:00Z' },
+    { id: 'two', role: 'assistant', text: 'First answer', created_at: '1970-01-01T00:00:02Z' },
+    { id: 'three', role: 'user', text: 'A new requirement', created_at: '1970-01-01T00:00:03Z' },
+    { id: 'four', role: 'assistant', text: 'Second answer', created_at: '1970-01-01T00:00:04Z' },
+  ] };
+  const frames = ingestGuideTimeline(createGuideFrameLog(), { frames: [
+    frame('first-tool', 'tool_call_requested', { id: 'first-call', name: 'inspect_blueprint', args: {} }, 1),
+  ] });
+  const html = renderToStaticMarkup(React.createElement(NativeGuideChat,
+    { state: saved, snapshot: { frames, bindings: [], available: true } }));
+  const dom = new JSDOM(html), document = dom.window.document;
+  const turns = [...document.querySelectorAll('[data-guide-turn]')];
+  const activity = document.querySelector('[data-guide-technical-activity]');
+  assert.ok(activity);
+  assert.equal(activity.open, false);
+  assert.equal(activity.closest('[data-guide-turn]'), turns[0]);
+  assert.match(turns[0].textContent, /First answer/);
+  assert.match(turns[1].textContent, /Second answer/);
+  for (const transcript of document.querySelectorAll('[data-guide-turn] > .cc-conversation-transcript'))
+    assert.equal(transcript.closest('details'), null);
   dom.window.close();
 });
 

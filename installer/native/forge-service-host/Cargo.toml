@@ -22,7 +22,7 @@ required-features = ["linux-startup-controls"]
 [dependencies]
 forge-ghe-collections = { path = "../ghe-collections" }
 forge-history-archive = { path = "../history-archive" }
-meerkat-connect = { git = "https://github.com/lukacf/meerkat-connect.git", rev = "a3e7634c41fd24c7b9996275a0ff04319d8f3040" }
+meerkat-connect = { git = "https://github.com/lukacf/meerkat-connect.git", rev = "a3239bbaf1acd5ccae0f2d789006f8704153ad52" }
 meerkat-core = "=0.9.5"
 serde_json = "=1.0.151"
 serde = { version = "=1.0.229", features = ["derive"] }
